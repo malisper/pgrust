@@ -164,6 +164,7 @@ postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
 commands_createas = { path = "../../backend/commands/createas" }
+copy_cmd = { path = "../../backend/commands/copy" }
 commands_matview = { path = "../../backend/commands/matview" }
 execreplication = { path = "../../backend/executor/execreplication" }
 prepare = { path = "../../backend/commands/prepare" }

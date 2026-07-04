@@ -671,6 +671,7 @@ members = [
     "crates/backend/commands/matview",
     "crates/backend/commands/matview_seams",
     "crates/backend/commands/createas_seams",
+    "crates/backend/commands/copy_seams",
     "crates/backend/commands/dbcommands",
     "crates/backend/commands/schemacmds",
     "crates/backend/commands/functioncmds",

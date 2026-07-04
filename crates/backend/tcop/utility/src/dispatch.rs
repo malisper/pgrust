@@ -347,7 +347,8 @@ fn dispatch_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_copy_stmt().unwrap();
-            let processed = copy_cmd::DoCopy(mcx, stmt, source_text)?;
+            let processed =
+                copy_cmd::DoCopy(mcx, stmt, source_text, pstmt.stmt_location, pstmt.stmt_len)?;
             if let Some(qc) = qc.as_mut() {
                 qc.commandTag = crate::consts::CMDTAG_COPY;
                 qc.nprocessed = processed;

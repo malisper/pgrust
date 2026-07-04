@@ -58,6 +58,11 @@ rls = { path = "../../utils/misc/rls" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
+postgres = { path = "../../tcop/postgres" }
+tcop_dest = { path = "../../tcop/dest" }
+copy_seams = { path = "../copy_seams" }
+execmain_seams = { path = "../../executor/execmain_seams" }
+types_portal = { path = "../../../_support/types/portal" }
 libc = "0.2"
 
 [dev-dependencies]

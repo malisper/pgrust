@@ -28,6 +28,7 @@ pub enum DestReceiver<'mcx> {
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
     Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
     IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
+    CopyOut(copy_seams::CopyDestState),    // CreateCopyDestReceiver (copyto.c)
     TransientRel(matview_seams::TransientRelState<'mcx>), // CreateTransientRelDestReceiver (matview.c)
     SqlFunction(sql_functions_seams::SqlFunctionDestState<'mcx>), // CreateSQLFunctionDestReceiver (functions.c)
     ExplainSerialize(explain_dr::SerializeDestReceiver<'mcx>), // CreateExplainSerializeDestReceiver (explain_dr.c)
@@ -44,6 +45,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::SpiPrintTup => spi_seams::spi_printtup::call(slot),
             DestReceiver::Tuplestore(dr) => dr.receive_slot(slot),
             DestReceiver::IntoRel(state) => createas_seams::intorel_receive::call(state, slot),
+            DestReceiver::CopyOut(state) => copy_seams::copy_dest_receive::call(state, slot),
             DestReceiver::TransientRel(state) => {
                 matview_seams::transientrel_receive::call(state, slot)
             }
@@ -65,6 +67,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::IntoRel(state) => {
                 createas_seams::intorel_startup::call(state, operation, typeinfo)
             }
+            DestReceiver::CopyOut(_) => Ok(()),
             DestReceiver::TransientRel(state) => {
                 matview_seams::transientrel_startup::call(state, operation, typeinfo)
             }
@@ -84,6 +87,7 @@ impl<'mcx> DestReceiver<'mcx> {
             | DestReceiver::DebugTup
             | DestReceiver::PrintSimple
             | DestReceiver::SpiPrintTup
+            | DestReceiver::CopyOut(_)
             | DestReceiver::SqlFunction(_) => Ok(()),
             DestReceiver::PrintTup(dr) => {
                 dr.shutdown();
@@ -118,6 +122,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::SpiPrintTup => CommandDest::Spi,
             DestReceiver::Tuplestore(_) => CommandDest::Tuplestore,
             DestReceiver::IntoRel(_) => CommandDest::IntoRel,
+            DestReceiver::CopyOut(_) => CommandDest::CopyOut,
             DestReceiver::TransientRel(_) => CommandDest::TransientRel,
             DestReceiver::SqlFunction(_) => CommandDest::SqlFunction,
             DestReceiver::ExplainSerialize(_) => CommandDest::ExplainSerialize,

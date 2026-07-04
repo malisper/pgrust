@@ -1,8 +1,8 @@
 // copy.c/copyto.c/copyfrom.c/copyfromparse.c — text, CSV and binary formats,
-// file and wire STDIN/STDOUT variants; column defaults, the DEFAULT marker and
-// FROM ... WHERE live. Loud (named): COPY (query), PROGRAM, HEADER match,
-// volatile defaults/WHERE, RLS rewrite. Option parsing (ProcessCopyOptions)
-// is full-parity.
+// file and wire STDIN/STDOUT variants; column defaults, the DEFAULT marker,
+// FROM ... WHERE and COPY (query) TO live. Loud (named): PROGRAM, HEADER
+// match, volatile defaults/WHERE, RLS rewrite. Option parsing
+// (ProcessCopyOptions) is full-parity.
 #![allow(non_snake_case)]
 
 use mcx::{vec_from_elem_in, Mcx, PgVec};
@@ -92,7 +92,13 @@ fn errpos(src: Option<&str>, location: types_core::ParseLoc) -> i32 {
 }
 
 /// `DoCopy` (copy.c). Returns rows processed.
-pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'mcx>, source_text: &str) -> PgResult<u64> {
+pub fn DoCopy<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CopyStmt<'mcx>,
+    source_text: &str,
+    stmt_location: types_core::ParseLoc,
+    stmt_len: types_core::ParseLoc,
+) -> PgResult<u64> {
     let is_from = stmt.is_from;
     if stmt.is_program {
         unported("TO/FROM PROGRAM (OpenPipeStream lane)");
@@ -111,11 +117,24 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'mcx>, source_text: &str) ->
     }
 
     let Some(rv_node) = stmt.relation else {
-        // C divergence: C analyzes the query before ProcessCopyOptions (inside
-        // BeginCopyTo); options are validated here first so option errors keep
-        // C's text while the executor lane stays loud.
-        ProcessCopyOptions(false, &stmt.options, Some(source_text))?;
-        unported("(query) TO (pg_analyze_and_rewrite + executor lane)");
+        assert!(!is_from, "COPY (query) FROM is excluded by the grammar");
+        let raw_query = types_nodes::rawnodes::RawStmt {
+            stmt: Some(stmt.query.expect("CopyStmt without relation has a query")),
+            stmt_location,
+            stmt_len,
+        };
+        let mut cstate = BeginCopyTo(
+            mcx,
+            None,
+            Some(&raw_query),
+            stmt.filename,
+            &stmt.attlist,
+            &stmt.options,
+            Some(source_text),
+        )?;
+        let processed = DoCopyTo(mcx, &mut cstate, None)?;
+        EndCopyTo(cstate)?;
+        return Ok(processed);
     };
     let rv = rv_node.as_range_var().expect("CopyStmt.relation is RangeVar");
     let rv = rel_vocab::RangeVar {
@@ -228,13 +247,14 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'mcx>, source_text: &str) ->
     } else {
         let mut cstate = BeginCopyTo(
             mcx,
-            &rel,
+            Some(&rel),
+            None,
             stmt.filename,
             &stmt.attlist,
             &stmt.options,
             Some(source_text),
         )?;
-        let processed = DoCopyTo(mcx, &mut cstate, &rel)?;
+        let processed = DoCopyTo(mcx, &mut cstate, Some(&rel))?;
         EndCopyTo(cstate)?;
         processed
     };
@@ -820,7 +840,7 @@ pub fn ProcessCopyOptions<'s>(
 fn force_flags<'mcx>(
     mcx: Mcx<'mcx>,
     tup_desc: &TupleDescData<'_>,
-    rel: &Relation<'_>,
+    rel: Option<&Relation<'_>>,
     attnumlist: &[i16],
     list: Option<&NodeList<'_>>,
     all: bool,
@@ -867,7 +887,7 @@ fn conflicting_option(src: Option<&str>, location: types_core::ParseLoc) -> Box<
 pub fn CopyGetAttnums<'mcx>(
     mcx: Mcx<'mcx>,
     tup_desc: &TupleDescData<'_>,
-    rel: &Relation<'_>,
+    rel: Option<&Relation<'_>>,
     attnamelist: &NodeList<'_>,
 ) -> PgResult<PgVec<'mcx, i16>> {
     let mut attnums: PgVec<'mcx, i16> = PgVec::new_in(mcx);
@@ -902,12 +922,15 @@ pub fn CopyGetAttnums<'mcx>(
             }
         }
         if attnum == 0 {
-            return Err(Box::new(
-                PgError::error(format!(
+            let msg = match rel {
+                Some(rel) => format!(
                     "column \"{name}\" of relation \"{}\" does not exist",
                     rel.name()
-                ))
-                .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+                ),
+                None => format!("column \"{name}\" does not exist"),
+            };
+            return Err(Box::new(
+                PgError::error(msg).with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
             ));
         }
         if attnums.contains(&attnum) {
@@ -959,4 +982,6 @@ fn to_file_denied() -> Box<PgError> {
     )
 }
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    copy_seams::copy_dest_receive::set(to::copy_dest_receive);
+}
