@@ -236,12 +236,18 @@ pub enum Step {
     },
     AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
     // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
-    FuncExprStrict2Thin { call: Call2Thin, out: OutRef },
-    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: Call2Thin, out: OutRef },
-    FuncFuncStrict2Thin { call1: Call2Thin, argno: u8, call2: Call2Thin, out: OutRef },
-    FuncStrict2QualThin { call: Call2Thin, jumpdone: u32, out: OutRef },
-    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: Call2Thin, out: OutRef },
-    NotDistinctQualThin { call: Call2Thin, jumpdone: u32, out: OutRef },
+    FuncExprStrict1Thin { call: CallThin, out: OutRef },
+    FuncExprStrict2Thin { call: CallThin, out: OutRef },
+    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    FuncFuncStrict2Thin { call1: CallThin, argno: u8, call2: CallThin, out: OutRef },
+    FuncStrict2QualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    NotDistinctQualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    AggTransStrictByValIndirectThin {
+        call: CallThin,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -297,7 +303,7 @@ pub struct Call2 {
 
 // Call2 with the thin fn resolved in place of the FmgrInfo indirection.
 #[derive(Clone, Copy, Debug)]
-pub struct Call2Thin {
+pub struct CallThin {
     pub(crate) fcinfo: NonNull<u8>,
     pub(crate) f: ::types_fmgr::PGFunctionThin,
 }
@@ -658,6 +664,7 @@ pub enum Kernel {
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
     AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
+    AggTransByValThin { call: CallThin, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
 const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);

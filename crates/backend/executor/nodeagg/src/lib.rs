@@ -1490,7 +1490,7 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
     let storeless = !src.has_qual()
         && matches!(
             node.evaltrans.as_deref().unwrap().kernel(),
-            ::execexpr::Kernel::AggTransByVal { .. }
+            ::execexpr::Kernel::AggTransByVal { .. } | ::execexpr::Kernel::AggTransByValThin { .. }
         );
     loop {
         let n = src.next_batch(estate)?;

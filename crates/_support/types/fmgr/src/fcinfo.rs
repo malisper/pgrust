@@ -485,6 +485,7 @@ define_calls! {
 #[derive(Clone, Copy)]
 pub struct ThinBuiltin {
     pub foid: Oid,
+    pub nargs: i16,
     pub func: PGFunction,
     pub thin: PGFunctionThin,
 }

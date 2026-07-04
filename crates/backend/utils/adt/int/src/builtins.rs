@@ -93,18 +93,34 @@ pub fn fc_int4send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 }
 
 macro_rules! fc1 {
-    ($($fc:ident: $core:ident($get:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($get:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a] = fcinfo.args_n::<1>();
+            Ok(Datum::$from(crate::$core(a.value.$get())))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 1 arg.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 1.
+            let a = unsafe { thin_arg(fcinfo, 0) };
             Ok(Datum::$from(crate::$core(a.value.$get())))
         }
     )*};
 }
 
 macro_rules! fc1t {
-    ($($fc:ident: $core:ident($get:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($get:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a] = fcinfo.args_n::<1>();
+            Ok(Datum::$from(crate::$core(a.value.$get())?))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 1 arg.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 1.
+            let a = unsafe { thin_arg(fcinfo, 0) };
             Ok(Datum::$from(crate::$core(a.value.$get())?))
         }
     )*};
@@ -160,22 +176,22 @@ macro_rules! fc_in_range {
 }
 
 fc1! {
-    fc_i2toi4: i2toi4(as_i16) -> from_i32;
-    fc_int4_bool: int4_bool(as_i32) -> from_bool;
-    fc_bool_int4: bool_int4(as_bool) -> from_i32;
-    fc_int4up: int4up(as_i32) -> from_i32;
-    fc_int2up: int2up(as_i16) -> from_i16;
-    fc_int4not: int4not(as_i32) -> from_i32;
-    fc_int2not: int2not(as_i16) -> from_i16;
+    fc_i2toi4 th_i2toi4: i2toi4(as_i16) -> from_i32;
+    fc_int4_bool th_int4_bool: int4_bool(as_i32) -> from_bool;
+    fc_bool_int4 th_bool_int4: bool_int4(as_bool) -> from_i32;
+    fc_int4up th_int4up: int4up(as_i32) -> from_i32;
+    fc_int2up th_int2up: int2up(as_i16) -> from_i16;
+    fc_int4not th_int4not: int4not(as_i32) -> from_i32;
+    fc_int2not th_int2not: int2not(as_i16) -> from_i16;
 }
 
 fc1t! {
-    fc_i4toi2: i4toi2(as_i32) -> from_i16;
-    fc_int4um: int4um(as_i32) -> from_i32;
-    fc_int4inc: int4inc(as_i32) -> from_i32;
-    fc_int2um: int2um(as_i16) -> from_i16;
-    fc_int4abs: int4abs(as_i32) -> from_i32;
-    fc_int2abs: int2abs(as_i16) -> from_i16;
+    fc_i4toi2 th_i4toi2: i4toi2(as_i32) -> from_i16;
+    fc_int4um th_int4um: int4um(as_i32) -> from_i32;
+    fc_int4inc th_int4inc: int4inc(as_i32) -> from_i32;
+    fc_int2um th_int2um: int2um(as_i16) -> from_i16;
+    fc_int4abs th_int4abs: int4abs(as_i32) -> from_i32;
+    fc_int2abs th_int2abs: int2abs(as_i16) -> from_i16;
 }
 
 // C home is hashfunc.c (no hash-AM adt crate yet); grouping/hashjoin reach it
@@ -443,71 +459,87 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(4130, "in_range_int2_int8", 5, fc_in_range_int2_int8),
 ];
 
-const fn t(foid: Oid, func: PGFunction, thin: ::types_fmgr::PGFunctionThin) -> ThinBuiltin {
-    ThinBuiltin { foid, func, thin }
+const fn t(foid: Oid, nargs: i16, func: PGFunction, thin: ::types_fmgr::PGFunctionThin) -> ThinBuiltin {
+    ThinBuiltin { foid, nargs, func, thin }
 }
 
-// Thin-ABI twins of the fc2!/fc2t! wrappers above (same cores, so the error
-// surface is identical by construction; none read flinfo or write isnull).
+// Thin-ABI twins of the fc1!/fc1t!/fc2!/fc2t! wrappers above (same cores, so
+// the error surface is identical by construction; none read flinfo or write
+// isnull).
 pub static INT_THIN: &[ThinBuiltin] = &[
-    t(63, fc_int2eq, th_int2eq),
-    t(64, fc_int2lt, th_int2lt),
-    t(65, fc_int4eq, th_int4eq),
-    t(66, fc_int4lt, th_int4lt),
-    t(141, fc_int4mul, th_int4mul),
-    t(144, fc_int4ne, th_int4ne),
-    t(145, fc_int2ne, th_int2ne),
-    t(146, fc_int2gt, th_int2gt),
-    t(147, fc_int4gt, th_int4gt),
-    t(148, fc_int2le, th_int2le),
-    t(149, fc_int4le, th_int4le),
-    t(150, fc_int4ge, th_int4ge),
-    t(151, fc_int2ge, th_int2ge),
-    t(152, fc_int2mul, th_int2mul),
-    t(153, fc_int2div, th_int2div),
-    t(154, fc_int4div, th_int4div),
-    t(155, fc_int2mod, th_int2mod),
-    t(156, fc_int4mod, th_int4mod),
-    t(158, fc_int24eq, th_int24eq),
-    t(159, fc_int42eq, th_int42eq),
-    t(160, fc_int24lt, th_int24lt),
-    t(161, fc_int42lt, th_int42lt),
-    t(162, fc_int24gt, th_int24gt),
-    t(163, fc_int42gt, th_int42gt),
-    t(164, fc_int24ne, th_int24ne),
-    t(165, fc_int42ne, th_int42ne),
-    t(166, fc_int24le, th_int24le),
-    t(167, fc_int42le, th_int42le),
-    t(168, fc_int24ge, th_int24ge),
-    t(169, fc_int42ge, th_int42ge),
-    t(170, fc_int24mul, th_int24mul),
-    t(171, fc_int42mul, th_int42mul),
-    t(172, fc_int24div, th_int24div),
-    t(173, fc_int42div, th_int42div),
-    t(176, fc_int2pl, th_int2pl),
-    t(177, fc_int4pl, th_int4pl),
-    t(178, fc_int24pl, th_int24pl),
-    t(179, fc_int42pl, th_int42pl),
-    t(180, fc_int2mi, th_int2mi),
-    t(181, fc_int4mi, th_int4mi),
-    t(182, fc_int24mi, th_int24mi),
-    t(183, fc_int42mi, th_int42mi),
-    t(768, fc_int4larger, th_int4larger),
-    t(769, fc_int4smaller, th_int4smaller),
-    t(770, fc_int2larger, th_int2larger),
-    t(771, fc_int2smaller, th_int2smaller),
-    t(940, fc_int2mod, th_int2mod),
-    t(941, fc_int4mod, th_int4mod),
-    t(1892, fc_int2and, th_int2and),
-    t(1893, fc_int2or, th_int2or),
-    t(1894, fc_int2xor, th_int2xor),
-    t(1896, fc_int2shl, th_int2shl),
-    t(1897, fc_int2shr, th_int2shr),
-    t(1898, fc_int4and, th_int4and),
-    t(1899, fc_int4or, th_int4or),
-    t(1900, fc_int4xor, th_int4xor),
-    t(1902, fc_int4shl, th_int4shl),
-    t(1903, fc_int4shr, th_int4shr),
-    t(5044, fc_int4gcd, th_int4gcd),
-    t(5046, fc_int4lcm, th_int4lcm),
+    t(63, 2, fc_int2eq, th_int2eq),
+    t(64, 2, fc_int2lt, th_int2lt),
+    t(65, 2, fc_int4eq, th_int4eq),
+    t(66, 2, fc_int4lt, th_int4lt),
+    t(141, 2, fc_int4mul, th_int4mul),
+    t(144, 2, fc_int4ne, th_int4ne),
+    t(145, 2, fc_int2ne, th_int2ne),
+    t(146, 2, fc_int2gt, th_int2gt),
+    t(147, 2, fc_int4gt, th_int4gt),
+    t(148, 2, fc_int2le, th_int2le),
+    t(149, 2, fc_int4le, th_int4le),
+    t(150, 2, fc_int4ge, th_int4ge),
+    t(151, 2, fc_int2ge, th_int2ge),
+    t(152, 2, fc_int2mul, th_int2mul),
+    t(153, 2, fc_int2div, th_int2div),
+    t(154, 2, fc_int4div, th_int4div),
+    t(155, 2, fc_int2mod, th_int2mod),
+    t(156, 2, fc_int4mod, th_int4mod),
+    t(158, 2, fc_int24eq, th_int24eq),
+    t(159, 2, fc_int42eq, th_int42eq),
+    t(160, 2, fc_int24lt, th_int24lt),
+    t(161, 2, fc_int42lt, th_int42lt),
+    t(162, 2, fc_int24gt, th_int24gt),
+    t(163, 2, fc_int42gt, th_int42gt),
+    t(164, 2, fc_int24ne, th_int24ne),
+    t(165, 2, fc_int42ne, th_int42ne),
+    t(166, 2, fc_int24le, th_int24le),
+    t(167, 2, fc_int42le, th_int42le),
+    t(168, 2, fc_int24ge, th_int24ge),
+    t(169, 2, fc_int42ge, th_int42ge),
+    t(170, 2, fc_int24mul, th_int24mul),
+    t(171, 2, fc_int42mul, th_int42mul),
+    t(172, 2, fc_int24div, th_int24div),
+    t(173, 2, fc_int42div, th_int42div),
+    t(176, 2, fc_int2pl, th_int2pl),
+    t(177, 2, fc_int4pl, th_int4pl),
+    t(178, 2, fc_int24pl, th_int24pl),
+    t(179, 2, fc_int42pl, th_int42pl),
+    t(180, 2, fc_int2mi, th_int2mi),
+    t(181, 2, fc_int4mi, th_int4mi),
+    t(182, 2, fc_int24mi, th_int24mi),
+    t(183, 2, fc_int42mi, th_int42mi),
+    t(212, 1, fc_int4um, th_int4um),
+    t(213, 1, fc_int2um, th_int2um),
+    t(313, 1, fc_i2toi4, th_i2toi4),
+    t(314, 1, fc_i4toi2, th_i4toi2),
+    t(766, 1, fc_int4inc, th_int4inc),
+    t(768, 2, fc_int4larger, th_int4larger),
+    t(769, 2, fc_int4smaller, th_int4smaller),
+    t(770, 2, fc_int2larger, th_int2larger),
+    t(771, 2, fc_int2smaller, th_int2smaller),
+    t(940, 2, fc_int2mod, th_int2mod),
+    t(941, 2, fc_int4mod, th_int4mod),
+    t(1251, 1, fc_int4abs, th_int4abs),
+    t(1253, 1, fc_int2abs, th_int2abs),
+    t(1397, 1, fc_int4abs, th_int4abs),
+    t(1398, 1, fc_int2abs, th_int2abs),
+    t(1892, 2, fc_int2and, th_int2and),
+    t(1893, 2, fc_int2or, th_int2or),
+    t(1894, 2, fc_int2xor, th_int2xor),
+    t(1895, 1, fc_int2not, th_int2not),
+    t(1896, 2, fc_int2shl, th_int2shl),
+    t(1897, 2, fc_int2shr, th_int2shr),
+    t(1898, 2, fc_int4and, th_int4and),
+    t(1899, 2, fc_int4or, th_int4or),
+    t(1900, 2, fc_int4xor, th_int4xor),
+    t(1901, 1, fc_int4not, th_int4not),
+    t(1902, 2, fc_int4shl, th_int4shl),
+    t(1903, 2, fc_int4shr, th_int4shr),
+    t(1911, 1, fc_int2up, th_int2up),
+    t(1912, 1, fc_int4up, th_int4up),
+    t(2557, 1, fc_int4_bool, th_int4_bool),
+    t(2558, 1, fc_bool_int4, th_bool_int4),
+    t(5044, 2, fc_int4gcd, th_int4gcd),
+    t(5046, 2, fc_int4lcm, th_int4lcm),
 ];
