@@ -356,8 +356,9 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
         // newitemoff - 1 (as btree_xlog_split does).
         #[repr(C, align(8))]
         struct ItupImage([u8; BLCKSZ]);
-        let mut newitem_img = ItupImage([0u8; BLCKSZ]);
-        let mut nposting_img = ItupImage([0u8; BLCKSZ]);
+        // (newitem, nposting) scratch exists only for posting-split redo; a
+        // plain split must not pay the 16KB zero-fill.
+        let mut swap_imgs: Option<(ItupImage, ItupImage)> = None;
         let mut nposting_sz = 0usize;
         let replacepostingoff: u16 = if postingoff != 0 { newitemoff - 1 } else { 0 };
 
@@ -372,21 +373,23 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
                 let opos_off = itemid.lp_off() as usize;
                 nposting_sz =
                     (u16_le_native(origpage, opos_off + 6) & INDEX_SIZE_MASK) as usize;
-                newitem_img.0[..newitemsz].copy_from_slice(newitem);
+                let (ni, np) =
+                    swap_imgs.insert((ItupImage([0u8; BLCKSZ]), ItupImage([0u8; BLCKSZ])));
+                ni.0[..newitemsz].copy_from_slice(newitem);
                 // SAFETY: in-bounds page item read under the redo lock.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         origpage.as_ptr().add(opos_off),
-                        nposting_img.0.as_mut_ptr(),
+                        np.0.as_mut_ptr(),
                         nposting_sz,
                     );
                 }
                 bt_swap_posting(
-                    &mut newitem_img.0[..newitemsz],
-                    &mut nposting_img.0[..nposting_sz],
+                    &mut ni.0[..newitemsz],
+                    &mut np.0[..nposting_sz],
                     postingoff as usize,
                 )?;
-                newitem = &newitem_img.0[..newitemsz];
+                newitem = &swap_imgs.as_ref().unwrap().0 .0[..newitemsz];
             }
         }
 
@@ -416,9 +419,10 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
         while off < firstrightoff {
             if postingoff != 0 && off == replacepostingoff {
                 debug_assert!(newitemonleft || firstrightoff == newitemoff);
-                let np_sz = maxalign(itup_size_at(&nposting_img.0, 0));
+                let nposting = &swap_imgs.as_ref().unwrap().1;
+                let np_sz = maxalign(itup_size_at(&nposting.0, 0));
                 debug_assert!(np_sz == maxalign(nposting_sz));
-                if leftpage.add_item(&nposting_img.0[..np_sz], leftoff, 0).is_none() {
+                if leftpage.add_item(&nposting.0[..np_sz], leftoff, 0).is_none() {
                     return Err(error_err(
                         "failed to add new posting list item to left page after split".into(),
                     ));
