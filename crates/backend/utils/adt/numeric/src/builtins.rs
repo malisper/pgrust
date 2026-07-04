@@ -679,10 +679,10 @@ pub fn fc_generate_series_numeric(
             None
         };
         let state = crate::series::GenerateSeriesNumeric::new(start, stop, step)?;
-        let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        let fctx = ::funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
         fctx.user_fctx = Some(std::boxed::Box::new(state));
     }
-    let next = ::funcapi::per_MultiFuncCall(flinfo)
+    let next = ::funcapi_srf::per_MultiFuncCall(flinfo)
         .user_fctx
         .as_mut()
         .expect("generate_series_numeric: user_fctx set at first call")
@@ -692,9 +692,9 @@ pub fn fc_generate_series_numeric(
     match next {
         Some(img) => {
             let d = img_result(fcinfo, &img)?;
-            Ok(::funcapi::srf_return_next(flinfo, fcinfo, d))
+            Ok(::funcapi_srf::srf_return_next(flinfo, fcinfo, d))
         }
-        None => Ok(::funcapi::srf_return_done(flinfo, fcinfo)),
+        None => Ok(::funcapi_srf::srf_return_done(flinfo, fcinfo)),
     }
 }
 
