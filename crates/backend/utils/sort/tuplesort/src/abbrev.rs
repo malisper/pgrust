@@ -105,7 +105,7 @@ impl AbbrevState {
     #[inline]
     pub unsafe fn convert(&mut self, original: Datum) -> Datum {
         let word = match &mut self.conv {
-            ConverterState::VarStr(s) => s.convert(varlena_payload(original)),
+            ConverterState::VarStr(s) => s.convert_slim(varlena_payload(original)),
             ConverterState::VarStrXfrm(s) => s.convert(varlena_payload(original)),
             ConverterState::Uuid(s) => {
                 s.convert(&*(original.as_usize() as *const ::adt_uuid::PgUuid))
@@ -120,7 +120,7 @@ impl AbbrevState {
 
     pub fn abort(&mut self, memtupcount: i32) -> bool {
         match &mut self.conv {
-            ConverterState::VarStr(s) => s.abort(memtupcount),
+            ConverterState::VarStr(s) => s.abort_slim(memtupcount),
             ConverterState::VarStrXfrm(s) => s.inner.abort(memtupcount),
             ConverterState::Uuid(s) => s.abort(memtupcount),
             ConverterState::Network(s) => s.abort(memtupcount),
