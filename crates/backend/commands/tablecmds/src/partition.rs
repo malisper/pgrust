@@ -25,6 +25,7 @@ pub(crate) fn compute_partition_key<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     partspec: &PartitionSpec<'mcx>,
+    query_string: &str,
 ) -> PgResult<PartKeyInfo<'mcx>> {
     let strategy = partspec.strategy;
     if strategy == PartitionStrategy::Hash {
@@ -105,7 +106,12 @@ pub(crate) fn compute_partition_key<'mcx>(
             return Err(Box::new(
                 PgError::new(ERROR, "cannot use generated column in partition key".to_string())
                     .with_detail(format!("Column \"{name}\" is a generated column."))
-                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .with_cursor_position(parser_small1::parser_errposition_source(
+                        Some(query_string.as_bytes()),
+                        pelem.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
             ));
         }
         info.partattrs.push(attnum);
