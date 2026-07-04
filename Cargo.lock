@@ -8137,6 +8137,7 @@ dependencies = [
  "parse_func",
  "parse_utilcmd",
  "parser_small1",
+ "pg_inherits_seams",
  "syscache_seams",
  "typcache",
  "types_core",
