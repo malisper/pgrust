@@ -369,6 +369,40 @@ pub fn getObjectDescription(
         PublicationRelRelationId => {
             let Some(tup) = cache_syscache::SearchSysCache1(
                 cache_syscache::cacheinfo::PUBLICATIONREL,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for publication table {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let prpubid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::PUBLICATIONREL,
+                &tup,
+                2,
+            )?
+            .as_oid();
+            let prrelid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::PUBLICATIONREL,
+                &tup,
+                3,
+            )?
+            .as_oid();
+            cache_syscache::ReleaseSysCache(tup);
+            let pubname = lsyscache::get_publication_name(mcx, prpubid, false)?
+                .expect("missing_ok=false yields a name");
+            let rel = getRelationDescription(prrelid, false)?
+                .expect("publication relation's table exists");
+            Ok(Some(format!(
+                "publication of {rel} in publication {}",
+                pubname.as_str()
+            )))
+        }
+        SubscriptionRelationId => {
+            Ok(lsyscache::get_subscription_name(mcx, object.objectId, missing_ok)?
+                .map(|subname| format!("subscription {}", subname.as_str())))
+        }
         types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => {
             let Some(name) = foreign_object_name(
                 cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID,
@@ -402,12 +436,6 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for publication table {}", object.objectId);
-                }
-                return Ok(None);
-            };
-            let prpubid = cache_syscache::SysCacheGetAttrNotNull(
-                cache_syscache::cacheinfo::PUBLICATIONREL,
                     panic!("cache lookup failed for user mapping {}", object.objectId);
                 }
                 return Ok(None);
@@ -418,8 +446,6 @@ pub fn getObjectDescription(
                 2,
             )?
             .as_oid();
-            let prrelid = cache_syscache::SysCacheGetAttrNotNull(
-                cache_syscache::cacheinfo::PUBLICATIONREL,
             let serverid = cache_syscache::SysCacheGetAttrNotNull(
                 cache_syscache::cacheinfo::USERMAPPINGOID,
                 &tup,
@@ -427,18 +453,6 @@ pub fn getObjectDescription(
             )?
             .as_oid();
             cache_syscache::ReleaseSysCache(tup);
-            let pubname = lsyscache::get_publication_name(mcx, prpubid, false)?
-                .expect("missing_ok=false yields a name");
-            let rel = getRelationDescription(prrelid, false)?
-                .expect("publication relation's table exists");
-            Ok(Some(format!(
-                "publication of {rel} in publication {}",
-                pubname.as_str()
-            )))
-        }
-        SubscriptionRelationId => {
-            Ok(lsyscache::get_subscription_name(mcx, object.objectId, missing_ok)?
-                .map(|subname| format!("subscription {}", subname.as_str())))
             let usename = if useid == types_core::InvalidOid {
                 "public".to_string()
             } else {
@@ -490,6 +504,8 @@ fn getPublicationSchemaInfo(
         return Ok(None);
     };
     Ok(Some((pubname.as_str().to_string(), nspname)))
+}
+
 // pg_foreign_data_wrapper and pg_foreign_server carry their NAMEDATALEN name
 // column at attnum 2.
 fn foreign_object_name(cache_id: i32, oid: Oid) -> PgResult<Option<String>> {
