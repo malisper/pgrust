@@ -113,6 +113,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SetOp) => false,
         t if t == tag16(NodeTag::T_Sort) => false,
         t if t == tag16(NodeTag::T_IncrementalSort) => false,
+        t if t == tag16(NodeTag::T_Group) => true,
         t if t == tag16(NodeTag::T_Unique) => false,
         t if t == tag16(NodeTag::T_LockRows) => false,
         t if t == tag16(NodeTag::T_Limit) => false,
@@ -1228,6 +1229,66 @@ pub fn create_index_path<'mcx>(
     };
     let id = run.root.alloc_path(PathNode::IndexPath(node));
     costsize::cost_index(run, id, loop_count)?;
+    Ok(id)
+}
+
+// create_group_path (pathnode.c): sorted grouping without aggregation.
+pub fn create_group_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    group_clause: PgVec<'mcx, types_pathnodes::NodeId>,
+    qual: PgVec<'mcx, types_pathnodes::NodeId>,
+    num_groups: f64,
+) -> PgResult<PathId> {
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let target_id = rel.pathtarget_id.expect("grouped rel has a reltarget");
+    let path = Path {
+        type_: tag16(NodeTag::T_GroupPath),
+        pathtype: tag16(NodeTag::T_Group),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        // Group doesn't change sort ordering.
+        pathkeys: types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys),
+    };
+    let (sub_disabled, sub_startup, sub_total, sub_rows) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let num_group_cols = group_clause.len() as i32;
+    let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &qual);
+
+    let id = run.root.alloc_path(PathNode::GroupPath(types_pathnodes::GroupPath {
+        path,
+        subpath: Some(subpath_id),
+        groupClause: group_clause,
+        qual,
+    }));
+    costsize::cost_group(
+        run,
+        id,
+        num_group_cols,
+        num_groups,
+        &quals,
+        sub_disabled,
+        sub_startup,
+        sub_total,
+        sub_rows,
+    )?;
+
+    let target = run.root.pathtarget(target_id);
+    let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
+    let p = run.root.path_mut(id).base_mut();
+    let rows = p.rows;
+    p.startup_cost += t_startup;
+    p.total_cost += t_startup + t_per_tuple * rows;
     Ok(id)
 }
 

@@ -1,7 +1,7 @@
 use types_error::PgResult;
 use types_nodes::list::{NodeList, OidList};
 use types_nodes::plannodes::{
-    Agg, Append, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, SetOp,
+    Agg, Append, Group, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, SetOp,
     SubqueryScan, WindowAgg,
 };
 use types_nodes::primnodes::{OpExpr, TargetEntry};
@@ -64,6 +64,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::ProjectSetPath(_) => create_project_set_plan(run, path_id),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
+        PathNode::GroupPath(_) => create_group_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
         PathNode::MinMaxAggPath(_) => create_minmaxagg_plan(run, path_id),
         PathNode::GroupingSetsPath(_) => create_groupingsets_plan(run, path_id),
@@ -1772,6 +1773,59 @@ fn create_group_result_plan<'mcx>(
 }
 
 // create_agg_plan + make_agg (createplan.c).
+fn create_group_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let (subpath_id, target_id, qual_ids, group_clause) = match run.root.path(path_id) {
+        PathNode::GroupPath(gp) => (
+            gp.subpath.expect("GroupPath has a subpath"),
+            gp.path.pathtarget_id.unwrap(),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &gp.qual),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &gp.groupClause),
+        ),
+        _ => unreachable!(),
+    };
+    let qual = order_bare_qual_clauses(run, &qual_ids)?;
+
+    // Group can project; grouping columns must be available (CP_LABEL_TLIST).
+    let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    // extract_grouping_cols/ops/collations (tlist.c) against the subplan tlist.
+    let num_cols = group_clause.len();
+    let mut grp_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(run.mcx);
+    let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+    let mut grp_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+    let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
+    for i in 0..num_cols {
+        let (sgref, eqop) = {
+            let scl = run
+                .root
+                .expr_node(group_clause[i])
+                .as_sort_group_clause()
+                .expect("GroupPath.groupClause cell");
+            (scl.tleSortGroupRef, scl.eqop)
+        };
+        let tle_node = subplan_tlist
+            .iter()
+            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
+            .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+        let tle = tle_node.as_target_entry().unwrap();
+        grp_col_idx.push(tle.resno);
+        grp_operators.push(eqop);
+        grp_collations.push(expr_collation(tle.expr));
+    }
+
+    let mut plan = Node::build::<Group>(run.mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = qual;
+    plan.plan.lefttree = Some(subplan);
+    plan.numCols = num_cols as i32;
+    plan.grpColIdx = mcx::vec_borrow_in(run.mcx, grp_col_idx)?;
+    plan.grpOperators = mcx::vec_borrow_in(run.mcx, grp_operators)?;
+    plan.grpCollations = mcx::vec_borrow_in(run.mcx, grp_collations)?;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
 fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let (subpath_id, target_id, aggstrategy, aggsplit, num_groups, transition_space, qual_ids) =
         match run.root.path(path_id) {

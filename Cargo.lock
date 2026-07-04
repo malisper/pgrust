@@ -4019,6 +4019,7 @@ dependencies = [
  "nodebitmapindexscan",
  "nodectescan",
  "nodefunctionscan",
+ "nodegroup",
  "nodehash",
  "nodehashjoin",
  "nodeincrementalsort",
@@ -6939,6 +6940,23 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_scan",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodegroup"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "exectuples",
+ "executils",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "types_error",
+ "types_nodes",
  "types_slot",
  "types_tuple",
 ]
@@ -11600,6 +11618,7 @@ dependencies = [
  "miscinit",
  "multixact",
  "nodeagg",
+ "nodegroup",
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",

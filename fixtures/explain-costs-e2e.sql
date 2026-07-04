@@ -173,6 +173,35 @@ EXPLAIN SELECT count(*) FROM ec_small s, ec_big b WHERE b.a = s.x AND b.b < 20;
 RESET enable_hashjoin;
 RESET enable_mergejoin;
 
+-- plain GROUP BY without aggregates (Group node; hashagg off forces the
+-- sorted grouping leg)
+SET enable_hashagg = off;
+EXPLAIN SELECT b FROM ec_big GROUP BY b;
+SELECT b FROM ec_big GROUP BY b ORDER BY b LIMIT 7;
+EXPLAIN SELECT b, c FROM ec_big GROUP BY b, c ORDER BY b, c LIMIT 5;
+SELECT b, c FROM ec_big GROUP BY b, c ORDER BY b, c LIMIT 5;
+EXPLAIN SELECT b + 1 FROM ec_big GROUP BY b;
+SELECT b + 1 FROM ec_big GROUP BY b ORDER BY 1 LIMIT 5;
+EXPLAIN SELECT k FROM ec_dup GROUP BY k HAVING k < 5;
+SELECT k FROM ec_dup GROUP BY k HAVING k < 5 ORDER BY k;
+RESET enable_hashagg;
+
+-- SubqueryScan execution (OFFSET 0 blocks pull-up; qual + projection above
+-- the unflattened subquery)
+EXPLAIN SELECT * FROM (SELECT y, x FROM ec_small OFFSET 0) s WHERE s.y < 3;
+SELECT * FROM (SELECT y, x FROM ec_small OFFSET 0) s WHERE s.y < 3 ORDER BY x LIMIT 8;
+SELECT count(*), sum(s.n) FROM (SELECT k, count(*) AS n FROM ec_dup GROUP BY k) s;
+SELECT * FROM (SELECT DISTINCT x FROM ec_small UNION ALL SELECT k FROM ec_dup) u ORDER BY 1 LIMIT 6;
+
+-- mergejoin with Materialized inner: mark/restore over the tuplestore
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+EXPLAIN SELECT count(*) FROM ec_dup d1, ec_dup d2 WHERE d1.k = d2.k;
+SELECT count(*) FROM ec_dup d1, ec_dup d2 WHERE d1.k = d2.k;
+SELECT count(*), sum(d.v) FROM ec_small s, ec_dup d WHERE s.y = d.k;
+RESET enable_hashjoin;
+RESET enable_nestloop;
+
 DROP TABLE ec_big, ec_small, ec_dup;
 
 -- TID scan cost shapes (tidscan lane); ANALYZE first: unanalyzed

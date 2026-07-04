@@ -1487,6 +1487,65 @@ pub fn cost_agg_shape(
     Ok((output_tuples, disabled_nodes, startup_cost, total_cost))
 }
 
+/// cost_group (costsize.c); caller ensures the input is sorted.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_group(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    num_group_cols: i32,
+    num_groups: f64,
+    quals: &[types_pathnodes::NodeId],
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+) -> PgResult<()> {
+    let mut output_tuples = num_groups;
+    let mut startup_cost = input_startup_cost;
+    let mut total_cost = input_total_cost;
+
+    // C associates cpu_operator_cost * input_tuples * numGroupCols left-to-
+    // right and fp-contracts the tail multiply; mirrored for EXPLAIN parity.
+    total_cost =
+        (gucs::cpu_operator_cost() * input_tuples).mul_add(num_group_cols as f64, total_cost);
+
+    if !quals.is_empty() {
+        let mut qual_cost = QualCost { startup: 0.0, per_tuple: 0.0 };
+        for &q in quals {
+            let c = cost_qual_eval_node(*run.root.expr_node(q))?;
+            qual_cost.startup += c.startup;
+            qual_cost.per_tuple += c.per_tuple;
+        }
+        startup_cost += qual_cost.startup;
+        total_cost += output_tuples.mul_add(qual_cost.per_tuple, qual_cost.startup);
+
+        // C passes the bare clauses; the transient RestrictInfo wrap feeds
+        // the same restriction_selectivity legs.
+        let mut rids: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+        for &q in quals {
+            let clause = *run.root.expr_node(q);
+            rids.push(planner_seams::make_restrictinfo::call(
+                run, clause, true, false, false, false, 0, None, None, None,
+            )?);
+        }
+        let sel = planner_seams::clauselist_selectivity::call(
+            run,
+            &rids,
+            0,
+            types_pathnodes::JOIN_INNER,
+            None,
+        )?;
+        output_tuples = clamp_row_est(output_tuples * sel);
+    }
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = output_tuples;
+    p.disabled_nodes = input_disabled_nodes;
+    p.startup_cost = startup_cost;
+    p.total_cost = total_cost;
+    Ok(())
+}
+
 const BLCKSZ: usize = 8192;
 const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
 

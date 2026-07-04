@@ -50,6 +50,7 @@ pub enum PlanStateNode<'mcx> {
     IncrementalSort(PgBox<'mcx, IncrementalSortNode<'mcx>>),
     Material(PgBox<'mcx, MaterialNode<'mcx>>),
     Unique(PgBox<'mcx, UniqueNode<'mcx>>),
+    Group(PgBox<'mcx, GroupNode<'mcx>>),
     Limit(LimitNode<'mcx>),
     LockRows(PgBox<'mcx, LockRowsNode<'mcx>>),
     BitmapHeapScan(PgBox<'mcx, BitmapHeapPlanState<'mcx>>),
@@ -209,6 +210,12 @@ pub struct UniqueNode<'mcx> {
     pub outer: PlanStateNode<'mcx>,
 }
 
+// The Group node's outer child lives here (nodesort/nodeagg precedent).
+pub struct GroupNode<'mcx> {
+    pub state: ::nodegroup::GroupState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+}
+
 // Both children live here; nodenestloop drives them via NestLoopChild.
 pub struct NestLoopNode<'mcx> {
     pub state: ::nodenestloop::NestLoopState<'mcx>,
@@ -315,6 +322,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => None,
             PlanStateNode::Memoize(m) => Some(m.state.ps_ExprContext),
             PlanStateNode::Unique(u) => Some(u.state.ps_ExprContext),
+            PlanStateNode::Group(g) => Some(g.state.ps_ExprContext),
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
             PlanStateNode::LockRows(_) => None,
             PlanStateNode::NestLoop(nl) => Some(nl.state.ps_ExprContext),
@@ -385,6 +393,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             }
             PlanStateNode::Material(m) => Ok(m.state.ps_ResultTupleDesc.clone().expect("material already ended")),
             PlanStateNode::Unique(u) => Ok(u.state.ps_ResultTupleDesc.clone().expect("unique already ended")),
+            PlanStateNode::Group(g) => Ok(g.state.ps_ResultTupleDesc.clone().expect("group already ended")),
             PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone().expect("nest loop already ended")),
             PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone().expect("hash join already ended")),
             PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone().expect("merge join already ended")),
@@ -684,6 +693,40 @@ pub fn exec_init_node<'mcx>(
             let state =
                 ::nodeunique::exec_init_unique(uq_plan, estate, eflags, &outer_desc, result_desc)?;
             PlanStateNode::Unique(::mcx::alloc_in(mcx, UniqueNode { state, outer })?)
+        }
+        NodeTag::T_Group => {
+            let mcx = estate.es_query_cxt;
+            let g_plan = node.as_group().unwrap();
+            let outer = exec_init_node(g_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitGroup (nodeGroup.c): Group without an outer plan")
+                });
+            let outer_desc =
+                outer.exec_get_result_type(g_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&g_plan.plan.targetlist)?;
+            let params = estate.param_bind();
+            let (qual, proj) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+                let qual =
+                    ::execexpr::exec_init_qual_subplans(mcx, &g_plan.plan.qual, params, env)?;
+                let proj = ::execexpr::exec_build_projection_info_subplans(
+                    mcx,
+                    &g_plan.plan.targetlist,
+                    None,
+                    params,
+                    env,
+                )?;
+                Ok((qual, proj))
+            })?;
+            let state = ::nodegroup::exec_init_group(
+                g_plan,
+                estate,
+                eflags,
+                &outer_desc,
+                result_desc,
+                qual,
+                proj,
+            )?;
+            PlanStateNode::Group(::mcx::alloc_in(mcx, GroupNode { state, outer })?)
         }
         NodeTag::T_Limit => {
             let limit_plan = node.as_limit().unwrap();
@@ -1120,7 +1163,6 @@ pub fn exec_init_node<'mcx>(
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
-            T_Group => "nodeGroup.c",
             T_WindowAgg => "nodeWindowAgg.c",
             T_Gather => "nodeGather.c",
             T_GatherMerge => "nodeGatherMerge.c",
@@ -1215,6 +1257,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Material(m) => material_arm(m, estate),
         PlanStateNode::Memoize(m) => memoize_arm(m, estate),
         PlanStateNode::Unique(u) => unique_arm(u, estate),
+        PlanStateNode::Group(g) => group_arm(g, estate),
         PlanStateNode::Limit(l) => limit_arm(l, estate),
         PlanStateNode::LockRows(l) => lockrows_arm(l, estate),
         PlanStateNode::BitmapHeapScan(b) => bitmap_heap_scan_arm(b, estate),
@@ -1840,6 +1883,16 @@ fn unique_arm<'mcx>(
 }
 
 #[inline(never)]
+fn group_arm<'mcx>(
+    g: &mut PgBox<'mcx, GroupNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let g = &mut **g;
+    let outer = &mut g.outer;
+    ::nodegroup::exec_group(&mut g.state, estate, |e| exec_proc_node(outer, e))
+}
+
+#[inline(never)]
 fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let LimitNode { state, outer } = l;
     ::nodelimit::exec_limit(state, &mut **outer, estate)
@@ -2346,6 +2399,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         | PlanStateNode::Material(_)
         | PlanStateNode::Memoize(_)
         | PlanStateNode::Unique(_)
+        | PlanStateNode::Group(_)
         | PlanStateNode::Limit(_) => {}
     }
 }
@@ -2389,6 +2443,7 @@ pub fn planstate_instr_extra<'mcx>(
         PlanStateNode::Material(m) => walk!(&mut *m.outer),
         PlanStateNode::Memoize(m) => walk!(&mut *m.outer),
         PlanStateNode::Unique(u) => walk!(&mut u.outer),
+        PlanStateNode::Group(g) => walk!(&mut g.outer),
         PlanStateNode::Limit(l) => walk!(&mut *l.outer),
         PlanStateNode::NestLoop(nl) => walk!(&mut *nl.outer, &mut *nl.inner),
         PlanStateNode::MergeJoin(mj) => walk!(&mut *mj.outer, &mut *mj.inner),
@@ -2550,6 +2605,10 @@ fn exec_end_node_inner<'mcx>(
             ::nodeunique::exec_end_unique(&mut u.state);
             exec_end_node(&mut u.outer, estate)
         }
+        PlanStateNode::Group(g) => {
+            ::nodegroup::exec_end_group(&mut g.state);
+            exec_end_node(&mut g.outer, estate)
+        }
         PlanStateNode::Limit(l) => {
             ::nodelimit::exec_end_limit(&mut l.state);
             exec_end_node(&mut l.outer, estate)
@@ -2667,6 +2726,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer, estate),
         PlanStateNode::Memoize(m) => exec_shutdown_node(&mut m.outer, estate),
         PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer, estate),
+        PlanStateNode::Group(g) => exec_shutdown_node(&mut g.outer, estate),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer, estate),
         PlanStateNode::LockRows(l) => exec_shutdown_node(&mut l.outer, estate),
         PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual, estate),
@@ -2966,6 +3026,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     LockRowsNode<'_> { state, outer, epq },
     LimitNode<'_> { state, outer },
     UniqueNode<'_> { state, outer },
+    GroupNode<'_> { state, outer },
     NestLoopNode<'_> { state, outer, inner },
     HashSubNode<'_> { state, child },
     HashJoinNode<'_> { state, outer, hash, probe_batch },
@@ -2975,7 +3036,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     PlanStateNode<'_> {
         Result(x), SeqScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
         IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
-        IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
+        IncrementalSort(x), Unique(x), Group(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), MergeAppend(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
         MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),

@@ -65,6 +65,7 @@ pub fn init_all() {
     nodeagg::init_seams();
     nodewindowagg::init_seams();
     nodesort::init_seams();
+    nodegroup::init_seams();
     nodeunique::init_seams();
     nodelimit::init_seams();
     nodelockrows::init_seams();

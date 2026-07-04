@@ -496,6 +496,17 @@ pub struct IncrementalSort<'mcx> {
 /// Per-key arrays as in [`Sort`].
 #[derive(Default)]
 #[repr(C)]
+pub struct Group<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub numCols: i32,
+    pub grpColIdx: &'mcx [i16],
+    pub grpOperators: &'mcx [Oid],
+    pub grpCollations: &'mcx [Oid],
+}
+
+/// Per-key arrays as in [`Sort`].
+#[derive(Default)]
+#[repr(C)]
 pub struct Unique<'mcx> {
     pub plan: Plan<'mcx>,
     pub numCols: i32,
@@ -920,6 +931,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for IncrementalSort<'mcx> {
     const TAG: NodeTag = NodeTag::T_IncrementalSort;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Group<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Group;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Unique<'mcx> {
     const TAG: NodeTag = NodeTag::T_Unique;
 }
@@ -1003,6 +1017,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
 // SAFETY: repr(C), Plan first via the Sort base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for IncrementalSort<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Group<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Unique<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -1108,6 +1124,8 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<IncrementalSort>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(Group, plan) == 0);
+    assert!(offset_of!(NodeRep<Group>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Unique, plan) == 0);
     assert!(offset_of!(NodeRep<Unique>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Agg, plan) == 0);
@@ -1166,6 +1184,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_ValuesScan
             | NodeTag::T_Sort
             | NodeTag::T_IncrementalSort
+            | NodeTag::T_Group
             | NodeTag::T_Unique
             | NodeTag::T_Agg
             | NodeTag::T_WindowAgg
@@ -1294,6 +1313,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_memoize(self) -> Option<&'mcx Memoize<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_group(self) -> Option<&'mcx Group<'mcx>> {
         self.as_variant()
     }
 
