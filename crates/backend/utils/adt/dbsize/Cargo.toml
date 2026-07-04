@@ -15,3 +15,10 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 relation_seams = { path = "../../../access/common/relation_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+varlena = { path = "../varlena" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+acl_seams = { path = "../acl_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+types_nodes = { path = "../../../../_support/types/nodes" }

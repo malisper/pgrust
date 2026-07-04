@@ -571,13 +571,248 @@ pub fn getObjectDescription(
             .unwrap_or_else(|| panic!("cache lookup failed for foreign server {serverid}"));
             Ok(Some(format!("user mapping for {usename} on server {srvname}")))
         }
+        crate::LargeObjectRelationId => {
+            if !pg_largeobject::LargeObjectExists(mcx, object.objectId)? {
+                return Ok(None);
+            }
+            Ok(Some(format!("large object {}", object.objectId)))
+        }
+        crate::AccessMethodRelationId => {
+            let cacheid = cache_syscache::cacheinfo::AMOID;
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cacheid,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for access method {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let amname =
+                name_from_datum(cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?);
+            cache_syscache::ReleaseSysCache(tup);
+            Ok(Some(format!("access method {amname}")))
+        }
+        crate::AccessMethodOperatorRelationId => {
+            let row = scan_one_row(
+                mcx,
+                crate::AccessMethodOperatorRelationId,
+                crate::AccessMethodOperatorOidIndexId,
+                object.objectId,
+                |tup, desc| {
+                    (
+                        getattr(tup, 2, desc).as_oid(),
+                        getattr(tup, 3, desc).as_oid(),
+                        getattr(tup, 4, desc).as_oid(),
+                        getattr(tup, 5, desc).as_i16(),
+                        getattr(tup, 7, desc).as_oid(),
+                    )
+                },
+            )?;
+            let Some((amopfamily, lefttype, righttype, strategy, amopopr)) = row else {
+                if !missing_ok {
+                    panic!("could not find tuple for amop entry {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let opfam = getObjectDescription(
+                mcx,
+                &ObjectAddress::set(OPERATOR_FAMILY_RELATION_ID, amopfamily),
+                false,
+            )?
+            .expect("missing_ok=false");
+            let lt = format_type::format_type_extended(
+                lefttype,
+                -1,
+                format_type::FORMAT_TYPE_ALLOW_INVALID,
+            )?
+            .expect("ALLOW_INVALID never yields NULL");
+            let rt = format_type::format_type_extended(
+                righttype,
+                -1,
+                format_type::FORMAT_TYPE_ALLOW_INVALID,
+            )?
+            .expect("ALLOW_INVALID never yields NULL");
+            Ok(Some(format!(
+                "operator {strategy} ({lt}, {rt}) of {opfam}: {}",
+                adt_regproc::format_operator(mcx, amopopr)?
+            )))
+        }
+        crate::AccessMethodProcedureRelationId => {
+            let row = scan_one_row(
+                mcx,
+                crate::AccessMethodProcedureRelationId,
+                crate::AccessMethodProcedureOidIndexId,
+                object.objectId,
+                |tup, desc| {
+                    (
+                        getattr(tup, 2, desc).as_oid(),
+                        getattr(tup, 3, desc).as_oid(),
+                        getattr(tup, 4, desc).as_oid(),
+                        getattr(tup, 5, desc).as_i16(),
+                        getattr(tup, 6, desc).as_oid(),
+                    )
+                },
+            )?;
+            let Some((amprocfamily, lefttype, righttype, procnum, amproc)) = row else {
+                if !missing_ok {
+                    panic!("could not find tuple for amproc entry {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let opfam = getObjectDescription(
+                mcx,
+                &ObjectAddress::set(OPERATOR_FAMILY_RELATION_ID, amprocfamily),
+                false,
+            )?
+            .expect("missing_ok=false");
+            let lt = format_type::format_type_extended(
+                lefttype,
+                -1,
+                format_type::FORMAT_TYPE_ALLOW_INVALID,
+            )?
+            .expect("ALLOW_INVALID never yields NULL");
+            let rt = format_type::format_type_extended(
+                righttype,
+                -1,
+                format_type::FORMAT_TYPE_ALLOW_INVALID,
+            )?
+            .expect("ALLOW_INVALID never yields NULL");
+            let procname = format_procedure(mcx, amproc, false)?
+                .unwrap_or_else(|| panic!("cache lookup failed for function {amproc}"));
+            Ok(Some(format!(
+                "function {procnum} ({lt}, {rt}) of {opfam}: {procname}"
+            )))
+        }
+        crate::AuthMemRelationId => {
+            let row = scan_one_row(
+                mcx,
+                crate::AuthMemRelationId,
+                crate::AuthMemOidIndexId,
+                object.objectId,
+                |tup, desc| (getattr(tup, 2, desc).as_oid(), getattr(tup, 3, desc).as_oid()),
+            )?;
+            let Some((roleid, member)) = row else {
+                if !missing_ok {
+                    panic!("could not find tuple for role membership {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let member = miscinit::GetUserNameFromId(mcx, member, false)?
+                .expect("noerr=false")
+                .as_str()
+                .to_string();
+            let role = miscinit::GetUserNameFromId(mcx, roleid, false)?
+                .expect("noerr=false")
+                .as_str()
+                .to_string();
+            Ok(Some(format!("membership of role {member} in role {role}")))
+        }
+        types_core::TABLE_SPACE_RELATION_ID => {
+            let Some(tblspc) = commands_tablespace::get_tablespace_name(mcx, object.objectId)?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for tablespace {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!("tablespace {}", name_str(&tblspc))))
+        }
+        crate::DefaultAclRelationId => {
+            let row = scan_one_row(
+                mcx,
+                crate::DefaultAclRelationId,
+                crate::DefaultAclOidIndexId,
+                object.objectId,
+                |tup, desc| {
+                    (
+                        getattr(tup, 2, desc).as_oid(),
+                        getattr(tup, 3, desc).as_oid(),
+                        getattr(tup, 4, desc).as_i8() as u8,
+                    )
+                },
+            )?;
+            let Some((defaclrole, defaclnamespace, defaclobjtype)) = row else {
+                if !missing_ok {
+                    panic!("could not find tuple for default ACL {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let rolename = miscinit::GetUserNameFromId(mcx, defaclrole, false)?
+                .expect("noerr=false")
+                .as_str()
+                .to_string();
+            let nspname = if OidIsValid(defaclnamespace) {
+                get_namespace_name(defaclnamespace)?
+            } else {
+                None
+            };
+            let noun = match defaclobjtype {
+                b'r' => "relations",
+                b'S' => "sequences",
+                b'f' => "functions",
+                b'T' => "types",
+                b'n' => "schemas",
+                b'L' => "large objects",
+                other => panic!("unrecognized default ACL object type {}", other as char),
+            };
+            Ok(Some(match nspname {
+                Some(nsp) => format!(
+                    "default privileges on new {noun} belonging to role {rolename} in schema {nsp}"
+                ),
+                None => {
+                    format!("default privileges on new {noun} belonging to role {rolename}")
+                }
+            }))
+        }
+        crate::ParameterAclRelationId => {
+            let cacheid = cache_syscache::cacheinfo::PARAMETERACLOID;
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cacheid,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for parameter ACL {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let parname = crate::identity::text_datum_to_string(
+                cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?,
+            );
+            cache_syscache::ReleaseSysCache(tup);
+            Ok(Some(format!("parameter {parname}")))
+        }
+        crate::TransformRelationId => {
+            let cacheid = cache_syscache::cacheinfo::TRFOID;
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cacheid,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("could not find tuple for transform {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let trftype = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?.as_oid();
+            let trflang = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 3)?.as_oid();
+            cache_syscache::ReleaseSysCache(tup);
+            let langname = crate::identity::language_name(trflang)?
+                .unwrap_or_else(|| panic!("cache lookup failed for language {trflang}"));
+            Ok(Some(format!(
+                "transform for {} language {langname}",
+                format_type::format_type_be(trftype)?
+            )))
+        }
         other => unported(&format!("getObjectDescription object class {other}")),
     }
 }
 
 // getPublicationSchemaInfo (objectaddress.c): (pubname, nspname) for a
 // pg_publication_namespace row.
-fn getPublicationSchemaInfo(
+pub(crate) fn getPublicationSchemaInfo(
     mcx: Mcx<'_>,
     psoid: types_core::Oid,
     missing_ok: bool,
@@ -611,7 +846,7 @@ fn getPublicationSchemaInfo(
 
 // pg_foreign_data_wrapper and pg_foreign_server carry their NAMEDATALEN name
 // column at attnum 2.
-fn foreign_object_name(cache_id: i32, oid: Oid) -> PgResult<Option<String>> {
+pub(crate) fn foreign_object_name(cache_id: i32, oid: Oid) -> PgResult<Option<String>> {
     let Some(tup) = cache_syscache::SearchSysCache1(
         cache_id,
         cache_syscache::SysCacheKey::Value(Datum::from_oid(oid)),
@@ -629,7 +864,7 @@ fn foreign_object_name(cache_id: i32, oid: Oid) -> PgResult<Option<String>> {
 
 // pg_opclass and pg_opfamily share the (method, name, namespace) column
 // layout at attnums 2/3/4.
-fn opclass_or_opfamily_row(cacheid: i32, objid: Oid) -> PgResult<Option<(Oid, String, Oid)>> {
+pub(crate) fn opclass_or_opfamily_row(cacheid: i32, objid: Oid) -> PgResult<Option<(Oid, String, Oid)>> {
     let Some(tup) = cache_syscache::SearchSysCache1(
         cacheid,
         cache_syscache::SysCacheKey::Value(Datum::from_oid(objid)),
@@ -644,7 +879,7 @@ fn opclass_or_opfamily_row(cacheid: i32, objid: Oid) -> PgResult<Option<(Oid, St
     Ok(Some((method, name, nsp)))
 }
 
-fn am_name(amoid: Oid) -> PgResult<String> {
+pub(crate) fn am_name(amoid: Oid) -> PgResult<String> {
     let cacheid = cache_syscache::cacheinfo::AMOID;
     let Some(tup) = cache_syscache::SearchSysCache1(
         cacheid,
@@ -658,79 +893,14 @@ fn am_name(amoid: Oid) -> PgResult<String> {
     Ok(name)
 }
 
-// getObjectIdentity (objectaddress.c getObjectIdentityParts), same class
-// coverage as getObjectDescription.
+// getObjectIdentity (objectaddress.c) == getObjectIdentityParts(obj, NULL,
+// NULL, missing_ok); one body keeps the strings from diverging.
 pub fn getObjectIdentity(
     mcx: Mcx<'_>,
     object: &ObjectAddress,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
-    match object.classId {
-        RELATION_RELATION_ID => {
-            let Some(ident) = getRelationIdentity(object.objectId, missing_ok)? else {
-                return Ok(None);
-            };
-            if object.objectSubId == 0 {
-                return Ok(Some(ident));
-            }
-            let Some(attname) = lsyscache::get_attname(
-                mcx,
-                object.objectId,
-                object.objectSubId as AttrNumber,
-                missing_ok,
-            )?
-            else {
-                return Ok(None);
-            };
-            Ok(Some(format!("{ident}.{}", quote_identifier(attname.as_str()))))
-        }
-        ProcedureRelationId => {
-            let Some(proname) = format_procedure(mcx, object.objectId, true)? else {
-                if !missing_ok {
-                    panic!("cache lookup failed for function {}", object.objectId);
-                }
-                return Ok(None);
-            };
-            Ok(Some(proname))
-        }
-        TYPE_RELATION_ID => {
-            let Some((typname, typnamespace)) =
-                syscache_seams::pg_type_name_namespace::call(object.objectId)?
-            else {
-                if !missing_ok {
-                    panic!("cache lookup failed for type {}", object.objectId);
-                }
-                return Ok(None);
-            };
-            // FORMAT_TYPE_FORCE_QUALIFY: catalog names, no special-casing.
-            let nspname = get_namespace_name(typnamespace)?
-                .unwrap_or_else(|| panic!("cache lookup failed for namespace {typnamespace}"));
-            Ok(Some(quote_qualified(Some(&nspname), name_str(&typname))))
-        }
-        NAMESPACE_RELATION_ID => {
-            let Some(nspname) = get_namespace_name(object.objectId)? else {
-                if !missing_ok {
-                    panic!("cache lookup failed for namespace {}", object.objectId);
-                }
-                return Ok(None);
-            };
-            Ok(Some(quote_identifier(&nspname).into_owned()))
-        }
-        AUTH_ID_RELATION_ID => {
-            Ok(miscinit::GetUserNameFromId(mcx, object.objectId, missing_ok)?
-                .map(|name| quote_identifier(name.as_str()).into_owned()))
-        }
-        DATABASE_RELATION_ID => {
-            let Some(datname) = dbcommands_seams::get_database_name::call(object.objectId)? else {
-                if !missing_ok {
-                    panic!("cache lookup failed for database {}", object.objectId);
-                }
-                return Ok(None);
-            };
-            Ok(Some(quote_identifier(&datname).into_owned()))
-        }
-        other => unported(&format!("getObjectIdentity object class {other}")),
-    }
+    Ok(crate::identity::getObjectIdentityParts(mcx, object, missing_ok)?.map(|i| i.identity))
 }
 
 // getRelationIdentity (objectaddress.c): always schema-qualified.
