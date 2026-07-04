@@ -149,6 +149,22 @@ pub struct SeqScan<'mcx> {
     pub scan: Scan<'mcx>,
 }
 
+/// tidquals has implicit OR semantics.
+#[derive(Default)]
+#[repr(C)]
+pub struct TidScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tidquals: NodeList<'mcx>,
+}
+
+/// tidrangequals has implicit AND semantics.
+#[derive(Default)]
+#[repr(C)]
+pub struct TidRangeScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tidrangequals: NodeList<'mcx>,
+}
+
 /// `indexorderdir` carries the C ScanDirection value (-1/0/1).
 #[derive(Default)]
 #[repr(C)]
@@ -674,6 +690,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ProjectSet<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SeqScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for TidScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TidScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TidRangeScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TidRangeScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexScan;
 }
@@ -837,6 +859,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<SeqScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(TidScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TidScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(TidRangeScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TidRangeScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(IndexScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<IndexScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -924,6 +954,8 @@ fn is_plan_tag(tag: NodeTag) -> bool {
         NodeTag::T_Result
             | NodeTag::T_ProjectSet
             | NodeTag::T_SeqScan
+            | NodeTag::T_TidScan
+            | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
             | NodeTag::T_IndexOnlyScan
             | NodeTag::T_BitmapAnd
@@ -973,6 +1005,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_seq_scan(self) -> Option<&'mcx SeqScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_tid_scan(self) -> Option<&'mcx TidScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_tid_range_scan(self) -> Option<&'mcx TidRangeScan<'mcx>> {
         self.as_variant()
     }
 

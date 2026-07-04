@@ -33,9 +33,14 @@ impl<'mcx> NodeWalker<'mcx> for PullVarnos<'mcx> {
                 }
                 Ok(false)
             }
-            t @ (NodeTag::T_CurrentOfExpr | NodeTag::T_PlaceHolderVar) => {
-                deferred("pull_varnos_walker", t)
+            NodeTag::T_CurrentOfExpr => {
+                if self.sublevels_up == 0 {
+                    let cvarno = node.as_current_of_expr().unwrap().cvarno;
+                    self.varnos.add_member(self.mcx, cvarno as i32)?;
+                }
+                Ok(false)
             }
+            t @ NodeTag::T_PlaceHolderVar => deferred("pull_varnos_walker", t),
             NodeTag::T_Query => {
                 let q = node.as_query().unwrap();
                 self.sublevels_up += 1;
