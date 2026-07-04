@@ -41,6 +41,7 @@ const NAMEDATALEN: usize = 64;
 const STATS_EXT_NDISTINCT: u8 = b'd';
 const STATS_EXT_DEPENDENCIES: u8 = b'f';
 const STATS_EXT_MCV: u8 = b'm';
+const STATS_EXT_EXPRESSIONS: u8 = b'e';
 
 use types_rel::{RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
@@ -126,6 +127,15 @@ fn int2vector_image<'mcx>(mcx: Mcx<'mcx>, vals: &[i16]) -> PgResult<PgVec<'mcx, 
     Ok(out)
 }
 
+// text varlena image (CStringGetTextDatum).
+fn text_image<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgVec<'mcx, u8>> {
+    let len = 4 + s.len();
+    let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    mcx::vec_append_bytes(&mut out, &((len as u32) << 2).to_ne_bytes())?;
+    mcx::vec_append_bytes(&mut out, s.as_bytes())?;
+    Ok(out)
+}
+
 // 1-D "char"[] image, lbound 1 (construct_array_builtin CHAROID).
 fn chararray_image<'mcx>(mcx: Mcx<'mcx>, vals: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let len = 4 + 20 + vals.len();
@@ -140,7 +150,7 @@ fn chararray_image<'mcx>(mcx: Mcx<'mcx>, vals: &[u8]) -> PgResult<PgVec<'mcx, u8
     Ok(out)
 }
 
-pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgResult<()> {
+pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'mcx>) -> PgResult<()> {
     let mut attnums: [i16; STATS_MAX_DIMENSIONS] = [0; STATS_MAX_DIMENSIONS];
     let mut nattnums = 0usize;
     let stxowner = miscinit_seams::get_user_id::call();
@@ -250,47 +260,121 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     }
 
     let tupdesc = rel.descr();
+    let mut stxexprs: PgVec<'_, types_nodes::Node<'_>> = PgVec::new_in(mcx);
     for selem_node in stmt.exprs.iter() {
         let selem: &StatsElem<'_> =
             selem_node.as_variant::<StatsElem>().expect("stats_param is a StatsElem");
-        let Some(attname) = selem.name else {
-            unported("CreateStatistics: expression statistics lane");
-        };
-        let i = (1..=tupdesc.natts).find(|&i| {
-            let a = tupdesc.attr(i as usize - 1);
-            !a.attisdropped && a.attname.name_str() == attname.as_bytes()
-        });
-        let Some(i) = i else {
-            if catalog_heap::SystemAttributeByName(attname).is_some() {
+        if let Some(attname) = selem.name {
+            let i = (1..=tupdesc.natts).find(|&i| {
+                let a = tupdesc.attr(i as usize - 1);
+                !a.attisdropped && a.attname.name_str() == attname.as_bytes()
+            });
+            let Some(i) = i else {
+                if catalog_heap::SystemAttributeByName(attname).is_some() {
+                    return Err(err(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "statistics creation on system columns is not supported".into(),
+                    ));
+                }
+                return Err(err(
+                    types_error::ERRCODE_UNDEFINED_COLUMN,
+                    format!("column \"{attname}\" does not exist"),
+                ));
+            };
+            let att = tupdesc.attr(i as usize - 1);
+            if att.attgenerated == b'v' as i8 {
+                return Err(err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "statistics creation on virtual generated columns is not supported".into(),
+                ));
+            }
+            let entry = typcache::lookup_type_cache(att.atttypid, typcache::TYPECACHE_LT_OPR)?;
+            if entry.lt_opr() == InvalidOid {
+                let typname = format_type::format_type_be(att.atttypid)?;
+                return Err(err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "column \"{attname}\" cannot be used in statistics because its type {typname} has no default btree operator class"
+                    ),
+                ));
+            }
+            attnums[nattnums] = i as i16;
+            nattnums += 1;
+        } else if let Some(var) = selem.expr.expect("StatsElem without name or expr").as_var() {
+            if var.varattno <= 0 {
                 return Err(err(
                     types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                     "statistics creation on system columns is not supported".into(),
                 ));
             }
-            return Err(err(
-                types_error::ERRCODE_UNDEFINED_COLUMN,
-                format!("column \"{attname}\" does not exist"),
-            ));
-        };
-        let att = tupdesc.attr(i as usize - 1);
-        if att.attgenerated == b'v' as i8 {
-            return Err(err(
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "statistics creation on virtual generated columns is not supported".into(),
-            ));
+            if lsyscache::get_attgenerated(relid, var.varattno)? == b'v' as i8 {
+                return Err(err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "statistics creation on virtual generated columns is not supported".into(),
+                ));
+            }
+            let entry = typcache::lookup_type_cache(var.vartype, typcache::TYPECACHE_LT_OPR)?;
+            if entry.lt_opr() == InvalidOid {
+                let attname = tupdesc.attr(var.varattno as usize - 1).attname;
+                let typname = format_type::format_type_be(var.vartype)?;
+                return Err(err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "column \"{}\" cannot be used in statistics because its type {typname} has no default btree operator class",
+                        core::str::from_utf8(attname.name_str()).unwrap_or("?")
+                    ),
+                ));
+            }
+            attnums[nattnums] = var.varattno;
+            nattnums += 1;
+        } else {
+            let expr = selem.expr.expect("StatsElem expr");
+            let mut exprattnums = types_nodes::Bitmapset::empty();
+            vars::pull_varattnos(mcx, expr, 1, &mut exprattnums)?;
+            for (w, word) in exprattnums.as_words().iter().enumerate() {
+                let mut word = *word;
+                while word != 0 {
+                    let k = (w * 64) as i32 + word.trailing_zeros() as i32;
+                    word &= word - 1;
+                    let attnum = k + types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+                    if attnum <= 0 {
+                        return Err(err(
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            "statistics creation on system columns is not supported".into(),
+                        ));
+                    }
+                    if lsyscache::get_attgenerated(relid, attnum as i16)? == b'v' as i8 {
+                        return Err(err(
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            "statistics creation on virtual generated columns is not supported"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            if stmt.exprs.len() > 1 {
+                let atttype = nodes_core::node_funcs::expr_type(expr);
+                let entry = typcache::lookup_type_cache(atttype, typcache::TYPECACHE_LT_OPR)?;
+                if entry.lt_opr() == InvalidOid {
+                    let typname = format_type::format_type_be(atttype)?;
+                    return Err(err(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "expression cannot be used in multivariate statistics because its type {typname} has no default btree operator class"
+                        ),
+                    ));
+                }
+            }
+            stxexprs.push(expr);
         }
-        let entry = typcache::lookup_type_cache(att.atttypid, typcache::TYPECACHE_LT_OPR)?;
-        if entry.lt_opr() == InvalidOid {
-            let typname = format_type::format_type_be(att.atttypid)?;
-            return Err(err(
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                format!(
-                    "column \"{attname}\" cannot be used in statistics because its type {typname} has no default btree operator class"
-                ),
-            ));
-        }
-        attnums[nattnums] = i as i16;
-        nattnums += 1;
+    }
+
+    if numcols == 1 && stxexprs.len() == 1 && !stmt.stat_types.is_nil() {
+        return Err(err(
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "when building statistics on a single expression, statistics kinds may not be specified"
+                .into(),
+        ));
     }
 
     let mut build_ndistinct = false;
@@ -325,7 +409,8 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         build_dependencies = true;
         build_mcv = true;
     }
-    if numcols < 2 {
+    let build_expressions = !stxexprs.is_empty();
+    if numcols < 2 && stxexprs.len() != 1 {
         return Err(err(
             types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
             "extended statistics require at least 2 columns".into(),
@@ -341,6 +426,16 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
             ));
         }
     }
+    for (i, &e1) in stxexprs.iter().enumerate() {
+        for (j, &e2) in stxexprs.iter().enumerate() {
+            if i != j && types_nodes::equal(e1, e2) {
+                return Err(err(
+                    types_error::ERRCODE_DUPLICATE_COLUMN,
+                    "duplicate expression in statistics definition".into(),
+                ));
+            }
+        }
+    }
 
     let mut stxkind: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, 4)?;
     if build_ndistinct {
@@ -352,6 +447,18 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     if build_mcv {
         stxkind.push(STATS_EXT_MCV);
     }
+    if build_expressions {
+        stxkind.push(STATS_EXT_EXPRESSIONS);
+    }
+
+    let exprs_img: Option<PgVec<'_, u8>> = if stxexprs.is_empty() {
+        None
+    } else {
+        let list = types_nodes::NodeList::from_slice(mcx, &stxexprs)?;
+        let list_node = types_nodes::Node::mk_list(mcx, list)?;
+        let s = outfuncs::nodeToString(mcx, list_node)?;
+        Some(text_image(mcx, s.as_str())?)
+    };
 
     let statrel = table::table_open(mcx, StatisticExtRelationId, RowExclusiveLock)?;
 
@@ -371,7 +478,10 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     values[Anum_stxkeys - 1] = Datum::from_usize(stxkeys.as_ptr() as usize);
     nulls[Anum_stxstattarget - 1] = true;
     values[Anum_stxkind - 1] = Datum::from_usize(stxkind_img.as_ptr() as usize);
-    nulls[Anum_stxexprs - 1] = true;
+    match &exprs_img {
+        Some(img) => values[Anum_stxexprs - 1] = Datum::from_usize(img.as_ptr() as usize),
+        None => nulls[Anum_stxexprs - 1] = true,
+    }
 
     let mut htup = heaptuple::heap_form_tuple(mcx, statrel.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &statrel, &mut htup)?;
@@ -386,6 +496,22 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     for &attnum in &attnums[..nattnums] {
         let parent = pg_depend::ObjectAddress::sub_set(RELATION_RELATION_ID, relid, attnum as i32);
         pg_depend::recordDependencyOn(mcx, &myself, &parent, pg_depend::DependencyType::Auto)?;
+    }
+    if nattnums == 0 {
+        let parent = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, relid);
+        pg_depend::recordDependencyOn(mcx, &myself, &parent, pg_depend::DependencyType::Auto)?;
+    }
+    if !stxexprs.is_empty() {
+        let list = types_nodes::NodeList::from_slice(mcx, &stxexprs)?;
+        let exprs_node = types_nodes::Node::mk_list(mcx, list)?;
+        pg_depend::recordDependencyOnSingleRelExpr(
+            mcx,
+            &myself,
+            exprs_node,
+            relid,
+            pg_depend::DependencyType::Normal,
+            pg_depend::DependencyType::Auto,
+        )?;
     }
     let parent = pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, namespace_id);
     pg_depend::recordDependencyOn(mcx, &myself, &parent, pg_depend::DependencyType::Normal)?;

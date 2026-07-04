@@ -1570,6 +1570,69 @@ fn index_expr_other_table() -> Box<PgError> {
     )
 }
 
+// transformStatsStmt (parse_utilcmd.c), hosted here like transformIndexStmt
+// (parse_utilcmd cannot reach transformExpr).
+pub fn transformStatsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    stmt_node: Node<'mcx>,
+    query_string: &str,
+) -> PgResult<()> {
+    use types_nodes::rawnodes::{CreateStatsStmt, StatsElem};
+    let (transformed, exprs) = {
+        let stmt = stmt_node.as_variant::<CreateStatsStmt>().expect("CreateStatsStmt");
+        let mut exprs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        exprs.extend(stmt.exprs.iter());
+        (stmt.transformed, exprs)
+    };
+    if transformed {
+        return Ok(());
+    }
+
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
+
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    let nsitem = parse_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        &rel,
+        types_rel::AccessShareLock,
+        None,
+        false,
+        true,
+    )?;
+    parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+
+    for node in exprs.iter() {
+        let raw = node.as_variant::<StatsElem>().expect("StatsElem").expr;
+        let Some(raw) = raw else { continue };
+        let expr = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_STATS_EXPRESSION)?;
+        parse_collate::assign_expr_collations(mcx, &mut pstate, expr)?;
+        // SAFETY: analyze-owned parse tree; no derived refs live.
+        unsafe { node.with_mut::<StatsElem, _>(|e| e.expr = Some(expr)) }.expect("StatsElem");
+    }
+
+    if pstate.p_rtable.len() != 1 {
+        return Err(stats_expr_other_table());
+    }
+    parser_small1::free_parsestate(pstate)?;
+    rel.close(types_rel::NoLock)?;
+    // SAFETY: analyze-owned parse tree; no derived refs live.
+    unsafe { stmt_node.with_mut::<CreateStatsStmt, _>(|s| s.transformed = true) }
+        .expect("CreateStatsStmt");
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn stats_expr_other_table() -> Box<PgError> {
+    Box::new(
+        PgError::error("statistics expressions can refer only to the table being referenced")
+            .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
+    )
+}
+
 fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<&'mcx [u8]> {
     let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, b.len())?;
     mcx::vec_append_bytes(&mut v, b)?;

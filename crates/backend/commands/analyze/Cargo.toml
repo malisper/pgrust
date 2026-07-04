@@ -53,6 +53,7 @@ nbtree = { path = "../../access/nbtree/nbtree" }
 types_storage = { path = "../../../_support/types/types_storage" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 execindexing = { path = "../../executor/execindexing" }
+execexpr = { path = "../../executor/execexpr" }
 exectuples = { path = "../../executor/exectuples" }
 nodes_core = { path = "../../nodes/nodes_core" }
 pgstat = { path = "../../utils/activity/pgstat" }

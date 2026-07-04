@@ -1048,15 +1048,17 @@ fn slow_switch<'mcx>(
                     relpersistence: rv_node.relpersistence,
                     location: rv_node.location,
                 };
-                catalog_namespace::RangeVarGetRelidExtended(
+                let relid = catalog_namespace::RangeVarGetRelidExtended(
                     &rv,
                     types_rel::ShareUpdateExclusiveLock,
                     0,
                     None,
                 )?;
+                parse_clause::transformStatsStmt(mcx, relid, stmt_node, source_text)?;
             }
-            // transformStatsStmt is a no-op for plain column references; the
-            // expression lane panics inside CreateStatistics.
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                .expect("CreateStatsStmt");
             collect_gap("CREATE STATISTICS");
             statscmds::CreateStatistics(mcx, stmt)?;
             Ok(None)

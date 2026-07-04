@@ -37,3 +37,7 @@ inval = { path = "../../utils/cache/inval" }
 typcache = { path = "../../utils/cache/typcache" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 elog = { path = "../../utils/error/elog" }
+vars = { path = "../../optimizer/util/vars" }
+outfuncs = { path = "../../nodes/outfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
