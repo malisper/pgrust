@@ -13,7 +13,9 @@ use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList};
-use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
+use types_nodes::parsenodes::{
+    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause,
+};
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
     Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
@@ -141,6 +143,19 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         ),
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
+        NodeTag::T_Param => {
+            let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
+            w!(
+                out,
+                "{{PARAM :paramkind {} :paramid {} :paramtype {} :paramtypmod {} \
+                 :paramcollid {} :location -1}}",
+                p.paramkind as u32, p.paramid, p.paramtype, p.paramtypmod, p.paramcollid
+            );
+        }
+        NodeTag::T_CommonTableExpr => out_common_table_expr(
+            out,
+            node.as_variant::<CommonTableExpr>().expect("CommonTableExpr"),
+        )?,
         NodeTag::T_IntList => out_int_list(out, node.as_int_list().expect("IntList")),
         NodeTag::T_OidList => out_oid_list(out, node.as_oid_list().expect("OidList")),
         NodeTag::T_String => out_string_node(out, node.as_string().expect("String").sval),
@@ -649,6 +664,18 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             w!(out, " :colcollations ");
             out_oid_list(out, &r.colcollations);
         }
+        RTEKind::RTE_CTE => {
+            w!(out, " :ctename ");
+            out_str(out, r.ctename);
+            w!(out, " :ctelevelsup {} :self_reference ", r.ctelevelsup);
+            out_bool(out, r.self_reference);
+            w!(out, " :coltypes ");
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
+        }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");
             out_list(out, &r.groupexprs)?;
@@ -790,6 +817,33 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
     w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_common_table_expr(out: &mut PgString<'_>, c: &CommonTableExpr<'_>) -> PgResult<()> {
+    if c.search_clause.is_some() {
+        panic!("_outCTESearchClause (outfuncs.c): SEARCH clause unported");
+    }
+    if c.cycle_clause.is_some() {
+        panic!("_outCTECycleClause (outfuncs.c): CYCLE clause unported");
+    }
+    w!(out, "{{COMMONTABLEEXPR :ctename ");
+    out_str(out, c.ctename);
+    w!(out, " :aliascolnames ");
+    out_list(out, &c.aliascolnames)?;
+    w!(out, " :ctematerialized {} :ctequery ", c.ctematerialized as u32);
+    out_opt_node(out, c.ctequery)?;
+    w!(out, " :search_clause <> :cycle_clause <> :location -1 :cterecursive ");
+    out_bool(out, c.cterecursive);
+    w!(out, " :cterefcount {} :ctecolnames ", c.cterefcount);
+    out_list(out, &c.ctecolnames)?;
+    w!(out, " :ctecoltypes ");
+    out_oid_list(out, &c.ctecoltypes);
+    w!(out, " :ctecoltypmods ");
+    out_int_list(out, &c.ctecoltypmods);
+    w!(out, " :ctecolcollations ");
+    out_oid_list(out, &c.ctecolcollations);
+    w!(out, "}}");
     Ok(())
 }
 

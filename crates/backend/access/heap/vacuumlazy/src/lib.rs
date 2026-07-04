@@ -1,6 +1,7 @@
 //! vacuumlazy.c phases I (scan/prune), II (index vacuum via ambulkdelete),
-//! and III (mark LP_UNUSED), single-table lane. Loud named panics:
-//! lazy_scan_noprune, rel truncation, parallel vacuum, eager scanning. C divergences (recorded): no HEAP_PAGE_PRUNE_FREEZE (pruneheap's
+//! III (mark LP_UNUSED), and end-of-vacuum rel truncation, single-table lane.
+//! Loud named panics:
+//! lazy_scan_noprune, parallel vacuum, eager scanning. C divergences (recorded): no HEAP_PAGE_PRUNE_FREEZE (pruneheap's
 //! freeze lane is loud), so page all-visibility is recomputed by
 //! heap_page_is_all_visible after pruning — the shape C asserts equivalent;
 //! relfrozenxid advancement and pg_class relstats writes are skipped
@@ -219,7 +220,7 @@ pub fn heap_vacuum_rel<'mcx>(
     vac_close_indexes(indrels, NoLock)?;
 
     if should_attempt_truncation(&vacrel) {
-        unported("lazy_truncate_heap (rel truncation lane)");
+        lazy_truncate_heap(&mut vacrel)?;
     }
 
     if vacrel.skippedallvis {
@@ -983,6 +984,142 @@ fn lazy_check_wraparound_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<b
     }
     SetVacuumFailsafeActive(true);
     unported("lazy_check_wraparound_failsafe: failsafe triggered (cost/parallel teardown)");
+}
+
+const VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS: u64 = 50;
+const VACUUM_TRUNCATE_LOCK_TIMEOUT_MS: u64 = 5000;
+const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: u128 = 20;
+
+// lazy_truncate_heap (vacuumlazy.c). The "stopping/suspending truncate" and
+// "truncated N to M pages" messages are DEBUG2 without VERBOSE (loud
+// upstream), so none are emitted.
+fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    let mut orig_rel_pages = vacrel.rel_pages;
+    loop {
+        let mut lock_retry = 0u64;
+        loop {
+            if lmgr::ConditionalLockRelation(vacrel.rel, types_rel::lock::AccessExclusiveLock)? {
+                break;
+            }
+            postgres_seams::check_for_interrupts::call()?;
+            lock_retry += 1;
+            if lock_retry
+                > VACUUM_TRUNCATE_LOCK_TIMEOUT_MS / VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS
+            {
+                return Ok(());
+            }
+            // C: WaitLatch(MyLatch, WL_TIMEOUT, 50ms) — no latch wakeups
+            // here, so a plain timed sleep (worst case the same 50ms).
+            std::thread::sleep(std::time::Duration::from_millis(
+                VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS,
+            ));
+        }
+
+        // If the rel grew while we vacuumed under a weaker lock, the new
+        // pages presumably hold live tuples: give up without updating
+        // rel_pages (the old density estimate stays).
+        let new_rel_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+            vacrel.rel,
+            ForkNumber::MAIN_FORKNUM,
+        )?;
+        if new_rel_pages != orig_rel_pages {
+            lmgr::UnlockRelation(vacrel.rel, types_rel::lock::AccessExclusiveLock)?;
+            return Ok(());
+        }
+
+        let mut lock_waiter_detected = false;
+        let new_rel_pages = count_nondeletable_pages(vacrel, &mut lock_waiter_detected)?;
+        vacrel.current_block = new_rel_pages;
+
+        if new_rel_pages >= orig_rel_pages {
+            lmgr::UnlockRelation(vacrel.rel, types_rel::lock::AccessExclusiveLock)?;
+            return Ok(());
+        }
+
+        catalog_storage::RelationTruncate(vacrel.rel, new_rel_pages)?;
+
+        // Other backends can't touch the rel until they process the smgr
+        // inval smgrtruncate sent, which happens once they take their lock.
+        lmgr::UnlockRelation(vacrel.rel, types_rel::lock::AccessExclusiveLock)?;
+
+        // rel_pages shrinks without touching reltuples: the truncated pages
+        // held no tuples.
+        vacrel.rel_pages = new_rel_pages;
+        orig_rel_pages = new_rel_pages;
+
+        if !(new_rel_pages > vacrel.nonempty_pages && lock_waiter_detected) {
+            return Ok(());
+        }
+    }
+}
+
+// count_nondeletable_pages (vacuumlazy.c). C's OS-readahead prefetch loop is
+// skipped (no PrefetchBuffer surface); advisory only.
+fn count_nondeletable_pages(
+    vacrel: &mut LVRelState<'_, '_>,
+    lock_waiter_detected: &mut bool,
+) -> PgResult<BlockNumber> {
+    let mut starttime = std::time::Instant::now();
+    let mut blkno = vacrel.rel_pages;
+    while blkno > vacrel.nonempty_pages {
+        // Waiters queue behind our AccessExclusiveLock; probe at most every
+        // VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL, checked once per 32 blocks.
+        if blkno % 32 == 0 {
+            let currenttime = std::time::Instant::now();
+            if currenttime.duration_since(starttime).as_millis()
+                >= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS
+            {
+                if lmgr::LockHasWaitersRelation(
+                    vacrel.rel,
+                    types_rel::lock::AccessExclusiveLock,
+                )? {
+                    *lock_waiter_detected = true;
+                    return Ok(blkno);
+                }
+                starttime = currenttime;
+            }
+        }
+
+        // No vacuum delay point under the exclusive lock; interrupts only.
+        postgres_seams::check_for_interrupts::call()?;
+
+        blkno -= 1;
+
+        let buf = bufmgr_seams::read_buffer_extended::call(
+            vacrel.rel,
+            ForkNumber::MAIN_FORKNUM,
+            blkno,
+            ReadBufferMode::Normal,
+            vacrel.bstrategy.clone(),
+        )?;
+        bufmgr_seams::lock_buffer::call(buf, ::bufmgr_seams::BUFFER_LOCK_SHARE)?;
+        // SAFETY: buffer pinned + share-locked above.
+        let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+
+        if page.is_new() || page_is_empty(page) {
+            bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            bufmgr_seams::release_buffer::call(buf)?;
+            continue;
+        }
+
+        let mut hastup = false;
+        let maxoff = page.max_offset_number();
+        for offnum in FirstOffsetNumber..=maxoff {
+            // Any non-unused item keeps the page: even LP_DEAD makes
+            // truncation unsafe, its index entries may not be cleaned out.
+            if page.item_id(offnum).is_used() {
+                hastup = true;
+                break;
+            }
+        }
+        bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+        bufmgr_seams::release_buffer::call(buf)?;
+
+        if hastup {
+            return Ok(blkno + 1);
+        }
+    }
+    Ok(vacrel.nonempty_pages)
 }
 
 fn should_attempt_truncation(vacrel: &LVRelState<'_, '_>) -> bool {

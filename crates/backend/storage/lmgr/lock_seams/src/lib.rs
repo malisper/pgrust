@@ -53,6 +53,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn lock_has_waiters(locktag: LOCKTAG, lockmode: LOCKMODE) -> PgResult<bool>
+);
+
+seam_core::seam!(
     // DoLockModesConflict (lock.c); pure conflict-table probe.
     pub fn do_lock_modes_conflict(mode1: LOCKMODE, mode2: LOCKMODE) -> bool
 );
