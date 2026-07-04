@@ -266,7 +266,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
 }
 
 pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     w: &mut W,
     flags: u32,
 ) -> PgResult<bool> {
