@@ -1,5 +1,4 @@
-// nodeBitmapIndexscan.c; array keys (SAOP) loud-panic in the shared scankey
-// builder.
+// nodeBitmapIndexscan.c; array keys (SAOP) loud-panic in the shared builder.
 #![allow(non_snake_case)]
 
 use ::executils::{EStateData, EcxtId};
@@ -72,9 +71,7 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
     tbm: &mut TIDBitmap<'_>,
 ) -> PgResult<f64> {
     let mcx = estate.es_query_cxt;
-    // Array keys are also runtime keys in C; the SAOP arm loud-panics at
-    // build, so ready-after-rescan is unconditional here (no empty-array
-    // doscan=false leg).
+    // C's empty-array doscan=false leg is unreachable (SAOP loud at build).
     if !node.biss_RuntimeKeysReady && !node.biss_RuntimeKeys.is_empty() {
         exec_rescan_bitmap_index_scan(node, estate)?;
     }
