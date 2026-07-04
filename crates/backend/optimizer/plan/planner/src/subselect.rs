@@ -1934,7 +1934,7 @@ fn finalize_plan<'mcx>(
         NodeTag::T_Unique => {}
         NodeTag::T_TableFuncScan => {
             let tf = plan.as_table_func_scan().unwrap().tablefunc.expect("tablefunc");
-            finalize_primnode(run, tf, &mut paramids)?;
+            finalize_primnode(run, root, tf, &mut paramids)?;
         }
         NodeTag::T_ModifyTable => {
             panic!("finalize_plan (subselect.c): ModifyTable with exec params; M2 DML lane")
