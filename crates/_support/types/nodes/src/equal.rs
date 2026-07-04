@@ -19,12 +19,14 @@ use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
     CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
     RangeVar, RelabelType, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
+    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
+    XmlExpr,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
-    InsertStmt, ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt,
-    ValUnion,
+    InsertStmt, ParamRef, RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, SelectStmt,
+    SortBy, TypeCast, TypeName, UpdateStmt,
+    ValUnion, XmlSerialize,
 };
 use crate::tags::NodeTag;
 
@@ -106,6 +108,11 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_A_Star => true,
         NodeTag::T_SortBy => cmp!(as_sort_by),
         NodeTag::T_FuncCall => cmp!(as_func_call),
+        NodeTag::T_XmlExpr => cmp!(as_xml_expr),
+        NodeTag::T_TableFunc => cmp!(as_table_func),
+        NodeTag::T_RangeTableFunc => cmp!(as_range_table_func),
+        NodeTag::T_RangeTableFuncCol => cmp!(as_range_table_func_col),
+        NodeTag::T_XmlSerialize => cmp!(as_xml_serialize),
         NodeTag::T_TypeName => cmp!(as_type_name),
         NodeTag::T_TypeCast => cmp!(as_type_cast),
         NodeTag::T_Integer => cmp!(as_integer),
@@ -479,6 +486,72 @@ impl NodeEqual for NullTest<'_> {
         equal_opt(self.arg, b.arg)
             && self.nulltesttype == b.nulltesttype
             && self.argisrow == b.argisrow
+    }
+}
+
+impl NodeEqual for XmlExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op
+            && self.name == b.name
+            && self.named_args.node_equal(&b.named_args)
+            && self.arg_names.node_equal(&b.arg_names)
+            && self.args.node_equal(&b.args)
+            && self.xmloption == b.xmloption
+            && self.indent == b.indent
+            && self.r#type == b.r#type
+            && self.typmod == b.typmod
+    }
+}
+
+impl NodeEqual for TableFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.functype == b.functype
+            && self.ns_uris.node_equal(&b.ns_uris)
+            && self.ns_names.node_equal(&b.ns_names)
+            && equal_opt(self.docexpr, b.docexpr)
+            && equal_opt(self.rowexpr, b.rowexpr)
+            && self.colnames.node_equal(&b.colnames)
+            && self.coltypes.node_equal(&b.coltypes)
+            && self.coltypmods.node_equal(&b.coltypmods)
+            && self.colcollations.node_equal(&b.colcollations)
+            && self.colexprs.node_equal(&b.colexprs)
+            && self.coldefexprs.node_equal(&b.coldefexprs)
+            && self.colvalexprs.node_equal(&b.colvalexprs)
+            && self.passingvalexprs.node_equal(&b.passingvalexprs)
+            && self.notnulls.equal(&b.notnulls)
+            && equal_opt(self.plan, b.plan)
+            && self.ordinalitycol == b.ordinalitycol
+    }
+}
+
+impl NodeEqual for RangeTableFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.lateral == b.lateral
+            && equal_opt(self.docexpr, b.docexpr)
+            && equal_opt(self.rowexpr, b.rowexpr)
+            && self.namespaces.node_equal(&b.namespaces)
+            && self.columns.node_equal(&b.columns)
+            && eq_ref(self.alias, b.alias)
+    }
+}
+
+impl NodeEqual for RangeTableFuncCol<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.colname == b.colname
+            && equal_opt(self.typeName, b.typeName)
+            && self.for_ordinality == b.for_ordinality
+            && self.is_not_null == b.is_not_null
+            && equal_opt(self.colexpr, b.colexpr)
+            && equal_opt(self.coldefexpr, b.coldefexpr)
+    }
+}
+
+impl NodeEqual for XmlSerialize<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.xmloption == b.xmloption
+            && equal_opt(self.expr, b.expr)
+            && equal_opt(self.typeName, b.typeName)
+            && self.indent == b.indent
     }
 }
 

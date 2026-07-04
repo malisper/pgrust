@@ -44,6 +44,11 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_XmlExpr => match node.as_xml_expr().unwrap().op {
+            types_nodes::XmlExprOp::IS_DOCUMENT => types_core::catalog::BOOLOID,
+            types_nodes::XmlExprOp::IS_XMLSERIALIZE => types_core::catalog::TEXTOID,
+            _ => types_core::catalog::XMLOID,
+        },
         NodeTag::T_NextValueExpr => {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
@@ -151,6 +156,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
         | NodeTag::T_CurrentOfExpr
+        | NodeTag::T_XmlExpr
         | NodeTag::T_RowExpr => -1,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
@@ -245,6 +251,15 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
+        // C: XMLSERIALIZE returns text from non-collatable inputs; the other
+        // ops return boolean or XML, which are non-collatable.
+        NodeTag::T_XmlExpr => {
+            if node.as_xml_expr().unwrap().op == types_nodes::XmlExprOp::IS_XMLSERIALIZE {
+                types_core::catalog::DEFAULT_COLLATION_OID
+            } else {
+                types_core::InvalidOid
+            }
+        }
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -379,6 +394,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             leftmost_loc(d.location, expr_location_list(&d.args))
         }
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
+        // C: consider both function name and leftmost arg.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            leftmost_loc(x.location, expr_location_list(&x.args))
+        }
+        NodeTag::T_TableFunc => node.as_table_func().unwrap().location,
+        // C: XMLSERIALIZE keyword should always be the first thing.
+        NodeTag::T_XmlSerialize => node.as_xml_serialize().unwrap().location,
         NodeTag::T_CollateClause => {
             let c = node.as_collate_clause().unwrap();
             leftmost_loc(c.arg.map_or(-1, expr_location), c.location)

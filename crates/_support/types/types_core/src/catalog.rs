@@ -81,6 +81,7 @@ pub const VARBITOID: Oid = 1562;
 pub const NUMERICOID: Oid = 1700;
 pub const INTERVALOID: Oid = 1186;
 pub const JSONOID: Oid = 114;
+pub const XMLOID: Oid = 142;
 pub const JSONBOID: Oid = 3802;
 pub const BPCHAROID: Oid = 1042;
 pub const VARCHAROID: Oid = 1043;

@@ -415,6 +415,7 @@ members = [
     "crates/backend/utils/adt/mac",
     "crates/backend/utils/adt/mac8",
     "crates/backend/utils/adt/pg_lsn",
+    "crates/backend/utils/adt/xml",
     "crates/backend/utils/adt/dbsize",
     "crates/backend/utils/adt/partitionfuncs",
     "crates/backend/utils/adt/genfile",
