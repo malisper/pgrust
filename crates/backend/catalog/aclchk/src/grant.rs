@@ -1093,6 +1093,196 @@ const CLASS_NAMESPACE: GrantClass = GrantClass {
     descr: "schema",
 };
 
+// RemoveRoleFromObjectACL (aclchk.c).
+pub fn RemoveRoleFromObjectACL<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    classid: Oid,
+    objid: Oid,
+) -> PgResult<()> {
+    if classid == crate::defacl::DefaultAclRelationId {
+        return crate::defacl::remove_role_from_default_acl(mcx, roleid, objid);
+    }
+
+    let objtype = match classid {
+        RELATION_RELATION_ID => ObjectType::OBJECT_TABLE,
+        DATABASE_RELATION_ID => ObjectType::OBJECT_DATABASE,
+        TYPE_RELATION_ID => ObjectType::OBJECT_TYPE,
+        PROCEDURE_RELATION_ID => ObjectType::OBJECT_ROUTINE,
+        LANGUAGE_RELATION_ID => ObjectType::OBJECT_LANGUAGE,
+        pg_largeobject::LargeObjectRelationId => ObjectType::OBJECT_LARGEOBJECT,
+        NAMESPACE_RELATION_ID => ObjectType::OBJECT_SCHEMA,
+        types_core::catalog::TABLE_SPACE_RELATION_ID => ObjectType::OBJECT_TABLESPACE,
+        types_core::FOREIGN_SERVER_RELATION_ID => ObjectType::OBJECT_FOREIGN_SERVER,
+        types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => ObjectType::OBJECT_FDW,
+        catalog::ParameterAclRelationId => ObjectType::OBJECT_PARAMETER_ACL,
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected object class {other}"
+            ))))
+        }
+    };
+
+    let mut objects: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    objects.push(objid);
+    let mut grantees: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    grantees.push(roleid);
+
+    let mut istmt = InternalGrant {
+        is_grant: false,
+        objtype,
+        objects,
+        all_privs: true,
+        privileges: ACL_NO_RIGHTS,
+        col_privs: mcx::vec_new_in(mcx),
+        grantees,
+        grant_option: false,
+        behavior: types_nodes::parsenodes::DropBehavior::DROP_CASCADE as i32,
+    };
+    exec_grant_stmt_oids(mcx, &mut istmt)
+}
+
+const InitPrivsRelationId: Oid = 3394;
+const InitPrivsObjIndexId: Oid = 3395;
+const Anum_pg_init_privs_objoid: types_core::AttrNumber = 1;
+const Anum_pg_init_privs_classoid: types_core::AttrNumber = 2;
+const Anum_pg_init_privs_objsubid: types_core::AttrNumber = 3;
+const Anum_pg_init_privs_privtype: types_core::AttrNumber = 4;
+const Anum_pg_init_privs_initprivs: types_core::AttrNumber = 5;
+const Natts_pg_init_privs: usize = 5;
+
+// objectaddress.c's get_object_catcache_oid/get_object_attnum_owner subset;
+// hosted here because catalog_objectaddress depends on this crate.
+fn init_priv_owner(classid: Oid, objid: Oid) -> PgResult<Oid> {
+    let (cacheid, owner_attnum, descr) = if classid == RELATION_RELATION_ID {
+        (RELOID, ANUM_PG_CLASS_RELOWNER, "relation")
+    } else if classid == TYPE_RELATION_ID {
+        (cache_syscache::cacheinfo::TYPEOID, 4, "type")
+    } else if classid == CLASS_DATABASE.classid {
+        (CLASS_DATABASE.cacheid, CLASS_DATABASE.owner_attnum, CLASS_DATABASE.descr)
+    } else if classid == CLASS_TABLESPACE.classid {
+        (CLASS_TABLESPACE.cacheid, CLASS_TABLESPACE.owner_attnum, CLASS_TABLESPACE.descr)
+    } else if classid == CLASS_PROC.classid {
+        (CLASS_PROC.cacheid, CLASS_PROC.owner_attnum, CLASS_PROC.descr)
+    } else if classid == CLASS_LANGUAGE.classid {
+        (CLASS_LANGUAGE.cacheid, CLASS_LANGUAGE.owner_attnum, CLASS_LANGUAGE.descr)
+    } else if classid == CLASS_NAMESPACE.classid {
+        (CLASS_NAMESPACE.cacheid, CLASS_NAMESPACE.owner_attnum, CLASS_NAMESPACE.descr)
+    } else {
+        panic!("RemoveRoleFromInitPriv (aclchk.c): owner lookup for object class {classid} unported")
+    };
+
+    let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objid)))? else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for {descr} {objid}"
+        ))));
+    };
+    let owner_id = SysCacheGetAttrNotNull(cacheid, &tuple, owner_attnum)?.as_oid();
+    ReleaseSysCache(tuple);
+    Ok(owner_id)
+}
+
+// RemoveRoleFromInitPriv (aclchk.c).
+pub fn RemoveRoleFromInitPriv<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    classid: Oid,
+    objid: Oid,
+    objsubid: i32,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, InitPrivsRelationId, RowExclusiveLock)?;
+    let desc = rel.descr();
+
+    let keys = [
+        pg_largeobject::oid_key(Anum_pg_init_privs_objoid, objid),
+        pg_largeobject::oid_key(Anum_pg_init_privs_classoid, classid),
+        int4_key(Anum_pg_init_privs_objsubid, objsubid),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, InitPrivsObjIndexId, true, None, &keys)?;
+
+    let old = match genam::systable_getnext(mcx, &mut scan)? {
+        None => None,
+        Some(tup) => {
+            let mut isnull = false;
+            // SAFETY: fixed catalog columns under the relation's descriptor.
+            let acl_datum = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_initprivs as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            debug_assert!(!isnull);
+            let old_acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            // SAFETY: as above.
+            let privtype = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_privtype as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            Some((tup.t_self, old_acl, privtype))
+        }
+    };
+    let Some((tid, old_acl, privtype)) = old else {
+        genam::systable_endscan(mcx, scan)?;
+        return rel.close(RowExclusiveLock);
+    };
+
+    let oldmembers = aclmembers(mcx, &old_acl)?;
+    let owner_id = init_priv_owner(classid, objid)?;
+
+    let new_acl = merge_acl_with_grant(
+        mcx,
+        &old_acl,
+        false,
+        false,
+        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT as i32,
+        &[roleid],
+        adt_acl::ACLITEM_ALL_PRIV_BITS,
+        owner_id,
+        owner_id,
+    )?;
+
+    if new_acl.is_empty() {
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    } else {
+        // C heap_modify_tuple; an identical row image is rebuilt instead.
+        let acl_img = acl_image(mcx, &new_acl)?;
+        let values = [
+            Datum::from_oid(objid),
+            Datum::from_oid(classid),
+            Datum::from_i32(objsubid),
+            privtype,
+            Datum::from_usize(acl_img.as_ptr() as usize),
+        ];
+        let nulls = [false; Natts_pg_init_privs];
+        let mut newtuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtuple)?;
+    }
+
+    let newmembers = aclmembers(mcx, &new_acl)?;
+    pg_shdepend::updateInitAclDependencies(mcx, classid, objid, objsubid, &oldmembers, &newmembers)?;
+
+    genam::systable_endscan(mcx, scan)?;
+    xact::CommandCounterIncrement()?;
+    rel.close(RowExclusiveLock)
+}
+
+fn int4_key(attno: types_core::AttrNumber, v: i32) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT4EQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_INT4EQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_i32(v);
+    key
+}
+
 fn unlock_catalog_tuple(cls: &GrantClass, tid: &ItemPointerData) -> PgResult<()> {
     let dbid = if catcache::cache_relisshared(cls.cacheid) {
         0

@@ -895,6 +895,15 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         TransformRelationId => {
             drop_row_by_oid(mcx, TransformRelationId, TransformOidIndexId, object.objectId)?
         }
+        TSParserRelationId => {
+            drop_row_by_oid(mcx, TSParserRelationId, TSParserOidIndexId, object.objectId)?
+        }
+        TSTemplateRelationId => {
+            drop_row_by_oid(mcx, TSTemplateRelationId, TSTemplateOidIndexId, object.objectId)?
+        }
+        AuthMemRelationId => {
+            drop_row_by_oid(mcx, AuthMemRelationId, AuthMemOidIndexId, object.objectId)?
+        }
         // DropObjectById (objectaddress.c) takes the EVENTTRIGGEROID catcache
         // branch; the unique-index scan reaches the same tuple.
         EventTriggerRelationId => {
@@ -950,6 +959,11 @@ const LanguageOidIndexId: Oid = 2682;
 const TransformRelationId: Oid = 3576;
 const TransformOidIndexId: Oid = 3574;
 const TSDictionaryRelationId: Oid = 3600;
+const TSParserRelationId: Oid = 3601;
+const TSParserOidIndexId: Oid = 3607;
+const TSTemplateRelationId: Oid = 3764;
+const TSTemplateOidIndexId: Oid = 3767;
+const AuthMemOidIndexId: Oid = 6303;
 const CollationRelationId_dep: Oid = 3456;
 const CollationOidIndexId_dep: Oid = 3085;
 const TSDictionaryOidIndexId: Oid = 3605;
@@ -1046,8 +1060,38 @@ fn seam_perform_deletion(
     performDeletion(mcx, &object, behavior, flags)
 }
 
+fn seam_acquire_deletion_lock(class_id: Oid, object_id: Oid, flags: i32) -> PgResult<()> {
+    AcquireDeletionLock(&ObjectAddress::set(class_id, object_id), flags)
+}
+
+fn seam_release_deletion_lock(class_id: Oid, object_id: Oid) -> PgResult<()> {
+    ReleaseDeletionLock(&ObjectAddress::set(class_id, object_id))
+}
+
+// sort_object_addresses + performMultipleDeletions tail of shdepDropOwned.
+fn seam_perform_multiple_deletions(
+    mcx: Mcx<'_>,
+    objects: &[(Oid, Oid, i32)],
+    behavior: DropBehavior,
+    flags: i32,
+) -> PgResult<()> {
+    let mut addrs = ObjectAddresses::new();
+    for &(class_id, object_id, object_sub_id) in objects {
+        addrs.add_exact_object_address(ObjectAddress::sub_set(
+            class_id,
+            object_id,
+            object_sub_id,
+        ));
+    }
+    addrs.refs.sort_by(object_address_comparator);
+    performMultipleDeletions(mcx, &addrs, behavior, flags)
+}
+
 pub fn init_seams() {
     dependency_seams::perform_deletion::set(seam_perform_deletion);
+    pg_shdepend::acquire_deletion_lock::set(seam_acquire_deletion_lock);
+    pg_shdepend::release_deletion_lock::set(seam_release_deletion_lock);
+    pg_shdepend::perform_multiple_deletions::set(seam_perform_multiple_deletions);
 }
 
 // DropObjectById (dependency.c) reduced to the oid-indexed catalogs above:

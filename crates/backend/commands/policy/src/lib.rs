@@ -930,4 +930,5 @@ pub fn RemovePolicyObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgRes
 
 pub fn init_seams() {
     policy_seams::remove_policy_by_id::set(RemovePolicyById);
+    policy_seams::remove_role_from_object_policy::set(RemoveRoleFromObjectPolicy);
 }

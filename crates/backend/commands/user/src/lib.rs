@@ -1311,7 +1311,7 @@ pub fn DropOwnedObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropOwnedStmt<'_>) -> PgRes
         }
     }
 
-    pg_shdepend::shdepDropOwned(&role_ids)
+    pg_shdepend::shdepDropOwned(mcx, &role_ids, stmt.behavior)
 }
 
 // REASSIGN OWNED BY

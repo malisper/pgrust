@@ -30,7 +30,9 @@ use types_rel::{RELKIND_SEQUENCE, RELKIND_VIEW};
 mod defacl;
 pub use defacl::{get_user_default_acl, ExecAlterDefaultPrivilegesStmt, DefaultAclRelationId};
 mod grant;
-pub use grant::{get_rolespec_oid, ExecuteGrantStmt};
+pub use grant::{
+    get_rolespec_oid, ExecuteGrantStmt, RemoveRoleFromInitPriv, RemoveRoleFromObjectACL,
+};
 mod lo;
 pub use lo::{object_ownercheck_lo, pg_largeobject_aclcheck_snapshot};
 
@@ -1220,6 +1222,8 @@ pub fn init_seams() {
     aclchk_seams::aclcheck_error::set(|aclresult, objtype, objectname| {
         aclcheck_error(aclresult, objtype_from_i32(objtype), objectname)
     });
+    pg_shdepend::remove_role_from_object_acl::set(grant::RemoveRoleFromObjectACL);
+    pg_shdepend::remove_role_from_init_priv::set(grant::RemoveRoleFromInitPriv);
     defacl::init_seams();
 }
 

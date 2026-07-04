@@ -194,6 +194,87 @@ fn SetDefaultACLsInSchemas<'mcx>(
     }
 }
 
+// RemoveRoleFromObjectACL's pg_default_acl branch (aclchk.c).
+pub(crate) fn remove_role_from_default_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    objid: Oid,
+) -> PgResult<()> {
+    use types_rel::AccessShareLock;
+
+    let rel = table::table_open(mcx, DefaultAclRelationId, AccessShareLock)?;
+    let skey = [pg_largeobject::oid_key(Anum_pg_default_acl_oid, objid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DefaultAclOidIndexId, true, None, &skey)?;
+    let Some(tuple) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(Box::new(PgError::error(format!(
+            "could not find tuple for default ACL {objid}"
+        ))));
+    };
+
+    let desc = rel.descr();
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_default_acl columns under the relation's
+    // descriptor.
+    let (defaclrole, defaclnamespace, defaclobjtype) = unsafe {
+        (
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_default_acl_defaclrole as i32,
+                desc,
+                &mut isnull,
+            )
+            .as_oid(),
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_default_acl_defaclnamespace as i32,
+                desc,
+                &mut isnull,
+            )
+            .as_oid(),
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_default_acl_defaclobjtype as i32,
+                desc,
+                &mut isnull,
+            )
+            .as_i8() as u8,
+        )
+    };
+
+    let objtype = match defaclobjtype {
+        DEFACLOBJ_RELATION => ObjectType::OBJECT_TABLE,
+        DEFACLOBJ_SEQUENCE => ObjectType::OBJECT_SEQUENCE,
+        DEFACLOBJ_FUNCTION => ObjectType::OBJECT_FUNCTION,
+        DEFACLOBJ_TYPE => ObjectType::OBJECT_TYPE,
+        DEFACLOBJ_NAMESPACE => ObjectType::OBJECT_SCHEMA,
+        DEFACLOBJ_LARGEOBJECT => ObjectType::OBJECT_LARGEOBJECT,
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected default ACL type: {}",
+                other as i32
+            ))))
+        }
+    };
+
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+
+    let mut grantees: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    grantees.push(roleid);
+    let iacls = InternalDefaultACL {
+        roleid: defaclrole,
+        nspid: defaclnamespace,
+        is_grant: false,
+        objtype,
+        all_privs: true,
+        privileges: ACL_NO_RIGHTS,
+        grantees,
+        grant_option: false,
+        behavior: DropBehavior::DROP_CASCADE as i32,
+    };
+    SetDefaultACL(mcx, &iacls)
+}
+
 fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResult<()> {
     let mut this_privileges = iacls.privileges;
 

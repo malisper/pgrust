@@ -1,5 +1,5 @@
-// pg_shdepend.c recording/mutation/report slice; shdepDropOwned and
-// shdepReassignOwned are loud unported, and the getObjectDescription arms
+// pg_shdepend.c recording/mutation/report slice plus shdepDropOwned;
+// shdepReassignOwned is loud unported, and the getObjectDescription arms
 // cover only relation/schema/database/role.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -17,8 +17,44 @@ use types_error::{
 use types_rel::{
     AccessShareLock, Relation, RowExclusiveLock,
 };
+use types_nodes::parsenodes::DropBehavior;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, ItemPointerData, TupleDescData};
+
+// dependency.c / aclchk.c callees used by shdepDropOwned; decls live here
+// because dependency_seams/aclchk_seams sit below crates that depend on this
+// one. Installed by catalog_dependency::init_seams and aclchk::init_seams.
+seam_core::seam!(
+    pub fn acquire_deletion_lock(class_id: Oid, object_id: Oid, flags: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn release_deletion_lock(class_id: Oid, object_id: Oid) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn perform_multiple_deletions(
+        mcx: Mcx<'_>,
+        objects: &[(Oid, Oid, i32)],
+        behavior: DropBehavior,
+        flags: i32,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn remove_role_from_object_acl(
+        mcx: Mcx<'_>,
+        roleid: Oid,
+        classid: Oid,
+        objid: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn remove_role_from_init_priv(
+        mcx: Mcx<'_>,
+        roleid: Oid,
+        classid: Oid,
+        objid: Oid,
+        objsubid: i32,
+    ) -> PgResult<()>
+);
 
 #[cfg(test)]
 mod tests;
@@ -882,8 +918,112 @@ fn getObjectDescription<'mcx>(
     )
 }
 
-pub fn shdepDropOwned(roleids: &[Oid]) -> ! {
-    panic!("shdepDropOwned (pg_shdepend.c): DROP OWNED unported (roles {roleids:?})")
+pub fn shdepDropOwned<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleids: &[Oid],
+    behavior: DropBehavior,
+) -> PgResult<()> {
+    let mut deleteobjs: PgVec<'mcx, (Oid, Oid, i32)> = PgVec::new_in(mcx);
+
+    let sdepRel = table::table_open(mcx, catalog::SharedDependRelationId, RowExclusiveLock)?;
+    let desc = sdepRel.descr();
+    let myDatabaseId = init_small::globals::MyDatabaseId();
+
+    for &roleid in roleids {
+        if catalog::IsPinnedObject(AUTH_ID_RELATION_ID, roleid) {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot drop objects owned by {} because they are required by the database system",
+                    getObjectDescription(mcx, AUTH_ID_RELATION_ID, roleid, 0)?
+                ))
+                .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
+            ));
+        }
+
+        let keys = [
+            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID),
+            oid_key(Anum_pg_shdepend_refobjid, roleid),
+        ];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &sdepRel,
+            catalog::SharedDependReferenceIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        loop {
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+            // SAFETY: aliases the slot-held image for the recheck call below.
+            let view = unsafe {
+                HeapTupleData::from_raw_parts(
+                    tup.header_ptr(),
+                    tup.t_len,
+                    tup.t_self,
+                    tup.t_tableOid,
+                )
+            };
+            let tup = &view;
+            let form = form_pg_shdepend(tup, desc);
+
+            if form.dbid != myDatabaseId && form.dbid != InvalidOid {
+                continue;
+            }
+
+            match form.deptype as u8 {
+                b'r' => {
+                    if !policy_seams::remove_role_from_object_policy::call(
+                        mcx,
+                        roleid,
+                        form.classid,
+                        form.objid,
+                    )? {
+                        acquire_deletion_lock::call(form.classid, form.objid, 0)?;
+                        if !genam::systable_recheck_tuple(mcx, &mut scan, tup)? {
+                            release_deletion_lock::call(form.classid, form.objid)?;
+                            continue;
+                        }
+                        deleteobjs.push((form.classid, form.objid, form.objsubid));
+                    }
+                }
+                // Role-grant ACL rows (pg_auth_members) drop the whole row:
+                // fall through to the OWNER arm, as in C.
+                b'a' if form.classid != catalog::AuthMemRelationId => {
+                    remove_role_from_object_acl::call(mcx, roleid, form.classid, form.objid)?;
+                }
+                b'a' | b'o' => {
+                    if form.dbid == myDatabaseId || form.classid == catalog::AuthMemRelationId {
+                        acquire_deletion_lock::call(form.classid, form.objid, 0)?;
+                        if !genam::systable_recheck_tuple(mcx, &mut scan, tup)? {
+                            release_deletion_lock::call(form.classid, form.objid)?;
+                            continue;
+                        }
+                        deleteobjs.push((form.classid, form.objid, form.objsubid));
+                    }
+                }
+                b'i' => {
+                    debug_assert!(form.classid != catalog::AuthMemRelationId);
+                    remove_role_from_init_priv::call(
+                        mcx,
+                        roleid,
+                        form.classid,
+                        form.objid,
+                        form.objsubid,
+                    )?;
+                }
+                _ => {
+                    return Err(Box::new(PgError::error(
+                        "unexpected dependency type".to_string(),
+                    )))
+                }
+            }
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+
+    perform_multiple_deletions::call(mcx, &deleteobjs, behavior, 0)?;
+
+    sdepRel.close(RowExclusiveLock)
 }
 
 pub fn shdepReassignOwned(roleids: &[Oid], newrole: Oid) -> ! {
