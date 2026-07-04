@@ -19,7 +19,7 @@ use types_snapshot::SnapshotData;
 use types_storage::storage::{
     SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
     PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM,
-    PROC_VACUUM_STATE_MASK,
+    PROC_VACUUM_STATE_MASK, PROC_XMIN_FLAGS,
 };
 
 mod running;
@@ -111,6 +111,37 @@ pub fn RecentXmin() -> TransactionId {
 // For snapmgr's SnapshotResetXmin (pairs with its MyProc->xmin write).
 pub fn set_transaction_xmin(xmin: TransactionId) {
     TRANSACTION_XMIN.set(xmin);
+}
+
+/// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
+/// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
+/// value the same way. False = source xact no longer running.
+pub fn ProcArrayInstallRestoredXmin(
+    xmin: TransactionId,
+    source_procno: ProcNumber,
+) -> PgResult<bool> {
+    debug_assert!(TransactionIdIsNormal(xmin));
+    let source = GetPGProcByNumber(source_procno);
+    let my_procno = MyProc().expect("ProcArrayInstallRestoredXmin without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+    let mut result = false;
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+    let xid = source.xmin.read();
+    if source.databaseId.load(Relaxed) == init_small::globals::MyDatabaseId()
+        && TransactionIdIsNormal(xid)
+        && TransactionIdPrecedesOrEquals(xid, xmin)
+    {
+        me.xmin.value.store(xmin, Relaxed);
+        TRANSACTION_XMIN.set(xmin);
+        let flags = (me.statusFlags.load(Relaxed) & !PROC_XMIN_FLAGS)
+            | (source.statusFlags.load(Relaxed) & PROC_XMIN_FLAGS);
+        me.statusFlags.store(flags, Relaxed);
+        ProcGlobal().statusFlags[me.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
+        result = true;
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(result)
 }
 
 fn TransactionIdAdvance(xid: &mut TransactionId) {

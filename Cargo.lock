@@ -7575,6 +7575,7 @@ dependencies = [
  "waitevent_seams",
  "waiteventset",
  "xact",
+ "xloginsert",
  "xlogutils",
 ]
 

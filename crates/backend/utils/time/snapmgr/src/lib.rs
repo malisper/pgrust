@@ -502,7 +502,15 @@ fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumb
             Ok(())
         })?;
 
-        unported("ProcArrayInstallRestoredXmin (procarray.c)");
+        if !procarray::ProcArrayInstallRestoredXmin(current.xmin, source_proc)? {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("could not import the requested snapshot")
+                .errdetail("The source transaction is not running anymore.")
+                .into_error()
+                .with_error_location(loc("SetTransactionSnapshot"))
+                .into());
+        }
 
         if xact_seams::isolation_uses_xact_snapshot::call() {
             if xact_seams::isolation_is_serializable::call() {
