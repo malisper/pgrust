@@ -997,7 +997,7 @@ pub fn addRangeTableEntryForValues<'mcx>(
             p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
             p_varnosyn: rtindex as Index,
             p_varattnosyn: varattno as AttrNumber + 1,
-            p_dontexpand: levelsup > 0 && varattno >= numcolumns - n_dontexpand_columns,
+            p_dontexpand: false,
         });
     }
     let nsitem = ParseNamespaceItem {
@@ -1364,7 +1364,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
             p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
             p_varnosyn: rtindex as Index,
             p_varattnosyn: varattno as AttrNumber + 1,
-            p_dontexpand: false,
+            p_dontexpand: levelsup > 0 && varattno >= numcolumns - n_dontexpand_columns,
         });
     }
     let nsitem = ParseNamespaceItem {
