@@ -179,6 +179,20 @@ pub fn range_deserialize(elem: &ElemInfo, range: &[u8]) -> (RangeBound, RangeBou
     (lower, upper, empty)
 }
 
+/// Caller-side slots for [`range_deserialize_into`]. Hot callers must call
+/// the out-param core directly on these (NOT the tuple shim): reconstructing
+/// the tuple lets LLVM fuse the flag bytes into misaligned word reloads of
+/// the callee's byte stores (`ldur w8,[x29,#-71]` class — measured worse
+/// than the sret q-reloads it replaced). Stable locals only ever read
+/// field-wise keep every load width-matched with the core's stores.
+#[inline(always)]
+pub fn range_bound_slots() -> (RangeBound, RangeBound) {
+    (
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: true },
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: false },
+    )
+}
+
 /// Out-param core of [`range_deserialize`]; returns `empty`. `lower.lower` /
 /// `upper.lower` keep the caller-initialized values (true/false as in C's
 /// stack-local convention).

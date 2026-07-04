@@ -6,7 +6,8 @@ use ::types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION, ERRCODE_UNDEFINED
 use ::types_fmgr::{function_call1_coll_in, function_call2_coll_in, FmgrInfo};
 
 use crate::{
-    cmp_elem_vals, make_empty_range, make_range, range_cmp_bounds, range_deserialize,
+    cmp_elem_vals, make_empty_range, make_range, range_bound_slots, range_cmp_bounds,
+    range_deserialize_into,
     range_get_flags, range_is_empty, range_type_oid, range_types_do_not_match, RangeBound,
     RangeInfo, range_cmp_bound_values,
 };
@@ -20,8 +21,10 @@ fn check_same_type(r1: &[u8], r2: &[u8]) -> PgResult<()> {
 
 pub fn range_eq_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     if empty1 && empty2 {
         return Ok(true);
     }
@@ -43,8 +46,10 @@ pub fn range_ne_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8])
 
 pub fn range_contains_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     if empty2 {
         return Ok(true);
     }
@@ -70,7 +75,8 @@ pub fn range_contains_elem_internal(
     r: &[u8],
     val: Datum,
 ) -> PgResult<bool> {
-    let (lower, upper, empty) = range_deserialize(&ri.elem, r);
+    let (mut lower, mut upper) = range_bound_slots();
+    let empty = range_deserialize_into(&ri.elem, r, &mut lower, &mut upper);
     if empty {
         return Ok(false);
     }
@@ -97,8 +103,10 @@ pub fn range_contains_elem_internal(
 
 pub fn range_before_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (_lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, _upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut _lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut _lower1, &mut upper1);
+    let (mut lower2, mut _upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut _upper2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -107,8 +115,10 @@ pub fn range_before_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[
 
 pub fn range_after_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, _upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (_lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut _upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut _upper1);
+    let (mut _lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut _lower2, &mut upper2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -149,8 +159,10 @@ pub fn range_adjacent_internal(
     r2: &[u8],
 ) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -159,8 +171,10 @@ pub fn range_adjacent_internal(
 
 pub fn range_overlaps_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -177,8 +191,10 @@ pub fn range_overlaps_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: 
 
 pub fn range_overleft_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (_l1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (_l2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut _l1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut _l1, &mut upper1);
+    let (mut _l2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut _l2, &mut upper2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -187,8 +203,10 @@ pub fn range_overleft_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: 
 
 pub fn range_overright_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
-    let (lower1, _u1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, _u2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut _u1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut _u1);
+    let (mut lower2, mut _u2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut _u2);
     if empty1 || empty2 {
         return Ok(false);
     }
@@ -216,8 +234,10 @@ pub fn range_minus_internal<'m>(
     r1: &[u8],
     r2: &[u8],
 ) -> PgResult<MinusResult<'m>> {
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (mut lower2, mut upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
 
     if empty1 || empty2 {
         return Ok(MinusResult::Input1);
@@ -285,8 +305,10 @@ pub fn range_union_internal<'m>(
     strict: bool,
 ) -> PgResult<UnionResult<'m>> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
 
     if empty1 {
         return Ok(UnionResult::Input2);
@@ -319,8 +341,10 @@ pub fn range_intersect_internal<'m>(
     r1: &[u8],
     r2: &[u8],
 ) -> PgResult<PgVec<'m, u8>> {
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
 
     if empty1 || empty2 || !range_overlaps_internal(mcx, ri, r1, r2)? {
         return make_empty_range(mcx, ri);
@@ -343,8 +367,10 @@ pub fn range_split_internal<'m>(
     r1: &[u8],
     r2: &[u8],
 ) -> PgResult<Option<(PgVec<'m, u8>, PgVec<'m, u8>)>> {
-    let (mut lower1, mut upper1, _e1) = range_deserialize(&ri.elem, r1);
-    let (mut lower2, mut upper2, _e2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let _e1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let _e2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
 
     if range_cmp_bounds(mcx, ri, &lower1, &lower2)? < 0 && range_cmp_bounds(mcx, ri, &upper1, &upper2)? > 0 {
         lower2.inclusive = !lower2.inclusive;
@@ -363,8 +389,10 @@ pub fn range_split_internal<'m>(
 /// range_cmp core (btree comparator; empties sort first).
 pub fn range_cmp_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
     check_same_type(r1, r2)?;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     if empty1 && empty2 {
         Ok(0)
     } else if empty1 {
@@ -417,7 +445,8 @@ pub fn elem_hash_extended_finfo(ri: &mut RangeInfo) -> PgResult<&mut FmgrInfo> {
 
 /// hash_range (rangetypes.c).
 pub fn hash_range_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r: &[u8]) -> PgResult<u32> {
-    let (lower, upper, _empty) = range_deserialize(&ri.elem, r);
+    let (mut lower, mut upper) = range_bound_slots();
+    let _empty = range_deserialize_into(&ri.elem, r, &mut lower, &mut upper);
     let flags = range_get_flags(r);
     let collation = ri.collation;
     elem_hash_finfo(ri)?;
@@ -447,7 +476,8 @@ pub fn hash_range_extended_internal(
     r: &[u8],
     seed: Datum,
 ) -> PgResult<u64> {
-    let (lower, upper, _empty) = range_deserialize(&ri.elem, r);
+    let (mut lower, mut upper) = range_bound_slots();
+    let _empty = range_deserialize_into(&ri.elem, r, &mut lower, &mut upper);
     let flags = range_get_flags(r);
     let collation = ri.collation;
     elem_hash_extended_finfo(ri)?;
