@@ -253,9 +253,10 @@ pub fn standard_planner<'mcx>(
         debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
         for i in 0..run.glob.subplans.len() {
             let subplan = run.glob.subplans.nth(i);
-            crate::subselect::ss_finalize_plan(&run, subplan, &run.subroots[i].root.outer_params)?;
+            let subroot = &run.subroots[i].root;
+            crate::subselect::ss_finalize_plan(&run, subroot, subplan, &subroot.outer_params)?;
         }
-        crate::subselect::ss_finalize_plan(&run, top_plan, &run.root.outer_params)?;
+        crate::subselect::ss_finalize_plan(&run, &run.root, top_plan, &run.root.outer_params)?;
     }
 
     debug_assert!(run.glob.finalrtable.is_nil());
