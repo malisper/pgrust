@@ -1,12 +1,12 @@
 // execPartition.c, INSERT tuple-routing lane: ExecFindPartition over
-// column-keyed LIST/RANGE/HASH trees. Expression keys, attno-remapped
+// column- and expression-keyed LIST/RANGE/HASH trees. Attno-remapped
 // children and runtime pruning are loud.
 #![allow(non_snake_case)]
 
 pub mod pruning;
 
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERROR};
 use types_fmgr::{FmgrInfo, LocalFcinfo};
@@ -28,6 +28,7 @@ struct PartitionDispatch<'mcx> {
     supfuncs: Vec<FmgrInfo>,
     // ExecPartitionCheck state for default routing, compiled once per tree.
     default_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    keystate: Vec<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
 }
 
 pub struct PartitionTupleRouting<'mcx> {
@@ -64,6 +65,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             partdesc,
             supfuncs,
             default_check: None,
+            keystate: Vec::new(),
         });
         Ok(self.dispatches.len() - 1)
     }
@@ -82,8 +84,13 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         &self.leaves[idx]
     }
 
-    // ExecFindPartition: returns an index for leaf_rel().
-    pub fn find_partition(&mut self, slot: &mut SlotData<'mcx>) -> PgResult<usize> {
+    // ExecFindPartition -> index for leaf_rel(); eval_mcx is C's per-tuple
+    // context (caller resets it per row).
+    pub fn find_partition(
+        &mut self,
+        slot: &mut SlotData<'mcx>,
+        eval_mcx: Mcx<'_>,
+    ) -> PgResult<usize> {
         let mcx = self.mcx;
         let mut values = [Datum::null(); PARTITION_MAX_KEYS];
         let mut isnull = [false; PARTITION_MAX_KEYS];
@@ -92,11 +99,36 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             let (oid, is_leaf, is_default) = {
                 let pd = &mut self.dispatches[dispatch_idx];
                 let n = pd.key.partnatts as usize;
-                // FormPartitionKeyDatum, column-attno arm (expressions
-                // loud at partcache build; attnos asserted equal below).
+                // FormPartitionKeyDatum; children share the root's attnos
+                // (asserted at leaf open below).
+                if !pd.key.partexprs.is_nil() && pd.keystate.is_empty() {
+                    for expr in pd.key.partexprs.iter() {
+                        let state =
+                            execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+                                .expect("partition key expression");
+                        pd.keystate.push(state);
+                    }
+                }
+                for state in pd.keystate.iter_mut() {
+                    // SAFETY: eval_mcx outlives this call; by-ref results are
+                    // consumed by routing before the caller resets it.
+                    unsafe { state.arm_result_mcx_raw(eval_mcx) };
+                }
+                let mut keystate_item = pd.keystate.iter_mut();
                 for i in 0..n {
                     let attno = pd.key.partattrs[i];
-                    values[i] = exectuples::slot_getattr(slot, attno as i32, &mut isnull[i]);
+                    if attno != 0 {
+                        values[i] = exectuples::slot_getattr(slot, attno as i32, &mut isnull[i]);
+                    } else {
+                        let state = keystate_item
+                            .next()
+                            .expect("wrong number of partition key expressions");
+                        let mut slots =
+                            execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+                        let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                        values[i] = r.value;
+                        isnull[i] = r.isnull;
+                    }
                 }
                 let Some(boundinfo) = pd.partdesc.boundinfo.as_ref() else {
                     return Err(no_partition_error(mcx, pd, &values, &isnull));

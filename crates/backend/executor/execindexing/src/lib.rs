@@ -128,6 +128,67 @@ pub fn RelationGetExclusionInfo(
     Ok(())
 }
 
+/// RelationGetDummyIndexExpressions (relcache.c): null Consts with the raw
+/// expressions' types — no user-defined code (not even const-folding) runs.
+pub fn RelationGetDummyIndexExpressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'_>,
+) -> PgResult<NodeList<'mcx>> {
+    let form = index.rd_index.as_ref().expect("index relation");
+    let Some(src) = form.indexprs_src.as_ref() else {
+        return Ok(NodeList::nil());
+    };
+    let node = readfuncs::stringToNode(mcx, src.as_str())?;
+    let list = node.as_list().expect("indexprs is a List");
+    let mut out = NodeList::nil();
+    for raw in list.iter() {
+        let mut c = ::types_nodes::Node::build::<::types_nodes::primnodes::Const>(mcx)?;
+        c.consttype = nodes_core::expr_type(raw);
+        c.consttypmod = nodes_core::expr_typmod(raw);
+        c.constcollid = nodes_core::expr_collation(raw);
+        c.constlen = 1;
+        c.constvalue = Datum::null();
+        c.constisnull = true;
+        c.constbyval = true;
+        out.lappend(mcx, c.seal())?;
+    }
+    Ok(out)
+}
+
+/// BuildDummyIndexInfo (catalog/index.c): dummy exprs, no predicate.
+pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
+    let indexstruct = index.rd_index.as_ref().expect("index relation");
+    let numatts = indexstruct.indnatts as i32;
+    let mut attrs = [0 as AttrNumber; INDEX_MAX_KEYS as usize];
+    for i in 0..numatts as usize {
+        attrs[i] = indexstruct.indkey[i];
+    }
+    Ok(IndexInfo {
+        ii_NumIndexAttrs: numatts,
+        ii_AmCache: None,
+        ii_NumIndexKeyAttrs: indexstruct.indnkeyatts as i32,
+        ii_IndexAttrNumbers: attrs,
+        ii_Expressions: RelationGetDummyIndexExpressions(mcx, index)?,
+        ii_ExpressionsState: PgVec::new_in(mcx),
+        ii_Predicate: NodeList::nil(),
+        ii_PredicateState: None,
+        ii_Unique: indexstruct.indisunique,
+        ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
+        ii_ReadyForInserts: indexstruct.indisready,
+        ii_Summarizing: false,
+        ii_Concurrent: false,
+        ii_BrokenHotChain: false,
+        ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+        // C BuildDummyIndexInfo ignores any exclusion constraint.
+        ii_HasExclusion: false,
+        ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+    })
+}
+
 /// BuildIndexInfo (catalog/index.c), pg_index arm.
 pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");

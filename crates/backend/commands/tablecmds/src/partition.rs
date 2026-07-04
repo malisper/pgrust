@@ -1,7 +1,6 @@
 // tablecmds.c partition DDL slice: transformPartitionSpec /
-// ComputePartitionAttrs (column-name keys) / StoreCatalogInheritance /
-// SetRelationHasSubclass. Expression keys, named collations, ATTACH/DETACH
-// are loud.
+// ComputePartitionAttrs / StoreCatalogInheritance / SetRelationHasSubclass.
+// Named opclasses and ATTACH/DETACH are loud.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, BTREE_AM_OID, HASH_AM_OID, RELATION_RELATION_ID};
@@ -15,12 +14,13 @@ use types_nodes::{Node, NodeList};
 pub(crate) struct PartKeyInfo<'mcx> {
     pub strategy: u8,
     pub partattrs: mcx::PgVec<'mcx, AttrNumber>,
+    pub partexprs: NodeList<'mcx>,
     pub partopclass: mcx::PgVec<'mcx, Oid>,
     pub partcollation: mcx::PgVec<'mcx, Oid>,
 }
 
-// transformPartitionSpec + ComputePartitionAttrs, fused (no expressions, so
-// there is no transformExpr pass to separate).
+// transformPartitionSpec + ComputePartitionAttrs, fused (the transformExpr
+// pass runs inline per elem; the input parse tree is never scribbled on).
 pub(crate) fn compute_partition_key<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -54,66 +54,177 @@ pub(crate) fn compute_partition_key<'mcx>(
     let mut info = PartKeyInfo {
         strategy: strategy as u8,
         partattrs: mcx::vec_with_capacity_in(mcx, n)?,
+        partexprs: NodeList::nil(),
         partopclass: mcx::vec_with_capacity_in(mcx, n)?,
         partcollation: mcx::vec_with_capacity_in(mcx, n)?,
     };
 
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    let nsitem = parse_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        rel,
+        types_rel::AccessShareLock,
+        None,
+        false,
+        true,
+    )?;
+    parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
+
     for pnode in partspec.partParams.iter() {
         let pelem = pnode.as_variant::<PartitionElem>().expect("PartitionElem");
-        if pelem.expr.is_some() {
-            unported("expression partition keys");
-        }
-        if !pelem.collation.is_nil() {
-            unported("COLLATE in partition keys");
-        }
-        let name = pelem.name.expect("PartitionElem name");
-        let mut attnum: AttrNumber = 0;
-        let mut atttype: Oid = InvalidOid;
-        let mut attcollation: Oid = InvalidOid;
-        let mut attgenerated: i8 = 0;
-        for i in 0..rel.rd_att.natts as usize {
-            let att = rel.rd_att.attr(i);
-            if att.attname.name_str() == name.as_bytes() && !att.attisdropped {
-                attnum = att.attnum;
-                atttype = att.atttypid;
-                attcollation = att.attcollation;
-                attgenerated = att.attgenerated;
-                break;
+        let atttype: Oid;
+        let mut attcollation: Oid;
+        if let Some(name) = pelem.name {
+            let mut attnum: AttrNumber = 0;
+            atttype = {
+                let mut ty: Oid = InvalidOid;
+                attcollation = InvalidOid;
+                for i in 0..rel.rd_att.natts as usize {
+                    let att = rel.rd_att.attr(i);
+                    if att.attname.name_str() == name.as_bytes() && !att.attisdropped {
+                        if att.attgenerated != 0 {
+                            return Err(generated_partition_column(
+                                name,
+                                query_string,
+                                pelem.location,
+                            ));
+                        }
+                        attnum = att.attnum;
+                        ty = att.atttypid;
+                        attcollation = att.attcollation;
+                        break;
+                    }
+                }
+                ty
+            };
+            if attnum == 0 {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!("column \"{name}\" named in partition key does not exist"),
+                    )
+                    .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+                ));
+            }
+            if attnum < 0 {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!("cannot use system column \"{name}\" in partition key"),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                ));
+            }
+            info.partattrs.push(attnum);
+        } else {
+            // transformPartitionSpec's transformExpr pass, fused here.
+            let raw = pelem.expr.expect("PartitionElem without name or expr");
+            let transformed = parse_expr::transformExpr(
+                mcx,
+                &mut pstate,
+                raw,
+                parser_small1::ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION,
+            )?;
+            parse_collate::assign_expr_collations(mcx, &mut pstate, transformed)?;
+            atttype = nodes_core::expr_type(transformed);
+            attcollation = nodes_core::expr_collation(transformed);
+            // CheckAttributeType(CHKATYPE_IS_PARTKEY) rides the repo-wide
+            // stub divergence (catalog_heap::create.rs).
+            let mut expr = transformed;
+            while let Some(ce) = expr.as_variant::<types_nodes::primnodes::CollateExpr>() {
+                expr = ce.arg;
+            }
+
+            const FLIHAN: i32 = types_tuple::FirstLowInvalidHeapAttributeNumber;
+            let mut expr_attrs = types_nodes::Bitmapset::empty();
+            vars::pull_varattnos(mcx, expr, 1, &mut expr_attrs)?;
+            if expr_attrs.is_member(-FLIHAN) {
+                expr_attrs.add_range(mcx, 1 - FLIHAN, rel.rd_att.natts as i32 - FLIHAN)?;
+                expr_attrs.del_member(-FLIHAN);
+            }
+            let mut b = -1;
+            loop {
+                b = expr_attrs.next_member(b);
+                if b < 0 {
+                    break;
+                }
+                let attno = b + FLIHAN;
+                debug_assert!(attno != 0);
+                if attno < 0 {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "partition key expressions cannot contain system column references"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    ));
+                }
+                let att = rel.rd_att.attr(attno as usize - 1);
+                if att.attgenerated != 0 {
+                    let colname = core::str::from_utf8(att.attname.name_str())
+                        .expect("non-UTF-8 attname");
+                    return Err(generated_partition_column(colname, query_string, pelem.location));
+                }
+            }
+
+            let var_shortcut = expr.as_var().filter(|v| v.varattno > 0).map(|v| v.varattno);
+            if let Some(varattno) = var_shortcut {
+                info.partattrs.push(varattno);
+            } else {
+                info.partattrs.push(0);
+                info.partexprs.lappend(mcx, expr)?;
+                let planned = clauses::eval_const_expressions(mcx, expr)?;
+                if clauses::contain_mutable_functions(planned)? {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "functions in partition key expression must be marked IMMUTABLE"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    ));
+                }
+                if planned.as_variant::<types_nodes::primnodes::Const>().is_some() {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "cannot use constant expression as partition key".to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    ));
+                }
             }
         }
-        if attnum == 0 {
+
+        if !pelem.collation.is_nil() {
+            attcollation = catalog_namespace::get_collation_oid_list(&pelem.collation, false)?;
+        }
+        if lsyscache::type_is_collatable(atttype)? {
+            if attcollation == InvalidOid {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "could not determine which collation to use for partition expression"
+                            .to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INDETERMINATE_COLLATION)
+                    .with_hint("Use the COLLATE clause to set the collation explicitly."),
+                ));
+            }
+        } else if attcollation != InvalidOid {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
-                    format!("column \"{name}\" named in partition key does not exist"),
+                    format!(
+                        "collations are not supported by type {}",
+                        format_type::format_type_be(atttype)?
+                    ),
                 )
-                .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
             ));
         }
-        if attnum < 0 {
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    format!("cannot use system column \"{name}\" in partition key"),
-                )
-                .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
-            ));
-        }
-        if attgenerated != 0 {
-            return Err(Box::new(
-                PgError::new(ERROR, "cannot use generated column in partition key".to_string())
-                    .with_detail(format!("Column \"{name}\" is a generated column."))
-                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-                    .with_cursor_position(parser_small1::parser_errposition_source(
-                        Some(query_string.as_bytes()),
-                        pelem.location,
-                        mbutils::GetDatabaseEncoding(),
-                    )),
-            ));
-        }
-        info.partattrs.push(attnum);
-        // Collation consistency (type_is_collatable arms): the collatable
-        // path carries att's own collation; COLLATE overrides are loud above.
         info.partcollation.push(attcollation);
 
         let (am_oid, am_name) = if strategy == PartitionStrategy::Hash {
@@ -145,7 +256,23 @@ pub(crate) fn compute_partition_key<'mcx>(
         };
         info.partopclass.push(opclass);
     }
+    parser_small1::free_parsestate(pstate)?;
     Ok(info)
+}
+
+#[cold]
+#[inline(never)]
+fn generated_partition_column(colname: &str, query_string: &str, location: i32) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, "cannot use generated column in partition key".to_string())
+            .with_detail(format!("Column \"{colname}\" is a generated column."))
+            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .with_cursor_position(parser_small1::parser_errposition_source(
+                Some(query_string.as_bytes()),
+                location,
+                mbutils::GetDatabaseEncoding(),
+            )),
+    )
 }
 
 // StoreCatalogInheritance + StoreCatalogInheritance1, partition arm.
@@ -248,13 +375,22 @@ pub(crate) fn transformPartitionBound<'mcx>(
 
     let colinfo = |i: usize| -> PgResult<(String, Oid, i32, Oid)> {
         let attno = key.partattrs[i];
-        debug_assert!(attno != 0, "expression keys loud in partcache");
-        // get_attname via the open parent's descriptor (the syscache seam is
-        // not part of the server init set).
-        let att = parent.rd_att.attr(attno as usize - 1);
-        let colname = core::str::from_utf8(att.attname.name_str())
-            .expect("non-UTF-8 attname")
-            .to_string();
+        let colname = if attno != 0 {
+            // get_attname via the open parent's descriptor (the syscache seam
+            // is not part of the server init set).
+            let att = parent.rd_att.attr(attno as usize - 1);
+            core::str::from_utf8(att.attname.name_str())
+                .expect("non-UTF-8 attname")
+                .to_string()
+        } else {
+            let exprno = key.partattrs[..i].iter().filter(|&&a| a == 0).count();
+            let expr = key
+                .partexprs
+                .iter()
+                .nth(exprno)
+                .expect("wrong number of partition key expressions");
+            ruleutils_seams::deparse_expression::call(mcx, expr, parent.rd_id)?
+        };
         Ok((colname, key.parttypid[i], key.parttypmod[i], key.partcollation[i]))
     };
 

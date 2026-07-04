@@ -325,6 +325,7 @@ members = [
     "crates/backend/partitioning/partprune",
     "crates/backend/partitioning/partdesc",
     "crates/backend/commands/indexcmds_seams",
+    "crates/backend/utils/adt/ruleutils_seams",
     "crates/backend/commands/indexcmds",
     "crates/backend/utils/adt/timestamp_seams",
     "crates/backend/utils/activity/backend_status_seams",

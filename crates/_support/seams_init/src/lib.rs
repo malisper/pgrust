@@ -47,6 +47,7 @@ pub fn init_all() {
     pg_database::init_seams();
     pg_db_role_setting::init_seams();
     indexcmds::init_seams();
+    ruleutils::init_seams();
     catalog_index::init_seams();
     pg_class::init_seams();
     dbcommands::init_seams();

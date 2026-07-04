@@ -36,6 +36,7 @@ catalog = { path = "../../catalog/catalog" }
 xact = { path = "../../access/transam/xact" }
 types_nodes = { path = "../../../_support/types/nodes" }
 readfuncs = { path = "../../nodes/readfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
 clauses = { path = "../../optimizer/util/clauses" }
 execexpr = { path = "../execexpr" }
 

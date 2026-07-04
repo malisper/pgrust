@@ -569,6 +569,7 @@ pub fn DefineRelation<'mcx>(
             info.strategy,
             info.partattrs.len() as i16,
             &info.partattrs,
+            &info.partexprs,
             &info.partopclass,
             &info.partcollation,
         )?;

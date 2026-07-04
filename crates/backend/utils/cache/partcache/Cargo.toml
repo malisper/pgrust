@@ -19,3 +19,7 @@ lsyscache = { path = "../lsyscache" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../../adt/format_type" }
 inval = { path = "../inval" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+clauses = { path = "../../../optimizer/util/clauses" }

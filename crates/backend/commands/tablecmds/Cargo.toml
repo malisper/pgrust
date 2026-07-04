@@ -65,6 +65,7 @@ parser_small1 = { path = "../../parser/parser_small1" }
 parse_collate = { path = "../../parser/parse_collate" }
 coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 catalog_storage = { path = "../../catalog/catalog_storage" }
 tableam = { path = "../../access/table/tableam" }
