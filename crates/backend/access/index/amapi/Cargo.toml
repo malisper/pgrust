@@ -13,6 +13,7 @@ types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_relscan = { path = "../relscan" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 nbt_validate = { path = "../../nbtree/nbt_validate" }
+hash_validate = { path = "../../hash/hash_validate" }
 cache_syscache = { path = "../../../utils/cache/cache_syscache" }
 catcache = { path = "../../../utils/cache/catcache" }
 

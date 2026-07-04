@@ -3,6 +3,7 @@
 pub mod parse_cte;
 mod parse_merge;
 mod set_op;
+pub use set_op::makeSortGroupClauseForSetOp;
 mod rules;
 pub use rules::transformRuleStmt;
 

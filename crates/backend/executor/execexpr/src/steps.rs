@@ -207,6 +207,7 @@ pub enum Step {
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
     JumpIfNull { jumpdone: u32, out: OutRef },
     ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    XmlExprEval { state: NonNull<crate::xmlops::XmlExprState>, out: OutRef },
     SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
     SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
@@ -250,6 +251,24 @@ pub enum Step {
         transno: u16,
     },
     AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
+    // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
+    FuncExprStrict1Thin { call: CallThin, out: OutRef },
+    FuncExprStrict2Thin { call: CallThin, out: OutRef },
+    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    FuncFuncStrict2Thin { call1: CallThin, argno: u8, call2: CallThin, out: OutRef },
+    FuncStrict2QualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    NotDistinctQualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    AggTransStrictByValIndirectThin {
+        call: CallThin,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    // C EEOP_FIELDSELECT; reads the record datum from `out`, writes the
+    // field back to `out`. Per-eval registry tupdesc copy stands in for C's
+    // rowcache (cold path; see interp). Kept last: appending preserves the
+    // hot variants' discriminants.
+    FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
 }
 
 // C JsonConstructorExprState: resolved-once metadata for the
@@ -328,6 +347,13 @@ pub struct IoCoerceCalls {
 pub struct Call2 {
     pub(crate) fcinfo: NonNull<u8>,
     pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+// Call2 with the thin fn resolved in place of the FmgrInfo indirection.
+#[derive(Clone, Copy, Debug)]
+pub struct CallThin {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) f: ::types_fmgr::PGFunctionThin,
 }
 
 impl From<FuncCall> for Call2 {
@@ -686,6 +712,7 @@ pub enum Kernel {
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
     AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
+    AggTransByValThin { call: CallThin, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
 const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);

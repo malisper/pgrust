@@ -143,6 +143,10 @@ pub fn UnlockRelation(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()
     Ok(())
 }
 
+pub fn LockHasWaitersRelation(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<bool> {
+    lock_seams::lock_has_waiters::call(rel_tag(rel), lockmode)
+}
+
 #[inline]
 fn extend_tag(rel: &RelationData<'_>) -> LOCKTAG {
     LOCKTAG::relation_extend(rel.rd_lockInfo.lockRelId.dbId, rel.rd_lockInfo.lockRelId.relId)

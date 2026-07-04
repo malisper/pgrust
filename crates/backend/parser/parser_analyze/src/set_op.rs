@@ -501,7 +501,7 @@ fn set_op_leaf_analyze<'mcx>(
     Ok(query)
 }
 
-fn makeSortGroupClauseForSetOp<'mcx>(
+pub fn makeSortGroupClauseForSetOp<'mcx>(
     mcx: Mcx<'mcx>,
     rescoltype: Oid,
     require_hash: bool,

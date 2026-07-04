@@ -332,6 +332,21 @@ fn eval_kernel<'mcx>(
             }
             Ok(NullableDatum::null())
         }
+        Kernel::AggTransByValThin { call, pergroup, strict } => {
+            // SAFETY: as AggTransByVal; thin callee never sets isnull.
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !strict || !(*pg).trans_value_is_null {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    (*pg).trans_value = invoke_thin(&call)?;
+                    (*pg).trans_value_is_null = false;
+                }
+            }
+            Ok(NullableDatum::null())
+        }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
             // SAFETY: the frame's fcinfo image and mcx-boxed FmgrInfo are
@@ -656,6 +671,12 @@ fn run_program<'mcx>(
                     write_out(*out, value, isnull);
                 }
             }
+            Step::XmlExprEval { state, out } => {
+                // SAFETY: compile-allocated state, live for the program.
+                let st = unsafe { state.as_ref() };
+                let (value, isnull) = crate::xmlops::eval_xml_expr(st)?;
+                write_out(*out, value, isnull);
+            }
             Step::MinMax { call, slots, nelems, least, out } => {
                 let mut value = Datum::null();
                 let mut isnull = true;
@@ -898,6 +919,14 @@ fn run_program<'mcx>(
                 let r = read_out(*out);
                 let b = eval_row_null(frames, *rn, *frame, r, false)?;
                 write_out(*out, Datum::from_bool(b), false);
+            }
+            Step::FieldSelect { fieldnum, resulttype, frame, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    let (value, isnull) =
+                        eval_field_select(frames, *fieldnum, *resulttype, *frame, r.value)?;
+                    write_out(*out, value, isnull);
+                }
             }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
@@ -1287,6 +1316,107 @@ fn run_program<'mcx>(
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
                 assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
                 assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
+            }
+            Step::FuncExprStrict1Thin { call, out } => {
+                // SAFETY: arg 0 of the call's live fcinfo image.
+                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+                if a0.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::FuncExprStrict2Thin { call, out } => {
+                let r = strict2_thin_eval(call)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::ScanVarFuncStrict2Thin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut scan), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::FuncFuncStrict2Thin { call1, argno, call2, out } => {
+                let r1 = strict2_thin_eval(call1)?;
+                // SAFETY: as ScanVarFuncStrict2, for call2's image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call2.fcinfo, *argno as usize).write(r1);
+                    crate::steps::arg_slot_of(call2.fcinfo, 1 - *argno as usize).read()
+                };
+                if r1.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call2)?, false);
+                }
+            }
+            Step::FuncStrict2QualThin { call, jumpdone, out } => {
+                let r = strict2_thin_eval(call)?;
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarNotDistinctThin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: as ScanVarFuncStrict2.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull && other.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::NotDistinctQualThin { call, jumpdone, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let v = if a0.isnull && a1.isnull {
+                    Datum::from_bool(true)
+                } else if a0.isnull || a1.isnull {
+                    Datum::from_bool(false)
+                } else {
+                    invoke_thin(call)?
+                };
+                if !v.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, v, false);
+            }
+            Step::AggTransStrictByValIndirectThin { call, base, transno } => {
+                // SAFETY: as AggTransByValIndirect; thin callee never sets isnull.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        (*pg).trans_value = invoke_thin(call)?;
+                        (*pg).trans_value_is_null = false;
+                    }
+                }
             }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -1841,6 +1971,69 @@ fn varlena_datum(v: ::datum::Varlena<'_>) -> Datum {
     image_datum(v.into_image())
 }
 
+// ExecEvalFieldSelect (execExprInterp.c), heap-composite leg; the expanded-
+// record fastpath is unported loud. C memoizes the tupdesc in the step's
+// rowcache; a per-eval registry copy stands in (cold path, no invalidation).
+#[inline(never)]
+#[cold]
+fn eval_field_select(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    fieldnum: i16,
+    resulttype: ::types_core::Oid,
+    frame: u32,
+    value: Datum,
+) -> PgResult<(Datum, bool)> {
+    use ::types_tuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null composite datum per the FieldSelect contract.
+    if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
+        panic!("ExecEvalFieldSelect (execExprInterp.c): expanded-record fastpath unported");
+    }
+    // SAFETY: a live varlena-headed composite image.
+    let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
+    // SAFETY: `total` readable bytes at p, per the datum contract.
+    let raw = unsafe { core::slice::from_raw_parts(p, total) };
+    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
+    let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, hdr.type_id(), hdr.typmod())?;
+    if fieldnum <= 0 || fieldnum as i32 > tupdesc.natts {
+        return Err(::types_error::PgError::error(format!(
+            "attribute number {fieldnum} exceeds number of columns {}",
+            tupdesc.natts
+        ))
+        .into());
+    }
+    let att = &tupdesc.attrs[(fieldnum - 1) as usize];
+    if att.attisdropped {
+        return Ok((Datum::null(), true));
+    }
+    if resulttype != att.atttypid {
+        return Err(::types_error::PgError::error(format!(
+            "attribute {fieldnum} has wrong type"
+        ))
+        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+        .into());
+    }
+    // SAFETY: MAXALIGN'd detoasted image of datum_length() bytes.
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    let mut isnull = false;
+    // SAFETY: fieldnum validated against the tuple's descriptor above.
+    let v = unsafe { ::types_tuple::heap_getattr(&tuple, fieldnum as i32, &tupdesc, &mut isnull) };
+    core::mem::forget(tuple);
+    Ok((v, isnull))
+}
+
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in
 // the armed per-eval result context.
 #[allow(clippy::too_many_arguments)]
@@ -1908,6 +2101,29 @@ fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
     }
     let (value, isnull) = invoke2(call)?;
     Ok(NullableDatum { value, isnull })
+}
+
+// Thin-ABI call: no flinfo arg, no arity check, no isnull round trip — the
+// registered callee never writes fcinfo.isnull (fmgr_thin_builtin contract).
+#[inline(always)]
+fn invoke_thin(call: &crate::steps::CallThin) -> PgResult<Datum> {
+    // SAFETY: live 2-arg fcinfo image; thin contract holds at registration.
+    unsafe { (call.f)(call.fcinfo.cast()) }
+}
+
+#[inline(always)]
+fn strict2_thin_eval(call: &crate::steps::CallThin) -> PgResult<NullableDatum> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        return Ok(NullableDatum::null());
+    }
+    Ok(NullableDatum { value: invoke_thin(call)?, isnull: false })
 }
 
 #[inline(always)]

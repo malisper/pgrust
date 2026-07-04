@@ -44,14 +44,6 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
             continue;
         }
 
-        if cte.cterecursive
-            && (cte.search_clause.is_some() || cte.cycle_clause.is_some())
-        {
-            panic!(
-                "rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE on \
-                 \"{ctename}\" survived rewrite; SEARCH/CYCLE lane"
-            );
-        }
         if cmd_type != types_nodes::CmdType::CMD_SELECT {
             panic!("SS_process_ctes (subselect.c): data-modifying CTE \"{ctename}\"; M2 DML-CTE lane");
         }

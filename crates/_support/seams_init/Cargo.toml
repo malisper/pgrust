@@ -171,6 +171,7 @@ adt_bool = { path = "../../backend/utils/adt/bool" }
 adt_float = { path = "../../backend/utils/adt/float" }
 pg_locale = { path = "../../backend/utils/adt/pg_locale" }
 varlena = { path = "../../backend/utils/adt/varlena" }
+adt_xml = { path = "../../backend/utils/adt/xml" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
 catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }
@@ -219,6 +220,7 @@ slot = { path = "../../backend/replication/slot" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
 aio_config = { path = "../../backend/storage/aio/aio_config" }
+aio_uring = { path = "../../backend/storage/aio/aio_uring" }
 gin = { path = "../../backend/access/gin/gin" }
 types_fmgr = { path = "../types/fmgr" }
 format_type = { path = "../../backend/utils/adt/format_type" }

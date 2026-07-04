@@ -1933,6 +1933,11 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
                 .any(expression_returns_set)
                 || j.passing_values.iter().any(expression_returns_set)
         }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            x.named_args.iter().any(expression_returns_set)
+                || x.args.iter().any(expression_returns_set)
+        }
         other => panic!(
             "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
              backend-nodes-core lane"

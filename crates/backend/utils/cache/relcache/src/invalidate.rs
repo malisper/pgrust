@@ -47,10 +47,16 @@ fn copy_preserved(from: &RelationData<'static>, to: &RelationData<'static>) {
 }
 
 fn replace_entry(relid: Oid, newrel: &Rc<RelationData<'static>>) {
-    with_state(|st| match st.id_cache.get_mut(&relid) {
-        Some(ent) => ent.rel = Rc::clone(newrel),
-        None => {
-            st.id_cache.insert(relid, RelCacheEnt { rel: Rc::clone(newrel), nailed: false });
+    with_state(|st| {
+        let old = match st.id_cache.get_mut(&relid) {
+            Some(ent) => Some(core::mem::replace(&mut ent.rel, Rc::clone(newrel))),
+            None => {
+                st.id_cache.insert(relid, RelCacheEnt { rel: Rc::clone(newrel), nailed: false });
+                None
+            }
+        };
+        if let Some(old) = old {
+            crate::note_stale(st, &old);
         }
     });
 }
@@ -163,11 +169,7 @@ fn RelationReloadIndexInfo(
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
-    with_state(|st| {
-        if let Some(ent) = st.id_cache.get_mut(&relid) {
-            ent.rel = Rc::clone(&newrel);
-        }
-    });
+    replace_entry(relid, &newrel);
     Ok(newrel)
 }
 
@@ -219,12 +221,8 @@ fn RelationReloadNailed(
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
-    with_state(|st| {
-        if let Some(ent) = st.id_cache.get_mut(&relid) {
-            debug_assert!(ent.nailed);
-            ent.rel = Rc::clone(&newrel);
-        }
-    });
+    debug_assert!(store::is_nailed(relid));
+    replace_entry(relid, &newrel);
     Ok(newrel)
 }
 

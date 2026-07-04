@@ -986,7 +986,11 @@ pub fn heap_batch_deform_soa<'mcx>(
     // SAFETY: as heap_batch_store_slot — pinned page, offsets from
     // page_collect_tuples under the per-page bound.
     let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
-    for i in 0..n {
+    // Descending i = ascending tuple addresses (pages fill from pd_upper down;
+    // scanqual -8.3% wall); SoA writes are positional, so output is order-free.
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
         let (ptr, len, lineoff) = unsafe {
             let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
             let lpp = page.item_id_unchecked(lineoff);

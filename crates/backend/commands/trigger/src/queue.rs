@@ -87,6 +87,28 @@ pub(crate) fn firing_counter() -> CommandId {
     FIRING_COUNTER.with(|c| c.get())
 }
 
+// AfterTriggerPendingOnRel (trigger.c): DONE events ignored — a DONE flag
+// rolled back by subxact abort rolls the TRUNCATE/etc back too.
+pub fn AfterTriggerPendingOnRel(relid: Oid) -> bool {
+    let hit = XACT_EVENTS.with(|s| {
+        s.borrow().iter().any(|ev| ev.flags & AFTER_TRIGGER_DONE == 0 && ev.relid == relid)
+    });
+    if hit {
+        return true;
+    }
+    let depth = query_depth();
+    if depth < 0 {
+        return false;
+    }
+    QUERY_STACK.with(|s| {
+        s.borrow()
+            .iter()
+            .take(depth as usize + 1)
+            .flatten()
+            .any(|ev| ev.flags & AFTER_TRIGGER_DONE == 0 && ev.relid == relid)
+    })
+}
+
 fn ri_trigger_kind(tgfoid: Oid) -> i32 {
     match tgfoid {
         F_RI_FKEY_CASCADE_DEL..=F_RI_FKEY_SETDEFAULT_UPD
@@ -493,7 +515,6 @@ fn trigger_type_matches(tgtype: i16, event: i16) -> bool {
         == TRIGGER_TYPE_ROW | TRIGGER_TYPE_AFTER | event
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn after_trigger_save_event<'mcx>(
     mcx: Mcx<'mcx>,

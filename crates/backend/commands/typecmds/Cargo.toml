@@ -23,6 +23,8 @@ coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
 outfuncs = { path = "../../nodes/outfuncs" }
 pg_type = { path = "../../catalog/pg_type" }
+tablecmds = { path = "../tablecmds" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
 pg_enum = { path = "../../catalog/pg_enum" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
@@ -39,7 +41,6 @@ genam = { path = "../../access/index/genam" }
 format_type = { path = "../../utils/adt/format_type" }
 mbutils = { path = "../../utils/mb/mbutils" }
 elog = { path = "../../utils/error/elog" }
-tablecmds = { path = "../tablecmds" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
