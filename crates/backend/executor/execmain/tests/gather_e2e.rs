@@ -300,14 +300,14 @@ fn leader_thread_boot() {
         miscinit::InitProcessLocalLatch();
         lmgr_proc::InitProcess(types_core::BackendType::Backend).unwrap();
         procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
+        // Before InitializeLatchWaitSet so the cached set reserves the inert
+        // postmaster-death position (this thread stays "under postmaster":
+        // RegisterDynamicBackgroundWorker runs mid-ExecGather).
+        g::SetIsUnderPostmaster(true);
         latch::InitializeLatchWaitSet().unwrap();
         procsignal::ProcSignalInit(&[]).unwrap();
         miscinit::SetAuthenticatedUserId(10);
         miscinit::SetSessionAuthorization(10, true).unwrap();
-        // After InitializeLatchWaitSet (so the cached wait set never armed a
-        // postmaster-death watch — no pipe here): RegisterDynamicBackgroundWorker
-        // runs mid-ExecGather and returns None when not under postmaster.
-        g::SetIsUnderPostmaster(true);
         armed.set(true);
     });
 }
