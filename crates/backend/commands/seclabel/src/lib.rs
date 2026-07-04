@@ -219,7 +219,7 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
     key.sk_strategy = BTEqualStrategyNumber;
-    key.sk_collation = 0;
+    key.sk_collation = types_core::C_COLLATION_OID;
     key.sk_func = fmgr_seams::fmgr_info::call(func)
         .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
     key.sk_argument = arg;
