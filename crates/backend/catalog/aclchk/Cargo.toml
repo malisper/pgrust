@@ -28,6 +28,8 @@ table = { path = "../../access/table/table" }
 heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
+catalog = { path = "../catalog" }
+dependency_seams = { path = "../dependency_seams" }
 xact = { path = "../../access/transam/xact" }
 miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
