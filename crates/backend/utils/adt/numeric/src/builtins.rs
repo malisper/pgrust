@@ -641,9 +641,8 @@ fc_num_unary_res! {
 }
 
 // C's numeric_support folds no-op typmod coercions into RelabelType; this
-// engine's simplify_function panics on any non-NULL prosupport rewrite, so
-// every request answers NULL (plans keep the coercion FuncExpr — same
-// divergence class as adt_windowfuncs prosupports).
+// port answers NULL (plans keep the coercion FuncExpr — recorded divergence;
+// simplify_function's rewrite plumbing is live, see varchar_support).
 pub fn fc_numeric_support(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::from_usize(0))
 }
