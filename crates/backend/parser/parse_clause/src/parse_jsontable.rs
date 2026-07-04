@@ -483,7 +483,7 @@ fn makeJsonTablePathScan<'mcx>(
 
     // jsonpath_in yields the flattened on-disk image (own varlena header);
     // stored verbatim as the by-ref Const value.
-    let image = adt_jsonpath::jsonpath_in(mcx, pathstring.as_bytes(), None)?
+    let image = adt_jsonpath::path::jsonpath_in(mcx, pathstring.as_bytes(), None)?
         .expect("hard errsave without escontext returns Err");
     let d = datum::Datum::from_usize(image.leak().as_ptr() as usize);
     let value = Node::mk_const(mcx, JSONPATHOID, -1, 0, -1, d, false, false)?;
