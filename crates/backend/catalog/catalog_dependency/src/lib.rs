@@ -863,6 +863,10 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         TSDictionaryRelationId => {
             drop_row_by_oid(mcx, TSDictionaryRelationId, TSDictionaryOidIndexId, object.objectId)?
         }
+        // RemoveCollationById (pg_collation.c): plain row delete.
+        CollationRelationId_dep => {
+            drop_row_by_oid(mcx, CollationRelationId_dep, CollationOidIndexId_dep, object.objectId)?
+        }
         TSConfigRelationId => {
             drop_row_by_oid(mcx, TSConfigRelationId, TSConfigOidIndexId, object.objectId)?;
             let rel = table::table_open(mcx, TSConfigMapRelationId, RowExclusiveLock)?;
@@ -947,6 +951,8 @@ const LanguageOidIndexId: Oid = 2682;
 const TransformRelationId: Oid = 3576;
 const TransformOidIndexId: Oid = 3574;
 const TSDictionaryRelationId: Oid = 3600;
+const CollationRelationId_dep: Oid = 3456;
+const CollationOidIndexId_dep: Oid = 3085;
 const TSDictionaryOidIndexId: Oid = 3605;
 const TSConfigRelationId: Oid = 3602;
 const TSConfigOidIndexId: Oid = 3712;
