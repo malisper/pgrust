@@ -248,3 +248,170 @@ fn element_set_replaces_and_extends() {
     .unwrap();
     assert_eq!(as_str(&array_out(mcx, &low, &m, &mut op).unwrap()), "[-1:3]={0,NULL,1,2,3}");
 }
+
+mod expanded {
+    use super::*;
+    use crate::expanded::{
+        datum_get_expanded_array, datum_get_expanded_array_x, deconstruct_expanded_array,
+        expand_array, ArrayMetaState, EA_MAGIC,
+    };
+    use ::datum::expandeddatum::{
+        datum_get_eohp, datum_is_external_expanded, datum_is_external_expanded_rw,
+        eoh_flatten_into, eoh_get_flat_size, make_expanded_object_read_only_internal,
+    };
+
+    fn int4_meta() -> ArrayMetaState {
+        ArrayMetaState { element_type: INT4OID, typlen: 4, typbyval: true, typalign: b'i' }
+    }
+
+    fn int4_array<'m>(mcx: Mcx<'m>, vals: &[i32], nulls: Option<&[bool]>) -> ::mcx::PgVec<'m, u8> {
+        let elems: std::vec::Vec<Datum> = vals.iter().map(|v| Datum::from_i32(*v)).collect();
+        construct_md_array(
+            mcx, &elems, nulls, 1, &[vals.len() as i32], &[1], INT4OID, 4, true, b'i',
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn expand_flat_and_flatten_round_trip() {
+        let parent = MemoryContext::new("t");
+        let img = int4_array(parent.mcx(), &[7, 8, 9], None);
+        let mut meta = int4_meta();
+        let d = expand_array(Datum::from_usize(img.as_ptr() as usize), &parent, Some(&mut meta))
+            .unwrap();
+        unsafe {
+            assert!(datum_is_external_expanded_rw(d));
+            let eah = &*(datum_get_eohp(d) as *const crate::expanded::ExpandedArrayHeader);
+            assert_eq!(eah.ea_magic, EA_MAGIC);
+            assert_eq!(eah.ndims, 1);
+            assert_eq!(eah.dims[0], 3);
+            assert_eq!(eah.lbound[0], 1);
+            assert_eq!(eah.element_type, INT4OID);
+            assert_eq!((eah.typlen, eah.typbyval, eah.typalign), (4, true, b'i'));
+            assert_eq!(eah.fvalue().unwrap(), img.as_slice());
+
+            let hdr = datum_get_eohp(d);
+            let n = eoh_get_flat_size(hdr);
+            assert_eq!(n, img.len());
+            let mut out = std::vec![0u8; n];
+            eoh_flatten_into(hdr, out.as_mut_ptr(), n);
+            assert_eq!(out.as_slice(), img.as_slice());
+
+            let ro = make_expanded_object_read_only_internal(d);
+            assert!(datum_is_external_expanded(ro));
+            assert!(!datum_is_external_expanded_rw(ro));
+        }
+    }
+
+    #[test]
+    fn deconstruct_and_reexpand_byval() {
+        let parent = MemoryContext::new("t");
+        let img = int4_array(parent.mcx(), &[1, 2, 3, 4], None);
+        let d = expand_array(
+            Datum::from_usize(img.as_ptr() as usize),
+            &parent,
+            Some(&mut int4_meta()),
+        )
+        .unwrap();
+        unsafe {
+            {
+                let eah = &mut *(datum_get_eohp(d) as *mut crate::expanded::ExpandedArrayHeader);
+                assert!(eah.dvalues().is_none());
+                deconstruct_expanded_array(eah).unwrap();
+                let (vals, nulls) = eah.dvalues().unwrap();
+                assert!(nulls.is_none());
+                assert_eq!(
+                    vals.iter().map(|v| v.as_i32()).collect::<std::vec::Vec<_>>(),
+                    [1, 2, 3, 4]
+                );
+                assert_eq!(eah.nelems, 4);
+            }
+
+            // copy_byval path: source is expanded with a Datum-array representation.
+            let mut meta = ArrayMetaState::invalid();
+            let d2 = expand_array(d, &parent, Some(&mut meta)).unwrap();
+            assert_eq!(meta.element_type, INT4OID);
+            {
+                let eah2 = &*(datum_get_eohp(d2) as *const crate::expanded::ExpandedArrayHeader);
+                assert!(eah2.fvalue().is_none());
+                let (vals2, _) = eah2.dvalues().unwrap();
+                assert_eq!(
+                    vals2.iter().map(|v| v.as_i32()).collect::<std::vec::Vec<_>>(),
+                    [1, 2, 3, 4]
+                );
+            }
+
+            // dvalues-only flatten reproduces the original image.
+            let hdr2 = datum_get_eohp(d2);
+            let n = eoh_get_flat_size(hdr2);
+            assert_eq!(n, img.len());
+            let mut out = std::vec![0u8; n];
+            eoh_flatten_into(hdr2, out.as_mut_ptr(), n);
+            assert_eq!(out.as_slice(), img.as_slice());
+        }
+    }
+
+    #[test]
+    fn with_nulls_round_trip() {
+        let parent = MemoryContext::new("t");
+        let img = int4_array(parent.mcx(), &[5, 0, 6], Some(&[false, true, false]));
+        let d = expand_array(
+            Datum::from_usize(img.as_ptr() as usize),
+            &parent,
+            Some(&mut int4_meta()),
+        )
+        .unwrap();
+        unsafe {
+            {
+                let eah = &mut *(datum_get_eohp(d) as *mut crate::expanded::ExpandedArrayHeader);
+                deconstruct_expanded_array(eah).unwrap();
+                let (vals, nulls) = eah.dvalues().unwrap();
+                assert_eq!(nulls.unwrap(), &[false, true, false]);
+                assert_eq!(vals[0].as_i32(), 5);
+                assert_eq!(vals[2].as_i32(), 6);
+            }
+
+            let d2 = expand_array(d, &parent, None).unwrap();
+            let hdr2 = datum_get_eohp(d2);
+            let n = eoh_get_flat_size(hdr2);
+            assert_eq!(n, img.len());
+            let mut out = std::vec![0u8; n];
+            eoh_flatten_into(hdr2, out.as_mut_ptr(), n);
+            assert_eq!(out.as_slice(), img.as_slice());
+        }
+    }
+
+    #[test]
+    fn datum_get_expanded_array_identity_and_expand() {
+        let parent = MemoryContext::new("t");
+        let img = int4_array(parent.mcx(), &[42], None);
+        unsafe {
+            let p1 =
+                datum_get_expanded_array(Datum::from_usize(img.as_ptr() as usize), &parent)
+                    .unwrap();
+            assert_eq!((*p1).ea_magic, EA_MAGIC);
+            let rw = ::datum::expandeddatum::eohp_get_rw_datum(&raw const (*p1).hdr);
+            let mut meta = ArrayMetaState::invalid();
+            let p2 = datum_get_expanded_array_x(rw, &parent, Some(&mut meta)).unwrap();
+            assert_eq!(p1, p2);
+            assert_eq!(meta.element_type, INT4OID);
+            assert_eq!(meta.typlen, 4);
+        }
+    }
+
+    #[test]
+    fn parent_reset_reclaims_objects() {
+        let mut parent = MemoryContext::new("t");
+        let img: std::vec::Vec<u8> = {
+            let tmp = MemoryContext::new("img");
+            int4_array(tmp.mcx(), &[1, 2], None).as_slice().to_vec()
+        };
+        let _ = expand_array(
+            Datum::from_usize(img.as_ptr() as usize),
+            &parent,
+            Some(&mut int4_meta()),
+        )
+        .unwrap();
+        parent.reset();
+    }
+}
