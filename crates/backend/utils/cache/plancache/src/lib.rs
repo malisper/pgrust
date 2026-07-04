@@ -778,9 +778,60 @@ fn build_stmt_list(
     mcx::vec_borrow_in(mcx, result?)
 }
 
+// The planner renumbers TLE resnos in place (extract_update_targetlist_colnos)
+// and rewrites MergeAction targetList/updateColnos, so those structs must be
+// private per plan; deeper subnodes stay shared (safe Rust denies edits).
+fn clone_tlist_in(
+    mcx: Mcx<'static>,
+    tlist: &types_nodes::NodeList<'static>,
+) -> PgResult<types_nodes::NodeList<'static>> {
+    let mut out = types_nodes::NodeList::nil();
+    for cell in tlist {
+        let node = match cell.as_target_entry() {
+            Some(tle) => types_nodes::Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: tle.expr,
+                    resno: tle.resno,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: tle.resorigtbl,
+                    resorigcol: tle.resorigcol,
+                    resjunk: tle.resjunk,
+                },
+            )?,
+            None => cell,
+        };
+        out.lappend(mcx, node)?;
+    }
+    Ok(out)
+}
+
+fn clone_merge_actions_in(
+    mcx: Mcx<'static>,
+    actions: &types_nodes::NodeList<'static>,
+) -> PgResult<types_nodes::NodeList<'static>> {
+    let mut out = types_nodes::NodeList::nil();
+    for cell in actions {
+        let a = cell.as_merge_action().expect("mergeActionList cell");
+        let node = types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::MergeAction {
+                matchKind: a.matchKind,
+                commandType: a.commandType,
+                r#override: a.r#override,
+                qual: a.qual,
+                targetList: clone_tlist_in(mcx, &a.targetList)?,
+                updateColnos: a.updateColnos.clone_in(mcx)?,
+            },
+        )?;
+        out.lappend(mcx, node)?;
+    }
+    Ok(out)
+}
+
 // copyObject(query_list) analog (BuildCachedPlan): top-level structs and list
-// cell arrays are copied so the planner never scribbles on cached cells;
-// subnodes stay shared — safe Rust denies the planner in-place edits of them.
+// cell arrays are copied so the planner never scribbles on cached cells.
 fn clone_query_in(mcx: Mcx<'static>, q: &Query<'static>) -> PgResult<Query<'static>> {
     let Query {
         commandType,
@@ -852,10 +903,10 @@ fn clone_query_in(mcx: Mcx<'static>, q: &Query<'static>) -> PgResult<Query<'stat
         rtable: rtable.clone_in(mcx)?,
         rteperminfos: rteperminfos.clone_in(mcx)?,
         jointree,
-        mergeActionList: mergeActionList.clone_in(mcx)?,
+        mergeActionList: clone_merge_actions_in(mcx, mergeActionList)?,
         mergeTargetRelation,
         mergeJoinCondition,
-        targetList: targetList.clone_in(mcx)?,
+        targetList: clone_tlist_in(mcx, targetList)?,
         r#override,
         onConflict,
         returningOldAlias,
