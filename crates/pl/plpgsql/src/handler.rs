@@ -316,9 +316,6 @@ fn do_compile(
             "trigger functions can only be called as triggers".to_string(),
         )));
     }
-    if proc.rettype == EVENT_TRIGGEROID {
-        panic!("plpgsql_compile: event trigger functions unported (function {fn_oid})");
-    }
     if is_polymorphic(proc.rettype) || proc.argtypes.iter().any(|&t| is_polymorphic(t)) {
         panic!("plpgsql_compile: polymorphic signatures unported (function {fn_oid})");
     }
