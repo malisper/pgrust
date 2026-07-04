@@ -68,29 +68,10 @@ fn deleted_while_in_use(relid: Oid) -> Box<PgError> {
 // entry Rc is replaced and live holders keep their invalidated snapshot until
 // they reopen. The swap's keep_* preservation set maps to copying the Cell
 // fields and reusing an equal tupdesc Rc.
-thread_local! {
-    static REBUILD_DEPTH: Cell<u32> = const { Cell::new(0) };
-}
-
-struct DepthGuard;
-impl Drop for DepthGuard {
-    fn drop(&mut self) {
-        REBUILD_DEPTH.with(|d| d.set(d.get() - 1));
-    }
-}
-fn scopeguard() -> DepthGuard {
-    DepthGuard
-}
-
 pub(crate) fn RelationRebuildRelation(
     relid: Oid,
     held: &Rc<RelationData<'static>>,
 ) -> PgResult<Rc<RelationData<'static>>> {
-    REBUILD_DEPTH.with(|d| {
-        d.set(d.get() + 1);
-        assert!(d.get() < 40, "PUBTRACE RelationRebuildRelation recursion depth {}", d.get());
-    });
-    let _guard = scopeguard();
     debug_assert!(!store::refcount_zero(held, 0));
     debug_assert_eq!(held.rd_droppedSubid.get(), InvalidSubTransactionId);
 
@@ -385,7 +366,6 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
 // pg_class, pg_class_oid_index, other nailed, rest — catalogs must be current
 // before they reload the rest. Phase lists are transient per call, as in C.
 pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
-    eprintln!("PUBTRACE RCI enter debug_discard={debug_discard}");
     relmapper_seams::relation_map_invalidate_all::call()?;
     with_state(|st| {
         st.rules_cache.clear();
