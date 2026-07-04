@@ -270,6 +270,55 @@ pub fn fc_varbittypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     fc_bit_typmodout(fcinfo)
 }
 
+
+// varbit.c bitfromint4: int4 -> bit(typmod), sign-filled, MSB-first.
+pub fn bitfromint4_core<'mcx>(mcx: Mcx<'mcx>, a: i32, typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
+    let typmod = if typmod <= 0 || typmod as i64 > VARBITMAXLEN { 1 } else { typmod };
+    let nbits = typmod as usize;
+    let len = varbit_total_len(nbits);
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, len)?;
+    out.extend_from_slice(&::datum::varlena::set_varsize_4b(len));
+    out.extend_from_slice(&(typmod).to_ne_bytes());
+    for _ in (VARHDRSZ + VARBITHDRSZ)..len {
+        out.push(0);
+    }
+    let r = &mut out[VARHDRSZ + VARBITHDRSZ..];
+    let mut ri = 0usize;
+    let mut destbitsleft = typmod;
+    let srcbitsleft = 32i32.min(destbitsleft);
+    while destbitsleft >= srcbitsleft + 8 {
+        r[ri] = if a < 0 { 0xff } else { 0 };
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    if destbitsleft > srcbitsleft {
+        let mut val = (a >> (destbitsleft - 8)) as u32;
+        if a < 0 {
+            val |= (!0u32) << (srcbitsleft + 8 - destbitsleft);
+        }
+        r[ri] = (val & 0xff) as u8;
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    while destbitsleft >= 8 {
+        r[ri] = ((a >> (destbitsleft - 8)) & 0xff) as u8;
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    if destbitsleft > 0 {
+        r[ri] = ((a << (8 - destbitsleft)) & 0xff) as u8;
+    }
+    Ok(out)
+}
+
+pub fn fc_bitfromint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = fcinfo.arg(0).as_i32();
+    let typmod = fcinfo.arg(1).as_i32();
+    let mcx = fcinfo.result_mcx();
+    let img = bitfromint4_core(mcx, a, typmod)?;
+    Ok(Datum::from_usize(img.leak().as_ptr() as usize))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -279,6 +328,7 @@ pub const VARBIT_BUILTINS: &[FmgrBuiltin] = &[
     b(1565, "bit_out", 1, fc_bit_out),
     b(1579, "varbit_in", 3, fc_varbit_in),
     b(1580, "varbit_out", 1, fc_varbit_out),
+    b(1683, "bitfromint4", 2, fc_bitfromint4),
     b(2902, "varbittypmodin", 1, fc_varbittypmodin),
     b(2919, "bittypmodin", 1, fc_bittypmodin),
     b(2920, "bittypmodout", 1, fc_bittypmodout),
