@@ -324,41 +324,34 @@ fn gather_merge_getnext<'mcx>(
     }
 }
 
-/// `load_tuple_array` (nodeGatherMerge.c).
+/// `load_tuple_array` (nodeGatherMerge.c). Nowait prefetch errors surface on
+/// the next demanded read (C reports immediately; the retry hits the same
+/// error).
 fn load_tuple_array(node: &mut GatherMergeState<'_>, reader: usize) {
     if reader == 0 {
         return;
     }
-    let buf = &mut node.tuple_buffers[reader - 1];
+    let b = reader - 1;
+    let readers = &mut node.reader;
+    let buf = &mut node.tuple_buffers[b];
     if buf.ntuples == buf.read_counter {
         buf.ntuples = 0;
         buf.read_counter = 0;
     }
     for i in buf.ntuples..MAX_TUPLE_STORE {
         let mut done = buf.done;
-        let got = {
-            let r = &mut node.reader[reader - 1];
-            match r.next(true, &mut done) {
-                Ok(Some(bytes)) => {
-                    node.tuple_buffers[reader - 1].tuple[i].store(bytes);
-                    true
-                }
-                Ok(None) => false,
-                Err(e) => {
-                    node.tuple_buffers[reader - 1].done = done;
-                    // Nowait prefetch: surface the error on the next demanded
-                    // read instead (C reports immediately; the retry hits the
-                    // same error).
-                    let _ = e;
-                    false
-                }
+        let got = match readers[b].next(true, &mut done) {
+            Ok(Some(bytes)) => {
+                buf.tuple[i].store(bytes);
+                true
             }
+            Ok(None) | Err(_) => false,
         };
-        node.tuple_buffers[reader - 1].done = done;
+        buf.done = done;
         if !got {
             break;
         }
-        node.tuple_buffers[reader - 1].ntuples += 1;
+        buf.ntuples += 1;
     }
 }
 
@@ -382,31 +375,32 @@ fn gather_merge_readnext<'mcx>(
         return Ok(false);
     }
 
-    let have_buffered =
-        node.tuple_buffers[reader - 1].ntuples > node.tuple_buffers[reader - 1].read_counter;
+    let b = reader - 1;
+    let have_buffered = node.tuple_buffers[b].ntuples > node.tuple_buffers[b].read_counter;
     if have_buffered {
-        let buf = &mut node.tuple_buffers[reader - 1];
+        let buf = &mut node.tuple_buffers[b];
         let rc = buf.read_counter;
         buf.read_counter += 1;
-        let (cur, arr) = (&mut buf.cur, &mut buf.tuple[rc]);
-        core::mem::swap(cur, arr);
-    } else if node.tuple_buffers[reader - 1].done {
+        let GmTupleBuffer { cur, tuple, .. } = buf;
+        core::mem::swap(cur, &mut tuple[rc]);
+    } else if node.tuple_buffers[b].done {
         node.gm_slots[reader] = None;
         return Ok(false);
     } else {
         crate::cfi()?;
         let mut done = false;
         let got = {
-            let r = &mut node.reader[reader - 1];
-            match r.next(nowait, &mut done)? {
+            let readers = &mut node.reader;
+            let buf = &mut node.tuple_buffers[b];
+            match readers[b].next(nowait, &mut done)? {
                 Some(bytes) => {
-                    node.tuple_buffers[reader - 1].cur.store(bytes);
+                    buf.cur.store(bytes);
                     true
                 }
                 None => false,
             }
         };
-        node.tuple_buffers[reader - 1].done = done;
+        node.tuple_buffers[b].done = done;
         if !got {
             node.gm_slots[reader] = None;
             return Ok(false);
