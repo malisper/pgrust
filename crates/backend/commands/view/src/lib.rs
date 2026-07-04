@@ -1,5 +1,4 @@
-//! view.c CREATE VIEW lane. CREATE OR REPLACE, WITH CHECK OPTION, and
-//! reloptions are loud panics.
+//! view.c CREATE VIEW lane. CREATE OR REPLACE is a loud panic.
 
 #![allow(non_snake_case)]
 
@@ -9,7 +8,7 @@ use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::Query;
+use types_nodes::parsenodes::{DefElem, DefElemAction, Query};
 use types_nodes::primnodes::RangeVar;
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName, ViewCheckOption, ViewStmt};
 use types_nodes::{Node, RawStmt};
@@ -43,11 +42,36 @@ pub fn DefineView<'mcx>(
             "views must not contain data-modifying statements in WITH",
         ));
     }
-    if stmt.withCheckOption != ViewCheckOption::NO_CHECK_OPTION {
-        panic!("DefineView (view.c): WITH CHECK OPTION lane unported (updatable views)");
+    let mut options = stmt.options.clone_in(mcx)?;
+    match stmt.withCheckOption {
+        ViewCheckOption::LOCAL_CHECK_OPTION => {
+            options.lappend(mcx, check_option_defelem(mcx, "local")?)?;
+        }
+        ViewCheckOption::CASCADED_CHECK_OPTION => {
+            options.lappend(mcx, check_option_defelem(mcx, "cascaded")?)?;
+        }
+        ViewCheckOption::NO_CHECK_OPTION => {}
     }
-    if !stmt.options.is_nil() {
-        panic!("DefineView (view.c): view reloptions lane unported");
+
+    let mut check_option = false;
+    for dnode in options.iter() {
+        let defel = dnode.as_def_elem().expect("DefElem");
+        if defel.defname == Some("check_option") {
+            check_option = true;
+        }
+    }
+    if check_option {
+        if let Some(view_updatable_error) =
+            rewrite_handler::view_query_is_auto_updatable(&viewParse, true)
+        {
+            return Err(Box::new(
+                PgError::error(
+                    "WITH CHECK OPTION is supported only on automatically updatable views",
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_hint(view_updatable_error),
+            ));
+        }
     }
 
     if !stmt.aliases.is_nil() {
@@ -107,7 +131,20 @@ pub fn DefineView<'mcx>(
             .finish(types_error::ErrorLocation::new("view.c", 0, "DefineView"))?;
     }
 
-    DefineVirtualRelation(mcx, stmt, view, &mut viewParse, query_string)
+    DefineVirtualRelation(mcx, stmt, view, options, &mut viewParse, query_string)
+}
+
+fn check_option_defelem<'mcx>(mcx: Mcx<'mcx>, value: &'mcx str) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some("check_option"),
+            arg: Some(Node::mk_string(mcx, value)?),
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        },
+    )
 }
 
 // DefineVirtualRelation (view.c), create lane; OR REPLACE is loud.
@@ -115,6 +152,7 @@ fn DefineVirtualRelation<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ViewStmt<'mcx>,
     view: &'mcx RangeVar<'mcx>,
+    options: NodeList<'mcx>,
     viewParse: &mut Query<'mcx>,
     query_string: &str,
 ) -> PgResult<Oid> {
@@ -163,7 +201,7 @@ fn DefineVirtualRelation<'mcx>(
     createStmt.tableElts = attrList;
     createStmt.inhRelations = NodeList::nil();
     createStmt.constraints = NodeList::nil();
-    createStmt.options = NodeList::nil();
+    createStmt.options = options;
     createStmt.oncommit = OnCommitAction::ONCOMMIT_NOOP;
     createStmt.tablespacename = None;
     createStmt.if_not_exists = false;

@@ -69,8 +69,16 @@ fn fc_row_security_active(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_bool(status == RlsEnabled))
 }
 
-fn fc_row_security_active_name(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("row_security_active_name (rls.c): textToQualifiedNameList unported (varlena lane)");
+fn fc_row_security_active_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let tablename = String::from_utf8_lossy(t.data()).into_owned();
+    let names = varlena::textToQualifiedNameList(fcinfo.result_mcx(), &tablename)?;
+    let parts: Vec<&str> = names.iter().map(String::as_str).collect();
+    let tablerel = catalog_objectaddress::makeRangeVarFromParts(&parts);
+    let tableoid = catalog_namespace::RangeVarGetRelid(&tablerel, types_rel::NoLock, false)?;
+    let status = check_enable_rls(tableoid, InvalidOid, true)?;
+    Ok(Datum::from_bool(status == RlsEnabled))
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

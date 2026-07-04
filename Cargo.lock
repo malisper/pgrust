@@ -2023,6 +2023,7 @@ dependencies = [
 name = "catalog_objectaddress"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
  "adt_acl",
  "adt_regproc",
  "cache_syscache",
@@ -3199,6 +3200,7 @@ dependencies = [
  "parse_relation",
  "parser_analyze",
  "rewrite_define",
+ "rewrite_handler",
  "tablecmds",
  "types_core",
  "types_error",
@@ -8726,7 +8728,6 @@ dependencies = [
  "parse_oper",
  "pg_depend",
  "pg_shdepend",
- "superuser",
  "syscache_seams",
  "table",
  "types_core",
@@ -8764,6 +8765,7 @@ dependencies = [
 name = "pg_proc"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "aclchk_seams",
  "cache_syscache",
  "catalog",
@@ -8779,12 +8781,12 @@ dependencies = [
  "pg_depend",
  "pgstat",
  "pquery",
- "superuser",
  "syscache_seams",
  "table",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_tuple",
  "varlena",
@@ -10729,6 +10731,7 @@ dependencies = [
  "origin_seams",
  "parallel_seams",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "parser_driver",
  "parser_seams",
@@ -10744,6 +10747,7 @@ dependencies = [
  "pruneheap_seams",
  "readfuncs",
  "rel_vocab",
+ "relation",
  "relation_seams",
  "relcache",
  "relcache_build_seams",
@@ -10908,6 +10912,8 @@ version = "0.0.0"
 dependencies = [
  "aclchk",
  "cache_syscache",
+ "catalog_namespace",
+ "catalog_objectaddress",
  "datum",
  "elog",
  "guc_tables",
@@ -10917,6 +10923,8 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_rel",
+ "varlena",
 ]
 
 [[package]]
@@ -12100,6 +12108,7 @@ dependencies = [
 name = "statscmds"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
  "cache_syscache",
  "catalog",
  "catalog_heap",
@@ -12119,7 +12128,6 @@ dependencies = [
  "pg_depend",
  "rel_vocab",
  "relation_seams",
- "superuser",
  "table",
  "typcache",
  "types_core",
@@ -13764,7 +13772,6 @@ dependencies = [
  "sequence",
  "statscmds",
  "subscriptioncmds",
- "superuser",
  "syscache_seams",
  "tablecmds",
  "tcop_dest",

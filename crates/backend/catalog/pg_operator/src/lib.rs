@@ -263,7 +263,7 @@ pub fn OperatorCreate(
 
     // Filling in a previously-created shell: insist the user own it.
     if OidIsValid(operatorObjectId) {
-        object_ownercheck(operatorName)?;
+        must_own_operator(operatorObjectId, operatorName)?;
     }
 
     let mut commutatorId = InvalidOid;
@@ -281,7 +281,7 @@ pub fn OperatorCreate(
         )?;
         if OidIsValid(commutatorId) {
             let name = commands_define::NameListToString(mcx, commutatorName)?;
-            object_ownercheck(name.as_str())?;
+            must_own_operator(commutatorId, name.as_str())?;
         }
         // Self-linkage to the new operator is fixed below.
         if !OidIsValid(commutatorId) {
@@ -304,7 +304,7 @@ pub fn OperatorCreate(
         )?;
         if OidIsValid(negatorId) {
             let name = commands_define::NameListToString(mcx, negatorName)?;
-            object_ownercheck(name.as_str())?;
+            must_own_operator(negatorId, name.as_str())?;
         }
         if !OidIsValid(negatorId) || negatorId == operatorObjectId {
             return Err(err(
@@ -397,11 +397,13 @@ pub fn OperatorCreate(
     Ok(address)
 }
 
-// Superuser-only build: real ownership ACLs are unported; a non-superuser
-// reaching DDL is loud, not silently allowed.
-fn object_ownercheck(name: &str) -> PgResult<()> {
-    if !superuser::superuser()? {
-        panic!("unported: object_ownercheck for non-superusers (operator {name})");
+fn must_own_operator(oper_oid: Oid, name: &str) -> PgResult<()> {
+    if !aclchk::object_ownercheck(OPERATOR_RELATION_ID, oper_oid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR,
+            name,
+        )?;
     }
     Ok(())
 }

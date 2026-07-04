@@ -50,6 +50,20 @@ const NoLock: types_rel::LOCKMODE = 0;
 
 use cache_syscache::cacheinfo::STATEXTNAMENSP;
 
+// get_relkind_objtype (objectaddress.c)
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType::*;
+    match relkind {
+        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
+        types_rel::RELKIND_INDEX | types_rel::RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
+        types_rel::RELKIND_SEQUENCE => OBJECT_SEQUENCE,
+        types_rel::RELKIND_VIEW => OBJECT_VIEW,
+        RELKIND_MATVIEW => OBJECT_MATVIEW,
+        RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
+        _ => OBJECT_TABLE,
+    }
+}
+
 fn loc(funcname: &str) -> ErrorLocation {
     ErrorLocation {
         filename: Some("statscmds.c".into()),
@@ -168,10 +182,12 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         ));
     }
 
-    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
-    // the unported remainder.
-    if !superuser::superuser_arg(stxowner)? {
-        unported("CreateStatistics: object_ownercheck for non-superusers");
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, stxowner)? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(relkind),
+            rel.name(),
+        )?;
     }
 
     if !init_small::globals::allowSystemTableMods()

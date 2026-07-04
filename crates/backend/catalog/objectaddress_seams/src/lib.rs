@@ -37,11 +37,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn check_object_ownership<'mcx>(
+    pub fn check_object_ownership<'mcx, 'a>(
         mcx: Mcx<'mcx>,
         roleid: Oid,
         objtype: ObjectType,
         address: ObjectAddr,
         object: Node<'mcx>,
+        relation: Option<&'a Relation<'mcx>>,
     ) -> PgResult<()>
 );

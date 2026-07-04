@@ -17,6 +17,7 @@ types_rel = { path = "../../../_support/types/rel" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_analyze = { path = "../../parser/parser_analyze" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 tablecmds = { path = "../tablecmds" }
 xact = { path = "../../access/transam/xact" }
 types_portal = { path = "../../../_support/types/portal" }

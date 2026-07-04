@@ -753,6 +753,13 @@ pub fn heap_reloptions<'mcx>(
             Ok(rdopts)
         }
         RELKIND_RELATION | RELKIND_MATVIEW => build_std(mcx, options, validate, RELOPT_KIND_HEAP),
+        // C DefineRelation dispatches RELKIND_VIEW to view_reloptions before
+        // reaching heap_reloptions; this repo's DefineRelation routes all
+        // non-partitioned relkinds here, so validate views in place.
+        RELKIND_VIEW => {
+            view_reloptions(mcx, options, validate)?;
+            Ok(None)
+        }
         _ => Ok(None),
     }
 }

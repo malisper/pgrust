@@ -1006,11 +1006,52 @@ fn rv_mutate<'mcx>(
             ctx.sublevels_up -= 1;
             Ok(None)
         }
+        // In-place, like the Query arm (exclusively-owned tree).
+        NodeTag::T_OnConflictExpr => {
+            rv_mutate_onconflict(node, ctx)?;
+            Ok(None)
+        }
         _ => {
             let mut m = |n: Node<'mcx>| rv_mutate(n, ctx);
             nodes_core::expression_tree_mutator(mcx, node, &mut m)
         }
     }
+}
+
+fn rv_mutate_onconflict<'mcx>(
+    oc_node: Node<'mcx>,
+    ctx: &mut ReplaceVarsCtx<'_, 'mcx>,
+) -> PgResult<()> {
+    let oc = oc_node
+        .as_on_conflict_expr()
+        .expect("OnConflictExpr");
+    let arbiter_elems = rv_mutate_list(&oc.arbiterElems, ctx)?;
+    let arbiter_where = rv_mutate_opt(oc.arbiterWhere, ctx)?;
+    let set = rv_mutate_list(&oc.onConflictSet, ctx)?;
+    let oc_where = rv_mutate_opt(oc.onConflictWhere, ctx)?;
+    let excl_tlist = rv_mutate_list(&oc.exclRelTlist, ctx)?;
+    // SAFETY: exclusive tree (module contract).
+    unsafe {
+        oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+            if let Some(v) = arbiter_elems {
+                o.arbiterElems = v;
+            }
+            if arbiter_where.is_some() {
+                o.arbiterWhere = arbiter_where;
+            }
+            if let Some(v) = set {
+                o.onConflictSet = v;
+            }
+            if oc_where.is_some() {
+                o.onConflictWhere = oc_where;
+            }
+            if let Some(v) = excl_tlist {
+                o.exclRelTlist = v;
+            }
+        })
+    }
+    .expect("OnConflictExpr");
+    Ok(())
 }
 
 // None = unchanged (mutator convention).
@@ -1053,12 +1094,45 @@ fn rv_query_inplace<'mcx>(
     let new_limit_off = rv_mutate_opt(q.limitOffset, ctx)?;
     let new_limit_cnt = rv_mutate_opt(q.limitCount, ctx)?;
     let new_setops = rv_mutate_opt(q.setOperations, ctx)?;
-    if q.onConflict.is_some() {
-        panic!(
-            "ReplaceVarsFromTargetList (rewriteManip.c): ON CONFLICT in a \
-             rule-rewritten query (OnConflictExpr mutation arm unported)"
-        );
+    if let Some(oc_node) = q.onConflict {
+        rv_mutate_onconflict(oc_node, ctx)?;
     }
+    for wco_node in &q.withCheckOptions {
+        let wco = wco_node
+            .as_with_check_option()
+            .expect("withCheckOptions cell");
+        if let Some(new_qual) = rv_mutate_opt(wco.qual, ctx)? {
+            // SAFETY: exclusive tree (module contract).
+            unsafe {
+                wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
+                    w.qual = Some(new_qual)
+                })
+            }
+            .expect("WithCheckOption");
+        }
+    }
+    for action_node in &q.mergeActionList {
+        let action = action_node
+            .as_merge_action()
+            .expect("mergeActionList cell is a MergeAction");
+        let new_qual = rv_mutate_opt(action.qual, ctx)?;
+        let new_tlist = rv_mutate_list(&action.targetList, ctx)?;
+        if new_qual.is_some() || new_tlist.is_some() {
+            // SAFETY: exclusive tree (module contract).
+            unsafe {
+                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                    if new_qual.is_some() {
+                        a.qual = new_qual;
+                    }
+                    if let Some(t) = new_tlist {
+                        a.targetList = t;
+                    }
+                })
+            }
+            .expect("MergeAction");
+        }
+    }
+    let new_merge_join_cond = rv_mutate_opt(q.mergeJoinCondition, ctx)?;
     for wc_node in &q.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
         if rv_mutate_opt(wc.startOffset, ctx)?.is_some()
@@ -1070,7 +1144,6 @@ fn rv_query_inplace<'mcx>(
             );
         }
     }
-    debug_assert!(q.mergeActionList.is_nil() && q.withCheckOptions.is_nil());
     let new_jointree = match q.jointree {
         None => None,
         Some(jt) => {
@@ -1147,7 +1220,13 @@ fn rv_query_inplace<'mcx>(
             ),
             _ => {}
         }
-        debug_assert!(rte.securityQuals.is_nil());
+        if let Some(new_sq) = rv_mutate_list(&rte.securityQuals, ctx)? {
+            // SAFETY: exclusive tree (module contract).
+            unsafe {
+                rte_node.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = new_sq)
+            }
+            .expect("RangeTblEntry");
+        }
     }
     // SAFETY: exclusive tree (module contract); field reads completed.
     unsafe {
@@ -1172,6 +1251,9 @@ fn rv_query_inplace<'mcx>(
             }
             if new_setops.is_some() {
                 qm.setOperations = new_setops;
+            }
+            if new_merge_join_cond.is_some() {
+                qm.mergeJoinCondition = new_merge_join_cond;
             }
         })
     }

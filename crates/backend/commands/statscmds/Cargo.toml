@@ -21,7 +21,7 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 init_small = { path = "../../utils/init/init_small" }
-superuser = { path = "../../utils/misc/superuser" }
+aclchk = { path = "../../catalog/aclchk" }
 table = { path = "../../access/table/table" }
 relation_seams = { path = "../../access/common/relation_seams" }
 pg_class_seams = { path = "../../catalog/pg_class_seams" }

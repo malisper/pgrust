@@ -774,8 +774,7 @@ fn objtype_noun(objtype: ObjectType) -> &'static str {
     }
 }
 
-// object_ownercheck (aclchk.c), pg_class/pg_type/pg_publication/pg_subscription
-// arms; other classes are loud.
+// object_ownercheck (aclchk.c); classes without an arm below are loud.
 pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {
         return Ok(true);
@@ -883,6 +882,57 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        NAMESPACE_RELATION_ID => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::NAMESPACEOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for namespace {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::NAMESPACEOID,
+                &tuple,
+                ANUM_PG_NAMESPACE_NSPOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        PROCEDURE_RELATION_ID => {
+            let Some(tuple) =
+                SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(objectid)))?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for function {objectid}"
+                ))));
+            };
+            let owner =
+                SysCacheGetAttrNotNull(PROCOID, &tuple, ANUM_PG_PROC_PROOWNER)?.as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        OperatorRelationId => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::OPEROID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for operator {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::OPEROID,
+                &tuple,
+                ANUM_PG_OPERATOR_OPROWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
@@ -891,8 +941,11 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
 
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
+const OperatorRelationId: Oid = 2617;
 const ANUM_PG_PUBLICATION_PUBOWNER: i32 = 3;
 const ANUM_PG_SUBSCRIPTION_SUBOWNER: i32 = 5;
+const ANUM_PG_NAMESPACE_NSPOWNER: i32 = 3;
+const ANUM_PG_OPERATOR_OPROWNER: i32 = 4;
 
 pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {
@@ -922,7 +975,11 @@ pub fn aclcheck_error(aclerr: i32, objtype: ObjectType, objectname: &str) -> PgR
         ACLCHECK_NOT_OWNER => {
             // C: ownership attaches to the relation for these object types.
             let noun = match objtype {
-                ObjectType::OBJECT_POLICY | ObjectType::OBJECT_TRIGGER => "relation",
+                ObjectType::OBJECT_COLUMN
+                | ObjectType::OBJECT_POLICY
+                | ObjectType::OBJECT_RULE
+                | ObjectType::OBJECT_TABCONSTRAINT
+                | ObjectType::OBJECT_TRIGGER => "relation",
                 _ => objtype_noun(objtype),
             };
             Err(Box::new(

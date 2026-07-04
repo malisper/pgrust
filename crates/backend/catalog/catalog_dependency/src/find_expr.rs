@@ -236,6 +236,20 @@ fn walker<'w, 'mcx: 'w>(
             walk_list(&tf.colvalexprs, context)?;
             walk_list(&tf.passingvalexprs, context)
         }
+        NodeTag::T_RangeTblFunction => {
+            let rtfunc = node
+                .as_variant::<types_nodes::parsenodes::RangeTblFunction>()
+                .unwrap();
+            for typid in &rtfunc.funccoltypes {
+                context.add(TYPE_RELATION_ID, typid, 0);
+            }
+            for collid in &rtfunc.funccolcollations {
+                if collid != InvalidOid && collid != DEFAULT_COLLATION_OID {
+                    context.add(CollationRelationId, collid, 0);
+                }
+            }
+            walk_opt(rtfunc.funcexpr, context)
+        }
         NodeTag::T_TargetEntry => walker(node.as_target_entry().unwrap().expr, context),
         NodeTag::T_RangeTblRef => Ok(()),
         NodeTag::T_Param => {
@@ -344,8 +358,13 @@ fn walk_query<'w, 'mcx: 'w>(
                 context.rtables.remove(0);
             }
             // RTE_CTE/RTE_VALUES collations only duplicate ones referenced
-            // elsewhere in the Query (C dependency.c:2153).
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_CTE | RTEKind::RTE_TABLEFUNC => {}
+            // elsewhere in the Query (C dependency.c:2153); RTE_FUNCTION
+            // collations ride with the RangeTblFunction recursion.
+            RTEKind::RTE_SUBQUERY
+            | RTEKind::RTE_CTE
+            | RTEKind::RTE_TABLEFUNC
+            | RTEKind::RTE_FUNCTION
+            | RTEKind::RTE_VALUES => {}
             other => walker_unported(&format!("rtekind {other:?}")),
         }
     }
@@ -421,6 +440,8 @@ fn walk_query_fields<'w, 'mcx: 'w>(
             RTEKind::RTE_TABLEFUNC => {
                 walk_opt(rte.tablefunc, context)?
             }
+            RTEKind::RTE_FUNCTION => walk_list(&rte.functions, context)?,
+            RTEKind::RTE_VALUES => walk_list(&rte.values_lists, context)?,
             other => walker_unported(&format!("rtekind {other:?}")),
         }
         walk_list(&rte.securityQuals, context)?;

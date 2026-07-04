@@ -99,6 +99,20 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
+// get_relkind_objtype (objectaddress.c)
+pub(crate) fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType::*;
+    match relkind {
+        RELKIND_RELATION | types_rel::RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
+        types_rel::RELKIND_INDEX | types_rel::RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
+        RELKIND_SEQUENCE => OBJECT_SEQUENCE,
+        types_rel::RELKIND_VIEW => OBJECT_VIEW,
+        types_rel::RELKIND_MATVIEW => OBJECT_MATVIEW,
+        types_rel::RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
+        _ => OBJECT_TABLE,
+    }
+}
+
 // GetColumnDefCollation (parse_type.c).
 fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid> {
     let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?

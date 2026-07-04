@@ -715,14 +715,26 @@ fn join_rte_forward_varno_is_internal_error() {
 }
 
 #[test]
-#[should_panic(expected = "FOR UPDATE/SHARE pushdown needs get_parse_rowmark")]
-fn rowmarks_pushdown_defers_loud() {
+fn rowmarks_pushdown_recurses_quietly() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let sub = leak_in(alloc_in(mcx, select1(mcx)).unwrap());
     let mut query = select1(mcx);
-    query.rowMarks = NodeList::make1(mcx, Node::mk_integer(mcx, 0).unwrap()).unwrap();
+    query.rowMarks = NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            types_nodes::parsenodes::RowMarkClause {
+                rti: 1,
+                strength: types_nodes::LockClauseStrength::LCS_FORUPDATE,
+                waitPolicy: types_nodes::LockWaitPolicy::LockWaitBlock,
+                pushedDown: false,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
     query.rtable = NodeList::make1(
         mcx,
         rte_node(
@@ -735,7 +747,7 @@ fn rowmarks_pushdown_defers_loud() {
         ),
     )
     .unwrap();
-    let _ = AcquireRewriteLocks(mcx, &query, true, false);
+    AcquireRewriteLocks(mcx, &query, true, false).unwrap();
 }
 
 #[test]

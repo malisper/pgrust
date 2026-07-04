@@ -71,6 +71,7 @@ pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult
         stmt.objtype,
         address,
         object,
+        relation.as_ref(),
     )?;
 
     if stmt.objtype == ObjectType::OBJECT_COLUMN {

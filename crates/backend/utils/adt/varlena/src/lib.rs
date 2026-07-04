@@ -830,6 +830,19 @@ pub fn split_identifier_string(
     }
 }
 
+// textToQualifiedNameList (varlena.c); caller detoasts to &str. Owned
+// strings, like split_identifier_string (C returns a list of String nodes).
+#[allow(non_snake_case)]
+pub fn textToQualifiedNameList(mcx: Mcx<'_>, rawname: &str) -> PgResult<Vec<String>> {
+    match split_identifier_string(mcx, rawname, b'.', mbutils::GetDatabaseEncoding())? {
+        Some(names) if !names.is_empty() => Ok(names),
+        _ => Err(Box::new(
+            PgError::error("invalid name syntax")
+                .with_sqlstate(types_error::ERRCODE_INVALID_NAME),
+        )),
+    }
+}
+
 // SplitGUCList (varlena.c): like SplitIdentifierString but never downcases
 // or truncates. None is C's `return false`.
 pub fn split_guc_list(rawstring: &str, separator: u8) -> Option<Vec<String>> {
