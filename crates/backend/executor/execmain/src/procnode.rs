@@ -1109,18 +1109,7 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
 
     #[inline]
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        ::nodeseqscan::seq_scan_batch_store(self.ss, estate, i);
-        match self.ss.ss.qual.as_deref_mut() {
-            None => Ok(true),
-            Some(q) => {
-                let mut slots = EvalSlots {
-                    scan: Some(estate.slot_mut(self.outer_slot)),
-                    inner: None,
-                    outer: None,
-                };
-                ::execexpr::exec_qual(Some(q), &mut slots)
-            }
-        }
+        ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)
     }
 
     #[inline]

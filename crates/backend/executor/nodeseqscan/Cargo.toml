@@ -15,9 +15,10 @@ execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
+datum = { path = "../../../_support/types/datum" }
+types_scan = { path = "../../../_support/types/types_scan" }
 
 [dev-dependencies]
-datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
