@@ -1809,12 +1809,6 @@ fn finalize_plan<'mcx>(
         | NodeTag::T_Material
         | NodeTag::T_SetOp
         | NodeTag::T_ProjectSet => {}
-        NodeTag::T_Append => {
-            for sub in &plan.as_append().unwrap().appendplans {
-                let child = finalize_plan(run, root, sub, &valid)?;
-                paramids.add_members(mcx, &child)?;
-            }
-        }
         NodeTag::T_WindowAgg => {
             let wa = plan.as_window_agg().unwrap();
             if let Some(off) = wa.startOffset {
