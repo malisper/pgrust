@@ -97,7 +97,19 @@ pub struct TuplestoreData<'m> {
 
 bind!(pub TuplestoreTy => TuplestoreData<'mcx>);
 
+// Drop is the fd guard: a spilled store owns an open temp-file VFD that must
+// close before the query's resowner cross-check (C closes in tuplestore_end).
 pub struct Tuplestore(McxOwned<TuplestoreTy>);
+
+impl Drop for Tuplestore {
+    fn drop(&mut self) {
+        self.0.with_mut(|st| {
+            if let Some(file) = st.myfile.take() {
+                let _ = file.close();
+            }
+        })
+    }
+}
 
 #[inline]
 fn cfi() -> PgResult<()> {
@@ -356,13 +368,6 @@ impl Tuplestore {
         if park {
             self.clear();
             ts_pool::park(self);
-        } else {
-            self.0.with_mut(|st| {
-                if let Some(file) = st.myfile.take() {
-                    file.close()
-                        .expect("tuplestore_end: closing temp file failed");
-                }
-            })
         }
     }
 
