@@ -1393,6 +1393,22 @@ impl<'mcx> Parser<'mcx> {
                 let v = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?;
                 *yyval = v;
             }
+            // reloption_elem: ColLabel '.' ColLabel ['=' def_arg]
+            // (makeDefElemExtended: defnamespace carries the qualifier)
+            381 | 382 => {
+                let arg = if rule == 381 { view.v(5).node() } else { Option::None };
+                let n = Node::mk(
+                    mcx,
+                    DefElem {
+                        defnamespace: Some(view.v(1).str_val()),
+                        defname: Some(view.v(3).str_val()),
+                        arg,
+                        defaction: DefElemAction::DEFELEM_UNSPEC,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             872 => *yyval = YYSTYPE::Node(view.v(1).node()),
             873 => {
                 *yyval = YYSTYPE::Node(Some(Node::mk(
@@ -4707,6 +4723,21 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<AlterTableCmd>(mcx)?;
                 n.subtype = subtype;
                 n.def = Some(cmd.seal());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTableStmt: ALTER INDEX [IF_P EXISTS] qualified_name
+            // alter_table_cmds
+            281 | 282 => {
+                let (rv, cmds) = if rule == 281 {
+                    (view.v(3), view.v(4))
+                } else {
+                    (view.v(5), view.v(6))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("qualified_name").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_INDEX;
+                n.missing_ok = rule == 282;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_table_cmds: alter_table_cmd | alter_table_cmds ',' alter_table_cmd

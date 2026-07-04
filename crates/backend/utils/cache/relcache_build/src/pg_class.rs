@@ -44,7 +44,7 @@ pub(crate) fn scan_pg_relation(
         &keys,
     )?;
     let decoded = match genam::systable_getnext(mcx, &mut scan)? {
-        Some(tup) => Some(decode(rel.descr(), tup, target_rel_id)?),
+        Some(tup) => Some(decode(mcx, rel.descr(), tup, target_rel_id)?),
         None => None,
     };
     genam::systable_endscan(mcx, scan)?;
@@ -53,6 +53,7 @@ pub(crate) fn scan_pg_relation(
 }
 
 pub(crate) fn decode(
+    scratch: mcx::Mcx<'_>,
     td: &TupleDescData<'_>,
     tup: &HeapTupleData<'_>,
     relid: Oid,
@@ -81,15 +82,16 @@ pub(crate) fn decode(
         relfrozenxid: req(td, tup, 30)?.as_transaction_id(),
         relminmxid: req(td, tup, 31)?.as_transaction_id(),
     };
-    let (_, opts_null) = getattr(td, tup, Anum_pg_class_reloptions);
-    if !opts_null {
-        panic!(
-            "relcache_build: pg_class.reloptions set for relation {relid}: \
-             extractRelOptions/RelationParseRelOptions unported (reloptions unit)"
-        );
-    }
+    let _ = relid;
+    let (opts_datum, opts_null) = getattr(td, tup, Anum_pg_class_reloptions);
+    let options = reloptions::extractRelOptions(
+        scratch,
+        form.relkind,
+        form.relam,
+        if opts_null { None } else { Some(opts_datum) },
+    )?;
     let relchecks = req(td, tup, 20)?.as_i16();
     let relhasrules = req(td, tup, 21)?.as_bool();
     let relhastriggers = req(td, tup, 22)?.as_bool();
-    Ok(ScannedPgClass { form, relchecks, relhastriggers, relhasrules, options: None })
+    Ok(ScannedPgClass { form, relchecks, relhastriggers, relhasrules, options })
 }

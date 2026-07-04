@@ -2,6 +2,7 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
+mod setrelopts;
 mod inheritance;
 mod partition;
 mod constraints;
@@ -180,8 +181,22 @@ pub fn DefineRelation<'mcx>(
     if relname.len() >= NAMEDATALEN as usize {
         unported("overlength relation name truncation");
     }
-    if !stmt.options.is_nil() {
-        unported("transformRelOptions/heap_reloptions (WITH options)");
+    let reloptions = reloptions::transformRelOptions(
+        mcx,
+        None,
+        &stmt.options,
+        None,
+        reloptions::HEAP_RELOPT_NAMESPACES,
+        true,
+        false,
+    )?;
+    match relkind {
+        types_rel::RELKIND_PARTITIONED_TABLE => {
+            reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
+        }
+        _ => {
+            reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
+        }
     }
     if stmt.tablespacename.is_some() {
         unported("TABLESPACE clauses");
@@ -329,6 +344,7 @@ pub fn DefineRelation<'mcx>(
             relkind,
             relpersistence,
             allow_system_table_mods: false,
+            reloptions: reloptions.as_deref(),
         },
         &descriptor,
     )?;

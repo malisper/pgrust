@@ -63,6 +63,7 @@ portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
+reloptions = { path = "../../access/common/reloptions" }
 catalog = { path = "../../catalog/catalog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 commands_cluster = { path = "../../commands/cluster" }

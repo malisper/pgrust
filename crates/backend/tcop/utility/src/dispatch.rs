@@ -688,9 +688,26 @@ fn slow_switch<'mcx>(
                             CreateCommandTag(stmt),
                         );
                         xact::CommandCounterIncrement()?;
-                        // toast_options: stmt.options is nil (gated in
-                        // DefineRelation), so transformRelOptions yields 0.
-                        catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
+                        let toast_options = reloptions::transformRelOptions(
+                            mcx,
+                            None,
+                            &cstmt.options,
+                            Some("toast"),
+                            reloptions::HEAP_RELOPT_NAMESPACES,
+                            true,
+                            false,
+                        )?;
+                        reloptions::heap_reloptions(
+                            mcx,
+                            types_rel::RELKIND_TOASTVALUE,
+                            toast_options.as_deref(),
+                            true,
+                        )?;
+                        catalog_toasting::NewRelationCreateToastTable(
+                            mcx,
+                            relid,
+                            toast_options.as_deref(),
+                        )?;
                     }
                     T_TableLikeClause => {
                         // Delayed LIKE expansion: sub-statements run before

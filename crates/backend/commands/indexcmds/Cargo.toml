@@ -9,6 +9,7 @@ name = "indexcmds"
 path = "src/lib.rs"
 
 [dependencies]
+reloptions = { path = "../../access/common/reloptions" }
 coerce = { path = "../../parser/coerce" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 datum = { path = "../../../_support/types/datum" }

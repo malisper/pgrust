@@ -2972,9 +2972,13 @@ dependencies = [
  "adt_numeric",
  "datum",
  "mcx",
+ "relation_seams",
+ "smgr_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -3002,6 +3006,16 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "define"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -3540,6 +3554,7 @@ dependencies = [
  "condition_variable_seams",
  "datum",
  "deadlock_seams",
+ "define",
  "elog",
  "execmain",
  "execmain_seams",
@@ -3847,11 +3862,13 @@ dependencies = [
  "bufmgr_seams",
  "catalog_seams",
  "freespace_seams",
+ "guc_tables",
  "heapam",
  "mcx",
  "miscinit_seams",
  "predicate_seams",
  "smgr_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -4805,6 +4822,7 @@ dependencies = [
  "pg_inherits",
  "rel_vocab",
  "relcache",
+ "reloptions",
  "syscache_seams",
  "table",
  "tablecmds",
@@ -8962,6 +8980,7 @@ dependencies = [
  "mcx",
  "relcache",
  "relcache_build_seams",
+ "reloptions",
  "table",
  "tupdesc",
  "typcache_seams",
@@ -9041,6 +9060,24 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "reloptions"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "datum",
+ "define",
+ "elog",
+ "guc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -10836,6 +10873,7 @@ dependencies = [
  "relation_seams",
  "relcache",
  "relcache_seams",
+ "reloptions",
  "rewrite_define",
  "rewrite_handler",
  "rewrite_manip",
@@ -11797,6 +11835,7 @@ dependencies = [
  "portalmem",
  "prepare",
  "rel_vocab",
+ "reloptions",
  "rewrite_define",
  "schemacmds",
  "sequence",
@@ -11852,6 +11891,7 @@ name = "vacuumlazy"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_storage",
  "commands_vacuum",
  "freespace",
  "guc_tables",
@@ -11859,8 +11899,10 @@ dependencies = [
  "heapam_visibility_seams",
  "indexam",
  "init_small",
+ "lmgr",
  "mcx",
  "nbtree",
+ "postgres_seams",
  "procarray_seams",
  "pruneheap",
  "relcache_seams",

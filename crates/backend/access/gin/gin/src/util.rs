@@ -62,20 +62,19 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     })
 }
 
-/// GinGetUseFastUpdate / GinGetPendingListCleanupSize: WITH-option gin
-/// indexes are unported (rd_options carries no GIN blob yet) — defaults only.
+// GinGetUseFastUpdate / GinGetPendingListCleanupSize
 pub(crate) fn gin_use_fastupdate(rel: &Relation<'_>) -> bool {
-    if rel.rd_options.is_some() {
-        unported("GIN reloptions (fastupdate / gin_pending_list_limit)");
+    match rel.rd_options.as_ref().and_then(|o| o.gin()) {
+        Some(o) => o.use_fast_update,
+        None => GIN_DEFAULT_USE_FASTUPDATE,
     }
-    GIN_DEFAULT_USE_FASTUPDATE
 }
 
 pub(crate) fn gin_pending_list_cleanup_size(rel: &Relation<'_>) -> i64 {
-    if rel.rd_options.is_some() {
-        unported("GIN reloptions (fastupdate / gin_pending_list_limit)");
+    match rel.rd_options.as_ref().and_then(|o| o.gin()) {
+        Some(o) if o.pending_list_cleanup_size != -1 => o.pending_list_cleanup_size as i64,
+        _ => guc_tables::vars::gin_pending_list_limit.read() as i64,
     }
-    guc_tables::vars::gin_pending_list_limit.read() as i64
 }
 
 /// GinPageIsRecyclable (ginvacuum.c): only vacuum produces deleted pages.

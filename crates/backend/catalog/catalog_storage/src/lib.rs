@@ -116,10 +116,16 @@ pub fn RelationTruncate(rel: &types_rel::RelationData<'_>, nblocks: BlockNumber)
     blocks[0] = nblocks;
     let mut nforks = 1;
 
+    let mut need_fsm_vacuum = false;
     if smgr::smgrexists(key, ForkNumber::FSM_FORKNUM)? {
-        // Loud: FSM prepare-truncate (and the FreeSpaceMapVacuumRange that
-        // follows a live FSM truncation) is unported.
-        freespace::FreeSpaceMapPrepareTruncateRel(rel, nblocks);
+        let b = freespace::FreeSpaceMapPrepareTruncateRel(rel, nblocks)?;
+        if b != InvalidBlockNumber {
+            forks[nforks] = ForkNumber::FSM_FORKNUM;
+            old_blocks[nforks] = smgr::smgrnblocks(key, ForkNumber::FSM_FORKNUM)?;
+            blocks[nforks] = b;
+            nforks += 1;
+            need_fsm_vacuum = true;
+        }
     }
     if smgr::smgrexists(key, ForkNumber::VISIBILITYMAP_FORKNUM)? {
         let b = visibilitymap::visibilitymap_prepare_truncate(rel, nblocks)?;
@@ -152,6 +158,10 @@ pub fn RelationTruncate(rel: &types_rel::RelationData<'_>, nblocks: BlockNumber)
     init_small::globals::EndCriticalSection();
 
     proc.delayChkptFlags.fetch_and(!(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE), Relaxed);
+
+    if need_fsm_vacuum {
+        freespace::FreeSpaceMapVacuumRange(rel, nblocks, InvalidBlockNumber)?;
+    }
     Ok(())
 }
 

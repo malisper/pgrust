@@ -11,8 +11,9 @@ use std::cell::Cell;
 use ::elog::ereport;
 use ::mcx::Mcx;
 use ::tableam_vocab::{
-    VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_ANALYZE, VACOPT_FULL,
-    VACOPT_ONLY_DATABASE_STATS, VACOPT_PROCESS_MAIN, VACOPT_PROCESS_TOAST,
+    VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_ANALYZE, VACOPT_DISABLE_PAGE_SKIPPING,
+    VACOPT_FREEZE, VACOPT_FULL, VACOPT_ONLY_DATABASE_STATS, VACOPT_PROCESS_MAIN,
+    VACOPT_PROCESS_TOAST,
     VACOPT_SKIP_DATABASE_STATS, VACOPT_SKIP_LOCKED, VACOPT_VACUUM, VACOPT_VERBOSE,
 };
 use ::types_core::xact::{
@@ -80,6 +81,8 @@ pub fn ExecVacuum<'mcx>(
     let mut skip_locked = false;
     let mut full = false;
     let mut analyze = false;
+    let mut freeze = false;
+    let mut disable_page_skipping = false;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
@@ -98,8 +101,18 @@ pub fn ExecVacuum<'mcx>(
                 };
             }
             "full" => full = explain::defGetBoolean(opt)?,
-            name @ ("freeze" | "disable_page_skipping"
-            | "process_main" | "process_toast" | "truncate" | "parallel"
+            "freeze" => freeze = explain::defGetBoolean(opt)?,
+            "disable_page_skipping" => {
+                disable_page_skipping = explain::defGetBoolean(opt)?
+            }
+            "truncate" => {
+                params.truncate = if explain::defGetBoolean(opt)? {
+                    VacOptValue::Enabled
+                } else {
+                    VacOptValue::Disabled
+                };
+            }
+            name @ ("process_main" | "process_toast" | "parallel"
             | "buffer_usage_limit" | "skip_database_stats" | "only_database_stats") => {
                 if explain::defGetBoolean(opt).unwrap_or(true) {
                     unported_option(name);
@@ -124,8 +137,25 @@ pub fn ExecVacuum<'mcx>(
         | VACOPT_PROCESS_TOAST
         | (if verbose { VACOPT_VERBOSE } else { 0 })
         | (if skip_locked { VACOPT_SKIP_LOCKED } else { 0 })
+        | (if freeze { VACOPT_FREEZE } else { 0 })
+        | (if disable_page_skipping { VACOPT_DISABLE_PAGE_SKIPPING } else { 0 })
         | (if full { VACOPT_FULL } else { 0 })
         | (if analyze { VACOPT_ANALYZE } else { 0 });
+
+    if full && disable_page_skipping {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")
+            .into_error()
+            .into());
+    }
+
+    if freeze {
+        params.freeze_min_age = 0;
+        params.freeze_table_age = 0;
+        params.multixact_freeze_min_age = 0;
+        params.multixact_freeze_table_age = 0;
+    }
 
     let bstrategy = bufmgr_seams::get_access_strategy::call(BufferAccessStrategyType::BasVacuum);
 
@@ -291,15 +321,35 @@ fn vacuum_rel<'mcx>(
     // recursion happens (loud below), so no cross-transaction lock is needed.
 
     let mut params = *params;
+    let std_opts = rel.rd_options.as_ref().and_then(|o| o.std()).copied();
     if params.index_cleanup == VacOptValue::Unspecified {
-        // StdRdOptions (reloptions) unported: AUTO is C's no-reloption default.
-        params.index_cleanup = VacOptValue::Auto;
+        params.index_cleanup = match std_opts.map(|o| o.vacuum_index_cleanup) {
+            Some(types_rel::STDRD_OPTION_VACUUM_INDEX_CLEANUP_ON) => VacOptValue::Enabled,
+            Some(types_rel::STDRD_OPTION_VACUUM_INDEX_CLEANUP_OFF) => VacOptValue::Disabled,
+            _ => VacOptValue::Auto,
+        };
+    }
+    if let Some(o) = &std_opts {
+        if o.vacuum_max_eager_freeze_failure_rate >= 0.0 {
+            params.max_eager_freeze_failure_rate = o.vacuum_max_eager_freeze_failure_rate;
+        }
     }
     if params.truncate == VacOptValue::Unspecified {
-        params.truncate = if guc_tables::vars::vacuum_truncate.read() {
-            VacOptValue::Enabled
-        } else {
-            VacOptValue::Disabled
+        params.truncate = match &std_opts {
+            Some(o) if o.vacuum_truncate_set => {
+                if o.vacuum_truncate {
+                    VacOptValue::Enabled
+                } else {
+                    VacOptValue::Disabled
+                }
+            }
+            _ => {
+                if guc_tables::vars::vacuum_truncate.read() {
+                    VacOptValue::Enabled
+                } else {
+                    VacOptValue::Disabled
+                }
+            }
         };
     }
 

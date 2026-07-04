@@ -1,5 +1,4 @@
-// define.c slice (defGetString/defGetBoolean); its CATALOG row stays todo and
-// points here for these two.
+// define.c slice (defGetString/defGetBoolean).
 #![allow(non_snake_case)]
 
 use core::fmt::Write;
@@ -32,6 +31,8 @@ pub fn defGetString<'r, 'mcx: 'r, 'a: 'r>(
         NodeTag::T_Boolean => Ok(if arg.as_boolean().unwrap().boolval { "true" } else { "false" }),
         NodeTag::T_String => Ok(arg.as_string().unwrap().sval),
         NodeTag::T_TypeName => {
+            // TypeNameToString: gram's def_arg func_type wraps any simple
+            // identifier as a TypeName.
             let tn = arg.as_type_name().expect("TypeName");
             if tn.names.is_nil() {
                 panic!("defGetString (define.c): precooked TypeName needs format_type_be");
@@ -97,7 +98,7 @@ pub fn defGetBoolean(def: &DefElem<'_>) -> PgResult<bool> {
         .into())
 }
 
-pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let bytes = mcx::slice_borrow_in(mcx, s.as_bytes())?;
     // SAFETY: byte-for-byte copy of a &str.
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
