@@ -693,23 +693,21 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
 
     fn read_field_select(&mut self) -> PgResult<Node<'mcx>> {
         let mcx = self.mcx;
-        let mut f = Node::build::<FieldSelect>(mcx)?;
-        f.arg = self.read_node("arg")?.expect("FieldSelect has an arg");
-        f.fieldnum = self.read_i32("fieldnum") as i16;
-        f.resulttype = self.read_u32("resulttype");
-        f.resulttypmod = self.read_i32("resulttypmod");
-        f.resultcollid = self.read_u32("resultcollid");
-        Ok(f.seal())
+        let arg = self.read_node("arg")?.expect("FieldSelect has an arg");
+        let fieldnum = self.read_i32("fieldnum") as i16;
+        let resulttype = self.read_u32("resulttype");
+        let resulttypmod = self.read_i32("resulttypmod");
+        let resultcollid = self.read_u32("resultcollid");
+        Node::mk(mcx, FieldSelect { arg, fieldnum, resulttype, resulttypmod, resultcollid })
     }
 
     fn read_field_store(&mut self) -> PgResult<Node<'mcx>> {
         let mcx = self.mcx;
-        let mut f = Node::build::<FieldStore>(mcx)?;
-        f.arg = self.read_node("arg")?.expect("FieldStore has an arg");
-        f.newvals = self.read_node_list("newvals")?;
-        f.fieldnums = self.read_int_list("fieldnums")?;
-        f.resulttype = self.read_u32("resulttype");
-        Ok(f.seal())
+        let arg = self.read_node("arg")?.expect("FieldStore has an arg");
+        let newvals = self.read_node_list("newvals")?;
+        let fieldnums = self.read_int_list("fieldnums")?;
+        let resulttype = self.read_u32("resulttype");
+        Node::mk(mcx, FieldStore { arg, newvals, fieldnums, resulttype })
     }
 
     fn read_merge_action(&mut self) -> PgResult<Node<'mcx>> {
