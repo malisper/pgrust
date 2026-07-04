@@ -70,6 +70,7 @@ pub const JOIN_UNIQUE_INNER: JoinType = 9;
 
 pub type RTEKind = u32;
 pub const RTE_RELATION: RTEKind = 0;
+pub const RTE_SUBQUERY: RTEKind = 1;
 pub const RTE_FUNCTION: RTEKind = 3;
 pub const RTE_VALUES: RTEKind = 5;
 pub const RTE_CTE: RTEKind = 6;
