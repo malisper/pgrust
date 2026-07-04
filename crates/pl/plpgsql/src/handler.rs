@@ -532,9 +532,14 @@ fn do_compile(
     };
     let parse_result = parser.parse_function_body();
     let latest_line = parser.sc.latest_lineno();
-    let action = parse_result.map_err(|e| {
+    let mut action = parse_result.map_err(|e| {
         attach_compile_context(e, &proc.proname, latest_line, for_validator, &proc.prosrc)
     })?;
+
+    // pl_comp.c:691-693: OUT params / VOID / SETOF may fall off the end.
+    if out_param_varno >= 0 || rettypeid == VOIDOID || proc.retset {
+        add_dummy_return(&mut action, out_param_varno, &mut comp.nstatements);
+    }
 
     // format_procedure covers input args only (proargtypes).
     let sig_argtypes: Vec<Oid> = proc
@@ -574,6 +579,29 @@ fn do_compile(
         nstatements: comp.nstatements,
         expr_ids: std::mem::take(&mut comp.expr_ids),
     })
+}
+
+// add_dummy_return (pl_comp.c): wrap labeled/EXCEPTION outer blocks so the
+// appended RETURN sits outside them.
+fn add_dummy_return(action: &mut PlBlock, out_param_varno: Dno, nstatements: &mut u32) {
+    if action.exceptions.is_some() || action.label.is_some() {
+        *nstatements += 1;
+        let inner = std::mem::replace(
+            action,
+            PlBlock {
+                lineno: 0,
+                label: None,
+                body: Vec::new(),
+                initvarnos: Vec::new(),
+                exceptions: None,
+            },
+        );
+        action.body.push(PlStmt::Block(inner));
+    }
+    if !matches!(action.body.last(), Some(PlStmt::Return { .. })) {
+        *nstatements += 1;
+        action.body.push(PlStmt::Return { lineno: 0, expr: None, retvarno: out_param_varno });
+    }
 }
 
 #[cold]
