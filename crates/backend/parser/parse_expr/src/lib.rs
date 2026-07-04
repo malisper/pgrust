@@ -509,6 +509,7 @@ fn transformIndirection<'mcx>(
                             mcx,
                             &[name],
                             1,
+                            &[],
                             false,
                             false,
                         )?
