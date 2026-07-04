@@ -14,8 +14,8 @@ use ::execexpr::{
 use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::indexam::{
-    index_beginscan, index_close, index_endscan, index_getnext_slot, index_markpos,
-    index_rescan, index_restrpos, IndexScanDescData,
+    index_beginscan, index_close, index_endscan, index_getnext_slot, index_getnext_tid,
+    index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::tableam::table_slot_callbacks;
@@ -65,23 +65,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
         let direction = ScanDirectionCombine(estate.es_direction, self.iss_OrderDir);
 
         if self.iss_ScanDesc.is_none() {
-            let snapshot = estate
-                .es_snapshot
-                .clone()
-                .expect("index scan requires es_snapshot");
-            let mut scandesc = index_beginscan(
-                mcx,
-                self.ss.ss_currentRelation.as_ref().expect("indexscan has a relation"),
-                self.iss_RelationDesc.as_ref().expect("index relation open"),
-                snapshot,
-                self.iss_ScanKeys.len() as i32,
-                0,
-            )?;
-            if self.iss_RuntimeKeys.is_empty() || self.iss_RuntimeKeysReady {
-                index_rescan(&mut scandesc, Some(&self.iss_ScanKeys), None)?;
-            }
-            // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
-            self.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+            self.open_scandesc(estate)?;
         }
 
         let slot_id = self.ss.ss_ScanTupleSlot;
@@ -121,6 +105,69 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
             return Ok(true);
         }
     }
+}
+
+impl<'mcx> IndexScanState<'mcx> {
+    #[inline(never)]
+    fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("index scan requires es_snapshot");
+        let mut scandesc = index_beginscan(
+            mcx,
+            self.ss.ss_currentRelation.as_ref().expect("indexscan has a relation"),
+            self.iss_RelationDesc.as_ref().expect("index relation open"),
+            snapshot,
+            self.iss_ScanKeys.len() as i32,
+            0,
+        )?;
+        if self.iss_RuntimeKeys.is_empty() || self.iss_RuntimeKeysReady {
+            index_rescan(&mut scandesc, Some(&self.iss_ScanKeys), None)?;
+        }
+        // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
+        self.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+        Ok(())
+    }
+}
+
+/// Fused agg-over-indexscan page-batch drive: stage the next same-block TID
+/// run. The dispatcher's matcher (btree, MVCC, forward, no quals/projection/
+/// runtime keys) gates every call.
+pub fn index_scan_next_tidrun<'mcx>(
+    node: &mut IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<u32> {
+    check_for_interrupts();
+    if node.iss_ScanDesc.is_none() {
+        node.open_scandesc(estate)?;
+    }
+    let mcx = estate.es_query_cxt;
+    let direction = ScanDirectionCombine(estate.es_direction, node.iss_OrderDir);
+    // SAFETY: written by open_scandesc when None.
+    let scandesc = unsafe { node.iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
+    ::indexam::index_getnext_tidrun(mcx, scandesc, direction)
+}
+
+/// Store staged run entry `i` into the scan slot; false = not visible.
+#[inline(always)]
+pub fn index_scan_batch_fetch<'mcx>(
+    node: &mut IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    i: u32,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let slot_id = node.ss.ss_ScanTupleSlot;
+    let direction = ScanDirectionCombine(estate.es_direction, node.iss_OrderDir);
+    let scandesc = node.iss_ScanDesc.as_deref_mut().expect("batch fetch before tidrun");
+    if i > 0 && index_getnext_tid(scandesc, direction)?.is_none() {
+        return Ok(false);
+    }
+    let found = ::indexam::index_fetch_heap(mcx, scandesc, estate.slot_mut(slot_id))?;
+    // Matcher admits btree only; xs_recheck stays false (no indexqualorig arm).
+    debug_assert!(!scandesc.xs_recheck);
+    Ok(found)
 }
 
 #[cold]

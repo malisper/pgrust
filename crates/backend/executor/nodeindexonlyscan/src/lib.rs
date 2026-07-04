@@ -61,24 +61,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
         let direction = ScanDirectionCombine(estate.es_direction, self.ioss_OrderDir);
 
         if self.ioss_ScanDesc.is_none() {
-            let snapshot = estate
-                .es_snapshot
-                .clone()
-                .expect("index-only scan requires es_snapshot");
-            let mut scandesc = index_beginscan(
-                mcx,
-                self.ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
-                self.ioss_RelationDesc.as_ref().expect("index relation open"),
-                snapshot,
-                self.ioss_ScanKeys.len() as i32,
-                0,
-            )?;
-            scandesc.xs_want_itup = true;
-            if self.ioss_RuntimeKeys.is_empty() || self.ioss_RuntimeKeysReady {
-                index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
-            }
-            // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
-            self.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+            self.open_scandesc(estate)?;
         }
 
         let slot_id = self.ss.ss_ScanTupleSlot;
@@ -191,6 +174,112 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             return Ok(true);
         }
     }
+}
+
+impl<'mcx> IndexOnlyScanState<'mcx> {
+    #[inline(never)]
+    fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("index-only scan requires es_snapshot");
+        let mut scandesc = index_beginscan(
+            mcx,
+            self.ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
+            self.ioss_RelationDesc.as_ref().expect("index relation open"),
+            snapshot,
+            self.ioss_ScanKeys.len() as i32,
+            0,
+        )?;
+        scandesc.xs_want_itup = true;
+        if self.ioss_RuntimeKeys.is_empty() || self.ioss_RuntimeKeysReady {
+            index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
+        }
+        // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
+        self.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+        Ok(())
+    }
+}
+
+/// Fused agg-over-IOS drive: advance to the next VISIBLE index tuple (VM
+/// probe first, heap fetch only on a cleared bit — C's IndexOnlyNext order);
+/// 1 = xs_itup staged, 0 = exhausted. Page-level predicate lock on the VM
+/// fast path is taken here so the storeless drain keeps SSI semantics.
+pub fn index_only_scan_batch_next<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<u32> {
+    check_for_interrupts();
+    if node.ioss_ScanDesc.is_none() {
+        node.open_scandesc(estate)?;
+    }
+    let mcx = estate.es_query_cxt;
+    let direction = ScanDirectionCombine(estate.es_direction, node.ioss_OrderDir);
+    let table_slot_id = node.ioss_TableSlot;
+    let IndexOnlyScanState { ss, ioss_ScanDesc, ioss_VMBuffer, .. } = node;
+    loop {
+        // SAFETY: written by open_scandesc when None.
+        let scandesc = unsafe { ioss_ScanDesc.as_deref_mut().unwrap_unchecked() };
+        let Some(tid) = index_getnext_tid(scandesc, direction)? else {
+            return Ok(0);
+        };
+        if !::visibilitymap::vm_all_visible(
+            ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
+            ItemPointerGetBlockNumber(&tid),
+            ioss_VMBuffer,
+        )? {
+            if !index_fetch_heap(mcx, scandesc, estate.slot_mut(table_slot_id))? {
+                continue;
+            }
+            exectuples::exec_clear_tuple(estate.slot_mut(table_slot_id), mcx);
+            // Only MVCC snapshots here (no HOT continuation), as C asserts.
+            debug_assert!(!scandesc.xs_heap_continue);
+        } else {
+            let snap = estate
+                .es_snapshot
+                .as_deref()
+                .expect("index-only scan requires es_snapshot");
+            predicate_seams::predicate_lock_page::call(
+                ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
+                ItemPointerGetBlockNumber(&tid),
+                snap,
+            )?;
+        }
+        // Matcher admits btree only; xs_recheck stays false.
+        debug_assert!(!scandesc.xs_recheck);
+        return Ok(1);
+    }
+}
+
+/// Store the staged index tuple into the scan slot.
+#[inline(always)]
+pub fn index_only_scan_batch_store<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let slot_id = node.ss.ss_ScanTupleSlot;
+    let scandesc = node.ioss_ScanDesc.as_deref().expect("batch store before batch next");
+    let Some(itup) = scandesc.xs_itup else {
+        return Err(no_data_returned());
+    };
+    let itupdesc = scandesc
+        .xs_itupdesc
+        .as_deref()
+        .expect("amgettuple published xs_itup without xs_itupdesc");
+    // SAFETY: xs_itup points at the AM's page-copy buffer, live until the
+    // next amgettuple/amendscan on this descriptor.
+    unsafe {
+        store_index_tuple(
+            estate.slot_mut(slot_id),
+            mcx,
+            itup.as_ptr(),
+            itupdesc,
+            &node.ioss_NameCStringAttNums,
+        )
+    };
+    Ok(true)
 }
 
 #[cold]
