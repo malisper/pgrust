@@ -244,8 +244,14 @@ fn decode_av_class_row(
     };
     let relkind = req(18).as_u8();
     let relam = req(7).as_oid();
-    let (opts_datum, opts_null) = att(33);
-    let avopts = extract_autovac_opts(mcx, relkind, relam, if opts_null { None } else { Some(opts_datum) })?;
+    // Only the relkinds autovacuum considers carry AutoVacOpts (C extracts
+    // after its relkind filters).
+    let avopts = if matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE) {
+        let (opts_datum, opts_null) = att(33);
+        extract_autovac_opts(mcx, relkind, relam, if opts_null { None } else { Some(opts_datum) })?
+    } else {
+        None
+    };
     Ok(AvClassRow {
         oid: req(1).as_oid(),
         relname,
