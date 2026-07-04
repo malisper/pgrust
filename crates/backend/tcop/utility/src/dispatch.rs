@@ -1426,6 +1426,23 @@ fn slow_switch<'mcx>(
                         stmt.objectType,
                     )?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLLATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_CONVERSION
+                | types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPCLASS
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPFAMILY
+                | types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE
+                | types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE
+                | types_nodes::parsenodes::ObjectType::OBJECT_STATISTIC_EXT
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSPARSER
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSTEMPLATE => {
+                    collect_gap("ALTER SET SCHEMA");
+                    commands_alter::ExecAlterObjectSchemaStmt_generic(mcx, stmt)?;
+                }
                 other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
             }
             Ok(None)
@@ -1629,7 +1646,22 @@ fn slow_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION
                 | types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION
-                | types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
+                | types_nodes::parsenodes::ObjectType::OBJECT_DATABASE
+                | types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLLATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_CONVERSION
+                | types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION
+                | types_nodes::parsenodes::ObjectType::OBJECT_LANGUAGE
+                | types_nodes::parsenodes::ObjectType::OBJECT_LARGEOBJECT
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPCLASS
+                | types_nodes::parsenodes::ObjectType::OBJECT_OPFAMILY
+                | types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE
+                | types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE
+                | types_nodes::parsenodes::ObjectType::OBJECT_STATISTIC_EXT
+                | types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION => {
                     // C: address = ExecAlterOwnerStmt; no address collected yet.
                     collect_gap("ALTER OWNER");
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
@@ -1757,7 +1789,24 @@ fn exec_rename_stmt_inner<'mcx>(
         types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
             tablecmds::RenameConstraint(mcx, stmt)?;
         }
-        types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION
+        types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE
+        | types_nodes::parsenodes::ObjectType::OBJECT_COLLATION
+        | types_nodes::parsenodes::ObjectType::OBJECT_CONVERSION
+        | types_nodes::parsenodes::ObjectType::OBJECT_EVENT_TRIGGER
+        | types_nodes::parsenodes::ObjectType::OBJECT_FDW
+        | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_SERVER
+        | types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION
+        | types_nodes::parsenodes::ObjectType::OBJECT_OPCLASS
+        | types_nodes::parsenodes::ObjectType::OBJECT_OPFAMILY
+        | types_nodes::parsenodes::ObjectType::OBJECT_LANGUAGE
+        | types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE
+        | types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE
+        | types_nodes::parsenodes::ObjectType::OBJECT_STATISTIC_EXT
+        | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION
+        | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
+        | types_nodes::parsenodes::ObjectType::OBJECT_TSPARSER
+        | types_nodes::parsenodes::ObjectType::OBJECT_TSTEMPLATE
+        | types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION
         | types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
             // Retention contract as unify_stmt_lifetime.
             let stmt = unsafe {
@@ -1768,7 +1817,18 @@ fn exec_rename_stmt_inner<'mcx>(
             };
             commands_alter::ExecRenameStmt_generic(mcx, stmt)?;
         }
-        types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => {
+        types_nodes::parsenodes::ObjectType::OBJECT_INDEX
+        | types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE
+        | types_nodes::parsenodes::ObjectType::OBJECT_VIEW
+        | types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
+        | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
+            tablecmds::RenameRelation(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_ATTRIBUTE => {
+            tablecmds::renameatt(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+        | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
             // Retention contract as unify_stmt_lifetime.
             let stmt = unsafe {
                 core::mem::transmute::<

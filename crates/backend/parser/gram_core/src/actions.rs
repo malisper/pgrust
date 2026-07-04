@@ -7280,6 +7280,329 @@ impl<'mcx> Parser<'mcx> {
                 n.newname = Some(view.v(6).str_val());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER {COLLATION|CONVERSION|STATISTICS|TYPE} any_name
+            // RENAME TO name
+            1275 | 1276 | 1322 | 1327 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = match rule {
+                    1275 => ObjectType::OBJECT_COLLATION,
+                    1276 => ObjectType::OBJECT_CONVERSION,
+                    1322 => ObjectType::OBJECT_STATISTIC_EXT,
+                    _ => ObjectType::OBJECT_TYPE,
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER TEXT_P SEARCH {PARSER|DICTIONARY|TEMPLATE|
+            // CONFIGURATION} any_name RENAME TO name
+            1323..=1326 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = match rule {
+                    1323 => ObjectType::OBJECT_TSPARSER,
+                    1324 => ObjectType::OBJECT_TSDICTIONARY,
+                    1325 => ObjectType::OBJECT_TSTEMPLATE,
+                    _ => ObjectType::OBJECT_TSCONFIGURATION,
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(5).list())?);
+                n.newname = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER {FDW|LANGUAGE|SERVER|EVENT TRIGGER} name
+            // RENAME TO name
+            1280 | 1283 | 1292 | 1318 => {
+                let (obj, nm, ty) = match rule {
+                    1280 => (5, 8, ObjectType::OBJECT_FDW),
+                    1283 => (4, 7, ObjectType::OBJECT_LANGUAGE),
+                    1292 => (3, 6, ObjectType::OBJECT_FOREIGN_SERVER),
+                    _ => (4, 7, ObjectType::OBJECT_EVENT_TRIGGER),
+                };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ty;
+                n.object = Some(Node::mk_string(mcx, view.v(obj).str_val())?);
+                n.newname = Some(view.v(nm).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER OPERATOR {CLASS|FAMILY} any_name USING name
+            // RENAME TO name
+            1284 | 1285 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = if rule == 1284 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut names = view.v(4).list();
+                names.lcons(mcx, Node::mk_string(mcx, view.v(6).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                n.newname = Some(view.v(9).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER {GROUP_P|ROLE|USER} RoleId RENAME TO RoleId;
+            // ALTER SCHEMA name RENAME TO name
+            1282 | 1291 | 1319 | 1320 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = if rule == 1291 {
+                    ObjectType::OBJECT_SCHEMA
+                } else {
+                    ObjectType::OBJECT_ROLE
+                };
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER {SEQUENCE|VIEW|INDEX|MATERIALIZED VIEW|FOREIGN
+            // TABLE} [IF_P EXISTS] rel RENAME TO name
+            1296..=1305 => {
+                let (rv, nm, ty, mok) = match rule {
+                    1296 => (3, 6, ObjectType::OBJECT_SEQUENCE, false),
+                    1297 => (5, 8, ObjectType::OBJECT_SEQUENCE, true),
+                    1298 => (3, 6, ObjectType::OBJECT_VIEW, false),
+                    1299 => (5, 8, ObjectType::OBJECT_VIEW, true),
+                    1300 => (4, 7, ObjectType::OBJECT_MATVIEW, false),
+                    1301 => (6, 9, ObjectType::OBJECT_MATVIEW, true),
+                    1302 => (3, 6, ObjectType::OBJECT_INDEX, false),
+                    1303 => (5, 8, ObjectType::OBJECT_INDEX, true),
+                    1304 => (4, 7, ObjectType::OBJECT_FOREIGN_TABLE, false),
+                    _ => (6, 9, ObjectType::OBJECT_FOREIGN_TABLE, true),
+                };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ty;
+                n.relation =
+                    view.v(rv).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = mok;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER {VIEW|MATERIALIZED VIEW|FOREIGN TABLE}
+            // [IF_P EXISTS] rel RENAME opt_column name TO name
+            1308..=1311 | 1314 | 1315 => {
+                let (rv, sub, nm, ty, mok) = match rule {
+                    1308 => (3, 6, 8, ObjectType::OBJECT_VIEW, false),
+                    1309 => (5, 8, 10, ObjectType::OBJECT_VIEW, true),
+                    1310 => (4, 7, 9, ObjectType::OBJECT_MATVIEW, false),
+                    1311 => (6, 9, 11, ObjectType::OBJECT_MATVIEW, true),
+                    1314 => (4, 7, 9, ObjectType::OBJECT_FOREIGN_TABLE, false),
+                    _ => (6, 9, 11, ObjectType::OBJECT_FOREIGN_TABLE, true),
+                };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_COLUMN;
+                n.relationType = ty;
+                n.relation =
+                    view.v(rv).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = mok;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER RULE name ON qualified_name RENAME TO name
+            1316 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_RULE;
+                n.relation =
+                    view.v(5).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER TYPE_P any_name RENAME ATTRIBUTE name TO name
+            // opt_drop_behavior
+            1328 => {
+                let names = view.v(3).list();
+                let mut it = names.iter();
+                let (c, s, r) = match names.len() {
+                    1 => (None, None, it.next()),
+                    2 => (None, it.next(), it.next()),
+                    3 => (it.next(), it.next(), it.next()),
+                    _ => return Err(self.improper_qualified_name(None, &names, view.l(3))),
+                };
+                let sval =
+                    |n: Option<Node<'mcx>>| n.and_then(|n| n.as_string()).map(|s| s.sval);
+                // makeRangeVarFromAnyName: makeNode zero-fill => inh false.
+                let rv = Node::mk(
+                    mcx,
+                    RangeVar {
+                        catalogname: sval(c),
+                        schemaname: sval(s),
+                        relname: sval(r),
+                        inh: false,
+                        relpersistence: RELPERSISTENCE_PERMANENT,
+                        alias: None,
+                        location: view.l(3),
+                    },
+                )?;
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_ATTRIBUTE;
+                n.relationType = ObjectType::OBJECT_TYPE;
+                n.relation = rv.as_range_var();
+                n.subname = Some(view.v(6).str_val());
+                n.newname = Some(view.v(8).str_val());
+                n.behavior = drop_behavior(view.v(9).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER {AGGREGATE|FUNCTION|OPERATOR|
+            // PROCEDURE|ROUTINE} with_argtypes SET SCHEMA name
+            1341 | 1346 | 1347 | 1350 | 1351 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = match rule {
+                    1341 => ObjectType::OBJECT_AGGREGATE,
+                    1346 => ObjectType::OBJECT_FUNCTION,
+                    1347 => ObjectType::OBJECT_OPERATOR,
+                    1350 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.newschema = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER {COLLATION|CONVERSION|STATISTICS|
+            // TYPE} any_name SET SCHEMA name
+            1342 | 1343 | 1354 | 1367 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = match rule {
+                    1342 => ObjectType::OBJECT_COLLATION,
+                    1343 => ObjectType::OBJECT_CONVERSION,
+                    1354 => ObjectType::OBJECT_STATISTIC_EXT,
+                    _ => ObjectType::OBJECT_TYPE,
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newschema = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER EXTENSION name SET SCHEMA name
+            1345 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_EXTENSION;
+                n.object = Some(Node::mk_string(mcx, view.v(3).str_val())?);
+                n.newschema = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER OPERATOR {CLASS|FAMILY} any_name
+            // USING name SET SCHEMA name
+            1348 | 1349 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = if rule == 1348 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut names = view.v(4).list();
+                names.lcons(mcx, Node::mk_string(mcx, view.v(6).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                n.newschema = Some(view.v(9).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER TEXT_P SEARCH {PARSER|DICTIONARY|
+            // TEMPLATE|CONFIGURATION} any_name SET SCHEMA name
+            1355..=1358 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = match rule {
+                    1355 => ObjectType::OBJECT_TSPARSER,
+                    1356 => ObjectType::OBJECT_TSDICTIONARY,
+                    1357 => ObjectType::OBJECT_TSTEMPLATE,
+                    _ => ObjectType::OBJECT_TSCONFIGURATION,
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(5).list())?);
+                n.newschema = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER {TABLE|SEQUENCE|VIEW|MATERIALIZED
+            // VIEW|FOREIGN TABLE} [IF_P EXISTS] rel SET SCHEMA name
+            1352 | 1353 | 1359..=1366 => {
+                let (rv, ns, ty, mok) = match rule {
+                    1352 => (3, 6, ObjectType::OBJECT_TABLE, false),
+                    1353 => (5, 8, ObjectType::OBJECT_TABLE, true),
+                    1359 => (3, 6, ObjectType::OBJECT_SEQUENCE, false),
+                    1360 => (5, 8, ObjectType::OBJECT_SEQUENCE, true),
+                    1361 => (3, 6, ObjectType::OBJECT_VIEW, false),
+                    1362 => (5, 8, ObjectType::OBJECT_VIEW, true),
+                    1363 => (4, 7, ObjectType::OBJECT_MATVIEW, false),
+                    1364 => (6, 9, ObjectType::OBJECT_MATVIEW, true),
+                    1365 => (4, 7, ObjectType::OBJECT_FOREIGN_TABLE, false),
+                    _ => (6, 9, ObjectType::OBJECT_FOREIGN_TABLE, true),
+                };
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = ty;
+                n.relation =
+                    view.v(rv).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.newschema = Some(view.v(ns).str_val());
+                n.missing_ok = mok;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER {COLLATION|CONVERSION|TYPE|STATISTICS}
+            // any_name OWNER TO RoleSpec
+            1381 | 1382 | 1394 | 1396 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = match rule {
+                    1381 => ObjectType::OBJECT_COLLATION,
+                    1382 => ObjectType::OBJECT_CONVERSION,
+                    1394 => ObjectType::OBJECT_TYPE,
+                    _ => ObjectType::OBJECT_STATISTIC_EXT,
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER {LANGUAGE|SCHEMA|FDW|SERVER|EVENT TRIGGER}
+            // name OWNER TO RoleSpec
+            1386 | 1393 | 1399 | 1400 | 1401 => {
+                let (obj, own, ty) = match rule {
+                    1386 => (4, 7, ObjectType::OBJECT_LANGUAGE),
+                    1393 => (3, 6, ObjectType::OBJECT_SCHEMA),
+                    1399 => (5, 8, ObjectType::OBJECT_FDW),
+                    1400 => (3, 6, ObjectType::OBJECT_FOREIGN_SERVER),
+                    _ => (4, 7, ObjectType::OBJECT_EVENT_TRIGGER),
+                };
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = ty;
+                n.object = Some(Node::mk_string(mcx, view.v(obj).str_val())?);
+                n.newowner =
+                    view.v(own).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER LARGE_P OBJECT_P NumericOnly OWNER TO
+            // RoleSpec; ALTER OPERATOR operator_with_argtypes OWNER TO RoleSpec
+            1387 | 1388 => {
+                let (obj, own) = if rule == 1387 { (4, 7) } else { (3, 6) };
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = if rule == 1387 {
+                    ObjectType::OBJECT_LARGEOBJECT
+                } else {
+                    ObjectType::OBJECT_OPERATOR
+                };
+                n.object = view.v(obj).node();
+                n.newowner =
+                    view.v(own).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER OPERATOR {CLASS|FAMILY} any_name USING
+            // name OWNER TO RoleSpec
+            1389 | 1390 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = if rule == 1389 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut names = view.v(4).list();
+                names.lcons(mcx, Node::mk_string(mcx, view.v(6).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                n.newowner = view.v(9).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER TEXT_P SEARCH {DICTIONARY|CONFIGURATION}
+            // any_name OWNER TO RoleSpec
+            1397 | 1398 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = if rule == 1397 {
+                    ObjectType::OBJECT_TSDICTIONARY
+                } else {
+                    ObjectType::OBJECT_TSCONFIGURATION
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(5).list())?);
+                n.newowner = view.v(8).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // RenameStmt: ALTER DATABASE name RENAME TO name
             1277 => {
                 let mut n = Node::build::<RenameStmt>(mcx)?;

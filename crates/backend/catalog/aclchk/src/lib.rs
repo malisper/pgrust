@@ -60,6 +60,7 @@ const ANUM_PG_CLASS_RELKIND: i32 = 18;
 pub(crate) const ANUM_PG_CLASS_RELNATTS: i32 = 19;
 pub(crate) const ANUM_PG_CLASS_RELACL: i32 = 32;
 const ANUM_PG_AUTHID_ROLBYPASSRLS: i32 = 9;
+const ANUM_PG_AUTHID_ROLCREATEROLE: i32 = 5;
 const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
 const ANUM_PG_ATTRIBUTE_ATTACL: i32 = 22;
 const ROLE_PG_READ_ALL_DATA: Oid = 6181;
@@ -74,7 +75,7 @@ thread_local! {
 // DatumGetAclP without the container copy: run `f` over the decoded items of
 // a stored aclitem[]. `d` must come from SysCacheGetAttr on a still-held
 // tuple (non-null).
-pub(crate) fn with_acl_datum<R>(
+pub fn with_acl_datum<R>(
     d: Datum,
     f: impl FnOnce(&[AclItem]) -> PgResult<R>,
 ) -> PgResult<R> {
@@ -1005,14 +1006,83 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        CollationRelationId_own => {
+            syscache_owner(cache_syscache::cacheinfo::COLLOID, 4, objectid, "collation")?
+        }
+        OperatorClassRelationId_own => {
+            syscache_owner(cache_syscache::cacheinfo::CLAOID, 5, objectid, "operator class")?
+        }
+        OperatorFamilyRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::OPFAMILYOID,
+            5,
+            objectid,
+            "operator family",
+        )?,
+        StatisticExtRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::STATEXTOID,
+            5,
+            objectid,
+            "statistics object",
+        )?,
+        TSDictionaryRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::TSDICTOID,
+            4,
+            objectid,
+            "text search dictionary",
+        )?,
+        TSConfigRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::TSCONFIGOID,
+            4,
+            objectid,
+            "text search configuration",
+        )?,
+        FOREIGN_DATA_WRAPPER_RELATION_ID_own => syscache_owner(
+            FOREIGNDATAWRAPPEROID,
+            ANUM_PG_FOREIGN_DATA_WRAPPER_FDWOWNER,
+            objectid,
+            "foreign-data wrapper",
+        )?,
+        FOREIGN_SERVER_RELATION_ID_own => syscache_owner(
+            FOREIGNSERVEROID,
+            ANUM_PG_FOREIGN_SERVER_SRVOWNER,
+            objectid,
+            "foreign server",
+        )?,
+        EventTriggerRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::EVENTTRIGGEROID,
+            4,
+            objectid,
+            "event trigger",
+        )?,
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
 }
 
+fn syscache_owner(cacheid: i32, attnum: i32, objectid: Oid, what: &str) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objectid)))?
+    else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for {what} {objectid}"
+        ))));
+    };
+    let owner = SysCacheGetAttrNotNull(cacheid, &tuple, attnum)?.as_oid();
+    ReleaseSysCache(tuple);
+    Ok(owner)
+}
+
 
 const ConversionRelationId_own: Oid = 2607;
 const LanguageRelationId_own: Oid = 2612;
+const CollationRelationId_own: Oid = 3456;
+const OperatorClassRelationId_own: Oid = 2616;
+const OperatorFamilyRelationId_own: Oid = 2753;
+const StatisticExtRelationId_own: Oid = 3381;
+const TSDictionaryRelationId_own: Oid = 3600;
+const TSConfigRelationId_own: Oid = 3602;
+const FOREIGN_DATA_WRAPPER_RELATION_ID_own: Oid = 2328;
+const FOREIGN_SERVER_RELATION_ID_own: Oid = 1417;
+const EventTriggerRelationId_own: Oid = 3466;
 const ANUM_PG_CONVERSION_CONOWNER: i32 = 4;
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
@@ -1021,6 +1091,21 @@ const ANUM_PG_PUBLICATION_PUBOWNER: i32 = 3;
 const ANUM_PG_SUBSCRIPTION_SUBOWNER: i32 = 5;
 const ANUM_PG_NAMESPACE_NSPOWNER: i32 = 3;
 const ANUM_PG_OPERATOR_OPROWNER: i32 = 4;
+
+pub fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
+    if superuser::superuser_arg(roleid)? {
+        return Ok(true);
+    }
+    match SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? {
+        Some(tuple) => {
+            let result =
+                SysCacheGetAttrNotNull(AUTHOID, &tuple, ANUM_PG_AUTHID_ROLCREATEROLE)?.as_bool();
+            ReleaseSysCache(tuple);
+            Ok(result)
+        }
+        None => Ok(false),
+    }
+}
 
 pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {

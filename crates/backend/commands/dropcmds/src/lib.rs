@@ -69,6 +69,16 @@ fn owningrel_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<St
     Ok(None)
 }
 
+fn type_does_not_exist_skipping(tn: &TypeName<'_>) -> PgResult<Option<String>> {
+    if !OidIsValid(catalog_objectaddress::LookupTypeNameOid(tn, true)?) {
+        return Ok(Some(format!(
+            "type \"{}\" does not exist, skipping",
+            catalog_objectaddress::TypeNameToString(tn)
+        )));
+    }
+    Ok(None)
+}
+
 fn type_in_list_does_not_exist_skipping(typenames: &NodeList<'_>) -> PgResult<Option<String>> {
     for n in typenames.iter() {
         let tn = n.as_variant::<TypeName>().expect("objargs holds TypeName nodes");
@@ -131,6 +141,89 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
         ObjectType::OBJECT_SUBSCRIPTION => {
             let name = object.as_string().expect("subscription name is a String node").sval;
             format!("subscription \"{name}\" does not exist, skipping")
+        }
+        ObjectType::OBJECT_COLLATION
+        | ObjectType::OBJECT_STATISTIC_EXT
+        | ObjectType::OBJECT_TSPARSER
+        | ObjectType::OBJECT_TSDICTIONARY
+        | ObjectType::OBJECT_TSTEMPLATE
+        | ObjectType::OBJECT_TSCONFIGURATION => {
+            let names = object.as_list().expect("object is a name list");
+            match schema_does_not_exist_skipping(names)? {
+                Some(msg) => msg,
+                None => {
+                    let noun = match objtype {
+                        ObjectType::OBJECT_COLLATION => "collation",
+                        ObjectType::OBJECT_STATISTIC_EXT => "statistics object",
+                        ObjectType::OBJECT_TSPARSER => "text search parser",
+                        ObjectType::OBJECT_TSDICTIONARY => "text search dictionary",
+                        ObjectType::OBJECT_TSTEMPLATE => "text search template",
+                        _ => "text search configuration",
+                    };
+                    let parts = string_parts(names, names.len());
+                    format!("{noun} \"{}\" does not exist, skipping", parts.join("."))
+                }
+            }
+        }
+        ObjectType::OBJECT_CAST => {
+            let objlist = object.as_list().expect("cast object is a TypeName pair");
+            let source = objlist
+                .first()
+                .and_then(|n| n.as_variant::<TypeName>())
+                .expect("cast source TypeName");
+            let target = objlist
+                .last()
+                .and_then(|n| n.as_variant::<TypeName>())
+                .expect("cast target TypeName");
+            let missing_source = type_does_not_exist_skipping(source)?;
+            match missing_source {
+                Some(msg) => msg,
+                None => match type_does_not_exist_skipping(target)? {
+                    Some(msg) => msg,
+                    None => format!(
+                        "cast from type {} to type {} does not exist, skipping",
+                        catalog_objectaddress::TypeNameToString(source),
+                        catalog_objectaddress::TypeNameToString(target)
+                    ),
+                },
+            }
+        }
+        ObjectType::OBJECT_TRANSFORM => {
+            let objlist = object.as_list().expect("transform object is a pair");
+            let tn = objlist
+                .first()
+                .and_then(|n| n.as_variant::<TypeName>())
+                .expect("transform type TypeName");
+            let lang = objlist
+                .last()
+                .and_then(|n| n.as_string())
+                .expect("transform language is a String node")
+                .sval;
+            match type_does_not_exist_skipping(tn)? {
+                Some(msg) => msg,
+                None => format!(
+                    "transform for type {} language \"{lang}\" does not exist, skipping",
+                    catalog_objectaddress::TypeNameToString(tn)
+                ),
+            }
+        }
+        ObjectType::OBJECT_POLICY => {
+            let names = object.as_list().expect("relation-attached object is a name list");
+            match owningrel_does_not_exist_skipping(names)? {
+                Some(msg) => msg,
+                None => {
+                    let depname = names
+                        .last()
+                        .and_then(|n| n.as_string())
+                        .expect("dependent object name is a String node")
+                        .sval;
+                    let parent = string_parts(names, names.len() - 1);
+                    format!(
+                        "policy \"{depname}\" for relation \"{}\" does not exist, skipping",
+                        parent.join(".")
+                    )
+                }
+            }
         }
         ObjectType::OBJECT_RULE | ObjectType::OBJECT_TRIGGER => {
             let names = object.as_list().expect("relation-attached object is a name list");
