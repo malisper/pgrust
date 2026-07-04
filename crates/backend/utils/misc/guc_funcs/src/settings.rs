@@ -150,6 +150,78 @@ pub fn fc_show_all_settings(
     Ok(srf.finish(fcinfo))
 }
 
+fn config_by_name(fcinfo: &mut Fcinfo, missing_ok: bool) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let name = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let name = String::from_utf8_lossy(name.data()).into_owned();
+    let varval = guc::store::with_store(|reg| {
+        guc::registry::get_config_option_by_name(reg, &name, missing_ok)
+    })
+    .expect("GUC store not initialized")?;
+    let mcx = fcinfo.result_mcx();
+    match varval {
+        Some(v) => text_datum(mcx, &v),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_show_config_by_name(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    config_by_name(fcinfo, false)
+}
+
+pub fn fc_show_config_by_name_missing_ok(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let missing_ok = fcinfo.args_n::<2>()[1].value.as_bool();
+    config_by_name(fcinfo, missing_ok)
+}
+
+pub fn fc_set_config_by_name(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use types_guc::{GucAction, GUC_ACTION_LOCAL, GUC_ACTION_SET};
+    let [a, b, c] = *fcinfo.args_n::<3>();
+    if a.isnull {
+        return Err(Box::new(
+            types_error::PgError::error("SET requires parameter name")
+                .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        ));
+    }
+    // SAFETY: nullness checked; non-null text args are live varlenas.
+    let name = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let name = String::from_utf8_lossy(name.data()).into_owned();
+    let value = if b.isnull {
+        None
+    } else {
+        // SAFETY: as above.
+        let v = unsafe { fcinfo.arg_varlena_packed(1)? };
+        Some(String::from_utf8_lossy(v.data()).into_owned())
+    };
+    let is_local = !c.isnull && c.value.as_bool();
+    let action: GucAction = if is_local { GUC_ACTION_LOCAL } else { GUC_ACTION_SET };
+    guc::set_config_option(
+        &name,
+        value.as_deref(),
+        crate::suset_or_userset()?,
+        types_guc::PGC_S_SESSION,
+        action,
+        true,
+        types_error::ErrorLevel(0),
+        false,
+    )?;
+    let new_value = guc::store::with_store(|reg| {
+        guc::registry::get_config_option_by_name(reg, &name, false)
+    })
+    .expect("GUC store not initialized")?
+    .expect("missing_ok=false returned None");
+    text_datum(fcinfo.result_mcx(), &new_value)
+}
+
 const fn b(
     foid: types_core::Oid,
     name: &'static str,
@@ -161,5 +233,9 @@ const fn b(
     FmgrBuiltin { foid, name, nargs, strict, retset, func }
 }
 
-pub const GUC_FUNCS_BUILTINS: &[FmgrBuiltin] =
-    &[b(2084, "show_all_settings", 0, true, true, fc_show_all_settings)];
+pub const GUC_FUNCS_BUILTINS: &[FmgrBuiltin] = &[
+    b(2084, "show_all_settings", 0, true, true, fc_show_all_settings),
+    b(2077, "show_config_by_name", 1, true, false, fc_show_config_by_name),
+    b(3294, "show_config_by_name_missing_ok", 2, true, false, fc_show_config_by_name_missing_ok),
+    b(2078, "set_config_by_name", 3, false, false, fc_set_config_by_name),
+];
