@@ -1311,7 +1311,10 @@ pub fn cost_agg_shape(
         debug_assert!(num_group_cols == 0);
         startup_cost = input_total_cost;
         startup_cost += aggcosts.transCost.startup;
-        startup_cost += aggcosts.transCost.per_tuple * input_tuples;
+        // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+        // fuses `cost += expr * rows`); EXPLAIN costs are byte-compared and
+        // a x.xx5 display boundary exposes the one-ulp difference.
+        startup_cost = aggcosts.transCost.per_tuple.mul_add(input_tuples, startup_cost);
         startup_cost += aggcosts.finalCost.startup;
         startup_cost += aggcosts.finalCost.per_tuple;
         total_cost = startup_cost + gucs::cpu_tuple_cost();
@@ -1326,11 +1329,12 @@ pub fn cost_agg_shape(
             disabled_nodes += 1;
         }
         total_cost += aggcosts.transCost.startup;
-        total_cost += aggcosts.transCost.per_tuple * input_tuples;
-        total_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
+        total_cost = aggcosts.transCost.per_tuple.mul_add(input_tuples, total_cost);
+        total_cost =
+            (gucs::cpu_operator_cost() * num_group_cols as f64).mul_add(input_tuples, total_cost);
         total_cost += aggcosts.finalCost.startup;
-        total_cost += aggcosts.finalCost.per_tuple * num_groups;
-        total_cost += gucs::cpu_tuple_cost() * num_groups;
+        total_cost = aggcosts.finalCost.per_tuple.mul_add(num_groups, total_cost);
+        total_cost = gucs::cpu_tuple_cost().mul_add(num_groups, total_cost);
         output_tuples = num_groups;
     } else if aggstrategy == types_pathnodes::AGG_HASHED {
         startup_cost = input_total_cost;
@@ -1338,12 +1342,13 @@ pub fn cost_agg_shape(
             disabled_nodes += 1;
         }
         startup_cost += aggcosts.transCost.startup;
-        startup_cost += aggcosts.transCost.per_tuple * input_tuples;
-        startup_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
+        startup_cost = aggcosts.transCost.per_tuple.mul_add(input_tuples, startup_cost);
+        startup_cost = (gucs::cpu_operator_cost() * num_group_cols as f64)
+            .mul_add(input_tuples, startup_cost);
         startup_cost += aggcosts.finalCost.startup;
         total_cost = startup_cost;
-        total_cost += aggcosts.finalCost.per_tuple * num_groups;
-        total_cost += gucs::cpu_tuple_cost() * num_groups;
+        total_cost = aggcosts.finalCost.per_tuple.mul_add(num_groups, total_cost);
+        total_cost = gucs::cpu_tuple_cost().mul_add(num_groups, total_cost);
         output_tuples = num_groups;
     } else {
         unreachable!("cost_agg (costsize.c): aggstrategy {aggstrategy}");
@@ -1366,9 +1371,9 @@ pub fn cost_agg_shape(
         let pages = relation_byte_size(input_tuples, input_width) / BLCKSZ as f64;
         let pages_written = pages * depth * 2.0;
         let pages_read = pages_written;
-        startup_cost += pages_written * gucs::random_page_cost();
-        total_cost += pages_written * gucs::random_page_cost();
-        total_cost += pages_read * gucs::seq_page_cost();
+        startup_cost = pages_written.mul_add(gucs::random_page_cost(), startup_cost);
+        total_cost = pages_written.mul_add(gucs::random_page_cost(), total_cost);
+        total_cost = pages_read.mul_add(gucs::seq_page_cost(), total_cost);
         let spill_cost = depth * input_tuples * 2.0 * gucs::cpu_tuple_cost();
         startup_cost += spill_cost;
         total_cost += spill_cost;
@@ -1386,7 +1391,7 @@ pub fn cost_agg_shape(
             qual_cost.per_tuple += c.per_tuple;
         }
         startup_cost += qual_cost.startup;
-        total_cost += qual_cost.startup + output_tuples * qual_cost.per_tuple;
+        total_cost += output_tuples.mul_add(qual_cost.per_tuple, qual_cost.startup);
 
         // C passes the bare clauses; the transient RestrictInfo wrap feeds
         // the same restriction_selectivity legs.
@@ -2694,10 +2699,10 @@ pub fn final_cost_hashjoin(
             * outer_matched_rows
             * crate::clamp_row_est(inner_path_rows * innerbucketsize * inner_scan_frac)
             * 0.5;
-        run_cost += hash_qual_cost.per_tuple
+        run_cost = (hash_qual_cost.per_tuple
             * (outer_path_rows - outer_matched_rows)
-            * crate::clamp_row_est(inner_path_rows / virtualbuckets)
-            * 0.05;
+            * crate::clamp_row_est(inner_path_rows / virtualbuckets))
+        .mul_add(0.05, run_cost);
         hashjointuples = if path.jpath.jointype == types_pathnodes::JOIN_ANTI {
             outer_path_rows - outer_matched_rows
         } else {
@@ -2727,11 +2732,11 @@ pub fn final_cost_hashjoin(
 
     startup_cost += qp_startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qp_per_tuple;
-    run_cost += cpu_per_tuple * hashjointuples;
+    run_cost = cpu_per_tuple.mul_add(hashjointuples, run_cost);
 
     let target = run.root.pathtarget(path.jpath.path.pathtarget_id.unwrap());
     startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * path.jpath.path.rows;
+    run_cost = target.cost.per_tuple.mul_add(path.jpath.path.rows, run_cost);
 
     path.jpath.path.startup_cost = startup_cost;
     path.jpath.path.total_cost = startup_cost + run_cost;
