@@ -879,10 +879,18 @@ fn find_nonnullable_rels_walker<'mcx>(
                 result.add_members(mcx, &phv.phrels)?;
             }
         }
-        NodeTag::T_SubPlan => panic!(
-            "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
-            node.node_tag()
-        ),
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            // Strictness transfers from the testexpr only for top-level ANY
+            // and any-level ROWCOMPARE sublinks (clauses.c:1649-1652).
+            if ((top_level
+                && sp.subLinkType == types_nodes::primnodes::SubLinkType::ANY_SUBLINK)
+                || sp.subLinkType == types_nodes::primnodes::SubLinkType::ROWCOMPARE_SUBLINK)
+                && sp.testexpr.is_some()
+            {
+                result = find_nonnullable_rels_walker(mcx, sp.testexpr, top_level)?;
+            }
+        }
         _ => {}
     }
     Ok(result)
@@ -1118,10 +1126,16 @@ fn find_nonnullable_vars_walker<'mcx>(
             let phv = node.as_place_holder_var().unwrap();
             result = find_nonnullable_vars_walker(mcx, Some(phv.phexpr), top_level)?;
         }
-        NodeTag::T_SubPlan => panic!(
-            "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
-            node.node_tag()
-        ),
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if ((top_level
+                && sp.subLinkType == types_nodes::primnodes::SubLinkType::ANY_SUBLINK)
+                || sp.subLinkType == types_nodes::primnodes::SubLinkType::ROWCOMPARE_SUBLINK)
+                && sp.testexpr.is_some()
+            {
+                result = find_nonnullable_vars_walker(mcx, sp.testexpr, top_level)?;
+            }
+        }
         _ => {}
     }
     Ok(result)

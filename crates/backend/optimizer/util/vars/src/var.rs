@@ -472,14 +472,16 @@ pub fn pull_var_clause<'mcx>(
 pub fn flatten_join_alias_vars<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &NodeList<'mcx>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    Ok(fjav_mutate(mcx, rtable, node)?.unwrap_or(node))
+    Ok(fjav_mutate(mcx, rtable, jointree, node)?.unwrap_or(node))
 }
 
 fn fjav_mutate<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &NodeList<'mcx>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
@@ -510,7 +512,7 @@ fn fjav_mutate<'mcx>(
                                 .unwrap();
                         }
                     }
-                    let newvar = fjav_mutate(mcx, rtable, newvar)?.unwrap_or(newvar);
+                    let newvar = fjav_mutate(mcx, rtable, jointree, newvar)?.unwrap_or(newvar);
                     fields.lappend(mcx, newvar)?;
                     colnames.lappend(mcx, cn)?;
                 }
@@ -537,16 +539,16 @@ fn fjav_mutate<'mcx>(
                         .unwrap();
                 }
             }
-            let newvar = fjav_mutate(mcx, rtable, newvar)?.unwrap_or(newvar);
+            let newvar = fjav_mutate(mcx, rtable, jointree, newvar)?.unwrap_or(newvar);
             Ok(Some(add_nullingrels_if_needed(mcx, newvar, v)?))
         }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();
-            let new_expr = fjav_mutate(mcx, rtable, phv.phexpr)?.unwrap_or(phv.phexpr);
+            let new_expr = fjav_mutate(mcx, rtable, jointree, phv.phexpr)?.unwrap_or(phv.phexpr);
             // sublevels_up is pinned at 0 here (Query descent is loud below),
             // so C's phlevelsup == sublevels_up test is phlevelsup == 0.
             let phrels = if phv.phlevelsup == 0 {
-                alias_relid_set(rtable, &phv.phrels, mcx)?
+                alias_relid_set(rtable, jointree, &phv.phrels, mcx)?
             } else {
                 phv.phrels.clone_in(mcx)?
             };
@@ -569,7 +571,7 @@ fn fjav_mutate<'mcx>(
             assert_subquery_free_of_upper_join_vars(rtable, q)?;
             Ok(None)
         }
-        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, rtable, n)),
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, rtable, jointree, n)),
     }
 }
 
@@ -623,10 +625,11 @@ fn assert_subquery_free_of_upper_join_vars<'mcx>(
     Ok(())
 }
 
-// alias_relid_set (var.c); the RTE_JOIN expansion (get_relids_for_join) is
-// loud until a join-alias PHV shape needs it.
+// alias_relid_set (var.c): JOIN members expand to their base + outer-join
+// relids via get_relids_for_join (prepjointree.c:4300).
 fn alias_relid_set<'mcx>(
     rtable: &NodeList<'mcx>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
     relids: &Bitmapset<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<Bitmapset<'mcx>> {
@@ -634,11 +637,80 @@ fn alias_relid_set<'mcx>(
     for rti in relids.iter() {
         let rte = rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
         if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
-            panic!("alias_relid_set (var.c): RTE_JOIN member (get_relids_for_join) unported");
+            let Some(jt) = jointree else {
+                panic!(
+                    "alias_relid_set (var.c): RTE_JOIN member on a caller without \
+                     the query jointree (get_relids_for_join)"
+                );
+            };
+            let mut jtnode = None;
+            for child in &jt.fromlist {
+                jtnode = find_jointree_node_for_rel(child, rti);
+                if jtnode.is_some() {
+                    break;
+                }
+            }
+            let jtnode =
+                jtnode.unwrap_or_else(|| panic!("could not find join node {rti}"));
+            join_relids_no_inner(mcx, jtnode, &mut out)?;
+        } else {
+            out.add_member(mcx, rti)?;
         }
-        out.add_member(mcx, rti)?;
     }
     Ok(out)
+}
+
+// find_jointree_node_for_rel (prepjointree.c:4319).
+fn find_jointree_node_for_rel<'mcx>(node: Node<'mcx>, relid: i32) -> Option<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            (node.as_range_tbl_ref().unwrap().rtindex == relid).then_some(node)
+        }
+        NodeTag::T_FromExpr => node
+            .as_from_expr()
+            .unwrap()
+            .fromlist
+            .iter()
+            .find_map(|child| find_jointree_node_for_rel(child, relid)),
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            if j.rtindex == relid {
+                return Some(node);
+            }
+            find_jointree_node_for_rel(j.larg, relid)
+                .or_else(|| find_jointree_node_for_rel(j.rarg, relid))
+        }
+        other => panic!("find_jointree_node_for_rel (prepjointree.c): {other:?}"),
+    }
+}
+
+// get_relids_in_jointree (prepjointree.c), include_outer_joins=true,
+// include_inner_joins=false.
+fn join_relids_no_inner<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    out: &mut Bitmapset<'mcx>,
+) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            out.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
+        }
+        NodeTag::T_FromExpr => {
+            for child in &node.as_from_expr().unwrap().fromlist {
+                join_relids_no_inner(mcx, child, out)?;
+            }
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            join_relids_no_inner(mcx, j.larg, out)?;
+            join_relids_no_inner(mcx, j.rarg, out)?;
+            if j.rtindex != 0 && j.jointype != types_nodes::JoinType::JOIN_INNER {
+                out.add_member(mcx, j.rtindex)?;
+            }
+        }
+        other => panic!("get_relids_in_jointree (prepjointree.c): {other:?}"),
+    }
+    Ok(())
 }
 
 // Deep copy of a joinaliasvars entry along its standard-expression spine

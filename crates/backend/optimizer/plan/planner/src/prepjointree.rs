@@ -761,18 +761,21 @@ fn pull_up_simple_subquery<'mcx>(
         None,
         off_tlist.len() + 1,
     ));
+    // C rcon->relids (all relids incl. inner joins) and the PHV-fixup
+    // subrelids (outer joins only), both from the offset jointree before
+    // off_fromlist moves into the replacement node.
+    let mut full_relids = types_nodes::Bitmapset::empty();
+    let mut subrelids = types_nodes::Bitmapset::empty();
+    for jnode in &off_fromlist {
+        get_relids_in_jointree(mcx, jnode, &mut full_relids)?;
+        get_relids_in_jointree_no_inner(mcx, jnode, &mut subrelids)?;
+    }
     let phc = PullupPhCtx {
         wrap_all: !parse.groupingSets.is_nil(),
         last_ph_id: &last_ph_id,
         rv_cache: &rv_cache,
+        sub_relids: &full_relids,
     };
-    // subrelids (C get_relids_in_jointree(subquery->jointree, true, false)):
-    // the post-pullup PHV phrels fixup target set, taken before off_fromlist
-    // moves into the replacement node.
-    let mut subrelids = types_nodes::Bitmapset::empty();
-    for jnode in &off_fromlist {
-        get_relids_in_jointree_no_inner(mcx, jnode, &mut subrelids)?;
-    }
 
     // OffsetVarNodes/IncrementVarSublevelsUp over the subroot's
     // append_rel_list: nested pull-ups landed their AppendRelInfos in
@@ -1350,6 +1353,8 @@ pub(crate) struct PullupPhCtx<'a, 'mcx> {
     wrap_all: bool,
     last_ph_id: &'a core::cell::Cell<u32>,
     rv_cache: &'a core::cell::RefCell<mcx::PgVec<'mcx, Option<Node<'mcx>>>>,
+    // C rcon->relids: the subquery's rels including inner-join relids.
+    sub_relids: &'a types_nodes::Bitmapset<'mcx>,
 }
 
 // pullup_replace_vars → pullup_replace_vars_callback (prepjointree.c) over
@@ -1391,12 +1396,6 @@ fn replace_var_expr_su<'mcx>(
                 )?));
             }
             let nulled = !v.varnullingrels.is_empty();
-            if nulled && lateral {
-                panic!(
-                    "pullup_replace_vars_callback (prepjointree.c): nulled Var over a \
-                     LATERAL pulled-up subquery (get_nullingrels wrap checks unported)"
-                );
-            }
             let need_phv = nulled || ph.is_some_and(|p| p.wrap_all);
             let cacheable = need_phv && (v.varattno as usize) <= tlist.len();
             let newnode = 'built: {
@@ -1443,6 +1442,21 @@ fn replace_var_expr_su<'mcx>(
                     copy_expr(mcx, tle.expr, 0)?
                 };
                 if need_phv {
+                    if nulled && lateral {
+                        // C's lateral legs consult get_nullingrels only for
+                        // replacement varnos outside the subquery; inside, the
+                        // non-lateral logic below is C-identical.
+                        let all = vars::pull_varnos(mcx, gen)?;
+                        let inside = ph
+                            .is_some_and(|p| all.iter().all(|m| p.sub_relids.is_member(m)));
+                        if !inside {
+                            panic!(
+                                "pullup_replace_vars_callback (prepjointree.c): nulled Var \
+                                 over a LATERAL pulled-up subquery with lateral references \
+                                 (get_nullingrels wrap checks unported)"
+                            );
+                        }
+                    }
                     // A whole-row reference wraps the entire RowExpr so it
                     // yields NULL, not ROW(NULL,...), when nulled; simple
                     // Vars/PHVs escape; a strict expression over the
@@ -2201,6 +2215,13 @@ pub(crate) fn copy_expr<'mcx>(
         // C copyObject + IncrementVarSublevelsUp(newnode, sublevels_up, 0):
         // the out/read round trip is the deep copy, and the in-place level
         // shift is safe on it (exclusive tree).
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().expect("CoerceToDomain");
+            Node::mk(
+                mcx,
+                pn::CoerceToDomain { arg: copy_expr(mcx, c.arg, levels_delta)?, ..*c },
+            )
+        }
         NodeTag::T_SubLink | NodeTag::T_PlaceHolderVar => {
             let copy = rewrite_manip::copy_node(mcx, node)?;
             if levels_delta > 0 {
