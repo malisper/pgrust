@@ -222,10 +222,10 @@ pub struct ProbeBatch<'mcx> {
     n: u32,
     i: u32,
     // Columnar probe hashes for the staged page (hash32var_low32 cover);
-    // hash_col == u16::MAX = disarmed. last_hash None = per-row eval.
+    // hash_col == u16::MAX = disarmed; rows past hashes.len() (fallback
+    // tail) re-eval per row.
     hash_col: u16,
     hashes: Option<PgVec<'mcx, u32>>,
-    last_hash: Option<u32>,
 }
 
 impl<'mcx> ProbeBatch<'mcx> {
@@ -236,7 +236,6 @@ impl<'mcx> ProbeBatch<'mcx> {
             i: 0,
             hash_col: u16::MAX,
             hashes: None,
-            last_hash: None,
         }
     }
 
@@ -244,7 +243,9 @@ impl<'mcx> ProbeBatch<'mcx> {
     pub fn reset_staged(&mut self) {
         self.n = 0;
         self.i = 0;
-        self.last_hash = None;
+        if let Some(h) = self.hashes.as_mut() {
+            h.clear();
+        }
     }
 }
 
@@ -1928,10 +1929,6 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
                 let i = self.cur.i;
                 self.cur.i += 1;
                 if ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)? {
-                    self.cur.last_hash = match self.cur.hashes.as_deref() {
-                        Some(h) if (i as usize) < h.len() => Some(h[i as usize]),
-                        _ => None,
-                    };
                     return Ok(Some(self.ss.ss.ss_ScanTupleSlot));
                 }
             }
@@ -1970,9 +1967,11 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
         ::nodeseqscan::exec_rescan_seq_scan(self.ss, estate)
     }
 
+    // cur.i already advanced past the row exec_proc returned.
     #[inline(always)]
     fn staged_hash(&self) -> Option<u32> {
-        self.cur.last_hash
+        let h = self.cur.hashes.as_deref()?;
+        h.get((self.cur.i as usize).wrapping_sub(1)).copied()
     }
 }
 
@@ -2732,7 +2731,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 // Exempt fields: released by release_owned/the per-node end fns before
 // standard_executor_end forgets the bundle (Drop stays the abort path).
 ::mcx::forget_safe_nodrop!(ProbeBatchMode);
-::mcx::forget_safe_struct!(ProbeBatch<'_> { mode, n, i, hash_col, hashes, last_hash });
+::mcx::forget_safe_struct!(ProbeBatch<'_> { mode, n, i, hash_col, hashes });
 ::mcx::forget_safe_struct!(
     PlanStateBase<'_> { plan, ps_ExprContext, ps_ResultTupleSlot;
         ps_ResultTupleDesc, ps_ProjInfo, qual },
