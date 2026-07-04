@@ -2,6 +2,7 @@ use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::ts_locale::TSL_PREFIX;
 
 fn leaked_mcx() -> Mcx<'static> {
+    ::pg_locale::set_default_locale_c_for_tests();
     Box::leak(Box::new(MemoryContext::new("dict-test"))).mcx()
 }
 

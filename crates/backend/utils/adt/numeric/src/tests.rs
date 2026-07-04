@@ -827,9 +827,9 @@ fn hash_numeric_parts_semantics() {
     let a = n("10.00");
     let b = n("10");
     assert_eq!(parts(a.num()), parts(b.num()));
-    // 1200 vs 12: same digit payload, different weight.
-    let c = n("1200");
-    let d = n("12");
+    // 12000000 vs 1200: same NBASE digit payload [1200], different weight.
+    let c = n("12000000");
+    let d = n("1200");
     let (cd, cw) = parts(c.num()).unwrap();
     let (dd, dw) = parts(d.num()).unwrap();
     assert_eq!(cd, dd);

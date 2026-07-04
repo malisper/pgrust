@@ -14,3 +14,6 @@ ts_locale = { path = "../ts_locale" }
 ts_cache = { path = "../../utils/cache/ts_cache" }
 adt_regproc = { path = "../../utils/adt/regproc" }
 mbutils = { path = "../../utils/mb/mbutils" }
+
+[dev-dependencies]
+pg_locale = { path = "../../utils/adt/pg_locale" }
