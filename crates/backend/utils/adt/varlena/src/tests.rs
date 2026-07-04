@@ -923,7 +923,7 @@ mod format_variadic {
     fn install() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            detoast::init_seams();
+            install_detoast_seams();
             syscache_seams::lookup_pg_type_shape::set(|typid| {
                 Ok((typid == TEXTOID).then_some(::types_tuple::PgTypeShape {
                     typlen: -1,
