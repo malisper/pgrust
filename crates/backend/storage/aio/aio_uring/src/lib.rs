@@ -562,3 +562,292 @@ mod imp {
         Ok(())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::Once;
+
+    use bufmgr::{
+        AtEOXact_Buffers, GetPrivateRefCount, PrefetchOutcome, ReadBufferWithoutRelcache,
+        ReleaseBuffer,
+    };
+    use init_small::globals;
+    use types_core::{Buffer, ForkNumber, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+    use types_error::PgError;
+    use types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
+
+    const TEST_NBUFFERS: i32 = 64;
+    const TEST_MAX_CONNECTIONS: i32 = 8;
+    const URING_REL: u32 = 9600;
+    const FILE_PAGES: u32 = 8;
+
+    static SYNC_READS: AtomicI32 = AtomicI32::new(0);
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static URING_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+    fn valid_page_into(buffer: &mut [u8], blkno: u32) {
+        buffer.fill(0);
+        let set_u16 =
+            |b: &mut [u8], off: usize, v: u16| b[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+        set_u16(buffer, 12, 24);
+        set_u16(buffer, 14, BLCKSZ as u16);
+        set_u16(buffer, 16, BLCKSZ as u16);
+        set_u16(buffer, 18, (BLCKSZ as u16) | 4);
+        buffer[24..28].copy_from_slice(&blkno.to_ne_bytes());
+    }
+
+    fn uring_file_fd() -> i32 {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        URING_FILE
+            .get_or_init(|| {
+                let dir =
+                    std::env::temp_dir().join(format!("aio-uring-pool-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(dir.join("rel.dat"))
+                    .unwrap();
+                let mut page = vec![0u8; BLCKSZ];
+                for blk in 0..FILE_PAGES {
+                    // +100 distinguishes uring-DMA'd pages from sync fallbacks.
+                    valid_page_into(&mut page, blk + 100);
+                    f.write_all(&page).unwrap();
+                }
+                f.flush().unwrap();
+                f
+            })
+            .as_raw_fd()
+    }
+
+    fn become_backend() {
+        if globals::MyProcNumber() != INVALID_PROC_NUMBER {
+            return;
+        }
+        static NEXT_PROCNO: AtomicI32 = AtomicI32::new(0);
+        let procno = NEXT_PROCNO.fetch_add(1, Ordering::Relaxed);
+        globals::SetMyProcNumber(procno);
+        globals::SetMyProcPid(7000 + procno);
+        waiteventset::InitializeWaitEventSupport().unwrap();
+        let h = types_storage::latch::LatchHandle::proc(procno);
+        latch::OwnLatch(h).unwrap();
+        globals::SetMyLatch(Some(h));
+        latch::InitializeLatchWaitSet().unwrap();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "uring-tests")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+    }
+
+    fn setup() -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            shmem_seams::shmem_alloc::set(|size| {
+                let layout = std::alloc::Layout::from_size_align(size, 128).unwrap();
+                // Cluster-lifetime allocation, deliberately leaked (C: shmem).
+                let p = unsafe { std::alloc::alloc_zeroed(layout) };
+                assert!(!p.is_null());
+                Ok(p)
+            });
+            shmem_seams::add_size::set(|a, b| {
+                a.checked_add(b)
+                    .ok_or_else(|| Box::new(PgError::error("shmem size overflow")))
+            });
+            shmem_seams::mul_size::set(|a, b| {
+                a.checked_mul(b)
+                    .ok_or_else(|| Box::new(PgError::error("shmem size overflow")))
+            });
+            static SHMEM_LOCK: AtomicBool = AtomicBool::new(false);
+            shmem_seams::shmem_lock_acquire::set(|| {
+                while SHMEM_LOCK.swap(true, Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+            });
+            shmem_seams::shmem_lock_release::set(|| SHMEM_LOCK.store(false, Ordering::Release));
+            smgr_seams::smgr_read::set(|_rlb, _f, blocknum, buffer| {
+                SYNC_READS.fetch_add(1, Ordering::Relaxed);
+                valid_page_into(buffer, blocknum);
+                Ok(())
+            });
+            smgr_seams::smgr_start_buffer_read::set(|rlb, _f, blocknum, buffer| {
+                assert_eq!(rlb.locator.relNumber, URING_REL);
+                Ok(aio_seams::uring_buf_read::call(
+                    uring_file_fd(),
+                    blocknum as i64 * BLCKSZ as i64,
+                    buffer,
+                ))
+            });
+            s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+            s_lock_seams::finish_spin_delay::set(|_| {});
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            postgres_seams::check_for_interrupts::set(|| Ok(()));
+            xact_seams::get_current_transaction_nest_level::set(|| 1);
+            pg_sema::init_seams();
+            globals::SetIsUnderPostmaster(false);
+            globals::SetMaxConnections(TEST_MAX_CONNECTIONS);
+            globals::set_max_worker_processes(2);
+            globals::SetNBuffers(TEST_NBUFFERS);
+            globals::SetMaxBackends(
+                TEST_MAX_CONNECTIONS
+                    + 3
+                    + 2
+                    + 2
+                    + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
+            );
+            lmgr_proc::init_seams();
+            lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+                autovacuum_worker_slots: 3,
+                max_wal_senders: 2,
+                max_prepared_xacts: 2,
+                fastpath_lock_groups_per_backend: 1,
+            });
+            waiteventset::init_seams();
+            latch::init_seams();
+            lwlock::CreateLWLocks(false).unwrap();
+            bufmgr::BufferManagerShmemInit().unwrap();
+            bufmgr::init_seams();
+            crate::init_seams();
+        });
+        become_backend();
+        guard
+    }
+
+    fn uring_smgr() -> RelFileLocatorBackend {
+        RelFileLocatorBackend {
+            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: URING_REL },
+            backend: INVALID_PROC_NUMBER,
+        }
+    }
+
+    fn uring_start(blk: u32) -> Option<PrefetchOutcome> {
+        bufmgr::uring_start_read(
+            uring_smgr(),
+            RELPERSISTENCE_PERMANENT,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+        )
+        .unwrap()
+    }
+
+    fn read_blk(blk: u32) -> Buffer {
+        ReadBufferWithoutRelcache(
+            uring_smgr().locator,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+            ReadBufferMode::Normal,
+            None,
+            true,
+        )
+        .unwrap()
+    }
+
+    fn page_block_field(b: Buffer) -> u32 {
+        let p = bufmgr::BufferGetBlockPtr(b);
+        // SAFETY: pinned valid buffer in the test.
+        let s = unsafe { core::slice::from_raw_parts(p, BLCKSZ) };
+        u32::from_ne_bytes(s[24..28].try_into().unwrap())
+    }
+
+    fn uring_here() -> bool {
+        if aio_seams::uring_available::call() {
+            return true;
+        }
+        eprintln!("io_uring unavailable here; skipping");
+        false
+    }
+
+    #[test]
+    fn prefetch_lands_in_pool_and_arrival_hits() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        for blk in 0..4u32 {
+            assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued), "block {blk}");
+        }
+        assert_eq!(uring_start(0), Some(PrefetchOutcome::Cached));
+        let mut bufs = Vec::new();
+        for blk in 0..4u32 {
+            let b = read_blk(blk);
+            assert_eq!(page_block_field(b), blk + 100, "page must arrive via uring DMA");
+            ReleaseBuffer(b).unwrap();
+            bufs.push(b);
+        }
+        assert_eq!(SYNC_READS.load(Ordering::Relaxed), before_sync, "no sync fallback");
+        bufmgr::uring_collect_pins();
+        for b in bufs {
+            assert_eq!(GetPrivateRefCount(b), 0, "prefetch pin must be collected");
+        }
+        AtEOXact_Buffers(true);
+    }
+
+    #[test]
+    fn short_read_degrades_to_sync_arrival() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        let blk = FILE_PAGES + 50;
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+        let b = read_blk(blk);
+        assert_eq!(page_block_field(b), blk, "content must come from the sync re-read");
+        assert_eq!(SYNC_READS.load(Ordering::Relaxed), before_sync + 1);
+        ReleaseBuffer(b).unwrap();
+        bufmgr::uring_collect_pins();
+        assert_eq!(GetPrivateRefCount(b), 0);
+        AtEOXact_Buffers(true);
+    }
+
+    #[test]
+    fn foreign_thread_completes_issuers_io() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        let blk = 5u32;
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+        let t = std::thread::spawn(move || {
+            become_backend();
+            let b = read_blk(blk);
+            let field = page_block_field(b);
+            ReleaseBuffer(b).unwrap();
+            field
+        });
+        assert_eq!(t.join().unwrap(), blk + 100);
+        assert_eq!(
+            SYNC_READS.load(Ordering::Relaxed),
+            before_sync,
+            "foreign thread must drain the issuer's ring, not re-read"
+        );
+        AtEOXact_Buffers(true);
+    }
+
+    #[test]
+    fn eoxact_drains_unread_prefetches() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        for blk in 6..FILE_PAGES {
+            assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued), "block {blk}");
+        }
+        AtEOXact_Buffers(true);
+        for blk in 6..FILE_PAGES {
+            let b = read_blk(blk);
+            assert_eq!(page_block_field(b), blk + 100);
+            assert_eq!(GetPrivateRefCount(b), 1, "only the arrival pin may remain");
+            ReleaseBuffer(b).unwrap();
+        }
+        AtEOXact_Buffers(true);
+    }
+}
