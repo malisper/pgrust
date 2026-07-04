@@ -43,6 +43,21 @@ pub trait HashJoinOuter<'mcx> {
     fn staged_hash(&self) -> Option<u32> {
         None
     }
+
+    /// Once per build; None disarms a stale filter after a rebuild.
+    fn set_hash_filter(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _push: Option<ProbeFilterPush<'mcx>>,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+/// Filter + the 0-based outer-scan attnum of its hashint4/hashoid key.
+pub struct ProbeFilterPush<'mcx> {
+    pub filter: std::rc::Rc<::nodehash::ProbeBloom<'mcx>>,
+    pub key_attnum: u16,
 }
 
 pub struct HashJoinState<'mcx> {
@@ -293,6 +308,19 @@ where
                     return Ok(None);
                 }
                 table.nbatch_outstart = table.nbatch;
+                // fill_outer must null-extend unmatched outers — never arms.
+                let push = if !node.hj_fill_outer {
+                    node.outer_hash_expr
+                        .hash32var_low32(::execexpr::SlotSrc::Inner)
+                        .and_then(|key_attnum| {
+                            table
+                                .take_probe_filter()
+                                .map(|filter| ProbeFilterPush { filter, key_attnum })
+                        })
+                } else {
+                    None
+                };
+                outer.set_hash_filter(estate, push)?;
                 node.hj_OuterNotEmpty = false;
                 node.hj_JoinState = HJ_NEED_NEW_OUTER;
             }

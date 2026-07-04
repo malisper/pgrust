@@ -1464,7 +1464,8 @@ fn hash_build_fusible<'mcx>(
                 _ => false,
             }
         }
-        ::nodeseqscan::SeqScanVariant::Epq => false,
+        ::nodeseqscan::SeqScanVariant::PlainBloom
+        | ::nodeseqscan::SeqScanVariant::Epq => false,
     }
 }
 
@@ -2660,6 +2661,21 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
 
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         crate::execami::exec_re_scan(self, estate)
+    }
+
+    // Bloom pushdown seat: bare uninstrumented SeqScan outers only
+    // (Instrumented is a different variant, so EXPLAIN ANALYZE keeps the
+    // per-tuple drive and its row counters). Arm errors surface as PgResult
+    // in the scan gate; a failed gate simply leaves the per-tuple drive.
+    fn set_hash_filter(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        push: Option<::nodehashjoin::ProbeFilterPush<'mcx>>,
+    ) -> PgResult<()> {
+        if let PlanStateNode::SeqScan(ss) = self {
+            ::nodeseqscan::seq_scan_set_bloom(ss, estate, push.map(|p| (p.filter, p.key_attnum)))?;
+        }
+        Ok(())
     }
 }
 

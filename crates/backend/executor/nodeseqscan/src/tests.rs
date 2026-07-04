@@ -496,3 +496,98 @@ fn end_scan_without_fetch_releases_nothing() {
         teardown(state, &mut estate);
     });
 }
+
+fn mk_bloom<'mcx>(mcx: Mcx<'mcx>, admit: &[i32]) -> Rc<::nodehash::ProbeBloom<'mcx>> {
+    let mut bf = ::nodehash::ProbeBloom::new_in(mcx, 64.0);
+    for v in admit {
+        bf.insert(::hashfn::hash_bytes_uint32(*v as u32));
+    }
+    Rc::new(bf)
+}
+
+#[test]
+fn bloom_pushdown_filters_and_preserves_order() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let (mut estate, mut state) = setup(mcx, &[&[1, 2, 3, 4], &[5, 6, 7]], &node);
+        state.batch_allowed = true;
+        let bf = mk_bloom(mcx, &[2, 5, 7]);
+        assert!(seq_scan_set_bloom(&mut state, &mut estate, Some((bf.clone(), 0))).unwrap());
+        assert_eq!(state.variant(), SeqScanVariant::PlainBloom);
+        let expect: Vec<i32> = (1..=7)
+            .filter(|v| bf.test(::hashfn::hash_bytes_uint32(*v as u32)))
+            .collect();
+        assert!(expect.contains(&2) && expect.contains(&5) && expect.contains(&7));
+        assert_eq!(drain(&mut state, &mut estate), expect);
+        // Disarm returns the exact Plain drive.
+        assert!(!seq_scan_set_bloom(&mut state, &mut estate, None).unwrap());
+        assert_eq!(state.variant(), SeqScanVariant::Plain);
+        exec_rescan_seq_scan(&mut state, &mut estate).unwrap();
+        assert_eq!(drain(&mut state, &mut estate), vec![1, 2, 3, 4, 5, 6, 7]);
+        teardown(state, &mut estate);
+    });
+}
+
+#[test]
+fn bloom_all_pass_matches_plain_and_rescan_restarts() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let (mut estate, mut state) = setup(mcx, &[&[10, 20], &[30]], &node);
+        state.batch_allowed = true;
+        let bf = mk_bloom(mcx, &[10, 20, 30]);
+        assert!(seq_scan_set_bloom(&mut state, &mut estate, Some((bf, 0))).unwrap());
+        assert_eq!(drain(&mut state, &mut estate), vec![10, 20, 30]);
+        assert!(exec_seq_scan(&mut state, &mut estate).unwrap().is_some());
+        exec_rescan_seq_scan(&mut state, &mut estate).unwrap();
+        assert_eq!(drain(&mut state, &mut estate), vec![10, 20, 30]);
+        teardown(state, &mut estate);
+    });
+}
+
+#[test]
+fn bloom_gate_rejects_nonplain_and_disallowed() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), int4_qual(mcx, F_INT4GT, 0));
+        let (mut estate, mut state) = setup(mcx, &[&[1, 2]], &node);
+        state.batch_allowed = true;
+        let bf = mk_bloom(mcx, &[1]);
+        assert!(!seq_scan_set_bloom(&mut state, &mut estate, Some((bf, 0))).unwrap());
+        assert_eq!(state.variant(), SeqScanVariant::WithQual);
+        teardown(state, &mut estate);
+    });
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let (mut estate, mut state) = setup(mcx, &[&[1, 2]], &node);
+        // batch_allowed stays false (EXEC_FLAG_BACKWARD|MARK shape).
+        let bf = mk_bloom(mcx, &[1]);
+        assert!(!seq_scan_set_bloom(&mut state, &mut estate, Some((bf, 0))).unwrap());
+        assert_eq!(state.variant(), SeqScanVariant::Plain);
+        assert_eq!(drain(&mut state, &mut estate), vec![1, 2]);
+        teardown(state, &mut estate);
+    });
+}
+
+#[test]
+fn bloom_sparse_filter_admits_only_tested_hashes() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let (mut estate, mut state) = setup(mcx, &[&[3, 4]], &node);
+        state.batch_allowed = true;
+        // Admit only the raw 0 hash: data rows may pass solely as false
+        // positives of that one slot; expected set computed exactly.
+        let mut bf = ::nodehash::ProbeBloom::new_in(mcx, 64.0);
+        bf.insert(0);
+        let bf = Rc::new(bf);
+        assert!(seq_scan_set_bloom(&mut state, &mut estate, Some((bf.clone(), 0))).unwrap());
+        let expect: Vec<i32> = [3, 4]
+            .into_iter()
+            .filter(|v| bf.test(::hashfn::hash_bytes_uint32(*v as u32)))
+            .collect();
+        assert_eq!(drain(&mut state, &mut estate), expect);
+        teardown(state, &mut estate);
+    });
+}

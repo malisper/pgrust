@@ -1,6 +1,5 @@
 // nodeHash.c serial build side; skew and parallel absent (sizing still
-// reserves skew memory like C). Tuples are C's HashJoinTupleData: 16-byte
-// header before the image in the per-batch aux arena, pointer bucket chains.
+// reserves skew memory like C); C HashJoinTupleData layout, pointer chains.
 #![allow(non_snake_case)]
 
 use core::ptr::NonNull;
@@ -20,12 +19,15 @@ use ::types_tuple::{MinimalTupleData, TupleDescData, SizeofMinimalTupleHeader};
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 /// The build side pulls its tuples from this child (C's `outerPlan(hashNode)`).
 pub trait HashBuildInput<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
 
-    /// `MultiExecHash` entry; the dispatcher overrides this to batch-consume
-    /// fusible children (same per-row hash+insert, node recursion elided).
+    /// `MultiExecHash` entry; the dispatcher overrides to batch-consume
+    /// fusible children (same per-row hash+insert order).
     fn multi_exec(
         &mut self,
         hs: &mut HashState<'mcx>,
@@ -38,12 +40,81 @@ pub trait HashBuildInput<'mcx> {
     }
 }
 
-/// Page-batch feed for the fused hash-build drive; same contract as the agg
-/// drive's source (store staged tuple `i` into the slot, apply the scan qual).
+/// Page-batch feed for the fused hash-build drive (agg-source contract).
 pub trait HashBuildBatchSource<'mcx> {
     fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
     fn slot(&self) -> ExecSlotId;
+}
+
+/// Word-blocked k=2 Bloom over build hashvalues; false positives only.
+pub struct ProbeBloom<'mcx> {
+    words: PgVec<'mcx, u64>,
+    wmask: u32,
+}
+
+impl<'mcx> ProbeBloom<'mcx> {
+    pub fn new_in(mcx: Mcx<'mcx>, ntuples_est: f64) -> ProbeBloom<'mcx> {
+        let n = if ntuples_est.is_finite() && ntuples_est > 0.0 {
+            (ntuples_est / 4.0) as u64
+        } else {
+            256
+        };
+        let nwords = (n.clamp(64, 1 << 18) as usize).next_power_of_two();
+        ProbeBloom {
+            words: ::mcx::vec_from_elem_in(mcx, 0u64, nwords),
+            wmask: (nwords - 1) as u32,
+        }
+    }
+
+    // Word from bits 12.. (wmask <= 2^18-1); probe bits from the low 12.
+    #[inline(always)]
+    fn slot(&self, h: u32) -> (usize, u64) {
+        let w = ((h >> 12) & self.wmask) as usize;
+        let mask = (1u64 << (h & 63)) | (1u64 << ((h >> 6) & 63));
+        (w, mask)
+    }
+
+    #[inline(always)]
+    pub fn insert(&mut self, h: u32) {
+        let (w, mask) = self.slot(h);
+        // SAFETY: wmask masks w into words' power-of-two length.
+        unsafe { *self.words.get_unchecked_mut(w) |= mask };
+    }
+
+    #[inline(always)]
+    pub fn test(&self, h: u32) -> bool {
+        let (w, mask) = self.slot(h);
+        // SAFETY: wmask masks w into words' power-of-two length.
+        unsafe { *self.words.get_unchecked(w) & mask == mask }
+    }
+
+    fn density(&self) -> f64 {
+        let ones: u64 = self.words.iter().map(|w| w.count_ones() as u64).sum();
+        ones as f64 / (self.words.len() as f64 * 64.0)
+    }
+
+    /// Hashes match the Hash32Var kernel exactly: a miss proves no match.
+    pub fn sel_hash32_low32(
+        &self,
+        values: &[::datum::Datum],
+        isnull: &[bool],
+        sel: &mut [u64],
+    ) {
+        debug_assert!(values.len() == isnull.len() && sel.len() >= values.len().div_ceil(64));
+        for (w, (vch, nch)) in values.chunks(64).zip(isnull.chunks(64)).enumerate() {
+            let mut word = 0u64;
+            for i in 0..vch.len() {
+                let h = if nch[i] {
+                    0
+                } else {
+                    ::hashfn::hash_bytes_uint32(vch[i].as_i32() as u32)
+                };
+                word |= (self.test(h) as u64) << i;
+            }
+            sel[w] = word;
+        }
+    }
 }
 
 /// C `HashJoinTupleData` (16 = HJTUPLE_OVERHEAD; image at +16).
@@ -105,6 +176,7 @@ pub struct HashJoinTable<'mcx> {
     pub outer_batch_file: PgVec<'mcx, Option<BufFile<'mcx>>>,
     batch_cxt: AuxCxtId,
     form_plan: Option<MinimalFormPlan>,
+    bloom: Option<ProbeBloom<'mcx>>,
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
@@ -115,6 +187,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         nbatch: i32,
         space_allowed: usize,
         form_plan: Option<MinimalFormPlan>,
+        ntuples_est: f64,
     ) -> PgResult<HashJoinTable<'mcx>> {
         debug_assert!(nbuckets.is_power_of_two());
         let mut buckets = vec_with_capacity_in(mcx, nbuckets as usize)?;
@@ -140,6 +213,7 @@ impl<'mcx> HashJoinTable<'mcx> {
             outer_batch_file: PgVec::new_in(mcx),
             batch_cxt: estate.create_aux_context("HashBatchContext"),
             form_plan,
+            bloom: (nbatch == 1).then(|| ProbeBloom::new_in(mcx, ntuples_est)),
         };
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
@@ -230,6 +304,9 @@ impl<'mcx> HashJoinTable<'mcx> {
         hashvalue: u32,
     ) -> PgResult<()> {
         let query_mcx = estate.es_query_cxt;
+        if let Some(bf) = self.bloom.as_mut() {
+            bf.insert(hashvalue);
+        }
         let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
         if batchno == self.curbatch {
             let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
@@ -330,6 +407,7 @@ impl<'mcx> HashJoinTable<'mcx> {
             return Ok(());
         }
         let nbatch = oldnbatch * 2;
+        self.bloom = None;
         if self.inner_batch_file.is_empty() {
             ::fd::buffile::PrepareTempTablespaces()?;
         }
@@ -489,6 +567,16 @@ impl<'mcx> HashJoinTable<'mcx> {
         }
     }
 
+    /// Runtime pushdown gate: single-batch build, density 0.25 caps FPR ~6%.
+    pub fn take_probe_filter(&mut self) -> Option<Rc<ProbeBloom<'mcx>>> {
+        if self.nbatch != 1 {
+            self.bloom = None;
+            return None;
+        }
+        let bf = self.bloom.take()?;
+        (bf.density() <= 0.25).then(|| Rc::new(bf))
+    }
+
     /// `ExecHashTableResetMatchFlags`.
     pub fn reset_match_flags(&mut self) {
         for &head in self.buckets.iter() {
@@ -622,7 +710,7 @@ pub fn exec_hash_table_create<'mcx>(
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
         exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true);
     let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
-    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan)
+    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, hs.ntuples_est)
 }
 
 #[inline(always)]
