@@ -1742,6 +1742,8 @@ fn eval_row_expr(
 // ExecEvalFieldSelect (execExprInterp.c), heap-composite leg; the expanded-
 // record fastpath is unported loud. C memoizes the tupdesc in the step's
 // rowcache; a per-eval registry copy stands in (cold path, no invalidation).
+#[inline(never)]
+#[cold]
 fn eval_field_select(
     frames: &mut [crate::steps::FuncFrame<'_>],
     fieldnum: i16,

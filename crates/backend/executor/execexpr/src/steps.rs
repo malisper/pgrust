@@ -74,10 +74,6 @@ pub enum Step {
     BoolOrStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
     BoolOrStepLast { anynull: NonNull<bool>, out: OutRef },
     BoolNotStep { out: OutRef },
-    // C EEOP_FIELDSELECT; reads the record datum from `out`, writes the
-    // field back to `out`. Per-eval registry tupdesc copy stands in for C's
-    // rowcache (cold path; see interp).
-    FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
     NullTestIsNull { out: OutRef },
     NullTestIsNotNull { out: OutRef },
     // C EEOP_BOOLTEST_IS_*; IS [NOT] UNKNOWN reuses the NullTest steps.
@@ -257,6 +253,11 @@ pub enum Step {
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
     },
+    // C EEOP_FIELDSELECT; reads the record datum from `out`, writes the
+    // field back to `out`. Per-eval registry tupdesc copy stands in for C's
+    // rowcache (cold path; see interp). Kept last: appending preserves the
+    // hot variants' discriminants.
+    FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
 }
 
 // C ExprEvalStep d.nulltest_row.rowcache: last-seen rowtype's tupdesc,
