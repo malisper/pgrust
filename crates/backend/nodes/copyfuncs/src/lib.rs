@@ -99,6 +99,16 @@ fn copy_stmt<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
                 },
             )
         }
+        NodeTag::T_ExplainStmt => {
+            let s = node.as_variant::<types_nodes::parsenodes::ExplainStmt>().expect("ExplainStmt");
+            Node::mk(
+                mcx,
+                types_nodes::parsenodes::ExplainStmt {
+                    query: copy_raw_opt(mcx, s.query)?,
+                    options: copy_raw_list(mcx, &s.options)?,
+                },
+            )
+        }
         NodeTag::T_VacuumStmt => {
             let s = node.as_vacuum_stmt().expect("VacuumStmt");
             Node::mk(
