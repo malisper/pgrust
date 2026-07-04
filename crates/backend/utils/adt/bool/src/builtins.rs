@@ -212,10 +212,10 @@ pub const BOOL_BUILTINS: &[FmgrBuiltin] = &[
     b(2515, "booland_statefunc", 2, fc_booland_statefunc),
     b(2516, "boolor_statefunc", 2, fc_boolor_statefunc),
     b(2971, "booltext", 1, fc_booltext),
-    b(6417, "hashbool", 1, fc_hashbool),
-    b(6418, "hashboolextended", 2, fc_hashboolextended),
     bn(3496, "bool_accum", 2, fc_bool_accum),
     bn(3497, "bool_accum_inv", 2, fc_bool_accum_inv),
     b(3498, "bool_alltrue", 1, fc_bool_alltrue),
     b(3499, "bool_anytrue", 1, fc_bool_anytrue),
+    b(6417, "hashbool", 1, fc_hashbool),
+    b(6418, "hashboolextended", 2, fc_hashboolextended),
 ];
