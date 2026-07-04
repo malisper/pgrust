@@ -88,8 +88,34 @@ pub(crate) fn complete_source(
         parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
     )?;
     let raw = raw_list.get(stmt_index).expect("re-parse reproduces the statement");
-    let query_list = analyze_and_rewrite(qmcx, raw, src, argtypes)?;
+    let query_list =
+        analyze_and_rewrite(qmcx, raw, src, argtypes).map_err(|e| spi_error_transpose(src, e))?;
     plancache::CompleteCachedPlan(psrc, query_list, argtypes, cursor_options, false)
+}
+
+
+// _SPI_error_callback (spi.c): a parse-phase syntax error position converts
+// to an internal error against the SPI query text; otherwise the query rides
+// the context stack.
+pub(crate) fn spi_error_transpose(
+    query: &str,
+    mut e: Box<types_error::PgError>,
+) -> Box<types_error::PgError> {
+    match e.cursor_position {
+        Some(pos) if pos > 0 => {
+            e.cursor_position = None;
+            e.internal_position = Some(pos);
+            e.internal_query = Some(query.to_owned());
+        }
+        _ => {
+            let line = format!("SQL statement \"{query}\"");
+            e.context = Some(match e.context.take() {
+                Some(c) => format!("{c}\n{line}"),
+                None => line,
+            });
+        }
+    }
+    e
 }
 
 fn create_sources(
@@ -135,7 +161,8 @@ pub(crate) fn prepare_oneshot_args(
     argtypes: &[Oid],
 ) -> PgResult<SpiPlanState> {
     Ok(SpiPlanState {
-        sources: create_sources(src, true, argtypes, cursor_options)?,
+        sources: create_sources(src, true, argtypes, cursor_options)
+            .map_err(|e| spi_error_transpose(src, e))?,
         oneshot: true,
         saved: false,
         cursor_options,
@@ -162,7 +189,8 @@ pub fn SPI_prepare_cursor(src: &str, argtypes: &[Oid], cursor_options: i32) -> P
     }
 
     let state = SpiPlanState {
-        sources: create_sources(src, false, argtypes, cursor_options)?,
+        sources: create_sources(src, false, argtypes, cursor_options)
+            .map_err(|e| spi_error_transpose(src, e))?,
         oneshot: false,
         saved: false,
         cursor_options,
