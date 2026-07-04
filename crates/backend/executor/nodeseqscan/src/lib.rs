@@ -103,6 +103,8 @@ struct BatchSoa<'mcx> {
     // Fused-sort direct key feed: deform this column only, never publish the
     // prefix onto the slot (other prefix cells stay stale).
     key_col: Option<u16>,
+    // Varlena key: staged into soa column 0 via the varkey pass.
+    varkey: Option<::exectuples::SoaVarKeyPlan>,
     // Precomputed !qual_only && key_col.is_none(): one test on the store path.
     publish: bool,
     qual_col: u16,
@@ -260,6 +262,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 qual_armed: qual.is_some(),
                 qual_only: qual_only && qual.is_some(),
                 key_col: None,
+                varkey: None,
                 publish: !(qual_only && qual.is_some()),
                 qual_col: qual.map_or(0, |(a, _, _)| a),
                 qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
@@ -305,17 +308,26 @@ pub fn seq_scan_sortkey_direct<'mcx>(
     }
     let mcx = estate.es_query_cxt;
     let atts: &[_] = &rel.rd_att.compact_attrs;
-    let Some(plan) = ::exectuples::SoaDeformPlan::try_new(mcx, atts, attnum as usize + 1)
-    else {
-        return false;
-    };
+    let (plan, varkey) =
+        match ::exectuples::SoaDeformPlan::try_new(mcx, atts, attnum as usize + 1) {
+            Some(plan) => (plan, None),
+            None => {
+                let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize)
+                else {
+                    return false;
+                };
+                (::exectuples::SoaDeformPlan::unused(mcx), Some(vk))
+            }
+        };
+    let soa_cols = if varkey.is_some() { 1 } else { plan.ncols() };
     node.batch_soa = Some(::mcx::PgBox::new_in(
         BatchSoa {
-            soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+            soa: ::exectuples::SoaBatch::new_in(mcx, soa_cols),
             plan,
             qual_armed: false,
             qual_only: false,
             key_col: Some(attnum),
+            varkey,
             publish: false,
             qual_col: 0,
             qual_cmp: ::execexpr::CmpOp::Int4Eq,
@@ -338,7 +350,8 @@ pub fn seq_scan_batch_key<'mcx>(
     i: u32,
 ) -> Option<(::datum::Datum, bool)> {
     let b = node.batch_soa.as_deref().expect("direct key feed armed");
-    let c = b.key_col.expect("direct key feed armed") as usize;
+    debug_assert!(b.key_col.is_some());
+    let c = if b.varkey.is_some() { 0 } else { b.key_col.unwrap() as usize };
     if b.soa.is_fallback(i) {
         return None;
     }
@@ -366,6 +379,10 @@ pub fn seq_scan_next_pagebatch<'mcx>(
     if n > 0 {
         if let Some(b) = batch_soa.as_mut() {
             let b = &mut **b;
+            if let Some(vk) = &b.varkey {
+                ::tableam::table_scan_batch_stage_varkey(scandesc, vk, &mut b.soa);
+                return Ok(n);
+            }
             let qual_col_only =
                 (b.qual_only && b.qual_armed).then_some(b.qual_col).or(b.key_col);
             ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
@@ -836,8 +853,8 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed; bloom },
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_only, key_col, publish, qual_col, qual_cmp, qual_konst,
-        sel, nwords, cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, key_col, varkey, publish, qual_col, qual_cmp,
+        qual_konst, sel, nwords, cur_word, cur_bits,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );
