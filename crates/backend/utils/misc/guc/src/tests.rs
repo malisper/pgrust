@@ -11,6 +11,10 @@ thread_local! {
     static SENT: RefCell<Vec<(u8, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
 
+// application_name's value backing (guc_tables::backing) is process-global;
+// tests that read or write it must not overlap across test threads.
+static APPLICATION_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn test_parse_bool(value: &str) -> Option<bool> {
     let lower = value.to_ascii_lowercase();
     if lower.is_empty() {
@@ -83,6 +87,7 @@ fn show(name: &str) -> Option<String> {
 #[test]
 fn boot_defaults_seeded() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(get_int("work_mem"), Some(4096));
     assert_eq!(get_bool("enable_seqscan"), Some(true));
     assert_eq!(get_real("cursor_tuple_fraction"), Some(0.1));
@@ -312,6 +317,7 @@ fn at_eoxact_without_store_is_noop() {
 #[test]
 fn report_list_is_o_changed() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
     begin_reporting_guc_options();
     let initial = SENT.with(|s| std::mem::take(&mut *s.borrow_mut()));
@@ -339,6 +345,7 @@ fn report_list_is_o_changed() {
 #[test]
 fn reset_and_reset_all() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(set_session("work_mem", Some("8192")).unwrap(), 1);
     assert_eq!(set_session("application_name", Some("x")).unwrap(), 1);
     assert_eq!(set_session("work_mem", None).unwrap(), 1);
@@ -380,6 +387,7 @@ fn case_insensitive_lookup() {
 #[test]
 fn guc_is_name_truncates_long_values() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let long = "a".repeat(100);
     assert_eq!(set_session("application_name", Some(&long)).unwrap(), 1);
     assert_eq!(get_string("application_name"), Some(Some("a".repeat(63))));
@@ -465,6 +473,7 @@ fn valid_custom_names() {
 #[test]
 fn process_config_file_applies_and_reverts() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("guc_pcf_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -512,6 +521,7 @@ fn process_config_file_applies_and_reverts() {
 #[test]
 fn seams_route_to_bodies() {
     setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let level = NewGUCNestLevel();
     AtEOXact_GUC(true, level);
     AtStart_GUC();
