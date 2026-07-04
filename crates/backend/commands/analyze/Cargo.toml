@@ -39,6 +39,7 @@ xact = { path = "../../access/transam/xact" }
 typcache = { path = "../../utils/cache/typcache" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }
+adt_tsvector_core = { path = "../../utils/adt/tsvector_core" }
 adt_rangetypes = { path = "../../utils/adt/rangetypes" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 detoast = { path = "../../access/common/detoast" }

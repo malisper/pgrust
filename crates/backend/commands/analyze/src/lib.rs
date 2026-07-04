@@ -2,6 +2,7 @@
 
 mod array_typanalyze;
 mod range_typanalyze;
+mod ts_typanalyze;
 pub mod sampling;
 
 use datum::Datum;
@@ -58,6 +59,7 @@ enum ComputeStats {
     Trivial,
     Range { is_multirange: bool },
     Array { std: StdCompute, elem_typeid: Oid },
+    TsVector,
 }
 
 // std_typanalyze's pick, saved by array_typanalyze (C's std_compute_stats).
@@ -435,6 +437,9 @@ fn do_analyze_rel<'mcx>(
                         totalrows,
                     )?
                 }
+                ComputeStats::TsVector => {
+                    ts_typanalyze::compute_tsvector_stats(anl_mcx, col_cx.mcx(), s, &src, numrows)?
+                }
             }
             col_cx.reset();
         }
@@ -688,6 +693,13 @@ fn compute_index_stats<'mcx>(
                                 totalindexrows,
                             )?
                         }
+                        ComputeStats::TsVector => ts_typanalyze::compute_tsvector_stats(
+                            anl_mcx,
+                            col_cx.mcx(),
+                            stats,
+                            &src,
+                            numindexrows as i32,
+                        )?,
                         ComputeStats::Array { std, elem_typeid } => {
                             array_typanalyze::compute_array_stats(
                                 anl_mcx,
@@ -787,10 +799,11 @@ fn examine_attribute<'mcx>(
     };
 
     // Closed-set typanalyze dispatch (rule 4): std, array 3816, range 3916,
-    // multirange 4242; anything else is an unported analyze lane.
+    // multirange 4242, tsvector 3688; anything else is an unported analyze lane.
     let ok = match typanalyze {
         InvalidOid => std_typanalyze(&mut stats)?,
         3816 => array_typanalyze::setup(&mut stats)?,
+        3688 => ts_typanalyze::setup(&mut stats)?,
         3916 => {
             stats.compute = ComputeStats::Range { is_multirange: false };
             range_typanalyze::setup(&mut stats)?
@@ -863,6 +876,7 @@ fn examine_expression<'mcx>(
     let ok = match typanalyze {
         InvalidOid => std_typanalyze(&mut stats)?,
         3816 => array_typanalyze::setup(&mut stats)?,
+        3688 => ts_typanalyze::setup(&mut stats)?,
         3916 => {
             stats.compute = ComputeStats::Range { is_multirange: false };
             range_typanalyze::setup(&mut stats)?
@@ -986,6 +1000,13 @@ impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
                             tcnt as f64,
                         )?
                     }
+                    ComputeStats::TsVector => ts_typanalyze::compute_tsvector_stats(
+                        mcx,
+                        col_cx.mcx(),
+                        &mut stats,
+                        &src,
+                        tcnt,
+                    )?,
                 }
                 col_cx.reset();
             }

@@ -36,6 +36,8 @@ aclchk = { path = "../../../catalog/aclchk" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 adt_rangetypes = { path = "../../../utils/adt/rangetypes" }
+adt_tsvector_core = { path = "../../../utils/adt/tsvector_core" }
+stack_depth = { path = "../../../utils/misc/stack_depth" }
 typcache = { path = "../../../utils/cache/typcache" }
 clauses = { path = "../../util/clauses" }
 execexpr = { path = "../../../executor/execexpr" }
