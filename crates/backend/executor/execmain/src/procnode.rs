@@ -1665,7 +1665,9 @@ fn sort_seq_fusible<'mcx>(
                 _ => return false,
             }
         }
-        ::nodeseqscan::SeqScanVariant::Epq => return false,
+        ::nodeseqscan::SeqScanVariant::PlainBloom | ::nodeseqscan::SeqScanVariant::Epq => {
+            return false
+        }
     }
     match ss.ss.ps_ProjInfo.as_ref() {
         None => true,
