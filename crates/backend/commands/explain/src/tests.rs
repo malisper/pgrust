@@ -711,15 +711,17 @@ fn show_buffer_usage_matches_c_shape() {
 }
 
 #[test]
-#[should_panic(expected = "non-text format lane")]
-fn json_format_is_loud() {
+fn json_format_is_clean_error() {
     install_fixtures();
     let mcx = leaked_mcx();
     let json = Node::mk_string(mcx, "json").unwrap();
     let opts = [opt(mcx, "format", Some(json))];
     let stmt = explain_stmt(mcx, &opts);
     let mut dest = DestReceiver::DoNothing;
-    let _ = ExplainQuery(mcx, &stmt, "q", ParamListHandle::NULL, QueryEnvHandle::NULL, &mut dest);
+    let err =
+        ExplainQuery(mcx, &stmt, "q", ParamListHandle::NULL, QueryEnvHandle::NULL, &mut dest)
+            .unwrap_err();
+    assert!(err.message().contains("non-text format lane"));
 }
 
 // EXPLAIN SELECT pk FROM t ORDER BY val LIMIT 2 through the REAL pipeline
