@@ -115,3 +115,9 @@ pub fn force_initialized(id: i32, kinds: [CCFastKind; CATCACHE_MAXKEYS]) {
         c.initialized = true;
     });
 }
+
+pub fn set_tupdesc(id: i32, tupdesc: &'static TupleDescData<'static>) {
+    with_state(|st| {
+        st.cache_mut(id).cc_tupdesc = Some(tupdesc);
+    });
+}
