@@ -213,8 +213,7 @@ fn get_object_address_relobject<'mcx>(
         .map(|n| n.as_string().expect("qualified name component is a String node").sval)
         .collect();
     let rv = fill_range_var(&parts);
-    let rel =
-        relation::relation_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?;
+    let rel = table::table_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?;
     let reloid = rel.as_ref().map(|r| r.rd_id).unwrap_or(InvalidOid);
     let (classId, objectId) = match objtype {
         ObjectType::OBJECT_RULE => (
