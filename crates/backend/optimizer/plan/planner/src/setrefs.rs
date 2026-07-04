@@ -16,6 +16,8 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
     let mcx = run.mcx;
     let rtoffset = run.glob.finalrtable.len() as i32;
     add_rtes_to_flat_rtable(run)?;
+    // Flat rtoffset-adjusted AppendRelInfo copies for EXPLAIN's appendrel
+    // deparse (child Vars print as the parent's column above Append nodes).
     for appinfo in run.root.append_rel_list.iter() {
         let node = Node::mk(
             mcx,

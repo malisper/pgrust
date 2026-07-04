@@ -27,12 +27,21 @@ use crate::pathnode::{
 pub use types_pathnodes::{is_outer_join, SemiAntiJoinFactors};
 use crate::run::PlannerRun;
 
-// PATH_PARAM_BY_REL (joinpath.c); top_parent legs dead (no appendrels).
+// PATH_PARAM_BY_PARENT (joinpath.c): paths parameterized by a parent rel
+// count as parameterized by any of its children during partitionwise joins.
+pub(crate) fn path_param_by_parent(run: &PlannerRun<'_>, path: PathId, rel: RelId) -> bool {
+    crate::relnode::relids_overlap(
+        crate::pathnode::path_req_outer(run.root.path(path).base()),
+        &run.root.rel(rel).top_parent_relids,
+    )
+}
+
+// PATH_PARAM_BY_REL (joinpath.c).
 fn path_param_by_rel(run: &PlannerRun<'_>, path: PathId, rel: RelId) -> bool {
     crate::relnode::relids_overlap(
         crate::pathnode::path_req_outer(run.root.path(path).base()),
         &run.root.rel(rel).relids,
-    )
+    ) || path_param_by_parent(run, path, rel)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,11 +101,18 @@ pub fn add_paths_to_joinrel<'mcx>(
     } else {
         None
     };
-    // param_source_rels: rels an added parameterized path may require.
+    // param_source_rels: rels an added parameterized path may require. Child
+    // joins have no SpecialJoinInfos of their own: test the topmost parent's
+    // relids against join_info_list.
     let param_source_rels = {
         use crate::relnode::{relids_difference, relids_overlap, relids_union};
         let mcx = run.mcx;
-        let joinrelids = crate::relnode::relids_copy(mcx, &run.root.rel(joinrel).relids);
+        let joinrelids = if run.root.rel(joinrel).reloptkind == types_pathnodes::RELOPT_OTHER_JOINREL
+        {
+            crate::relnode::relids_copy(mcx, &run.root.rel(joinrel).top_parent_relids)
+        } else {
+            crate::relnode::relids_copy(mcx, &run.root.rel(joinrel).relids)
+        };
         let mut psr: Relids<'mcx> = None;
         for i in 0..run.root.join_info_list.len() {
             let (min_l, min_r, jt) = {
@@ -854,9 +870,8 @@ fn get_memoize_path<'mcx>(
             }
         }
     }
-    debug_assert!(crate::relnode::relids_is_empty(
-        &run.root.rel(outerrel).top_parent_relids
-    ));
+    // Parameterization refers to the topmost parent of the outer rel.
+    let outerrel = run.root.rel(outerrel).top_parent.unwrap_or(outerrel);
     let Some((param_exprs, hash_operators, binary_mode)) =
         paraminfo_get_equal_hashops(run, inner_path, outerrel, innerrel)?
     else {
@@ -904,16 +919,18 @@ fn try_nestloop_path<'mcx>(
     {
         return Ok(());
     }
-    let innerrelids = {
-        let r = run.root.path(inner_path).base().parent;
-        debug_assert!(relids_is_empty(&run.root.rel(r).top_parent_relids));
-        relids_copy(mcx, &run.root.rel(r).relids)
+    // Input-path parameterizations refer to topmost parents
+    // (reparameterize_path_by_child runs at create_plan), so the tests below
+    // use topmost-parent relids too.
+    let top_or_self = |r: RelId| {
+        if relids_is_empty(&run.root.rel(r).top_parent_relids) {
+            relids_copy(mcx, &run.root.rel(r).relids)
+        } else {
+            relids_copy(mcx, &run.root.rel(r).top_parent_relids)
+        }
     };
-    let outerrelids = {
-        let r = run.root.path(outer_path).base().parent;
-        debug_assert!(relids_is_empty(&run.root.rel(r).top_parent_relids));
-        relids_copy(mcx, &run.root.rel(r).relids)
-    };
+    let innerrelids = top_or_self(run.root.path(inner_path).base().parent);
+    let outerrelids = top_or_self(run.root.path(outer_path).base().parent);
 
     // calc_nestloop_required_outer (pathnode.c).
     debug_assert!(!relids_overlap(&outer_paramrels, &innerrelids));
@@ -935,6 +952,17 @@ fn try_nestloop_path<'mcx>(
         let star = relids_overlap(&inner_paramrels, &outerrelids)
             && !relids_is_subset(&inner_paramrels, &outerrelids);
         if !star {
+            return Ok(());
+        }
+    }
+
+    // A parent-parameterized inner is translated at create_plan; skip if the
+    // translation would fail.
+    {
+        let outer_parent = run.root.path(outer_path).base().parent;
+        if path_param_by_parent(run, inner_path, outer_parent)
+            && !crate::createplan::path_is_reparameterizable_by_child(run, inner_path, outer_parent)
+        {
             return Ok(());
         }
     }
