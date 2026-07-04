@@ -462,8 +462,8 @@ pub fn make_range<'m>(
     Ok(Some(img))
 }
 
-// The built-in canonical functions, dispatched natively (the only range types
-// are the catalog built-ins; CREATE TYPE AS RANGE is an unported lane).
+// Built-in canonical functions dispatch natively; user-defined range types'
+// canonicals go through fmgr (C make_range's FunctionCallInvoke arm).
 fn canonicalize<'m>(
     mcx: Mcx<'m>,
     ri: &mut RangeInfo,
@@ -488,7 +488,48 @@ fn canonicalize<'m>(
                 return Ok(None);
             }
         }
-        other => panic!("range canonical function {other} not ported (custom range type)"),
+        other => {
+            let pin = ri
+                .pin
+                .as_ref()
+                .unwrap_or_else(|| panic!("range canonical function {other}: no typcache pin"));
+            let mut lfc = ::types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+            // SAFETY: mcx outlives this call.
+            unsafe { lfc.set_result_mcx(mcx) };
+            let mut node = esc
+                .as_deref()
+                .map(|e| ::types_fmgr::ErrorSaveNode::new(e.details_wanted()));
+            if let Some(n) = node.as_mut() {
+                lfc.context = n.fm_node_ptr();
+            }
+            lfc.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+            // Entry-owned finfo (C's rng_canonical_finfo); RANGE_INFO is
+            // already loaded, so the callee cannot re-borrow this cell.
+            let mut finfo = pin.rng_canonical_finfo();
+            let r = finfo.invoke(&mut lfc)?;
+            drop(finfo);
+            if let Some(mut n) = node {
+                if n.ctx.error_occurred() {
+                    if let Some(e) = esc {
+                        match n.ctx.take_error() {
+                            Some(err) => e.save(err),
+                            None => e.mark_error_occurred(),
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
+            let p = r.as_usize() as *const u8;
+            // SAFETY: the canonical fn returned a live flat range varlena.
+            let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
+            let mut out: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
+            // SAFETY: `total` readable bytes at p; capacity reserved above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), total);
+                out.set_len(total);
+            }
+            return Ok(Some(out));
+        }
     }
     range_serialize(mcx, ri, &mut lower, &mut upper, false, esc)
 }
