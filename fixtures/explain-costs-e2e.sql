@@ -86,6 +86,24 @@ EXPLAIN SELECT x FROM ec_small UNION ALL SELECT k FROM ec_dup;
 EXPLAIN SELECT x FROM ec_small INTERSECT SELECT k FROM ec_dup;
 EXPLAIN SELECT x FROM ec_small EXCEPT SELECT k FROM ec_dup;
 
+-- UNION ALL flattening (pull_up_simple_union_all / flatten_simple_union_all);
+-- ordered unions stay off indexed rels (MergeAppend/child-EC lane is loud)
+EXPLAIN SELECT 1 UNION ALL SELECT 2;
+EXPLAIN SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3;
+EXPLAIN SELECT x FROM ec_small UNION ALL SELECT 42;
+EXPLAIN SELECT x FROM ec_small UNION ALL SELECT k FROM ec_dup ORDER BY 1;
+EXPLAIN SELECT x FROM ec_small WHERE y = 3 UNION ALL SELECT k FROM ec_dup WHERE v < 100;
+EXPLAIN SELECT * FROM (SELECT x FROM ec_small UNION ALL SELECT k FROM ec_dup) u;
+EXPLAIN SELECT count(*) FROM (SELECT x FROM ec_small UNION ALL SELECT k FROM ec_dup) u;
+EXPLAIN SELECT * FROM (SELECT x, y FROM ec_small UNION ALL SELECT k, v FROM ec_dup) u WHERE u.x = 3;
+EXPLAIN SELECT * FROM (SELECT 1 AS n UNION ALL SELECT 2) u;
+EXPLAIN SELECT DISTINCT x FROM (SELECT x FROM ec_small UNION ALL SELECT k FROM ec_dup) u;
+-- unpullable leaf keeps a Subquery Scan on "*SELECT* N"
+EXPLAIN SELECT * FROM (SELECT DISTINCT x FROM ec_small UNION ALL SELECT k FROM ec_dup) u;
+-- unindexed group column: GROUP BY sets query_pathkeys and an indexed child
+-- would trip the (pre-existing) ordered-append/child-EC loud arm
+EXPLAIN SELECT b, count(*) FROM (SELECT y FROM ec_small UNION ALL SELECT k FROM ec_dup) u(b) GROUP BY b;
+
 -- window
 EXPLAIN SELECT sum(x) OVER (PARTITION BY y) FROM ec_small;
 EXPLAIN SELECT rank() OVER (ORDER BY x) FROM ec_small;

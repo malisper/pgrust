@@ -20,6 +20,7 @@ pub const EXPRKIND_RTFUNC_LATERAL: i32 = 3;
 pub const EXPRKIND_VALUES: i32 = 4;
 pub const EXPRKIND_VALUES_LATERAL: i32 = 5;
 pub const EXPRKIND_LIMIT: i32 = 6;
+pub const EXPRKIND_APPINFO: i32 = 7;
 pub const EXPRKIND_TABLEFUNC: i32 = 8;
 pub const EXPRKIND_TABLEFUNC_LATERAL: i32 = 9;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
@@ -64,6 +65,9 @@ pub fn subquery_planner<'mcx>(
         .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
     {
         crate::prepjointree::pull_up_subqueries(run, &mut parse)?;
+    }
+    if parse.setOperations.is_some() {
+        crate::prepjointree::flatten_simple_union_all(run, &mut parse)?;
     }
     if parse.rtable.iter().any(|n| {
         let r = n.as_range_tbl_entry().expect("rtable cell");
@@ -323,7 +327,28 @@ pub fn subquery_planner<'mcx>(
         }
         .expect("OnConflictExpr");
     }
-    debug_assert!(run.root.append_rel_list.is_empty());
+    // EXPRKIND_APPINFO: UNION ALL pull-up leaves arbitrary expressions in
+    // AppendRelInfo translated_vars.
+    for ai in 0..run.root.append_rel_list.len() {
+        let n = run.root.append_rel_list[ai].translated_vars.len();
+        for j in 0..n {
+            let tid = run.root.append_rel_list[ai].translated_vars[j];
+            if tid == types_pathnodes::NodeId::default() {
+                continue;
+            }
+            let node = *run.root.expr_node(tid);
+            let new = preprocess_expression(
+                run,
+                &parse.rtable,
+                Some(node),
+                EXPRKIND_APPINFO,
+                parse.hasSubLinks,
+            )?
+            .expect("translated var never folds to nothing");
+            let nid = run.intern_expr(new);
+            run.root.append_rel_list[ai].translated_vars[j] = nid;
+        }
+    }
     // Per-RTE expression preprocessing: expression-bearing RTEs panicked above.
 
     if parse.hasGroupRTE {

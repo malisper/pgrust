@@ -24,11 +24,37 @@ pub fn add_other_rels_to_query(run: &mut PlannerRun<'_>) -> PgResult<()> {
         }
         match rte.rtekind {
             RTEKind::RTE_RELATION => expand_inherited_rtentry(run, rel, rti)?,
-            RTEKind::RTE_SUBQUERY => panic!(
-                "expand_appendrel_subquery (inherit.c): UNION ALL appendrel; \
-                 flatten_simple_union_all unported"
-            ),
+            RTEKind::RTE_SUBQUERY => expand_appendrel_subquery(run, rel, rti)?,
             other => panic!("add_other_rels_to_query (initsplan.c): inh {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+// expand_appendrel_subquery (inherit.c): UNION ALL children already have RTEs
+// and AppendRelInfos from prepjointree; just build their RelOptInfos.
+fn expand_appendrel_subquery(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    for ai in 0..run.root.append_rel_list.len() {
+        let child_rti = {
+            let a = &run.root.append_rel_list[ai];
+            if a.parent_relid != rti as u32 {
+                continue;
+            }
+            a.child_relid
+        };
+        debug_assert!((child_rti as i32) < run.root.simple_rel_array_size);
+        let childrel = crate::relnode::build_simple_rel_child(run, child_rti, rel)?;
+        let childrte = run.rte(child_rti as usize);
+        if childrte.inh {
+            match childrte.rtekind {
+                RTEKind::RTE_RELATION => {
+                    expand_inherited_rtentry(run, childrel, child_rti as usize)?
+                }
+                RTEKind::RTE_SUBQUERY => {
+                    expand_appendrel_subquery(run, childrel, child_rti as usize)?
+                }
+                other => panic!("expand_appendrel_subquery (inherit.c): inh {other:?}"),
+            }
         }
     }
     Ok(())
@@ -340,8 +366,8 @@ pub fn adjust_appendrel_attrs<'mcx>(
 struct AppinfoMap<'mcx> {
     parent_relid: u32,
     child_relid: u32,
-    // 0 attno = dropped parent column.
-    translated: PgVec<'mcx, i16>,
+    // None = dropped parent column.
+    translated: PgVec<'mcx, Option<Node<'mcx>>>,
 }
 
 pub fn adjust_appendrel_attrs_multi<'mcx>(
@@ -352,16 +378,15 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
     let mcx = run.mcx;
     debug_assert!(!appinfos.is_empty());
     // The mutator can't re-enter run (appinfos may borrow it), so snapshot
-    // the translated Vars up front.
+    // the translated exprs up front.
     let mut maps: PgVec<'mcx, AppinfoMap<'mcx>> = PgVec::new_in(mcx);
     for appinfo in appinfos {
-        let mut translated: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+        let mut translated: PgVec<'mcx, Option<Node<'mcx>>> = PgVec::new_in(mcx);
         for &tid in appinfo.translated_vars.iter() {
             if tid == NodeId::default() {
-                translated.push(0);
+                translated.push(None);
             } else {
-                translated
-                    .push(run.root.expr_node(tid).as_var().expect("translated var").varattno);
+                translated.push(Some(*run.root.expr_node(tid)));
             }
         }
         maps.push(AppinfoMap {
@@ -402,28 +427,39 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     return Ok(Some(Node::mk(mcx, copy_var(mcx, v)?)?));
                 };
                 if v.varattno > 0 {
-                    assert!(
-                        (v.varattno as usize) <= map.translated.len(),
-                        "attribute {} of relation does not exist",
-                        v.varattno
-                    );
-                    let child_attno = map.translated[v.varattno as usize - 1];
-                    assert!(
-                        child_attno > 0,
-                        "attribute {} of relation does not exist",
-                        v.varattno
-                    );
-                    // The translated Var carries the parent's varnullingrels
-                    // (child partitions never have their own; C merges).
-                    let mut newvar = copy_var(mcx, v)?;
-                    newvar.varno = map.child_relid as i32;
-                    newvar.varattno = child_attno;
-                    // C drops syntactic labeling on generated Vars
-                    // (appendinfo.c:278).
-                    newvar.varnosyn = 0;
-                    newvar.varattnosyn = 0;
-                    newvar.location = -1;
-                    Ok(Some(Node::mk(mcx, newvar)?))
+                    let t = map
+                        .translated
+                        .get(v.varattno as usize - 1)
+                        .copied()
+                        .flatten()
+                        .unwrap_or_else(|| {
+                            panic!("attribute {} of relation does not exist", v.varattno)
+                        });
+                    // C copyObject's the translation per substitution site so
+                    // setrefs' in-place fixups never see a shared subtree.
+                    if let Some(tv) = t.as_var() {
+                        let mut newvar = copy_var(mcx, tv)?;
+                        newvar.varreturningtype = v.varreturningtype;
+                        // C merges (not copies): the child Var may carry
+                        // nullingrel bits of its own.
+                        if !v.varnullingrels.is_empty() {
+                            let mut merged = newvar.varnullingrels.clone_in(mcx)?;
+                            merged.add_members(mcx, &v.varnullingrels)?;
+                            newvar.varnullingrels = merged;
+                        }
+                        Ok(Some(Node::mk(mcx, newvar)?))
+                    } else {
+                        assert!(
+                            v.varnullingrels.is_empty(),
+                            "adjust_appendrel_attrs (appendinfo.c): nulled parent Var \
+                             over a non-Var UNION ALL translation"
+                        );
+                        debug_assert!(
+                            v.varreturningtype
+                                == types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
+                        );
+                        Ok(Some(crate::prepjointree::copy_expr(mcx, t, 0)?))
+                    }
                 } else if v.varattno == 0 {
                     panic!(
                         "adjust_appendrel_attrs (appendinfo.c): whole-row Var \

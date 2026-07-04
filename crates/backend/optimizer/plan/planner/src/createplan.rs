@@ -94,10 +94,11 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
     let base = run.root.path(best_path).base();
     let rel_id = base.parent;
     let rel = run.root.rel(rel_id);
-    // C also admits SUBQUERY/FUNCTION/TABLEFUNC/VALUES; those arms of
+    // C also admits FUNCTION/TABLEFUNC/VALUES; those arms of
     // build_physical_tlist are unported, so their scans keep the path tlist
     // (a VERBOSE Output divergence only, not a semantic one).
     if (rel.rtekind != types_pathnodes::RTE_RELATION
+        && rel.rtekind != types_pathnodes::RTE_SUBQUERY
         && rel.rtekind != types_pathnodes::RTE_CTE)
         || rel.reloptkind != types_pathnodes::RELOPT_BASEREL
     {
@@ -178,7 +179,7 @@ fn apply_pathtarget_labeling_to_tlist(
     }
 }
 
-// build_physical_tlist (plancat.c), heap-relation + CTE arms.
+// build_physical_tlist (plancat.c), heap-relation + subquery + CTE arms.
 fn build_physical_tlist<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: types_pathnodes::RelId,
@@ -186,6 +187,23 @@ fn build_physical_tlist<'mcx>(
     let mcx = run.mcx;
     let varno = run.root.rel(rel_id).relid;
     let rte = run.rte(varno as usize);
+    if run.root.rel(rel_id).rtekind == types_pathnodes::RTE_SUBQUERY {
+        // One Var per subquery output; resjunk columns stay resjunk.
+        let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+        let mut tlist = NodeList::nil();
+        for tle_node in &sub.targetList {
+            let tle = tle_node.as_target_entry().expect("tlist cell");
+            let (vartype, vartypmod) = crate::costsize::expr_type_typmod(tle.expr);
+            let varcollid = crate::pathkeys::expr_collation(tle.expr);
+            let var =
+                Node::mk_var(mcx, varno as i32, tle.resno, vartype, vartypmod, varcollid, 0)?;
+            tlist.lappend(
+                mcx,
+                Node::mk_target_entry(mcx, var, tle.resno, None, tle.resjunk)?,
+            )?;
+        }
+        return Ok(tlist);
+    }
     if run.root.rel(rel_id).rtekind == types_pathnodes::RTE_CTE {
         // expandRTE's CTE leg: one Var per output column.
         let mut tlist = NodeList::nil();

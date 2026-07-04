@@ -684,7 +684,7 @@ fn convert_exists_sublink_to_join<'mcx>(
     for srte_node in &subselect.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
         assert!(
-            srte.rtekind == RTEKind::RTE_RELATION,
+            matches!(srte.rtekind, RTEKind::RTE_RELATION | RTEKind::RTE_SUBQUERY),
             "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
             srte.rtekind
         );
@@ -693,10 +693,27 @@ fn convert_exists_sublink_to_join<'mcx>(
         } else {
             srte.perminfoindex
         };
-        parse.rtable.lappend(
-            mcx,
-            crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?,
-        )?;
+        let copy = crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?;
+        if srte.rtekind == RTEKind::RTE_SUBQUERY {
+            // The C OffsetVarNodes/IncrementVarSublevelsUp pair over the whole
+            // subselect reaches this RTE's body one level down; adjustment is
+            // only needed (and the deep copy only paid) when uplevel vars
+            // exist — the plancache-shared tree stays unwritten either way.
+            let body = srte.subquery.expect("RTE_SUBQUERY has a subquery");
+            if crate::prepjointree::query_has_uplevel_vars(body)? {
+                let deep = rewrite_manip::copy_query_node(mcx, body)?;
+                rewrite_manip::OffsetVarNodes(mcx, deep, rtoffset, 1)?;
+                rewrite_manip::IncrementVarSublevelsUp(deep, -1, 2)?;
+                let subq = deep.as_query().expect("Query round trip");
+                // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                unsafe {
+                    copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.subquery = Some(subq)
+                    })
+                };
+            }
+        }
+        parse.rtable.lappend(mcx, copy)?;
     }
     for p in &subselect.rteperminfos {
         parse.rteperminfos.lappend(mcx, p)?;
