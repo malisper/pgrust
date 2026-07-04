@@ -245,3 +245,4 @@ format_type = { path = "../../backend/utils/adt/format_type" }
 ruleutils = { path = "../../backend/utils/adt/ruleutils" }
 adt_regproc = { path = "../../backend/utils/adt/regproc" }
 ts_cache = { path = "../../backend/utils/cache/ts_cache" }
+statistics = { path = "../../backend/statistics/statistics" }
