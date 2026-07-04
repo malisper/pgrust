@@ -306,6 +306,7 @@ pub(crate) fn generate_function_name(
         mcx,
         &[&proname],
         argtypes.len() as i16,
+        &[],
         true,
         true,
     )?;

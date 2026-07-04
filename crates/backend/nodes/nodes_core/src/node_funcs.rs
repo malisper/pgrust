@@ -19,6 +19,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::catalog::BOOLOID,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_NamedArgExpr => expr_type(node.as_named_arg_expr().unwrap().arg),
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
@@ -140,6 +141,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
+        NodeTag::T_NamedArgExpr => expr_typmod(node.as_named_arg_expr().unwrap().arg),
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
@@ -228,6 +230,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_NamedArgExpr => expr_collation(node.as_named_arg_expr().unwrap().arg),
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
@@ -337,6 +340,11 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             leftmost_loc(f.location, expr_location_list(&f.args))
+        }
+        // C: consider both argument name and value.
+        NodeTag::T_NamedArgExpr => {
+            let na = node.as_named_arg_expr().unwrap();
+            leftmost_loc(na.location, expr_location(na.arg))
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();

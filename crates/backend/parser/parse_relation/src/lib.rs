@@ -795,101 +795,303 @@ pub fn addRangeTableEntryForRelation<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
-// chooseScalarFunctionAlias; nfuncs fixed at 1 on this slice.
 fn chooseScalarFunctionAlias<'mcx>(
     mcx: Mcx<'mcx>,
     funcexpr: Node<'mcx>,
     funcname: &'mcx str,
     alias: Option<&'mcx Alias<'mcx>>,
+    nfuncs: usize,
 ) -> PgResult<&'mcx str> {
     if let Some(fe) = funcexpr.as_func_expr() {
         if let Some(pname) = funcapi::get_func_result_name(mcx, fe.funcid)? {
             return Ok(pname);
         }
     }
-    if let Some(name) = alias.and_then(|a| a.aliasname) {
-        return Ok(name);
+    if nfuncs == 1 {
+        if let Some(name) = alias.and_then(|a| a.aliasname) {
+            return Ok(name);
+        }
     }
     Ok(funcname)
 }
 
-// Single-function scalar-result slice of C's addRangeTableEntryForFunction;
-// coldeflists never arrive (transformRangeFunction louds them out).
+// GetColumnDefCollation (parse_type.c).
+fn GetColumnDefCollation(
+    pstate: &ParseState<'_, '_>,
+    coldef: &types_nodes::rawnodes::ColumnDef<'_>,
+    type_oid: Oid,
+) -> PgResult<Oid> {
+    let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+        .expect("pg_type row vanished")
+        .typcollation;
+    let result = if let Some(cc) = coldef.collClause {
+        let cc = cc.as_collate_clause().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)?
+    } else if coldef.collOid != InvalidOid {
+        coldef.collOid
+    } else {
+        typcollation
+    };
+    if result != InvalidOid && typcollation == InvalidOid {
+        let typename = format_type::format_type_be(type_oid)
+            .unwrap_or_else(|_| format!("type {type_oid}"));
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!("collations are not supported by type {typename}"))
+                .errposition(errpos(pstate, coldef.location))
+                .into_error()
+                .with_error_location(loc("GetColumnDefCollation")),
+        ));
+    }
+    Ok(result)
+}
+
+#[cold]
+#[inline(never)]
+fn coldeflist_error(
+    pstate: &ParseState<'_, '_>,
+    code: types_error::SqlState,
+    msg: String,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(code)
+            .errmsg(msg)
+            .errposition(errpos(pstate, location))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForFunction")),
+    )
+}
+
 pub fn addRangeTableEntryForFunction<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
-    funcname: &'mcx str,
-    funcexpr: Node<'mcx>,
-    alias: Option<&'mcx Alias<'mcx>>,
-    funcordinality: bool,
+    funcnames: &[&'mcx str],
+    funcexprs: NodeList<'mcx>,
+    coldeflists: &[&'mcx NodeList<'mcx>],
+    rangefunc: &'mcx types_nodes::RangeFunction<'mcx>,
     lateral: bool,
     inFromCl: bool,
 ) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
-    if funcordinality {
-        panic!(
-            "addRangeTableEntryForFunction (parse_relation.c): WITH ORDINALITY \
-             merged-tupdesc arm unported — unit backend-parser-relation"
-        );
+    use types_error::{ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_COLUMNS};
+    use types_tuple::htup::{MaxHeapAttributeNumber, MaxTupleAttributeNumber};
+
+    let alias = rangefunc.alias;
+    let nfuncs = funcexprs.len();
+    let aliasname = alias.and_then(|a| a.aliasname).unwrap_or(funcnames[0]);
+
+    let mut functions = NodeList::nil();
+    let mut functupdescs: PgVec<'mcx, TupleDescData<'mcx>> = PgVec::new_in(mcx);
+    let mut totalatts: i32 = 0;
+
+    for (funcno, funcexpr) in funcexprs.iter().enumerate() {
+        let funcname = funcnames[funcno];
+        let coldeflist = coldeflists[funcno];
+
+        let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
+
+        if !coldeflist.is_nil() {
+            match resolved.class {
+                funcapi::TypeFuncClass::Record => {}
+                funcapi::TypeFuncClass::Composite
+                | funcapi::TypeFuncClass::CompositeDomain => {
+                    let msg = if nodes_core::node_funcs::expr_type(funcexpr)
+                        == types_core::catalog::RECORDOID
+                    {
+                        "a column definition list is redundant for a function with OUT \
+                         parameters"
+                    } else {
+                        "a column definition list is redundant for a function returning a \
+                         named composite type"
+                    };
+                    return Err(coldeflist_error(
+                        pstate,
+                        ERRCODE_SYNTAX_ERROR,
+                        msg.into(),
+                        nodes_core::node_funcs::expr_location_list(coldeflist),
+                    ));
+                }
+                _ => {
+                    return Err(coldeflist_error(
+                        pstate,
+                        ERRCODE_SYNTAX_ERROR,
+                        "a column definition list is only allowed for functions returning \
+                         \"record\""
+                            .into(),
+                        nodes_core::node_funcs::expr_location_list(coldeflist),
+                    ));
+                }
+            }
+        } else if matches!(resolved.class, funcapi::TypeFuncClass::Record) {
+            return Err(coldeflist_error(
+                pstate,
+                ERRCODE_SYNTAX_ERROR,
+                "a column definition list is required for functions returning \"record\""
+                    .into(),
+                nodes_core::node_funcs::expr_location(funcexpr),
+            ));
+        }
+
+        let mut funccolnames = NodeList::nil();
+        let mut funccoltypes = types_nodes::OidList::nil();
+        let mut funccoltypmods = types_nodes::IntList::nil();
+        let mut funccolcollations = types_nodes::OidList::nil();
+
+        let tupdesc = match resolved.class {
+            funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
+                resolved.result_tuple_desc.unwrap_or_else(|| {
+                    panic!(
+                        "addRangeTableEntryForFunction (parse_relation.c): composite \
+                         result without a tupdesc"
+                    )
+                })
+            }
+            funcapi::TypeFuncClass::Scalar => {
+                let colname =
+                    chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias, nfuncs)?;
+                // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
+                // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
+                let (typmod, collation) = match funcexpr.as_func_expr() {
+                    Some(fe) => (-1, fe.funccollid),
+                    None => panic!(
+                        "addRangeTableEntryForFunction (parse_relation.c): non-FuncExpr \
+                         scalar function item (planner-folded expr) unported"
+                    ),
+                };
+                let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+                tupdesc::TupleDescInitEntry(
+                    &mut d,
+                    1,
+                    Some(colname),
+                    resolved.result_type_id,
+                    typmod,
+                    0,
+                )?;
+                tupdesc::TupleDescInitEntryCollation(&mut d, 1, collation);
+                d
+            }
+            funcapi::TypeFuncClass::Record => {
+                if coldeflist.len() as i32 > MaxHeapAttributeNumber {
+                    return Err(coldeflist_error(
+                        pstate,
+                        ERRCODE_TOO_MANY_COLUMNS,
+                        format!(
+                            "column definition lists can have at most \
+                             {MaxHeapAttributeNumber} entries"
+                        ),
+                        nodes_core::node_funcs::expr_location_list(coldeflist),
+                    ));
+                }
+                let mut d = tupdesc::CreateTemplateTupleDesc(mcx, coldeflist.len() as i32)?;
+                for (i, col) in coldeflist.iter().enumerate() {
+                    let n = col
+                        .as_variant::<types_nodes::rawnodes::ColumnDef>()
+                        .expect("coldeflist cell is ColumnDef");
+                    let attrname = n.colname.expect("TableFuncElement always names");
+                    let tn = n
+                        .typeName
+                        .expect("TableFuncElement always types")
+                        .as_type_name()
+                        .expect("TypeName");
+                    if tn.setof {
+                        return Err(coldeflist_error(
+                            pstate,
+                            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+                            format!("column \"{attrname}\" cannot be declared SETOF"),
+                            n.location,
+                        ));
+                    }
+                    let (attrtype, attrtypmod) =
+                        parse_utilcmd_seams::typename_type_id_and_mod::call(mcx, Some(pstate), tn)?;
+                    let attrcollation = GetColumnDefCollation(pstate, n, attrtype)?;
+                    let attno = (i + 1) as AttrNumber;
+                    tupdesc::TupleDescInitEntry(
+                        &mut d,
+                        attno,
+                        Some(attrname),
+                        attrtype,
+                        attrtypmod,
+                        0,
+                    )?;
+                    tupdesc::TupleDescInitEntryCollation(&mut d, attno, attrcollation);
+                    funccolnames
+                        .lappend(mcx, Node::mk_string(mcx, str_in(mcx, attrname)?)?)?;
+                    funccoltypes.lappend(mcx, attrtype)?;
+                    funccoltypmods.lappend(mcx, attrtypmod)?;
+                    funccolcollations.lappend(mcx, attrcollation)?;
+                }
+                catalog_heap::CheckAttributeNamesTypes(
+                    &d,
+                    types_rel::RELKIND_COMPOSITE_TYPE,
+                )?;
+                d
+            }
+            funcapi::TypeFuncClass::Other => {
+                return Err(unsupported_function_return_type(
+                    pstate,
+                    funcname,
+                    resolved.result_type_id,
+                ))
+            }
+        };
+
+        let rtfunc = Node::mk(
+            mcx,
+            types_nodes::RangeTblFunction {
+                funcexpr: Some(funcexpr),
+                funccolcount: tupdesc.natts,
+                funccolnames,
+                funccoltypes,
+                funccoltypmods,
+                funccolcollations,
+                ..Default::default()
+            },
+        )?;
+        functions.lappend(mcx, rtfunc)?;
+        totalatts += tupdesc.natts;
+        functupdescs.push(tupdesc);
     }
 
-    let aliasname = alias.and_then(|a| a.aliasname).unwrap_or(funcname);
-
-    let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
-    let tupdesc = match resolved.class {
-        funcapi::TypeFuncClass::Scalar => {
-            let colname = chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias)?;
-            // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
-            // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
-            let (typmod, collation) = match funcexpr.as_func_expr() {
-                Some(fe) => (-1, fe.funccollid),
-                None => panic!(
-                    "addRangeTableEntryForFunction (parse_relation.c): non-FuncExpr \
-                     scalar function item (planner-folded expr) unported"
+    let tupdesc = if nfuncs > 1 || rangefunc.ordinality {
+        if rangefunc.ordinality {
+            totalatts += 1;
+        }
+        if totalatts > MaxTupleAttributeNumber {
+            return Err(coldeflist_error(
+                pstate,
+                ERRCODE_TOO_MANY_COLUMNS,
+                format!(
+                    "functions in FROM can return at most {MaxTupleAttributeNumber} columns"
                 ),
-            };
-            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+                nodes_core::node_funcs::expr_location_list(&funcexprs),
+            ));
+        }
+        let mut d = tupdesc::CreateTemplateTupleDesc(mcx, totalatts)?;
+        let mut natts: AttrNumber = 0;
+        for fd in functupdescs.iter() {
+            for j in 1..=fd.natts {
+                natts += 1;
+                tupdesc::TupleDescCopyEntry(&mut d, natts, fd, j as AttrNumber);
+            }
+        }
+        if rangefunc.ordinality {
+            natts += 1;
             tupdesc::TupleDescInitEntry(
                 &mut d,
-                1,
-                Some(colname),
-                resolved.result_type_id,
-                typmod,
+                natts,
+                Some("ordinality"),
+                types_core::catalog::INT8OID,
+                -1,
                 0,
             )?;
-            tupdesc::TupleDescInitEntryCollation(&mut d, 1, collation);
-            d
         }
-        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
-            resolved.result_tuple_desc.unwrap_or_else(|| {
-                panic!(
-                    "addRangeTableEntryForFunction (parse_relation.c): composite result \
-                     without a tupdesc"
-                )
-            })
-        }
-        funcapi::TypeFuncClass::Record => panic!(
-            "addRangeTableEntryForFunction (parse_relation.c): RECORD-returning \
-             function needs a column definition list — coldeflist lane"
-        ),
-        funcapi::TypeFuncClass::Other => {
-            return Err(unsupported_function_return_type(
-                pstate,
-                funcname,
-                resolved.result_type_id,
-            ))
-        }
+        debug_assert_eq!(natts as i32, totalatts);
+        d
+    } else {
+        functupdescs.pop().expect("at least one function")
     };
-
-    let rtfunc = Node::mk(
-        mcx,
-        types_nodes::RangeTblFunction {
-            funcexpr: Some(funcexpr),
-            funccolcount: tupdesc.natts,
-            ..Default::default()
-        },
-    )?;
-    let mut functions = NodeList::nil();
-    functions.lappend(mcx, rtfunc)?;
 
     let (eref, rebuilt_alias) =
         buildRelationAliases(mcx, &tupdesc, alias, str_in(mcx, aliasname)?)?;
@@ -899,7 +1101,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         rtekind: RTEKind::RTE_FUNCTION,
         alias: rebuilt_alias,
         functions,
-        funcordinality,
+        funcordinality: rangefunc.ordinality,
         eref: Some(eref),
         lateral,
         inFromCl,
@@ -1454,79 +1656,123 @@ fn expandFunction<'mcx>(
     location: ParseLoc,
     include_dropped: bool,
 ) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>)> {
-    if rte.funcordinality || rte.functions.len() != 1 {
-        panic!(
-            "expandRTE (parse_relation.c): ORDINALITY / multiple functions \
-             unported — unit backend-parser-relation"
-        );
-    }
-    let rtfunc = rte
-        .functions
-        .nth(0)
-        .as_range_tbl_function()
-        .expect("functions cell is RangeTblFunction");
-    if !rtfunc.funccolnames.is_nil() {
-        panic!(
-            "expandRTE (parse_relation.c): coldeflist (RECORD-returning) arm \
-             unported — coldeflist lane"
-        );
-    }
     let eref = rte.eref.expect("function RTE has eref");
-    let funcexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
-    let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
-    match resolved.class {
-        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
-            let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
-            debug_assert_eq!(rtfunc.funccolcount, tupdesc.natts);
-            expandTupleDesc(
-                mcx,
-                &tupdesc,
-                eref,
-                rtfunc.funccolcount as usize,
-                0,
-                rtindex,
-                sublevels_up,
-                returning_type,
+    let mut colnames = NodeList::nil();
+    let mut colvars = NodeList::nil();
+    let mut atts_done: usize = 0;
+
+    let mk_var = |vartype: Oid, vartypmod: i32, varcollid: Oid, attno: i32| {
+        Node::mk(
+            mcx,
+            Var {
+                varno: rtindex,
+                varattno: attno as AttrNumber,
+                vartype,
+                vartypmod,
+                varcollid,
+                varnullingrels: types_nodes::Bitmapset::empty(),
+                varlevelsup: sublevels_up as Index,
+                varreturningtype: returning_type,
+                varnosyn: rtindex as Index,
+                varattnosyn: attno as AttrNumber,
                 location,
-                include_dropped,
-            )
-        }
-        funcapi::TypeFuncClass::Scalar => {
-            // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
-            // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
-            let (typmod, collation) = match funcexpr.as_func_expr() {
-                Some(fe) => (-1, fe.funccollid),
-                None => panic!(
-                    "expandRTE (parse_relation.c): non-FuncExpr scalar function \
-                     item (planner-folded expr) unported"
-                ),
-            };
-            let mut colnames = NodeList::nil();
-            let mut colvars = NodeList::nil();
-            colnames.lappend(mcx, eref.colnames.nth(0))?;
-            colvars.lappend(
-                mcx,
-                Node::mk(
+            },
+        )
+    };
+
+    for f in &rte.functions {
+        let rtfunc = f
+            .as_range_tbl_function()
+            .expect("functions cell is RangeTblFunction");
+        let funcexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
+
+        if !rtfunc.funccolnames.is_nil() {
+            // Coldeflist leg (RECORD-returning).
+            for (k, name) in eref
+                .colnames
+                .as_slice()
+                .iter()
+                .skip(atts_done)
+                .take(rtfunc.funccolcount as usize)
+                .enumerate()
+            {
+                colnames.lappend(mcx, *name)?;
+                let attnum = atts_done + k + 1;
+                colvars.lappend(
                     mcx,
-                    Var {
-                        varno: rtindex,
-                        varattno: 1,
-                        vartype: resolved.result_type_id,
-                        vartypmod: typmod,
-                        varcollid: collation,
-                        varnullingrels: types_nodes::Bitmapset::empty(),
-                        varlevelsup: sublevels_up as Index,
-                        varreturningtype: returning_type,
-                        varnosyn: rtindex as Index,
-                        varattnosyn: 1,
+                    mk_var(
+                        rtfunc.funccoltypes.nth(k),
+                        rtfunc.funccoltypmods.nth(k),
+                        rtfunc.funccolcollations.nth(k),
+                        attnum as i32,
+                    )?,
+                )?;
+            }
+        } else {
+            let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
+            match resolved.class {
+                funcapi::TypeFuncClass::Composite
+                | funcapi::TypeFuncClass::CompositeDomain => {
+                    let tupdesc =
+                        resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+                    debug_assert_eq!(rtfunc.funccolcount, tupdesc.natts);
+                    let (names, vars) = expandTupleDesc(
+                        mcx,
+                        &tupdesc,
+                        eref,
+                        rtfunc.funccolcount as usize,
+                        atts_done,
+                        rtindex,
+                        sublevels_up,
+                        returning_type,
                         location,
-                    },
-                )?,
-            )?;
-            Ok((colnames, colvars))
+                        include_dropped,
+                    )?;
+                    for n in &names {
+                        colnames.lappend(mcx, n)?;
+                    }
+                    for v in &vars {
+                        colvars.lappend(mcx, v)?;
+                    }
+                }
+                funcapi::TypeFuncClass::Scalar => {
+                    // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
+                    // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
+                    let (typmod, collation) = match funcexpr.as_func_expr() {
+                        Some(fe) => (-1, fe.funccollid),
+                        None => panic!(
+                            "expandRTE (parse_relation.c): non-FuncExpr scalar function \
+                             item (planner-folded expr) unported"
+                        ),
+                    };
+                    colnames.lappend(mcx, eref.colnames.nth(atts_done))?;
+                    colvars.lappend(
+                        mcx,
+                        mk_var(
+                            resolved.result_type_id,
+                            typmod,
+                            collation,
+                            atts_done as i32 + 1,
+                        )?,
+                    )?;
+                }
+                other => panic!(
+                    "expandRTE: function in FROM has unsupported return type ({other:?})"
+                ),
+            }
         }
-        other => panic!("expandRTE: function in FROM has unsupported return type ({other:?})"),
+        atts_done += rtfunc.funccolcount as usize;
     }
+
+    if rte.funcordinality {
+        colnames.lappend(mcx, *eref.colnames.as_slice().last().expect("ordinality alias"))?;
+        colvars.lappend(
+            mcx,
+            mk_var(types_core::catalog::INT8OID, -1, InvalidOid, atts_done as i32 + 1)?,
+        )?;
+    }
+
+    Ok((colnames, colvars))
 }
 
 #[allow(clippy::too_many_arguments)]

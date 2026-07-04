@@ -80,11 +80,11 @@ pub fn init_all() {
     vars::init_seams();
     parser_driver::init_seams();
     parse_expr::init_seams();
+    parse_func::init_seams();
+    parse_utilcmd::init_seams();
     parse_collate::init_seams();
     parse_clause::init_seams();
     parser_analyze::init_seams();
-    parse_func::init_seams();
-    parse_utilcmd::init_seams();
     scan_fgram::init_seams();
     pg_sema::init_seams();
     autovacuum::init_seams();

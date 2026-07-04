@@ -13,13 +13,17 @@ use types_core::catalog::{RECORDOID, UNKNOWNOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION,
-    ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::primnodes::{Aggref, WindowFunc, AGGKIND_HYPOTHETICAL, AGGKIND_ORDERED_SET};
 use types_nodes::parsenodes::ObjectType;
 use types_nodes::rawnodes::FuncCall;
-use types_nodes::{CoercionForm, FuncExpr, Node, NodeList, NodeTag};
+use types_nodes::{CoercionForm, FuncExpr, NamedArgExpr, Node, NodeList, NodeTag};
+
+pub fn init_seams() {
+    clauses_seams::recheck_cast_function_args::set(recheck_cast_function_args);
+}
 
 const FUNC_MAX_ARGS: usize = 100;
 
@@ -89,12 +93,29 @@ pub fn ParseFuncOrColumn<'mcx>(
         return Err(too_many_arguments(pstate, location));
     }
 
-    let fdresult = func_get_detail(
+    // C: mixed notation is allowed, but only with all the named parameters
+    // after all the unnamed ones, so argnames maps onto the last N actuals.
+    let mut argnames: PgVec<'mcx, &'mcx str> = PgVec::new_in(mcx);
+    for arg in &fargs {
+        if let Some(na) = arg.as_named_arg_expr() {
+            let name = na.name.expect("NamedArgExpr in fargs carries a name");
+            if argnames.iter().any(|prev| *prev == name) {
+                return Err(duplicate_argument_name(pstate, name, na.location));
+            }
+            argnames.push(name);
+        } else if !argnames.is_empty() {
+            return Err(positional_after_named(pstate, expr_location(arg)));
+        }
+    }
+
+    let nargs = fargs.len() as i16;
+    let (fdresult, fargs) = func_get_detail(
         mcx,
         parts,
-        &fargs,
-        fargs.len() as i16,
+        fargs,
+        nargs,
         actual_arg_types,
+        argnames.as_slice(),
         !fn_call.func_variadic,
     )?;
 
@@ -110,7 +131,9 @@ pub fn ParseFuncOrColumn<'mcx>(
             CoercionForm::COERCE_EXPLICIT_CALL,
             location,
         ),
-        FuncDetail::Multiple => Err(ambiguous_function(pstate, parts, actual_arg_types, location)),
+        FuncDetail::Multiple => {
+            Err(ambiguous_function(pstate, parts, argnames.as_slice(), actual_arg_types, location))
+        }
         FuncDetail::Normal {
             funcid,
             rettype,
@@ -382,6 +405,17 @@ pub fn ParseFuncOrColumn<'mcx>(
                 ));
             }
 
+            // C: named notation would need NamedArgExpr-vs-TargetEntry layering
+            // decisions plus planner reordering; disallowed for aggregates.
+            if !argnames.is_empty() {
+                return Err(feature_not_supported(
+                    pstate,
+                    "aggregates cannot use named arguments".into(),
+                    None,
+                    location,
+                ));
+            }
+
             let mut aggref = Node::build::<Aggref>(mcx)?;
             aggref.aggfnoid = funcid;
             aggref.aggtype = rettype;
@@ -404,7 +438,10 @@ pub fn ParseFuncOrColumn<'mcx>(
         }
         FuncDetail::Procedure { .. } => Err(wrong_object_type_hint(
             pstate,
-            format!("{} is a procedure", func_signature_string(parts, actual_arg_types)?),
+            format!(
+                "{} is a procedure",
+                func_signature_string(parts, argnames.as_slice(), actual_arg_types)?
+            ),
             "To call a procedure, use CALL.",
             location,
         )),
@@ -446,6 +483,7 @@ pub fn ParseFuncOrColumn<'mcx>(
         FuncDetail::NotFound => Err(undefined_function(
             pstate,
             parts,
+            argnames.as_slice(),
             actual_arg_types,
             fn_call.agg_order.len() > 1 && !fn_call.agg_within_group,
             location,
@@ -808,15 +846,18 @@ fn default_expr_type(node: Node<'_>) -> Oid {
     }
 }
 
+// Named/mixed notation returns a rebuilt fargs whose NamedArgExpr wrappers
+// carry the winning candidate's argnumbers (C writes na->argnumber in place).
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
     parts: &[&str],
-    fargs: &NodeList<'mcx>,
+    fargs: NodeList<'mcx>,
     nargs: i16,
     argtypes: &[Oid],
+    argnames: &[&str],
     expand_variadic: bool,
-) -> PgResult<FuncDetail<'mcx>> {
-    let candidates = FuncnameGetCandidates(mcx, parts, nargs, expand_variadic, true)?;
+) -> PgResult<(FuncDetail<'mcx>, NodeList<'mcx>)> {
+    let candidates = FuncnameGetCandidates(mcx, parts, nargs, argnames, expand_variadic, true)?;
 
     let mut best: Option<&FuncCandidate<'_>> = None;
     for cand in candidates.iter() {
@@ -828,7 +869,7 @@ fn func_get_detail<'mcx>(
     }
 
     if best.is_none() {
-        if nargs == 1 && !fargs.is_nil() {
+        if nargs == 1 && !fargs.is_nil() && argnames.is_empty() {
             let target_type = FuncNameAsType(parts)?;
             if OidIsValid(target_type) {
                 let source_type = argtypes[0];
@@ -849,7 +890,7 @@ fn func_get_detail<'mcx>(
                     }
                 };
                 if iscoercion {
-                    return Ok(FuncDetail::Coercion { rettype: target_type });
+                    return Ok((FuncDetail::Coercion { rettype: target_type }, fargs));
                 }
             }
         }
@@ -861,21 +902,53 @@ fn func_get_detail<'mcx>(
             } else if matched.len() > 1 {
                 match func_select_candidate(argtypes, matched)? {
                     Some(c) => best = Some(c),
-                    None => return Ok(FuncDetail::Multiple),
+                    None => return Ok((FuncDetail::Multiple, fargs)),
                 }
             }
         }
     }
 
     let Some(best) = best else {
-        return Ok(FuncDetail::NotFound);
+        return Ok((FuncDetail::NotFound, fargs));
     };
     // C: an InvalidOid "best candidate" is the ambiguous-set placeholder.
     if !OidIsValid(best.oid) {
-        return Ok(FuncDetail::Multiple);
+        return Ok((FuncDetail::Multiple, fargs));
+    }
+    // C: VARIADIC with named arguments is only allowed when the decorated
+    // last argument actually matched the variadic parameter.
+    if !argnames.is_empty() && !expand_variadic && nargs > 0 {
+        let an = best.argnumbers.as_ref().expect("named-notation candidate carries argnumbers");
+        if an[nargs as usize - 1] != nargs as i32 - 1 {
+            return Ok((FuncDetail::NotFound, fargs));
+        }
     }
     let funcid = best.oid;
     let declared_arg_types = mcx::slice_in(mcx, best.args.as_slice())?;
+
+    // C: return actual argument positions into the NamedArgExpr nodes.
+    let fargs = match best.argnumbers.as_ref() {
+        None => fargs,
+        Some(an) => {
+            let mut out = NodeList::nil();
+            for (i, cell) in fargs.iter().enumerate() {
+                let node = match cell.as_named_arg_expr() {
+                    None => cell,
+                    Some(na) => Node::mk(
+                        mcx,
+                        NamedArgExpr {
+                            arg: na.arg,
+                            name: na.name,
+                            argnumber: an[i],
+                            location: na.location,
+                        },
+                    )?,
+                };
+                out.lappend(mcx, node)?;
+            }
+            out
+        }
+    };
 
     let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
         .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (parse_func.c)"));
@@ -903,15 +976,32 @@ fn func_get_detail<'mcx>(
         let Some(list) = defaults.as_list() else {
             panic!("proargdefaults of {funcid} is not a List");
         };
-        // Defaults attach to the trailing parameters: take the list tail.
-        let skip = list.len() - best.ndargs as usize;
-        for (i, cell) in list.iter().enumerate() {
-            if i >= skip {
-                argdefaults.push(cell);
+        match best.argnumbers.as_ref() {
+            // C: in named notation the supplied args can replace any subset of
+            // the defaults; keep the defaults whose argnumber the candidate's
+            // defaulted tail names (positional order preserved).
+            Some(an) => {
+                let firstdefarg = &an[(best.nargs - best.ndargs) as usize..best.nargs as usize];
+                let start = best.nominal_nargs as i32 - list.len() as i32;
+                for (i, cell) in list.iter().enumerate() {
+                    if firstdefarg.contains(&(start + i as i32)) {
+                        argdefaults.push(cell);
+                    }
+                }
+                debug_assert_eq!(argdefaults.len(), best.ndargs as usize);
+            }
+            None => {
+                // Defaults attach to the trailing parameters: take the tail.
+                let skip = list.len() - best.ndargs as usize;
+                for (i, cell) in list.iter().enumerate() {
+                    if i >= skip {
+                        argdefaults.push(cell);
+                    }
+                }
             }
         }
     }
-    Ok(match shape.prokind {
+    let detail = match shape.prokind {
         PROKIND_AGGREGATE => FuncDetail::Aggregate {
             funcid,
             rettype: shape.prorettype,
@@ -935,7 +1025,8 @@ fn func_get_detail<'mcx>(
             declared_arg_types,
         },
         other => panic!("unrecognized prokind: {other} (parse_func.c func_get_detail)"),
-    })
+    };
+    Ok((detail, fargs))
 }
 
 // check_srf_call_placement. DIVERGENCE: the nested-SRF errposition points at
@@ -1116,8 +1207,7 @@ fn post_coercion_type(actual: Oid, declared: Oid) -> PgResult<Oid> {
 }
 
 // make_fn_arguments (parse_func.c). Divergence: rebuilds the list instead of
-// C's in-place lfirst replacement; NamedArgExpr is unrepresented in
-// types_nodes, so named-argument wrapping cannot arise.
+// C's in-place lfirst/na->arg replacement.
 fn make_fn_arguments<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
@@ -1131,23 +1221,70 @@ fn make_fn_arguments<'mcx>(
     let mut out = NodeList::nil();
     for (i, node) in fargs.iter().enumerate() {
         let node = if actual_arg_types[i] != declared_arg_types[i] {
-            coerce::coerce_type(
-                mcx,
-                pstate,
-                node,
-                actual_arg_types[i],
-                declared_arg_types[i],
-                -1,
-                COERCION_IMPLICIT,
-                CoercionForm::COERCE_IMPLICIT_CAST,
-                -1,
-            )?
+            let coerce_one = |arg| {
+                coerce::coerce_type(
+                    mcx,
+                    pstate,
+                    arg,
+                    actual_arg_types[i],
+                    declared_arg_types[i],
+                    -1,
+                    COERCION_IMPLICIT,
+                    CoercionForm::COERCE_IMPLICIT_CAST,
+                    -1,
+                )
+            };
+            match node.as_named_arg_expr() {
+                // C: coerce the input expr; the NamedArgExpr stays on top.
+                Some(na) => Node::mk(
+                    mcx,
+                    NamedArgExpr {
+                        arg: coerce_one(na.arg)?,
+                        name: na.name,
+                        argnumber: na.argnumber,
+                        location: na.location,
+                    },
+                )?,
+                None => coerce_one(node)?,
+            }
         } else {
             node
         };
         out.lappend(mcx, node)?;
     }
     Ok(out)
+}
+
+// recheck_cast_function_args' parser tail (clauses.c): re-resolve polymorphics
+// and re-coerce exactly as the parser did; installed behind clauses_seams (a
+// clauses -> parser dependency cycles).
+fn recheck_cast_function_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: NodeList<'mcx>,
+    actual_arg_types: &[Oid],
+    declared_arg_types: &[Oid],
+    result_type: Oid,
+    prorettype: Oid,
+) -> PgResult<NodeList<'mcx>> {
+    if args.len() > FUNC_MAX_ARGS {
+        return Err(Box::new(PgError::error("too many function arguments")));
+    }
+    debug_assert_eq!(args.len(), actual_arg_types.len());
+    let mut declared = mcx::slice_in(mcx, declared_arg_types)?;
+    let rettype = coerce::enforce_generic_type_consistency(
+        actual_arg_types,
+        declared.as_mut_slice(),
+        prorettype,
+        false,
+    )?;
+    // C: just check we got the same answer as the parser did.
+    if rettype != result_type {
+        return Err(Box::new(PgError::error(
+            "function's resolved result type changed during planning",
+        )));
+    }
+    let pstate = parser_small1::make_parsestate(mcx, None);
+    make_fn_arguments(mcx, &pstate, args, actual_arg_types, declared.as_slice())
 }
 
 fn name_parts<'a, 'mcx>(name: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
@@ -1162,17 +1299,54 @@ fn name_list_to_string(parts: &[&str]) -> String {
     parts.join(".")
 }
 
-fn func_signature_string(parts: &[&str], argtypes: &[Oid]) -> PgResult<String> {
+fn func_signature_string(parts: &[&str], argnames: &[&str], argtypes: &[Oid]) -> PgResult<String> {
     let mut sig = name_list_to_string(parts);
     sig.push('(');
+    let numposargs = argtypes.len() - argnames.len();
     for (i, &t) in argtypes.iter().enumerate() {
         if i > 0 {
             sig.push_str(", ");
+        }
+        if i >= numposargs {
+            sig.push_str(argnames[i - numposargs]);
+            sig.push_str(" => ");
         }
         sig.push_str(&format_type::format_type_be(t)?);
     }
     sig.push(')');
     Ok(sig)
+}
+
+#[cold]
+#[inline(never)]
+fn duplicate_argument_name(
+    pstate: &ParseState<'_, '_>,
+    name: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("argument name \"{name}\" used more than once"))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn positional_after_named(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("positional argument cannot follow named argument")
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
 }
 
 #[cold]
@@ -1219,6 +1393,10 @@ fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             leftmost(f.location, list_loc(&f.args))
+        }
+        NodeTag::T_NamedArgExpr => {
+            let na = node.as_named_arg_expr().unwrap();
+            leftmost(na.location, expr_location(na.arg))
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
@@ -1304,10 +1482,11 @@ fn wrong_object_type_hint(
 fn ambiguous_function(
     pstate: &ParseState<'_, '_>,
     parts: &[&str],
+    argnames: &[&str],
     argtypes: &[Oid],
     location: ParseLoc,
 ) -> Box<PgError> {
-    let sig = match func_signature_string(parts, argtypes) {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
         Ok(sig) => sig,
         Err(e) => return e,
     };
@@ -1331,11 +1510,12 @@ fn ambiguous_function(
 fn undefined_function(
     pstate: &ParseState<'_, '_>,
     parts: &[&str],
+    argnames: &[&str],
     argtypes: &[Oid],
     misplaced_order_by: bool,
     location: ParseLoc,
 ) -> Box<PgError> {
-    let sig = match func_signature_string(parts, argtypes) {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
         Ok(sig) => sig,
         Err(e) => return e,
     };
@@ -1373,6 +1553,7 @@ fn lookup_func_name_internal(
         scratch.mcx(),
         parts,
         nargs,
+        &[],
         false,
         false,
         missing_ok,
@@ -1422,7 +1603,7 @@ fn function_does_not_exist(parts: &[&str], argtypes: &[Oid]) -> PgResult<Box<PgE
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
             .errmsg(format!(
                 "function {} does not exist",
-                func_signature_string(parts, argtypes)?
+                func_signature_string(parts, &[], argtypes)?
             ))
             .into_error(),
     ))
@@ -1562,7 +1743,7 @@ pub fn LookupFuncWithArgs(
                         .errcode(ERRCODE_UNDEFINED_FUNCTION)
                         .errmsg(format!(
                             "{noun} {} does not exist",
-                            func_signature_string(parts, &argoids[..argcount])?
+                            func_signature_string(parts, &[], &argoids[..argcount])?
                         ))
                         .into_error(),
                 ))
@@ -1576,7 +1757,7 @@ fn wrong_prokind(template: &str, parts: &[&str], argtypes: &[Oid]) -> PgResult<B
     Ok(Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(template.replacen("%s", &func_signature_string(parts, argtypes)?, 1))
+            .errmsg(template.replacen("%s", &func_signature_string(parts, &[], argtypes)?, 1))
             .into_error(),
     ))
 }

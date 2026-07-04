@@ -2078,6 +2078,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "readfuncs",
  "stack_depth",
  "syscache_seams",
  "typcache_seams",
@@ -7050,6 +7051,7 @@ name = "parse_func"
 version = "0.0.0"
 dependencies = [
  "catalog_namespace",
+ "clauses_seams",
  "coerce",
  "elog",
  "format_type",
@@ -7121,6 +7123,8 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nodes_core",
+ "parse_utilcmd_seams",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
@@ -7209,6 +7213,7 @@ name = "parse_utilcmd_seams"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "parser_small1",
  "seam_core",
  "types_core",
  "types_error",

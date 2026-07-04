@@ -83,7 +83,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{FuncAliasCols, JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -501,6 +501,33 @@ impl<'mcx> Parser<'mcx> {
                 n.if_not_exists = false;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // CreateStmt: CREATE OptTemp TABLE [IF_P NOT EXISTS] qualified_name
+            // OF any_name OptTypedTableElementList OptPartitionSpec
+            // table_access_method_clause OptWith OnCommitOption OptTableSpace
+            457 | 458 => {
+                let d = if rule == 458 { 3 } else { 0 };
+                let persistence = view.v(2).ival() as u8;
+                let relation = view.v(4 + d).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let of_typename =
+                    make_type_name(mcx, view.v(6 + d).list(), NodeList::nil(), view.l(6 + d))?;
+                let mut n = Node::build::<CreateStmt>(mcx)?;
+                n.relation = relation.as_variant::<RangeVar>();
+                n.tableElts = view.v(7 + d).list();
+                n.partspec = view.v(8 + d).node();
+                n.ofTypename = Some(of_typename);
+                n.accessMethod = opt_str(view.v(9 + d));
+                n.options = view.v(10 + d).list();
+                n.oncommit = on_commit_action(view.v(11 + d).ival());
+                n.tablespacename = opt_str(view.v(12 + d));
+                n.if_not_exists = rule == 458;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // PartitionBoundSpec: FOR VALUES WITH '(' hash_partbound ')'
             393 => {
                 let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
@@ -621,6 +648,33 @@ impl<'mcx> Parser<'mcx> {
                 n.oncommit = on_commit_action(view.v(13).ival());
                 n.tablespacename = opt_str(view.v(14));
                 n.if_not_exists = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateStmt: CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name
+            // PARTITION OF qualified_name OptTypedTableElementList
+            // PartitionBoundSpec OptPartitionSpec table_access_method_clause
+            // OptWith OnCommitOption OptTableSpace
+            460 => {
+                let persistence = view.v(2).ival() as u8;
+                let relation = view.v(7).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let parent = view.v(10).node().expect("qualified_name");
+                let mut n = Node::build::<CreateStmt>(mcx)?;
+                n.relation = relation.as_variant::<RangeVar>();
+                n.tableElts = view.v(11).list();
+                n.inhRelations = NodeList::make1(mcx, parent)?;
+                n.partbound = view.v(12).node();
+                n.partspec = view.v(13).node();
+                n.accessMethod = opt_str(view.v(14));
+                n.options = view.v(15).list();
+                n.oncommit = on_commit_action(view.v(16).ival());
+                n.tablespacename = opt_str(view.v(17));
+                n.if_not_exists = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // CreateAsStmt: CREATE OptTemp TABLE [IF_P NOT EXISTS]
@@ -836,6 +890,17 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, el)?;
                 *yyval = YYSTYPE::List(list);
             }
+            // TypedTableElementList: TypedTableElement [',' TypedTableElement]
+            475 => {
+                let el = view.v(1).node().expect("TypedTableElement");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            476 => {
+                let mut list = view.v(1).list();
+                let el = view.v(3).node().expect("TypedTableElement");
+                list.lappend(mcx, el)?;
+                *yyval = YYSTYPE::List(list);
+            }
             // columnDef: ColId Typename opt_column_storage
             // opt_column_compression create_generic_options ColQualList
             482 => {
@@ -872,6 +937,35 @@ impl<'mcx> Parser<'mcx> {
                 n.is_local = true;
                 n.constraints = constraints;
                 n.fdwoptions = fdwoptions;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // columnOptions: ColId ColQualList | ColId WITH OPTIONS ColQualList
+            483 | 484 => {
+                let quals = view.v(if rule == 484 { 4 } else { 2 }).list();
+                // SplitColQualList: COLLATE splits out; Constraints stay.
+                let mut constraints = NodeList::nil();
+                let mut coll_clause: Option<Node<'_>> = None;
+                for q in quals.iter() {
+                    match q.node_tag() {
+                        NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
+                        NodeTag::T_CollateClause => {
+                            if coll_clause.is_some() {
+                                return Err(self.errposition_error(
+                                    "multiple COLLATE clauses not allowed".into(),
+                                    q.as_collate_clause().unwrap().location,
+                                ));
+                            }
+                            coll_clause = Some(q);
+                        }
+                        other => panic!("unexpected node type {other:?} in ColQualList"),
+                    }
+                }
+                let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.collClause = coll_clause;
+                n.colname = Some(view.v(1).str_val());
+                n.is_local = true;
+                n.constraints = constraints;
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
@@ -2335,23 +2429,66 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rf));
             }
-            // func_alias_clause coldeflist arms stay unimplemented-rule louds.
             1858 => {
                 let alias = view.v(1).alias();
                 *yyval = YYSTYPE::FuncAlias(alias, NodeList::nil());
             }
+            1859..=1861 => {
+                let (alias, cols) = match rule {
+                    1859 => (None, view.v(3).list()),
+                    1860 | 1861 => {
+                        let off = if rule == 1860 { 1 } else { 0 };
+                        let a = Node::mk_mut(
+                            mcx,
+                            Alias {
+                                aliasname: Some(view.v(1 + off).str_val()),
+                                colnames: NodeList::nil(),
+                            },
+                        )?;
+                        (Some(a.seal_ref()), view.v(3 + off).list())
+                    }
+                    _ => unreachable!(),
+                };
+                let c = mcx::leak_in(mcx::alloc_in(mcx, FuncAliasCols { alias, coldeflist: cols })?);
+                *yyval = YYSTYPE::FuncAliasV(c);
+            }
             1862 => {
                 *yyval = YYSTYPE::FuncAlias(None, NodeList::nil());
             }
-            // DIVERGENCE: functions holds bare funcexprs, not C's (funcexpr,
-            // coldeflist) sublists; the ROWS FROM lane restores the pair shape.
+            // func_table: functions cells are C's (funcexpr, coldeflist) 2-lists.
             1884 => {
                 let fexpr = view.v(1).node().expect("func_expr_windowless");
                 let ordinality = view.v(2).boolean();
+                let mut pair = NodeList::make1(mcx, fexpr)?;
+                pair.lappend(mcx, Node::mk_list(mcx, NodeList::nil())?)?;
                 let mut n = Node::build::<RangeFunction>(mcx)?;
                 n.ordinality = ordinality;
-                n.functions = NodeList::make1(mcx, fexpr)?;
+                n.functions = NodeList::make1(mcx, Node::mk_list(mcx, pair)?)?;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // func_table: ROWS FROM '(' rowsfrom_list ')' opt_ordinality
+            1885 => {
+                let mut n = Node::build::<RangeFunction>(mcx)?;
+                n.ordinality = view.v(6).boolean();
+                n.is_rowsfrom = true;
+                n.functions = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // rowsfrom_item: func_expr_windowless opt_col_def_list
+            1886 => {
+                let mut pair =
+                    NodeList::make1(mcx, view.v(1).node().expect("func_expr_windowless"))?;
+                pair.lappend(mcx, Node::mk_list(mcx, view.v(2).list())?)?;
+                *yyval = YYSTYPE::List(pair);
+            }
+            1887 => {
+                *yyval =
+                    YYSTYPE::List(NodeList::make1(mcx, Node::mk_list(mcx, view.v(1).list())?)?);
+            }
+            1888 => {
+                let mut l = view.v(1).list();
+                l.lappend(mcx, Node::mk_list(mcx, view.v(3).list())?)?;
+                *yyval = YYSTYPE::List(l);
             }
             1891 => *yyval = YYSTYPE::Boolean(true),
             1892 => *yyval = YYSTYPE::Boolean(false),
@@ -3225,6 +3362,19 @@ impl<'mcx> Parser<'mcx> {
                 let e = view.v(1).node().expect("a_expr");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, e)?);
             }
+            // func_arg_expr: param_name COLON_EQUALS/EQUALS_GREATER a_expr
+            2295 | 2296 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::NamedArgExpr {
+                        arg: view.v(3).node().expect("a_expr"),
+                        name: Some(view.v(1).str_val()),
+                        argnumber: -1,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             2291 | 2293 => {
                 let mut list = view.v(1).list();
                 let e = view.v(3).node().expect("a_expr");
@@ -3882,6 +4032,17 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // COLLATION FOR '(' a_expr ')'.
+            2139 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "pg_collation_for")?,
+                    NodeList::make1(mcx, view.v(4).node().expect("a_expr"))?,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
             // SYSTEM_USER: FuncCall via SystemFuncName.
             2152 => {
                 let names = NodeList::make2(
@@ -3909,6 +4070,110 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
+            // NORMALIZE '(' a_expr [',' unicode_normal_form] ')'.
+            2158 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "normalize")?,
+                    NodeList::make1(mcx, view.v(3).node().expect("a_expr"))?,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            2159 => {
+                let form = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(5).str_val() })),
+                    view.l(5),
+                )?;
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "normalize")?,
+                    NodeList::make2(mcx, view.v(3).node().expect("a_expr"), form)?,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // OVERLAY '(' overlay_list ')' — SQL-syntax form.
+            2160 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "overlay")?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // OVERLAY '(' func_arg_list_opt ')' — plain call form.
+            2161 => {
+                let f = make_func_call(
+                    mcx,
+                    NodeList::make1(mcx, Node::mk_string(mcx, "overlay")?)?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_EXPLICIT_CALL,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // POSITION '(' position_list ')'.
+            2162 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "position")?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // TREAT '(' a_expr AS Typename ')': funcname from type's last name.
+            2165 => {
+                let t = view.v(5).node().expect("Typename").as_type_name().expect("TypeName");
+                let name = t.names.last().expect("TypeName names").as_string().expect("String");
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, name.sval)?,
+                    NodeList::make1(mcx, view.v(3).node().expect("a_expr"))?,
+                    CoercionForm::COERCE_EXPLICIT_CALL,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // TRIM '(' [BOTH|LEADING|TRAILING] trim_list ')'.
+            2166..=2169 => {
+                let (name, li) = match rule {
+                    2166 => ("btrim", 4),
+                    2167 => ("ltrim", 4),
+                    2168 => ("rtrim", 4),
+                    _ => ("btrim", 3),
+                };
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, name)?,
+                    view.v(li).list(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // NULLIF '(' a_expr ',' a_expr ')' — makeSimpleA_Expr(AEXPR_NULLIF, "=").
+            2170 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind: A_Expr_Kind::AEXPR_NULLIF,
+                        name: NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?,
+                        lexpr: view.v(3).node(),
+                        rexpr: view.v(5).node(),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: view.l(1),
+                    },
+                )?));
+            }
             // extract_list: extract_arg FROM a_expr.
             2306 => {
                 let s = Node::mk_a_const(
@@ -3924,6 +4189,44 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Str(
                     ["year", "month", "day", "hour", "minute", "second"][rule - 2308],
                 );
+            }
+            // unicode_normal_form: NFC | NFD | NFKC | NFKD.
+            2315..=2318 => {
+                *yyval = YYSTYPE::Str(["NFC", "NFD", "NFKC", "NFKD"][rule - 2315]);
+            }
+            // overlay_list: a_expr PLACING a_expr FROM a_expr [FOR a_expr].
+            2319 => {
+                *yyval = YYSTYPE::List(NodeList::from_slice(
+                    mcx,
+                    &[
+                        view.v(1).node().expect("a_expr"),
+                        view.v(3).node().expect("a_expr"),
+                        view.v(5).node().expect("a_expr"),
+                        view.v(7).node().expect("a_expr"),
+                    ],
+                )?);
+            }
+            2320 => {
+                *yyval = YYSTYPE::List(NodeList::make3(
+                    mcx,
+                    view.v(1).node().expect("a_expr"),
+                    view.v(3).node().expect("a_expr"),
+                    view.v(5).node().expect("a_expr"),
+                )?);
+            }
+            // position_list: b_expr IN_P b_expr — position(A in B) is position(B, A).
+            2321 => {
+                *yyval = YYSTYPE::List(NodeList::make2(
+                    mcx,
+                    view.v(3).node().expect("b_expr"),
+                    view.v(1).node().expect("b_expr"),
+                )?);
+            }
+            // trim_list: a_expr FROM expr_list (FROM-only/plain ride DISPATCH).
+            2327 => {
+                let mut list = view.v(3).list();
+                list.lappend(mcx, view.v(1).node().expect("a_expr"))?;
+                *yyval = YYSTYPE::List(list);
             }
             // generic_set: var_name TO var_list | var_name '=' var_list.
             207 | 208 => {
@@ -5548,8 +5851,68 @@ impl<'mcx> Parser<'mcx> {
                 n.behavior = drop_behavior(view.v(5).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // CreateFunctionStmt (RETURNS TABLE 1127 stays loud:
-            // mergeTableFuncParameters unported).
+            // CreateFunctionStmt: RETURNS TABLE (mergeTableFuncParameters +
+            // TableFuncTypeName inline).
+            1127 => {
+                let mut n = Node::build::<CreateFunctionStmt>(mcx)?;
+                n.is_procedure = false;
+                n.replace = view.v(2).boolean();
+                n.funcname = view.v(4).list();
+                let mut params = view.v(5).list();
+                let columns = view.v(9).list();
+                for p in &params {
+                    let fp = p
+                        .as_variant::<FunctionParameter>()
+                        .expect("func_args_with_defaults cell");
+                    match fp.mode {
+                        FunctionParameterMode::FUNC_PARAM_DEFAULT
+                        | FunctionParameterMode::FUNC_PARAM_IN
+                        | FunctionParameterMode::FUNC_PARAM_VARIADIC => {}
+                        _ => {
+                            return Err(self.errposition_error(
+                                "OUT and INOUT arguments aren't allowed in TABLE functions"
+                                    .into(),
+                                fp.location,
+                            ))
+                        }
+                    }
+                }
+                for c in &columns {
+                    params.lappend(mcx, c)?;
+                }
+                n.parameters = params;
+                let mut t = Node::build::<TypeName>(mcx)?;
+                if columns.len() == 1 {
+                    let p = columns
+                        .nth(0)
+                        .as_variant::<FunctionParameter>()
+                        .expect("table_func_column");
+                    let src = p
+                        .argType
+                        .expect("table_func_column has a type")
+                        .as_type_name()
+                        .expect("TypeName");
+                    t.names = src.names.clone_in(mcx)?;
+                    t.typeOid = src.typeOid;
+                    t.pct_type = src.pct_type;
+                    t.typmods = src.typmods.clone_in(mcx)?;
+                    t.typemod = src.typemod;
+                    t.arrayBounds = src.arrayBounds.clone_in(mcx)?;
+                } else {
+                    t.names = NodeList::make2(
+                        mcx,
+                        Node::mk_string(mcx, "pg_catalog")?,
+                        Node::mk_string(mcx, "record")?,
+                    )?;
+                    t.typemod = -1;
+                }
+                t.setof = true;
+                t.location = view.l(7);
+                n.returnType = Some(t.seal());
+                n.options = view.v(11).list();
+                n.sql_body = view.v(12).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1126 | 1128 | 1129 => {
                 let mut n = Node::build::<CreateFunctionStmt>(mcx)?;
                 n.is_procedure = rule == 1129;
@@ -5591,6 +5954,24 @@ impl<'mcx> Parser<'mcx> {
                     .unwrap_or(FunctionParameterMode::FUNC_PARAM_DEFAULT);
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // table_func_column: param_name func_type
+            1214 => {
+                let mut n = Node::build::<FunctionParameter>(mcx)?;
+                n.name = Some(view.v(1).str_val());
+                n.argType = view.v(2).node();
+                n.mode = FunctionParameterMode::FUNC_PARAM_TABLE;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1215 => {
+                let el = view.v(1).node().expect("table_func_column");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1216 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("table_func_column"))?;
+                *yyval = YYSTYPE::List(list);
             }
             1151 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_IN as i32),
             1152 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_OUT as i32),

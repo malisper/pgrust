@@ -637,12 +637,30 @@ fn accumulate_append_subpath(
     subpaths.push(path);
 }
 
-// set_function_pathlist (allpaths.c); the ORDINALITY pathkey leg is dead
-// (funcordinality is loud in the parser).
+// set_function_pathlist (allpaths.c).
 fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
-    debug_assert!(!run.rte(rti).funcordinality);
+    let mut pathkeys = mcx::PgVec::new_in(run.mcx);
+    if run.rte(rti).funcordinality {
+        // Ordered by the ordinal (last) column when some EC already cares.
+        let ordattno = run.root.rel(rel).max_attr;
+        let mut ordvar = None;
+        for &eid in run.root.rel_reltarget(rel).exprs.iter() {
+            let node = *run.root.expr_node(eid);
+            if let Some(v) = node.as_var() {
+                if v.varattno == ordattno && v.varno == rti as i32 && v.varlevelsup == 0 {
+                    ordvar = Some(node);
+                    break;
+                }
+            }
+        }
+        if let Some(var) = ordvar {
+            const INT8_LESS_OPERATOR: u32 = 412;
+            pathkeys =
+                crate::pathkeys::build_expression_pathkey(run, var, INT8_LESS_OPERATOR, false)?;
+        }
+    }
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
-    let path = crate::pathnode::create_functionscan_path(run, rel, &required_outer)?;
+    let path = crate::pathnode::create_functionscan_path(run, rel, pathkeys, &required_outer)?;
     add_path(run, rel, path);
     Ok(())
 }

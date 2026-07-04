@@ -916,11 +916,42 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr
         | NodeTag::T_SortGroupClause => Ok(None),
+        // C's T_WindowFunc arm can't simplify the node but still expands
+        // named args/defaults in its argument list before recursing.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            let shape = syscache_seams::lookup_pg_proc_shape::call(wf.winfnoid)?
+                .ok_or_else(|| func_lookup_failed(wf.winfnoid))?;
+            match expand_function_arguments(cx.mcx, &wf.args, wf.wintype, wf.winfnoid, &shape)? {
+                None => expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx)),
+                Some(args) => {
+                    let expanded = Node::mk(
+                        cx.mcx,
+                        types_nodes::primnodes::WindowFunc {
+                            winfnoid: wf.winfnoid,
+                            wintype: wf.wintype,
+                            wincollid: wf.wincollid,
+                            inputcollid: wf.inputcollid,
+                            args,
+                            aggfilter: wf.aggfilter,
+                            runCondition: wf.runCondition.clone_in(cx.mcx)?,
+                            winref: wf.winref,
+                            winstar: wf.winstar,
+                            winagg: wf.winagg,
+                            location: wf.location,
+                        },
+                    )?;
+                    Ok(Some(
+                        expression_tree_mutator(cx.mcx, expanded, &mut |n| ece_mutator(n, cx))?
+                            .unwrap_or(expanded),
+                    ))
+                }
+            }
+        }
         // Aggref takes C's default ece_generic_processing arm: fold inside
         // the aggregate's arguments, never the Aggref itself. SubLink likewise
         // (C folds testexpr only; the sub-Query waits for SS_process_sublinks).
         NodeTag::T_Aggref
-        | NodeTag::T_WindowFunc
         | NodeTag::T_TargetEntry
         | NodeTag::T_FromExpr
         | NodeTag::T_SubLink
@@ -1026,8 +1057,15 @@ fn simplify_function<'mcx>(
 
     let mut new_args: Option<NodeList<'mcx>> = None;
     if process_args {
-        expand_function_arguments_gate(args, &shape);
-        new_args = mutate_list(cx.mcx, args, &mut |n| ece_mutator(n, cx))?;
+        new_args = match expand_function_arguments(cx.mcx, args, result_type, funcid, &shape)? {
+            Some(expanded) => {
+                Some(match mutate_list(cx.mcx, &expanded, &mut |n| ece_mutator(n, cx))? {
+                    Some(l) => l,
+                    None => expanded,
+                })
+            }
+            None => mutate_list(cx.mcx, args, &mut |n| ece_mutator(n, cx))?,
+        };
     }
     let eff_args = new_args.as_ref().unwrap_or(args);
 
@@ -1165,16 +1203,140 @@ fn sql_inline_recursion_error<'mcx>(
     Box::new(err)
 }
 
-/// Pass-through case (positional, no defaults) returns args unchanged;
-/// named-arg reordering and default insertion need proargdefaults decode.
-fn expand_function_arguments_gate(args: &NodeList<'_>, shape: &PgProcShape) {
-    for a in args {
-        if a.node_tag() == NodeTag::T_NamedArgExpr {
-            panic!("expand_function_arguments deferred: named-argument notation");
+const FUNC_MAX_ARGS: usize = 100;
+
+/// expand_function_arguments (clauses.c), include_out_arguments=false leg
+/// (proallargtypes matching is CALL-only). None = args unchanged. This is
+/// what strips NamedArgExpr before execution.
+fn expand_function_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: &NodeList<'mcx>,
+    result_type: Oid,
+    funcid: Oid,
+    shape: &PgProcShape,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    let pronargs = shape.pronargs as usize;
+    let has_named_args = args.iter().any(|a| a.node_tag() == NodeTag::T_NamedArgExpr);
+
+    let reordered = if has_named_args {
+        reorder_function_arguments(mcx, args, pronargs, funcid)?
+    } else if args.len() < pronargs {
+        add_function_defaults(mcx, args, pronargs, funcid)?
+    } else {
+        return Ok(None);
+    };
+
+    // C: recheck argument types and add casts if needed.
+    let (prorettype, proargtypes) = syscache_seams::lookup_pg_proc_signature::call(mcx, funcid)?
+        .ok_or_else(|| func_lookup_failed(funcid))?;
+    let mut actual_arg_types: mcx::PgVec<'mcx, Oid> =
+        mcx::vec_with_capacity_in(mcx, reordered.len())?;
+    for a in &reordered {
+        actual_arg_types.push(nodes_core::node_funcs::expr_type(a));
+    }
+    debug_assert_eq!(actual_arg_types.len(), pronargs);
+    let rechecked = clauses_seams::recheck_cast_function_args::call(
+        mcx,
+        reordered,
+        actual_arg_types.as_slice(),
+        proargtypes.as_slice(),
+        result_type,
+        prorettype,
+    )?;
+    Ok(Some(rechecked))
+}
+
+/// reorder_function_arguments (clauses.c): convert named-notation args to
+/// positional, inserting defaults as needed.
+fn reorder_function_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: &NodeList<'mcx>,
+    pronargs: usize,
+    funcid: Oid,
+) -> PgResult<NodeList<'mcx>> {
+    let nargsprovided = args.len();
+    debug_assert!(nargsprovided <= pronargs);
+    if pronargs > FUNC_MAX_ARGS {
+        return Err(Box::new(PgError::error("too many function arguments")));
+    }
+    let mut argarray: mcx::PgVec<'mcx, Option<Node<'mcx>>> =
+        mcx::vec_with_capacity_in(mcx, pronargs)?;
+    for _ in 0..pronargs {
+        argarray.push(None);
+    }
+    let mut i = 0usize;
+    for arg in args {
+        match arg.as_named_arg_expr() {
+            // C: positional argument, assumed to precede all named args.
+            None => {
+                debug_assert!(argarray[i].is_none());
+                argarray[i] = Some(arg);
+                i += 1;
+            }
+            Some(na) => {
+                debug_assert!(na.argnumber >= 0 && (na.argnumber as usize) < pronargs);
+                debug_assert!(argarray[na.argnumber as usize].is_none());
+                argarray[na.argnumber as usize] = Some(na.arg);
+            }
         }
     }
-    if args.len() < shape.pronargs as usize {
-        panic!("expand_function_arguments deferred: default-argument insertion");
+    if nargsprovided < pronargs {
+        // C: defaults aren't necessarily consecutive or all used.
+        let defaults = fetch_function_defaults(mcx, funcid)?;
+        let mut i = pronargs as i64 - defaults.len() as i64;
+        for d in &defaults {
+            if i >= 0 && argarray[i as usize].is_none() {
+                argarray[i as usize] = Some(d);
+            }
+            i += 1;
+        }
+    }
+    let mut out = NodeList::nil();
+    for &slot in argarray.iter() {
+        out.lappend(mcx, slot.expect("reorder_function_arguments: missing argument"))?;
+    }
+    Ok(out)
+}
+
+/// add_function_defaults (clauses.c): positional call short some trailing
+/// defaults; append the tail of the defaults list.
+fn add_function_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: &NodeList<'mcx>,
+    pronargs: usize,
+    funcid: Oid,
+) -> PgResult<NodeList<'mcx>> {
+    let nargsprovided = args.len();
+    let defaults = fetch_function_defaults(mcx, funcid)?;
+    let ndelete = (nargsprovided + defaults.len()) as i64 - pronargs as i64;
+    if ndelete < 0 {
+        return Err(Box::new(PgError::error("not enough default arguments")));
+    }
+    let mut out = NodeList::nil();
+    for a in args {
+        out.lappend(mcx, a)?;
+    }
+    for (i, d) in defaults.iter().enumerate() {
+        if i as i64 >= ndelete {
+            out.lappend(mcx, d)?;
+        }
+    }
+    Ok(out)
+}
+
+/// fetch_function_defaults (clauses.c).
+fn fetch_function_defaults<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<NodeList<'mcx>> {
+    let src = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)?
+        .ok_or_else(|| func_lookup_failed(funcid))?
+        .ok_or_else(|| -> Box<PgError> {
+            Box::new(PgError::error(format!(
+                "not enough default arguments (proargdefaults null for function {funcid})"
+            )))
+        })?;
+    let defaults = readfuncs::stringToNode(mcx, src.as_str())?;
+    match defaults.as_list() {
+        Some(l) => Ok(l.clone_in(mcx)?),
+        None => panic!("proargdefaults of {funcid} is not a List"),
     }
 }
 

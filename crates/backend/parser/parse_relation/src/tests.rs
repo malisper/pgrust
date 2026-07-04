@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext, PgVec};
-use parser_small1::{make_parsestate, ParseState};
+use parser_small1::{make_parsestate, ParseNamespaceItem, ParseState};
 use types_core::catalog::{INT4OID, TEXTOID};
 use types_core::{InvalidOid, Oid, RELPERSISTENCE_PERMANENT, INVALID_PROC_NUMBER};
 use types_error::{
@@ -820,6 +820,20 @@ fn func_expr<'mcx>(mcx: Mcx<'mcx>, funcid: Oid, funcresulttype: Oid) -> Node<'mc
     .unwrap()
 }
 
+fn add_function_rte<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    name: &'mcx str,
+    fe: Node<'mcx>,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let mut fexprs = NodeList::nil();
+    fexprs.lappend(mcx, fe)?;
+    let nil: &NodeList<'mcx> = mcx::leak_in(mcx::alloc_in(mcx, NodeList::nil())?);
+    let rf: &types_nodes::RangeFunction<'mcx> =
+        mcx::leak_in(mcx::alloc_in(mcx, types_nodes::RangeFunction::default())?);
+    addRangeTableEntryForFunction(mcx, pstate, &[name], fexprs, &[nil], rf, false, true)
+}
+
 #[test]
 fn composite_function_rte_expands_rowtype_columns() {
     install_func();
@@ -829,8 +843,7 @@ fn composite_function_rte_expands_rowtype_columns() {
 
     let fe = func_expr(mcx, F_COMPOSITE, COMPOSITE_TYPE);
     let nsitem =
-        addRangeTableEntryForFunction(mcx, &mut pstate, "f", fe, None, false, false, true)
-            .unwrap();
+        add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
 
     let rte = nsitem.p_rte;
     assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
@@ -870,8 +883,7 @@ fn scalar_function_rte_expands_single_var() {
 
     let fe = func_expr(mcx, F_SCALAR, INT4OID);
     let nsitem =
-        addRangeTableEntryForFunction(mcx, &mut pstate, "f", fe, None, false, false, true)
-            .unwrap();
+        add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
 
     let (colnames, colvars) = expandRTE(
         mcx,

@@ -19,7 +19,7 @@ use types_nodes::parsenodes::{
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MinMaxExpr,
-    MinMaxOp, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
+    MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
     CollateExpr, RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var,
     VarReturningType, WindowFunc,
 };
@@ -349,6 +349,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"CONST" => self.read_const(),
             b"OPEXPR" => self.read_op_expr(),
             b"FUNCEXPR" => self.read_func_expr(),
+            b"NAMEDARGEXPR" => self.read_named_arg_expr(),
             b"BOOLEXPR" => self.read_bool_expr(),
             b"SQLVALUEFUNCTION" => self.read_sql_value_function(),
             b"RELABELTYPE" => self.read_relabel_type(),
@@ -962,6 +963,17 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, c)
+    }
+
+    fn read_named_arg_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("NamedArgExpr has an arg");
+        let n = NamedArgExpr {
+            arg,
+            name: self.read_str("name")?,
+            argnumber: self.read_i32("argnumber"),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, n)
     }
 
     fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {
