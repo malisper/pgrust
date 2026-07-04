@@ -140,7 +140,7 @@ pub fn BeginCopyTo<'mcx, 's>(
         file_encoding,
         need_transcoding,
         bytes_processed: 0,
-        rowcx: MemoryContext::new("COPY TO"),
+        rowcx: MemoryContext::new_bump("COPY TO"),
     })
 }
 
