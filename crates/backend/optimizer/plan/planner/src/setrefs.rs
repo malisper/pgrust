@@ -333,13 +333,63 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_FunctionScan => {
             let s = plan.as_function_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            for rtfunc_node in &s.functions {
-                let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
-                if let Some(fexpr) = rtfunc.funcexpr {
-                    fix_scan_expr_walker(run, fexpr)?;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let fns = if rtoffset == 0
+                && !run.glob.has_alternative_subplans
+                && run.root.minmax_aggs.is_empty()
+            {
+                for rtfunc_node in &s.functions {
+                    let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
+                    if let Some(fexpr) = rtfunc.funcexpr {
+                        fix_scan_expr_walker(run, fexpr)?;
+                    }
                 }
+                None
+            } else {
+                let mcx = run.mcx;
+                let mut out = NodeList::nil();
+                for rtfunc_node in &s.functions {
+                    let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
+                    let funcexpr = match rtfunc.funcexpr {
+                        Some(fexpr) => Some(fix_scan_expr_mutator(run, fexpr, rtoffset, 1.0)?),
+                        None => None,
+                    };
+                    out.lappend(
+                        mcx,
+                        Node::mk(
+                            mcx,
+                            types_nodes::parsenodes::RangeTblFunction {
+                                funcexpr,
+                                funccolcount: rtfunc.funccolcount,
+                                funccolnames: rtfunc.funccolnames.clone_in(mcx)?,
+                                funccoltypes: rtfunc.funccoltypes.clone_in(mcx)?,
+                                funccoltypmods: rtfunc.funccoltypmods.clone_in(mcx)?,
+                                funccolcollations: rtfunc.funccolcollations.clone_in(mcx)?,
+                                funcparams: rtfunc.funcparams.clone_in(mcx)?,
+                            },
+                        )?,
+                    )?;
+                }
+                Some(out)
+            };
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || fns.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::FunctionScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        if let Some(f) = fns {
+                            s.functions = f;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("FunctionScan node");
             }
         }
         NodeTag::T_TableFuncScan => {
