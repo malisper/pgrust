@@ -164,6 +164,12 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         match_restriction_clauses_to_index(run, &index, &mut rclauseset)?;
         get_index_paths(run, rel, &index, &rclauseset, &mut bitindexpaths)?;
 
+        // Without join or EC-join clauses both match passes are no-ops; skip
+        // their clause-set builds (strictly less work than C's stack MemSets).
+        if run.root.rel(rel).joininfo.is_empty() && !run.root.rel(rel).has_eclass_joins {
+            continue;
+        }
+
         // "Loose" join clauses not absorbed into ECs.
         let mut jclauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
         match_join_clauses_to_index(run, rel, &index, &mut jclauseset, &mut joinorclauses)?;
