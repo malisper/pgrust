@@ -36,8 +36,16 @@ pub(crate) fn XLOGfileslop(lastredoptr: XLogRecPtr) -> XLogSegNo {
         * CHECK_POINT_DISTANCE_ESTIMATE.get();
     distance *= 1.10;
 
-    let recycle_seg_no = ((lastredoptr as f64 + distance) / wal_segsz as f64).ceil() as XLogSegNo;
-    recycle_seg_no.clamp(min_seg_no, max_seg_no)
+    // Sequential bounds: min_wal_size > max_wal_size is legal (max wins).
+    let mut recycle_seg_no =
+        ((lastredoptr as f64 + distance) / wal_segsz as f64).ceil() as XLogSegNo;
+    if recycle_seg_no < min_seg_no {
+        recycle_seg_no = min_seg_no;
+    }
+    if recycle_seg_no > max_seg_no {
+        recycle_seg_no = max_seg_no;
+    }
+    recycle_seg_no
 }
 
 // Returns true when the max_slot_wal_keep_size cap pushed the slot horizon
@@ -154,8 +162,7 @@ pub(crate) fn RemoveOldXlogFiles(
     Ok(())
 }
 
-// Only regular files are recycled — symlinks into an archive directory must
-// not be renamed back into pg_wal.
+// Only regular files recycle — never rename an archive symlink into pg_wal.
 fn RemoveXlogFile(
     de: &std::fs::DirEntry,
     recycle_seg_no: XLogSegNo,
