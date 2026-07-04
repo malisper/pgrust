@@ -1830,6 +1830,17 @@ impl<'mcx> Parser<'mcx> {
                 n.if_not_exists = rule == 633;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterSeqStmt: ALTER SEQUENCE [IF_P EXISTS] qualified_name SeqOptList
+            634 | 635 => {
+                let (rv, opts) =
+                    if rule == 634 { (view.v(3), view.v(4)) } else { (view.v(5), view.v(6)) };
+                let mut n = Node::build::<types_nodes::AlterSeqStmt>(mcx)?;
+                n.sequence =
+                    rv.node().expect("qualified_name").as_variant::<RangeVar>();
+                n.options = opts.list();
+                n.missing_ok = rule == 635;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // OptParenthesizedSeqOptList: '(' SeqOptList ')' | /*EMPTY*/
             638 => *yyval = YYSTYPE::List(view.v(2).list()),
             639 => *yyval = YYSTYPE::List(NodeList::nil()),

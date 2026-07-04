@@ -653,7 +653,7 @@ fn ATRewriteCatalogs<'mcx>(
             nodes.push(c);
         }
         for &cnode in nodes.iter() {
-            let mut rel = table::table_open(mcx, wqueue[tabidx].relid, NoLock)?;
+            let mut rel = relation_seams::relation_open::call(mcx, wqueue[tabidx].relid, NoLock)?;
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
                 AlterTableType::AT_AddColumn => {
