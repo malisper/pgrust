@@ -341,6 +341,58 @@ fn collect_subplans_expr<'mcx>(
                 collect_subplans_expr(a, out);
             }
         }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                collect_subplans_expr(a, out);
+            }
+            for w in &c.args {
+                collect_subplans_expr(w, out);
+            }
+            if let Some(d) = c.defresult {
+                collect_subplans_expr(d, out);
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let w = node.as_case_when().unwrap();
+            if let Some(e) = w.expr {
+                collect_subplans_expr(e, out);
+            }
+            if let Some(r) = w.result {
+                collect_subplans_expr(r, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in &node.as_array_expr().unwrap().elements {
+                collect_subplans_expr(e, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            collect_subplans_expr(node.as_coerce_via_io().unwrap().arg, out)
+        }
+        NodeTag::T_CoerceToDomain => {
+            collect_subplans_expr(node.as_coerce_to_domain().unwrap().arg, out)
+        }
         _ => {}
     }
 }
