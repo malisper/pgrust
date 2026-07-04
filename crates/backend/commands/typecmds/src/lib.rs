@@ -1493,7 +1493,7 @@ pub fn DefineCompositeType<'mcx>(
     let old_type_oid =
         syscache_seams::lookup_pg_type_oid_by_name::call(relname, type_namespace)?;
     if old_type_oid != InvalidOid
-        && !pg_type::moveArrayTypeName(old_type_oid, relname, type_namespace)?
+        && !pg_type::moveArrayTypeName(mcx, old_type_oid, relname, type_namespace)?
     {
         return Err(Box::new(
             PgError::new(ERROR, format!("type \"{relname}\" already exists"))

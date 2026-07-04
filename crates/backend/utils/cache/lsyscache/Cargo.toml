@@ -22,5 +22,4 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 adt_scalar = { path = "../../adt/scalar" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../../adt/format_type" }
-types_nodes = { path = "../../../../_support/types/nodes" }
 readfuncs = { path = "../../../nodes/readfuncs" }

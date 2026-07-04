@@ -4402,8 +4402,10 @@ dependencies = [
  "cache_syscache",
  "catalog_indexing",
  "catalog_namespace",
+ "commands_define",
  "datum",
  "detoast_seams",
+ "elog",
  "execexpr",
  "exectuples_output",
  "extension",
@@ -4419,6 +4421,7 @@ dependencies = [
  "nodes_core",
  "parser_small1",
  "pg_proc",
+ "pg_type",
  "pquery_seams",
  "rel_vocab",
  "snapmgr",
@@ -5874,6 +5877,7 @@ dependencies = [
 name = "lsyscache"
 version = "0.1.0"
 dependencies = [
+ "adt_scalar",
  "datum",
  "fmgr_seams",
  "format_type",
@@ -8404,6 +8408,7 @@ dependencies = [
  "miscinit_seams",
  "pg_depend",
  "pg_enum",
+ "pg_shdepend",
  "syscache_seams",
  "table",
  "types_core",
@@ -8411,6 +8416,7 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -12681,6 +12687,7 @@ dependencies = [
  "catalog_namespace",
  "clauses",
  "coerce",
+ "commands_define",
  "datum",
  "elog",
  "elog_seams",
@@ -12698,6 +12705,7 @@ dependencies = [
  "outfuncs",
  "parse_collate",
  "parse_expr",
+ "parse_func",
  "parse_utilcmd",
  "parser_small1",
  "pg_constraint",
