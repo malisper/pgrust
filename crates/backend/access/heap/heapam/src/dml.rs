@@ -2,11 +2,9 @@
 // Deferred (named panics): toast, MultiXact create/expand/wait lanes,
 // speculative-insert driver, index-attr bitmaps (updates on relhasindex
 // rels), bulk insert + heap_multi_insert, heap_lock_tuple (phase 3).
-// C divergences: logical-decoding gates (RelationIsLogicallyLogged,
-// log_heap_new_cid, ExtractReplicaIdentity payloads) are const-false like
-// the read lane's CheckXidAlive; crit sections pend miscadmin; WAL
-// prefix/suffix compression off (XLogCheckBufferNeedsBackup pends
-// xloginsert), records stay redo-compatible.
+// C divergences: crit sections pend miscadmin; WAL prefix/suffix
+// compression off (XLogCheckBufferNeedsBackup pends xloginsert; C also
+// disables it under wal_level=logical), records stay redo-compatible.
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::tableam_vocab::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
@@ -15,7 +13,10 @@ use ::tableam_vocab::{
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{CommandId, InvalidBlockNumber, TransactionId};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
-use ::types_rel::{RelationData, RELKIND_MATVIEW, RELKIND_RELATION};
+use ::types_rel::{
+    RelationData, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_RELATION,
+    REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_NOTHING,
+};
 use ::types_snapshot::SnapshotData;
 use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeofHeapTupleHeader};
 use ::types_storage::lock::{
@@ -26,7 +27,7 @@ use ::types_tuple::{
     ItemPointerGetOffsetNumber, HEAP2_XACT_MASK, HEAP_KEYS_UPDATED, HEAP_LOCK_MASK, HEAP_MOVED,
     HEAP_UPDATED, HEAP_XACT_MASK, HEAP_XMAX_BITS, HEAP_XMAX_COMMITTED, HEAP_XMAX_EXCL_LOCK,
     HEAP_XMAX_INVALID, HEAP_XMAX_IS_LOCKED_ONLY, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
-    HEAP_XMAX_LOCK_ONLY, HEAP_XMAX_SHR_LOCK, HEAP_LOCKED_UPGRADED,
+    HEAP_XMAX_LOCK_ONLY, HEAP_XMAX_SHR_LOCK, HEAP_COMBOCID, HEAP_LOCKED_UPGRADED,
 };
 use ::xloginsert_seams::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
@@ -45,11 +46,18 @@ pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_INSERT_IS_SPECULATIVE: u8 = 1 << 2;
+pub const XLH_INSERT_CONTAINS_NEW_TUPLE: u8 = 1 << 3;
+pub const XLH_INSERT_ON_TOAST_RELATION: u8 = 1 << 4;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+pub const XLH_DELETE_CONTAINS_OLD_TUPLE: u8 = 1 << 1;
+pub const XLH_DELETE_CONTAINS_OLD_KEY: u8 = 1 << 2;
 pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = 1 << 1;
+pub const XLH_UPDATE_CONTAINS_OLD_TUPLE: u8 = 1 << 2;
+pub const XLH_UPDATE_CONTAINS_OLD_KEY: u8 = 1 << 3;
+pub const XLH_UPDATE_CONTAINS_NEW_TUPLE: u8 = 1 << 4;
 pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 1 << 0;
 
 pub const XLHL_XMAX_IS_MULTI: u8 = 0x01;
@@ -79,13 +87,19 @@ pub(crate) fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
 }
 
-// XLogLogicalInfoActive() && ...: wal_level=logical unported, const-false.
-fn relation_is_logically_logged(_rel: &RelationData<'_>) -> bool {
-    false
+// RelationIsLogicallyLogged (utils/rel.h).
+pub fn relation_is_logically_logged(rel: &RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_needs_wal(rel)
+        && rel.rd_rel.relkind != RELKIND_FOREIGN_TABLE
+        && !catalog_seams::is_catalog_relation::call(rel)
 }
 
-fn relation_is_accessible_in_logical_decoding(_rel: &RelationData<'_>) -> bool {
-    false
+// RelationIsAccessibleInLogicalDecoding (utils/rel.h).
+pub fn relation_is_accessible_in_logical_decoding(rel: &RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_needs_wal(rel)
+        && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
 // IsParallelWorker() (miscadmin.h): parallel workers unported.
@@ -268,6 +282,10 @@ pub fn heap_insert(
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
     if relation_needs_wal(relation) {
+        if relation_is_accessible_in_logical_decoding(relation) {
+            log_heap_new_cid(relation, heaptup)?;
+        }
+
         let page = pin.page();
         let mut info = XLOG_HEAP_INSERT;
         let mut bufflags = REGBUF_STANDARD;
@@ -284,6 +302,15 @@ pub fn heap_insert(
         }
         if (options & HEAP_INSERT_SPECULATIVE) != 0 {
             flags |= XLH_INSERT_IS_SPECULATIVE;
+        }
+        if relation_is_logically_logged(relation)
+            && (options & crate::hio::HEAP_INSERT_NO_LOGICAL) == 0
+        {
+            flags |= XLH_INSERT_CONTAINS_NEW_TUPLE;
+            bufflags |= REGBUF_KEEP_DATA;
+            if catalog_seams::is_toast_relation::call(relation) {
+                flags |= XLH_INSERT_ON_TOAST_RELATION;
+            }
         }
         let mut xlrec = [0u8; 3];
         xlrec[0..2].copy_from_slice(&offnum.to_ne_bytes());
@@ -340,6 +367,7 @@ pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'
 
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
 const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
+const XLOG_HEAP2_NEW_CID: u8 = 0x70;
 const XLH_INSERT_LAST_IN_MULTI: u8 = 1 << 1;
 const SizeOfHeapMultiInsert: usize = 4;
 const SizeOfMultiInsertTuple: usize = 7;
@@ -378,6 +406,8 @@ pub fn heap_multi_insert<'mcx>(
     use ::types_slot::SlotData;
 
     debug_assert!(options & crate::hio::HEAP_INSERT_NO_LOGICAL == 0);
+    let need_tuple_data = relation_is_logically_logged(relation);
+    let need_cids = relation_is_accessible_in_logical_decoding(relation);
     let xid = xact_seams::get_current_transaction_id::call()?;
     let needwal = relation_needs_wal(relation);
     let save_free_space =
@@ -486,6 +516,9 @@ pub fn heap_multi_insert<'mcx>(
         starting_with_empty_page = pin.page().max_offset_number() == 0;
 
         RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone], false)?;
+        if needwal && need_cids {
+            log_heap_new_cid(relation, &heaptuples[ndone])?;
+        }
         let mut nthispage = 1usize;
         while ndone + nthispage < ntuples {
             let need =
@@ -494,6 +527,9 @@ pub fn heap_multi_insert<'mcx>(
                 break;
             }
             RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone + nthispage], false)?;
+            if needwal && need_cids {
+                log_heap_new_cid(relation, &heaptuples[ndone + nthispage])?;
+            }
             nthispage += 1;
         }
 
@@ -524,6 +560,9 @@ pub fn heap_multi_insert<'mcx>(
             let mut xl_flags = 0u8;
             if all_visible_cleared {
                 xl_flags |= XLH_INSERT_ALL_VISIBLE_CLEARED;
+            }
+            if need_tuple_data {
+                xl_flags |= XLH_INSERT_CONTAINS_NEW_TUPLE;
             }
             if ndone + nthispage == ntuples {
                 xl_flags |= XLH_INSERT_LAST_IN_MULTI;
@@ -569,6 +608,9 @@ pub fn heap_multi_insert<'mcx>(
             if init {
                 info |= XLOG_HEAP_INIT_PAGE;
                 bufflags |= REGBUF_WILL_INIT;
+            }
+            if need_tuple_data {
+                bufflags |= REGBUF_KEEP_DATA;
             }
 
             let recptr = crate::wal::insert_record(
@@ -797,16 +839,145 @@ fn heap_acquire_tuplock(
     Ok(true)
 }
 
-// ExtractReplicaIdentity: gated on RelationIsLogicallyLogged (const-false).
-fn extract_replica_identity<'a>(
-    relation: &RelationData<'_>,
-    _tp: &HeapTupleData<'a>,
-    _key_required: bool,
-) -> Option<HeapTupleData<'a>> {
-    if !relation_is_logically_logged(relation) {
-        return None;
+const SizeOfHeapNewCid: usize = 34;
+
+// No buffer registration: the record modifies no page.
+fn log_heap_new_cid(relation: &RelationData<'_>, tup: &HeapTupleData<'_>) -> PgResult<()> {
+    let hdr = tup.t_data();
+    let top_xid = xact_seams::get_top_transaction_id_if_any::call();
+    debug_assert!(TransactionIdIsValid(top_xid));
+
+    let invalid = ::types_core::xact::InvalidCommandId;
+    let (cmin, cmax, combocid) = if (hdr.t_infomask & HEAP_COMBOCID) != 0 {
+        debug_assert!((hdr.t_infomask & HEAP_XMAX_INVALID) == 0);
+        (
+            combocid_seams::heap_tuple_header_get_cmin::call(hdr),
+            combocid_seams::heap_tuple_header_get_cmax::call(hdr),
+            hdr.raw_command_id(),
+        )
+    } else if (hdr.t_infomask & HEAP_XMAX_INVALID) != 0
+        || HEAP_XMAX_IS_LOCKED_ONLY(hdr.t_infomask)
+    {
+        (hdr.raw_command_id(), invalid, invalid)
+    } else {
+        (invalid, hdr.raw_command_id(), invalid)
+    };
+
+    let loc = relation.rd_locator.get();
+    let mut xlrec = [0u8; SizeOfHeapNewCid];
+    xlrec[0..4].copy_from_slice(&top_xid.to_ne_bytes());
+    xlrec[4..8].copy_from_slice(&cmin.to_ne_bytes());
+    xlrec[8..12].copy_from_slice(&cmax.to_ne_bytes());
+    xlrec[12..16].copy_from_slice(&combocid.to_ne_bytes());
+    xlrec[16..20].copy_from_slice(&loc.spcOid.to_ne_bytes());
+    xlrec[20..24].copy_from_slice(&loc.dbOid.to_ne_bytes());
+    xlrec[24..28].copy_from_slice(&loc.relNumber.to_ne_bytes());
+    xlrec[28..30].copy_from_slice(&tup.t_self.ip_blkid.bi_hi.to_ne_bytes());
+    xlrec[30..32].copy_from_slice(&tup.t_self.ip_blkid.bi_lo.to_ne_bytes());
+    xlrec[32..34].copy_from_slice(&tup.t_self.ip_posid.to_ne_bytes());
+
+    crate::wal::insert_record(RM_HEAP2_ID, XLOG_HEAP2_NEW_CID, 0, &[&xlrec], &[])?;
+    Ok(())
+}
+
+pub(crate) struct OldKeyTuple {
+    tup: HeapTupleData<'static>,
+    _ctx: Option<::mcx::MemoryContext>,
+}
+
+fn erase_owned(mut t: heaptuple::HeapTuple<'_>) -> HeapTupleData<'static> {
+    let ht = t.as_tuple_mut();
+    // SAFETY: image owned by the caller-held context (page_tuple model).
+    let tup = unsafe {
+        HeapTupleData::from_raw_parts(ht.header_ptr().cast_mut(), ht.t_len, ht.t_self, ht.t_tableOid)
+    };
+    // Drop is heap_freetuple; the image is bulk-freed with the context.
+    core::mem::forget(t);
+    tup
+}
+
+impl OldKeyTuple {
+    fn header(&self) -> [u8; 5] {
+        xl_heap_header(self.tup.t_data())
     }
-    unported("ExtractReplicaIdentity beyond the wal_level gate (heapam.c)")
+
+    fn body(&self) -> &[u8] {
+        // SAFETY: tuple image is t_len readable bytes.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.tup.header_ptr().add(SizeofHeapTupleHeader),
+                self.tup.t_len as usize - SizeofHeapTupleHeader,
+            )
+        }
+    }
+}
+
+// ExtractReplicaIdentity: the FULL-without-externals arm aliases `tp` (C
+// returns tp itself), so later header stamps show through.
+fn extract_replica_identity(
+    relation: &RelationData<'_>,
+    tp: &HeapTupleData<'_>,
+    key_required: bool,
+) -> PgResult<Option<OldKeyTuple>> {
+    if !relation_is_logically_logged(relation) {
+        return Ok(None);
+    }
+    let replident = relation.rd_rel.relreplident;
+    if replident == REPLICA_IDENTITY_NOTHING {
+        return Ok(None);
+    }
+    let desc = &relation.rd_att;
+    if replident == REPLICA_IDENTITY_FULL {
+        if tp.has_external() {
+            let ctx = ::mcx::MemoryContext::new("ExtractReplicaIdentity");
+            let tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(ctx.mcx(), tp, desc)?);
+            return Ok(Some(OldKeyTuple { tup, _ctx: Some(ctx) }));
+        }
+        // SAFETY: aliases the caller's tuple image, valid while its pin holds.
+        let tup = unsafe {
+            HeapTupleData::from_raw_parts(
+                tp.header_ptr().cast_mut(),
+                tp.t_len,
+                tp.t_self,
+                tp.t_tableOid,
+            )
+        };
+        return Ok(Some(OldKeyTuple { tup, _ctx: None }));
+    }
+
+    if !key_required {
+        return Ok(None);
+    }
+
+    let idattrs = relcache_seams::relation_get_index_attr_bitmap::call(relation.rd_id)?;
+    if idattrs.identity.is_empty() {
+        return Ok(None);
+    }
+
+    let ctx = ::mcx::MemoryContext::new("ExtractReplicaIdentity");
+    let cmcx = ctx.mcx();
+    let natts = desc.natts as usize;
+    let mut values: ::mcx::PgVec<'_, ::datum::Datum> = ::mcx::PgVec::new_in(cmcx);
+    values.resize(natts, ::datum::Datum::null());
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::PgVec::new_in(cmcx);
+    nulls.resize(natts, false);
+    ::types_tuple::heap_deform_tuple(tp, desc, &mut values, &mut nulls);
+
+    for i in 0..natts {
+        if idattrs.identity.binary_search(&((i + 1) as i16)).is_ok() {
+            debug_assert!(!nulls[i]);
+        } else {
+            nulls[i] = true;
+        }
+    }
+
+    let mut tup = erase_owned(heaptuple::heap_form_tuple(cmcx, desc, &values, &nulls)?);
+    if tup.has_external() {
+        tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(cmcx, &tup, desc)?);
+    }
+    drop(values);
+    drop(nulls);
+    Ok(Some(OldKeyTuple { tup, _ctx: Some(ctx) }))
 }
 
 /// `heap_delete` core. Concurrent-updater wait lanes past the self-update
@@ -942,7 +1113,7 @@ pub fn heap_delete(
 
     let (cid, iscombo) = combocid_seams::heap_tuple_header_adjust_cmax::call(tp.t_data(), cid)?;
 
-    let old_key_tuple = extract_replica_identity(relation, &tp, true);
+    let old_key_tuple = extract_replica_identity(relation, &tp, true)?;
 
     multixact_seams::multi_xact_id_set_oldest_member::call()?;
 
@@ -989,7 +1160,9 @@ pub fn heap_delete(
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
     if relation_needs_wal(relation) {
-        debug_assert!(old_key_tuple.is_none());
+        if relation_is_accessible_in_logical_decoding(relation) {
+            log_heap_new_cid(relation, &tp)?;
+        }
         let mut flags = 0u8;
         if all_visible_cleared {
             flags |= XLH_DELETE_ALL_VISIBLE_CLEARED;
@@ -997,17 +1170,35 @@ pub fn heap_delete(
         if changing_part {
             flags |= XLH_DELETE_IS_PARTITION_MOVE;
         }
+        if old_key_tuple.is_some() {
+            flags |= if relation.rd_rel.relreplident == REPLICA_IDENTITY_FULL {
+                XLH_DELETE_CONTAINS_OLD_TUPLE
+            } else {
+                XLH_DELETE_CONTAINS_OLD_KEY
+            };
+        }
         let mut xlrec = [0u8; 8];
         xlrec[0..4].copy_from_slice(&new_xmax.to_ne_bytes());
         xlrec[4..6].copy_from_slice(&ItemPointerGetOffsetNumber(&tp.t_self).to_ne_bytes());
         xlrec[6] = compute_infobits(tp.t_data().t_infomask, tp.t_data().t_infomask2);
         xlrec[7] = flags;
 
+        let old_key_hdr;
+        let mut main_data: [&[u8]; 3] = [&xlrec, &[], &[]];
+        let n_main = match &old_key_tuple {
+            Some(k) => {
+                old_key_hdr = k.header();
+                main_data[1] = &old_key_hdr;
+                main_data[2] = k.body();
+                3
+            }
+            None => 1,
+        };
         let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_DELETE,
             XLOG_INCLUDE_ORIGIN,
-            &[&xlrec],
+            &main_data[..n_main],
             &[crate::wal::reg_block(
                 0,
                 relation.rd_locator.get(),
@@ -1591,16 +1782,20 @@ fn clear_page_all_visible(relation: &RelationData<'_>, pin: &BufferPin) -> PgRes
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_heap_update(
     relation: &RelationData<'_>,
     oldbuf: &BufferPin,
     newbuf: &BufferPin,
     oldtup: &HeapTupleData<'_>,
     newtup: &HeapTupleData<'_>,
+    old_key_tuple: Option<&OldKeyTuple>,
     all_visible_cleared: bool,
     new_all_visible_cleared: bool,
 ) -> PgResult<::types_core::XLogRecPtr> {
     debug_assert!(relation_needs_wal(relation));
+
+    let need_tuple_data = relation_is_logically_logged(relation);
 
     let mut info = if newtup.t_data().is_heap_only() {
         XLOG_HEAP_HOT_UPDATE
@@ -1609,13 +1804,24 @@ fn log_heap_update(
     };
 
     // Prefix/suffix WAL compression needs XLogCheckBufferNeedsBackup; off
-    // until xloginsert lands (records stay redo-compatible, just larger).
+    // until xloginsert lands (C also disables it when need_tuple_data;
+    // records stay redo-compatible, just larger).
     let mut flags = 0u8;
     if all_visible_cleared {
         flags |= XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED;
     }
     if new_all_visible_cleared {
         flags |= XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED;
+    }
+    if need_tuple_data {
+        flags |= XLH_UPDATE_CONTAINS_NEW_TUPLE;
+        if old_key_tuple.is_some() {
+            flags |= if relation.rd_rel.relreplident == REPLICA_IDENTITY_FULL {
+                XLH_UPDATE_CONTAINS_OLD_TUPLE
+            } else {
+                XLH_UPDATE_CONTAINS_OLD_KEY
+            };
+        }
     }
 
     let new_page = newbuf.page();
@@ -1635,7 +1841,7 @@ fn log_heap_update(
         info |= XLOG_HEAP_INIT_PAGE;
         bufflags |= REGBUF_WILL_INIT;
     }
-    if relation_is_logically_logged(relation) {
+    if need_tuple_data {
         bufflags |= REGBUF_KEEP_DATA;
     }
 
@@ -1659,14 +1865,26 @@ fn log_heap_update(
         bufflags,
         &new_bufdata,
     );
+    let old_key_hdr;
+    let mut main_data: [&[u8]; 3] = [&xlrec, &[], &[]];
+    let n_main = match old_key_tuple {
+        Some(k) if need_tuple_data => {
+            old_key_hdr = k.header();
+            main_data[1] = &old_key_hdr;
+            main_data[2] = k.body();
+            3
+        }
+        _ => 1,
+    };
+    let main_data = &main_data[..n_main];
     if same_buf {
-        crate::wal::insert_record(RM_HEAP_ID, info, XLOG_INCLUDE_ORIGIN, &[&xlrec], &[new_reg])
+        crate::wal::insert_record(RM_HEAP_ID, info, XLOG_INCLUDE_ORIGIN, main_data, &[new_reg])
     } else {
         crate::wal::insert_record(
             RM_HEAP_ID,
             info,
             XLOG_INCLUDE_ORIGIN,
-            &[&xlrec],
+            main_data,
             &[
                 new_reg,
                 crate::wal::reg_block(
@@ -1735,15 +1953,20 @@ pub fn heap_update(
     newtup.t_tableOid = relation.rd_id;
 
     // HeapDetermineColumnsInfo over the four attr sets (empty when indexless).
-    let (hot_modified, sum_modified, key_modified, id_modified) = match &attr_bitmaps {
-        Some(bm) => (
-            any_attr_modified(relation, &oldtup, newtup, &bm.hot_blocking),
-            any_attr_modified(relation, &oldtup, newtup, &bm.summarized),
-            any_attr_modified(relation, &oldtup, newtup, &bm.key),
-            any_attr_modified(relation, &oldtup, newtup, &bm.identity),
-        ),
-        None => (false, false, false, false),
-    };
+    let (hot_modified, sum_modified, key_modified, id_modified, id_has_external) =
+        match &attr_bitmaps {
+            Some(bm) => {
+                let (idm, idext) = identity_attrs_info(relation, &oldtup, newtup, &bm.identity);
+                (
+                    any_attr_modified(relation, &oldtup, newtup, &bm.hot_blocking),
+                    any_attr_modified(relation, &oldtup, newtup, &bm.summarized),
+                    any_attr_modified(relation, &oldtup, newtup, &bm.key),
+                    idm,
+                    idext,
+                )
+            }
+            None => (false, false, false, false, false),
+        };
     let key_intact = !key_modified;
     *lockmode = if key_intact {
         LockTupleMode::LockTupleNoKeyExclusive
@@ -2053,8 +2276,8 @@ pub fn heap_update(
         pm.set_full();
     }
 
-    let old_key_tuple = extract_replica_identity(relation, &oldtup, id_modified);
-    debug_assert!(old_key_tuple.is_none());
+    let old_key_tuple =
+        extract_replica_identity(relation, &oldtup, id_modified || id_has_external)?;
 
     {
         // SAFETY: pin + exclusive lock held.
@@ -2102,12 +2325,17 @@ pub fn heap_update(
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
     if relation_needs_wal(relation) {
+        if relation_is_accessible_in_logical_decoding(relation) {
+            log_heap_new_cid(relation, &oldtup)?;
+            log_heap_new_cid(relation, heaptup)?;
+        }
         let recptr = log_heap_update(
             relation,
             &pin,
             put_pin,
             &oldtup,
             heaptup,
+            old_key_tuple.as_ref(),
             all_visible_cleared,
             all_visible_cleared_new,
         )?;
@@ -2235,6 +2463,52 @@ fn any_attr_modified(
         }
     }
     false
+}
+
+// HeapDetermineColumnsInfo, identity slice: any-modified plus has_external
+// (an unmodified external identity attr must ride in the old_key_tuple).
+fn identity_attrs_info(
+    relation: &RelationData<'_>,
+    oldtup: &HeapTupleData<'_>,
+    newtup: &HeapTupleData<'_>,
+    attnums: &[i16],
+) -> (bool, bool) {
+    let td = &relation.rd_att;
+    let mut modified = false;
+    let mut has_external = false;
+    for &attnum in attnums {
+        debug_assert!(attnum > 0);
+        let mut isnull1 = false;
+        let mut isnull2 = false;
+        // SAFETY: both tuples were formed/read under this relation's
+        // descriptor; attnum comes off its own index definitions.
+        let (v1, v2) = unsafe {
+            (
+                ::types_tuple::heap_getattr(oldtup, attnum as i32, td, &mut isnull1),
+                ::types_tuple::heap_getattr(newtup, attnum as i32, td, &mut isnull2),
+            )
+        };
+        if isnull1 != isnull2 {
+            modified = true;
+            continue;
+        }
+        if isnull1 {
+            continue;
+        }
+        let att = td.attr(attnum as usize - 1);
+        if !datum_is_equal(v1, v2, att.attbyval, att.attlen as i32) {
+            modified = true;
+            continue;
+        }
+        // VARATT_IS_EXTERNAL: the 1B_E header tag byte.
+        if att.attlen as i32 == -1
+            // SAFETY: non-null byref varlena datum off a live tuple.
+            && unsafe { *(v1.as_usize() as *const u8) } == 0x01
+        {
+            has_external = true;
+        }
+    }
+    (modified, has_external)
 }
 
 // datumIsEqual (datum.c).

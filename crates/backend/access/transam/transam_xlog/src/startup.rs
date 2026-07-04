@@ -178,7 +178,17 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     relcache_seams::relation_cache_init_file_remove::call();
 
-    require_empty_or_seam("pg_replslot", false, "StartupReplicationSlots (replication/slot.c)");
+    require_empty_or_seam(
+        "pg_replslot",
+        slot_seams::startup_replication_slots::is_installed(),
+        "StartupReplicationSlots (replication/slot.c)",
+    );
+    if slot_seams::startup_replication_slots::is_installed() {
+        slot_seams::startup_replication_slots::call()?;
+    }
+    if reorderbuffer_seams::startup_reorder_buffer::is_installed() {
+        reorderbuffer_seams::startup_reorder_buffer::call()?;
+    }
     if origin_seams::startup_replication_origin::is_installed() {
         origin_seams::startup_replication_origin::call()?;
     }
@@ -603,7 +613,14 @@ pub fn UpdateFullPageWrites() -> PgResult<()> {
 
 fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     relmapper::CheckPointRelationMap()?;
-    require_empty_or_seam("pg_replslot", false, "CheckPointReplicationSlots (slot.c)");
+    require_empty_or_seam(
+        "pg_replslot",
+        slot_seams::check_point_replication_slots::is_installed(),
+        "CheckPointReplicationSlots (slot.c)",
+    );
+    if slot_seams::check_point_replication_slots::is_installed() {
+        slot_seams::check_point_replication_slots::call(flags & CHECKPOINT_IS_SHUTDOWN != 0)?;
+    }
     if snapbuild_seams::check_point_snap_build::is_installed() {
         snapbuild_seams::check_point_snap_build::call()?;
     }

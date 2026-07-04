@@ -41,6 +41,7 @@ fn TransactionIdFollowsOrEquals(id1: TransactionId, id2: TransactionId) -> bool 
 
 #[cold]
 #[inline(never)]
+#[allow(dead_code)]
 fn unported(what: &str) -> ! {
     panic!("unported callee reached from snapmgr.c: {what}")
 }
@@ -73,6 +74,7 @@ struct SnapMgrState {
     secondary: Option<SnapRef>,
     catalog_valid: bool,
     historic: Option<Snapshot>,
+    historic_tuplecids: Option<HistoricTupleCids>,
     first_snapshot_set: bool,
     first_xact_snapshot: Option<Snapshot>,
     // Resource-handle owners (Rc payloads): plain-heap Vecs per docs/no-drop.md.
@@ -143,6 +145,7 @@ fn with_state<R>(f: impl FnOnce(&mut SnapMgrState) -> R) -> R {
                 secondary: None,
                 catalog_valid: false,
                 historic: None,
+                historic_tuplecids: None,
                 first_snapshot_set: false,
                 first_xact_snapshot: None,
                 active: Vec::new(),
@@ -793,21 +796,30 @@ pub fn HaveRegisteredOrActiveSnapshot() -> bool {
     })
 }
 
-pub fn SetupHistoricSnapshot(historic_snapshot: Snapshot) {
-    with_state(|s| s.historic = Some(historic_snapshot));
-    // The (cmin,cmax) tuplecid hash rides with logical decoding (phase 2).
+// The tuplecid hash is reorderbuffer's (relfilelocator, ctid) -> (cmin, cmax)
+// map; snapmgr stores it opaquely, exactly like C's HTAB *tuplecid_data.
+pub type HistoricTupleCids = std::rc::Rc<dyn std::any::Any>;
+
+pub fn SetupHistoricSnapshot(historic_snapshot: Snapshot, tuplecids: Option<HistoricTupleCids>) {
+    with_state(|s| {
+        s.historic = Some(historic_snapshot);
+        s.historic_tuplecids = tuplecids;
+    });
 }
 
 pub fn TeardownHistoricSnapshot(_is_error: bool) {
-    with_state(|s| s.historic = None);
+    with_state(|s| {
+        s.historic = None;
+        s.historic_tuplecids = None;
+    });
 }
 
 pub fn HistoricSnapshotActive() -> bool {
     with_state(|s| s.historic.is_some())
 }
 
-pub fn HistoricSnapshotGetTupleCids() -> ! {
-    unported("HistoricSnapshotGetTupleCids (logical decoding tuplecid hash)")
+pub fn HistoricSnapshotGetTupleCids() -> Option<HistoricTupleCids> {
+    with_state(|s| s.historic_tuplecids.clone())
 }
 
 // Callers check TransactionIdIsCurrentTransactionId first, as in C.

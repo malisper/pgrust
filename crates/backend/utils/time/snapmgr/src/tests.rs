@@ -410,7 +410,7 @@ fn historic_snapshot_short_circuits_acquisition() {
     drop(snap);
     end_xact();
 
-    SetupHistoricSnapshot(historic.clone());
+    SetupHistoricSnapshot(historic.clone(), None);
     assert!(HistoricSnapshotActive());
     let got = GetTransactionSnapshot().unwrap();
     assert!(Rc::ptr_eq(&got, &historic));

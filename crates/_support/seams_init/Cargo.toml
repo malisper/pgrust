@@ -227,6 +227,7 @@ syslogger = { path = "../../backend/postmaster/syslogger" }
 launcher = { path = "../../backend/replication/launcher" }
 walsender_config = { path = "../../backend/replication/walsender_config" }
 slot = { path = "../../backend/replication/slot" }
+reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
 aio_config = { path = "../../backend/storage/aio/aio_config" }

@@ -43,15 +43,39 @@ pub const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
 pub const XLOG_HEAP2_NEW_CID: u8 = 0x70;
 
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+pub const XLH_INSERT_CONTAINS_NEW_TUPLE: u8 = 1 << 3;
+pub const XLH_INSERT_ON_TOAST_RELATION: u8 = 1 << 4;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = 1 << 5;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = 1 << 1;
+pub const XLH_UPDATE_CONTAINS_OLD_TUPLE: u8 = 1 << 2;
+pub const XLH_UPDATE_CONTAINS_OLD_KEY: u8 = 1 << 3;
+pub const XLH_UPDATE_CONTAINS_NEW_TUPLE: u8 = 1 << 4;
 pub const XLH_UPDATE_PREFIX_FROM_OLD: u8 = 1 << 5;
 pub const XLH_UPDATE_SUFFIX_FROM_OLD: u8 = 1 << 6;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+pub const XLH_DELETE_CONTAINS_OLD_TUPLE: u8 = 1 << 1;
+pub const XLH_DELETE_CONTAINS_OLD_KEY: u8 = 1 << 2;
 pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 1 << 0;
+
+// xl_heap_new_cid (heapam_xlog.h); the record payload is the SizeOfHeapNewCid
+// prefix (trailing tid padding excluded).
+#[repr(C)]
+pub struct XlHeapNewCid {
+    pub top_xid: TransactionId,
+    pub cmin: u32,
+    pub cmax: u32,
+    pub combocid: u32,
+    pub target_locator: types_storage::RelFileLocator,
+    pub target_tid: ItemPointerData,
+}
+
+pub const SizeOfHeapNewCid: usize =
+    core::mem::offset_of!(XlHeapNewCid, target_tid) + core::mem::size_of::<ItemPointerData>();
+const _: () = assert!(core::mem::offset_of!(XlHeapNewCid, target_locator) == 16);
+const _: () = assert!(SizeOfHeapNewCid == 34);
 
 pub const XLHP_IS_CATALOG_REL: u8 = 1 << 1;
 pub const XLHP_CLEANUP_LOCK: u8 = 1 << 2;
