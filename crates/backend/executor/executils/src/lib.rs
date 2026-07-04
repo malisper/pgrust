@@ -840,18 +840,27 @@ impl<'mcx> EStateData<'mcx> {
                 rte.rtekind == RTEKind::RTE_RELATION,
                 "ExecGetRangeTableRelation of a non-relation RTE"
             );
-            // C's IsParallelWorker arm takes its own lock; workers unported.
-            let rel = table::table_open(self.es_query_cxt, rte.relid, NoLock)?;
-            // AcquireExecutorLocks contract: parser/plancache already hold
-            // rellockmode (C asserts the same past AccessShareLock).
-            debug_assert!(
-                rte.rellockmode == AccessShareLock
-                    || lmgr_seams::check_relation_locked_by_me::call(
-                        rel.rd_id,
-                        rte.rellockmode,
-                        false
-                    )
-            );
+            // A parallel worker takes its own lock (sane behavior if the
+            // leader exits first); the leader relies on parser/plancache
+            // already holding rellockmode (C asserts past AccessShareLock).
+            // is_installed: crate tests run without parallel::init_seams;
+            // uninstalled means no worker can exist.
+            let in_worker = parallel_seams::is_parallel_worker::is_installed()
+                && parallel_seams::is_parallel_worker::call();
+            let rel = if in_worker {
+                table::table_open(self.es_query_cxt, rte.relid, rte.rellockmode)?
+            } else {
+                let rel = table::table_open(self.es_query_cxt, rte.relid, NoLock)?;
+                debug_assert!(
+                    rte.rellockmode == AccessShareLock
+                        || lmgr_seams::check_relation_locked_by_me::call(
+                            rel.rd_id,
+                            rte.rellockmode,
+                            false
+                        )
+                );
+                rel
+            };
             self.es_relations[idx] = Some(rel);
         }
         Ok(self.es_relations[idx].as_ref().unwrap())

@@ -17,6 +17,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
 table = { path = "../../access/table/table" }
 lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 exectuples = { path = "../exectuples" }
 execexpr = { path = "../execexpr" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
