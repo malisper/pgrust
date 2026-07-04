@@ -18,6 +18,7 @@ lsyscache_seams = { path = "../lsyscache_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
 init_small = { path = "../../init/init_small" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../../adt/format_type" }
 types_nodes = { path = "../../../../_support/types/nodes" }
