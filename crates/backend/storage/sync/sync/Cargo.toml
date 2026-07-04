@@ -19,6 +19,7 @@ miscinit = { path = "../../../utils/init/miscinit" }
 smgr = { path = "../../smgr/smgr" }
 md = { path = "../../smgr/md" }
 clog = { path = "../../../access/transam/clog" }
+commit_ts = { path = "../../../access/transam/commit_ts" }
 multixact = { path = "../../../access/transam/multixact" }
 fd = { path = "../../file/fd" }
 latch = { path = "../../ipc/latch" }

@@ -120,13 +120,19 @@ fn UpdateLastRemovedPtr(fname: &str) {
     });
 }
 
-// DEBT(wal-archive train): until xlogarchive's .ready/.done check is wired in,
-// archiving-active keeps the segment — never delete unarchived WAL.
-fn xlog_archive_check_done(_xlog: &str) -> bool {
-    !XLogArchivingActive()
+// archive_mode=off is C's XLogArchiveCheckDone fast path; the fast path also
+// keeps seam-less unit tests off the uninstalled-seam panic.
+fn xlog_archive_check_done(xlog: &str) -> PgResult<bool> {
+    if !XLogArchivingActive() {
+        return Ok(true);
+    }
+    xlogarchive_seams::xlog_archive_check_done::call(xlog)
 }
 
 fn xlog_archive_cleanup(xlog: &str) {
+    if xlogarchive_seams::xlog_archive_cleanup::is_installed() {
+        return xlogarchive_seams::xlog_archive_cleanup::call(xlog);
+    }
     let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.done"));
     let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.ready"));
 }
@@ -154,7 +160,7 @@ pub(crate) fn RemoveOldXlogFiles(
             continue;
         }
         // Full-tail compare keeps an equal-segno ".partial" (C strcmp parity).
-        if fname[8..] <= lastoff[8..] && xlog_archive_check_done(fname) {
+        if fname[8..] <= lastoff[8..] && xlog_archive_check_done(fname)? {
             UpdateLastRemovedPtr(fname);
             RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, insert_tli)?;
         }

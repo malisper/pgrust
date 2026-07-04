@@ -80,8 +80,8 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
             return Ok(InvalidTransactionId); // goto cleanup
         }
     } else {
-        // Uninstalled origin seams = C defaults (origin.c globals): origins
-        // and commit_ts are unported units (wal.rs/xloginsert precedent).
+        // Uninstalled origin seams = C defaults (origin.c globals); origin.c
+        // is unported (wal.rs/xloginsert precedent).
         let session_origin = crate::wal::session_origin_or_default();
         let replorigin = session_origin != types_core::InvalidRepOriginId
             && session_origin != DoNotReplicateId;

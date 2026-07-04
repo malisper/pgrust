@@ -29,6 +29,7 @@ commands_define = { path = "../commands_define" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }
 multixact = { path = "../../access/transam/multixact" }
+commit_ts = { path = "../../access/transam/commit_ts" }
 procarray = { path = "../../storage/ipc/procarray" }
 varsup = { path = "../../access/transam/varsup" }
 relation = { path = "../../access/common/relation" }

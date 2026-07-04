@@ -3155,6 +3155,7 @@ dependencies = [
  "combocid_seams",
  "commands_analyze_seams",
  "commands_define",
+ "commit_ts",
  "commit_ts_seams",
  "condition_variable_seams",
  "controldata_utils",
@@ -3298,6 +3299,55 @@ dependencies = [
  "types_portal",
  "types_rel",
  "xact",
+]
+
+[[package]]
+name = "commit_ts"
+version = "0.0.0"
+dependencies = [
+ "autovacuum_seams",
+ "commit_ts_seams",
+ "condition_variable_seams",
+ "datum",
+ "deadlock_seams",
+ "elog",
+ "file_seams",
+ "fmgr_core",
+ "funcapi",
+ "guc",
+ "guc_seams",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "libc",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "lock_seams",
+ "lwlock",
+ "miscinit_seams",
+ "pg_sema_seams",
+ "pgstat_seams",
+ "pmsignal_seams",
+ "procarray_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "slru",
+ "sync_seams",
+ "syncrep_seams",
+ "timeout_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_storage",
+ "varsup",
+ "waitevent_seams",
+ "xloginsert_seams",
+ "xlogreader_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]
@@ -6048,6 +6098,7 @@ dependencies = [
  "checkpointer",
  "clog",
  "commands_async",
+ "commit_ts",
  "condition_variable_seams",
  "dsm_core",
  "elog",
@@ -6065,6 +6116,7 @@ dependencies = [
  "multixact",
  "pg_prng",
  "pg_sema_seams",
+ "pgarch",
  "pgstat",
  "pgstat_seams",
  "pmchild_seams",
@@ -6087,6 +6139,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "xact_seams",
+ "xlogprefetcher",
 ]
 
 [[package]]
@@ -6173,6 +6226,7 @@ dependencies = [
  "libc",
  "libpq_pqsignal",
  "miscinit",
+ "pgarch",
  "postmaster_seams",
  "postmaster_startup",
  "pqcomm_seams",
@@ -9360,6 +9414,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgarch"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "auxprocess",
+ "condition_variable_seams",
+ "datum",
+ "dynahash",
+ "elog",
+ "fd",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
+ "mcxt_seams",
+ "miscinit",
+ "procsignal",
+ "procsignal_seams",
+ "ps_status_seams",
+ "resowner",
+ "shell_archive",
+ "timeout_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
+]
+
+[[package]]
 name = "pglz"
 version = "0.1.0"
 
@@ -10099,6 +10192,7 @@ dependencies = [
  "pg_path",
  "pg_prng",
  "pg_sema_seams",
+ "pgarch",
  "pgstat",
  "pmchild",
  "pmchild_seams",
@@ -11499,6 +11593,7 @@ version = "0.0.0"
 dependencies = [
  "brin_xlog",
  "clog",
+ "commit_ts",
  "dbcommands_seams",
  "elog",
  "generic_xlog",
@@ -11531,6 +11626,7 @@ dependencies = [
  "adt_datetime",
  "adt_timestamp",
  "clog",
+ "commit_ts",
  "controldata_utils",
  "heapam_xlog",
  "mcx",
@@ -11779,6 +11875,7 @@ dependencies = [
  "commands_publicationcmds",
  "commands_tablespace",
  "commands_vacuum",
+ "commit_ts",
  "condition_variable",
  "conffiles",
  "costsize",
@@ -11878,6 +11975,7 @@ dependencies = [
  "pg_sema",
  "pg_string",
  "pg_subscription",
+ "pgarch",
  "pgstat",
  "pgtz",
  "plancache",
@@ -11945,6 +12043,7 @@ dependencies = [
  "tablecmds",
  "tcop_dest",
  "test_decoding",
+ "timeline",
  "timeout",
  "transam",
  "transam_xlog",
@@ -11969,7 +12068,9 @@ dependencies = [
  "walsender_config",
  "walwriter",
  "xact",
+ "xlogarchive",
  "xloginsert",
+ "xlogprefetcher",
  "xlogreader",
  "xlogrecovery",
  "xlogutils",
@@ -12062,6 +12163,17 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "shell_archive"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "libc",
+ "types_error",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -12981,6 +13093,7 @@ dependencies = [
  "aio_seams",
  "checkpointer_seams",
  "clog",
+ "commit_ts",
  "elog",
  "fd",
  "guc_tables",
@@ -13391,6 +13504,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "timeline"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "init_small_seams",
+ "ipc_seams",
+ "libc",
+ "mcx",
+ "pgstat_seams",
+ "timeline_seams",
+ "types_core",
+ "types_error",
+ "waitevent_seams",
+ "xact_seams",
+ "xlogarchive_seams",
+ "xlogrecovery_seams",
+]
+
+[[package]]
 name = "timeline_seams"
 version = "0.0.0"
 dependencies = [
@@ -13582,6 +13715,7 @@ dependencies = [
  "varsup_seams",
  "waitevent_seams",
  "xact_seams",
+ "xlogarchive_seams",
  "xloginsert_seams",
  "xlogreader_seams",
  "xlogrecovery_seams",
@@ -14691,6 +14825,7 @@ dependencies = [
  "wchar",
  "xact",
  "xact_seams",
+ "xlogprefetcher_seams",
 ]
 
 [[package]]
@@ -15070,6 +15205,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlogarchive"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "ipc",
+ "libc",
+ "pgarch",
+ "postmaster_startup",
+ "shell_archive",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "waitevent_seams",
+ "xact_seams",
+ "xlogarchive_seams",
+ "xlogrecovery_seams",
+]
+
+[[package]]
+name = "xlogarchive_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "xlogbackup"
+version = "0.0.0"
+dependencies = [
+ "localtime",
+ "mcx",
+ "pgtz",
+ "strftime",
+ "stringinfo",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "xloginsert"
 version = "0.0.0"
 dependencies = [
@@ -15110,6 +15289,45 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xlogprefetcher"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "bufmgr",
+ "crc32c",
+ "datum",
+ "elog",
+ "fd",
+ "fmgr_core",
+ "funcapi",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "relpath",
+ "rmgr",
+ "smgr",
+ "storage_xlog",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "waitevent_seams",
+ "xlogprefetcher_seams",
+ "xlogreader",
+ "xlogreader_seams",
+]
+
+[[package]]
+name = "xlogprefetcher_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
@@ -15226,6 +15444,7 @@ dependencies = [
  "tableam_vocab",
  "tablecmds_seams",
  "tablespace_seams",
+ "timeline",
  "timeline_seams",
  "timeout_seams",
  "timestamp_seams",
@@ -15251,6 +15470,7 @@ dependencies = [
  "xact",
  "xloginsert",
  "xloginsert_seams",
+ "xlogprefetcher",
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery_seams",

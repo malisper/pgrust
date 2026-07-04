@@ -29,6 +29,7 @@ vacuumparallel = { path = "../../backend/commands/vacuumparallel" }
 commands_analyze = { path = "../../backend/commands/analyze" }
 commands_tablespace = { path = "../../backend/commands/tablespace" }
 clog = { path = "../../backend/access/transam/clog" }
+commit_ts = { path = "../../backend/access/transam/commit_ts" }
 multixact = { path = "../../backend/access/transam/multixact" }
 rmgr = { path = "../../backend/access/transam/rmgr" }
 subtrans = { path = "../../backend/access/transam/subtrans" }
@@ -38,7 +39,10 @@ varsup = { path = "../../backend/access/transam/varsup" }
 xact = { path = "../../backend/access/transam/xact" }
 xloginsert = { path = "../../backend/access/transam/xloginsert" }
 xlogreader = { path = "../../backend/access/transam/xlogreader" }
+xlogprefetcher = { path = "../../backend/access/transam/xlogprefetcher" }
 xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
+timeline = { path = "../../backend/access/transam/timeline" }
+xlogarchive = { path = "../../backend/access/transam/xlogarchive" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 rls = { path = "../../backend/utils/misc/rls" }
@@ -110,6 +114,7 @@ checkpointer = { path = "../../backend/postmaster/checkpointer" }
 syncscan = { path = "../../backend/access/common/syncscan" }
 bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
+pgarch = { path = "../../backend/postmaster/pgarch" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
 rewrite_define = { path = "../../backend/rewrite/rewrite_define" }

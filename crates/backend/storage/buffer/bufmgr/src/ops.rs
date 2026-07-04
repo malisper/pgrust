@@ -66,6 +66,11 @@ pub fn ConditionalLockBuffer(buffer: Buffer) -> PgResult<bool> {
 pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
     debug_assert!(BufferIsPinned(buffer));
     debug_assert!(pin_count_wait_buf() == -1);
+    if buffer >= 0 && crate::privref::GetPrivateRefCount(buffer) != 1 {
+        // Uncollected uring prefetch reads hold thread-owned pins (AtEOXact
+        // precedent); wait them out before the pinned-once check.
+        crate::uring::drain_own();
+    }
     CheckBufferIsPinnedOnce(buffer)?;
     if buffer < 0 {
         return Ok(());
@@ -109,7 +114,10 @@ pub fn ConditionalLockBufferForCleanup(buffer: Buffer) -> PgResult<bool> {
         return Ok(refcount == 1);
     }
     if crate::privref::GetPrivateRefCount(buffer) != 1 {
-        return Ok(false);
+        crate::uring::drain_own();
+        if crate::privref::GetPrivateRefCount(buffer) != 1 {
+            return Ok(false);
+        }
     }
     if !ConditionalLockBuffer(buffer)? {
         return Ok(false);

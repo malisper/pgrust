@@ -65,8 +65,8 @@ fn install_seams() {
             });
             Ok(v)
         });
-        timeline_seams::tli_of_point_in_history::set(|_, history| history[0].tli);
-        timeline_seams::tli_switch_point::set(|_, _| (0, 0));
+        timeline_seams::tli_of_point_in_history::set(|_, history| Ok(history[0].tli));
+        timeline_seams::tli_switch_point::set(|_, _| Ok((0, 0)));
     });
 }
 

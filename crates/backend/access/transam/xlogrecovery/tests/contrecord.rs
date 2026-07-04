@@ -195,7 +195,15 @@ fn install_real() {
     xloginsert::init_seams();
     xlogreader::init_seams();
     xlogutils::init_seams();
+    xlogprefetcher::init_seams();
+    xlogprefetcher::XLogPrefetchShmemInit();
+    // variable.rs owns this slot; its init_seams conflicts with this rig.
+    guc_tables::vars::maintenance_io_concurrency.install(guc_tables::GucVarAccessors {
+        get: || 10,
+        set: |_| {},
+    });
     xlogrecovery::init_seams();
+    timeline::init_seams();
     guc::store::initialize_guc_options().unwrap();
 
     fd::init_seams();

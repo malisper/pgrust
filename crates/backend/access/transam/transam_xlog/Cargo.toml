@@ -33,6 +33,7 @@ transam_xlog_seams = { path = "../transam_xlog_seams" }
 xloginsert_seams = { path = "../xloginsert_seams" }
 standby_seams = { path = "../../../storage/ipc/standby_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+xlogarchive_seams = { path = "../xlogarchive_seams" }
 timeline_seams = { path = "../timeline_seams" }
 subtrans_seams = { path = "../subtrans_seams" }
 commit_ts_seams = { path = "../commit_ts_seams" }

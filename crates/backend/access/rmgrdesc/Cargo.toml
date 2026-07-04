@@ -22,6 +22,7 @@ controldata_utils = { path = "../../../common/controldata_utils" }
 relpath_seams = { path = "../../../common/relpath_seams" }
 xact = { path = "../transam/xact" }
 clog = { path = "../transam/clog" }
+commit_ts = { path = "../transam/commit_ts" }
 multixact = { path = "../transam/multixact" }
 relmapper = { path = "../../utils/cache/relmapper" }
 storage_xlog = { path = "../../catalog/storage_xlog" }

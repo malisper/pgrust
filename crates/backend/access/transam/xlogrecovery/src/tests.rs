@@ -87,8 +87,14 @@ fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ck
     std::fs::write(dir.join("pg_wal").join(name), &seg).unwrap();
 }
 
+fn install_timeline_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(timeline::init_seams);
+}
+
 #[test]
 fn timeline_history_helpers() {
+    install_timeline_seams();
     let tles = vec![Tle { tli: 3, begin: 0, end: 0 }];
     assert!(tli_in_history(3, &tles));
     assert!(!tli_in_history(2, &tles));
@@ -121,7 +127,12 @@ fn clean_shutdown_boot_path() {
     init_small::globals::set_enableFsync(false);
     guc_tables::init_seams();
     transam_xlog::init_seams();
+    xlogprefetcher::init_seams();
+    xlogprefetcher::XLogPrefetchShmemInit();
+    guc_tables::vars::maintenance_io_concurrency
+        .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
     init_seams();
+    install_timeline_seams();
 
     let ckpt_loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
     let ckpt = make_checkpoint(ckpt_loc);

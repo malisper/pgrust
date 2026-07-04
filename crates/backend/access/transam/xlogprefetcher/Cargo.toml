@@ -1,0 +1,39 @@
+[package]
+name = "xlogprefetcher"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogprefetcher"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+elog = { path = "../../../utils/error/elog" }
+xlogreader = { path = "../xlogreader" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+xlogprefetcher_seams = { path = "../xlogprefetcher_seams" }
+transam_xlog = { path = "../transam_xlog" }
+storage_xlog = { path = "../../../catalog/storage_xlog" }
+smgr = { path = "../../../storage/smgr/smgr" }
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+fd = { path = "../../../storage/file/fd" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+miscinit = { path = "../../../utils/init/miscinit" }
+init_small = { path = "../../../utils/init/init_small" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+funcapi = { path = "../../../utils/fmgr/funcapi" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+
+[dev-dependencies]
+rmgr = { path = "../rmgr" }
+crc32c = { path = "../../../../port/crc32c" }
+relpath = { path = "../../../../common/relpath" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

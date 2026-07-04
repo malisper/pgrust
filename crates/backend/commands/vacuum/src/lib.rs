@@ -1151,14 +1151,12 @@ fn vac_truncate_clog(
 
     async_seams::async_notify_freeze_xids::call(frozen_xid)?;
 
-    // Slot uninstalled == commit_ts unported == off (startup.rs shape).
-    if guc_tables::vars::track_commit_timestamp.installed()
-        && guc_tables::vars::track_commit_timestamp.read()
-    {
-        unported("vac_truncate_clog: commit_ts truncation (AdvanceOldestCommitTsXid/TruncateCommitTs)");
-    }
+    // Advance the commit-ts oldest value before truncating so concurrent
+    // lookups of a just-truncated xid get NULL, not a file-not-found error.
+    commit_ts::AdvanceOldestCommitTsXid(frozen_xid)?;
 
     clog::TruncateCLOG(frozen_xid, oldestxid_datoid)?;
+    commit_ts::TruncateCommitTs(frozen_xid)?;
     multixact::TruncateMultiXact(min_multi, minmulti_datoid)?;
 
     varsup::SetTransactionIdLimit(frozen_xid, oldestxid_datoid)?;

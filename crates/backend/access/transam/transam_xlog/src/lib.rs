@@ -138,6 +138,51 @@ pub fn XLogLogicalInfoActive() -> bool {
 pub fn XLogArchivingActive() -> bool {
     guc_tables::vars::XLogArchiveMode.read() > 0
 }
+pub fn XLogArchivingAlways() -> bool {
+    guc_tables::vars::XLogArchiveMode.read() == 2
+}
+
+// xlog_internal.h archive-status naming.
+pub const MAXFNAMELEN: usize = 64;
+pub const MIN_XFN_CHARS: usize = 16;
+pub const MAX_XFN_CHARS: usize = 40;
+pub const VALID_XFN_CHARS: &str = "0123456789ABCDEF.history.backup.partial";
+
+pub fn StatusFilePath(xlog: &str, suffix: &str) -> String {
+    format!("{XLOGDIR}/archive_status/{xlog}{suffix}")
+}
+
+pub fn IsTLHistoryFileName(fname: &str) -> bool {
+    let b = fname.as_bytes();
+    b.len() == 8 + ".history".len()
+        && b[..8].iter().all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(c))
+        && fname.ends_with(".history")
+}
+
+/// GetRecoveryState (xlog.c).
+pub fn GetRecoveryState() -> RecoveryState {
+    let ctl = ctl::XLogCtl();
+    ctl.info_lck.with(|| ctl.SharedRecoveryState.load(Relaxed))
+}
+
+/// GetOldestRestartPoint (xlog.c): last-restartpoint redo location + TLI.
+pub fn GetOldestRestartPoint() -> PgResult<(XLogRecPtr, TimeLineID)> {
+    lwlock::LWLockAcquire(
+        ctl::ControlFileLock(),
+        lwlock::LW_SHARED,
+        init_small::globals::MyProcNumber(),
+    )?;
+    let cf = control_file::control_file();
+    let r = (cf.checkPointCopy.redo, cf.checkPointCopy.ThisTimeLineID);
+    lwlock::LWLockRelease(ctl::ControlFileLock())?;
+    Ok(r)
+}
+
+/// RequestXLogSwitch (xlog.c): XLOG SWITCH record, no data.
+pub fn RequestXLogSwitch(mark_unimportant: bool) -> PgResult<XLogRecPtr> {
+    let flags = if mark_unimportant { XLOG_MARK_UNIMPORTANT } else { 0 };
+    xloginsert_seams::xlog_insert_with_flags::call(RM_XLOG_ID, XLOG_SWITCH, flags, &[])
+}
 
 // wal_segment_size + UsableBytesInSegment are fixed by ReadControlFile before
 // any WAL access; cached here so per-record arithmetic is a plain load.
@@ -438,6 +483,7 @@ pub fn init_seams() {
     guc_tables::hooks::assign_wal_consistency_checking
         .install(assign_wal_consistency_checking_hook);
     guc_vars::install_wal_consistency_checking_string();
+    guc_vars::install_xlog_archive_command();
     guc_tables::option_sets::wal_sync_method_options.install(guc_vars::WAL_SYNC_METHOD_OPTIONS);
     guc_tables::option_sets::archive_mode_options.install(guc_vars::ARCHIVE_MODE_OPTIONS);
     guc_vars::install();

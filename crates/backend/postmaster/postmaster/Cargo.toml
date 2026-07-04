@@ -26,6 +26,7 @@ guc_file = { path = "../../utils/misc/guc_file" }
 latch = { path = "../../storage/ipc/latch" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
+pgarch = { path = "../pgarch" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 fd = { path = "../../storage/file/fd" }
 ipc = { path = "../../storage/ipc/ipc" }

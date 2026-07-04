@@ -229,7 +229,7 @@ unported! {
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
 }
 
-pub use read::{PrefetchBuffer, PrefetchOutcome};
+pub use read::{PrefetchBuffer, PrefetchBufferResult, PrefetchOutcome, PrefetchSharedBuffer};
 pub use uring::{
     collect_done as uring_collect_pins, start_read as uring_start_read, uring_clear_io_wref,
     uring_read_complete, uring_set_io_wref,

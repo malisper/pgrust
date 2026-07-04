@@ -185,7 +185,12 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             let wal_log_hints = data[24] != 0;
             let track_commit_timestamp = data[25] != 0;
 
-            if track_commit_timestamp != control_file().track_commit_timestamp {
+            if commit_ts_seams::commit_ts_parameter_change::is_installed() {
+                commit_ts_seams::commit_ts_parameter_change::call(
+                    track_commit_timestamp,
+                    control_file().track_commit_timestamp,
+                )?;
+            } else if track_commit_timestamp != control_file().track_commit_timestamp {
                 panic!("CommitTsParameterChange replay not ported");
             }
 

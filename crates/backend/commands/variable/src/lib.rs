@@ -725,9 +725,7 @@ pub fn io_combine_limit() -> i32 {
 pub fn assign_maintenance_io_concurrency(newval: i32, _extra: Option<&GucHookExtra>) {
     MAINTENANCE_IO_CONCURRENCY.with(|c| c.set(newval));
     if miscinit::GetMyBackendType() == BackendType::Startup {
-        unported(
-            "assign_maintenance_io_concurrency: XLogPrefetchReconfigure (xlogprefetcher lane)",
-        );
+        xlogprefetcher_seams::xlog_prefetch_reconfigure::call();
     }
 }
 

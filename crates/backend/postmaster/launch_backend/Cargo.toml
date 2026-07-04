@@ -21,6 +21,7 @@ autovacuum = { path = "../autovacuum" }
 bgworker = { path = "../bgworker" }
 bgwriter = { path = "../bgwriter" }
 checkpointer = { path = "../checkpointer" }
+pgarch = { path = "../pgarch" }
 postmaster_startup = { path = "../startup" }
 walwriter = { path = "../walwriter" }
 postmaster_seams = { path = "../postmaster_seams" }

@@ -133,7 +133,6 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
 }
 
 unported_redo! {
-    commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     logicalmsg_redo => "backend-replication-message";
 }
@@ -142,7 +141,6 @@ unported_desc! {
     hash_desc => "backend-rmgrdesc-next";
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
-    commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
 }
@@ -151,7 +149,6 @@ unported_identify! {
     hash_identify => "backend-rmgrdesc-next";
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
-    commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
 }
@@ -334,9 +331,9 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "CommitTs",
-        rm_redo: commit_ts_redo,
-        rm_desc: commit_ts_desc,
-        rm_identify: commit_ts_identify,
+        rm_redo: commit_ts::commit_ts_redo,
+        rm_desc: rmgrdesc::committsdesc::commit_ts_desc,
+        rm_identify: rmgrdesc::committsdesc::commit_ts_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
