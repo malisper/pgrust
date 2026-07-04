@@ -2,6 +2,7 @@
 // ipad/opad per RFC 2104; update/final mirror the C incremental sequence.
 // Monomorphized per hash (no fn-pointer table); infallible — C's error arms
 // are OOM/EVP-failure only. Target builds use hmac_openssl.c; output identical.
+// DIVERGENCE: C explicit_bzero's key material on free; ctxs here drop unwiped.
 
 use pg_sha2::{PgSha256Ctx, PgSha512Ctx};
 
@@ -103,10 +104,14 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    // RFC 4231 test cases 1, 2, 3, 6 (6 = key longer than block, exercises
-    // the key-shrink arm), 7 (long key + long data).
+    // RFC 4231 cases 1-4, 6, 7 (6/7 = over-block key, exercises key-shrink).
     #[test]
     fn rfc4231_hmac_sha256() {
+        let case4_key: [u8; 25] = core::array::from_fn(|i| (i + 1) as u8);
+        assert_eq!(
+            hex(&hmac_sha256(&case4_key, &[0xcd; 50])),
+            "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b"
+        );
         assert_eq!(
             hex(&hmac_sha256(&[0x0b; 20], b"Hi There")),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
@@ -156,6 +161,56 @@ mod tests {
         assert_eq!(
             hex(&c.finalize()),
             "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"
+        );
+    }
+
+    // RFC 4231 case 5: output truncated to 128 bits; assert the prefix.
+    #[test]
+    fn rfc4231_case5_truncated() {
+        let key = [0x0cu8; 20];
+        let msg = b"Test With Truncation";
+        let mut c = PgHmacCtx::<Sha224>::init(&key);
+        c.update(msg);
+        assert_eq!(hex(&c.finalize()[..16]), "0e2aea68a90c8d37c988bcdb9fca6fa8");
+        assert_eq!(hex(&hmac_sha256(&key, msg)[..16]), "a3b6167473100ee06e0c796c2955552b");
+        let mut c = PgHmacCtx::<Sha384>::init(&key);
+        c.update(msg);
+        assert_eq!(hex(&c.finalize()[..16]), "3abf34c3503b2a23a46efc619baef897");
+        let mut c = PgHmacCtx::<Sha512>::init(&key);
+        c.update(msg);
+        assert_eq!(hex(&c.finalize()[..16]), "415fad6271580a531d4179bc891d87a6");
+    }
+
+    // RFC 4231 cases 6/7 at the 128-byte-block widths (SHA-384/512 key-shrink).
+    #[test]
+    fn rfc4231_keyshrink_wide_blocks() {
+        let key = [0xaau8; 131];
+        let msg6: &[u8] = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        let msg7: &[u8] = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+
+        let mut c = PgHmacCtx::<Sha384>::init(&key);
+        c.update(msg6);
+        assert_eq!(
+            hex(&c.finalize()),
+            "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952"
+        );
+        let mut c = PgHmacCtx::<Sha512>::init(&key);
+        c.update(msg6);
+        assert_eq!(
+            hex(&c.finalize()),
+            "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598"
+        );
+        let mut c = PgHmacCtx::<Sha384>::init(&key);
+        c.update(msg7);
+        assert_eq!(
+            hex(&c.finalize()),
+            "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e"
+        );
+        let mut c = PgHmacCtx::<Sha512>::init(&key);
+        c.update(msg7);
+        assert_eq!(
+            hex(&c.finalize()),
+            "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58"
         );
     }
 
