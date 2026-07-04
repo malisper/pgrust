@@ -1079,7 +1079,6 @@ fn unique_check_walks_posting_list_tids() {
         )
     };
 
-    // every posting TID is dead: the walk crosses them without a conflict.
     assert!(unique_insert(20, tid(2, 1)).unwrap());
     // a live duplicate sitting past the dead posting lists: 23505.
     let err = unique_insert(20, tid(2, 2)).unwrap_err();
@@ -1097,9 +1096,8 @@ fn posting_split_page_split_coincidence_keeps_every_tid() {
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
-    // Even posids dedup into capped posting lists; the odd pass then lands
-    // every insert inside an existing posting list until the page can no
-    // longer dedup and _bt_split runs with postingoff != 0.
+    // even posids dedup into postings; the odd pass splits them until the
+    // page can no longer dedup and _bt_split runs with postingoff != 0.
     for i in 1..=800u16 {
         insert_key(&rel, &rel, 7, tid(1, i * 2));
     }
