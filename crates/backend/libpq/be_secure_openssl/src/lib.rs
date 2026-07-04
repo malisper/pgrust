@@ -29,6 +29,7 @@ use openssl::dh::Dh;
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
+use openssl::pkey::Params;
 use openssl::ssl::{
     select_next_proto, AlpnError, ErrorCode, HandshakeError, Ssl, SslContext, SslContextBuilder,
     SslMethod, SslMode, SslOptions, SslSessionCacheMode, SslStream, SslVerifyMode, SslVersion,
@@ -347,7 +348,7 @@ fn x509_name_to_cstring(name: &X509NameRef) -> String {
     cffi::x509_name_slash_format(name.as_ptr()).unwrap_or_default()
 }
 
-fn load_dh_file(cx: &InitCx, filename: &str) -> PgResult<Option<Dh<openssl::dh::Params>>> {
+fn load_dh_file(cx: &InitCx, filename: &str) -> PgResult<Option<Dh<Params>>> {
     let bytes = match std::fs::read(filename) {
         Ok(b) => b,
         Err(e) => {
@@ -407,7 +408,7 @@ fn load_dh_file(cx: &InitCx, filename: &str) -> PgResult<Option<Dh<openssl::dh::
     Ok(Some(dh))
 }
 
-fn load_dh_buffer() -> PgResult<Option<Dh<openssl::dh::Params>>> {
+fn load_dh_buffer() -> PgResult<Option<Dh<Params>>> {
     match Dh::params_from_pem(FILE_DH2048) {
         Ok(dh) => Ok(Some(dh)),
         Err(st) => {
