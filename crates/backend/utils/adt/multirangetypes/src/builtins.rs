@@ -200,6 +200,8 @@ pub fn fc_multirange_constructor2(
         return Err(constructor_type_mismatch(rngtypid));
     }
 
+    // ranges slices borrow the detoasted array image: array must stay live
+    // past the make_multirange consumption (lifetimes laundered below).
     let mut ranges: PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, 8)?;
     if ndim != 0 {
         let (elems, nulls) = ::arrayfuncs::deconstruct_array(

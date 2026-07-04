@@ -864,6 +864,8 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         Ok(self.images.get_or_init(|| img))
     }
 
+    /// By-ref stavalues Datums borrow this bundle's values_image: reading a
+    /// copied-out Datum past the bundle's life is the detoast drop-order UAF.
     pub fn values(&self) -> PgResult<&[Datum]> {
         if let Some(v) = self.values.get() {
             return Ok(v);
