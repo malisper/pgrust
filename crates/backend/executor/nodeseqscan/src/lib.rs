@@ -34,6 +34,13 @@ pub enum SeqScanVariant {
 pub struct SeqScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     variant: SeqScanVariant,
+    // Boxed: PlanStateNode carries a 1024-byte size assert.
+    batch_soa: Option<::mcx::PgBox<'mcx, BatchSoa<'mcx>>>,
+}
+
+struct BatchSoa<'mcx> {
+    plan: ::exectuples::SoaDeformPlan<'mcx>,
+    soa: ::exectuples::SoaBatch<'mcx>,
 }
 
 impl<'mcx> SeqScanState<'mcx> {
@@ -114,14 +121,49 @@ pub fn seq_scan_batch_supported<'mcx>(
     Ok(::tableam::table_scan_supports_pagebatch(scandesc))
 }
 
+/// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
+/// stays disarmed (per-row lazy deform) unless the prefix is all fixed-width.
+pub fn seq_scan_batch_soa_prepare<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+) {
+    if prefix <= 0 {
+        node.batch_soa = None;
+        return;
+    }
+    if let Some(b) = &node.batch_soa {
+        if b.plan.ncols() as i32 == prefix {
+            return;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    node.batch_soa = ::exectuples::SoaDeformPlan::try_new(mcx, atts, prefix as usize).map(|plan| {
+        ::mcx::PgBox::new_in(
+            BatchSoa { soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()), plan },
+            mcx,
+        )
+    });
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<u32> {
     node.ensure_scandesc(estate)?;
+    let SeqScanState { ss, batch_soa, .. } = node;
     // SAFETY: written by ensure_scandesc when None.
-    let scandesc = unsafe { node.ss.ss_currentScanDesc.as_mut().unwrap_unchecked() };
-    ::tableam::table_scan_getnextpagebatch(scandesc)
+    let scandesc = unsafe { ss.ss_currentScanDesc.as_mut().unwrap_unchecked() };
+    let n = ::tableam::table_scan_getnextpagebatch(scandesc)?;
+    if n > 0 {
+        if let Some(b) = batch_soa.as_mut() {
+            let BatchSoa { plan, soa } = &mut **b;
+            ::tableam::table_scan_batch_deform(scandesc, plan, soa);
+        }
+    }
+    Ok(n)
 }
 
 pub fn seq_scan_batch_store<'mcx>(
@@ -134,6 +176,9 @@ pub fn seq_scan_batch_store<'mcx>(
         node.ss.ss_currentScanDesc.as_mut().expect("batch store before batch fetch");
     let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
     ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
+    if let Some(b) = node.batch_soa.as_ref() {
+        ::exectuples::soa_store_prefix(slot, &b.soa, i);
+    }
 }
 
 /// `ExecSeqScan` + its four specialized variants, dispatched on the enum
@@ -230,7 +275,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
             (true, true) => SeqScanVariant::WithQualProject,
         }
     };
-    Ok(SeqScanState { ss, variant })
+    Ok(SeqScanState { ss, variant, batch_soa: None })
 }
 
 /// `ExecEndSeqScan`.
@@ -273,5 +318,6 @@ pub fn exec_seq_scan_initialize_worker(_node: &mut SeqScanState<'_>) -> ! {
 mcx::forget_safe_nodrop!(SeqScanVariant);
 
 mcx::forget_safe_struct!(
-    SeqScanState<'_> { ss, variant },
+    SeqScanState<'_> { ss, variant, batch_soa },
+    BatchSoa<'_> { plan, soa },
 );

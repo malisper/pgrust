@@ -883,6 +883,17 @@ pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgRe
     }
 }
 
+/// SoA-deform the staged page batch's column prefix per `plan`.
+pub fn table_scan_batch_deform<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa),
+    }
+}
+
 /// Store tuple `i` of the staged page batch into `slot`.
 pub fn table_scan_batch_store_slot<'mcx>(
     mcx: Mcx<'mcx>,
