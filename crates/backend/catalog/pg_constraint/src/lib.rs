@@ -615,7 +615,13 @@ pub enum ConstraintCategory {
 // oid (C returns the copied tuple; callers use only the oid).
 pub fn findDomainNotNullConstraint<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<Oid>> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
-    let keys = [eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid))];
+    // C keys only contypid (index column 2); the conrelid=0 prefix key is
+    // added here so the scan stays a plain prefix scan (skip scan unported) —
+    // domain constraints always carry conrelid=0, identical row set.
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
+    ];
     let mut scan = genam::systable_beginscan(
         mcx,
         &con_rel,
