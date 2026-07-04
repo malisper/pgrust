@@ -682,6 +682,19 @@ fn dispatch_switch<'mcx>(
             }
         }
 
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterOwnerStmt>()
+                .expect("AlterOwnerStmt");
+            if event_trigger::EventTriggerSupportsObjectType(stmt.objectType) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                exec_alter_owner_non_et(mcx, stmt)?;
+            }
+        }
+
         // All other statement types have event trigger support.
         _ => process_utility_slow(
             mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
@@ -1390,21 +1403,6 @@ fn slow_switch<'mcx>(
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
                     Ok(None)
                 }
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
-                    let name = stmt
-                        .object
-                        .expect("AlterOwnerStmt.object")
-                        .as_string()
-                        .expect("tablespace name String")
-                        .sval;
-                    let newowner = aclchk::get_rolespec_oid(
-                        stmt.newowner.expect("AlterOwnerStmt.newowner"),
-                        false,
-                    )?;
-                    collect_gap("ALTER OWNER");
-                    commands_tablespace::AlterTableSpaceOwner(mcx, name, newowner)?;
-                    Ok(None)
-                }
                 _ => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
             }
         }
@@ -1455,6 +1453,28 @@ fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> 
         >(stmt)
     };
     commands_comment::CommentObject(mcx, stmt)
+}
+
+// ExecAlterOwnerStmt (alter.c) for the object types without event-trigger
+// support (only OBJECT_TABLESPACE is ported).
+fn exec_alter_owner_non_et<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::AlterOwnerStmt<'_>,
+) -> PgResult<()> {
+    match stmt.objectType {
+        types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
+            let name = stmt
+                .object
+                .expect("AlterOwnerStmt.object")
+                .as_string()
+                .expect("tablespace name String")
+                .sval;
+            let newowner =
+                aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
+            commands_tablespace::AlterTableSpaceOwner(mcx, name, newowner)
+        }
+        other => panic!("unported: ExecAlterOwnerStmt {other:?}"),
+    }
 }
 
 fn exec_rename_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
