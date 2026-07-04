@@ -222,9 +222,9 @@ fn raw_heap_insert<'mcx>(
     } else {
         None
     };
-    let (img_ptr, img_len) = match heaptup.as_ref() {
-        Some(t) => (t.as_tuple().header_ptr(), t.as_tuple().t_len as usize),
-        None => (tup.header_ptr(), tup.t_len as usize),
+    let img_len = match heaptup.as_ref() {
+        Some(t) => t.as_tuple().t_len as usize,
+        None => tup.t_len as usize,
     };
 
     let len = transam_xlog::MAXALIGN(img_len);
@@ -255,6 +255,11 @@ fn raw_heap_insert<'mcx>(
 
     let buffer = state.rs_buffer.as_mut().unwrap();
     let mut page = page_mut_of(buffer);
+    // Extracted adjacent to the copy: no code between raw view and read.
+    let img_ptr = match heaptup.as_ref() {
+        Some(t) => t.as_tuple().header_ptr(),
+        None => tup.header_ptr(),
+    };
     // SAFETY: img_ptr/img_len delimit a live tuple image (HeapTupleData invariant).
     let item = unsafe { core::slice::from_raw_parts(img_ptr, img_len) };
     let newoff: OffsetNumber =

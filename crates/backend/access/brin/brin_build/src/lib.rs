@@ -199,6 +199,8 @@ pub fn brinbuildempty(_index: &Relation<'_>) -> ! {
 }
 
 fn form_and_insert_tuple(state: &mut BrinBuildState<'_, '_>) -> PgResult<()> {
+    // Minmax-multi serialization leaves scratch-dead datums in bs_dtuple
+    // bv_values[0]: reinitialize before any read (C brin_memtuple_initialize).
     let scratch = MemoryContext::new_bump("brin form tuple");
     let tup = brin_form_tuple(
         scratch.mcx(),

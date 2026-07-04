@@ -91,6 +91,13 @@ impl<'mcx> HeapTuple<'mcx> {
         unsafe { core::slice::from_raw_parts(self.htup.header_ptr(), self.htup.t_len as usize) }
     }
 
+    /// The size Drop frees with; forget-then-free-by-t_len consumers must
+    /// assert `t_len` still equals it.
+    #[inline]
+    pub fn alloc_size(&self) -> u32 {
+        self.alloc_size
+    }
+
     #[inline]
     pub fn image_mut(&mut self) -> &mut [u8] {
         // SAFETY: the image is owned, live, unique, and t_len bytes long.

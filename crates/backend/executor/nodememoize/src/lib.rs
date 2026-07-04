@@ -291,9 +291,9 @@ impl<'mcx> MemoizeState<'mcx> {
     }
 }
 
-// SAFETY (all image helpers): images were produced by
-// exec_copy_slot_minimal_tuple into the table context and stay live until
-// explicitly freed here or the context resets.
+// SAFETY (all image helpers): images live in the table context until freed
+// here or reset. size must equal the exact alloc layout (t_len, or
+// TUPLE_PREFIX + t_len): the Aset is exact-accounting.
 unsafe fn free_image(mcx: Mcx<'_>, base: NonNull<u8>, size: usize) {
     unsafe { mcx.deallocate(base, Layout::from_size_align_unchecked(size, 8)) };
 }

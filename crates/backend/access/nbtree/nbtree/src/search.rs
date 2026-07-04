@@ -4,32 +4,28 @@
 
 use core::mem::MaybeUninit;
 
-use ::bufmgr_seams::{self as bufmgr, BufferPin};
-use ::mcx::vec_with_capacity_in;
-use ::types_core::{
-    BlockNumber, Buffer, InvalidBuffer, Oid, OffsetNumber, BLCKSZ, INDEX_MAX_KEYS,
-};
-use ::types_error::{PgError, PgResult};
-use ::types_fmgr::FmgrInfo;
-use ::types_nbtree::{
+use bufmgr_seams::{self as bufmgr, BufferPin};
+use mcx::vec_with_capacity_in;
+use types_core::{BlockNumber, Buffer, InvalidBuffer, OffsetNumber, Oid, BLCKSZ, INDEX_MAX_KEYS};
+use types_error::{PgError, PgResult};
+use types_fmgr::FmgrInfo;
+use types_nbtree::{
     BTScanOpaqueData, BTScanPosData, BTScanPosInvalidate, BTScanPosIsPinned, BTScanPosIsValid,
-    BTScanPosItem, MaxTIDsPerBTreePage, BTORDER_PROC, BT_READ, P_FIRSTDATAKEY, P_HIKEY,
-    P_IGNORE, P_ISDELETED, P_ISLEAF, P_LEFTMOST, P_NONE, P_RIGHTMOST,
+    BTScanPosItem, MaxTIDsPerBTreePage, BTORDER_PROC, BT_READ, P_FIRSTDATAKEY, P_HIKEY, P_IGNORE,
+    P_ISDELETED, P_ISLEAF, P_LEFTMOST, P_NONE, P_RIGHTMOST,
 };
-use ::types_rel::Relation;
-use ::types_scan::scankey::{
-    ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
-    BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
+use types_rel::Relation;
+use types_scan::scankey::{
+    BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
+    BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber,
     SK_BT_DESC, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_NULLS_FIRST, SK_BT_PRIOR,
     SK_BT_REQBKWD, SK_BT_REQFWD, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHNOTNULL,
 };
-use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
-use ::types_snapshot::SnapshotData;
-use ::types_storage::bufpage::PageRef;
-use ::types_tuple::itemptr::{
-    ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck,
-};
-use ::types_tuple::TupleDescData;
+use types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
+use types_snapshot::SnapshotData;
+use types_storage::bufpage::PageRef;
+use types_tuple::itemptr::{ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck};
+use types_tuple::TupleDescData;
 
 use crate::fcframe::OrderProcFrame;
 use crate::itup::{
@@ -115,9 +111,7 @@ impl BtScanInsert {
     #[inline]
     pub fn keys_mut(&mut self) -> &mut [ScanKeyData] {
         // SAFETY: [0, keysz) written by push; MaybeUninit<T> is layout-T.
-        unsafe {
-            core::slice::from_raw_parts_mut(self.scankeys.as_mut_ptr().cast(), self.keysz)
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.scankeys.as_mut_ptr().cast(), self.keysz) }
     }
 }
 
@@ -483,18 +477,14 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                 keysz += 1;
 
                 strat_total = keys[bk].sk_strategy;
-                if strat_total == BTGreaterStrategyNumber
-                    || strat_total == BTLessStrategyNumber
-                {
+                if strat_total == BTGreaterStrategyNumber || strat_total == BTLessStrategyNumber {
                     break;
                 }
                 if keys[bk].sk_flags & (SK_BT_NEXT | SK_BT_PRIOR) != 0 {
                     unported_phase2("skip-array NEXT/PRIOR sentinel keys");
                 }
 
-                if i >= keys.len()
-                    || keys[i].sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0
-                {
+                if i >= keys.len() || keys[i].sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0 {
                     break;
                 }
 
@@ -746,9 +736,7 @@ fn bt_readpage(
 
                 // SAFETY: pinned+locked page item for this whole call.
                 if so.scanBehind
-                    && !unsafe {
-                        bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)?
-                    }
+                    && !unsafe { bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)? }
                 {
                     // Schedule another primitive index scan after all.
                     so.currPos.moreRight = false;
@@ -802,8 +790,7 @@ fn bt_readpage(
                         bt_saveitem(so, item_index, offnum, itup);
                         item_index += 1;
                     } else {
-                        let tuple_offset =
-                            bt_setuppostingitems(so, item_index, offnum, itup);
+                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup);
                         item_index += 1;
                         for i in 1..bt_tuple_get_nposting(itup) {
                             bt_savepostingitem(
@@ -832,7 +819,7 @@ fn bt_readpage(
             }
             pstate.forcenonrequired = false;
             pstate.startikey = 0; // _bt_set_startikey ignores P_HIKEY
-            // SAFETY: pinned+locked page item.
+                                  // SAFETY: pinned+locked page item.
             unsafe {
                 let truncatt = bt_tuple_get_natts(itup, indnatts);
                 if array_keys {
@@ -859,9 +846,7 @@ fn bt_readpage(
 
                 // SAFETY: pinned+locked page item for this whole call.
                 if so.scanBehind
-                    && !unsafe {
-                        bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)?
-                    }
+                    && !unsafe { bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)? }
                 {
                     // Schedule another primitive index scan after all.
                     so.currPos.moreLeft = false;
@@ -933,8 +918,7 @@ fn bt_readpage(
                         bt_saveitem(so, item_index, offnum, itup);
                     } else {
                         item_index -= 1;
-                        let tuple_offset =
-                            bt_setuppostingitems(so, item_index, offnum, itup);
+                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup);
                         for i in 1..bt_tuple_get_nposting(itup) {
                             item_index -= 1;
                             bt_savepostingitem(
@@ -994,7 +978,9 @@ unsafe fn bt_saveitem(
         // SAFETY: nextTupleOffset stays <= BLCKSZ (page-sourced tuples).
         core::ptr::copy_nonoverlapping(
             itup,
-            curr_tuples.as_mut_ptr().add(so.currPos.nextTupleOffset as usize),
+            curr_tuples
+                .as_mut_ptr()
+                .add(so.currPos.nextTupleOffset as usize),
             itupsz,
         );
         so.currPos.nextTupleOffset += MAXALIGN(itupsz) as i32;
@@ -1024,7 +1010,9 @@ unsafe fn bt_setuppostingitems(
         let itupsz = MAXALIGN(crate::itup::bt_tuple_get_posting_offset(itup));
         item.tupleOffset = so.currPos.nextTupleOffset as u16;
         tuple_offset = item.tupleOffset;
-        let base = curr_tuples.as_mut_ptr().add(so.currPos.nextTupleOffset as usize);
+        let base = curr_tuples
+            .as_mut_ptr()
+            .add(so.currPos.nextTupleOffset as usize);
         // SAFETY: nextTupleOffset stays <= BLCKSZ.
         core::ptr::copy_nonoverlapping(itup, base, itupsz);
         let info_p = base.add(6).cast::<u16>();
@@ -1048,7 +1036,11 @@ fn bt_savepostingitem(
         BTScanPosItem {
             heapTid: heap_tid,
             indexOffset: offnum,
-            tupleOffset: if so.currTuples.is_some() { tuple_offset } else { 0 },
+            tupleOffset: if so.currTuples.is_some() {
+                tuple_offset
+            } else {
+                0
+            },
         },
     );
 }
@@ -1064,9 +1056,11 @@ fn bt_returnitem(ctx: &mut ScanCtx<'_, '_>) {
     let item = unsafe { so.currPos.item(so.currPos.itemIndex as usize) };
     *ctx.xs_heaptid = item.heapTid;
     if let Some(curr_tuples) = so.currTuples.as_ref() {
-        *ctx.xs_itup =
-            core::ptr::NonNull::new(curr_tuples.as_ptr().wrapping_add(item.tupleOffset as usize)
-                as *mut u8);
+        // Escaping xs_itup dangles if currTuples ever reallocates (no push).
+        debug_assert_eq!(curr_tuples.capacity(), BLCKSZ);
+        *ctx.xs_itup = core::ptr::NonNull::new(
+            curr_tuples.as_ptr().wrapping_add(item.tupleOffset as usize) as *mut u8,
+        );
     }
 }
 
@@ -1085,7 +1079,11 @@ pub fn bt_peek_same_block_tids(
     // SAFETY: indexes stay within [firstItem, lastItem]: written slots.
     let cur = unsafe { pos.item(pos.itemIndex as usize) }.heapTid;
     let blk = ItemPointerGetBlockNumberNoCheck(&cur);
-    let step: i32 = if ScanDirectionIsForward(pos.dir) { 1 } else { -1 };
+    let step: i32 = if ScanDirectionIsForward(pos.dir) {
+        1
+    } else {
+        -1
+    };
     let mut n = 0usize;
     let mut j = pos.itemIndex + step;
     while j >= pos.firstItem && j <= pos.lastItem && n < out.len() {
@@ -1186,7 +1184,9 @@ pub(crate) fn restore_scanpos(so: &mut BTScanOpaqueData<'_>) {
     so.currPos.lastItem = so.markPos.lastItem;
     so.currPos.itemIndex = so.markPos.itemIndex;
     let (curr_items, mark_items) = {
-        let BTScanOpaqueData { currPos, markPos, .. } = so;
+        let BTScanOpaqueData {
+            currPos, markPos, ..
+        } = so;
         (&mut currPos.items, &markPos.items)
     };
     curr_items[..n].copy_from_slice(&mark_items[..n]);
@@ -1343,11 +1343,7 @@ fn bt_lock_and_validate_left(
             let (deleted, next, rightmost) = {
                 let page = pin.page();
                 let opaque = page_opaque(&page);
-                (
-                    P_ISDELETED(&opaque),
-                    opaque.btpo_next,
-                    P_RIGHTMOST(&opaque),
-                )
+                (P_ISDELETED(&opaque), opaque.btpo_next, P_RIGHTMOST(&opaque))
             };
             if !deleted && next == lastcurrblkno {
                 return Ok(Some(pin));

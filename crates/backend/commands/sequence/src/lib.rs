@@ -106,12 +106,23 @@ fn with_elm<R>(relid: Oid, f: impl FnOnce(&mut SeqTableData) -> R) -> R {
 }
 
 // FormData_pg_sequence_data on-page layout: int8 @0, int8 @8, bool @16.
+// data points into the buffer page: valid only while the read_seq_tuple
+// buffer stays pinned + exclusively locked.
 struct SeqTuple {
     data: *mut u8,
     t_len: u32,
+    #[cfg(debug_assertions)]
+    buf: Buffer,
 }
 
 impl SeqTuple {
+    #[inline]
+    fn assert_pinned(&self) {
+        // InvalidBuffer marks a synthetic (non-page-backed) image.
+        #[cfg(debug_assertions)]
+        debug_assert!(self.buf == types_core::InvalidBuffer || bufmgr::BufferIsPinned(self.buf));
+    }
+
     fn header(&self) -> *mut HeapTupleHeaderData {
         self.data.cast()
     }
@@ -120,6 +131,7 @@ impl SeqTuple {
         unsafe { self.data.add((*self.header()).t_hoff as usize) }
     }
     fn image(&self) -> &[u8] {
+        self.assert_pinned();
         // SAFETY: item bytes are t_len long inside the locked page.
         unsafe { core::slice::from_raw_parts(self.data, self.t_len as usize) }
     }
@@ -136,6 +148,7 @@ impl SeqTuple {
         unsafe { self.payload().add(16).read() != 0 }
     }
     fn set(&self, last_value: i64, log_cnt: i64, is_called: bool) {
+        self.assert_pinned();
         // SAFETY: exclusive buffer lock held by the caller.
         unsafe {
             self.payload().cast::<i64>().write_unaligned(last_value);
@@ -218,7 +231,12 @@ fn read_seq_tuple(rel: &Relation<'_>) -> PgResult<(Buffer, SeqTuple)> {
     let lp = page.item_id(1);
     debug_assert!(lp.is_used());
     let (ptr, len) = page.item_raw(lp);
-    let tup = SeqTuple { data: ptr.cast_mut(), t_len: len };
+    let tup = SeqTuple {
+        data: ptr.cast_mut(),
+        t_len: len,
+        #[cfg(debug_assertions)]
+        buf,
+    };
 
     // Clear any leftover xmax from historical SELECT FOR UPDATE, hint-style.
     // SAFETY: exclusive lock held; header is within the item.
@@ -1230,7 +1248,12 @@ mod tests {
         let mut img = [0u8; 64];
         let hoff = 24u8;
         img[22] = hoff; // t_hoff offset within HeapTupleHeaderData
-        let tup = SeqTuple { data: img.as_mut_ptr(), t_len: 64 };
+        let tup = SeqTuple {
+            data: img.as_mut_ptr(),
+            t_len: 64,
+            #[cfg(debug_assertions)]
+            buf: types_core::InvalidBuffer,
+        };
         tup.set(0x1122334455667788, 32, true);
         assert_eq!(tup.last_value(), 0x1122334455667788);
         assert_eq!(tup.log_cnt(), 32);

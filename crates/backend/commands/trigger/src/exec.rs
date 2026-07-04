@@ -225,6 +225,10 @@ pub fn ExecBSTruncateTriggers<'mcx>(
     Ok(())
 }
 
+// The returned pointer's image lives in per_tuple_mcx: the 'a in the return
+// type overstates validity — it dies at the per-tuple reset, and callers must
+// consume or copy it before then (C: SPI trigger returns palloc'd in the
+// per-tuple context).
 pub fn ExecCallTriggerFunc<'a, 'mcx>(
     per_tuple_mcx: Mcx<'_>,
     trigdata: &mut TriggerData<'a, 'mcx>,

@@ -612,6 +612,10 @@ fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) {
             let src = seg.seg.as_ref().unwrap();
             let segsize = src.len();
             if modified {
+                // Page-backed bytes would alias the region being rewritten;
+                // leaf_repack_items owns every segment written after the
+                // first modification.
+                debug_assert!(matches!(src, SegBytes::Owned(..)));
                 let s = src.as_slice();
                 bytes[ptr..ptr + segsize].copy_from_slice(s);
             }
