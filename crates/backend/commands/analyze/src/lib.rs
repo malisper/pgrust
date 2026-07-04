@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod array_typanalyze;
 mod range_typanalyze;
 pub mod sampling;
 
@@ -52,6 +53,7 @@ enum ComputeStats {
     Scalar,
     Trivial,
     Range { is_multirange: bool },
+    Array { std_scalar: bool, elem_typeid: Oid },
 }
 
 struct StdAnalyzeData {
@@ -347,6 +349,12 @@ fn do_analyze_rel<'mcx>(
                         anl_mcx, s, is_multirange, &src, numrows, totalrows,
                     )?
                 }
+                ComputeStats::Array { std_scalar, elem_typeid } => {
+                    array_typanalyze::compute_array_stats(
+                        anl_mcx, col_cx.mcx(), s, std_scalar, elem_typeid, &src, numrows,
+                        totalrows,
+                    )?
+                }
             }
             col_cx.reset();
         }
@@ -546,6 +554,18 @@ fn compute_index_stats<'mcx>(
                                 totalindexrows,
                             )?
                         }
+                        ComputeStats::Array { std_scalar, elem_typeid } => {
+                            array_typanalyze::compute_array_stats(
+                                anl_mcx,
+                                col_cx.mcx(),
+                                stats,
+                                std_scalar,
+                                elem_typeid,
+                                &src,
+                                numindexrows as i32,
+                                totalindexrows,
+                            )?
+                        }
                     }
                     col_cx.reset();
                 }
@@ -632,10 +652,11 @@ fn examine_attribute<'mcx>(
         statypalign: [ty.typalign as u8; STATISTIC_NUM_SLOTS],
     };
 
-    // Closed-set typanalyze dispatch (rule 4): std, range 3916, multirange
-    // 4242; anything else is an unported analyze lane.
+    // Closed-set typanalyze dispatch (rule 4): std, array 3816, range 3916,
+    // multirange 4242; anything else is an unported analyze lane.
     let ok = match typanalyze {
         InvalidOid => std_typanalyze(&mut stats)?,
+        3816 => array_typanalyze::setup(&mut stats)?,
         3916 => {
             stats.compute = ComputeStats::Range { is_multirange: false };
             range_typanalyze::setup(&mut stats)?
