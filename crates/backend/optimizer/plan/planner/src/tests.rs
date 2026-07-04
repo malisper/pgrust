@@ -402,23 +402,41 @@ fn install_scan_fixtures() {
         })
     });
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
-    // Typcache fixtures for scalararraysel: int4 pg_type row, no default
-    // opclass (eq_opr resolution stays invalid, containment skipped).
+    // Typcache fixtures for scalararraysel + check_memoizable: int4/text
+    // pg_type rows, no default opclass (eq_opr resolution stays invalid,
+    // containment skipped, hasheqoperator stays unset).
     syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
-        Ok((typid == 23).then(|| syscache_seams::PgTypeTypcacheShape {
-            typname: types_tuple::NameData::default(),
-            typlen: 4,
-            typbyval: true,
-            typalign: b'i' as i8,
-            typstorage: b'p' as i8,
-            typtype: b'b' as i8,
-            typisdefined: true,
-            typrelid: 0,
-            typsubscript: 0,
-            typelem: 0,
-            typarray: 1007,
-            typcollation: 0,
-        }))
+        Ok(match typid {
+            23 => Some(syscache_seams::PgTypeTypcacheShape {
+                typname: types_tuple::NameData::default(),
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: 0,
+                typsubscript: 0,
+                typelem: 0,
+                typarray: 1007,
+                typcollation: 0,
+            }),
+            25 => Some(syscache_seams::PgTypeTypcacheShape {
+                typname: types_tuple::NameData::default(),
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: 0,
+                typsubscript: 0,
+                typelem: 0,
+                typarray: 1009,
+                typcollation: 100,
+            }),
+            _ => None,
+        })
     });
     syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid));
     indexcmds_seams::get_default_opclass::set(|_, _| Ok(0));
