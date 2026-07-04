@@ -1143,13 +1143,14 @@ fn exec_grant_common<'mcx>(
         unlock_catalog_tuple(cls, &otid)?;
 
         pg_depend::updateAclDependencies(
+            mcx,
             cls.classid,
             objectid,
             0,
             owner_id,
             old_members.as_deref().unwrap_or(&[]),
             &new_members,
-        );
+        )?;
 
         ReleaseSysCache(tuple);
 
@@ -1269,13 +1270,14 @@ fn exec_grant_largeobject<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_
         catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
 
         pg_depend::updateAclDependencies(
+            mcx,
             LargeObjectRelationId,
             loid,
             0,
             owner_id,
             old_members.as_deref().unwrap_or(&[]),
             &new_members,
-        );
+        )?;
 
         genam::systable_endscan(mcx, scan)?;
 
