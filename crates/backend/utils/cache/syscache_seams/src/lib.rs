@@ -461,6 +461,41 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SearchSysCache1(OPEROID, opno) projected to (oprname, oprnamespace);
+    // None mirrors !HeapTupleIsValid.
+    pub fn pg_operator_oprnamensp(opno: Oid) -> PgResult<Option<(NameData, Oid)>>
+);
+
+// The (name, namespace) pair regconfigout/regdictionaryout read off one
+// TSCONFIGOID/TSDICTOID probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgTsObjectRow {
+    pub name: NameData,
+    pub namespace_oid: Oid,
+}
+
+seam_core::seam!(
+    // GetSysCacheOid2(TSCONFIGNAMENSP, cfgname, cfgnamespace); InvalidOid on a miss.
+    pub fn lookup_pg_ts_config_oid_by_name_nsp(cfgname: &str, cfgnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TSCONFIGOID, cfgid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_ts_config_row(cfgid: Oid) -> PgResult<Option<PgTsObjectRow>>
+);
+
+seam_core::seam!(
+    // GetSysCacheOid2(TSDICTNAMENSP, dictname, dictnamespace); InvalidOid on a miss.
+    pub fn lookup_pg_ts_dict_oid_by_name_nsp(dictname: &str, dictnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TSDICTOID, dictid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_ts_dict_row(dictid: Oid) -> PgResult<Option<PgTsObjectRow>>
+);
+
+
+seam_core::seam!(
     pub fn lookup_pg_constraint_shape(conoid: Oid) -> PgResult<Option<PgConstraintShape>>
 );
 
@@ -752,40 +787,49 @@ seam_core::seam!(
     pub fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> PgStatisticSlotShape
 );
 
-// One pg_statistic slot, arrays decoded on first access (C's get_attstatsslot
-// laziness: eqsel-only plans never deconstruct the histogram). Byref `values`
-// datums point into `values_image`, whose heap buffer is stable across moves
-// of this struct; decode allocates from the images' own allocator.
+// One pg_statistic slot. Array images are fetched on first access via
+// lookup_pg_statistic_slot_images and decoded on first values()/numbers()
+// (C's get_attstatsslot laziness: the unique-column eq path never touches
+// the arrays at all). Byref `values` datums point into the fetched
+// values_image, whose heap buffer is stable across moves of this struct.
 pub struct PgStatisticSlotData<'mcx> {
     pub kind: i16,
     pub staop: Oid,
     pub stacoll: Oid,
-    pub valuetype: Oid,
+    mcx: Mcx<'mcx>,
+    key: (Oid, AttrNumber, bool, i32),
+    images: core::cell::OnceCell<PgStatisticSlotImages<'mcx>>,
     values: core::cell::OnceCell<PgVec<'mcx, Datum>>,
     numbers: core::cell::OnceCell<PgVec<'mcx, f32>>,
-    values_image: PgVec<'mcx, u8>,
-    numbers_image: PgVec<'mcx, u8>,
+}
+
+pub struct PgStatisticSlotImages<'mcx> {
+    pub valuetype: Oid,
+    // Empty images mirror SQL NULL (decode to empty slices).
+    pub values_image: PgVec<'mcx, u8>,
+    pub numbers_image: PgVec<'mcx, u8>,
 }
 
 impl<'mcx> PgStatisticSlotData<'mcx> {
-    // Empty images mirror SQL NULL (decode to empty slices).
-    pub fn from_images(
+    pub fn lazy(
         kind: i16,
         staop: Oid,
         stacoll: Oid,
-        valuetype: Oid,
-        values_image: PgVec<'mcx, u8>,
-        numbers_image: PgVec<'mcx, u8>,
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inh: bool,
+        pos: i32,
     ) -> Self {
         PgStatisticSlotData {
             kind,
             staop,
             stacoll,
-            valuetype,
+            mcx,
+            key: (relid, attnum, inh, pos),
+            images: core::cell::OnceCell::new(),
             values: core::cell::OnceCell::new(),
             numbers: core::cell::OnceCell::new(),
-            values_image,
-            numbers_image,
         }
     }
 
@@ -798,25 +842,33 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         numbers: PgVec<'mcx, f32>,
         values_image: PgVec<'mcx, u8>,
     ) -> Self {
-        let s = PgStatisticSlotData::from_images(
-            kind,
-            staop,
-            stacoll,
+        let mcx = *values.allocator();
+        let s = PgStatisticSlotData::lazy(kind, staop, stacoll, mcx, 0, 0, false, 0);
+        let _ = s.images.set(PgStatisticSlotImages {
             valuetype,
             values_image,
-            PgVec::new_in(*values.allocator()),
-        );
+            numbers_image: PgVec::new_in(mcx),
+        });
         let _ = s.values.set(values);
         let _ = s.numbers.set(numbers);
         s
+    }
+
+    fn images(&self) -> PgResult<&PgStatisticSlotImages<'mcx>> {
+        if let Some(i) = self.images.get() {
+            return Ok(i);
+        }
+        let (relid, attnum, inh, pos) = self.key;
+        let img = lookup_pg_statistic_slot_images::call(self.mcx, relid, attnum, inh, pos)?;
+        Ok(self.images.get_or_init(|| img))
     }
 
     pub fn values(&self) -> PgResult<&[Datum]> {
         if let Some(v) = self.values.get() {
             return Ok(v);
         }
-        let mcx = *self.values_image.allocator();
-        let v = decode_pg_statistic_values::call(mcx, self.valuetype, &self.values_image)?;
+        let img = self.images()?;
+        let v = decode_pg_statistic_values::call(self.mcx, img.valuetype, &img.values_image)?;
         Ok(self.values.get_or_init(|| v))
     }
 
@@ -824,15 +876,33 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         if let Some(n) = self.numbers.get() {
             return Ok(n);
         }
-        let mcx = *self.numbers_image.allocator();
-        let n = decode_pg_statistic_numbers::call(mcx, &self.numbers_image)?;
+        let img = self.images()?;
+        let n = decode_pg_statistic_numbers::call(self.mcx, &img.numbers_image)?;
         Ok(self.numbers.get_or_init(|| n))
     }
 
-    pub fn values_image(&self) -> &[u8] {
-        &self.values_image
+    pub fn values_image(&self) -> PgResult<&[u8]> {
+        Ok(&self.images()?.values_image)
+    }
+
+    pub fn valuetype(&self) -> PgResult<Oid> {
+        Ok(self.images()?.valuetype)
     }
 }
+
+seam_core::seam!(
+    // get_attstatsslot's deferred array fetch: re-probe STATRELATTINH and
+    // extract one slot's stavalues/stanumbers images. The row existed at
+    // bundle probe time; a vanished row is loud (C reads its still-pinned
+    // original tuple).
+    pub fn lookup_pg_statistic_slot_images<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inh: bool,
+        pos: i32,
+    ) -> PgResult<PgStatisticSlotImages<'mcx>>
+);
 
 seam_core::seam!(
     // stavalues image decode (get_attstatsslot's deconstruct_array arm);

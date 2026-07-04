@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_json = { path = "../json" }
+adt_jsonpath = { path = "../jsonpath" }
+gin_vocab = { path = "../../../access/gin/gin_vocab" }
+stack_depth = { path = "../../misc/stack_depth" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 funcapi = { path = "../../fmgr/funcapi" }
 heaptuple = { path = "../../../access/common/heaptuple" }
@@ -23,7 +26,6 @@ hashfn = { path = "../../../../common/hashfn" }
 mbutils = { path = "../../mb/mbutils" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }
-stack_depth = { path = "../../misc/stack_depth" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }

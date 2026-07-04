@@ -16,15 +16,17 @@ use crate::parsenodes::{
 };
 use crate::list::OptNodeList;
 use crate::primnodes::{
-    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr, NullTest, OpExpr, Param, RangeTblRef,
-    RangeVar, RelabelType, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
+    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO, CollateExpr, Const,
+    CurrentOfExpr, DistinctExpr, FieldSelect, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
+    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
+    XmlExpr,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
-    InsertStmt, ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt,
-    ValUnion,
+    InsertStmt, ParamRef, RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, SelectStmt,
+    SortBy, TypeCast, TypeName, UpdateStmt,
+    ValUnion, XmlSerialize,
 };
 use crate::tags::NodeTag;
 
@@ -66,14 +68,17 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
+        NodeTag::T_FieldSelect => cmp!(as_field_select),
         NodeTag::T_CollateExpr => cmp!(as_collate_expr),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
+        NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
         NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
         NodeTag::T_CollateClause => cmp!(as_collate_clause),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
+        NodeTag::T_CurrentOfExpr => cmp!(as_current_of_expr),
         NodeTag::T_FromExpr => cmp!(as_from_expr),
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
@@ -106,6 +111,11 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_A_Star => true,
         NodeTag::T_SortBy => cmp!(as_sort_by),
         NodeTag::T_FuncCall => cmp!(as_func_call),
+        NodeTag::T_XmlExpr => cmp!(as_xml_expr),
+        NodeTag::T_TableFunc => cmp!(as_table_func),
+        NodeTag::T_RangeTableFunc => cmp!(as_range_table_func),
+        NodeTag::T_RangeTableFuncCol => cmp!(as_range_table_func_col),
+        NodeTag::T_XmlSerialize => cmp!(as_xml_serialize),
         NodeTag::T_TypeName => cmp!(as_type_name),
         NodeTag::T_TypeCast => cmp!(as_type_cast),
         NodeTag::T_Integer => cmp!(as_integer),
@@ -379,7 +389,7 @@ impl NodeEqual for FuncExpr<'_> {
 
 impl NodeEqual for NamedArgExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
-        equal(self.arg, b.arg) && self.name == b.name && self.argnumber == b.argnumber
+        equal_opt(self.arg, b.arg) && self.name == b.name && self.argnumber == b.argnumber
     }
 }
 
@@ -458,12 +468,30 @@ impl NodeEqual for BoolExpr<'_> {
     }
 }
 
+impl NodeEqual for FieldSelect<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.fieldnum == b.fieldnum
+            && self.resulttype == b.resulttype
+            && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
+    }
+}
+
 impl NodeEqual for RelabelType<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         equal(self.arg, b.arg)
             && self.resulttype == b.resulttype
             && self.resulttypmod == b.resulttypmod
             && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for CoalesceExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.coalescetype == b.coalescetype
+            && self.coalescecollid == b.coalescecollid
+            && self.args.node_equal(&b.args)
     }
 }
 
@@ -492,6 +520,72 @@ impl NodeEqual for NullTest<'_> {
         equal_opt(self.arg, b.arg)
             && self.nulltesttype == b.nulltesttype
             && self.argisrow == b.argisrow
+    }
+}
+
+impl NodeEqual for XmlExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op
+            && self.name == b.name
+            && self.named_args.node_equal(&b.named_args)
+            && self.arg_names.node_equal(&b.arg_names)
+            && self.args.node_equal(&b.args)
+            && self.xmloption == b.xmloption
+            && self.indent == b.indent
+            && self.r#type == b.r#type
+            && self.typmod == b.typmod
+    }
+}
+
+impl NodeEqual for TableFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.functype == b.functype
+            && self.ns_uris.node_equal(&b.ns_uris)
+            && self.ns_names.node_equal(&b.ns_names)
+            && equal_opt(self.docexpr, b.docexpr)
+            && equal_opt(self.rowexpr, b.rowexpr)
+            && self.colnames.node_equal(&b.colnames)
+            && self.coltypes.node_equal(&b.coltypes)
+            && self.coltypmods.node_equal(&b.coltypmods)
+            && self.colcollations.node_equal(&b.colcollations)
+            && self.colexprs.node_equal(&b.colexprs)
+            && self.coldefexprs.node_equal(&b.coldefexprs)
+            && self.colvalexprs.node_equal(&b.colvalexprs)
+            && self.passingvalexprs.node_equal(&b.passingvalexprs)
+            && self.notnulls.equal(&b.notnulls)
+            && equal_opt(self.plan, b.plan)
+            && self.ordinalitycol == b.ordinalitycol
+    }
+}
+
+impl NodeEqual for RangeTableFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.lateral == b.lateral
+            && equal_opt(self.docexpr, b.docexpr)
+            && equal_opt(self.rowexpr, b.rowexpr)
+            && self.namespaces.node_equal(&b.namespaces)
+            && self.columns.node_equal(&b.columns)
+            && eq_ref(self.alias, b.alias)
+    }
+}
+
+impl NodeEqual for RangeTableFuncCol<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.colname == b.colname
+            && equal_opt(self.typeName, b.typeName)
+            && self.for_ordinality == b.for_ordinality
+            && self.is_not_null == b.is_not_null
+            && equal_opt(self.colexpr, b.colexpr)
+            && equal_opt(self.coldefexpr, b.coldefexpr)
+    }
+}
+
+impl NodeEqual for XmlSerialize<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.xmloption == b.xmloption
+            && equal_opt(self.expr, b.expr)
+            && equal_opt(self.typeName, b.typeName)
+            && self.indent == b.indent
     }
 }
 
@@ -534,6 +628,14 @@ impl NodeEqual for TargetEntry<'_> {
 impl NodeEqual for RangeTblRef {
     fn node_equal(&self, b: &Self) -> bool {
         self.rtindex == b.rtindex
+    }
+}
+
+impl NodeEqual for CurrentOfExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.cvarno == b.cvarno
+            && self.cursor_name == b.cursor_name
+            && self.cursor_param == b.cursor_param
     }
 }
 

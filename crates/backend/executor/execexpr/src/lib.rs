@@ -3,7 +3,7 @@
 // DONE_NO_RETURN, INNER/OUTER/SCAN_FETCHSOME, INNER/OUTER/SCAN_VAR,
 // ASSIGN_*_VAR, ASSIGN_TMP[_MAKE_RO], CONST, FUNCEXPR[_STRICT[_1|_2]], QUAL,
 // PARAM_EXTERN/PARAM_EXEC (compile-resolved; ParamBind), MINMAX,
-// BOOL_AND/OR/NOT, NULLTEST_ISNULL/ISNOTNULL (ROWISNULL forms loud).
+// BOOL_AND/OR/NOT, NULLTEST_ISNULL/ISNOTNULL/ROWISNULL/ROWISNOTNULL.
 // Deferred families (loud-panic at compile): WHOLEROW, SYSVAR, OLD/NEW
 // (RETURNING), PARAM_CALLBACK, JUMP_* +
 // BOOLTEST + CASE/COALESCE (eval_const_expressions folds the all-Const
@@ -18,6 +18,7 @@ mod arrayops;
 mod compile;
 pub mod domain;
 mod interp;
+mod xmlops;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -36,7 +37,10 @@ pub use interp::{
     agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_outcome,
     exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome, Resume, Suspension,
 };
-pub use steps::{AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef, SlotSrc, Step};
+pub use steps::{
+    qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef,
+    SlotSrc, Step,
+};
 pub use types_portal::params::ParamBind;
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.

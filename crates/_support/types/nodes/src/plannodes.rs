@@ -149,6 +149,22 @@ pub struct SeqScan<'mcx> {
     pub scan: Scan<'mcx>,
 }
 
+/// tidquals has implicit OR semantics.
+#[derive(Default)]
+#[repr(C)]
+pub struct TidScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tidquals: NodeList<'mcx>,
+}
+
+/// tidrangequals has implicit AND semantics.
+#[derive(Default)]
+#[repr(C)]
+pub struct TidRangeScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tidrangequals: NodeList<'mcx>,
+}
+
 /// `indexorderdir` carries the C ScanDirection value (-1/0/1).
 #[derive(Default)]
 #[repr(C)]
@@ -361,12 +377,41 @@ pub struct FunctionScan<'mcx> {
     pub funcordinality: bool,
 }
 
+/// `tablefunc` is a `TableFunc` node.
+#[derive(Default)]
+#[repr(C)]
+pub struct TableFuncScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tablefunc: Option<Node<'mcx>>,
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct CteScan<'mcx> {
     pub scan: Scan<'mcx>,
     pub ctePlanId: i32,
     pub cteParam: i32,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct WorkTableScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub wtParam: i32,
+}
+
+/// Outer child is the non-recursive term, inner child the recursive term;
+/// dup fields are zero/empty for UNION ALL. Per-key arrays as in [`Sort`].
+#[derive(Default)]
+#[repr(C)]
+pub struct RecursiveUnion<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub wtParam: i32,
+    pub numCols: i32,
+    pub dupColIdx: &'mcx [i16],
+    pub dupOperators: &'mcx [Oid],
+    pub dupCollations: &'mcx [Oid],
+    pub numGroups: i64,
 }
 
 #[derive(Default)]
@@ -746,6 +791,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ProjectSet<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SeqScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for TidScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TidScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TidRangeScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TidRangeScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexScan;
 }
@@ -788,8 +839,17 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SetOp<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_FunctionScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for TableFuncScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TableFuncScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CteScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_CteScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for WorkTableScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WorkTableScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RecursiveUnion<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RecursiveUnion;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ValuesScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_ValuesScan;
@@ -869,7 +929,11 @@ unsafe impl<'mcx> PlanVariant<'mcx> for SetOp<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for TableFuncScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
+unsafe impl<'mcx> PlanVariant<'mcx> for WorkTableScan<'mcx> {}
+unsafe impl<'mcx> PlanVariant<'mcx> for RecursiveUnion<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -913,6 +977,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<SeqScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(TidScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TidScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(TidRangeScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TidRangeScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(IndexScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<IndexScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -948,6 +1020,10 @@ const _: () = {
     assert!(offset_of!(FunctionScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<FunctionScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(TableFuncScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TableFuncScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
     assert!(offset_of!(CteScan, scan) == 0);
     assert!(
@@ -1000,6 +1076,8 @@ fn is_plan_tag(tag: NodeTag) -> bool {
         NodeTag::T_Result
             | NodeTag::T_ProjectSet
             | NodeTag::T_SeqScan
+            | NodeTag::T_TidScan
+            | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
             | NodeTag::T_IndexOnlyScan
             | NodeTag::T_BitmapAnd
@@ -1010,7 +1088,10 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_SubqueryScan
             | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
+            | NodeTag::T_TableFuncScan
             | NodeTag::T_CteScan
+            | NodeTag::T_WorkTableScan
+            | NodeTag::T_RecursiveUnion
             | NodeTag::T_ValuesScan
             | NodeTag::T_Sort
             | NodeTag::T_IncrementalSort
@@ -1051,6 +1132,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_tid_scan(self) -> Option<&'mcx TidScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_tid_range_scan(self) -> Option<&'mcx TidRangeScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_index_scan(self) -> Option<&'mcx IndexScan<'mcx>> {
         self.as_variant()
     }
@@ -1086,7 +1177,22 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_table_func_scan(self) -> Option<&'mcx TableFuncScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_cte_scan(self) -> Option<&'mcx CteScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_work_table_scan(self) -> Option<&'mcx WorkTableScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_recursive_union(self) -> Option<&'mcx RecursiveUnion<'mcx>> {
         self.as_variant()
     }
 

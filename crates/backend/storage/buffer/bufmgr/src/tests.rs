@@ -704,7 +704,7 @@ fn abort_resowner_release_aborts_leaked_io_and_wakes_waiter() {
     // extend.rs beyond-EOF shape: invalidate, take input IO, "error out".
     let s = LockBufHdr(desc);
     UnlockBufHdr(desc, s & !BM_VALID);
-    assert!(crate::read::StartBufferIO(desc, true, false).unwrap());
+    assert!(crate::read::StartBufferIO(desc, true, false, true).unwrap());
 
     let waiter = spawn_reader(rel, std::time::Duration::ZERO);
     std::thread::sleep(std::time::Duration::from_millis(150));
@@ -975,3 +975,4 @@ fn buf_table_dense_grow_delete_reinsert() {
     let err = bt_delete(&synth_tag(rel, 0)).unwrap_err();
     assert!(format!("{err:?}").contains("shared buffer hash table corrupted"));
 }
+

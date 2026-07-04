@@ -17,7 +17,7 @@ mod tests;
 
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use types_core::Oid;
@@ -65,6 +65,10 @@ pub(crate) struct RelcacheState {
     pub(crate) indexattr_cache:
         PgHashMap<'static, Oid, std::rc::Rc<relcache_seams::IndexAttrBitmaps>>,
     pub(crate) statext_cache: PgHashMap<'static, Oid, std::rc::Rc<[Oid]>>,
+    // C rebuilds swap entry contents in place, preserving rd_refcnt identity;
+    // our rebuild replaces the Rc, so still-held predecessors are tracked here
+    // (weak, pruned on read) to keep per-oid refcounts C-exact.
+    pub(crate) stale_refs: PgHashMap<'static, Oid, PgVec<'static, Weak<RelationData<'static>>>>,
     pub(crate) in_progress: PgVec<'static, InProgressEnt>,
     pub(crate) eoxact_list: [Oid; MAX_EOXACT_LIST],
     pub(crate) eoxact_list_len: usize,
@@ -93,6 +97,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 policies_cache: PgHashMap::new_in(mcx),
                 indexattr_cache: PgHashMap::new_in(mcx),
                 statext_cache: PgHashMap::new_in(mcx),
+                stale_refs: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),
                 eoxact_list: [0; MAX_EOXACT_LIST],
                 eoxact_list_len: 0,
@@ -108,6 +113,41 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
 
 pub(crate) fn cache_mcx() -> Mcx<'static> {
     with_state(|st| st.mcx)
+}
+
+// Record a replaced entry allocation that still has holders; weak so pruning
+// is automatic once the last holder drops.
+pub(crate) fn note_stale(st: &mut RelcacheState, old: &Rc<RelationData<'static>>) {
+    if Rc::strong_count(old) <= 1 {
+        return;
+    }
+    let mcx = st.mcx;
+    st.stale_refs
+        .entry(old.rd_id)
+        .or_insert_with(|| PgVec::new_in(mcx))
+        .push(Rc::downgrade(old));
+}
+
+// C rd_refcnt vs (rd_isnailed ? 2 : 1): user refs across the current entry and
+// any still-held rebuilt-away predecessors. The nail is a flag here, so the
+// caller's expected count is 1 in both cases.
+pub fn RelationUserRefcount(relid: Oid) -> usize {
+    with_state(|st| {
+        let mut total = 0usize;
+        if let Some(ent) = st.id_cache.get(&relid) {
+            total += Rc::strong_count(&ent.rel) - 1;
+        }
+        if let Some(v) = st.stale_refs.get_mut(&relid) {
+            v.retain(|w| w.strong_count() > 0);
+            for w in v.iter() {
+                total += w.strong_count();
+            }
+            if v.is_empty() {
+                st.stale_refs.remove(&relid);
+            }
+        }
+        total
+    })
 }
 
 pub fn criticalRelcachesBuilt() -> bool {

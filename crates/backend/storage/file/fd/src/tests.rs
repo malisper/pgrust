@@ -74,6 +74,37 @@ fn vfd_open_write_read_close_roundtrip() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn dio_companion_fd_lifecycle() {
+    setup();
+    let dir = scratch_dir("dio");
+    let path = format!("{dir}/d");
+    let f = open_rw(&path);
+    assert_eq!(crate::io::FileWrite(f, &[7u8; 8192], 0, 0).unwrap(), 8192);
+
+    let ext_before = vfd::num_external_fds();
+    let raw = with_fd(|fd| vfd::FileAccessDio(fd, f.0)).unwrap();
+    if raw < 0 {
+        // tmpfs refuses O_DIRECT; the failure must latch, never retry-loop.
+        assert!(with_fd(|fd| fd.vfd_cache[f.0 as usize].dio_failed));
+        crate::io::FileClose(f).unwrap();
+        return;
+    }
+    assert_eq!(vfd::num_external_fds(), ext_before + 1);
+    let again = with_fd(|fd| vfd::FileAccessDio(fd, f.0)).unwrap();
+    assert_eq!(raw, again, "companion fd must be cached, not reopened");
+
+    crate::io::FileClose(f).unwrap();
+    assert_eq!(vfd::num_external_fds(), ext_before);
+    // Slot reuse must not inherit dio state.
+    let f2 = open_rw(&format!("{dir}/e"));
+    assert_eq!(f.0, f2.0);
+    assert!(with_fd(|fd| !fd.vfd_cache[f2.0 as usize].dio_failed
+        && fd.vfd_cache[f2.0 as usize].fd_dio.is_none()));
+    crate::io::FileClose(f2).unwrap();
+}
+
+#[test]
 fn vfd_slot_recycled_through_free_list() {
     setup();
     let dir = scratch_dir("recycle");

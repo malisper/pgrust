@@ -159,6 +159,9 @@ pub fn RelationTruncate(rel: &types_rel::RelationData<'_>, nblocks: BlockNumber)
 
     proc.delayChkptFlags.fetch_and(!(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE), Relaxed);
 
+    // Truncated-away pages were likely all-free and preferentially chosen:
+    // rebuild the upper FSM levels now (FSM is un-WAL-logged, so no
+    // checkpoint-delay concern).
     if need_fsm_vacuum {
         freespace::FreeSpaceMapVacuumRange(rel, nblocks, InvalidBlockNumber)?;
     }

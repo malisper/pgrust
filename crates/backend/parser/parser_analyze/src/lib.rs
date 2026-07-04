@@ -3,6 +3,7 @@
 pub mod parse_cte;
 mod parse_merge;
 mod set_op;
+pub use set_op::makeSortGroupClauseForSetOp;
 mod rules;
 pub use rules::transformRuleStmt;
 
@@ -383,7 +384,7 @@ fn transformCreateTableAsStmt<'mcx>(
             )
             .into());
         }
-        if is_query_using_temp_relation(mcx, &query)? {
+        if parse_relation::isQueryUsingTempRelation(mcx, &query)? {
             return Err(
                 matview_err("materialized views must not use temporary tables or views").into()
             );
@@ -427,48 +428,6 @@ fn transformCreateTableAsStmt<'mcx>(
     Ok(result)
 }
 
-// isQueryUsingTempRelation (rewriteManip.c). C also walks sublinks via
-// query_tree_walker; that leg is loud, gated on a live temp namespace so it
-// cannot fire while no temp relation can exist in-session.
-fn is_query_using_temp_relation<'mcx>(
-    mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
-) -> PgResult<bool> {
-    use types_nodes::parsenodes::RTEKind;
-    if query.hasSubLinks && catalog_namespace::my_temp_namespace() != types_core::InvalidOid {
-        panic!(
-            "isQueryUsingTempRelation (rewriteManip.c): sublink walk unported \
-             (query_tree_walker) — unit backend-commands-matview"
-        );
-    }
-    for node in query.rtable.iter() {
-        let rte = node.as_range_tbl_entry().expect("rtable holds RangeTblEntry nodes");
-        match rte.rtekind {
-            RTEKind::RTE_RELATION => {
-                if lsyscache::get_rel_persistence(rte.relid)?
-                    == types_core::catalog::RELPERSISTENCE_TEMP as i8
-                {
-                    return Ok(true);
-                }
-            }
-            RTEKind::RTE_SUBQUERY => {
-                let sub = rte.subquery.expect("subquery RTE carries a Query");
-                if is_query_using_temp_relation(mcx, sub)? {
-                    return Ok(true);
-                }
-            }
-            _ => {}
-        }
-    }
-    for cte in query.cteList.iter() {
-        let cte = cte.as_common_table_expr().expect("cteList holds CommonTableExpr");
-        let q = cte.ctequery.expect("analyzed CTE query");
-        if is_query_using_temp_relation(mcx, q.as_query().expect("Query"))? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 fn transformDeclareCursorStmt<'mcx>(
     mcx: Mcx<'mcx>,

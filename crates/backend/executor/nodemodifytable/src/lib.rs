@@ -17,6 +17,7 @@ use tableam_vocab::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
     TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
+use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_CHECK_VIOLATION,
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_NOT_NULL_VIOLATION,
@@ -981,6 +982,7 @@ fn merge_update_act<'mcx>(
         .as_ref()
         .expect("result relation opened");
     let slot = &mut es_tupleTable[slot_id.0 as usize];
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     if let Some(indexes) = mt.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             if update_indexes == TU_UpdateIndexes::TU_Summarizing {
@@ -989,7 +991,7 @@ fn merge_update_act<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(
+            recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                 indexes,
@@ -1002,7 +1004,7 @@ fn merge_update_act<'mcx>(
         }
     }
     if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid)?;
+        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
     }
     Ok(TM_Result::TM_Ok)
 }
@@ -1239,6 +1241,7 @@ fn exec_check_plan_output<'mcx>(
 fn expr_type(node: Node<'_>) -> u32 {
     match node.node_tag() {
         NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_Var => node.as_var().unwrap().vartype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
@@ -1626,6 +1629,7 @@ fn exec_update<'mcx>(
         .as_ref()
         .expect("result relation opened");
     let slot = &mut es_tupleTable[slot_id.0 as usize];
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     if let Some(indexes) = mt.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             if update_indexes == TU_UpdateIndexes::TU_Summarizing {
@@ -1634,7 +1638,7 @@ fn exec_update<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(
+            recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                 indexes,
@@ -1648,7 +1652,7 @@ fn exec_update<'mcx>(
     }
 
     if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid)?;
+        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
     }
 
     if mt.canSetTag {
@@ -1873,27 +1877,13 @@ fn br_row_triggers<'mcx>(
         Some(id) => Some(slot_raw_tuple(estate, id)?),
         None => None,
     };
-    let raw_new = match new_slot {
+    let mut raw_new = match new_slot {
         Some(id) => Some(slot_raw_tuple(estate, id)?),
         None => None,
     };
-    // SAFETY (both): materialized query-context images; the slots are not
-    // written while these handles live.
-    let mut old_t = raw_old.map(|(img, len, tid, oid)| unsafe {
-        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
-    });
-    let mut new_t = raw_new.map(|(img, len, tid, oid)| unsafe {
-        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
-    });
     let trigdesc = mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone();
     let tg_event = event_op | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
-    // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE carries
-    // old in tg_trigtuple and new in tg_newtuple.
-    let old_nn = old_t.as_mut().map(core::ptr::NonNull::from);
-    let new_nn = new_t.as_mut().map(core::ptr::NonNull::from);
-    let (trig_nn, newtup_nn) =
-        if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
             != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | tgtype_event
@@ -1909,23 +1899,72 @@ fn br_row_triggers<'mcx>(
                  unported on the BEFORE ROW path"
             );
         }
-        let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
-        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let mut tdata = types_trigger_call::TriggerData::from_raw(
-            tg_event, rel, trig_nn, newtup_nn, trigger,
-        );
+        // SAFETY (both): materialized query-context images; the slots are not
+        // written while these handles live within this iteration.
+        let mut old_t = raw_old.map(|(img, len, tid, oid)| unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+        });
+        let mut new_t = raw_new.map(|(img, len, tid, oid)| unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+        });
+        // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE
+        // carries old in tg_trigtuple and new in tg_newtuple.
+        let old_nn = old_t.as_mut().map(core::ptr::NonNull::from);
+        let new_nn = new_t.as_mut().map(core::ptr::NonNull::from);
+        let (trig_nn, newtup_nn) =
+            if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
         let expected = if newtup_nn.is_some() { newtup_nn } else { trig_nn };
-        let ret = ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?;
+        let ret = {
+            let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
+            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let mut tdata = types_trigger_call::TriggerData::from_raw(
+                tg_event, rel, trig_nn, newtup_nn, trigger,
+            );
+            ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?
+        };
         match ret {
             None => return Ok(false),
             Some(p) if Some(p) == expected => {}
             Some(_) if is_delete => {}
-            Some(_) => panic!(
-                "ExecBRInsertTriggers/ExecBRUpdateTriggers (trigger.c): trigger \
-                 returned a replacement tuple (store-back lane unported)"
-            ),
+            Some(p) => {
+                // ExecBR{Insert,Update}Triggers replacement-tuple arm:
+                // ExecForceStoreHeapTuple into the new slot, subsequent
+                // triggers and the DML proper see the replaced row.
+                if trigger.tgisclone {
+                    panic!(
+                        "ExecBRInsertTriggers (trigger.c): replacement tuple in a \
+                         partition (ExecPartitionCheck re-verify) unported"
+                    );
+                }
+                let slot_id = new_slot.expect("insert/update BR has a new slot");
+                // SAFETY: p is the trigger's returned tuple, live in the
+                // per-call context; copied into the slot before reuse.
+                let returned = unsafe { p.as_ref() };
+                let img = unsafe {
+                    core::slice::from_raw_parts(returned.header_ptr(), returned.t_len as usize)
+                };
+                let mut buf = mcx::vec_with_capacity_in(mcx, img.len())?;
+                mcx::vec_append_bytes(&mut buf, img)?;
+                let ptr = buf.as_ptr();
+                core::mem::forget(buf);
+                // SAFETY: fresh query-context copy of the returned image.
+                let copy = unsafe {
+                    types_tuple::HeapTupleData::from_raw_parts(
+                        ptr,
+                        returned.t_len,
+                        returned.t_self,
+                        returned.t_tableOid,
+                    )
+                };
+                exectuples::exec_force_store_heap_tuple(
+                    copy,
+                    &mut estate.es_tupleTable[slot_id.0 as usize],
+                    mcx,
+                )?;
+                raw_new = Some(slot_raw_tuple(estate, slot_id)?);
+            }
         }
     }
     Ok(true)
@@ -2077,6 +2116,7 @@ fn exec_insert<'mcx>(
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let onconflict = mt.plan.onConflictAction;
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
 
     if mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row) {
         if !br_row_triggers(
@@ -2233,7 +2273,7 @@ fn exec_insert<'mcx>(
                 tableam::table_tuple_insert_speculative(
                     mcx, rel, slot, output_cid, 0, None, spec_token,
                 )?;
-                execindexing::ExecInsertIndexTuples(
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
                     mcx,
                     mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
@@ -2279,7 +2319,7 @@ fn exec_insert<'mcx>(
 
         if let Some(indexes) = indexes.as_mut() {
             if indexes.num_indices() > 0 {
-                execindexing::ExecInsertIndexTuples(
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
                     mcx,
                     mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
@@ -2299,7 +2339,7 @@ fn exec_insert<'mcx>(
             .as_ref()
             .expect("result relation opened");
         let slot = &es_tupleTable[slot_id.0 as usize];
-        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid)?;
+        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid, &recheck_indexes)?;
     }
 
     if mt.canSetTag {

@@ -883,7 +883,20 @@ pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgRe
     }
 }
 
+/// SoA-deform the staged page batch's column prefix per `plan`.
+pub fn table_scan_batch_deform<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    qual_col_only: Option<u16>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa, qual_col_only),
+    }
+}
+
 /// Store tuple `i` of the staged page batch into `slot`.
+#[inline(always)]
 pub fn table_scan_batch_store_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,
@@ -892,6 +905,36 @@ pub fn table_scan_batch_store_slot<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+    }
+}
+
+/// Bitmap page-batch feed for the fused drive: stage the next page with
+/// visible tuples (visibility resolved at staging); 0 = bitmap exhausted.
+pub fn table_scan_bitmap_next_pagebatch<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    tbm: &tidbitmap::TIDBitmap<'_>,
+    iterator: &mut tidbitmap::TbmIterator,
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_next_pagebatch(
+            h, tbm, iterator, recheck, lossy_pages, exact_pages,
+        ),
+    }
+}
+
+/// Store staged bitmap tuple `i` of the current page into `slot`.
+#[inline(always)]
+pub fn table_scan_bitmap_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_batch_store(mcx, h, i, slot),
     }
 }
 

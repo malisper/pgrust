@@ -11,6 +11,7 @@ use ::types_error::PgResult;
 
 mod epq;
 mod execami;
+mod execcurrent;
 mod execmain;
 mod noderesult;
 mod nodeprojectset;
@@ -69,6 +70,7 @@ pub fn init_seams() {
     );
     execmain_seams::query_desc_index_searches::set(querydesc::query_desc_index_searches_seam);
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
+    execmain_seams::exec_current_of::set(execcurrent::exec_current_of_seam);
 }
 
 // Divergence from C: result tupdescs die in es_query_cxt there (execMain.c),

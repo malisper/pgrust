@@ -142,11 +142,24 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
                     CMDTAG_ALTER_SUBSCRIPTION
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
+                    CMDTAG_ALTER_DOMAIN
+                }
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
-        T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
+        T_AlterObjectSchemaStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
+                .expect("AlterObjectSchemaStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => CMDTAG_ALTER_DOMAIN,
+                types_nodes::parsenodes::ObjectType::OBJECT_TYPE => CMDTAG_ALTER_TYPE,
+                _ => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
+            }
+        }
         T_AlterOwnerStmt => {
             let stmt = parsetree
                 .as_alter_owner_stmt()
@@ -162,6 +175,8 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
                     CMDTAG_ALTER_SUBSCRIPTION
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => CMDTAG_ALTER_DOMAIN,
+                types_nodes::parsenodes::ObjectType::OBJECT_TYPE => CMDTAG_ALTER_TYPE,
                 _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
             }
         }

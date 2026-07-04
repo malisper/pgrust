@@ -179,6 +179,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         }
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_FieldSelect => w.visit(node.as_field_select().unwrap().arg),
         NodeTag::T_CollateExpr => w.visit(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
@@ -281,12 +282,27 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_RangeTblFunction => {
             walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
         }
+        // C: arg_names and ns_names deemed uninteresting.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            Ok(walk_list(&x.named_args, w)? || walk_list(&x.args, w)?)
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            Ok(walk_list(&tf.ns_uris, w)?
+                || walk_opt(tf.docexpr, w)?
+                || walk_opt(tf.rowexpr, w)?
+                || walk_opt_list(&tf.colexprs, w)?
+                || walk_opt_list(&tf.coldefexprs, w)?
+                || walk_list(&tf.colvalexprs, w)?
+                || walk_list(&tf.passingvalexprs, w)?)
+        }
         other => deferred("expression_tree_walker", other),
     }
 }
 
 pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     w: &mut W,
     flags: u32,
 ) -> PgResult<bool> {
@@ -540,6 +556,25 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_MergeAction => {
             let a = node.as_merge_action().unwrap();
             Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
+        }
+        NodeTag::T_RangeTableFunc => {
+            let rtf = node.as_range_table_func().unwrap();
+            Ok(walk_opt(rtf.docexpr, w)?
+                || walk_opt(rtf.rowexpr, w)?
+                || walk_list(&rtf.namespaces, w)?
+                || walk_list(&rtf.columns, w)?
+                || match rtf.alias {
+                    Some(a) => w.visit_alias_ref(a)?,
+                    None => false,
+                })
+        }
+        NodeTag::T_RangeTableFuncCol => {
+            let rtfc = node.as_range_table_func_col().unwrap();
+            Ok(walk_opt(rtfc.colexpr, w)? || walk_opt(rtfc.coldefexpr, w)?)
+        }
+        NodeTag::T_XmlSerialize => {
+            let xs = node.as_xml_serialize().unwrap();
+            Ok(walk_opt(xs.expr, w)? || walk_opt(xs.typeName, w)?)
         }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         // JsonFormat/JsonReturning subtrees are leaves here (typed refs, no
@@ -1017,6 +1052,16 @@ where
                 )?)),
             }
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            match m(f.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::FieldSelect { arg, ..*f },
+                )?)),
+            }
+        }
         NodeTag::T_RangeTblFunction => {
             let rtf = node.as_range_tbl_function().unwrap();
             let funcexpr = match rtf.funcexpr {
@@ -1479,6 +1524,98 @@ where
                         None => a.targetList.clone_in(mcx)?,
                     },
                     updateColnos: a.updateColnos.clone_in(mcx)?,
+                },
+            )?))
+        }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            let named_args = mutate_list(mcx, &x.named_args, m)?;
+            let args = mutate_list(mcx, &x.args, m)?;
+            if named_args.is_none() && args.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::XmlExpr {
+                    op: x.op,
+                    name: x.name,
+                    named_args: match named_args {
+                        Some(l) => l,
+                        None => x.named_args.clone_in(mcx)?,
+                    },
+                    arg_names: x.arg_names.clone_in(mcx)?,
+                    args: match args {
+                        Some(l) => l,
+                        None => x.args.clone_in(mcx)?,
+                    },
+                    xmloption: x.xmloption,
+                    indent: x.indent,
+                    r#type: x.r#type,
+                    typmod: x.typmod,
+                    location: x.location,
+                },
+            )?))
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            let ns_uris = mutate_list(mcx, &tf.ns_uris, m)?;
+            let docexpr = match tf.docexpr {
+                Some(d) => m(d)?.map(Some),
+                None => None,
+            };
+            let rowexpr = match tf.rowexpr {
+                Some(r) => m(r)?.map(Some),
+                None => None,
+            };
+            let colexprs = mutate_opt_list(mcx, &tf.colexprs, m)?;
+            let coldefexprs = mutate_opt_list(mcx, &tf.coldefexprs, m)?;
+            let colvalexprs = mutate_list(mcx, &tf.colvalexprs, m)?;
+            let passingvalexprs = mutate_list(mcx, &tf.passingvalexprs, m)?;
+            if ns_uris.is_none()
+                && docexpr.is_none()
+                && rowexpr.is_none()
+                && colexprs.is_none()
+                && coldefexprs.is_none()
+                && colvalexprs.is_none()
+                && passingvalexprs.is_none()
+            {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::TableFunc {
+                    functype: tf.functype,
+                    ns_uris: match ns_uris {
+                        Some(l) => l,
+                        None => tf.ns_uris.clone_in(mcx)?,
+                    },
+                    ns_names: tf.ns_names.clone_in(mcx)?,
+                    docexpr: docexpr.unwrap_or(tf.docexpr),
+                    rowexpr: rowexpr.unwrap_or(tf.rowexpr),
+                    colnames: tf.colnames.clone_in(mcx)?,
+                    coltypes: tf.coltypes.clone_in(mcx)?,
+                    coltypmods: tf.coltypmods.clone_in(mcx)?,
+                    colcollations: tf.colcollations.clone_in(mcx)?,
+                    colexprs: match colexprs {
+                        Some(l) => l,
+                        None => tf.colexprs.clone_in(mcx)?,
+                    },
+                    coldefexprs: match coldefexprs {
+                        Some(l) => l,
+                        None => tf.coldefexprs.clone_in(mcx)?,
+                    },
+                    colvalexprs: match colvalexprs {
+                        Some(l) => l,
+                        None => tf.colvalexprs.clone_in(mcx)?,
+                    },
+                    passingvalexprs: match passingvalexprs {
+                        Some(l) => l,
+                        None => tf.passingvalexprs.clone_in(mcx)?,
+                    },
+                    notnulls: tf.notnulls.clone_in(mcx)?,
+                    plan: tf.plan,
+                    ordinalitycol: tf.ordinalitycol,
+                    location: tf.location,
                 },
             )?))
         }

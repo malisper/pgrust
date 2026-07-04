@@ -33,9 +33,9 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+catalog_storage = { path = "../../../catalog/catalog_storage" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
-catalog_storage = { path = "../../../catalog/catalog_storage" }
 
 [dev-dependencies]
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }

@@ -19,7 +19,7 @@ pub const MAXDIM: usize = 6;
 pub type ResMcx = Option<NonNull<MemoryContext>>;
 
 #[inline]
-fn res_mcx<'a>(slot: &ResMcx) -> Mcx<'a> {
+pub(crate) fn res_mcx<'a>(slot: &ResMcx) -> Mcx<'a> {
     match slot {
         // SAFETY: arm_result_mcx's contract — the context outlives evaluation.
         Some(p) => unsafe { p.as_ref() }.mcx(),

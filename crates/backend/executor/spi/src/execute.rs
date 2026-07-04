@@ -72,6 +72,41 @@ pub fn SPI_exec(src: &str, tcount: i64) -> PgResult<i32> {
     SPI_execute(src, false, tcount)
 }
 
+// SPI_execute_extended's params leg (spi.c): one-shot plan, $n types drawn
+// from the caller's param list (C paramlist_parser_setup equivalent).
+pub fn SPI_execute_extended(
+    src: &str,
+    argtypes: &[types_core::Oid],
+    values: &[Datum],
+    nulls: &[bool],
+    read_only: bool,
+) -> PgResult<i32> {
+    if argtypes.len() != values.len() || values.len() != nulls.len() {
+        return Ok(SPI_ERROR_PARAM);
+    }
+    let res = _SPI_begin_call(true);
+    if res < 0 {
+        return Ok(res);
+    }
+
+    let mut plan = plan::prepare_oneshot_args(src, CURSOR_OPT_PARALLEL_OK, argtypes)?;
+    let params = convert_params(argtypes, values, nulls)?;
+    let options = SpiExecuteOptions {
+        params,
+        read_only,
+        ..Default::default()
+    };
+    let res = _SPI_execute_plan(&plan, &options, None, None, true);
+    if !params.is_null() {
+        types_portal::params::free(params);
+    }
+    plan::drop_state_sources(&mut plan);
+    let res = res?;
+
+    _SPI_end_call(true);
+    Ok(res)
+}
+
 pub fn SPI_execute_plan(
     ptr: SpiPlanPtr,
     values: &[Datum],

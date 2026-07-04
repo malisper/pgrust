@@ -39,8 +39,11 @@ pub enum PlanStateNode<'mcx> {
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
+    TableFuncScan(PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>),
     CteScan(PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
+    TidScan(::nodetidscan::TidScanState<'mcx>),
+    TidRangeScan(::nodetidrangescan::TidRangeScanState<'mcx>),
     IndexOnlyScan(PgBox<'mcx, ::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
     Sort(SortNode<'mcx>),
@@ -62,6 +65,8 @@ pub enum PlanStateNode<'mcx> {
     SubqueryScan(PgBox<'mcx, SubqueryScanNode<'mcx>>),
     SetOp(PgBox<'mcx, SetOpNode<'mcx>>),
     Memoize(PgBox<'mcx, MemoizeNode<'mcx>>),
+    RecursiveUnion(PgBox<'mcx, RecursiveUnionNode<'mcx>>),
+    WorkTableScan(PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -95,6 +100,13 @@ impl<'mcx> ::execscan::ScanNode<'mcx> for SubqueryScanNode<'mcx> {
         self.ss.ss_ScanTupleSlot = id;
         Ok(true)
     }
+}
+
+// Both children live here; noderecursiveunion drives them via RuChild.
+pub struct RecursiveUnionNode<'mcx> {
+    pub state: ::noderecursiveunion::RecursiveUnionState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+    pub inner: PlanStateNode<'mcx>,
 }
 
 // Both children live here (nodesort/nodeagg precedent; fetch closures).
@@ -213,8 +225,11 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::ProjectSet(ps) => ps.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
+            PlanStateNode::TidScan(ts) => Some(ts.ss.ps_ExprContext),
+            PlanStateNode::TidRangeScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
+            PlanStateNode::TableFuncScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::CteScan(cs) => Some(cs.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
             PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
@@ -238,6 +253,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(_) => None,
             PlanStateNode::SubqueryScan(s) => Some(s.ss.ps_ExprContext),
             PlanStateNode::SetOp(s) => Some(s.state.ps_ExprContext),
+            // Divergence: C's RU has no ExprContext, only the tempContext here.
+            PlanStateNode::RecursiveUnion(ru) => ru.state.ps_ExprContext,
+            PlanStateNode::WorkTableScan(wts) => Some(wts.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_)
@@ -266,15 +284,20 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .expect("ProjectSetState without a result type")),
             PlanStateNode::SeqScan(_)
             | PlanStateNode::FunctionScan(_)
+            | PlanStateNode::TableFuncScan(_)
             | PlanStateNode::ValuesScan(_)
             | PlanStateNode::CteScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
+            | PlanStateNode::TidScan(_)
+            | PlanStateNode::TidRangeScan(_)
             | PlanStateNode::Limit(_)
             | PlanStateNode::LockRows(_)
             | PlanStateNode::BitmapHeapScan(_)
             | PlanStateNode::Append(_)
-            | PlanStateNode::SubqueryScan(_) => crate::exec_type_from_tl(&plan.targetlist),
+            | PlanStateNode::SubqueryScan(_)
+            | PlanStateNode::RecursiveUnion(_)
+            | PlanStateNode::WorkTableScan(_) => crate::exec_type_from_tl(&plan.targetlist),
             // The tlist is NIL (empty type) without RETURNING, else the first
             // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
@@ -350,6 +373,15 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::FunctionScan(::mcx::alloc_in(mcx, state)?)
         }
+        NodeTag::T_TableFuncScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodetablefuncscan::exec_init_table_func_scan(
+                mcx,
+                node.as_table_func_scan().unwrap(),
+                estate,
+            )?;
+            PlanStateNode::TableFuncScan(::mcx::alloc_in(mcx, state)?)
+        }
         NodeTag::T_ValuesScan => {
             let mcx = estate.es_query_cxt;
             let state = ::nodevaluesscan::exec_init_values_scan(
@@ -395,6 +427,24 @@ pub fn exec_init_node<'mcx>(
             PlanStateNode::IndexScan(::nodeindexscan::exec_init_index_scan(
                 mcx,
                 node.as_index_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
+        NodeTag::T_TidScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::TidScan(::nodetidscan::exec_init_tid_scan(
+                mcx,
+                node.as_tid_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
+        NodeTag::T_TidRangeScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::TidRangeScan(::nodetidrangescan::exec_init_tid_range_scan(
+                mcx,
+                node.as_tid_range_scan().unwrap(),
                 estate,
                 eflags,
             )?)
@@ -847,6 +897,49 @@ pub fn exec_init_node<'mcx>(
                 ::nodesetop::exec_init_set_op(so_plan, estate, eflags, &outer_desc, result_desc)?;
             PlanStateNode::SetOp(::mcx::alloc_in(mcx, SetOpNode { state, outer, inner })?)
         }
+        NodeTag::T_RecursiveUnion => {
+            let mcx = estate.es_query_cxt;
+            let ru_plan = node.as_recursive_union().unwrap();
+            let result_desc = crate::exec_type_from_tl(&ru_plan.plan.targetlist)?;
+            // C order: the wtParam entry is published before child init.
+            ::noderecursiveunion::exec_init_recursive_union_shared(ru_plan, estate, result_desc);
+            let outer = exec_init_node(ru_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitRecursiveUnion (nodeRecursiveunion.c): RecursiveUnion \
+                         without an outer plan"
+                    )
+                });
+            let inner = exec_init_node(ru_plan.plan.righttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitRecursiveUnion (nodeRecursiveunion.c): RecursiveUnion \
+                         without an inner plan"
+                    )
+                });
+            let outer_desc = outer
+                .exec_get_result_type(ru_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let state = ::noderecursiveunion::exec_init_recursive_union(
+                ru_plan,
+                estate,
+                eflags,
+                &outer_desc,
+            )?;
+            PlanStateNode::RecursiveUnion(::mcx::alloc_in(
+                mcx,
+                RecursiveUnionNode { state, outer, inner },
+            )?)
+        }
+        NodeTag::T_WorkTableScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodeworktablescan::exec_init_work_table_scan(
+                mcx,
+                node.as_work_table_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::WorkTableScan(::mcx::alloc_in(mcx, state)?)
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -879,14 +972,9 @@ pub fn exec_init_node<'mcx>(
         }
         tag => unported_nodes!(tag, {
             T_MergeAppend => "nodeMergeAppend.c",
-            T_RecursiveUnion => "nodeRecursiveunion.c",
             T_SampleScan => "nodeSamplescan.c",
-            T_TidScan => "nodeTidscan.c",
-            T_TidRangeScan => "nodeTidrangescan.c",
-            T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
-            T_WorkTableScan => "nodeWorktablescan.c",
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
@@ -944,8 +1032,12 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::SeqScan(ss) => Some(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
+        PlanStateNode::TableFuncScan(ts) => Some(&mut ts.ss),
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
+        PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
+        PlanStateNode::TidScan(ts) => Some(&mut ts.ss),
+        PlanStateNode::TidRangeScan(ts) => Some(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
         _ => None,
@@ -967,8 +1059,11 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
+        PlanStateNode::TableFuncScan(ts) => table_func_scan_arm(ts, estate),
         PlanStateNode::CteScan(cs) => cte_scan_arm(cs, estate),
         PlanStateNode::IndexScan(is) => index_scan_arm(is, estate),
+        PlanStateNode::TidScan(ts) => tid_scan_arm(ts, estate),
+        PlanStateNode::TidRangeScan(ts) => tid_range_scan_arm(ts, estate),
         PlanStateNode::IndexOnlyScan(ios) => index_only_scan_arm(ios, estate),
         PlanStateNode::Agg(aps) => agg_arm(aps, estate),
         PlanStateNode::WindowAgg(w) => window_agg_arm(w, estate),
@@ -989,6 +1084,8 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Append(a) => append_arm(a, estate),
         PlanStateNode::SubqueryScan(s) => subquery_scan_arm(s, estate),
         PlanStateNode::SetOp(s) => set_op_arm(s, estate),
+        PlanStateNode::RecursiveUnion(ru) => recursive_union_arm(ru, estate),
+        PlanStateNode::WorkTableScan(wts) => work_table_scan_arm(wts, estate),
         PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
         PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
@@ -1027,6 +1124,14 @@ fn function_scan_arm<'mcx>(
 }
 
 #[inline(never)]
+fn table_func_scan_arm<'mcx>(
+    ts: &mut PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetablefuncscan::exec_table_func_scan(ts, estate)
+}
+
+#[inline(never)]
 fn values_scan_arm<'mcx>(
     vs: &mut PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
@@ -1051,6 +1156,22 @@ fn index_scan_arm<'mcx>(
 }
 
 #[inline(never)]
+fn tid_scan_arm<'mcx>(
+    ts: &mut ::nodetidscan::TidScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetidscan::exec_tid_scan(ts, estate)
+}
+
+#[inline(never)]
+fn tid_range_scan_arm<'mcx>(
+    ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetidrangescan::exec_tid_range_scan(ts, estate)
+}
+
+#[inline(never)]
 fn index_only_scan_arm<'mcx>(
     ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1065,16 +1186,89 @@ fn agg_arm<'mcx>(
 ) -> ProcResult {
     let aps = &mut **aps;
     let AggPlanState { agg, outer } = aps;
-    if let PlanStateNode::SeqScan(ss) = outer {
-        if seq_agg_fusible(agg, ss, estate)
-            && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
-        {
-            let outer_slot = ss.ss.ss_ScanTupleSlot;
-            let src = SeqScanBatchSource { ss, outer_slot };
-            return ::nodeagg::exec_agg_batched(agg, estate, src);
+    match outer {
+        PlanStateNode::SeqScan(ss) => {
+            if seq_agg_fusible(agg, ss, estate)
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+            {
+                ::nodeseqscan::seq_scan_batch_soa_prepare(
+                    ss,
+                    estate,
+                    fused_soa_prefix(agg, ss).unwrap_or(0),
+                    false,
+                );
+                let outer_slot = ss.ss.ss_ScanTupleSlot;
+                let src = SeqScanBatchSource { ss, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
         }
+        PlanStateNode::IndexScan(is) => {
+            if agg_fusible_common(agg, estate)
+                && is.ss.qual.is_none()
+                && is.ss.ps_ProjInfo.is_none()
+                && is.iss_Runtime.is_none()
+                && ::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir)
+                && is
+                    .iss_RelationDesc
+                    .as_ref()
+                    .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+            {
+                let outer_slot = is.ss.ss_ScanTupleSlot;
+                let src = IndexScanBatchSource { is, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        PlanStateNode::IndexOnlyScan(ios) => {
+            if agg_fusible_common(agg, estate)
+                && ios.ss.qual.is_none()
+                && ios.ss.ps_ProjInfo.is_none()
+                && ios.ioss_Runtime.is_none()
+                && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
+                && ios
+                    .ioss_RelationDesc
+                    .as_ref()
+                    .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+            {
+                let ios = &mut **ios;
+                let outer_slot = ios.ss.ss_ScanTupleSlot;
+                let src = IndexOnlyScanBatchSource { ios, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if agg_fusible_common(agg, estate)
+                && b.scan.ss.qual.is_none()
+                && b.scan.ss.ps_ProjInfo.is_none()
+            {
+                if !b.scan.initialized {
+                    let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
+                    ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
+                }
+                let outer_slot = b.scan.ss.ss_ScanTupleSlot;
+                let src = BitmapScanBatchSource { bhs: &mut b.scan, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
+}
+
+// Shared gate for the fused agg-over-index/bitmap arms: uninstrumented
+// (Instrumented children are a different variant), forward, no EPQ, MVCC
+// snapshot, batch-drainable agg shape.
+fn agg_fusible_common<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    !estate.es_epq_active
+        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        && estate
+            .es_snapshot
+            .as_deref()
+            .is_some_and(::types_snapshot::IsMVCCSnapshot)
+        && ::nodeagg::agg_batch_drainable(agg)
 }
 
 // Fused agg-over-seqscan page-batch drive (upstream batch executor, CF 6176):
@@ -1109,6 +1303,19 @@ fn seq_agg_fusible<'mcx>(
     }
 }
 
+// Deform prefix for the fused drive's SoA page-batch deform: everything the
+// per-row consumers read from the scan's output slot.
+fn fused_soa_prefix<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<i32> {
+    let mut p = ::nodeagg::agg_batch_outer_prefix(agg)?;
+    if let Some(q) = ss.ss.qual.as_deref() {
+        p = p.max(q.max_fetch(::execexpr::SlotSrc::Scan)?);
+    }
+    Some(p)
+}
+
 struct SeqScanBatchSource<'a, 'mcx> {
     ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
     outer_slot: ExecSlotId,
@@ -1122,18 +1329,7 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
 
     #[inline]
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        ::nodeseqscan::seq_scan_batch_store(self.ss, estate, i);
-        match self.ss.ss.qual.as_deref_mut() {
-            None => Ok(true),
-            Some(q) => {
-                let mut slots = EvalSlots {
-                    scan: Some(estate.slot_mut(self.outer_slot)),
-                    inner: None,
-                    outer: None,
-                };
-                ::execexpr::exec_qual(Some(q), &mut slots)
-            }
-        }
+        ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)
     }
 
     #[inline]
@@ -1144,6 +1340,100 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     #[inline]
     fn has_qual(&self) -> bool {
         self.ss.ss.qual.is_some()
+    }
+}
+
+struct IndexScanBatchSource<'a, 'mcx> {
+    is: &'a mut ::nodeindexscan::IndexScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for IndexScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeindexscan::index_scan_next_tidrun(self.is, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeindexscan::index_scan_batch_fetch(self.is, estate, i)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+
+    // Visibility resolves in fetch_tuple.
+    #[inline]
+    fn storeless_ok(&self) -> bool {
+        false
+    }
+}
+
+struct IndexOnlyScanBatchSource<'a, 'mcx> {
+    ios: &'a mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for IndexOnlyScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeindexonlyscan::index_only_scan_batch_next(self.ios, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, _i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeindexonlyscan::index_only_scan_batch_store(self.ios, estate)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    // next_batch returns visible rows only: the storeless drain is sound.
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+}
+
+struct BitmapScanBatchSource<'a, 'mcx> {
+    bhs: &'a mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for BitmapScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodebitmapheapscan::bitmap_scan_next_pagebatch(self.bhs, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodebitmapheapscan::bitmap_scan_batch_fetch(self.bhs, estate, i)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+
+    // Lossy/recheck pages apply bitmapqualorig in fetch_tuple.
+    #[inline]
+    fn storeless_ok(&self) -> bool {
+        false
     }
 }
 
@@ -1279,6 +1569,23 @@ fn set_op_arm<'mcx>(
         |e| exec_proc_node(outer, e),
         |e| exec_proc_node(inner, e),
     )
+}
+
+#[inline(never)]
+fn recursive_union_arm<'mcx>(
+    ru: &mut PgBox<'mcx, RecursiveUnionNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let RecursiveUnionNode { state, outer, inner } = &mut **ru;
+    ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
+}
+
+#[inline(never)]
+fn work_table_scan_arm<'mcx>(
+    wts: &mut PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeworktablescan::exec_work_table_scan(wts, estate)
 }
 
 #[inline(never)]
@@ -1470,8 +1777,12 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
+        PlanStateNode::TableFuncScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
+        PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
         PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
+        PlanStateNode::TidScan(ts) => end_scan(&mut ts.ss),
+        PlanStateNode::TidRangeScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => end_scan(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
         PlanStateNode::Sort(s) => s.outer_desc = None,
@@ -1479,6 +1790,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
         | PlanStateNode::SetOp(_)
+        | PlanStateNode::RecursiveUnion(_)
         | PlanStateNode::IncrementalSort(_)
         | PlanStateNode::Agg(_)
         | PlanStateNode::BitmapIndexScan(_)
@@ -1561,14 +1873,22 @@ pub fn planstate_instr_extra<'mcx>(
         }
         PlanStateNode::SubqueryScan(s) => walk!(&mut *s.subplan),
         PlanStateNode::SetOp(s) => walk!(&mut s.outer, &mut s.inner),
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            walk!(&mut ru.outer, &mut ru.inner)
+        }
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
-        PlanStateNode::Result(_)
+        PlanStateNode::WorkTableScan(_)
+        | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::IndexScan(_)
+        | PlanStateNode::TidScan(_)
+        | PlanStateNode::TidRangeScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => None,
     }
@@ -1637,11 +1957,17 @@ fn exec_end_node_inner<'mcx>(
             ::nodevaluesscan::exec_end_values_scan(vs);
             Ok(())
         }
+        PlanStateNode::TableFuncScan(ts) => {
+            ::nodetablefuncscan::exec_end_table_func_scan(ts);
+            Ok(())
+        }
         PlanStateNode::CteScan(cs) => {
             ::nodectescan::exec_end_cte_scan(cs, estate);
             Ok(())
         }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_end_index_scan(is),
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_end_tid_scan(ts),
+        PlanStateNode::TidRangeScan(ts) => ::nodetidrangescan::exec_end_tid_range_scan(ts),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_end_index_only_scan(ios)
         }
@@ -1711,6 +2037,13 @@ fn exec_end_node_inner<'mcx>(
             Ok(())
         }
         PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
+        PlanStateNode::WorkTableScan(_) => Ok(()),
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            ::noderecursiveunion::exec_end_recursive_union(&mut ru.state, estate);
+            exec_end_node(&mut ru.outer, estate)?;
+            exec_end_node(&mut ru.inner, estate)
+        }
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
             ::nodesetop::exec_end_set_op(&mut s.state);
@@ -1750,11 +2083,20 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
+        | PlanStateNode::WorkTableScan(_)
         | PlanStateNode::IndexScan(_)
+        | PlanStateNode::TidScan(_)
+        | PlanStateNode::TidRangeScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            exec_shutdown_node(&mut ru.outer, estate);
+            exec_shutdown_node(&mut ru.inner, estate);
+        }
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer, estate),
         PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer, estate),
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer, estate),
@@ -1876,6 +2218,21 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
     }
 }
 
+impl<'mcx> ::noderecursiveunion::RuChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan_with_chg(
+        &mut self,
+        plan: ::types_nodes::Node<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        crate::execami::exec_re_scan_with_chg(self, plan, estate, chg)
+    }
+}
+
 impl<'mcx> ::nodememoize::MemoizeChild<'mcx> for PlanStateNode<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
         exec_proc_node(self, estate)
@@ -1978,6 +2335,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     AppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
+    RecursiveUnionNode<'_> { state, outer, inner },
     LockRowsNode<'_> { state, outer, epq },
     LimitNode<'_> { state, outer },
     UniqueNode<'_> { state, outer },
@@ -1988,11 +2346,12 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 );
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
-        Result(x), SeqScan(x), FunctionScan(x), ValuesScan(x), CteScan(x),
-        IndexScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
+        Result(x), SeqScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
+        IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
-        MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x), Instrumented(x),
+        MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),
+        RecursiveUnion(x), WorkTableScan(x), Instrumented(x),
     },
 );

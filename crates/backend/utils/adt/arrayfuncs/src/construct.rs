@@ -251,14 +251,14 @@ fn att_addlength_datum_offset(cur: usize, attlen: i32, _datum: Datum, p: *const 
     }
 }
 
-fn write_header(out: &mut [u8], total_size: usize, ndim: i32, dataoffset: i32, elemtype: Oid) {
+pub(crate) fn write_header(out: &mut [u8], total_size: usize, ndim: i32, dataoffset: i32, elemtype: Oid) {
     out[0..4].copy_from_slice(&set_varsize_4b(total_size));
     out[4..8].copy_from_slice(&ndim.to_ne_bytes());
     out[8..12].copy_from_slice(&dataoffset.to_ne_bytes());
     out[12..16].copy_from_slice(&(elemtype as u32).to_ne_bytes());
 }
 
-fn write_dims_lbounds(out: &mut [u8], ndim: i32, dims: &[i32], lbs: &[i32]) {
+pub(crate) fn write_dims_lbounds(out: &mut [u8], ndim: i32, dims: &[i32], lbs: &[i32]) {
     let mut off = ARRAYTYPE_HDRSZ;
     for i in 0..ndim as usize {
         out[off..off + 4].copy_from_slice(&dims[i].to_ne_bytes());

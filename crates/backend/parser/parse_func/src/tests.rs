@@ -443,7 +443,7 @@ fn all_unknown_same_category_nonpreferred_is_ambiguous() {
 fn named_arg<'mcx>(mcx: Mcx<'mcx>, name: &'static str, arg: Node<'mcx>, loc: i32) -> Node<'mcx> {
     Node::mk(
         mcx,
-        types_nodes::NamedArgExpr { arg, name: Some(name), argnumber: -1, location: loc },
+        types_nodes::NamedArgExpr { arg: Some(arg), name: Some(name), argnumber: -1, location: loc },
     )
     .unwrap()
 }

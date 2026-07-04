@@ -821,8 +821,9 @@ macro_rules! unported {
     )*};
 }
 
-// Deferred loud (M3+ / other lanes): wire format, sortsupport/hash,
-// in_range/series.
+// Deferred loud (M3+ / other lanes): wire format, hash, in_range/series.
+// numeric_sortsupport itself lives in sortsupport.rs, dispatched by proc oid
+// in tuplesort::ssup (never through fmgr); this loud guards direct fmgr calls.
 unported! {
     numeric_recv_unported,
     numeric_send_unported,

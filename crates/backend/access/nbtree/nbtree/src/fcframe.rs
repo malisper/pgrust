@@ -56,6 +56,19 @@ impl OrderProcFrame {
                 };
                 Ok(::varlena::varstrfastcmp_c(a.data(), b.data()))
             }
+            // numeric_cmp: the generic proc frame is mcx-less and short args
+            // detoast-expand; the kernel realigns on the stack instead.
+            1769 if unsafe { inline_image(left) && inline_image(right) } => {
+                // SAFETY: numeric BTORDER args are live non-null (possibly
+                // packed) varlenas for the duration of the compare.
+                let (a, b) = unsafe {
+                    (
+                        PackedVarlena::from_ptr(left.as_usize() as *const u8),
+                        PackedVarlena::from_ptr(right.as_usize() as *const u8),
+                    )
+                };
+                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(a.data(), b.data()))
+            }
             _ => Ok(self.call(key, left, right)?.as_i32()),
         }
     }
@@ -92,6 +105,16 @@ impl OrderProcFrame {
                     )
                 };
                 Ok(::varlena::varstrfastcmp_c(a.data(), b.data()))
+            }
+            1769 if unsafe { inline_image(left) && inline_image(right) } => {
+                // SAFETY: as `cmp`'s numeric arm.
+                let (a, b) = unsafe {
+                    (
+                        PackedVarlena::from_ptr(left.as_usize() as *const u8),
+                        PackedVarlena::from_ptr(right.as_usize() as *const u8),
+                    )
+                };
+                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(a.data(), b.data()))
             }
             _ => {
                 self.fcinfo.rearm(collation);

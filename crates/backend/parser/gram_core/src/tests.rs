@@ -903,15 +903,30 @@ fn join_on_shapes() {
 }
 
 #[test]
-#[should_panic(expected = "JOIN USING unimplemented")]
-fn join_using_is_loud() {
-    let _ = parse("SELECT * FROM a JOIN b USING (x);");
+fn join_using_shapes() {
+    use types_nodes::JoinType;
+    let list = parse("SELECT * FROM a LEFT JOIN b USING (x, y) AS j;");
+    let sel = select_of(only_stmt(&list));
+    let j = sel.fromClause.nth(0).as_join_expr().expect("JoinExpr");
+    assert_eq!(j.jointype, JoinType::JOIN_LEFT);
+    assert!(!j.isNatural && j.quals.is_none());
+    assert_eq!(j.usingClause.len(), 2);
+    assert_eq!(j.usingClause.nth(0).as_string().unwrap().sval, "x");
+    assert_eq!(j.usingClause.nth(1).as_string().unwrap().sval, "y");
+    let jua = j.join_using_alias.expect("USING alias");
+    assert_eq!(jua.aliasname, Some("j"));
+    assert!(jua.colnames.is_nil());
 }
 
 #[test]
-#[should_panic(expected = "NATURAL JOIN unimplemented")]
-fn natural_join_is_loud() {
-    let _ = parse("SELECT * FROM a NATURAL JOIN b;");
+fn natural_join_shapes() {
+    use types_nodes::JoinType;
+    let list = parse("SELECT * FROM a NATURAL FULL OUTER JOIN b;");
+    let sel = select_of(only_stmt(&list));
+    let j = sel.fromClause.nth(0).as_join_expr().expect("JoinExpr");
+    assert_eq!(j.jointype, JoinType::JOIN_FULL);
+    assert!(j.isNatural && j.usingClause.is_nil() && j.join_using_alias.is_none());
+    assert!(j.quals.is_none());
 }
 
 #[test]
@@ -2018,7 +2033,7 @@ fn named_arg_shapes() {
     let na = fc.args.nth(1).as_variant::<NamedArgExpr>().unwrap();
     assert_eq!(na.name, Some("silent"));
     assert_eq!(na.argnumber, -1);
-    assert!(na.arg.as_a_const().is_some());
+    assert!(na.arg.expect("NamedArgExpr has an arg").as_a_const().is_some());
 
     let list = parse("SELECT f(silent => true)");
     let sel = select_of(only_stmt(&list));

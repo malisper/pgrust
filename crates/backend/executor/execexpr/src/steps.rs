@@ -109,6 +109,10 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL; `frame` is an argless FuncFrame
+    // carried only for its armed per-eval mcx (detoast scratch).
+    NullTestRowIsNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
+    NullTestRowIsNotNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
     // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
     // element table (and its hash FuncCall) lives in state.saop_tables.
     HashedScalarArrayOp {
@@ -203,6 +207,7 @@ pub enum Step {
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
     JumpIfNull { jumpdone: u32, out: OutRef },
     ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    XmlExprEval { state: NonNull<crate::xmlops::XmlExprState>, out: OutRef },
     SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
     SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
@@ -246,6 +251,24 @@ pub enum Step {
         transno: u16,
     },
     AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
+    // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
+    FuncExprStrict1Thin { call: CallThin, out: OutRef },
+    FuncExprStrict2Thin { call: CallThin, out: OutRef },
+    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    FuncFuncStrict2Thin { call1: CallThin, argno: u8, call2: CallThin, out: OutRef },
+    FuncStrict2QualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    NotDistinctQualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    AggTransStrictByValIndirectThin {
+        call: CallThin,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    // C EEOP_FIELDSELECT; reads the record datum from `out`, writes the
+    // field back to `out`. Per-eval registry tupdesc copy stands in for C's
+    // rowcache (cold path; see interp). Kept last: appending preserves the
+    // hot variants' discriminants.
+    FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
 }
 
 // C JsonConstructorExprState: resolved-once metadata for the
@@ -263,6 +286,16 @@ pub struct JsonConstructorState {
     pub types: NonNull<Oid>,
     pub scalar_json: Option<NonNull<::adt_json::tojson::TypeCat>>,
     pub scalar_jsonb: Option<NonNull<::adt_jsonb::tojsonb::ValCategory>>,
+}
+
+// C ExprEvalStep d.nulltest_row.rowcache: last-seen rowtype's tupdesc,
+// refreshed from typcache when the header's (type, typmod) changes. `mcx` is
+// the compile mcx restamped 'static; it outlives every eval of this step.
+pub struct RowNullState {
+    pub tup_type: Oid,
+    pub tup_typmod: i32,
+    pub desc: Option<NonNull<::types_tuple::TupleDescData<'static>>>,
+    pub mcx: Mcx<'static>,
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -296,7 +329,7 @@ pub struct AggPerGroup {
     pub no_trans_value: bool,
 }
 
-::mcx::forget_safe_nodrop!(AggPerGroup);
+::mcx::forget_safe_nodrop!(AggPerGroup, CmpOp);
 
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 
@@ -314,6 +347,13 @@ pub struct IoCoerceCalls {
 pub struct Call2 {
     pub(crate) fcinfo: NonNull<u8>,
     pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+// Call2 with the thin fn resolved in place of the FmgrInfo indirection.
+#[derive(Clone, Copy, Debug)]
+pub struct CallThin {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) f: ::types_fmgr::PGFunctionThin,
 }
 
 impl From<FuncCall> for Call2 {
@@ -587,6 +627,72 @@ impl CmpOp {
     }
 }
 
+// Batched ExecQual over an SoA column (comparisons only — non-erroring, so
+// evaluation order is unobservable): selection bit = !isnull && cmp(v, k).
+// Chunked so LLVM can vectorize the compare and reduce the bit-pack per word.
+pub fn qual_bitmap_cmp_const(
+    cmp: CmpOp,
+    konst: Datum,
+    values: &[Datum],
+    isnull: &[bool],
+    sel: &mut [u64],
+) {
+    debug_assert!(values.len() == isnull.len() && sel.len() >= values.len().div_ceil(64));
+    macro_rules! lanes {
+        ($pred:expr) => {
+            bitmap_loop(values, isnull, sel, $pred)
+        };
+    }
+    match cmp {
+        CmpOp::Int4Eq => lanes!(|v: Datum| v.as_i32() == konst.as_i32()),
+        CmpOp::Int4Ne => lanes!(|v: Datum| v.as_i32() != konst.as_i32()),
+        CmpOp::Int4Lt => lanes!(|v: Datum| v.as_i32() < konst.as_i32()),
+        CmpOp::Int4Le => lanes!(|v: Datum| v.as_i32() <= konst.as_i32()),
+        CmpOp::Int4Gt => lanes!(|v: Datum| v.as_i32() > konst.as_i32()),
+        CmpOp::Int4Ge => lanes!(|v: Datum| v.as_i32() >= konst.as_i32()),
+        CmpOp::Int8Eq => lanes!(|v: Datum| v.as_i64() == konst.as_i64()),
+        CmpOp::Int8Ne => lanes!(|v: Datum| v.as_i64() != konst.as_i64()),
+        CmpOp::Int8Lt => lanes!(|v: Datum| v.as_i64() < konst.as_i64()),
+        CmpOp::Int8Le => lanes!(|v: Datum| v.as_i64() <= konst.as_i64()),
+        CmpOp::Int8Gt => lanes!(|v: Datum| v.as_i64() > konst.as_i64()),
+        CmpOp::Int8Ge => lanes!(|v: Datum| v.as_i64() >= konst.as_i64()),
+        CmpOp::Int2Eq => lanes!(|v: Datum| v.as_i16() == konst.as_i16()),
+        CmpOp::Int2Ne => lanes!(|v: Datum| v.as_i16() != konst.as_i16()),
+        CmpOp::Int2Lt => lanes!(|v: Datum| v.as_i16() < konst.as_i16()),
+        CmpOp::Int2Le => lanes!(|v: Datum| v.as_i16() <= konst.as_i16()),
+        CmpOp::Int2Gt => lanes!(|v: Datum| v.as_i16() > konst.as_i16()),
+        CmpOp::Int2Ge => lanes!(|v: Datum| v.as_i16() >= konst.as_i16()),
+        CmpOp::Int84Eq => lanes!(|v: Datum| v.as_i64() == konst.as_i32() as i64),
+        CmpOp::Int84Ne => lanes!(|v: Datum| v.as_i64() != konst.as_i32() as i64),
+        CmpOp::Int84Lt => lanes!(|v: Datum| v.as_i64() < konst.as_i32() as i64),
+        CmpOp::Int84Le => lanes!(|v: Datum| v.as_i64() <= konst.as_i32() as i64),
+        CmpOp::Int84Gt => lanes!(|v: Datum| v.as_i64() > konst.as_i32() as i64),
+        CmpOp::Int84Ge => lanes!(|v: Datum| v.as_i64() >= konst.as_i32() as i64),
+        CmpOp::Int48Eq => lanes!(|v: Datum| (v.as_i32() as i64) == konst.as_i64()),
+        CmpOp::Int48Ne => lanes!(|v: Datum| (v.as_i32() as i64) != konst.as_i64()),
+        CmpOp::Int48Lt => lanes!(|v: Datum| (v.as_i32() as i64) < konst.as_i64()),
+        CmpOp::Int48Le => lanes!(|v: Datum| (v.as_i32() as i64) <= konst.as_i64()),
+        CmpOp::Int48Gt => lanes!(|v: Datum| (v.as_i32() as i64) > konst.as_i64()),
+        CmpOp::Int48Ge => lanes!(|v: Datum| (v.as_i32() as i64) >= konst.as_i64()),
+    }
+}
+
+#[inline(always)]
+fn bitmap_loop(
+    values: &[Datum],
+    isnull: &[bool],
+    sel: &mut [u64],
+    pred: impl Fn(Datum) -> bool,
+) {
+    for (w, (vch, nch)) in values.chunks(64).zip(isnull.chunks(64)).enumerate() {
+        let mut word = 0u64;
+        for i in 0..vch.len() {
+            word |= ((!nch[i] && pred(vch[i])) as u64) << i;
+        }
+        sel[w] = word;
+    }
+}
+
 // Fast-path evaluators selected once at ready time from the compiled program
 // shape (C ExecReadyInterpretedExpr's ExecJust* selection, plus the fused
 // monomorphized shapes C has no non-JIT equivalent for).
@@ -606,6 +712,7 @@ pub enum Kernel {
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
     AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
+    AggTransByValThin { call: CallThin, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
 const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);
@@ -680,6 +787,44 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn kernel(&self) -> Kernel {
         self.kernel
+    }
+
+    /// Max attnum this expression demands of `src`'s slot (its FETCHSOME
+    /// bound; 0 = none); None = shape unknown to the batch-deform planner.
+    pub fn max_fetch(&self, src: SlotSrc) -> Option<i32> {
+        match self.kernel {
+            Kernel::Program => {
+                let mut m = 0i32;
+                for s in self.steps() {
+                    match (s, src) {
+                        (Step::ScanFetchSome { last_var }, SlotSrc::Scan)
+                        | (Step::InnerFetchSome { last_var }, SlotSrc::Inner)
+                        | (Step::OuterFetchSome { last_var }, SlotSrc::Outer) => {
+                            m = m.max(*last_var as i32)
+                        }
+                        _ => {}
+                    }
+                }
+                Some(m)
+            }
+            Kernel::AggTransByVal { .. }
+            | Kernel::JustConst { .. }
+            | Kernel::JustConstAssign { .. } => Some(0),
+            Kernel::QualScanVarCmpConst { attnum, .. } => {
+                Some(if src == SlotSrc::Scan { attnum as i32 + 1 } else { 0 })
+            }
+            Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, .. } => {
+                let mut m = 0i32;
+                if a_src == src {
+                    m = a_attnum as i32 + 1;
+                }
+                if b_src == src {
+                    m = m.max(b_attnum as i32 + 1);
+                }
+                Some(m)
+            }
+            _ => None,
+        }
     }
 
     #[inline(always)]

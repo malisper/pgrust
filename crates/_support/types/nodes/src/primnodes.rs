@@ -8,7 +8,7 @@ use types_core::{AttrNumber, Index, Oid, ParseLoc};
 use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
-use crate::list::{NodeList, OptNodeList};
+use crate::list::{IntList, NodeList, OidList, OptNodeList};
 use crate::node_tree::{Node, NodeVariant};
 use crate::tags::NodeTag;
 
@@ -358,6 +358,14 @@ pub struct SetToDefault {
     pub location: ParseLoc,
 }
 
+// cvarno is a live RT index after parse analysis; varlevelsup is implicitly 0.
+#[derive(Clone, Copy, Default)]
+pub struct CurrentOfExpr<'mcx> {
+    pub cvarno: Index,
+    pub cursor_name: Option<&'mcx str>,
+    pub cursor_param: i32,
+}
+
 #[derive(Default)]
 pub struct OpExpr<'mcx> {
     pub opno: Oid,
@@ -408,6 +416,15 @@ pub struct RelabelType<'mcx> {
 pub struct NextValueExpr {
     pub seqid: Oid,
     pub typeId: Oid,
+}
+
+// C `Expr *arg` is never NULL in a live FieldSelect; modeled non-optional.
+pub struct FieldSelect<'mcx> {
+    pub arg: Node<'mcx>,
+    pub fieldnum: AttrNumber,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
 }
 
 // C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
@@ -555,6 +572,73 @@ pub struct MinMaxExpr<'mcx> {
 pub struct CollateExpr<'mcx> {
     pub arg: Node<'mcx>,
     pub collOid: Oid,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum XmlExprOp {
+    #[default]
+    IS_XMLCONCAT = 0,
+    IS_XMLELEMENT = 1,
+    IS_XMLFOREST = 2,
+    IS_XMLPARSE = 3,
+    IS_XMLPI = 4,
+    IS_XMLROOT = 5,
+    IS_XMLSERIALIZE = 6,
+    IS_DOCUMENT = 7,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum XmlOptionType {
+    #[default]
+    XMLOPTION_DOCUMENT = 0,
+    XMLOPTION_CONTENT = 1,
+}
+
+#[derive(Default)]
+pub struct XmlExpr<'mcx> {
+    pub op: XmlExprOp,
+    pub name: Option<&'mcx str>,
+    pub named_args: NodeList<'mcx>,
+    pub arg_names: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub xmloption: XmlOptionType,
+    pub indent: bool,
+    pub r#type: Oid,
+    pub typmod: i32,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum TableFuncType {
+    #[default]
+    TFT_XMLTABLE = 0,
+    TFT_JSON_TABLE = 1,
+}
+
+// ns_names holds String-or-NULL cells (NULL = DEFAULT namespace); colexprs /
+// coldefexprs carry NULL cells for columns without a PATH / DEFAULT.
+#[derive(Default)]
+pub struct TableFunc<'mcx> {
+    pub functype: TableFuncType,
+    pub ns_uris: NodeList<'mcx>,
+    pub ns_names: OptNodeList<'mcx>,
+    pub docexpr: Option<Node<'mcx>>,
+    pub rowexpr: Option<Node<'mcx>>,
+    pub colnames: NodeList<'mcx>,
+    pub coltypes: OidList<'mcx>,
+    pub coltypmods: IntList<'mcx>,
+    pub colcollations: OidList<'mcx>,
+    pub colexprs: OptNodeList<'mcx>,
+    pub coldefexprs: OptNodeList<'mcx>,
+    pub colvalexprs: NodeList<'mcx>,
+    pub passingvalexprs: NodeList<'mcx>,
+    pub notnulls: Bitmapset<'mcx>,
+    pub plan: Option<Node<'mcx>>,
+    pub ordinalitycol: i32,
     pub location: ParseLoc,
 }
 
@@ -892,9 +976,9 @@ pub struct FuncExpr<'mcx> {
     pub location: ParseLoc,
 }
 
-// C `Expr *arg` is never NULL in a live NamedArgExpr; modeled non-optional.
+#[derive(Default)]
 pub struct NamedArgExpr<'mcx> {
-    pub arg: Node<'mcx>,
+    pub arg: Option<Node<'mcx>>,
     pub name: Option<&'mcx str>,
     pub argnumber: i32,
     pub location: ParseLoc,
@@ -964,6 +1048,9 @@ unsafe impl NodeVariant<'_> for RangeTblRef {
 unsafe impl NodeVariant<'_> for SetToDefault {
     const TAG: NodeTag = NodeTag::T_SetToDefault;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CurrentOfExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CurrentOfExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for JoinExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_JoinExpr;
 }
@@ -979,11 +1066,17 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ArrayExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NamedArgExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NamedArgExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SubscriptingRef<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubscriptingRef;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for FieldSelect<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FieldSelect;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceViaIO;
@@ -1029,6 +1122,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for NamedArgExpr<'mcx> {
 }
 unsafe impl NodeVariant<'_> for SQLValueFunction {
     const TAG: NodeTag = NodeTag::T_SQLValueFunction;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for XmlExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_XmlExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TableFunc<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TableFunc;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
@@ -1229,6 +1328,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_current_of_expr(self) -> Option<&'mcx CurrentOfExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_op_expr(self) -> Option<&'mcx OpExpr<'mcx>> {
         self.as_variant()
     }
@@ -1245,6 +1349,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_relabel_type(self) -> Option<&'mcx RelabelType<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_field_select(self) -> Option<&'mcx FieldSelect<'mcx>> {
         self.as_variant()
     }
 
@@ -1272,6 +1381,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_func_expr(self) -> Option<&'mcx FuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_named_arg_expr(self) -> Option<&'mcx NamedArgExpr<'mcx>> {
         self.as_variant()
     }
 
@@ -1376,6 +1490,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_xml_expr(self) -> Option<&'mcx XmlExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_json_returning(self) -> Option<&'mcx JsonReturning<'mcx>> {
         self.as_variant()
     }
@@ -1402,6 +1521,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_json_expr(self) -> Option<&'mcx JsonExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_table_func(self) -> Option<&'mcx TableFunc<'mcx>> {
         self.as_variant()
     }
 }

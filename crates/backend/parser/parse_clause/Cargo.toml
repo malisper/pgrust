@@ -9,6 +9,7 @@ name = "parse_clause"
 path = "src/lib.rs"
 
 [dependencies]
+parse_utilcmd = { path = "../parse_utilcmd" }
 catalog = { path = "../../catalog/catalog" }
 table = { path = "../../access/table/table" }
 types_rel = { path = "../../../_support/types/rel" }

@@ -49,6 +49,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // UnregisterSnapshotNoOwner (snapmgr.c): the ResOwnerReleaseSnapshot
+    // target — must not touch the resource owner mid-release.
+    pub fn unregister_snapshot_no_owner(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData<'static>>,
+    )
+);
+
+seam_core::seam!(
     // ImportSnapshot (snapmgr.c): SET TRANSACTION SNAPSHOT 'id'.
     pub fn import_snapshot(idstr: &str) -> types_error::PgResult<()>
 );

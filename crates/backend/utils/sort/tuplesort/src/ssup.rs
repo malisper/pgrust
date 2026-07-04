@@ -21,6 +21,7 @@ const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 const F_BTNAMESORTSUPPORT: Oid = 3135;
 const F_BYTEA_SORTSUPPORT: Oid = 3331;
+const F_NUMERIC_SORTSUPPORT: Oid = 3283;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -55,6 +56,12 @@ pub enum SortComparator {
     Uuid,
     /// `network_fast_cmp` (network_sortsupport); live untoasted inet varlenas.
     Network,
+    /// `numeric_fast_cmp` (numeric_sortsupport); live untoasted numeric
+    /// varlenas (short or long numeric format).
+    Numeric,
+    /// `numeric_cmp_abbrev`: intentionally backwards signed compare — numeric
+    /// abbreviations are negated so NaN (i64::MIN) sorts highest.
+    NumericAbbrev,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -145,6 +152,14 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
                 ::adt_network::InetRef::from_payload(varlena_payload(y)),
             )
         },
+        // SAFETY: Numeric contract (enum doc) — live untoasted numeric varlenas.
+        SortComparator::Numeric => unsafe {
+            ::adt_numeric::sortsupport::numeric_fast_cmp(varlena_payload(x), varlena_payload(y))
+        },
+        SortComparator::NumericAbbrev => {
+            let (x, y) = (x.as_i64(), y.as_i64());
+            (x < y) as i32 - (x > y) as i32
+        }
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
              (merge join over shim-compared types not ported)",
@@ -343,6 +358,7 @@ pub enum AbbrevKind {
     },
     Uuid,
     Network,
+    Numeric,
 }
 
 /// Armed abbreviation: the key's `comparator` becomes `Unsigned` over
@@ -353,6 +369,17 @@ pub enum AbbrevKind {
 pub struct AbbrevArm {
     pub kind: AbbrevKind,
     pub full_comparator: SortComparator,
+}
+
+impl AbbrevArm {
+    /// The armed comparator over converted datum1 words: `ssup_datum_unsigned_cmp`
+    /// for byte-image abbrevs, `numeric_cmp_abbrev` for numeric.
+    pub fn abbrev_comparator(&self) -> SortComparator {
+        match self.kind {
+            AbbrevKind::Numeric => SortComparator::NumericAbbrev,
+            _ => SortComparator::Unsigned,
+        }
+    }
 }
 
 /// `PrepareSortSupportFromOrderingOp` (sortsupport.c), `abbreviate=false` arm
@@ -389,8 +416,8 @@ pub fn prepare_sort_support_abbrev(
             ssup_reverse,
             ssup_nulls_first: ssup.ssup_nulls_first,
             ssup_attno: ssup.ssup_attno,
-            comparator: match abbrev {
-                Some(_) => SortComparator::Unsigned,
+            comparator: match &abbrev {
+                Some(arm) => arm.abbrev_comparator(),
                 None => comparator,
             },
         },
@@ -410,6 +437,7 @@ fn abbrev_arm_for(comparator: SortComparator) -> Option<AbbrevArm> {
         }
         SortComparator::Uuid => AbbrevKind::Uuid,
         SortComparator::Network => AbbrevKind::Network,
+        SortComparator::Numeric => AbbrevKind::Numeric,
         _ => return None,
     };
     Some(AbbrevArm { kind, full_comparator: comparator })
@@ -441,6 +469,7 @@ pub fn comparator_for_opfamily(
         F_BYTEA_SORTSUPPORT => SortComparator::TextC,
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
+        F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
         // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
         // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
         0 | F_RANGE_SORTSUPPORT => {
@@ -510,6 +539,7 @@ pub fn comparator_for_index_col(
         F_BYTEA_SORTSUPPORT => SortComparator::TextC,
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
+        F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
         // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
         // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
         0 | F_RANGE_SORTSUPPORT => {

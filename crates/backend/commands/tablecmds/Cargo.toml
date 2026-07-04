@@ -91,9 +91,12 @@ procarray = { path = "../../storage/ipc/procarray" }
 multixact = { path = "../../access/transam/multixact" }
 
 indexcmds_seams = { path = "../indexcmds_seams" }
+execindexing = { path = "../../executor/execindexing" }
+typcache = { path = "../../utils/cache/typcache" }
+commands_tablespace = { path = "../tablespace" }
+commands_amcmds = { path = "../amcmds" }
 partcache = { path = "../../utils/cache/partcache" }
 partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 planner = { path = "../../optimizer/plan/planner" }
-execindexing = { path = "../../executor/execindexing" }

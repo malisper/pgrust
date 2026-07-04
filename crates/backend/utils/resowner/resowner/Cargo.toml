@@ -18,4 +18,5 @@ resowner_seams = { path = "../resowner_seams" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
 types_storage = { path = "../../../../_support/types/types_storage" }

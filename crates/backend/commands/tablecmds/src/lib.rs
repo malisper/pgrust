@@ -12,7 +12,10 @@ mod drop;
 mod oncommit;
 mod rename;
 mod truncate;
-pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
+pub use alter::{
+    find_composite_type_dependencies, AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation,
+};
+pub use constraints::cook_default;
 pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use partition::SetRelationHasSubclass;
@@ -271,6 +274,21 @@ pub fn DefineRelation<'mcx>(
             relpersistence as u8,
         )?)
     } else {
+        // MergeAttributes' duplicate-name scan runs even without parents
+        // (tablecmds.c:2612); the is_from_type merge leg stays with OF-typed
+        // tables downstream.
+        for (i, c) in stmt.tableElts.iter().enumerate() {
+            let Some(cd) = c.as_variant::<ColumnDef>() else { continue };
+            if cd.is_from_type {
+                continue;
+            }
+            for r in stmt.tableElts.iter().skip(i + 1) {
+                let Some(rd) = r.as_variant::<ColumnDef>() else { continue };
+                if cd.colname.is_some() && cd.colname == rd.colname {
+                    return Err(inheritance::duplicate_column(cd.colname.unwrap_or("")));
+                }
+            }
+        }
         None
     };
 

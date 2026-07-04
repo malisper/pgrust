@@ -208,7 +208,6 @@ fn install() {
         smgr_seams::smgr_set_cached_nblocks::set(|_loc, _fork, _n| Ok(()));
         smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
 
-        transam_xlog_seams::xlog_standby_info_active::set(|| false);
         xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, _main, _bufs| {
             with_fake(|f| {
                 f.wal.push((rmid, info));
@@ -299,6 +298,7 @@ fn install() {
             Ok(F_BTINT4CMP)
         });
     });
+    test_boot::boot_wal("execindexing");
 }
 
 thread_local! {
@@ -369,7 +369,7 @@ fn pg_class(relname: &str, oid: Oid, relam: Oid, relkind: u8, hasindex: bool) ->
 
 fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
     RelationData {
-        rd_locator: Default::default(),
+        rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, HEAP_OID)),
         rd_smgr: Default::default(),
         rd_id: HEAP_OID,
         rd_backend: INVALID_PROC_NUMBER,
@@ -483,7 +483,7 @@ fn insert_row<'mcx>(
     slot.base_mut().tts_tid = tuple.as_tuple_mut().t_self;
     slot.base_mut().tts_tableOid = HEAP_OID;
 
-    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[])
+    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[]).map(|_| ())
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {

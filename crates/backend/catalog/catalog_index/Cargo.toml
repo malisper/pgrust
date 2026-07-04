@@ -41,6 +41,8 @@ clauses = { path = "../../optimizer/util/clauses" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_constraint = { path = "../pg_constraint" }
+trigger = { path = "../../commands/trigger" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
 pgstat = { path = "../../utils/activity/pgstat" }
 relcache = { path = "../../utils/cache/relcache" }
 snapmgr = { path = "../../utils/time/snapmgr" }

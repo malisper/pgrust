@@ -453,6 +453,12 @@ fn bump_inval_counter() {
     INVAL_COUNTER.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
+/// Valid while the source stays saved and valid (C: plansource->query_list;
+/// callers must have just revalidated via GetCachedPlan).
+pub fn SourceQueryList(h: CachedPlanSourceHandle) -> &'static [Query<'static>] {
+    with_source(h, |src| src.query_list)
+}
+
 /// Valid while the caller holds a refcount on `cplan` (C: cplan->stmt_list).
 pub fn CachedPlanStmtList(cplan: CachedPlanHandle) -> &'static [PlannedStmt<'static>] {
     with_plan(cplan, |plan| {

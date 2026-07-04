@@ -21,6 +21,7 @@ mod tests;
 
 pub fn init_seams() {
     rewrite_handler_seams::query_rewrite::set(QueryRewrite);
+    rewrite_handler_seams::acquire_rewrite_locks::set(AcquireRewriteLocks);
 }
 
 pub fn QueryRewrite<'mcx>(
@@ -521,26 +522,20 @@ fn rewriteTargetListIU<'mcx>(
             // Stored generated columns are computed in the executor.
             None
         } else if apply_default {
-            let expr = if att.attidentity != 0 || att.atthasdef {
-                Some(build_column_default(mcx, target_relation, attrno)?)
-            } else if command_type == CmdType::CMD_INSERT {
-                // No stored default: C omits the entry; the planner inserts
-                // the NULL (expand_insert_targetlist).
-                None
-            } else {
-                // UPDATE SET col = DEFAULT with no stored default: explicit
-                // NULL. C wraps coerce_to_domain; CREATE DOMAIN is unreachable
-                // on this base, so the wrapper is dead.
-                Some(types_nodes::Node::mk_const(
+            let expr = match build_column_default(mcx, target_relation, attrno)? {
+                Some(e) => Some(e),
+                // No stored default: C omits the entry for INSERT (the
+                // planner inserts the NULL); UPDATE SET col = DEFAULT sets an
+                // explicit NULL, domain-wrapped.
+                None if command_type == CmdType::CMD_INSERT => None,
+                None => Some(coerce::coerce_null_to_domain(
                     mcx,
                     att.atttypid,
-                    -1,
+                    att.atttypmod,
                     att.attcollation,
                     att.attlen as i32,
-                    datum::Datum::null(),
-                    true,
                     att.attbyval,
-                )?)
+                )?),
             };
             match expr {
                 None => None,
@@ -658,22 +653,21 @@ fn rewriteValuesRTE<'mcx>(
             let att = target_relation.rd_att.attr(attrno - 1);
             // Stored generated columns get the NULL placeholder (C leaves
             // new_expr NULL); the executor recomputes them.
-            let new_expr = if !att.attisdropped
-                && att.attgenerated == 0
-                && (att.atthasdef || att.attidentity != 0)
-            {
+            let default_expr = if !att.attisdropped && att.attgenerated == 0 {
                 build_column_default(mcx, target_relation, attrno)?
             } else {
-                types_nodes::Node::mk_const(
+                None
+            };
+            let new_expr = match default_expr {
+                Some(e) => e,
+                None => coerce::coerce_null_to_domain(
                     mcx,
                     att.atttypid,
-                    -1,
+                    att.atttypmod,
                     att.attcollation,
                     att.attlen as i32,
-                    datum::Datum::null(),
-                    true,
                     att.attbyval,
-                )?
+                )?,
             };
             new_list.lappend(mcx, new_expr)?;
         }
@@ -688,32 +682,42 @@ fn rewriteValuesRTE<'mcx>(
     Ok(())
 }
 
-// build_column_default (rewriteHandler.c), atthasdef arm: the stored adbin
-// deserialized and coerced to the column type. get_typdefault (pg_type
-// typdefaultbin) stays with the domain lane; callers gate on atthasdef.
+// build_column_default (rewriteHandler.c): the stored adbin, else the
+// column type's own default (get_typdefault), coerced to the column type;
+// None is C's NULL return (no default anywhere).
 pub fn build_column_default<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     attrno: usize,
-) -> PgResult<types_nodes::Node<'mcx>> {
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
     let att = rel.rd_att.attr(attrno - 1);
     if att.attidentity != 0 {
         let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32, false)?;
-        return types_nodes::Node::mk(
+        return Ok(Some(types_nodes::Node::mk(
             mcx,
             types_nodes::primnodes::NextValueExpr { seqid, typeId: att.atttypid },
-        );
+        )?));
     }
-    debug_assert!(att.atthasdef);
-    let constr = rel.rd_att.constr.as_deref();
-    let adbin = constr
-        .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
-        .and_then(|d| d.adbin.as_ref());
-    let adbin = match adbin {
-        Some(s) => s,
-        None => return Err(default_expression_not_found(attrno, rel)),
+    let expr = if att.atthasdef {
+        let constr = rel.rd_att.constr.as_deref();
+        let adbin = constr
+            .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
+            .and_then(|d| d.adbin.as_ref());
+        let adbin = match adbin {
+            Some(s) => s,
+            None => return Err(default_expression_not_found(attrno, rel)),
+        };
+        Some(readfuncs::stringToNode(mcx, adbin.as_str())?)
+    } else {
+        None
     };
-    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    let expr = match expr {
+        Some(e) => e,
+        None => match lsyscache::get_typdefault(mcx, att.atttypid)? {
+            Some(e) => e,
+            None => return Ok(None),
+        },
+    };
     let exprtype = parse_expr::expr_type(expr);
     let pstate = parser_small1::make_parsestate(mcx, None);
     let coerced = coerce::coerce_to_target_type(
@@ -728,7 +732,7 @@ pub fn build_column_default<'mcx>(
         -1,
     )?;
     match coerced {
-        Some(e) => Ok(e),
+        Some(e) => Ok(Some(e)),
         None => Err(default_type_mismatch(att.attname.name_str(), att.atttypid, exprtype)),
     }
 }
@@ -741,7 +745,15 @@ pub fn build_generation_expression<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
     debug_assert!(att.attgenerated != 0);
-    let defexpr = build_column_default(mcx, rel, attrno)?;
+    let defexpr = match build_column_default(mcx, rel, attrno)? {
+        Some(e) => e,
+        None => {
+            let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+            return Err(Box::new(PgError::error(format!(
+                "no generation expression found for column number {attrno} of table \"{relname}\""
+            ))));
+        }
+    };
     let attcollid = att.attcollation;
     if attcollid != InvalidOid && attcollid != nodes_core::node_funcs::expr_collation(defexpr) {
         return Node::mk(
@@ -859,6 +871,15 @@ fn fireRIRrules<'mcx>(
         has_sub_links: false,
         with_check_options: PgVec::new_in(mcx),
     };
+    // SEARCH/CYCLE expansion precedes the RIR recursion into each ctequery
+    // (C runs the expansion loop at the top of fireRIRrules); C copyObject's
+    // the CTE and replaces the cell — the arena tree is mutated in place.
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
+            rewrite_search_cycle::rewriteSearchAndCycle(mcx, cte_node)?;
+        }
+    }
     // C reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
     // argument mutated in place, so the shared-ref recursion is equivalent.
     for cte_node in &parsetree.cteList {
@@ -868,9 +889,6 @@ fn fireRIRrules<'mcx>(
         let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
         stamp_query_flags(cte_query_node, &rir);
         out.has_row_security |= rir.has_row_security;
-        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
-            panic!("rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE lane");
-        }
     }
     // The EXCLUDED pseudo-relation must stay RTE_RELATION; never expand it.
     let excl_rel_index = parsetree
@@ -1213,7 +1231,7 @@ fn ApplyRetrieveRule<'mcx>(
     } else {
         relation.rd_rel.relowner
     };
-    set_rule_check_as_user(rule_action, check_as_user);
+    set_rule_check_as_user(rule_action, check_as_user)?;
 
     AcquireRewriteLocks(mcx, rule_action, true, false)?;
 
@@ -1253,7 +1271,7 @@ fn ApplyRetrieveRule<'mcx>(
 }
 
 // setRuleCheckAsUser_Query (rewriteDefine.c).
-fn set_rule_check_as_user(qry: &Query<'_>, userid: Oid) {
+fn set_rule_check_as_user<'mcx>(qry: &'mcx Query<'mcx>, userid: Oid) -> PgResult<()> {
     for pnode in qry.rteperminfos.iter() {
         // SAFETY: the tree was just read by stringToNode; exclusively ours.
         unsafe { pnode.with_mut::<RTEPermissionInfo, _>(|p| p.checkAsUser = userid) }
@@ -1262,15 +1280,36 @@ fn set_rule_check_as_user(qry: &Query<'_>, userid: Oid) {
     for rnode in qry.rtable.iter() {
         let rte = rte_of(rnode);
         if rte.rtekind == RTEKind::RTE_SUBQUERY {
-            set_rule_check_as_user(rte.subquery.expect("subquery RTE"), userid);
+            set_rule_check_as_user(rte.subquery.expect("subquery RTE"), userid)?;
         }
     }
-    debug_assert!(qry.cteList.is_nil());
+    for cnode in qry.cteList.iter() {
+        let cte = cnode.as_common_table_expr().expect("cteList holds CommonTableExpr");
+        let ctequery = cte
+            .ctequery
+            .and_then(|n| n.as_query())
+            .expect("ctequery is a Query");
+        set_rule_check_as_user(ctequery, userid)?;
+    }
     if qry.hasSubLinks {
-        panic!(
-            "setRuleCheckAsUser (rewriteDefine.c): sublink descent needs the \
-             walker's T_SubLink arm (SubLink vocabulary unported)"
-        );
+        let mut w = RuleCheckAsUser { userid };
+        nodes_core::query_tree_walker(qry, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
+    }
+    Ok(())
+}
+
+// setRuleCheckAsUser_walker (rewriteDefine.c).
+struct RuleCheckAsUser {
+    userid: Oid,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for RuleCheckAsUser {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(q) = node.as_query() {
+            set_rule_check_as_user(q, self.userid)?;
+            return Ok(false);
+        }
+        nodes_core::expression_tree_walker(node, self)
     }
 }
 
@@ -1436,13 +1475,28 @@ pub fn AcquireRewriteLocks<'mcx>(
     }
 
     if parsetree.hasSubLinks {
-        panic!(
-            "AcquireRewriteLocks (rewriteHandler.c): sublink descent needs the \
-             walker's T_SubLink arm (SubLink vocabulary unported)"
-        );
+        let mut w = LocksOnSubLinks { mcx, for_execute: forExecute };
+        nodes_core::query_tree_walker(parsetree, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
     }
 
     Ok(())
+}
+
+// acquireLocksOnSubLinks (rewriteHandler.c).
+struct LocksOnSubLinks<'mcx> {
+    mcx: Mcx<'mcx>,
+    for_execute: bool,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for LocksOnSubLinks<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(sl) = node.as_sub_link() {
+            if let Some(q) = sl.subselect.as_query() {
+                AcquireRewriteLocks(self.mcx, q, self.for_execute, false)?;
+            }
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
 }
 
 fn rte_of<'mcx>(node: Node<'mcx>) -> &'mcx RangeTblEntry<'mcx> {

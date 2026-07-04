@@ -344,6 +344,59 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "collname", &cc.collname);
         int_field(out, "location", cc.location);
         out.push('}');
+    } else if let Some(t) = n.as_variant::<types_nodes::rawnodes::RangeTableFunc>() {
+        out.push_str("{RANGETABLEFUNC");
+        bool_field(out, "lateral", t.lateral);
+        node_field(out, "docexpr", t.docexpr);
+        node_field(out, "rowexpr", t.rowexpr);
+        list_field(out, "namespaces", &t.namespaces);
+        list_field(out, "columns", &t.columns);
+        out.push_str(" :alias ");
+        match t.alias {
+            Some(a) => alias(out, a),
+            None => out.push_str("<>"),
+        }
+        int_field(out, "location", t.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::RangeTableFuncCol>() {
+        out.push_str("{RANGETABLEFUNCCOL");
+        string_field(out, "colname", c.colname);
+        node_field(out, "typeName", c.typeName);
+        bool_field(out, "for_ordinality", c.for_ordinality);
+        bool_field(out, "is_not_null", c.is_not_null);
+        node_field(out, "colexpr", c.colexpr);
+        node_field(out, "coldefexpr", c.coldefexpr);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::XmlSerialize>() {
+        out.push_str("{XMLSERIALIZE");
+        int_field(out, "xmloption", s.xmloption as i32);
+        node_field(out, "expr", s.expr);
+        node_field(out, "typeName", s.typeName);
+        bool_field(out, "indent", s.indent);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(x) = n.as_xml_expr() {
+        out.push_str("{XMLEXPR");
+        int_field(out, "op", x.op as i32);
+        string_field(out, "name", x.name);
+        list_field(out, "named_args", &x.named_args);
+        list_field(out, "arg_names", &x.arg_names);
+        list_field(out, "args", &x.args);
+        int_field(out, "xmloption", x.xmloption as i32);
+        bool_field(out, "indent", x.indent);
+        int_field(out, "type", x.r#type as i32);
+        int_field(out, "typmod", x.typmod);
+        int_field(out, "location", x.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CompositeTypeStmt>() {
+        out.push_str("{COMPOSITETYPESTMT :typevar ");
+        match c.typevar {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "coldeflist", &c.coldeflist);
+        out.push('}');
     } else if let Some(g) = n.as_grant_stmt() {
         grant_stmt(out, g);
     } else if let Some(a) = n.as_alter_default_privileges_stmt() {
@@ -734,6 +787,26 @@ fn node(out: &mut String, n: Node<'_>) {
         assert!(c.ctecoltypes.is_nil() && c.ctecoltypmods.is_nil() && c.ctecolcollations.is_nil());
         out.push_str(" :ctecoltypes <> :ctecoltypmods <> :ctecolcollations <>");
         out.push('}');
+    } else if let Some(s) = n.as_cte_search_clause() {
+        out.push_str("{CTESEARCHCLAUSE");
+        list_field(out, "search_col_list", &s.search_col_list);
+        bool_field(out, "search_breadth_first", s.search_breadth_first);
+        string_field(out, "search_seq_column", s.search_seq_column);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(c) = n.as_cte_cycle_clause() {
+        out.push_str("{CTECYCLECLAUSE");
+        list_field(out, "cycle_col_list", &c.cycle_col_list);
+        string_field(out, "cycle_mark_column", c.cycle_mark_column);
+        node_field(out, "cycle_mark_value", c.cycle_mark_value);
+        node_field(out, "cycle_mark_default", c.cycle_mark_default);
+        string_field(out, "cycle_path_column", c.cycle_path_column);
+        int_field(out, "location", c.location);
+        int_field(out, "cycle_mark_type", c.cycle_mark_type as i32);
+        int_field(out, "cycle_mark_typmod", c.cycle_mark_typmod);
+        int_field(out, "cycle_mark_collation", c.cycle_mark_collation as i32);
+        int_field(out, "cycle_mark_neop", c.cycle_mark_neop as i32);
+        out.push('}');
     } else if let Some(e) = n.as_variant::<types_nodes::rawnodes::IndexElem>() {
         out.push_str("{INDEXELEM");
         string_field(out, "name", e.name);
@@ -895,12 +968,14 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);
         list_field(out, "including", &c.including);
-        out.push_str(" :exclusions <>");
+        list_field(out, "exclusions", &c.exclusions);
         list_field(out, "options", &c.options);
         string_field(out, "indexname", c.indexname);
         string_field(out, "indexspace", c.indexspace);
         bool_field(out, "reset_default_tblspc", false);
-        out.push_str(" :access_method <> :where_clause <> :pktable ");
+        string_field(out, "access_method", c.access_method);
+        node_field(out, "where_clause", c.where_clause);
+        out.push_str(" :pktable ");
         match c.pktable {
             Some(rv) => range_var(out, rv),
             None => out.push_str("<>"),
@@ -1159,6 +1234,27 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
+        out.push_str("{ALTERDOMAINSTMT :subtype ");
+        out.push(a.subtype as char);
+        list_field(out, "typeName", &a.typeName);
+        string_field(out, "name", a.name);
+        node_field(out, "def", a.def);
+        int_field(out, "behavior", a.behavior as i32);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>() {
+        out.push_str("{ALTEROBJECTSCHEMASTMT");
+        int_field(out, "objectType", a.objectType as i32);
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", a.object);
+        string_field(out, "newschema", a.newschema);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
     } else if let Some(a) = n.as_alter_function_stmt() {
         out.push_str("{ALTERFUNCTIONSTMT");
         int_field(out, "objtype", a.objtype as i32);
@@ -1312,6 +1408,36 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "constructor", a.constructor);
         node_field(out, "arg", a.arg);
         bool_field(out, "absent_on_null", a.absent_on_null);
+        out.push('}');
+    } else if let Some(d) = n.as_delete_stmt() {
+        out.push_str("{DELETESTMT");
+        node_field(out, "relation", d.relation);
+        list_field(out, "usingClause", &d.usingClause);
+        node_field(out, "whereClause", d.whereClause);
+        node_field(out, "returningClause", d.returningClause);
+        node_field(out, "withClause", d.withClause);
+        out.push('}');
+    } else if let Some(u) = n.as_update_stmt() {
+        out.push_str("{UPDATESTMT");
+        node_field(out, "relation", u.relation);
+        list_field(out, "targetList", &u.targetList);
+        node_field(out, "whereClause", u.whereClause);
+        list_field(out, "fromClause", &u.fromClause);
+        node_field(out, "returningClause", u.returningClause);
+        node_field(out, "withClause", u.withClause);
+        out.push('}');
+    } else if let Some(st) = n.as_set_to_default() {
+        out.push_str("{SETTODEFAULT");
+        int_field(out, "typeId", st.typeId as i32);
+        int_field(out, "typeMod", st.typeMod);
+        int_field(out, "collation", st.collation as i32);
+        int_field(out, "location", st.location);
+        out.push('}');
+    } else if let Some(c) = n.as_current_of_expr() {
+        out.push_str("{CURRENTOFEXPR");
+        int_field(out, "cvarno", c.cvarno as i32);
+        string_field(out, "cursor_name", c.cursor_name);
+        int_field(out, "cursor_param", c.cursor_param);
         out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
