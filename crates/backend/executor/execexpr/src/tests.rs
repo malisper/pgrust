@@ -595,13 +595,17 @@ fn step_footprint_and_program_shapes() {
         let state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
         let shapes: alloc::vec::Vec<core::mem::Discriminant<Step>> =
             state.steps().iter().map(core::mem::discriminant).collect();
-        assert_eq!(state.steps().len(), 5);
+        // Ready-time fusion: [Fetch, Var, FuncStrict2, Qual, Done] ->
+        // [Fetch, ScanVarFuncStrict2, Qual(remapped), Done].
+        assert_eq!(state.steps().len(), 4);
         assert!(matches!(state.steps()[0], Step::ScanFetchSome { last_var: 1 }));
-        assert!(matches!(state.steps()[1], Step::ScanVar { attnum: 0, .. }));
-        assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
-        assert!(matches!(state.steps()[3], Step::Qual { jumpdone: 4 }));
-        assert!(matches!(state.steps()[4], Step::DoneReturn));
-        assert_eq!(shapes.len(), 5);
+        assert!(matches!(
+            state.steps()[1],
+            Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }
+        ));
+        assert!(matches!(state.steps()[2], Step::Qual { jumpdone: 3 }));
+        assert!(matches!(state.steps()[3], Step::DoneReturn));
+        assert_eq!(shapes.len(), 4);
     });
 }
 
@@ -1434,5 +1438,119 @@ fn array_expr_builds_array_consumable_by_saop() {
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(!r.isnull);
         assert!(r.value.as_bool());
+    });
+}
+
+#[test]
+fn fused_func_chain_evaluates_like_unfused() {
+    with_mcx(|mcx| {
+        let mut expr = mk_scan_var(mcx, 1, INT4OID);
+        for k in 1..=8 {
+            let args = NodeList::make2(mcx, expr, mk_int4_const(mcx, Some(k))).unwrap();
+            expr = mk_opexpr(mcx, 177, INT4OID, args);
+        }
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        // [Fetch, Var, F1..F8, Done] -> [Fetch, VarF1, FF23, FF45, FF67, F8, Done]
+        assert_eq!(state.steps().len(), 7);
+        assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }));
+        assert!(matches!(state.steps()[2], Step::FuncFuncStrict2 { argno: 0, .. }));
+        assert!(matches!(state.steps()[4], Step::FuncFuncStrict2 { .. }));
+        assert!(matches!(state.steps()[5], Step::FuncExprStrict2 { .. }));
+        for v in [Some(5), Some(-1000), None] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            match v {
+                Some(x) => {
+                    assert!(!r.isnull);
+                    assert_eq!(r.value.as_i32(), x + 36);
+                }
+                None => assert!(r.isnull),
+            }
+        }
+    });
+}
+
+#[test]
+fn fused_two_clause_qual_matches() {
+    with_mcx(|mcx| {
+        let a_lt0 = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                    .unwrap();
+            mk_opexpr(mcx, 66, BOOLOID, args)
+        };
+        let b_gt5 = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(5)))
+                    .unwrap();
+            mk_opexpr(mcx, 147, BOOLOID, args)
+        };
+        let qual = NodeList::make2(mcx, a_lt0, b_gt5).unwrap();
+        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+        assert!(matches!(state.kernel(), Kernel::Program));
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2 { .. })));
+        for (a, b, want) in [
+            (Some(-1), Some(6), true),
+            (Some(-1), Some(5), false),
+            (Some(1), Some(6), false),
+            (None, Some(6), false),
+            (Some(-1), None, false),
+        ] {
+            assert_eq!(run_qual(mcx, &mut state, &[a, b]), want, "a={a:?} b={b:?}");
+        }
+    });
+}
+
+#[test]
+fn fusion_skips_jump_targets() {
+    with_mcx(|mcx| {
+        // CASE WHEN var < 0 THEN (var + 1) + 2 ELSE 7 END: the THEN arm's
+        // chain head is a jump target; results stay correct across arms.
+        let cond = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                    .unwrap();
+            mk_opexpr(mcx, 66, BOOLOID, args)
+        };
+        let then_expr = {
+            let a1 =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(1)))
+                    .unwrap();
+            let inner = mk_opexpr(mcx, 177, INT4OID, a1);
+            let a2 = NodeList::make2(mcx, inner, mk_int4_const(mcx, Some(2))).unwrap();
+            mk_opexpr(mcx, 177, INT4OID, a2)
+        };
+        let when = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseWhen {
+                expr: Some(cond),
+                result: Some(then_expr),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let case = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseExpr {
+                casetype: INT4OID,
+                casecollid: 0,
+                arg: None,
+                args: NodeList::make1(mcx, when).unwrap(),
+                defresult: Some(mk_int4_const(mcx, Some(7))),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        for (v, want) in [(Some(-4), Some(-1)), (Some(3), Some(7)), (None, Some(7))] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, want.unwrap()), "v={v:?}");
+        }
     });
 }

@@ -1172,6 +1172,45 @@ fn run_program<'mcx>(
                     write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
+            Step::ScanVarFuncStrict2 { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut scan), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the call's live
+                // 2-arg fcinfo image (fuse_program invariant).
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, value, isnull);
+                }
+            }
+            Step::FuncFuncStrict2 { call1, argno, call2, out } => {
+                let r1 = strict2_eval(call1)?;
+                // SAFETY: as ScanVarFuncStrict2, for call2's image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call2.fcinfo, *argno as usize).write(r1);
+                    crate::steps::arg_slot_of(call2.fcinfo, 1 - *argno as usize).read()
+                };
+                if r1.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let (value, isnull) = invoke(call2)?;
+                    write_out(*out, value, isnull);
+                }
+            }
+            Step::FuncStrict2Qual { call, jumpdone, out } => {
+                let r = strict2_eval(call)?;
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
                 let (a0, a1) = unsafe {
@@ -1539,6 +1578,23 @@ fn eval_array_expr(
     Ok((Datum::from_usize(img.leak().as_ptr() as usize), false))
 }
 
+// The FuncExprStrict2 arm body, shared by the fused superinstructions.
+#[inline(always)]
+fn strict2_eval(call: &FuncCall) -> PgResult<NullableDatum> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        return Ok(NullableDatum::null());
+    }
+    let (value, isnull) = invoke(call)?;
+    Ok(NullableDatum { value, isnull })
+}
+
 #[inline(always)]
 fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
@@ -1669,7 +1725,8 @@ fn check_still_valid_slow<'mcx>(
 ) -> PgResult<()> {
     for step in state.steps.as_slice() {
         let (src, attnum, vartype) = match *step {
-            Step::ScanVar { attnum, vartype, .. } => (SlotSrc::Scan, attnum, vartype),
+            Step::ScanVar { attnum, vartype, .. }
+            | Step::ScanVarFuncStrict2 { attnum, vartype, .. } => (SlotSrc::Scan, attnum, vartype),
             Step::InnerVar { attnum, vartype, .. } => (SlotSrc::Inner, attnum, vartype),
             Step::OuterVar { attnum, vartype, .. } => (SlotSrc::Outer, attnum, vartype),
             _ => continue,

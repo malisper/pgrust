@@ -220,6 +220,12 @@ pub enum Step {
         scratch: NonNull<u8>,
         out: OutRef,
     },
+    // Ready-time fused pairs (copyjit-superinstruction shape): semantics are
+    // exactly the two source steps back-to-back; emitted by fuse_program only
+    // where the second step is not a jump target.
+    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: FuncCall, out: OutRef },
+    FuncFuncStrict2 { call1: FuncCall, argno: u8, call2: FuncCall, out: OutRef },
+    FuncStrict2Qual { call: FuncCall, jumpdone: u32, out: OutRef },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
