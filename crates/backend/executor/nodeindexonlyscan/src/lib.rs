@@ -98,7 +98,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 return Ok(false);
             };
             let mut tuple_from_heap = false;
-            check_for_interrupts();
+            check_for_interrupts()?;
 
             // Skip the heap fetch when the VM says the TID's page is
             // all-visible; caller-recheck caveats are C's (visibilitymap.c).
@@ -215,7 +215,7 @@ pub fn index_only_scan_batch_next<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<u32> {
-    check_for_interrupts();
+    check_for_interrupts()?;
     if node.ioss_ScanDesc.is_none() {
         node.open_scandesc(estate)?;
     }
@@ -304,17 +304,12 @@ fn lossy_distance_unported() -> ! {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("nodeindexonlyscan: ProcessInterrupts (tcop/postgres.c) unported")
-}
-
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        return postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 /// `StoreIndexTuple` over btree tuple formats. The deform loop is C's
