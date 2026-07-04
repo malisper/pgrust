@@ -309,7 +309,7 @@ fn ExtendBufferedRelShared(
             loop {
                 let buf_state = LockBufHdr(existing_desc);
                 UnlockBufHdr(existing_desc, buf_state & !BM_VALID);
-                if StartBufferIO(existing_desc, true, false)? {
+                if StartBufferIO(existing_desc, true, false, true)? {
                     break;
                 }
             }
@@ -325,7 +325,7 @@ fn ExtendBufferedRelShared(
             }
             UnlockBufHdr(victim_desc, buf_state);
             LWLockRelease(partition_lock)?;
-            StartBufferIO(victim_desc, true, false)?;
+            StartBufferIO(victim_desc, true, false, true)?;
         }
     }
 

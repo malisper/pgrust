@@ -540,6 +540,23 @@ pub fn mdprefetch(
     Ok(true)
 }
 
+pub fn mdstartbufread(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    blocknum: BlockNumber,
+    buffer: i32,
+) -> PgResult<bool> {
+    let behavior = if in_recovery() { EXTENSION_RETURN_NULL } else { EXTENSION_FAIL };
+    let v = match _mdfd_getseg(rlocator, st, forknum, blocknum, false, behavior)? {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    let seekpos = BLCKSZ_I64 * (blocknum % RELSEG_SIZE) as i64;
+    debug_assert!(seekpos < BLCKSZ_I64 * RELSEG_SIZE as i64);
+    fd::FileStartBufferRead(v.mdfd_vfd, seekpos, buffer)
+}
+
 pub fn mdmaxcombine(blocknum: BlockNumber) -> u32 {
     RELSEG_SIZE - (blocknum % RELSEG_SIZE)
 }

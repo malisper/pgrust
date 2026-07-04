@@ -236,7 +236,7 @@ pub(crate) fn with_checksummed_page<R>(
 
 /// FlushBuffer (bufmgr.c): caller holds a pin and the content lock (any mode).
 pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
-    if !StartBufferIO(desc, false, false)? {
+    if !StartBufferIO(desc, false, false, true)? {
         return Ok(());
     }
 
