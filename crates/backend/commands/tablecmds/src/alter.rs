@@ -248,15 +248,32 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
             .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
         ));
     }
+    let wrong_type = |msg: String| -> PgResult<()> {
+        Err(Box::new(
+            PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ))
+    };
     match objtype {
         ObjectType::OBJECT_INDEX => {
             if relkind != types_rel::RELKIND_INDEX
                 && relkind != types_rel::RELKIND_PARTITIONED_INDEX
             {
-                return Err(Box::new(
-                    PgError::new(ERROR, format!("\"{}\" is not an index", rel.relname))
-                        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
-                ));
+                return wrong_type(format!("\"{}\" is not an index", rel.relname));
+            }
+        }
+        ObjectType::OBJECT_VIEW => {
+            if relkind != types_rel::RELKIND_VIEW {
+                return wrong_type(format!("\"{}\" is not a view", rel.relname));
+            }
+        }
+        ObjectType::OBJECT_SEQUENCE => {
+            if relkind != types_rel::RELKIND_SEQUENCE {
+                return wrong_type(format!("\"{}\" is not a sequence", rel.relname));
+            }
+        }
+        ObjectType::OBJECT_MATVIEW => {
+            if relkind != types_rel::RELKIND_MATVIEW {
+                return wrong_type(format!("\"{}\" is not a materialized view", rel.relname));
             }
         }
         _ => {
@@ -431,6 +448,8 @@ fn ATPrepCmd<'mcx>(
             rel.rd_rel.relkind == types_rel::RELKIND_INDEX
                 || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
         }
+        // AT_ColumnDefault: ATT_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE.
+        AlterTableType::AT_ColumnDefault => rel.rd_rel.relkind == types_rel::RELKIND_VIEW,
         _ => false,
     };
     let partitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;

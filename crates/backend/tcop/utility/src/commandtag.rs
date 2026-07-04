@@ -197,6 +197,11 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             match stmt.objtype {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE => CMDTAG_ALTER_TABLE,
                 types_nodes::parsenodes::ObjectType::OBJECT_INDEX => CMDTAG_ALTER_INDEX,
+                types_nodes::parsenodes::ObjectType::OBJECT_VIEW => CMDTAG_ALTER_VIEW,
+                types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE => CMDTAG_ALTER_SEQUENCE,
+                types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW => {
+                    CMDTAG_ALTER_MATERIALIZED_VIEW
+                }
                 _ => payload_gap("CreateCommandTag", "AlterObjectTypeCommandTag non-table"),
             }
         }

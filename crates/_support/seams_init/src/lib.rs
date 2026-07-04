@@ -184,6 +184,7 @@ pub fn init_all() {
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
+    fmgr_core::register_late_builtins(rewrite_handler::REWRITE_BUILTINS);
     fmgr_core::register_late_builtins(opclasscmds::builtins::OPCLASS_BUILTINS);
     operatorcmds::init_seams();
     foreigncmds::init_seams();
