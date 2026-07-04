@@ -93,12 +93,6 @@ pub fn add_paths_to_joinrel<'mcx>(
     } else {
         None
     };
-    if gucs::enable_mergejoin() && mergejoin_allowed {
-        sort_inner_and_outer(
-            run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist,
-            &mergeclause_list, semifactors,
-        )?;
-    }
     // param_source_rels: rels an added parameterized path may require.
     let param_source_rels = {
         use crate::relnode::{relids_difference, relids_overlap, relids_union};
@@ -134,6 +128,12 @@ pub fn add_paths_to_joinrel<'mcx>(
         }
         relids_union(mcx, &psr, &run.root.rel(joinrel).lateral_relids)
     };
+    if gucs::enable_mergejoin() && mergejoin_allowed {
+        sort_inner_and_outer(
+            run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist,
+            &mergeclause_list, &param_source_rels, semifactors,
+        )?;
+    }
     if mergejoin_allowed {
         match_unsorted_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &mergeclause_list, &param_source_rels, semifactors)?;
     } else {
@@ -143,7 +143,7 @@ pub fn add_paths_to_joinrel<'mcx>(
         );
     }
     if gucs::enable_hashjoin() {
-        hash_inner_and_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, semifactors)?;
+        hash_inner_and_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &param_source_rels, semifactors)?;
     }
     Ok(())
 }
@@ -275,6 +275,7 @@ fn sort_inner_and_outer<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
     mergeclause_list: &[RinfoId],
+    param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
     if jointype == types_pathnodes::JOIN_RIGHT_SEMI {
@@ -343,6 +344,7 @@ fn sort_inner_and_outer<'mcx>(
             inner_unique,
             sjinfo,
             restrictlist,
+            param_source_rels,
             semifactors,
         )?;
     }
@@ -364,6 +366,7 @@ fn generate_mergejoin_paths<'mcx>(
     useallclauses: bool,
     inner_cheapest_total: PathId,
     merge_pathkeys: &[PathKey],
+    param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
@@ -402,6 +405,7 @@ fn generate_mergejoin_paths<'mcx>(
         inner_unique,
         sjinfo,
         restrictlist,
+        param_source_rels,
         semifactors,
     )?;
 
@@ -472,6 +476,7 @@ fn generate_mergejoin_paths<'mcx>(
                     inner_unique,
                     sjinfo,
                     restrictlist,
+                    param_source_rels,
                     semifactors,
                 )?;
                 cheapest_total_inner = Some(ip);
@@ -529,6 +534,7 @@ fn generate_mergejoin_paths<'mcx>(
                         inner_unique,
                         sjinfo,
                         restrictlist,
+                        param_source_rels,
                         semifactors,
                     )?;
                 }
@@ -651,6 +657,7 @@ fn match_unsorted_outer<'mcx>(
                 useallclauses,
                 ict_for_merge,
                 &merge_pathkeys,
+                param_source_rels,
                 semifactors,
             )?;
         }
@@ -741,6 +748,7 @@ fn try_nestloop_path<'mcx>(
             jointype,
             &workspace,
             inner_unique,
+            sjinfo,
             outer_path,
             inner_path,
             pathkeys,
@@ -768,13 +776,30 @@ fn try_mergejoin_path<'mcx>(
     inner_unique: bool,
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
+    param_source_rels: &Relids<'mcx>,
     _semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
-    assert!(
-        run.root.path(outer_path).base().param_info.is_none()
-            && run.root.path(inner_path).base().param_info.is_none(),
-        "try_mergejoin_path (joinpath.c): parameterized input; M2 param-path lane"
+    use crate::relnode::{relids_is_empty, relids_is_member, relids_overlap};
+    if sjinfo.ojrelid != 0
+        && (relids_is_member(
+            sjinfo.ojrelid as i32,
+            crate::pathnode::path_req_outer(run.root.path(inner_path).base()),
+        ) || relids_is_member(
+            sjinfo.ojrelid as i32,
+            crate::pathnode::path_req_outer(run.root.path(outer_path).base()),
+        ))
+    {
+        return Ok(());
+    }
+    let required_outer = crate::pathnode::calc_non_nestloop_required_outer(
+        run,
+        run.mcx,
+        outer_path,
+        inner_path,
     );
+    if !relids_is_empty(&required_outer) && !relids_overlap(&required_outer, param_source_rels) {
+        return Ok(());
+    }
 
     let mut outer_presorted_keys = 0usize;
     if !outersortkeys.is_empty() {
@@ -805,17 +830,19 @@ fn try_mergejoin_path<'mcx>(
         outer_presorted_keys,
     )?;
 
-    if add_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.startup_cost, workspace.total_cost, &pathkeys, &None) {
+    if add_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.startup_cost, workspace.total_cost, &pathkeys, &required_outer) {
         let path = create_mergejoin_path(
             run,
             joinrel,
             jointype,
             &workspace,
             inner_unique,
+            sjinfo,
             outer_path,
             inner_path,
             restrictlist,
             pathkeys,
+            &required_outer,
             mergeclauses,
             outersortkeys,
             innersortkeys,
@@ -837,6 +864,7 @@ fn hash_inner_and_outer<'mcx>(
     inner_unique: bool,
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
+    param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
     use types_pathnodes::{JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER};
@@ -893,7 +921,7 @@ fn hash_inner_and_outer<'mcx>(
         jointype = JOIN_INNER;
         try_hashjoin_path(
             run, joinrel, cheapest_total_outer, cheapest_total_inner, &hashclauses, jointype,
-            inner_unique, sjinfo, restrictlist, semifactors,
+            inner_unique, sjinfo, restrictlist, param_source_rels, semifactors,
         )?;
         return Ok(());
     }
@@ -904,13 +932,13 @@ fn hash_inner_and_outer<'mcx>(
         jointype = JOIN_INNER;
         try_hashjoin_path(
             run, joinrel, cheapest_total_outer, cheapest_total_inner, &hashclauses, jointype,
-            inner_unique, sjinfo, restrictlist, semifactors,
+            inner_unique, sjinfo, restrictlist, param_source_rels, semifactors,
         )?;
         if let Some(cso) = cheapest_startup_outer {
             if cso != cheapest_total_outer {
                 try_hashjoin_path(
                     run, joinrel, cso, cheapest_total_inner, &hashclauses, jointype,
-                    inner_unique, sjinfo, restrictlist, semifactors,
+                    inner_unique, sjinfo, restrictlist, param_source_rels, semifactors,
                 )?;
             }
         }
@@ -920,7 +948,7 @@ fn hash_inner_and_outer<'mcx>(
     if let Some(cso) = cheapest_startup_outer {
         try_hashjoin_path(
             run, joinrel, cso, cheapest_total_inner, &hashclauses, jointype, inner_unique, sjinfo,
-            restrictlist, semifactors,
+            restrictlist, param_source_rels, semifactors,
         )?;
     }
 
@@ -941,7 +969,7 @@ fn hash_inner_and_outer<'mcx>(
             }
             try_hashjoin_path(
                 run, joinrel, op, ip, &hashclauses, jointype, inner_unique, sjinfo, restrictlist,
-                semifactors,
+                param_source_rels, semifactors,
             )?;
         }
     }
@@ -985,15 +1013,32 @@ fn try_hashjoin_path<'mcx>(
     hashclauses: &[RinfoId],
     jointype: u32,
     inner_unique: bool,
-    _sjinfo: &SpecialJoinInfo<'mcx>,
+    sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
+    param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
-    assert!(
-        run.root.path(outer_path).base().param_info.is_none()
-            && run.root.path(inner_path).base().param_info.is_none(),
-        "try_hashjoin_path (joinpath.c): parameterized input; M2 param-path lane"
+    use crate::relnode::{relids_is_empty, relids_is_member, relids_overlap};
+    if sjinfo.ojrelid != 0
+        && (relids_is_member(
+            sjinfo.ojrelid as i32,
+            crate::pathnode::path_req_outer(run.root.path(inner_path).base()),
+        ) || relids_is_member(
+            sjinfo.ojrelid as i32,
+            crate::pathnode::path_req_outer(run.root.path(outer_path).base()),
+        ))
+    {
+        return Ok(());
+    }
+    let required_outer = crate::pathnode::calc_non_nestloop_required_outer(
+        run,
+        run.mcx,
+        outer_path,
+        inner_path,
     );
+    if !relids_is_empty(&required_outer) && !relids_overlap(&required_outer, param_source_rels) {
+        return Ok(());
+    }
     let workspace = initial_cost_hashjoin(run, hashclauses, outer_path, inner_path);
     if add_path_precheck(
         run,
@@ -1002,11 +1047,21 @@ fn try_hashjoin_path<'mcx>(
         workspace.startup_cost,
         workspace.total_cost,
         &[],
-        &None,
+        &required_outer,
     ) {
         let path = create_hashjoin_path(
-            run, joinrel, jointype, &workspace, inner_unique, outer_path, inner_path, restrictlist,
-            hashclauses, semifactors,
+            run,
+            joinrel,
+            jointype,
+            &workspace,
+            inner_unique,
+            sjinfo,
+            outer_path,
+            inner_path,
+            restrictlist,
+            &required_outer,
+            hashclauses,
+            semifactors,
         )?;
         crate::pathnode::add_path(run, joinrel, path);
     }

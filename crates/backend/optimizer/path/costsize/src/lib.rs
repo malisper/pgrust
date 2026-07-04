@@ -2102,8 +2102,10 @@ pub fn final_cost_nestloop(
     let mut run_cost = workspace.run_cost;
 
     path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
+    path.jpath.path.rows = match path.jpath.path.param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => run.root.rel(path.jpath.path.parent).rows,
+    };
     debug_assert!(path.jpath.path.parallel_workers == 0);
 
     let early_stop = matches!(
@@ -2237,8 +2239,10 @@ pub fn final_cost_hashjoin(
     let mut run_cost = workspace.run_cost;
 
     path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
+    path.jpath.path.rows = match path.jpath.path.param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => run.root.rel(path.jpath.path.parent).rows,
+    };
     debug_assert!(path.jpath.path.parallel_workers == 0);
 
     path.num_batches = numbatches;
@@ -2661,8 +2665,10 @@ pub fn final_cost_mergejoin(
     let inner_skip_rows = workspace.inner_skip_rows;
 
     path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
+    path.jpath.path.rows = match path.jpath.path.param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => run.root.rel(path.jpath.path.parent).rows,
+    };
     debug_assert!(path.jpath.path.parallel_workers == 0);
 
     let mergeclauses =
@@ -2746,9 +2752,41 @@ pub fn set_joinrel_size_estimates<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[types_pathnodes::RinfoId],
 ) -> PgResult<()> {
-    debug_assert!(run.root.fkey_list.is_empty());
     let outer_rows = run.root.rel(outer_rel).rows;
     let inner_rows = run.root.rel(inner_rel).rows;
+    let nrows =
+        calc_joinrel_size_estimate(run, joinrel, outer_rows, inner_rows, sjinfo, restrictlist)?;
+    run.root.rel_mut(joinrel).rows = nrows;
+    Ok(())
+}
+
+pub fn get_parameterized_joinrel_size<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    outer_path: types_pathnodes::PathId,
+    inner_path: types_pathnodes::PathId,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrict_clauses: &[types_pathnodes::RinfoId],
+) -> PgResult<f64> {
+    let outer_rows = run.root.path(outer_path).base().rows;
+    let inner_rows = run.root.path(inner_path).base().rows;
+    let mut nrows =
+        calc_joinrel_size_estimate(run, rel, outer_rows, inner_rows, sjinfo, restrict_clauses)?;
+    if nrows > run.root.rel(rel).rows {
+        nrows = run.root.rel(rel).rows;
+    }
+    Ok(nrows)
+}
+
+fn calc_joinrel_size_estimate<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outer_rows: f64,
+    inner_rows: f64,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[types_pathnodes::RinfoId],
+) -> PgResult<f64> {
+    debug_assert!(run.root.fkey_list.is_empty());
     let jointype = sjinfo.jointype;
     let is_outer = is_outer_join(jointype);
     let (jselec, pselec) = if is_outer {
@@ -2811,6 +2849,5 @@ pub fn set_joinrel_size_estimates<'mcx>(
         }
         other => panic!("calc_joinrel_size_estimate (costsize.c): jointype {other}"),
     };
-    run.root.rel_mut(joinrel).rows = crate::clamp_row_est(nrows);
-    Ok(())
+    Ok(crate::clamp_row_est(nrows))
 }
