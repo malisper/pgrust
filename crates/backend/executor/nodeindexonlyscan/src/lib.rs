@@ -433,7 +433,9 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         &tup_desc,
     )?;
     let params = estate.param_bind();
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
+    })?;
     let recheckqual = exec_init_qual(mcx, &node.recheckqual, params)?;
 
     if !node.indexorderby.is_nil() {

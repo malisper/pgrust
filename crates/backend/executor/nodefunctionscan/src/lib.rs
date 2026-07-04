@@ -266,7 +266,12 @@ pub fn exec_init_function_scan<'mcx>(
         instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
+    ss.qual = {
+        let pb = estate.param_bind();
+        ::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, pb, env)
+        })?
+    };
 
     Ok(FunctionScanState {
         ss,

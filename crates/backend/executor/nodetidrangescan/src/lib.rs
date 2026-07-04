@@ -240,7 +240,9 @@ pub fn exec_init_tid_range_scan<'mcx>(
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
+    })?;
 
     let trss_tidexprs = tid_expr_list_create(mcx, node, estate)?;
 
