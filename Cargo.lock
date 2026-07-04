@@ -11006,6 +11006,7 @@ dependencies = [
  "adt_int8",
  "bufmgr",
  "bufmgr_seams",
+ "catalog_index",
  "catalog_indexing",
  "datum",
  "fmgr_seams",

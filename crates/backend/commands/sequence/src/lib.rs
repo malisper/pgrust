@@ -1,7 +1,7 @@
-//! sequence.c write half: DefineSequence, nextval/currval/lastval/setval,
-//! the backend SeqTable cache, and OWNED BY. Loud (named panics): unlogged
-//! sequences, IF NOT EXISTS, ALTER SEQUENCE beyond the serial
-//! OWNED BY form, ResetSequence/SequenceChangePersistence consumers.
+//! sequence.c write half: DefineSequence, AlterSequence, nextval/currval/
+//! lastval/setval, the backend SeqTable cache, and OWNED BY. Loud (named
+//! panics): unlogged sequences, IF NOT EXISTS, ALTER SEQUENCE IF EXISTS,
+//! ResetSequence/SequenceChangePersistence consumers.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -339,6 +339,8 @@ struct SeqFormLocal {
 
 struct SeqDataFormLocal {
     last_value: i64,
+    log_cnt: i64,
+    is_called: bool,
 }
 
 fn def_get_i64(defel: &DefElem<'_>) -> PgResult<i64> {
@@ -368,17 +370,17 @@ fn conflicting_def_elem() -> Box<PgError> {
 }
 
 struct InitParamsOut<'mcx> {
-    form: SeqFormLocal,
-    dataform: SeqDataFormLocal,
+    need_seq_rewrite: bool,
     owned_by: Option<&'mcx NodeList<'mcx>>,
 }
 
-// init_params, isInit half (the ALTER isInit=false lane is loud at the
-// AlterSequence gate below).
 fn init_params<'mcx>(
     mcx: Mcx<'mcx>,
     options: &NodeList<'mcx>,
     for_identity: bool,
+    is_init: bool,
+    form: &mut SeqFormLocal,
+    dataform: &mut SeqDataFormLocal,
 ) -> PgResult<InitParamsOut<'mcx>> {
     let mut as_type: Option<&DefElem<'_>> = None;
     let mut start_value: Option<&DefElem<'_>> = None;
@@ -389,6 +391,9 @@ fn init_params<'mcx>(
     let mut cache_value: Option<&DefElem<'_>> = None;
     let mut is_cycled: Option<&DefElem<'_>> = None;
     let mut owned_by: Option<&'mcx NodeList<'mcx>> = None;
+    let mut need_seq_rewrite = false;
+    let mut reset_max_value = false;
+    let mut reset_min_value = false;
 
     for opt in options.iter() {
         let defel = opt.as_variant::<DefElem>().expect("DefElem");
@@ -426,17 +431,12 @@ fn init_params<'mcx>(
             return Err(conflicting_def_elem());
         }
         *slot = Some(defel);
+        need_seq_rewrite = true;
     }
 
-    let mut form = SeqFormLocal {
-        seqtypid: INT8OID,
-        seqstart: 0,
-        seqincrement: 1,
-        seqmax: 0,
-        seqmin: 0,
-        seqcache: 1,
-        seqcycle: false,
-    };
+    if is_init {
+        dataform.log_cnt = 0;
+    }
 
     if let Some(d) = as_type {
         let tn = d.arg.expect("AS arg").as_variant::<TypeName>().expect("AS TypeName");
@@ -451,7 +451,25 @@ fn init_params<'mcx>(
                 ERRCODE_INVALID_PARAMETER_VALUE,
             ));
         }
+        if !is_init {
+            // Old bounds at the old type's limits follow the type; explicit
+            // user bounds stay.
+            if (form.seqtypid == INT2OID && form.seqmax == i16::MAX as i64)
+                || (form.seqtypid == INT4OID && form.seqmax == i32::MAX as i64)
+                || (form.seqtypid == INT8OID && form.seqmax == i64::MAX)
+            {
+                reset_max_value = true;
+            }
+            if (form.seqtypid == INT2OID && form.seqmin == i16::MIN as i64)
+                || (form.seqtypid == INT4OID && form.seqmin == i32::MIN as i64)
+                || (form.seqtypid == INT8OID && form.seqmin == i64::MIN)
+            {
+                reset_min_value = true;
+            }
+        }
         form.seqtypid = newtypid;
+    } else if is_init {
+        form.seqtypid = INT8OID;
     }
 
     if let Some(d) = increment_by {
@@ -459,10 +477,16 @@ fn init_params<'mcx>(
         if form.seqincrement == 0 {
             return Err(err("INCREMENT must not be zero".into(), ERRCODE_INVALID_PARAMETER_VALUE));
         }
+        dataform.log_cnt = 0;
+    } else if is_init {
+        form.seqincrement = 1;
     }
 
     if let Some(d) = is_cycled {
         form.seqcycle = d.arg.expect("cycle arg").as_boolean().expect("Boolean").boolval;
+        dataform.log_cnt = 0;
+    } else if is_init {
+        form.seqcycle = false;
     }
 
     let type_max = match form.seqtypid {
@@ -477,8 +501,16 @@ fn init_params<'mcx>(
     };
 
     match max_value {
-        Some(d) if d.arg.is_some() => form.seqmax = def_get_i64(d)?,
-        _ => form.seqmax = if form.seqincrement > 0 { type_max } else { -1 },
+        Some(d) if d.arg.is_some() => {
+            form.seqmax = def_get_i64(d)?;
+            dataform.log_cnt = 0;
+        }
+        _ if is_init || max_value.is_some() || reset_max_value => {
+            form.seqmax =
+                if form.seqincrement > 0 || reset_max_value { type_max } else { -1 };
+            dataform.log_cnt = 0;
+        }
+        _ => {}
     }
     if form.seqmax < type_min || form.seqmax > type_max {
         return Err(err(
@@ -492,8 +524,16 @@ fn init_params<'mcx>(
     }
 
     match min_value {
-        Some(d) if d.arg.is_some() => form.seqmin = def_get_i64(d)?,
-        _ => form.seqmin = if form.seqincrement < 0 { type_min } else { 1 },
+        Some(d) if d.arg.is_some() => {
+            form.seqmin = def_get_i64(d)?;
+            dataform.log_cnt = 0;
+        }
+        _ if is_init || min_value.is_some() || reset_min_value => {
+            form.seqmin =
+                if form.seqincrement < 0 || reset_min_value { type_min } else { 1 };
+            dataform.log_cnt = 0;
+        }
+        _ => {}
     }
     if form.seqmin < type_min || form.seqmin > type_max {
         return Err(err(
@@ -513,11 +553,11 @@ fn init_params<'mcx>(
         ));
     }
 
-    form.seqstart = match start_value {
-        Some(d) => def_get_i64(d)?,
-        None if form.seqincrement > 0 => form.seqmin,
-        None => form.seqmax,
-    };
+    if let Some(d) = start_value {
+        form.seqstart = def_get_i64(d)?;
+    } else if is_init {
+        form.seqstart = if form.seqincrement > 0 { form.seqmin } else { form.seqmax };
+    }
     if form.seqstart < form.seqmin {
         return Err(err(
             format!(
@@ -537,24 +577,29 @@ fn init_params<'mcx>(
         ));
     }
 
-    let last_value = match restart_value {
-        Some(d) if d.arg.is_some() => def_get_i64(d)?,
-        _ => form.seqstart,
-    };
-    if last_value < form.seqmin {
+    if let Some(d) = restart_value {
+        dataform.last_value =
+            if d.arg.is_some() { def_get_i64(d)? } else { form.seqstart };
+        dataform.is_called = false;
+        dataform.log_cnt = 0;
+    } else if is_init {
+        dataform.last_value = form.seqstart;
+        dataform.is_called = false;
+    }
+    if dataform.last_value < form.seqmin {
         return Err(err(
             format!(
-                "RESTART value ({last_value}) cannot be less than MINVALUE ({})",
-                form.seqmin
+                "RESTART value ({}) cannot be less than MINVALUE ({})",
+                dataform.last_value, form.seqmin
             ),
             ERRCODE_INVALID_PARAMETER_VALUE,
         ));
     }
-    if last_value > form.seqmax {
+    if dataform.last_value > form.seqmax {
         return Err(err(
             format!(
-                "RESTART value ({last_value}) cannot be greater than MAXVALUE ({})",
-                form.seqmax
+                "RESTART value ({}) cannot be greater than MAXVALUE ({})",
+                dataform.last_value, form.seqmax
             ),
             ERRCODE_INVALID_PARAMETER_VALUE,
         ));
@@ -568,9 +613,12 @@ fn init_params<'mcx>(
                 ERRCODE_INVALID_PARAMETER_VALUE,
             ));
         }
+        dataform.log_cnt = 0;
+    } else if is_init {
+        form.seqcache = 1;
     }
 
-    Ok(InitParamsOut { form, dataform: SeqDataFormLocal { last_value }, owned_by })
+    Ok(InitParamsOut { need_seq_rewrite, owned_by })
 }
 
 fn type_name_of(typid: Oid) -> &'static str {
@@ -606,7 +654,17 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
         unported("unlogged sequences");
     }
 
-    let p = init_params(mcx, &seq.options, seq.for_identity)?;
+    let mut form = SeqFormLocal {
+        seqtypid: INT8OID,
+        seqstart: 0,
+        seqincrement: 1,
+        seqmax: 0,
+        seqmin: 0,
+        seqcache: 1,
+        seqcycle: false,
+    };
+    let mut dataform = SeqDataFormLocal { last_value: 0, log_cnt: 0, is_called: false };
+    let p = init_params(mcx, &seq.options, seq.for_identity, true, &mut form, &mut dataform)?;
 
     let mut elts = NodeList::make1(mcx, make_column_def(mcx, "last_value", INT8OID)?)?;
     elts.lappend(mcx, make_column_def(mcx, "log_cnt", INT8OID)?)?;
@@ -619,8 +677,11 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
     let seqoid = tablecmds::DefineRelation(mcx, &stmt, RELKIND_SEQUENCE, seq.ownerId, "")?;
 
     let seqrel = sequence_open(mcx, seqoid, AccessExclusiveLock)?;
-    let values =
-        [Datum::from_i64(p.dataform.last_value), Datum::from_i64(0), Datum::from_bool(false)];
+    let values = [
+        Datum::from_i64(dataform.last_value),
+        Datum::from_i64(dataform.log_cnt),
+        Datum::from_bool(dataform.is_called),
+    ];
     let nulls = [false; SEQ_COLS];
     let mut tuple = heaptuple::heap_form_tuple(mcx, seqrel.descr(), &values, &nulls)?;
     fill_seq_with_data(&seqrel, &mut tuple)?;
@@ -633,13 +694,13 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
     let rel = table::table_open(mcx, SequenceRelationId, RowExclusiveLock)?;
     let pgs_values = [
         Datum::from_oid(seqoid),
-        Datum::from_oid(p.form.seqtypid),
-        Datum::from_i64(p.form.seqstart),
-        Datum::from_i64(p.form.seqincrement),
-        Datum::from_i64(p.form.seqmax),
-        Datum::from_i64(p.form.seqmin),
-        Datum::from_i64(p.form.seqcache),
-        Datum::from_bool(p.form.seqcycle),
+        Datum::from_oid(form.seqtypid),
+        Datum::from_i64(form.seqstart),
+        Datum::from_i64(form.seqincrement),
+        Datum::from_i64(form.seqmax),
+        Datum::from_i64(form.seqmin),
+        Datum::from_i64(form.seqcache),
+        Datum::from_bool(form.seqcycle),
     ];
     let pgs_nulls = [false; Natts_pg_sequence];
     let mut tuple = heaptuple::heap_form_tuple(mcx, rel.descr(), &pgs_values, &pgs_nulls)?;
@@ -649,22 +710,7 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
     Ok(seqoid)
 }
 
-// AlterSequence, bounded to the serial-expansion OWNED BY form; every other
-// option set is loud. C also rewrites the unchanged pg_sequence row
-// (CatalogTupleUpdate); values are identical, only tuple-version churn is
-// skipped here.
 pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<()> {
-    let mut owned_by: Option<&'mcx NodeList<'mcx>> = None;
-    for opt in stmt.options.iter() {
-        let defel = opt.as_variant::<DefElem>().expect("DefElem");
-        match defel.defname.expect("defname") {
-            "owned_by" if owned_by.is_none() => {
-                owned_by =
-                    Some(defel.arg.expect("owned_by arg").as_list().expect("owned_by name list"));
-            }
-            other => unported(&format!("ALTER SEQUENCE option \"{other}\"")),
-        }
-    }
     if stmt.missing_ok {
         unported("ALTER SEQUENCE IF EXISTS");
     }
@@ -682,10 +728,75 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     let relid = namespace_seams::range_var_get_relid::call(mcx, &v, ShareRowExclusiveLock, false)?;
 
     let seqrel = init_sequence(mcx, relid)?;
+
+    let rel = table::table_open(mcx, SequenceRelationId, RowExclusiveLock)?;
+    let keys = [seqrelid_key(relid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, SequenceRelidIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for sequence {relid}"));
+    let otid = tup.t_self;
+    let desc = rel.descr();
+    let mut isnull = false;
+    let mut get = |anum: i32| {
+        // SAFETY: fixed NOT NULL pg_sequence columns under its descriptor.
+        unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) }
+    };
+    let mut form = SeqFormLocal {
+        seqtypid: get(2).as_oid(),
+        seqstart: get(3).as_i64(),
+        seqincrement: get(4).as_i64(),
+        seqmax: get(5).as_i64(),
+        seqmin: get(6).as_i64(),
+        seqcache: get(7).as_i64(),
+        seqcycle: get(8).as_bool(),
+    };
+    genam::systable_endscan(mcx, scan)?;
+
+    let (buf, seq) = read_seq_tuple(&seqrel)?;
+    let mut dataform = SeqDataFormLocal {
+        last_value: seq.last_value(),
+        log_cnt: seq.log_cnt(),
+        is_called: seq.is_called(),
+    };
+    bufmgr::UnlockReleaseBuffer(buf)?;
+
+    let p = init_params(mcx, &stmt.options, stmt.for_identity, false, &mut form, &mut dataform)?;
+
+    if p.need_seq_rewrite {
+        if relation_needs_wal(&seqrel) {
+            xact::GetTopTransactionId()?;
+        }
+        catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, seqrel.rd_rel.relpersistence)?;
+        let values = [
+            Datum::from_i64(dataform.last_value),
+            Datum::from_i64(dataform.log_cnt),
+            Datum::from_bool(dataform.is_called),
+        ];
+        let nulls = [false; SEQ_COLS];
+        let mut tuple = heaptuple::heap_form_tuple(mcx, seqrel.descr(), &values, &nulls)?;
+        fill_seq_with_data(&seqrel, &mut tuple)?;
+    }
+
     with_elm(relid, |e| e.cached = e.last);
-    if let Some(owned_by) = owned_by {
+
+    if let Some(owned_by) = p.owned_by {
         process_owned_by(mcx, &seqrel, owned_by, stmt.for_identity)?;
     }
+
+    let pgs_values = [
+        Datum::from_oid(relid),
+        Datum::from_oid(form.seqtypid),
+        Datum::from_i64(form.seqstart),
+        Datum::from_i64(form.seqincrement),
+        Datum::from_i64(form.seqmax),
+        Datum::from_i64(form.seqmin),
+        Datum::from_i64(form.seqcache),
+        Datum::from_bool(form.seqcycle),
+    ];
+    let pgs_nulls = [false; Natts_pg_sequence];
+    let mut newtup = heaptuple::heap_form_tuple(mcx, rel.descr(), &pgs_values, &pgs_nulls)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+    rel.close(RowExclusiveLock)?;
     seqrel.close(NoLock)
 }
 
@@ -1189,28 +1300,48 @@ mod tests {
         }
     }
 
+    fn run_init<'mcx>(
+        mcx: Mcx<'mcx>,
+        opts: &NodeList<'mcx>,
+    ) -> PgResult<(SeqFormLocal, SeqDataFormLocal)> {
+        let mut form = SeqFormLocal {
+            seqtypid: INT8OID,
+            seqstart: 0,
+            seqincrement: 1,
+            seqmax: 0,
+            seqmin: 0,
+            seqcache: 1,
+            seqcycle: false,
+        };
+        let mut dataform = SeqDataFormLocal { last_value: 0, log_cnt: 0, is_called: false };
+        init_params(mcx, opts, false, true, &mut form, &mut dataform)?;
+        Ok((form, dataform))
+    }
+
     #[test]
     fn init_params_defaults_match_c() {
         let mcx = ctx().mcx();
-        let p = init_params(mcx, &NodeList::nil(), false).unwrap();
-        assert_eq!(p.form.seqtypid, INT8OID);
-        assert_eq!(p.form.seqincrement, 1);
-        assert_eq!(p.form.seqmin, 1);
-        assert_eq!(p.form.seqmax, i64::MAX);
-        assert_eq!(p.form.seqstart, 1);
-        assert_eq!(p.form.seqcache, 1);
-        assert!(!p.form.seqcycle);
-        assert_eq!(p.dataform.last_value, 1);
+        let (form, dataform) = run_init(mcx, &NodeList::nil()).unwrap();
+        assert_eq!(form.seqtypid, INT8OID);
+        assert_eq!(form.seqincrement, 1);
+        assert_eq!(form.seqmin, 1);
+        assert_eq!(form.seqmax, i64::MAX);
+        assert_eq!(form.seqstart, 1);
+        assert_eq!(form.seqcache, 1);
+        assert!(!form.seqcycle);
+        assert_eq!(dataform.last_value, 1);
+        assert!(!dataform.is_called);
+        assert_eq!(dataform.log_cnt, 0);
     }
 
     #[test]
     fn init_params_descending_defaults() {
         let mcx = ctx().mcx();
         let opts = NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, -3))).unwrap();
-        let p = init_params(mcx, &opts, false).unwrap();
-        assert_eq!(p.form.seqmax, -1);
-        assert_eq!(p.form.seqmin, i64::MIN);
-        assert_eq!(p.form.seqstart, -1);
+        let (form, _) = run_init(mcx, &opts).unwrap();
+        assert_eq!(form.seqmax, -1);
+        assert_eq!(form.seqmin, i64::MIN);
+        assert_eq!(form.seqstart, -1);
     }
 
     #[test]
@@ -1222,14 +1353,14 @@ mod tests {
             ("start", 0, "START value (0) cannot be less than MINVALUE (1)"),
         ] {
             let opts = NodeList::make1(mcx, defel(mcx, name, int_arg(mcx, v))).unwrap();
-            let e = init_params(mcx, &opts, false).err().expect("error expected");
+            let e = run_init(mcx, &opts).err().expect("error expected");
             assert!(e.message().contains(frag), "{name}: {}", e.message());
             assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
         }
         let mut opts =
             NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, 1))).unwrap();
         opts.lappend(mcx, defel(mcx, "increment", int_arg(mcx, 2))).unwrap();
-        let e = init_params(mcx, &opts, false).err().expect("error expected");
+        let e = run_init(mcx, &opts).err().expect("error expected");
         assert!(e.message().contains("conflicting or redundant options"));
     }
 
@@ -1239,8 +1370,59 @@ mod tests {
         let opts =
             NodeList::make1(mcx, defel(mcx, "maxvalue", int_arg(mcx, 9223372036854775806)))
                 .unwrap();
-        let p = init_params(mcx, &opts, false).unwrap();
-        assert_eq!(p.form.seqmax, 9223372036854775806);
+        let (form, _) = run_init(mcx, &opts).unwrap();
+        assert_eq!(form.seqmax, 9223372036854775806);
+    }
+
+    #[test]
+    fn init_params_alter_as_retype_follows_type_bounds() {
+        syscache_seams::pg_type_isdefined::set(|_| Ok(Some(true)));
+        syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
+        let mcx = ctx().mcx();
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        tn.typeOid = INT2OID;
+        tn.typemod = -1;
+        tn.location = -1;
+        let opts = NodeList::make1(mcx, defel(mcx, "as", Some(tn.seal()))).unwrap();
+        let mut form = SeqFormLocal {
+            seqtypid: INT4OID,
+            seqstart: 1,
+            seqincrement: 1,
+            seqmax: i32::MAX as i64,
+            seqmin: 1,
+            seqcache: 1,
+            seqcycle: false,
+        };
+        let mut dataform = SeqDataFormLocal { last_value: 7, log_cnt: 5, is_called: true };
+        let p = init_params(mcx, &opts, true, false, &mut form, &mut dataform).unwrap();
+        assert!(p.need_seq_rewrite);
+        assert_eq!(form.seqtypid, INT2OID);
+        assert_eq!(form.seqmax, i16::MAX as i64);
+        assert_eq!(form.seqmin, 1);
+        assert_eq!(dataform.last_value, 7);
+        assert!(dataform.is_called);
+        assert_eq!(dataform.log_cnt, 0);
+
+        // Explicit old bound is kept, and an out-of-range current value errors.
+        let mut tn2 = Node::build::<TypeName>(mcx).unwrap();
+        tn2.typeOid = INT2OID;
+        tn2.typemod = -1;
+        tn2.location = -1;
+        let opts2 = NodeList::make1(mcx, defel(mcx, "as", Some(tn2.seal()))).unwrap();
+        let mut form2 = SeqFormLocal {
+            seqtypid: INT4OID,
+            seqstart: 1,
+            seqincrement: 1,
+            seqmax: 100000,
+            seqmin: 1,
+            seqcache: 1,
+            seqcycle: false,
+        };
+        let mut dataform2 = SeqDataFormLocal { last_value: 1, log_cnt: 0, is_called: false };
+        let e = init_params(mcx, &opts2, true, false, &mut form2, &mut dataform2)
+            .err()
+            .expect("error expected");
+        assert!(e.message().contains("MAXVALUE (100000) is out of range"), "{}", e.message());
     }
 
     #[test]

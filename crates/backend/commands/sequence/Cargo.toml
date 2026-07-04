@@ -36,6 +36,7 @@ init_small = { path = "../../utils/init/init_small" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_index = { path = "../../catalog/catalog_index" }
 pg_depend = { path = "../../catalog/pg_depend" }
 tablecmds = { path = "../tablecmds" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
