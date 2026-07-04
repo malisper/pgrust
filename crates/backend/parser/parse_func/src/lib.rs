@@ -1452,18 +1452,20 @@ pub fn LookupFuncName(
 // LookupFuncWithArgs (parse_func.c) over a grammar ObjectWithArgs (objargs
 // TypeNames; args_unspecified => any-arity lookup). Divergence: the
 // PROCEDURE/ROUTINE include_out_arguments second pass is not ported
-// (OUT-parameter procedures).
+// (OUT-parameter spellings resolve as missing — notes/grant-objpriv-lane.md).
 pub fn LookupFuncWithArgs(
     objtype: ObjectType,
-    objname: &NodeList<'_>,
-    objargs: &NodeList<'_>,
-    args_unspecified: bool,
+    func: &types_nodes::parsenodes::ObjectWithArgs<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
+    use types_nodes::parsenodes::ObjectType::*;
+    debug_assert!(matches!(objtype, OBJECT_AGGREGATE | OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE));
+    let objname = &func.objname;
+    let objargs = &func.objargs;
+    let args_unspecified = func.args_unspecified;
     let argcount = objargs.len();
     if argcount > FUNC_MAX_ARGS {
-        let noun =
-            if objtype == ObjectType::OBJECT_PROCEDURE { "procedures" } else { "functions" };
+        let noun = if objtype == OBJECT_PROCEDURE { "procedures" } else { "functions" };
         return Err(Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
@@ -1489,19 +1491,18 @@ pub fn LookupFuncWithArgs(
     let parts = name_parts(objname, &mut buf);
     // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
     // "object is of wrong type" beats "object doesn't exist".
-    let lookup_objtype =
-        if args_unspecified { objtype } else { ObjectType::OBJECT_ROUTINE };
+    let lookup_objtype = if args_unspecified { objtype } else { OBJECT_ROUTINE };
     match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, missing_ok)? {
         Ok(oid) => {
             let prokind = lsyscache::get_func_prokind(oid)?;
             match objtype {
-                ObjectType::OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
+                OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
                     Err(wrong_prokind("%s is not a function", parts, &argoids[..argcount])?)
                 }
-                ObjectType::OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
+                OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
                     Err(wrong_prokind("%s is not a procedure", parts, &argoids[..argcount])?)
                 }
-                ObjectType::OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
+                OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
                     "function %s is not an aggregate",
                     parts,
                     &argoids[..argcount],
@@ -1509,15 +1510,30 @@ pub fn LookupFuncWithArgs(
                 _ => Ok(oid),
             }
         }
-        Err(true) => Err(func_name_not_unique(parts)),
+        Err(true) => {
+            let noun = match objtype {
+                OBJECT_PROCEDURE => "procedure",
+                OBJECT_AGGREGATE => "aggregate",
+                OBJECT_ROUTINE => "routine",
+                _ => "function",
+            };
+            let mut rpt = ereport(ERROR)
+                .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
+                .errmsg(format!("{noun} name \"{}\" is not unique", name_list_to_string(parts)));
+            if args_unspecified {
+                rpt = rpt.errhint(format!(
+                    "Specify the argument list to select the {noun} unambiguously."
+                ));
+            }
+            Err(Box::new(rpt.into_error()))
+        }
         Err(false) => {
             if missing_ok {
                 return Ok(InvalidOid);
             }
             let (noun, named) = match objtype {
-                ObjectType::OBJECT_PROCEDURE => ("procedure", "a procedure"),
-                ObjectType::OBJECT_AGGREGATE => ("aggregate", "an aggregate"),
-                ObjectType::OBJECT_ROUTINE => ("routine", "a routine"),
+                OBJECT_PROCEDURE => ("procedure", "a procedure"),
+                OBJECT_AGGREGATE => ("aggregate", "an aggregate"),
                 _ => ("function", "a function"),
             };
             if args_unspecified {
@@ -1530,7 +1546,7 @@ pub fn LookupFuncWithArgs(
                         ))
                         .into_error(),
                 ))
-            } else if objtype == ObjectType::OBJECT_AGGREGATE && argcount == 0 {
+            } else if objtype == OBJECT_AGGREGATE && argcount == 0 {
                 Err(Box::new(
                     ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_FUNCTION)
@@ -1563,4 +1579,44 @@ fn wrong_prokind(template: &str, parts: &[&str], argtypes: &[Oid]) -> PgResult<B
             .errmsg(template.replacen("%s", &func_signature_string(parts, argtypes)?, 1))
             .into_error(),
     ))
+}
+
+pub fn init_seams() {
+    parse_func_seams::LookupFuncWithArgs::set(lookup_func_with_args_seam);
+    parse_func_seams::LookupFuncName::set(lookup_func_name_seam);
+}
+
+fn lookup_func_with_args_seam(
+    objtype: i32,
+    func: &types_nodes::parsenodes::ObjectWithArgs<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    LookupFuncWithArgs(objtype_from_i32(objtype), func, missing_ok)
+}
+
+fn lookup_func_name_seam(
+    parts: &[&str],
+    nargs: i16,
+    argtypes: &[Oid],
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, missing_ok)? {
+        Ok(oid) => Ok(oid),
+        Err(true) => Err(func_name_not_unique(parts)),
+        Err(false) => {
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
+            Err(function_does_not_exist(parts, &argtypes[..nargs.max(0) as usize])?)
+        }
+    }
+}
+
+fn objtype_from_i32(objtype: i32) -> types_nodes::parsenodes::ObjectType {
+    assert!(
+        (0..=types_nodes::parsenodes::ObjectType::OBJECT_VIEW as i32).contains(&objtype),
+        "LookupFuncWithArgs seam: bad ObjectType {objtype}"
+    );
+    // SAFETY: ObjectType is repr(u32) and contiguous over the asserted range.
+    unsafe { core::mem::transmute::<u32, types_nodes::parsenodes::ObjectType>(objtype as u32) }
 }

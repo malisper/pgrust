@@ -1,4 +1,24 @@
 seam_core::seam!(
+    // object_aclcheck_ext (aclchk.c): (AclResult, is_missing).
+    pub fn object_aclcheck_ext(
+        classid: types_core::Oid,
+        objectid: types_core::Oid,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<(i32, bool)>
+);
+
+seam_core::seam!(
+    // has_lo_priv_byid (acl.c): (result, is_missing); snapshot selection
+    // (active vs NULL for ACL_UPDATE) happens on the aclchk side.
+    pub fn has_lo_priv_byid(
+        roleid: types_core::Oid,
+        lobj_oid: types_core::Oid,
+        priv_mode: u64,
+    ) -> types_error::PgResult<(bool, bool)>
+);
+
+seam_core::seam!(
     // pg_parameter_aclcheck(name, roleid, ACL_SET) == ACLCHECK_OK (aclchk.c).
     pub fn pg_parameter_aclcheck_set(
         name: &str,

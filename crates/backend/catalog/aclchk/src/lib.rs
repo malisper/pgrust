@@ -6,15 +6,18 @@ use adt_acl::{
     acldefault, aclmask, has_privs_of_role, AclItem, AclMaskHow, AclObjectType, ACL_DELETE,
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use cache_syscache::cacheinfo::{ATTNUM, AUTHOID, DATABASEOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID};
+use cache_syscache::cacheinfo::{
+    ATTNUM, AUTHOID, DATABASEOID, LANGOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID,
+};
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
     SysCacheKey,
 };
 use datum::Datum;
 use types_core::catalog::{
-    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, NAMESPACE_RELATION_ID,
-    PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID,
+    NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID, RELATION_RELATION_ID,
+    TYPE_RELATION_ID,
 };
 use types_core::Oid;
 use types_error::{
@@ -38,7 +41,12 @@ const ANUM_PG_DATABASE_DATACL: i32 = 18;
 const ANUM_PG_PROC_PROOWNER: i32 = 4;
 const ANUM_PG_PROC_PROACL: i32 = 30;
 const ANUM_PG_TYPE_TYPOWNER: i32 = 4;
+pub(crate) const ANUM_PG_TYPE_TYPTYPE: i32 = 7;
+const ANUM_PG_TYPE_TYPSUBSCRIPT: i32 = 13;
+const ANUM_PG_TYPE_TYPELEM: i32 = 14;
 const ANUM_PG_TYPE_TYPACL: i32 = 32;
+const ANUM_PG_LANGUAGE_LANOWNER: i32 = 3;
+const ANUM_PG_LANGUAGE_LANACL: i32 = 9;
 const ANUM_PG_PARAMETER_ACL_PARACL: i32 = 3;
 const ANUM_PG_CLASS_RELNAMESPACE: i32 = 3;
 const ANUM_PG_CLASS_RELOWNER: i32 = 6;
@@ -106,6 +114,26 @@ pub fn object_aclcheck(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> P
     }
 }
 
+// object_aclcheck_ext (aclchk.c): (AclResult, is_missing).
+pub fn object_aclcheck_ext(
+    classid: Oid,
+    objectid: Oid,
+    roleid: Oid,
+    mode: u64,
+) -> PgResult<(i32, bool)> {
+    let mut is_missing = false;
+    let m = object_aclmask_ext(
+        classid,
+        objectid,
+        roleid,
+        mode,
+        AclMaskHow::AclmaskAny,
+        Some(&mut is_missing),
+    )?;
+    let r = if m != 0 { ACLCHECK_OK } else { ACLCHECK_NO_PRIV };
+    Ok((r, is_missing))
+}
+
 fn object_aclmask(
     classid: Oid,
     objectid: Oid,
@@ -113,8 +141,22 @@ fn object_aclmask(
     mask: u64,
     how: AclMaskHow,
 ) -> PgResult<u64> {
+    object_aclmask_ext(classid, objectid, roleid, mask, how, None)
+}
+
+fn object_aclmask_ext(
+    classid: Oid,
+    objectid: Oid,
+    roleid: Oid,
+    mask: u64,
+    how: AclMaskHow,
+    is_missing: Option<&mut bool>,
+) -> PgResult<u64> {
     match classid {
-        NAMESPACE_RELATION_ID => return pg_namespace_aclmask(objectid, roleid, mask, how),
+        NAMESPACE_RELATION_ID => {
+            return pg_namespace_aclmask_ext(objectid, roleid, mask, how, is_missing)
+        }
+        TYPE_RELATION_ID => return pg_type_aclmask_ext(objectid, roleid, mask, how, is_missing),
         // C divergence: C asserts callers use pg_class_aclmask directly; the
         // executor consumes it through the object_aclcheck seam, so route it.
         RELATION_RELATION_ID => return pg_class_aclmask(objectid, roleid, mask, how),
@@ -142,20 +184,22 @@ fn object_aclmask(
             AclObjectType::Function,
             "function",
         ),
-        // C divergence: pg_type_aclmask's array-element indirection is not
-        // applied; element and array types share default ACLs at initdb.
-        TYPE_RELATION_ID => (
-            TYPEOID,
-            ANUM_PG_TYPE_TYPOWNER,
-            ANUM_PG_TYPE_TYPACL,
-            AclObjectType::Type,
-            "type",
+        LANGUAGE_RELATION_ID => (
+            LANGOID,
+            ANUM_PG_LANGUAGE_LANOWNER,
+            ANUM_PG_LANGUAGE_LANACL,
+            AclObjectType::Language,
+            "language",
         ),
         _ => panic!("object_aclmask: classid {classid} unported (ObjectProperty table)"),
     };
 
     let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objectid)))?
     else {
+        if let Some(m) = is_missing {
+            *m = true;
+            return Ok(0);
+        }
         return Err(types_error::PgError::error(format!(
             "cache lookup failed for {descr} {objectid}"
         ))
@@ -166,6 +210,109 @@ fn object_aclmask(
     let (acl_datum, isnull) = SysCacheGetAttr(cacheid, &tuple, acl_attnum)?;
     let result = if isnull {
         aclmask(acldefault(objtype, owner_id).as_slice(), roleid, owner_id, mask, how)?
+    } else {
+        with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, owner_id, mask, how))?
+    };
+    ReleaseSysCache(tuple);
+    Ok(result)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_type(type_oid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("type with OID {type_oid} does not exist"))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+// pg_type_aclmask_ext (aclchk.c): true array types and multiranges consult
+// the element / range type's ACL.
+fn pg_type_aclmask_ext(
+    type_oid: Oid,
+    roleid: Oid,
+    mask: u64,
+    how: AclMaskHow,
+    mut is_missing: Option<&mut bool>,
+) -> PgResult<u64> {
+    const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+    const TYPTYPE_MULTIRANGE: u8 = b'm';
+    const ANUM_PG_RANGE_RNGTYPID: i32 = 1;
+
+    if superuser::superuser_arg(roleid)? {
+        return Ok(mask);
+    }
+
+    let mut type_oid = type_oid;
+    let mut tuple = match SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(type_oid)))? {
+        Some(t) => t,
+        None => {
+            if let Some(m) = is_missing.as_deref_mut() {
+                *m = true;
+                return Ok(0);
+            }
+            return Err(undefined_type(type_oid));
+        }
+    };
+
+    let typelem = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPELEM)?.as_oid();
+    let typsubscript =
+        SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPSUBSCRIPT)?.as_oid();
+    if typelem != Oid::default() && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
+        ReleaseSysCache(tuple);
+        type_oid = typelem;
+        tuple = match SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(type_oid)))? {
+            Some(t) => t,
+            None => {
+                if let Some(m) = is_missing.as_deref_mut() {
+                    *m = true;
+                    return Ok(0);
+                }
+                return Err(undefined_type(type_oid));
+            }
+        };
+    }
+
+    let typtype = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPTYPE)?.as_u8();
+    if typtype == TYPTYPE_MULTIRANGE {
+        use cache_syscache::cacheinfo::RANGEMULTIRANGE;
+        ReleaseSysCache(tuple);
+        // get_multirange_range (lsyscache.c): InvalidOid when missing; the
+        // pg_type probe below then reports it.
+        type_oid = match SearchSysCache1(
+            RANGEMULTIRANGE,
+            SysCacheKey::Value(Datum::from_oid(type_oid)),
+        )? {
+            Some(range_tuple) => {
+                let r = SysCacheGetAttrNotNull(RANGEMULTIRANGE, &range_tuple, ANUM_PG_RANGE_RNGTYPID)?
+                    .as_oid();
+                ReleaseSysCache(range_tuple);
+                r
+            }
+            None => Oid::default(),
+        };
+        tuple = match SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(type_oid)))? {
+            Some(t) => t,
+            None => {
+                if let Some(m) = is_missing.as_deref_mut() {
+                    *m = true;
+                    return Ok(0);
+                }
+                return Err(undefined_type(type_oid));
+            }
+        };
+    }
+
+    let owner_id = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPOWNER)?.as_oid();
+    let (acl_datum, isnull) = SysCacheGetAttr(TYPEOID, &tuple, ANUM_PG_TYPE_TYPACL)?;
+    let result = if isnull {
+        aclmask(
+            acldefault(AclObjectType::Type, owner_id).as_slice(),
+            roleid,
+            owner_id,
+            mask,
+            how,
+        )?
     } else {
         with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, owner_id, mask, how))?
     };
@@ -278,8 +425,14 @@ fn undefined_table(table_oid: Oid) -> Box<PgError> {
     )
 }
 
-// pg_namespace_aclmask_ext (aclchk.c), is_missing arm dropped (no caller).
-fn pg_namespace_aclmask(nsp_oid: Oid, roleid: Oid, mask: u64, how: AclMaskHow) -> PgResult<u64> {
+// pg_namespace_aclmask_ext (aclchk.c).
+fn pg_namespace_aclmask_ext(
+    nsp_oid: Oid,
+    roleid: Oid,
+    mask: u64,
+    how: AclMaskHow,
+    is_missing: Option<&mut bool>,
+) -> PgResult<u64> {
     const ANUM_PG_NAMESPACE_NSPOWNER: i32 = 3;
     const ANUM_PG_NAMESPACE_NSPACL: i32 = 4;
     use cache_syscache::cacheinfo::NAMESPACEOID;
@@ -302,6 +455,10 @@ fn pg_namespace_aclmask(nsp_oid: Oid, roleid: Oid, mask: u64, how: AclMaskHow) -
 
     let Some(tuple) = SearchSysCache1(NAMESPACEOID, SysCacheKey::Value(Datum::from_oid(nsp_oid)))?
     else {
+        if let Some(m) = is_missing {
+            *m = true;
+            return Ok(0);
+        }
         return Err(Box::new(
             PgError::error(format!("schema with OID {nsp_oid} does not exist"))
                 .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
@@ -462,8 +619,7 @@ pub fn pg_attribute_aclcheck_all(
     Ok(result)
 }
 
-// pg_aclmask (aclchk.c), reduced to the objtypes reachable from GRANT/REVOKE
-// ON TABLE/SEQUENCE (restrict_and_check_grant's no-goptions fallback).
+// pg_aclmask (aclchk.c) (restrict_and_check_grant's no-goptions fallback).
 pub(crate) fn pg_aclmask_for_grant(
     objtype: ObjectType,
     object_oid: Oid,
@@ -471,22 +627,30 @@ pub(crate) fn pg_aclmask_for_grant(
     roleid: Oid,
     mask: u64,
 ) -> PgResult<u64> {
+    let how = AclMaskHow::AclmaskAny;
     match objtype {
-        ObjectType::OBJECT_COLUMN => Ok(pg_class_aclmask(
-            object_oid,
-            roleid,
-            mask,
-            AclMaskHow::AclmaskAny,
-        )? | pg_attribute_aclmask_ext(
-            object_oid,
-            attnum,
-            roleid,
-            mask,
-            AclMaskHow::AclmaskAny,
-            None,
-        )?),
+        ObjectType::OBJECT_COLUMN => Ok(pg_class_aclmask(object_oid, roleid, mask, how)?
+            | pg_attribute_aclmask_ext(object_oid, attnum, roleid, mask, how, None)?),
         ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE => {
-            pg_class_aclmask(object_oid, roleid, mask, AclMaskHow::AclmaskAny)
+            pg_class_aclmask(object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_DATABASE => {
+            object_aclmask(DATABASE_RELATION_ID, object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_FUNCTION => {
+            object_aclmask(PROCEDURE_RELATION_ID, object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_LANGUAGE => {
+            object_aclmask(LANGUAGE_RELATION_ID, object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_LARGEOBJECT => {
+            lo::pg_largeobject_aclmask_snapshot_current(object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_SCHEMA => {
+            object_aclmask(NAMESPACE_RELATION_ID, object_oid, roleid, mask, how)
+        }
+        ObjectType::OBJECT_TYPE => {
+            object_aclmask(TYPE_RELATION_ID, object_oid, roleid, mask, how)
         }
         other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
     }
@@ -651,6 +815,8 @@ fn pg_parameter_aclcheck_set(name: &str, roleid: Oid) -> PgResult<bool> {
 
 pub fn init_seams() {
     aclchk_seams::object_aclcheck::set(object_aclcheck);
+    aclchk_seams::object_aclcheck_ext::set(object_aclcheck_ext);
+    aclchk_seams::has_lo_priv_byid::set(lo::has_lo_priv_byid);
     aclchk_seams::pg_parameter_aclcheck_set::set(pg_parameter_aclcheck_set);
     aclchk_seams::pg_class_aclcheck_ext::set(pg_class_aclcheck_ext);
     aclchk_seams::pg_class_aclmask::set(|table_oid, roleid, mask, how_all| {
