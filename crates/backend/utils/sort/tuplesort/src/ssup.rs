@@ -193,8 +193,12 @@ fn namefastcmp_c(a: &[u8; 64], b: &[u8; 64]) -> i32 {
 }
 
 std::thread_local! {
-    static SHIM_FLINFO: core::cell::RefCell<Option<(Oid, ::types_fmgr::FmgrInfo)>> =
-        const { core::cell::RefCell::new(None) };
+    // ManuallyDrop: fn_extra Drop reaches other TLS registries, whose
+    // destruction order at thread exit is unspecified — a panic in a TLS
+    // dtor aborts the process. Leaks with the backend, like C's exit free.
+    static SHIM_FLINFO: core::cell::RefCell<
+        core::mem::ManuallyDrop<Option<(Oid, ::types_fmgr::FmgrInfo)>>,
+    > = const { core::cell::RefCell::new(core::mem::ManuallyDrop::new(None)) };
 }
 
 // TLS carrier = C's ssup_cxt-lived flinfo (record_cmp memoizes in fn_extra);
@@ -203,8 +207,8 @@ std::thread_local! {
 fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
     let call = SHIM_FLINFO.with(|c| {
         let mut slot = c.borrow_mut();
-        if !matches!(&*slot, Some((o, _)) if *o == shim.fn_oid) {
-            *slot = Some((shim.fn_oid, ::fmgr_seams::fmgr_info::call(shim.fn_oid)?));
+        if !matches!(&**slot, Some((o, _)) if *o == shim.fn_oid) {
+            **slot = Some((shim.fn_oid, ::fmgr_seams::fmgr_info::call(shim.fn_oid)?));
         }
         let (_, fl) = slot.as_mut().expect("just filled");
         ::types_fmgr::function_call2_coll_in(fl, collation, mcx, x, y)
