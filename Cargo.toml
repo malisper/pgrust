@@ -437,6 +437,7 @@ members = [
     "crates/backend/utils/cache/relcache",
     "crates/backend/access/index/relscan",
     "crates/backend/access/hash/hash",
+    "crates/backend/access/hash/hash_validate",
     "crates/backend/access/hash/hash_xlog",
     "crates/backend/access/hash/hashsort",
     "crates/_support/types/types_brin",

@@ -132,8 +132,56 @@ pub fn XLogRecordPageWithFreeSpace(
     Ok(())
 }
 
-pub fn FreeSpaceMapPrepareTruncateRel(_rel: &RelationData<'_>, _nblocks: BlockNumber) -> ! {
-    unported("FreeSpaceMapPrepareTruncateRel (rel truncate lane, freespace.c)");
+/// New FSM length in blocks, or `InvalidBlockNumber` when there is nothing to
+/// truncate; the caller runs the smgrtruncate.
+pub fn FreeSpaceMapPrepareTruncateRel(
+    rel: &RelationData<'_>,
+    nblocks: BlockNumber,
+) -> PgResult<BlockNumber> {
+    let rlocator = bufmgr_seams::relation_smgr_locator::call(rel);
+    if !smgr_seams::smgr_exists::call(rlocator, ForkNumber::FSM_FORKNUM)? {
+        return Ok(InvalidBlockNumber);
+    }
+
+    let (first_removed_address, first_removed_slot) = fsm_get_location(nblocks);
+
+    if first_removed_slot > 0 {
+        let Some(pin) = fsm_readbuf(rel, first_removed_address, false)? else {
+            return Ok(InvalidBlockNumber);
+        };
+        let guard = pin.lock_exclusive()?;
+        init_small::globals::StartCriticalSection();
+        let res = (|| -> PgResult<()> {
+            // SAFETY: exclusive content lock held for `guard`'s lifetime.
+            let page =
+                unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+            fsm_truncate_avail(page, first_removed_slot as i32);
+            // Non-critical (fsm_does_block_exist rejects truncated-away
+            // blocks) but this clears up to SlotsPerFSMPage slots: full
+            // MarkBufferDirty plus the FPI MarkBufferDirtyHint would have
+            // logged, so the page cannot diverge from the rest of the file.
+            bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+            if !xlogutils_seams::in_recovery::call()
+                && rel.is_permanent()
+                && (transam_xlog_seams::data_checksums_enabled::call()
+                    || guc_tables::vars::wal_log_hints.read())
+            {
+                xloginsert_seams::log_newpage_buffer::call(pin.buffer(), false)?;
+            }
+            Ok(())
+        })();
+        init_small::globals::EndCriticalSection();
+        guard.unlock();
+        pin.release();
+        res?;
+        Ok(fsm_logical_to_physical(first_removed_address) + 1)
+    } else {
+        let new_nfsmblocks = fsm_logical_to_physical(first_removed_address);
+        if smgr_seams::smgr_nblocks::call(rlocator, ForkNumber::FSM_FORKNUM)? <= new_nfsmblocks {
+            return Ok(InvalidBlockNumber);
+        }
+        Ok(new_nfsmblocks)
+    }
 }
 
 pub fn FreeSpaceMapVacuum(rel: &RelationData<'_>) -> PgResult<()> {
