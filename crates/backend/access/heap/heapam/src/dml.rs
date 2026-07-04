@@ -481,6 +481,15 @@ pub fn heap_multi_insert<'mcx>(
         )?;
         starting_with_empty_page = pin.page().max_offset_number() == 0;
 
+        std::eprintln!(
+            "TOASTPROBE mi place[{}]: len={} xmin={} infomask={:#x} rel={} tid_after={:?}",
+            ndone,
+            heaptuples[ndone].t_len,
+            heaptuples[ndone].t_data().xmin_raw(),
+            heaptuples[ndone].t_data().t_infomask,
+            relation.rd_id,
+            heaptuples[ndone].t_self
+        );
         RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone], false)?;
         let mut nthispage = 1usize;
         while ndone + nthispage < ntuples {
@@ -489,6 +498,16 @@ pub fn heap_multi_insert<'mcx>(
             if pin.page().heap_free_space() < need {
                 break;
             }
+            let i = ndone + nthispage;
+            std::eprintln!(
+                "TOASTPROBE mi place[{}]: len={} xmin={} infomask={:#x} rel={} tid_after={:?}",
+                i,
+                heaptuples[i].t_len,
+                heaptuples[i].t_data().xmin_raw(),
+                heaptuples[i].t_data().t_infomask,
+                relation.rd_id,
+                heaptuples[i].t_self
+            );
             RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone + nthispage], false)?;
             nthispage += 1;
         }
