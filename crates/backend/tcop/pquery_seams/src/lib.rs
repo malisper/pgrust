@@ -24,3 +24,8 @@ seam_core::seam!(
     // (idempotent; C's portal->stmts dies with the portal contexts).
     pub fn stmt_list_free(h: StmtListHandle)
 );
+
+seam_core::seam!(
+    // EnsurePortalSnapshotExists (pquery.c).
+    pub fn ensure_portal_snapshot_exists() -> PgResult<()>
+);

@@ -89,7 +89,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
     let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
-    let _is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
+    let is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
         || context == PROCESS_UTILITY_QUERY_NONATOMIC)
         || xact::IsTransactionBlock();
 
@@ -162,6 +162,19 @@ unsafe fn unify_execute_lifetime<'u>(
         core::mem::transmute::<
             &types_nodes::parsenodes::ExecuteStmt<'_>,
             &'u types_nodes::parsenodes::ExecuteStmt<'u>,
+        >(s)
+    }
+}
+
+// Same retention contract: the CALL statement arena and the portal context
+// outlive the utility call; dest receives copied bytes only.
+unsafe fn unify_call_lifetime<'u>(
+    s: &types_nodes::rawnodes::CallStmt<'_>,
+) -> &'u types_nodes::rawnodes::CallStmt<'u> {
+    unsafe {
+        core::mem::transmute::<
+            &types_nodes::rawnodes::CallStmt<'_>,
+            &'u types_nodes::rawnodes::CallStmt<'u>,
         >(s)
     }
 }
@@ -420,7 +433,16 @@ fn dispatch_switch<'mcx>(
         T_LoadStmt => {
             let _ = parsetree.as_load_stmt().expect("LoadStmt");
         }
-        T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
+        T_CallStmt => {
+            let stmt = parsetree.as_call_stmt().expect("CallStmt");
+            functioncmds::ExecuteCallStmt(
+                mcx,
+                unsafe { unify_call_lifetime(stmt) },
+                params,
+                is_atomic_context,
+                dest,
+            )?;
+        }
         T_ClusterStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::ClusterStmt>()

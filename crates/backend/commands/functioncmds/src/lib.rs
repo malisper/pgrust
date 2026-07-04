@@ -2,7 +2,7 @@
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
 // WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal,
 // shell types, %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION,
-// CREATE CAST/TRANSFORM, DO, CALL.
+// CREATE CAST/TRANSFORM, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -13,18 +13,22 @@ use pg_proc::{
     PROVOLATILE_STABLE, PROVOLATILE_VOLATILE, SQLlanguageId,
 };
 use types_core::{
-    InvalidOid, Oid, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, LANGUAGE_RELATION_ID,
-    NAMESPACE_RELATION_ID, RECORDOID, TYPE_RELATION_ID, VOIDOID,
+    AttrNumber, InvalidOid, Oid, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, FUNC_MAX_ARGS,
+    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, RECORDOID,
+    TYPE_RELATION_ID, VOIDOID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_FUNCTION_DEFINITION,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::parsenodes::{
     CreateFunctionStmt, DefElem, FunctionParameter, FunctionParameterMode, ObjectType,
+    ACL_EXECUTE,
 };
-use types_nodes::rawnodes::TypeName;
+use types_nodes::rawnodes::{CallStmt, TypeName};
 use types_nodes::Node;
+use types_portal::ParamListHandle;
 
 pub use pg_proc::ObjectAddress;
 
@@ -887,4 +891,171 @@ pub fn ExecuteDoStmt<'mcx>(
         datum::Datum::from_usize(&codeblock as *const _ as usize),
     )?;
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
+}
+
+#[cold]
+#[inline(never)]
+fn proc_lookup_failed(funcid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for procedure {funcid}")))
+}
+
+pub fn ExecuteCallStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CallStmt<'mcx>,
+    params: ParamListHandle,
+    atomic: bool,
+    dest: &mut tcop_dest::DestReceiver<'mcx>,
+) -> PgResult<()> {
+    let fexpr = stmt.funcexpr.expect("CALL: analyzed CallStmt holds a FuncExpr");
+
+    let aclresult = aclchk::object_aclcheck(
+        PROCEDURE_RELATION_ID,
+        fexpr.funcid,
+        miscinit::GetUserId(),
+        ACL_EXECUTE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let funcname = lsyscache::get_func_name(mcx, fexpr.funcid)?;
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            ObjectType::OBJECT_PROCEDURE as i32,
+            funcname.as_ref().map_or("", |s| s.as_str()),
+        )?;
+    }
+
+    let shape = syscache_seams::lookup_pg_proc_shape::call(fexpr.funcid)?
+        .ok_or_else(|| func_lookup_failed(fexpr.funcid))?;
+    // C: proconfig or SECURITY DEFINER forbid transaction control inside.
+    let mut callcontext =
+        types_fmgr::CallContext::new(atomic || !shape.proconfig_isnull || shape.prosecdef);
+
+    let nargs = fexpr.args.len();
+    if nargs > FUNC_MAX_ARGS {
+        return Err(err(
+            format!("cannot pass more than {FUNC_MAX_ARGS} arguments to a procedure"),
+            ERRCODE_TOO_MANY_ARGUMENTS,
+        ));
+    }
+
+    // InvokeFunctionExecuteHook / pgstat_init_function_usage: no hook or
+    // per-function stats surface exists (repo-wide).
+    let mut flinfo = fmgr_seams::fmgr_info::call(fexpr.funcid)?;
+    // C fmgr_info_set_expr(fexpr): no fn_expr consumer exists on the CALL
+    // path (plpgsql polymorphic-arg resolution is unported).
+    flinfo.fn_expr = None;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<FUNC_MAX_ARGS>::fresh(fexpr.inputcollid);
+    fcinfo.init(nargs as i16, fexpr.inputcollid, callcontext.fm_node_ptr(), None);
+    // SAFETY: mcx is the portal context; it outlives the call and its result reads.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+
+    let extern_params = if params.is_null() {
+        None
+    } else {
+        // SAFETY: the portal that registered the handle outlives this utility call.
+        Some(unsafe { types_portal::params::resolve(params) })
+    };
+    let bind = execexpr::ParamBind { extern_params, exec_vals: None, n_exec: 0 };
+
+    if !atomic {
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+    }
+
+    let mut slots = execexpr::EvalSlots::default();
+    for (i, arg) in fexpr.args.iter().enumerate() {
+        let mut state = execexpr::exec_init_expr(mcx, Some(arg), bind)?.expect("arg is Some");
+        state.arm_result_mcx(mcx);
+        fcinfo.args[i] = execexpr::exec_eval_expr(&mut state, &mut slots)?;
+    }
+
+    if !atomic {
+        snapmgr::PopActiveSnapshot()?;
+    }
+
+    let retval = flinfo.invoke(&mut fcinfo)?;
+
+    if fexpr.funcresulttype == VOIDOID {
+    } else if fexpr.funcresulttype == RECORDOID {
+        if fcinfo.isnull {
+            return Err(Box::new(PgError::error(
+                "procedure returned null record".to_string(),
+            )));
+        }
+
+        pquery_seams::ensure_portal_snapshot_exists::call()?;
+
+        let p = retval.as_usize() as *const u8;
+        // SAFETY: non-null record datum — a live varlena-headed composite image.
+        let total = unsafe { types_tuple::varatt::varsize_any(p) };
+        // SAFETY: `total` readable bytes at p, per the datum contract.
+        let raw = unsafe { core::slice::from_raw_parts(p, total) };
+        let rec = detoast_seams::detoast_attr::call(mcx, raw)?;
+        // SAFETY: detoasted composite image; header prefix is in bounds.
+        let hdr = unsafe { &*(rec.as_ptr() as *const types_tuple::HeapTupleHeaderData) };
+        let retdesc =
+            typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, hdr.type_id(), hdr.typmod())?;
+        // SAFETY: MAXALIGN'd detoasted image of datum_length() == rec.len() bytes.
+        let tuple = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                rec.as_ptr(),
+                hdr.datum_length(),
+                types_tuple::ItemPointerData::invalid(),
+                InvalidOid,
+            )
+        };
+        let natts = retdesc.natts as usize;
+        let mut values = mcx::vec_from_elem_in(mcx, datum::Datum::null(), natts);
+        let mut nulls = mcx::vec_from_elem_in(mcx, true, natts);
+        types_tuple::heap_deform_tuple(&tuple, &retdesc, &mut values, &mut nulls);
+
+        let mut tstate =
+            exectuples_output::begin_tup_output_tupdesc(mcx, dest, std::rc::Rc::new(retdesc))?;
+        exectuples_output::do_tup_output(&mut tstate, mcx, &values, &nulls)?;
+        exectuples_output::end_tup_output(tstate)?;
+    } else {
+        return Err(Box::new(PgError::error(format!(
+            "unexpected result type for procedure: {}",
+            fexpr.funcresulttype
+        ))));
+    }
+
+    Ok(())
+}
+
+pub fn CallStmtResultDesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CallStmt<'_>,
+) -> PgResult<Option<types_tuple::TupleDescData<'mcx>>> {
+    let fexpr = stmt.funcexpr.expect("CALL: analyzed CallStmt holds a FuncExpr");
+
+    let shape = syscache_seams::lookup_pg_proc_shape::call(fexpr.funcid)?
+        .ok_or_else(|| proc_lookup_failed(fexpr.funcid))?;
+    let Some(mut desc) = funcapi::build_function_result_tupdesc_t(mcx, fexpr.funcid, &shape)?
+    else {
+        return Ok(None);
+    };
+
+    // C: keep the declared column names but take each type from the
+    // transformed outarg (polymorphic cases); typmod -1, default collation.
+    debug_assert_eq!(desc.natts as usize, stmt.outargs.len());
+    for (i, outarg) in stmt.outargs.iter().enumerate() {
+        let name = core::str::from_utf8(desc.attrs[i].attname.name_str())
+            .expect("attname is UTF-8")
+            .to_string();
+        tupdesc::TupleDescInitEntry(
+            &mut desc,
+            (i + 1) as AttrNumber,
+            Some(&name),
+            nodes_core::node_funcs::expr_type(outarg),
+            -1,
+            0,
+        )?;
+    }
+    Ok(Some(desc))
 }

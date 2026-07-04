@@ -30,9 +30,13 @@ fn desc_mcx() -> Mcx<'static> {
 pub fn UtilityReturnsTuples(parsetree: Node<'_>) -> bool {
     use NodeTag::*;
     match parsetree.node_tag() {
-        // C probes funcexpr->funcresulttype / the named portal / the prepared
-        // statement; those land with functioncmds/portalcmds/prepare.c.
-        T_CallStmt => payload_gap("UtilityReturnsTuples", "CallStmt"),
+        T_CallStmt => {
+            let stmt = parsetree.as_call_stmt().unwrap();
+            stmt.funcexpr
+                .expect("CALL: analyzed CallStmt holds a FuncExpr")
+                .funcresulttype
+                == types_core::RECORDOID
+        }
         T_FetchStmt => {
             let stmt = parsetree.as_fetch_stmt().unwrap();
             if stmt.ismove {
@@ -66,7 +70,10 @@ pub fn UtilityTupleDescriptor(
 ) -> PgResult<Option<Rc<TupleDescData<'static>>>> {
     use NodeTag::*;
     match parsetree.node_tag() {
-        T_CallStmt => payload_gap("UtilityTupleDescriptor", "CallStmt"),
+        T_CallStmt => {
+            let stmt = parsetree.as_call_stmt().unwrap();
+            Ok(functioncmds::CallStmtResultDesc(desc_mcx(), stmt)?.map(Rc::new))
+        }
         T_FetchStmt => {
             let stmt = parsetree.as_fetch_stmt().unwrap();
             if stmt.ismove {
