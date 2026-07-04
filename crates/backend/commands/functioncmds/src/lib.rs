@@ -27,6 +27,7 @@ pub use pg_proc::ObjectAddress;
 
 const Anum_pg_language_oid: i32 = 1;
 const Anum_pg_language_lanpltrusted: i32 = 5;
+const Anum_pg_language_laninline: i32 = 7;
 const Anum_pg_language_lanvalidator: i32 = 8;
 
 #[cold]
@@ -643,5 +644,110 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
     if prokind == PROKIND_AGGREGATE {
         unported("RemoveFunctionById: pg_aggregate tuple deletion (aggregate DDL lane)");
     }
+    Ok(())
+}
+
+// ExecuteDoStmt (functioncmds.c:2084).
+pub fn ExecuteDoStmt<'mcx>(
+    stmt: &types_nodes::parsenodes::DoStmt<'mcx>,
+    atomic: bool,
+) -> PgResult<()> {
+    let mut as_item: Option<&DefElem<'mcx>> = None;
+    let mut language_item: Option<&DefElem<'mcx>> = None;
+    for option in stmt.args.iter() {
+        let defel = option.as_def_elem().expect("dostmt_opt_list holds DefElems");
+        let slot = match defel.defname.unwrap_or("") {
+            "as" => &mut as_item,
+            "language" => &mut language_item,
+            other => panic!("option \"{other}\" not recognized"),
+        };
+        if slot.is_some() {
+            return Err(conflicting_options());
+        }
+        *slot = Some(defel);
+    }
+
+    let Some(as_item) = as_item else {
+        return Err(err(
+            "no inline code specified".to_string(),
+            ERRCODE_SYNTAX_ERROR,
+        ));
+    };
+    let source_text = defel_str(as_item);
+    let language = language_item.map(defel_str).unwrap_or("plpgsql");
+
+    let Some(lang_tuple) = cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::LANGNAME,
+        cache_syscache::SysCacheKey::Str(language),
+    )?
+    else {
+        let mut e = PgError::new(ERROR, format!("language \"{language}\" does not exist"))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT);
+        if extension::extension_file_exists(language)? {
+            e.hint = Some("Use CREATE EXTENSION to load the language into the database.".to_string());
+        }
+        return Err(Box::new(e));
+    };
+    let lang_oid = cache_syscache::SysCacheGetAttrNotNull(
+        cache_syscache::cacheinfo::LANGNAME,
+        &lang_tuple,
+        Anum_pg_language_oid,
+    )?
+    .as_oid();
+    let lanpltrusted = cache_syscache::SysCacheGetAttrNotNull(
+        cache_syscache::cacheinfo::LANGNAME,
+        &lang_tuple,
+        Anum_pg_language_lanpltrusted,
+    )?
+    .as_bool();
+    let laninline = cache_syscache::SysCacheGetAttrNotNull(
+        cache_syscache::cacheinfo::LANGNAME,
+        &lang_tuple,
+        Anum_pg_language_laninline,
+    )?
+    .as_oid();
+    cache_syscache::ReleaseSysCache(lang_tuple);
+
+    if lanpltrusted {
+        let aclresult = aclchk::object_aclcheck(
+            LANGUAGE_RELATION_ID,
+            lang_oid,
+            miscinit::GetUserId(),
+            types_nodes::parsenodes::ACL_USAGE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk_seams::aclcheck_error::call(
+                aclresult,
+                ObjectType::OBJECT_LANGUAGE as i32,
+                language,
+            )?;
+        }
+    } else if !superuser::superuser()? {
+        aclchk_seams::aclcheck_error::call(
+            aclchk::ACLCHECK_NO_PRIV,
+            ObjectType::OBJECT_LANGUAGE as i32,
+            language,
+        )?;
+    }
+
+    if !types_core::OidIsValid(laninline) {
+        return Err(err(
+            format!("language \"{language}\" does not support inline code execution"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+
+    let codeblock = types_nodes::parsenodes::InlineCodeBlock {
+        source_text,
+        lang_oid,
+        lang_is_trusted: lanpltrusted,
+        atomic,
+    };
+    let mut flinfo = fmgr_core::fmgr_info(laninline)?;
+    types_fmgr::function_call1_coll(
+        &mut flinfo,
+        types_core::InvalidOid,
+        datum::Datum::from_usize(&codeblock as *const _ as usize),
+    )?;
     Ok(())
 }

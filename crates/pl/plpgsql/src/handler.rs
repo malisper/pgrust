@@ -625,7 +625,7 @@ fn plpgsql_call_handler(
                     Datum::null()
                 })
             }
-            (FnTrigger::NotTrigger, None, None) => plpgsql_exec_function(&entry.func, fcinfo),
+            (FnTrigger::NotTrigger, None, None) => plpgsql_exec_function(&entry.func, fcinfo, true),
             _ => panic!(
                 "plpgsql_call_handler: call context does not match the compiled \
                  trigger-ness (function {fn_oid})"
@@ -643,9 +643,85 @@ fn plpgsql_call_handler(
 
 fn plpgsql_inline_handler(
     _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut FunctionCallInfoBaseData,
+    fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    panic!("plpgsql_inline_handler (pl_handler.c): DO blocks unported — unit backend-pl-plpgsql-handler");
+    // SAFETY: ExecuteDoStmt passes a live InlineCodeBlock for this call.
+    let cb: &types_nodes::parsenodes::InlineCodeBlock =
+        unsafe { &*(fcinfo.args[0].value.as_usize() as *const _) };
+
+    let rc = spi::SPI_connect_ext(if cb.atomic { 0 } else { spi::SPI_OPT_NONATOMIC })?;
+    assert_eq!(rc, spi::SPI_OK_CONNECT, "SPI_connect failed");
+
+    let func = compile_inline(cb.source_text)?;
+    let mut fake = fmgr::LocalFcinfo::<0>::fresh(types_core::InvalidOid);
+    let result = plpgsql_exec_function(&func, &mut fake, cb.atomic);
+    crate::exec::free_function_plans(&func.expr_ids);
+    result?;
+
+    let rc = spi::SPI_finish()?;
+    assert_eq!(rc, spi::SPI_OK_FINISH, "SPI_finish failed");
+    Ok(Datum::null())
+}
+
+// plpgsql_compile_inline (pl_comp.c): uncached, VOID, no args.
+fn compile_inline(src: &str) -> PgResult<PlFunction> {
+    let func_name = "inline_code_block";
+    let mut comp = CompState::new();
+    comp.ns_push_label(Some(func_name), crate::gram::LABEL_BLOCK);
+    let found_varno = comp.build_variable(
+        "found",
+        0,
+        CompState::build_datatype(BOOLOID, -1, types_core::InvalidOid)?,
+        true,
+    )?;
+
+    let scan_cx = mcx::MemoryContext::new("plpgsql inline parse");
+    let scanbuf = mcx::slice_borrow_in(scan_cx.mcx(), src.as_bytes())?;
+    let scanner = PlScanner::new(scan_cx.mcx(), scanbuf);
+    let mut parser = Parser {
+        sc: scanner,
+        comp: &mut comp,
+        check_syntax: guc_check_function_bodies(),
+        fn_rettype: VOIDOID,
+        fn_retset: false,
+        fn_prokind: PROKIND_FUNCTION,
+        fn_input_collation: types_core::InvalidOid,
+        fn_is_trigger: false,
+        scratch: scan_cx.mcx(),
+    };
+    let parse_result = parser.parse_function_body();
+    let latest_line = parser.sc.latest_lineno();
+    let action = parse_result
+        .map_err(|e| attach_compile_context(e, func_name, latest_line, false, src))?;
+
+    Ok(PlFunction {
+        fn_signature: func_name.to_string(),
+        fn_oid: types_core::InvalidOid,
+        fn_xmin: 0,
+        fn_tid: (0, 0),
+        fn_input_collation: types_core::InvalidOid,
+        fn_rettype: VOIDOID,
+        fn_rettyplen: 4,
+        fn_retbyval: true,
+        fn_retistuple: false,
+        fn_retisdomain: false,
+        fn_retset: false,
+        fn_readonly: false,
+        fn_prokind: PROKIND_FUNCTION,
+        fn_nargs: 0,
+        fn_argvarnos: Vec::new(),
+        fn_is_trigger: false,
+        new_varno: -1,
+        old_varno: -1,
+        found_varno,
+        datums: std::mem::take(&mut comp.datums),
+        ns: std::mem::take(&mut comp.ns),
+        action,
+        resolve_option: comp.resolve_option,
+        print_strict_params: comp.print_strict_params,
+        nstatements: comp.nstatements,
+        expr_ids: std::mem::take(&mut comp.expr_ids),
+    })
 }
 
 // plpgsql_validator (pl_handler.c).
@@ -687,11 +763,13 @@ fn guc_check_function_bodies() -> bool {
 fn plpgsql_exec_function(
     func: &PlFunction,
     fcinfo: &mut FunctionCallInfoBaseData,
+    atomic: bool,
 ) -> PgResult<Datum> {
-    let mut estate = Estate::new(func, func.fn_readonly, true);
+    let mut estate = Estate::new(func, func.fn_readonly, atomic);
+    let _frame = crate::exec::FrameGuard::push_pl(&estate);
 
     // Store call arguments into the argument variables.
-    estate.err_text = Some("while storing call arguments into local variables");
+    estate.frame.text.set(Some("while storing call arguments into local variables"));
     for (i, &dno) in func.fn_argvarnos.iter().enumerate() {
         let arg = &fcinfo.args[i];
         let ty = match &func.datums[dno as usize] {
@@ -705,9 +783,9 @@ fn plpgsql_exec_function(
     }
 
     // C sets FOUND=false at function entry (pl_exec.c:623).
-    estate.err_text = Some("during function entry");
+    estate.frame.text.set(Some("during function entry"));
     estate.set_var(func.found_varno, Datum::from_bool(false), false);
-    estate.err_text = None;
+    estate.frame.text.set(None);
 
     let outcome = (|| -> PgResult<i32> {
         let rc = estate.exec_toplevel_block(&func.action)?;
@@ -743,7 +821,7 @@ fn plpgsql_exec_function(
     }
     // Cast the return value to the function's return type and copy it out
     // of SPI/estate memory (it must survive SPI_finish and estate drop).
-    estate.err_text = Some("while casting return value to function's return type");
+    estate.frame.text.set(Some("while casting return value to function's return type"));
     let mut isnull = estate.retisnull;
     let mut retval = estate.retval;
     if !isnull || func.fn_rettype != VOIDOID {
@@ -1038,7 +1116,8 @@ fn plpgsql_exec_trigger(
         "plpgsql_exec_trigger on a non-trigger function"
     );
     let mut estate = Estate::new(func, func.fn_readonly, true);
-    estate.err_text = Some("during initialization of execution state");
+    let _frame = crate::exec::FrameGuard::push_pl(&estate);
+    estate.frame.text.set(Some("during initialization of execution state"));
 
     let rel = trigdata.tg_relation;
     let tupdesc = rel.rd_att.clone();
@@ -1086,9 +1165,9 @@ fn plpgsql_exec_trigger(
 
     fulfill_trigger_promises(&mut estate, func, trigdata)?;
 
-    estate.err_text = Some("during function entry");
+    estate.frame.text.set(Some("during function entry"));
     estate.set_var(func.found_varno, Datum::from_bool(false), false);
-    estate.err_text = None;
+    estate.frame.text.set(None);
 
     let rc = match estate.exec_toplevel_block(&func.action) {
         Ok(rc) => rc,
@@ -1104,7 +1183,7 @@ fn plpgsql_exec_trigger(
         ));
     }
 
-    estate.err_text = Some("during function exit");
+    estate.frame.text.set(Some("during function exit"));
     fcinfo.isnull = false;
     if estate.retisnull || !TRIGGER_FIRED_FOR_ROW(ev) {
         return Ok(Datum::null());

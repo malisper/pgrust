@@ -906,6 +906,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     K_LOOP => Ok(Some(self.parse_loop(Some(label), nt.2)?)),
                     K_WHILE => Ok(Some(self.parse_while(Some(label), nt.2)?)),
                     K_FOR => Ok(Some(self.parse_for(Some(label), nt.2)?)),
+                    K_FOREACH => Ok(Some(self.parse_foreach(Some(label), nt.2)?)),
                     K_DECLARE | K_BEGIN => {
                         self.push_back(&nt)?;
                         let b = self.parse_block_after_label(Some(label), Some(lloc))?;
@@ -925,14 +926,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_WHILE => Ok(Some(self.parse_while(None, lloc)?)),
             K_FOR => Ok(Some(self.parse_for(None, lloc)?)),
             K_IF => Ok(Some(self.parse_if(lloc)?)),
-            K_CASE => panic!(
-                "stmt_case (pl_gram.y): CASE statement unported — \
-                 unit backend-pl-plpgsql-gram"
-            ),
-            K_FOREACH => panic!(
-                "stmt_foreach_a (pl_gram.y): FOREACH unported — \
-                 unit backend-pl-plpgsql-gram"
-            ),
+            K_CASE => Ok(Some(self.parse_case(lloc)?)),
+            K_FOREACH => Ok(Some(self.parse_foreach(None, lloc)?)),
             K_EXIT | K_CONTINUE => Ok(Some(self.parse_exit(t.0 == K_EXIT, lloc)?)),
             K_RETURN => Ok(Some(self.parse_return(lloc)?)),
             K_RAISE => Ok(Some(self.parse_raise(lloc)?)),
@@ -1269,6 +1264,102 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 body,
             })
         }
+    }
+
+    // stmt_case + make_case (pl_gram.y).
+    fn parse_case(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let lineno = self.lineno(lloc);
+        let t = self.yylex()?;
+        let t_expr = if t.0 == K_WHEN {
+            self.push_back(&t)?;
+            None
+        } else {
+            self.push_back(&t)?;
+            Some(self.read_sql_expression(K_WHEN, "WHEN")?)
+        };
+
+        let mut whens: Vec<(PlExpr, Vec<PlStmt>)> = Vec::new();
+        loop {
+            self.expect(K_WHEN, "syntax error")?;
+            let expr = self.read_sql_expression(K_THEN, "THEN")?;
+            let stmts = self.parse_proc_sect(&[K_WHEN, K_ELSE, K_END])?;
+            whens.push((expr, stmts));
+            if self.peek()? != K_WHEN {
+                break;
+            }
+        }
+        let mut have_else = false;
+        let mut else_stmts = Vec::new();
+        let t = self.yylex()?;
+        if t.0 == K_ELSE {
+            have_else = true;
+            else_stmts = self.parse_proc_sect(&[K_END])?;
+            self.expect(K_END, "syntax error")?;
+        } else {
+            debug_assert_eq!(t.0, K_END);
+        }
+        self.expect(K_CASE, "syntax error")?;
+        self.expect(';' as i32, "syntax error")?;
+
+        let mut t_varno: Dno = 0;
+        if t_expr.is_some() {
+            let varname = format!("__Case__Variable_{}__", self.comp.datums.len());
+            t_varno = self.comp.build_variable(
+                &varname,
+                lineno,
+                CompState::build_datatype(INT4OID, -1, types_core::InvalidOid)?,
+                true,
+            )?;
+            for (expr, _) in &mut whens {
+                debug_assert_eq!(expr.parse_mode, RawParseMode::RAW_PARSE_PLPGSQL_EXPR);
+                expr.query = format!("\"{varname}\" IN ({})", expr.query);
+                expr.ns = self.comp.ns_top;
+            }
+        }
+        Ok(PlStmt::Case { lineno, t_expr, t_varno, whens, have_else, else_stmts })
+    }
+
+    // stmt_foreach_a (pl_gram.y).
+    fn parse_foreach(&mut self, label: Option<String>, lloc: i32) -> PgResult<PlStmt> {
+        self.comp.ns_push_label(label.as_deref(), LABEL_LOOP);
+        let (name, _var_lineno, scalar, rowrec, var_loc) = self.parse_for_variable()?;
+        let varno = if let Some(r) = rowrec {
+            self.check_assignable(r, var_loc)?;
+            r
+        } else if let Some(s) = scalar {
+            self.check_assignable(s, var_loc)?;
+            s
+        } else {
+            let _ = name;
+            return Err(self.gram_err_pos(
+                ERRCODE_SYNTAX_ERROR,
+                "loop variable of FOREACH must be a known variable or list of variables"
+                    .to_string(),
+                var_loc,
+            ));
+        };
+        let t = self.yylex()?;
+        let slice = if Self::tok_is_keyword(&t, K_SLICE, "slice") {
+            let it = self.expect(ICONST, "syntax error")?;
+            it.1.ival
+        } else {
+            self.push_back(&t)?;
+            0
+        };
+        self.expect(K_IN, "syntax error")?;
+        self.expect(K_ARRAY, "syntax error")?;
+        let expr = self.read_sql_expression(K_LOOP, "LOOP")?;
+        let (body, end_label, end_loc) = self.parse_loop_body()?;
+        self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
+        self.comp.ns_pop();
+        Ok(PlStmt::ForEachA {
+            lineno: self.lineno(lloc),
+            label,
+            varno,
+            slice,
+            expr,
+            body,
+        })
     }
 
     fn make_scalar_list1(&mut self, _name: &str, dno: Dno, lineno: i32, loc: i32) -> PgResult<Dno> {
@@ -1715,18 +1806,51 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let it = self.yylex()?;
             let kind = if Self::tok_is_keyword(&it, K_ROW_COUNT, "row_count") {
                 GETDIAG_ROW_COUNT
+            } else if Self::tok_is_keyword(&it, K_PG_ROUTINE_OID, "pg_routine_oid") {
+                GETDIAG_ROUTINE_OID
+            } else if Self::tok_is_keyword(&it, K_PG_CONTEXT, "pg_context") {
+                GETDIAG_CONTEXT
+            } else if Self::tok_is_keyword(&it, K_PG_EXCEPTION_CONTEXT, "pg_exception_context") {
+                GETDIAG_ERROR_CONTEXT
+            } else if Self::tok_is_keyword(&it, K_PG_EXCEPTION_DETAIL, "pg_exception_detail") {
+                GETDIAG_ERROR_DETAIL
+            } else if Self::tok_is_keyword(&it, K_PG_EXCEPTION_HINT, "pg_exception_hint") {
+                GETDIAG_ERROR_HINT
+            } else if Self::tok_is_keyword(&it, K_RETURNED_SQLSTATE, "returned_sqlstate") {
+                GETDIAG_RETURNED_SQLSTATE
+            } else if Self::tok_is_keyword(&it, K_COLUMN_NAME, "column_name") {
+                GETDIAG_COLUMN_NAME
+            } else if Self::tok_is_keyword(&it, K_CONSTRAINT_NAME, "constraint_name") {
+                GETDIAG_CONSTRAINT_NAME
+            } else if Self::tok_is_keyword(&it, K_PG_DATATYPE_NAME, "pg_datatype_name") {
+                GETDIAG_DATATYPE_NAME
+            } else if Self::tok_is_keyword(&it, K_MESSAGE_TEXT, "message_text") {
+                GETDIAG_MESSAGE_TEXT
+            } else if Self::tok_is_keyword(&it, K_TABLE_NAME, "table_name") {
+                GETDIAG_TABLE_NAME
+            } else if Self::tok_is_keyword(&it, K_SCHEMA_NAME, "schema_name") {
+                GETDIAG_SCHEMA_NAME
             } else {
-                panic!(
-                    "getdiag_item (pl_gram.y): GET {}DIAGNOSTICS items beyond ROW_COUNT \
-                     unported — unit backend-pl-plpgsql-gram",
-                    if is_stacked { "STACKED " } else { "" }
-                );
+                return Err(self.yyerror("unrecognized GET DIAGNOSTICS item", it.2));
             };
-            if is_stacked {
+            let kindname = getdiag_kindname(kind);
+            if is_stacked && matches!(kind, GETDIAG_ROW_COUNT | GETDIAG_ROUTINE_OID) {
                 return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
-                    "diagnostics item ROW_COUNT is not allowed in GET STACKED DIAGNOSTICS"
-                        .to_string(),
+                    format!(
+                        "diagnostics item {kindname} is not allowed in GET STACKED DIAGNOSTICS"
+                    ),
+                    lloc,
+                ));
+            }
+            if !is_stacked
+                && !matches!(kind, GETDIAG_ROW_COUNT | GETDIAG_ROUTINE_OID | GETDIAG_CONTEXT)
+            {
+                return Err(self.gram_err_pos(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!(
+                        "diagnostics item {kindname} is not allowed in GET CURRENT DIAGNOSTICS"
+                    ),
                     lloc,
                 ));
             }
@@ -1982,5 +2106,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         } else {
             Err(self.current_token_is_not_variable(&t))
         }
+    }
+}
+
+pub fn getdiag_kindname(kind: i32) -> &'static str {
+    match kind {
+        GETDIAG_ROW_COUNT => "ROW_COUNT",
+        GETDIAG_ROUTINE_OID => "PG_ROUTINE_OID",
+        GETDIAG_CONTEXT => "PG_CONTEXT",
+        GETDIAG_ERROR_CONTEXT => "PG_EXCEPTION_CONTEXT",
+        GETDIAG_ERROR_DETAIL => "PG_EXCEPTION_DETAIL",
+        GETDIAG_ERROR_HINT => "PG_EXCEPTION_HINT",
+        GETDIAG_RETURNED_SQLSTATE => "RETURNED_SQLSTATE",
+        GETDIAG_COLUMN_NAME => "COLUMN_NAME",
+        GETDIAG_CONSTRAINT_NAME => "CONSTRAINT_NAME",
+        GETDIAG_DATATYPE_NAME => "PG_DATATYPE_NAME",
+        GETDIAG_MESSAGE_TEXT => "MESSAGE_TEXT",
+        GETDIAG_TABLE_NAME => "TABLE_NAME",
+        GETDIAG_SCHEMA_NAME => "SCHEMA_NAME",
+        _ => "unknown",
     }
 }
