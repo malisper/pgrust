@@ -283,8 +283,11 @@ fn dispatch_switch<'mcx>(
             tablecmds::ExecuteTruncate(mcx, stmt)?;
         }
         T_CopyStmt => {
-            let stmt = parsetree.as_copy_stmt().unwrap();
-            let processed = copy_cmd::DoCopy(mcx, stmt)?;
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_copy_stmt().unwrap();
+            let processed = copy_cmd::DoCopy(mcx, stmt, source_text)?;
             if let Some(qc) = qc.as_mut() {
                 qc.commandTag = crate::consts::CMDTAG_COPY;
                 qc.nprocessed = processed;
@@ -311,7 +314,10 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree.as_grant_stmt().unwrap();
             aclchk::ExecuteGrantStmt(mcx, stmt)?;
         }
-        T_GrantRoleStmt => handler_gap("GrantRole (user lane)"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree.as_grant_role_stmt().unwrap();
+            user::GrantRole(mcx, stmt)?;
+        }
 
         T_CreatedbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE DATABASE")?;
@@ -433,11 +439,30 @@ fn dispatch_switch<'mcx>(
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
         T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
-        T_CreateRoleStmt => handler_gap("CreateRole (user lane)"),
-        T_AlterRoleStmt => handler_gap("AlterRole (user lane)"),
-        T_AlterRoleSetStmt => handler_gap("AlterRoleSet (user lane)"),
-        T_DropRoleStmt => handler_gap("DropRole (user lane)"),
-        T_ReassignOwnedStmt => handler_gap("ReassignOwnedObjects (user lane)"),
+        T_CreateRoleStmt => {
+            let stmt = parsetree.as_create_role_stmt().unwrap();
+            user::CreateRole(mcx, stmt)?;
+        }
+        T_AlterRoleStmt => {
+            let stmt = parsetree.as_alter_role_stmt().unwrap();
+            user::AlterRole(mcx, stmt)?;
+        }
+        T_AlterRoleSetStmt => {
+            let stmt = parsetree.as_alter_role_set_stmt().unwrap();
+            user::AlterRoleSet(stmt)
+        }
+        T_DropRoleStmt => {
+            let stmt = parsetree.as_drop_role_stmt().unwrap();
+            user::DropRole(mcx, stmt)?;
+        }
+        T_DropOwnedStmt => {
+            let stmt = parsetree.as_drop_owned_stmt().unwrap();
+            user::DropOwnedObjects(mcx, stmt)?;
+        }
+        T_ReassignOwnedStmt => {
+            let stmt = parsetree.as_reassign_owned_stmt().unwrap();
+            user::ReassignOwnedObjects(mcx, stmt)?;
+        }
 
         T_LockStmt => {
             xact::RequireTransactionBlock(is_top_level, "LOCK TABLE")?;
@@ -446,7 +471,8 @@ fn dispatch_switch<'mcx>(
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
-            handler_gap("AfterTriggerSetState (trigger lane)")
+            let stmt = parsetree.as_constraints_set_stmt().unwrap();
+            trigger::AfterTriggerSetState(mcx, stmt)?;
         }
         T_CheckPointStmt => {
             if !acl_seams::has_privs_of_role::call(
@@ -489,7 +515,11 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_TRIGGER => trigger::RemoveTriggers(mcx, stmt)?,
                 OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
+                // Interim RemoveObjects specialization; collapses into
+                // dropcmds::RemoveObjects when the dropcmds lane lands.
+                OBJECT_EXTENSION => remove_extensions(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -577,6 +607,17 @@ fn dispatch_switch<'mcx>(
             exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
+        T_CreateTrigStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
+                .expect("CreateTrigStmt");
+            trigger::CreateTrigger(mcx, stmt, source_text)?;
+        }
+
         T_AlterTableStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
@@ -602,6 +643,12 @@ fn dispatch_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+                    trigger::renametrig(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    tablecmds::RenameConstraint(mcx, stmt)?;
                 }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
@@ -687,6 +734,52 @@ fn dispatch_switch<'mcx>(
                 }
             }
         }
+        T_DefineStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
+                    debug_assert!(!stmt.oldstyle);
+                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+            }
+        }
+
+        T_CreateOpClassStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
+                .expect("CreateOpClassStmt");
+            opclasscmds::DefineOpClass(mcx, stmt)?;
+        }
+
+        T_CreateOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
+                .expect("CreateOpFamilyStmt");
+            opclasscmds::DefineOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
+                .expect("AlterOpFamilyStmt");
+            opclasscmds::AlterOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOperatorStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
+                .expect("AlterOperatorStmt");
+            operatorcmds::AlterOperator(mcx, stmt)?;
+        }
+
         T_CreateTableAsStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
@@ -728,6 +821,22 @@ fn dispatch_switch<'mcx>(
             let altstmt =
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
             sequence::AlterSequence(mcx, altstmt)?;
+        }
+        T_CreateExtensionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateExtensionStmt>()
+                .expect("CreateExtensionStmt");
+            extension::CreateExtension(mcx, stmt)?;
+        }
+        T_AlterExtensionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterExtensionStmt>()
+                .expect("AlterExtensionStmt");
+            extension::ExecAlterExtensionStmt(mcx, stmt)?;
         }
         T_CreateDomainStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
@@ -795,6 +904,49 @@ fn dispatch_switch<'mcx>(
     Ok(())
 }
 
+// RemoveObjects (dropcmds.c) bounded to OBJECT_EXTENSION: name lookup,
+// missing_ok NOTICE, ownership (superuser fast path), performMultipleDeletions.
+fn remove_extensions<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::DropStmt<'mcx>,
+) -> PgResult<()> {
+    let mut objects = catalog_dependency::ObjectAddresses::new();
+
+    for obj in stmt.objects.iter() {
+        let name = obj.as_string().expect("DROP EXTENSION object is a String node").sval;
+        let ext_oid = extension::get_extension_oid(name, true)?;
+
+        if ext_oid == types_core::InvalidOid {
+            if !stmt.missing_ok {
+                return Err(::elog::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                    .errmsg(format!("extension \"{name}\" does not exist"))
+                    .into_error()
+                    .into());
+            }
+            elog_seams::ereport_msg::call(
+                types_error::NOTICE,
+                format!("extension \"{name}\" does not exist, skipping"),
+                None,
+            )?;
+            continue;
+        }
+
+        // check_object_ownership (aclchk.c): superuser fast path; role ACL
+        // walks are the aclchk lane.
+        if !superuser::superuser()? {
+            handler_gap("RemoveObjects: object_ownercheck for non-superusers");
+        }
+
+        objects.add_exact_object_address(pg_depend::ObjectAddress::set(
+            types_core::EXTENSION_RELATION_ID,
+            ext_oid,
+        ));
+    }
+
+    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)
+}
+
 fn exec_index_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt_node: Node<'mcx>,
@@ -826,10 +978,24 @@ fn exec_index_stmt<'mcx>(
                   old_rel_id: types_core::Oid|
      -> PgResult<()> { range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id) };
     let relid = catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
+    // Partitioned recursion locks every partition up front (deadlock
+    // avoidance) and pre-checks partition relkinds.
     if rv.inh
         && lsyscache::get_rel_relkind(relid)? as u8 == types_rel::RELKIND_PARTITIONED_TABLE
     {
-        handler_gap("CREATE INDEX partitioned-table recursion");
+        let inheritors = pg_inherits::find_all_inheritors(mcx, relid, lockmode)?;
+        for &partrelid in inheritors.iter() {
+            let relkind = lsyscache::get_rel_relkind(partrelid)? as u8;
+            if relkind != types_rel::RELKIND_RELATION
+                && relkind != types_rel::RELKIND_MATVIEW
+                && relkind != types_rel::RELKIND_PARTITIONED_TABLE
+            {
+                panic!(
+                    "unexpected relkind \"{}\" on partition \"{}\"",
+                    relkind as char, rv.relname
+                );
+            }
+        }
     }
     let is_alter_table = stmt.transformed;
     parse_clause::transformIndexStmt(mcx, relid, stmt_node, source_text)?;
@@ -841,6 +1007,8 @@ fn exec_index_stmt<'mcx>(
         mcx,
         relid,
         stmt,
+        types_core::InvalidOid,
+        types_core::InvalidOid,
         types_core::InvalidOid,
         is_alter_table,
         true,

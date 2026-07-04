@@ -37,3 +37,40 @@ pub use walker::{
     query_or_expression_tree_walker, query_tree_walker, range_table_entry_walker,
     range_table_walker, walk_list, walk_opt, NodeWalker,
 };
+
+// is_parallel_safe (clauses.c) over a PathTarget's exprs; C passes the List*.
+pub fn is_parallel_safe_exprs(run: &types_pathnodes::run::PlannerRun<'_>, target: types_pathnodes::PtId) -> types_error::PgResult<bool> {
+    if run.glob.max_parallel_hazard == b's' as i8 && run.glob.param_exec_types.is_nil() {
+        return Ok(true);
+    }
+    let mcx = run.mcx;
+    let mut list = types_nodes::list::NodeList::nil();
+    let n = run.root.pathtarget(target).exprs.len();
+    for i in 0..n {
+        let id = run.root.pathtarget(target).exprs[i];
+        list.lappend(mcx, *run.root.expr_node(id))?;
+    }
+    let node = types_nodes::Node::mk_list(mcx, list)?;
+    crate::is_parallel_safe(
+        run.glob.max_parallel_hazard,
+        run.glob.param_exec_types.is_nil(),
+        &[],
+        node,
+    )
+}
+
+pub fn is_parallel_safe_opt(
+    run: &types_pathnodes::run::PlannerRun<'_>,
+    node: Option<types_nodes::Node<'_>>,
+) -> types_error::PgResult<bool> {
+    match node {
+        // C is_parallel_safe(root, NULL): the walker sees nothing unsafe.
+        None => Ok(true),
+        Some(n) => crate::is_parallel_safe(
+            run.glob.max_parallel_hazard,
+            run.glob.param_exec_types.is_nil(),
+            &[],
+            n,
+        ),
+    }
+}

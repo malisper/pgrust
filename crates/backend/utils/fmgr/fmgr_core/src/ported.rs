@@ -16,6 +16,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_int8::builtins::INT8_BUILTINS,
     ::adt_json::builtins::JSON_BUILTINS,
     ::adt_jsonb::builtins::JSONB_BUILTINS,
+    ::adt_jsonpath::builtins::JSONPATH_BUILTINS,
     ::adt_like::builtins::LIKE_BUILTINS,
     ::adt_regexp::builtins::REGEXP_BUILTINS,
     ::adt_mac::builtins::MAC_BUILTINS,
@@ -37,6 +38,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::sequence_seams::builtins::SEQUENCE_BUILTINS,
+    ::extension_seams::builtins::EXTENSION_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,
@@ -44,6 +46,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::commands_async::builtins::ASYNC_BUILTINS,
     ::cryptohashfuncs::CRYPTOHASH_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
+    ::trigfuncs::TRIGFUNCS_BUILTINS,
 ];
 
 const fn total() -> usize {

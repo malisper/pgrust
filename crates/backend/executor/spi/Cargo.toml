@@ -30,9 +30,11 @@ heaptuple = { path = "../../access/common/heaptuple" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parser_seams = { path = "../../parser/parser_seams" }
 analyze_seams = { path = "../../parser/analyze_seams" }
+parser_small1 = { path = "../../parser/parser_small1" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 plancache = { path = "../../utils/cache/plancache" }
 pquery = { path = "../../tcop/pquery" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 tcop_dest = { path = "../../tcop/dest" }
 tupdesc = { path = "../../access/common/tupdesc" }
@@ -42,6 +44,7 @@ xact = { path = "../../access/transam/xact" }
 elog = { path = "../../utils/error/elog" }
 
 [dev-dependencies]
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

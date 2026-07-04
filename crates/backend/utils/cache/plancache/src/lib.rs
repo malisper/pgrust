@@ -391,6 +391,50 @@ pub fn CachedPlanIsValid(h: CachedPlanSourceHandle) -> bool {
     with_source(h, |src| src.is_valid)
 }
 
+// C CachedPlanIsSimplyValid (plancache.c) minus the resowner arm: true only
+// while `cplan` is the source's current generic plan, both are valid, and the
+// captured search_path still matches the current environment. Caller must
+// hold a refcount on `cplan`.
+pub fn CachedPlanIsSimplyValid(
+    h: CachedPlanSourceHandle,
+    cplan: CachedPlanHandle,
+) -> PgResult<bool> {
+    let ok = with_cache(|pc| {
+        let (src_valid, gplan) = {
+            let src = source_mut(pc, h);
+            (src.is_valid, src.gplan)
+        };
+        src_valid && gplan == Some(cplan) && plan_mut(pc, cplan).is_valid
+    });
+    if !ok {
+        return Ok(false);
+    }
+    // Matcher taken out of the registry: SearchPathMatchesCurrentEnvironment
+    // probes catalogs and must run outside the cache borrow.
+    let mut matcher = with_source(h, |src| src.search_path.take());
+    let matches = match matcher.as_mut() {
+        Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m),
+        None => panic!("CachedPlanIsSimplyValid: valid revalidatable source lost its search_path"),
+    };
+    with_source(h, |src| src.search_path = matcher);
+    matches
+}
+
+thread_local! {
+    // Monotonic count of plancache invalidation events; consumers holding
+    // uncached coercion expressions (plpgsql cast cache) rebuild on any bump
+    // (conservative stand-in for C's CachedExpression is_valid).
+    static INVAL_COUNTER: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+pub fn PlanCacheInvalCounter() -> u64 {
+    INVAL_COUNTER.with(core::cell::Cell::get)
+}
+
+fn bump_inval_counter() {
+    INVAL_COUNTER.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
 /// Valid while the caller holds a refcount on `cplan` (C: cplan->stmt_list).
 pub fn CachedPlanStmtList(cplan: CachedPlanHandle) -> &'static [PlannedStmt<'static>] {
     with_plan(cplan, |plan| {
@@ -459,12 +503,13 @@ pub fn GetCachedPlan(
             src.num_custom_plans += 1;
         });
         plan = Some(built);
-    } else {
-        with_source(h, |src| src.num_generic_plans += 1);
     }
 
     let plan = plan.expect("GetCachedPlan: no plan chosen");
     with_cache(|pc| {
+        if !customplan {
+            source_mut(pc, h).num_generic_plans += 1;
+        }
         let p = plan_mut(pc, plan);
         p.refcount += 1;
         if customplan && is_saved {
@@ -475,26 +520,37 @@ pub fn GetCachedPlan(
 }
 
 fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -> PgResult<()> {
-    let requires_reval = with_source(h, |src| src.requires_reval);
+    // One borrow per phase; the catalog probe and lock calls run outside.
+    let (requires_reval, is_valid, mut matcher) = with_source(h, |src| {
+        let take = src.requires_reval && src.is_valid;
+        (
+            src.requires_reval,
+            src.is_valid,
+            if take { src.search_path.take() } else { None },
+        )
+    });
     if !requires_reval {
-        debug_assert!(with_source(h, |src| src.is_valid));
+        debug_assert!(is_valid);
         return Ok(());
     }
 
-    if with_source(h, |src| src.is_valid) {
-        let mut matcher = with_source(h, |src| src.search_path.take());
+    if is_valid {
         let matches = match matcher.as_mut() {
             Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m)?,
             None => panic!("RevalidateCachedQuery: valid revalidatable source lost its search_path"),
         };
-        with_source(h, |src| src.search_path = matcher);
-        if !matches {
-            invalidate_source(h);
-        }
+        with_cache(|pc| {
+            let src = source_mut(pc, h);
+            src.search_path = matcher;
+            if !matches {
+                if let Some(gplan) = invalidate_source_entry(src) {
+                    plan_mut(pc, gplan).is_valid = false;
+                }
+            }
+        });
     }
 
-    if with_source(h, |src| src.is_valid) {
-        let query_list = with_source(h, |src| src.query_list);
+    if let Some(query_list) = with_source(h, |src| src.is_valid.then_some(src.query_list)) {
         AcquirePlannerLocks(query_list, true)?;
         if with_source(h, |src| src.is_valid) {
             return Ok(());
@@ -510,20 +566,20 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
 }
 
 fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
-    let Some(gplan) = with_source(h, |src| src.gplan) else {
-        return Ok(false);
-    };
-
     let user = miscinit::GetUserId();
-    let (mut is_valid, stmt_list) = with_cache(|pc| {
-        debug_assert!(source_mut(pc, h).is_valid);
+    let Some((gplan, mut is_valid, stmt_list)) = with_cache(|pc| {
+        let src = source_mut(pc, h);
+        debug_assert!(src.is_valid);
+        let gplan = src.gplan?;
         let plan = plan_mut(pc, gplan);
         debug_assert!(plan.refcount > 0);
         if plan.is_valid && plan.depends_on_role && plan.plan_role_id != user {
             plan.is_valid = false;
         }
-        (plan.is_valid, plan.stmt_list)
-    });
+        Some((gplan, plan.is_valid, plan.stmt_list))
+    }) else {
+        return Ok(false);
+    };
 
     if is_valid {
         AcquireExecutorLocks(stmt_list, true)?;
@@ -1186,6 +1242,25 @@ pub fn CachedPlanFixedResult(h: CachedPlanSourceHandle) -> bool {
     with_source(h, |src| src.fixed_result)
 }
 
+#[derive(Clone, Copy)]
+pub struct SourceExecInfo {
+    pub fixed_result: bool,
+    pub num_params: usize,
+    pub query_string: &'static str,
+    pub commandTag: CommandTag,
+}
+
+/// ExecuteQuery's per-EXECUTE field reads in one registry borrow (C reads
+/// plansource fields directly).
+pub fn CachedPlanSourceExecInfo(h: CachedPlanSourceHandle) -> SourceExecInfo {
+    with_source(h, |src| SourceExecInfo {
+        fixed_result: src.fixed_result,
+        num_params: src.param_types.len(),
+        query_string: src.query_string,
+        commandTag: src.commandTag,
+    })
+}
+
 pub fn CachedPlanGeneration(cplan: CachedPlanHandle) -> i32 {
     with_plan(cplan, |plan| plan.generation)
 }
@@ -1204,6 +1279,7 @@ fn invalidate_source(h: CachedPlanSourceHandle) {
 }
 
 pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];
@@ -1248,6 +1324,7 @@ pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
 }
 
 pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];
@@ -1289,6 +1366,7 @@ pub fn PlanCacheSysCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
 }
 
 pub fn ResetPlanCache() {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];

@@ -224,6 +224,42 @@ pub fn contain_vars_of_level(node: Node<'_>, levelsup: i32) -> PgResult<bool> {
     query_or_expression_tree_walker(node, &mut cx, 0)
 }
 
+struct ContainUplevelVars {
+    sublevels_up: i64,
+}
+
+impl<'mcx> NodeWalker<'mcx> for ContainUplevelVars {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var => Ok(node.as_var().unwrap().varlevelsup as i64 >= self.sublevels_up),
+            NodeTag::T_CurrentOfExpr => Ok(false),
+            t @ NodeTag::T_PlaceHolderVar => deferred("contain_uplevel_vars_walker", t),
+            NodeTag::T_Query => {
+                let q = node.as_query().unwrap();
+                self.sublevels_up += 1;
+                let r = query_tree_walker(q, self, 0);
+                self.sublevels_up -= 1;
+                r
+            }
+            _ => expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        r
+    }
+}
+
+/// Any Var escaping `node` (varlevelsup >= 1 relative to it); the gate for
+/// C's IncrementVarSublevelsUp being a no-op.
+pub fn contain_uplevel_vars(node: Node<'_>) -> PgResult<bool> {
+    let mut cx = ContainUplevelVars { sublevels_up: 1 };
+    query_or_expression_tree_walker(node, &mut cx, 0)
+}
+
 struct ContainVarsReturningOldOrNew;
 
 impl<'mcx> NodeWalker<'mcx> for ContainVarsReturningOldOrNew {
@@ -293,10 +329,9 @@ fn upper_level_error(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("Upper-level {what} found where not expected")))
 }
 
-// PVC flags are consulted only by the Aggref/WindowFunc/PHV arms, all
-// deferred with their payloads; the struct carries no flags until then.
 struct PullVarClause<'mcx> {
     mcx: Mcx<'mcx>,
+    flags: u32,
     varlist: NodeList<'mcx>,
 }
 
@@ -310,12 +345,46 @@ impl<'mcx> NodeWalker<'mcx> for PullVarClause<'mcx> {
                 self.varlist.lappend(self.mcx, node)?;
                 return Ok(false);
             }
-            // INCLUDE/RECURSE/error all need these payloads (levelsup
-            // checks, argument lists) to stay faithful — deferred together.
-            t @ (NodeTag::T_Aggref
-            | NodeTag::T_GroupingFunc
-            | NodeTag::T_WindowFunc
-            | NodeTag::T_PlaceHolderVar) => deferred("pull_var_clause_walker", t),
+            NodeTag::T_Aggref => {
+                if node.as_aggref().unwrap().agglevelsup != 0 {
+                    return Err(upper_level_error("Aggref"));
+                }
+                if self.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_AGGREGATES == 0 {
+                    return Err(Box::new(PgError::error(
+                        "Aggref found where not expected".to_string(),
+                    )));
+                }
+            }
+            NodeTag::T_GroupingFunc => {
+                if node.as_grouping_func().unwrap().agglevelsup != 0 {
+                    return Err(upper_level_error("GROUPING"));
+                }
+                if self.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_AGGREGATES == 0 {
+                    return Err(Box::new(PgError::error(
+                        "GROUPING found where not expected".to_string(),
+                    )));
+                }
+            }
+            NodeTag::T_WindowFunc => {
+                if self.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_WINDOWFUNCS == 0 {
+                    return Err(Box::new(PgError::error(
+                        "WindowFunc found where not expected".to_string(),
+                    )));
+                }
+            }
+            t @ NodeTag::T_PlaceHolderVar => deferred("pull_var_clause_walker", t),
             _ => {}
         }
         expression_tree_walker(node, self)
@@ -340,14 +409,66 @@ pub fn pull_var_clause<'mcx>(
         flags & (PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS)
             != (PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS)
     );
-    let _ = flags;
-    let mut cx = PullVarClause { mcx, varlist: NodeList::nil() };
+    let mut cx = PullVarClause { mcx, flags, varlist: NodeList::nil() };
     cx.visit(node)?;
     Ok(cx.varlist)
 }
 
-pub fn flatten_join_alias_vars<'mcx>(_query: &Query<'mcx>, _node: Node<'mcx>) -> ! {
-    panic!("flatten_join_alias_vars deferred: RowExpr/PlaceHolderVar vocabulary unported");
+/// C mutator, detection form: join-alias Vars only arise from merged
+/// USING/NATURAL columns or join whole-row refs, both unported (loud in the
+/// parser), so C's rewrite is the identity on every tree that parses today.
+pub fn flatten_join_alias_vars<'mcx>(
+    query: &Query<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    struct W<'a, 'mcx> {
+        query: &'a Query<'mcx>,
+        sublevels_up: i64,
+    }
+    impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            match node.node_tag() {
+                NodeTag::T_Var => {
+                    let v = node.as_var().unwrap();
+                    if v.varlevelsup as i64 == self.sublevels_up {
+                        let rte = self
+                            .query
+                            .rtable
+                            .nth(v.varno as usize - 1)
+                            .as_range_tbl_entry()
+                            .expect("rtable cell");
+                        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
+                            panic!(
+                                "flatten_join_alias_vars (var.c): join alias Var \
+                                 (varno {}); join-using lane",
+                                v.varno
+                            );
+                        }
+                    }
+                    Ok(false)
+                }
+                t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
+                NodeTag::T_Query => {
+                    let q = node.as_query().unwrap();
+                    self.sublevels_up += 1;
+                    let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+                    self.sublevels_up -= 1;
+                    r
+                }
+                _ => expression_tree_walker(node, self),
+            }
+        }
+
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.sublevels_up += 1;
+            let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+            self.sublevels_up -= 1;
+            r
+        }
+    }
+    let mut w = W { query, sublevels_up: 0 };
+    w.visit(node)?;
+    Ok(node)
 }
 
 // flatten_group_exprs (var.c), root == NULL arm: GROUP-RTE Vars replaced by

@@ -9,6 +9,7 @@ use crate::pathnode::{add_existing_path, create_pathtarget, create_projection_pa
 use crate::planmain::{fetch_final_rel, query_planner};
 use crate::prep::preprocess_targetlist;
 use crate::run::PlannerRun;
+pub(crate) use types_pathnodes::run::sortgrouplist_exprs;
 use crate::{is_parallel_safe_exprs, is_parallel_safe_opt};
 
 pub fn grouping_planner<'mcx>(
@@ -294,9 +295,6 @@ fn grouping_planner_tail<'mcx>(
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            if parse.commandType == CmdType::CMD_MERGE {
-                panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
-            }
             debug_assert!(parse.withCheckOptions.is_nil());
             debug_assert!(run.root.rowMarks.is_empty());
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
@@ -311,6 +309,16 @@ fn grouping_planner_tail<'mcx>(
                 }
                 ids
             });
+            let merge_action_list = (!parse.mergeActionList.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for action in &parse.mergeActionList {
+                    ids.push(run.root.alloc_expr_node(action));
+                }
+                ids
+            });
+            let merge_join_condition = (parse.commandType == CmdType::CMD_MERGE)
+                .then(|| parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -321,6 +329,8 @@ fn grouping_planner_tail<'mcx>(
                 update_colnos,
                 returning_list,
                 onconflict,
+                merge_action_list,
+                merge_join_condition,
             );
             path_id = run.root.alloc_path(mtpath);
         }
@@ -506,6 +516,16 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(f, out);
             }
         }
+        // PVC_RECURSE_WINDOWFUNCS: window args feed the grouped input target.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_agg_input_vars(f, out);
+            }
+        }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
@@ -539,6 +559,21 @@ fn pull_agg_input_vars<'mcx>(
         }
         NodeTag::T_RelabelType => {
             pull_agg_input_vars(node.as_relabel_type().unwrap().arg, out)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_agg_input_vars(a, out);
+            }
         }
         NodeTag::T_Param => {}
         NodeTag::T_NullTest => {
@@ -574,6 +609,48 @@ fn pull_agg_input_vars<'mcx>(
             for a in &sp.args {
                 pull_agg_input_vars(a, out);
             }
+        }
+        NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_agg_input_vars(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_agg_input_vars(cw.expr.expect("CaseWhen.expr"), out);
+                pull_agg_input_vars(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_agg_input_vars(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            pull_agg_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
         }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
@@ -760,13 +837,16 @@ fn create_grouping_paths<'mcx>(
 
     if can_hash {
         if !parse.groupingSets.is_nil() {
-            // C's hash-only consider_groupingsets_paths(is_sorted=false) arm.
-            if crate::gucs::enable_hashagg() {
-                panic!(
-                    "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
-                     strategy unported — set enable_hashagg=off; grouping-sets lane"
-                );
-            }
+            crate::groupingsets::consider_groupingsets_paths(
+                run,
+                grouped_rel,
+                cheapest,
+                false,
+                true,
+                &agg_costs,
+                &having_qual,
+                num_groups,
+            )?;
         } else {
             let group_clause =
                 crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
@@ -805,33 +885,7 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
     )
 }
 
-// get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
-pub(crate) fn sortgrouplist_exprs<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    clauses: &[types_pathnodes::NodeId],
-    tlist: &types_nodes::list::NodeList<'mcx>,
-) -> mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> {
-    let mut exprs = mcx::PgVec::new_in(run.mcx);
-    for &gc_id in clauses {
-        let sgref = run
-            .root
-            .expr_node(gc_id)
-            .as_sort_group_clause()
-            .expect("sortgroup clause cell")
-            .tleSortGroupRef;
-        let tle_node = tlist
-            .iter()
-            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
-            .expect("sortgroupref has a tlist entry");
-        let expr = tle_node.as_target_entry().unwrap().expr;
-        let id = run.intern_expr(expr);
-        exprs.push((id, expr));
-    }
-    exprs
-}
-
-// get_number_of_groups (planner.c); the hash_sets leg needs the unported
-// hashed strategy and stays loud.
+// get_number_of_groups (planner.c).
 fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
     let parse = run.parse();
     let path_rows = {
@@ -841,12 +895,6 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
     if !parse.groupClause.is_nil() {
         if !parse.groupingSets.is_nil() {
             let mut gd = run.gset_data.take().expect("grouping sets preprocessed");
-            if !gd.unsortable_sets.is_empty() {
-                panic!(
-                    "get_number_of_groups (planner.c): unsortable grouping sets need the \
-                     hashed strategy (unported); grouping-sets lane"
-                );
-            }
             let tlist = run.processed_tlist();
             let mut dnum_groups = 0.0;
             for rollup in gd.rollups.iter_mut() {
@@ -865,6 +913,25 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
                     rollup.numGroups += num_groups;
                 }
                 dnum_groups += rollup.numGroups;
+            }
+            if !gd.hash_sets_idx.is_empty() {
+                gd.dNumHashGroups = 0.0;
+                let clauses = crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.processed_groupClause,
+                );
+                let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
+                for (gset, gs) in gd.hash_sets_idx.iter().zip(gd.unsortable_sets.iter_mut()) {
+                    let num_groups = crate::selfuncs::estimate_num_groups_pgset(
+                        run,
+                        &group_exprs,
+                        path_rows,
+                        Some(gset),
+                    )?;
+                    gs.numGroups = num_groups;
+                    gd.dNumHashGroups += num_groups;
+                }
+                dnum_groups += gd.dNumHashGroups;
             }
             run.gset_data = Some(gd);
             return Ok(dnum_groups);
@@ -1167,12 +1234,12 @@ fn preprocess_limit<'mcx>(
     Ok(tuple_fraction)
 }
 
-// The no-postponable-columns arm returns final_target; the projection-
-// building arm is loud.
+// make_sort_input_target (planner.c); the SRF-postponement leg is loud.
 fn make_sort_input_target<'mcx>(
     run: &mut PlannerRun<'mcx>,
     final_target: types_pathnodes::PtId,
 ) -> PgResult<types_pathnodes::PtId> {
+    let mcx = run.mcx;
     let parse = run.parse();
     debug_assert!(!parse.sortClause.is_nil());
     let mut have_srf = false;
@@ -1180,10 +1247,12 @@ fn make_sort_input_target<'mcx>(
     let mut have_volatile = false;
     let mut have_expensive = false;
     let n = run.root.pathtarget(final_target).exprs.len();
+    let mut postpone_col: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
     for i in 0..n {
         let ft = run.root.pathtarget(final_target);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
         let expr = *run.root.expr_node(ft.exprs[i]);
+        let mut postpone = false;
         if sgref != 0 {
             if !have_srf_sortcols
                 && parse.hasTargetSRFs
@@ -1191,18 +1260,19 @@ fn make_sort_input_target<'mcx>(
             {
                 have_srf_sortcols = true;
             }
-            continue;
-        }
-        if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
+        } else if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
             have_srf = true;
         } else if clauses::contain_volatile_functions(expr)? {
+            postpone = true;
             have_volatile = true;
         } else {
             let cost = crate::costsize::cost_qual_eval_node(expr)?;
             if cost.per_tuple > 10.0 * crate::gucs::cpu_operator_cost() {
+                postpone = true;
                 have_expensive = true;
             }
         }
+        postpone_col.push(postpone);
     }
     let postpone_srfs = have_srf && !have_srf_sortcols;
     if !(postpone_srfs
@@ -1211,7 +1281,62 @@ fn make_sort_input_target<'mcx>(
     {
         return Ok(final_target);
     }
-    panic!("make_sort_input_target (planner.c): postponed-column projection; M2 sort lane");
+    assert!(
+        !postpone_srfs,
+        "make_sort_input_target (planner.c): SRF postponement; M2 sort lane"
+    );
+
+    let mut input = types_pathnodes::PathTarget::new(mcx);
+    let mut postponable = types_nodes::list::NodeList::nil();
+    for i in 0..n {
+        let ft = run.root.pathtarget(final_target);
+        let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
+        let eid = ft.exprs[i];
+        if postpone_col[i] {
+            postponable.lappend(mcx, *run.root.expr_node(eid))?;
+        } else {
+            input.exprs.push(eid);
+            input.sortgrouprefs.push(sgref);
+        }
+    }
+    let postponable_vars = vars::pull_var_clause(
+        mcx,
+        types_nodes::Node::mk_list(mcx, postponable)?,
+        vars::PVC_INCLUDE_AGGREGATES
+            | vars::PVC_INCLUDE_WINDOWFUNCS
+            | vars::PVC_INCLUDE_PLACEHOLDERS,
+    )?;
+    for v in &postponable_vars {
+        let dup = input
+            .exprs
+            .iter()
+            .any(|&eid| types_nodes::equal(*run.root.expr_node(eid), v));
+        if !dup {
+            input.exprs.push(run.intern_expr(v));
+            input.sortgrouprefs.push(0);
+        }
+    }
+    if input.sortgrouprefs.iter().all(|&r| r == 0) {
+        input.sortgrouprefs.clear();
+    }
+
+    // set_pathtarget_cost_width (costsize.c), as create_pathtarget.
+    for i in 0..input.exprs.len() {
+        let expr = *run.root.expr_node(input.exprs[i]);
+        if expr.node_tag() != types_nodes::NodeTag::T_Var {
+            let cost = crate::costsize::cost_qual_eval_node(expr)?;
+            input.cost.startup += cost.startup;
+            input.cost.per_tuple += cost.per_tuple;
+        }
+    }
+    let id = run.root.alloc_pathtarget(input);
+    let mut tuple_width: i64 = 0;
+    for i in 0..run.root.pathtarget(id).exprs.len() {
+        let expr = run.root.pathtarget(id).exprs[i];
+        tuple_width += crate::costsize::get_expr_width(run, expr)? as i64;
+    }
+    run.root.pathtarget_mut(id).width = crate::costsize::clamp_width_est(tuple_width);
+    Ok(id)
 }
 
 // Incremental sort and partial paths are loud/absent.
@@ -1284,13 +1409,15 @@ fn create_ordered_paths<'mcx>(
             .base()
             .pathtarget_id
             .expect("sorted path has a pathtarget");
-        if !crate::pathnode::exprs_same(
+        let sorted_path = if !crate::pathnode::exprs_same(
             run,
             &run.root.pathtarget(sorted_target).exprs,
             &run.root.pathtarget(target).exprs,
         ) {
-            panic!("apply_projection_to_path (pathnode.c): post-sort projection; M2 sort lane");
-        }
+            crate::pathnode::apply_projection_to_path(run, ordered_rel, sorted_path, target)?
+        } else {
+            sorted_path
+        };
         crate::pathnode::add_path(run, ordered_rel, sorted_path);
     }
     debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());

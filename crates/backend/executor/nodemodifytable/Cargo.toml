@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 types_trigger = { path = "../../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
 relcache = { path = "../../utils/cache/relcache" }
 trigger = { path = "../../commands/trigger" }
 mcx = { path = "../../../_support/mcx" }

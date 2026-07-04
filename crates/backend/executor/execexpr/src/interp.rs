@@ -41,6 +41,14 @@ fn missing_slot(src: SlotSrc) -> ! {
 
 #[cold]
 #[inline(never)]
+fn invalid_role_oid(roleid: ::types_core::Oid) -> Box<PgError> {
+    PgError::new(::types_error::ERROR, format!("invalid role OID: {roleid}"))
+        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT)
+        .into()
+}
+
+#[cold]
+#[inline(never)]
 fn no_result_slot() -> ! {
     panic!("execexpr: projection step without a result slot")
 }
@@ -380,7 +388,7 @@ fn run_program<'mcx>(
     mut result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
-    let ExprState { steps, frames, resnd, .. } = state;
+    let ExprState { steps, frames, resnd, saop_tables, .. } = state;
     let res = *resnd;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
@@ -570,6 +578,19 @@ fn run_program<'mcx>(
                 )?;
                 write_out(*out, value, isnull);
             }
+            Step::HashedScalarArrayOp { call, inclause, typlen, typbyval, typalign, table, out } => {
+                let arr = read_out(*out);
+                let (value, isnull) = eval_hashed_scalar_array_op(
+                    &mut saop_tables[*table as usize],
+                    call,
+                    *inclause,
+                    *typlen,
+                    *typbyval,
+                    *typalign,
+                    arr,
+                )?;
+                write_out(*out, value, isnull);
+            }
             Step::ArrayExprStep {
                 elems,
                 nelems,
@@ -657,7 +678,7 @@ fn run_program<'mcx>(
                 }
                 write_out(*out, value, isnull);
             }
-            Step::SqlValueFunction { op, typmod, timetz, out } => {
+            Step::SqlValueFunction { op, typmod, scratch, out } => {
                 use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
                 let value = match op {
                     Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
@@ -666,10 +687,10 @@ fn run_program<'mcx>(
                         // SAFETY: compile-allocated 12-byte 8-aligned image
                         // slot owned by this step (steps.rs note).
                         unsafe {
-                            timetz.as_ptr().cast::<i64>().write(t.time);
-                            timetz.as_ptr().add(8).cast::<i32>().write(t.zone);
+                            scratch.as_ptr().cast::<i64>().write(t.time);
+                            scratch.as_ptr().add(8).cast::<i32>().write(t.zone);
                         }
-                        Datum::from_usize(timetz.as_ptr() as usize)
+                        Datum::from_usize(scratch.as_ptr() as usize)
                     }
                     Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
                         Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(*typmod))
@@ -680,9 +701,28 @@ fn run_program<'mcx>(
                     Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
                         Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(*typmod)?)
                     }
+                    Op::SVFOP_CURRENT_ROLE | Op::SVFOP_CURRENT_USER | Op::SVFOP_USER
+                    | Op::SVFOP_SESSION_USER => {
+                        let roleid = if matches!(op, Op::SVFOP_SESSION_USER) {
+                            miscinit_seams::get_session_user_id::call()
+                        } else {
+                            miscinit_seams::get_user_id::call()
+                        };
+                        let shape = syscache_seams::lookup_authid_session_by_oid::call(roleid)?
+                            .ok_or_else(|| invalid_role_oid(roleid))?;
+                        // SAFETY: compile-allocated NameData-sized image slot
+                        // owned by this step (steps.rs note).
+                        unsafe {
+                            scratch
+                                .as_ptr()
+                                .cast::<::types_tuple::NameData>()
+                                .write(shape.rolname);
+                        }
+                        Datum::from_usize(scratch.as_ptr() as usize)
+                    }
                     other => panic!(
-                        "execexpr EEOP_SQLVALUEFUNCTION: name op {other:?} unported \
-                         (grammar arms 2149-2155 are louds)"
+                        "execexpr EEOP_SQLVALUEFUNCTION: op {other:?} unported \
+                         (CURRENT_CATALOG/CURRENT_SCHEMA — dbcommands/namespace lanes)"
                     ),
                 };
                 write_out(*out, value, false);
@@ -695,6 +735,21 @@ fn run_program<'mcx>(
             Step::JumpIfNotTrue { jumpdone, out } => {
                 let r = read_out(*out);
                 if r.isnull || !r.value.as_bool() {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::JumpIfNotNull { jumpdone, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::JumpIfNull { jumpdone, out } => {
+                if read_out(*out).isnull {
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
@@ -718,6 +773,46 @@ fn run_program<'mcx>(
                         });
                     }
                 }
+            }
+            Step::ArrayExprEval { state, out } => {
+                // SAFETY: compile-allocated state, live for 'mcx, sole access.
+                let st = unsafe { &mut *state.as_ptr() };
+                let r = crate::arrayops::eval_array_expr(st)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::SbsrefSubscripts { state, jumpdone, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                if !crate::arrayops::sbsref_check_subscripts(st)? {
+                    write_out(*out, Datum::null(), true);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::SbsrefFetch { state, slice, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = if *slice {
+                    crate::arrayops::sbsref_fetch_slice(st, cur)?
+                } else {
+                    crate::arrayops::sbsref_fetch(st, cur)?
+                };
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::SbsrefOld { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                crate::arrayops::sbsref_fetch_old(st, cur)?;
+            }
+            Step::SbsrefAssign { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::arrayops::sbsref_assign(st, cur)?;
+                write_out(*out, r.value, r.isnull);
             }
             Step::Qual { jumpdone } => {
                 // SAFETY: res is the state's live result cell.
@@ -1128,13 +1223,19 @@ fn eval_scalar_array_op(
         return Ok((Datum::null(), true));
     }
     let p = arr.value.as_usize() as *const u8;
-    // SAFETY: non-null array datum; folded/deserialized arrays here always
-    // carry an inline 4-byte header.
-    let b0 = unsafe { *p };
-    assert!(b0 != 0x01 && b0 & 0x03 == 0, "scalararrayop: toasted/packed array image");
-    // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
-    let img = unsafe {
-        core::slice::from_raw_parts(p, ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)))
+    // DatumGetArrayTypeP: borrow in place on an inline 4-byte header, else
+    // detoast/unpack a copy into the armed per-eval result context (C's
+    // CurrentMemoryContext at eval).
+    // SAFETY: non-null array datum addresses a live varlena.
+    let img: &[u8] = unsafe {
+        if ::types_tuple::varatt::varatt_is_4b_u(p) {
+            core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+        } else {
+            let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+            let mcx = crate::steps::fcinfo_mut(call.fcinfo, call.nargs).result_mcx();
+            let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+            &*(flat.leak() as *const [u8])
+        }
     };
     let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
     let mut nitems = 1i64;
@@ -1201,6 +1302,159 @@ fn eval_scalar_array_op(
                 bitmask = 1;
                 bitmap_byte += 1;
             }
+        }
+    }
+
+    if resultnull {
+        return Ok((Datum::null(), true));
+    }
+    Ok((Datum::from_bool(result), false))
+}
+
+// ExecEvalHashedScalarArrayOp (execExprInterp.c): OR-semantics probe against
+// a table of the const array's elements, built on first evaluation.
+#[allow(clippy::too_many_arguments)]
+fn eval_hashed_scalar_array_op(
+    tab: &mut crate::steps::SaopTable<'_>,
+    call: &FuncCall,
+    inclause: bool,
+    typlen: i16,
+    typbyval: bool,
+    typalign: u8,
+    arr: NullableDatum,
+) -> PgResult<(Datum, bool)> {
+    // The planner only converts a non-null Const array.
+    debug_assert!(!arr.isnull);
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo the step's carrier points at.
+    let strictfunc = unsafe { call.flinfo.as_ref() }.fn_strict;
+    // SAFETY: arg slot 0 of the call's live fcinfo image.
+    let scalar = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+
+    if scalar.isnull && strictfunc {
+        return Ok((Datum::null(), true));
+    }
+
+    let hash_of = |hashcall: &FuncCall, v: Datum| -> PgResult<u32> {
+        // SAFETY: arg slot 0 of the hashcall's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(hashcall.fcinfo, 0)
+                .write(NullableDatum { value: v, isnull: false })
+        };
+        let (h, _) = invoke(hashcall)?;
+        Ok(h.as_i32() as u32)
+    };
+    let eq_of = |call: &FuncCall, a: Datum, b: Datum| -> PgResult<bool> {
+        // SAFETY: arg slots 0/1 of the call's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(call.fcinfo, 0)
+                .write(NullableDatum { value: a, isnull: false });
+            crate::steps::arg_slot_of(call.fcinfo, 1)
+                .write(NullableDatum { value: b, isnull: false });
+        }
+        let (r, _) = invoke(call)?;
+        Ok(r.as_bool())
+    };
+
+    if !tab.built {
+        let hashcall = tab.hashcall;
+        let p = arr.value.as_usize() as *const u8;
+        // SAFETY: non-null const array datum with an inline 4-byte header.
+        let b0 = unsafe { *p };
+        assert!(b0 != 0x01 && b0 & 0x03 == 0, "hashed scalararrayop: toasted/packed array image");
+        // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
+        let img = unsafe {
+            core::slice::from_raw_parts(
+                p,
+                ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)),
+            )
+        };
+        let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
+        let mut nitems = 1i64;
+        for d in &dims[..ndim as usize] {
+            nitems *= *d as i64;
+        }
+        if ndim == 0 {
+            nitems = 0;
+        }
+        let bitmap_off = ::arrayfuncs::foundation::arr_nullbitmap_off(img);
+        let mut off = ::arrayfuncs::foundation::arr_data_offset(img);
+        let mut bitmask: u32 = 1;
+        let mut bitmap_byte = 0usize;
+        let mcx = *tab.map.allocator();
+        for _ in 0..nitems {
+            let elt_null = match bitmap_off {
+                Some(bo) => (img[bo + bitmap_byte] as u32 & bitmask) == 0,
+                None => false,
+            };
+            if elt_null {
+                tab.has_nulls = true;
+            } else {
+                off = ::arrayfuncs::foundation::att_align_nominal(off, typalign);
+                // SAFETY: off stays within the VARSIZE image per the array layout.
+                let ep = unsafe { img.as_ptr().add(off) };
+                let elt = ::arrayfuncs::foundation::fetch_att(ep, typbyval, typlen as i32);
+                off = ::arrayfuncs::foundation::att_addlength_pointer(off, typlen as i32, ep);
+
+                let h = hash_of(&hashcall, elt)?;
+                let bucket = tab
+                    .map
+                    .entry(h)
+                    .or_insert_with(|| ::mcx::PgVec::new_in(mcx));
+                let mut found = false;
+                for i in 0..bucket.len() {
+                    if eq_of(call, elt, bucket[i])? {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    bucket.push(elt);
+                }
+            }
+            if bitmap_off.is_some() {
+                bitmask <<= 1;
+                if bitmask == 0x100 {
+                    bitmask = 1;
+                    bitmap_byte += 1;
+                }
+            }
+        }
+        tab.built = true;
+    }
+
+    // Probe (C probes even a null non-strict scalar, value word 0).
+    let mut hashfound = false;
+    {
+        let h = hash_of(&tab.hashcall, scalar.value)?;
+        if let Some(bucket) = tab.map.get(&h) {
+            for i in 0..bucket.len() {
+                if eq_of(call, scalar.value, bucket[i])? {
+                    hashfound = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut result = if inclause { hashfound } else { !hashfound };
+    let mut resultnull = false;
+
+    // No match + nulls in the array: strict fns yield NULL; non-strict fns
+    // get one call with a null rhs (result negated for NOT IN).
+    if !hashfound && tab.has_nulls {
+        if strictfunc {
+            return Ok((Datum::null(), true));
+        }
+        // SAFETY: arg slots 0/1 of the call's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(call.fcinfo, 0).write(scalar);
+            crate::steps::arg_slot_of(call.fcinfo, 1).write(NullableDatum::null());
+        }
+        let (r, isnull) = invoke(call)?;
+        result = r.as_bool();
+        resultnull = isnull;
+        if !inclause {
+            result = !result;
         }
     }
 

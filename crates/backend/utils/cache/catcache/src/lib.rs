@@ -22,7 +22,7 @@ use types_tuple::{ItemPointerData, TupleDescData};
 
 pub use compute::{CatCKey, CCFastKind, CATCACHE_MAXKEYS};
 pub use graph::{
-    CatCacheInvalidate, CatalogCacheFlushCatalog, InitCatCache, ResetCatalogCaches,
+    inval_epoch, CatCacheInvalidate, CatalogCacheFlushCatalog, InitCatCache, ResetCatalogCaches,
     ResetCatalogCachesExt,
 };
 pub use init::{cache_nkeys, cache_relisshared, cache_tupdesc, InitCatCachePhase2};

@@ -384,6 +384,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_MergeJoin => "Merge",
         NodeTag::T_Hash => "Hash",
         NodeTag::T_Material => "Materialize",
+        NodeTag::T_Memoize => "Memoize",
         NodeTag::T_Agg => {
             let agg = node.as_agg().expect("Agg plan node");
             assert!(
@@ -699,6 +700,9 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_Material => {
             show_material_info(node, es);
+        }
+        NodeTag::T_Memoize => {
+            show_memoize_info(node, ancestors, es)?;
         }
         NodeTag::T_SubqueryScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
@@ -1533,6 +1537,58 @@ fn show_material_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     }
 }
 
+// show_memoize_info (explain.c); the parallel-worker stanza has no lane.
+fn show_memoize_info<'mcx>(
+    node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    use core::fmt::Write;
+    let m = node.as_memoize().expect("Memoize plan node");
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let mut keystr = PgString::new_in(mcx);
+    let mut sep = "";
+    for expr in &m.param_exprs {
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, node, ancestors, expr, useprefix, false, &mut buf)?;
+        write!(keystr, "{sep}{}", buf.as_str()).expect("PgString write");
+        sep = ", ";
+    }
+    ExplainPropertyText("Cache Key", keystr.as_str(), es);
+    ExplainPropertyText("Cache Mode", if m.binary_mode { "binary" } else { "logical" }, es);
+
+    if !es.analyze || es.qd.is_null() {
+        return Ok(());
+    }
+    let id = plan_of(node).plan_node_id;
+    let Some(si) = execmain_seams::query_desc_memoize_instrument::call(es.qd, id) else {
+        return Ok(());
+    };
+    if si.cache_misses > 0 {
+        let mem_peak_kb = (si.mem_peak + 1023) / 1024;
+        if es.format != EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es);
+            ExplainPropertyInteger("Cache Misses", None, si.cache_misses as i64, es);
+            ExplainPropertyInteger("Cache Evictions", None, si.cache_evictions as i64, es);
+            ExplainPropertyInteger("Cache Overflows", None, si.cache_overflows as i64, es);
+            ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb as i64, es);
+        } else {
+            crate::format::ExplainIndentText(es);
+            append!(
+                es,
+                "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
+                si.cache_hits,
+                si.cache_misses,
+                si.cache_evictions,
+                si.cache_overflows,
+                mem_peak_kb
+            );
+        }
+    }
+    Ok(())
+}
+
 fn show_windowagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if let Some(stats) = tuplestore_stats(node, es) {
         show_storage_info(stats, es);
@@ -1651,6 +1707,18 @@ fn deparse_expr<'mcx>(
                 get_coercion_expr(
                     es, plan_node, ancestors, r.arg, r.resulttype, r.resulttypmod, useprefix,
                     buf,
+                )
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let io = expr.as_coerce_via_io().unwrap();
+            if io.coerceformat == types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+                && !showimplicit
+            {
+                deparse_expr(es, plan_node, ancestors, io.arg, useprefix, false, buf)
+            } else {
+                get_coercion_expr(
+                    es, plan_node, ancestors, io.arg, io.resulttype, -1, useprefix, buf,
                 )
             }
         }
@@ -1805,6 +1873,39 @@ fn deparse_expr<'mcx>(
                     | Op::SVFOP_LOCALTIMESTAMP_N
             ) {
                 write!(buf, "({})", svf.typmod).expect("PgString write");
+            }
+            Ok(())
+        }
+        // get_rule_expr T_SubscriptingRef (fetch form; stores never reach
+        // EXPLAIN expressions).
+        NodeTag::T_SubscriptingRef => {
+            let sr = expr.as_subscripting_ref().unwrap();
+            if sr.refassgnexpr.is_some() {
+                node_gap("get_rule_expr", "SubscriptingRef store deparse (ruleutils lane)");
+            }
+            let refexpr = sr.refexpr.expect("SubscriptingRef.refexpr");
+            let need_parens = refexpr.node_tag() != NodeTag::T_Var;
+            if need_parens {
+                buf.try_push('(')?;
+            }
+            deparse_expr(es, plan_node, ancestors, refexpr, useprefix, showimplicit, buf)?;
+            if need_parens {
+                buf.try_push(')')?;
+            }
+            let mut low = sr.reflowerindexpr.iter();
+            let has_lower = !sr.reflowerindexpr.is_nil();
+            for up in sr.refupperindexpr.iter() {
+                buf.try_push('[')?;
+                if has_lower {
+                    if let Some(Some(l)) = low.next() {
+                        deparse_expr(es, plan_node, ancestors, l, useprefix, false, buf)?;
+                    }
+                    buf.try_push(':')?;
+                }
+                if let Some(u) = up {
+                    deparse_expr(es, plan_node, ancestors, u, useprefix, false, buf)?;
+                }
+                buf.try_push(']')?;
             }
             Ok(())
         }
@@ -1988,6 +2089,19 @@ fn deparse_expr<'mcx>(
                 .expect("PgString write");
             deparse_expr(es, plan_node, ancestors, sa.args.nth(1), useprefix, true, buf)?;
             buf.try_push_str("))")?;
+            Ok(())
+        }
+        // get_rule_expr T_ArrayExpr.
+        NodeTag::T_ArrayExpr => {
+            let a = expr.as_array_expr().unwrap();
+            buf.try_push_str("ARRAY[")?;
+            for (i, e) in a.elements.iter().enumerate() {
+                if i > 0 {
+                    buf.try_push_str(", ")?;
+                }
+                deparse_expr(es, plan_node, ancestors, e, useprefix, true, buf)?;
+            }
+            buf.try_push(']')?;
             Ok(())
         }
         other => node_gap(
@@ -2179,6 +2293,8 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }
@@ -2198,8 +2314,12 @@ fn deparse_var<'mcx>(
         ResolvedVar::Base(v, a) => (v, a),
         // C get_variable: a non-Var referent prints parenthesized.
         ResolvedVar::Expr(expr, ctx) => {
+            // push_child_plan: the current node stays on the ancestor stack
+            // while deparsing in the child's context (initplan Params on this
+            // node must stay resolvable).
+            let stacked = Ancestors { entry: AncestorEntry::Plan(plan_node), parent: ancestors };
             buf.try_push('(')?;
-            deparse_expr(es, ctx, ancestors, expr, useprefix, true, buf)?;
+            deparse_expr(es, ctx, Some(&stacked), expr, useprefix, true, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }

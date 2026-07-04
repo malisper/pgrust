@@ -10,16 +10,19 @@ path = "src/lib.rs"
 [dependencies]
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 dropcmds = { path = "../../commands/dropcmds" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
 tablecmds = { path = "../../commands/tablecmds" }
+trigger = { path = "../../commands/trigger" }
 typecmds = { path = "../../commands/typecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
 statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
+user = { path = "../../commands/user" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
 parser_small1 = { path = "../../parser/parser_small1" }
@@ -65,6 +68,12 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
+
+operatorcmds = { path = "../../commands/operatorcmds" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+extension = { path = "../../commands/extension" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -9,7 +9,10 @@ name = "seams_init"
 path = "src/lib.rs"
 
 [dependencies]
+operatorcmds = { path = "../../backend/commands/operatorcmds" }
+opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
+extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
@@ -36,6 +39,8 @@ xlogreader = { path = "../../backend/access/transam/xlogreader" }
 xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
+be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
+large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 commands_cluster = { path = "../../backend/commands/cluster" }
@@ -66,8 +71,11 @@ nodelockrows = { path = "../../backend/executor/nodelockrows" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 nodematerial = { path = "../../backend/executor/nodematerial" }
+nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
+auth_scram = { path = "../../backend/libpq/auth_scram" }
+crypt = { path = "../../backend/libpq/crypt" }
 be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
@@ -112,6 +120,7 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
@@ -153,6 +162,7 @@ catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+costsize = { path = "../../backend/optimizer/path/costsize" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }
@@ -171,6 +181,7 @@ guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
 variable = { path = "../../backend/commands/variable" }
+user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
 queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }
@@ -183,6 +194,7 @@ snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
 regex_core = { path = "../../backend/regex/regex_core" }
 adt_regexp = { path = "../../backend/utils/adt/regexp" }
+twophase = { path = "../../backend/access/transam/twophase" }
 twophase_config = { path = "../../backend/access/transam/twophase_config" }
 pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }

@@ -308,7 +308,22 @@ pub(crate) fn remove_cl(st: &mut CatCacheState<'_>, cache_id: i32, slot: u32) {
 }
 
 /// `CatCacheInvalidate(SysCache[cacheId], hashValue)`.
+// Bumped on every path that can change what a syscache probe returns;
+// downstream decode-once memos (cache_syscache shape carriers) key on it.
+thread_local! {
+    static INVAL_EPOCH: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+pub fn inval_epoch() -> u64 {
+    INVAL_EPOCH.get()
+}
+
+fn bump_inval_epoch() {
+    INVAL_EPOCH.set(INVAL_EPOCH.get() + 1);
+}
+
 pub fn CatCacheInvalidate(cache_id: i32, hash_value: u32) {
+    bump_inval_epoch();
     with_state(|st| {
         if st.caches.get(cache_id as usize).map(|c| c.is_none()).unwrap_or(true) {
             return;
@@ -416,6 +431,7 @@ pub fn ResetCatalogCaches() -> PgResult<()> {
 }
 
 pub fn ResetCatalogCachesExt(debug_discard: bool) -> PgResult<()> {
+    bump_inval_epoch();
     with_state(|st| {
         for id in 0..st.caches.len() {
             if st.caches[id].is_some() {
@@ -430,6 +446,7 @@ pub(crate) const MAX_CACHES: usize = 96;
 
 /// `CatalogCacheFlushCatalog(catId)`.
 pub fn CatalogCacheFlushCatalog(cat_id: Oid) -> PgResult<()> {
+    bump_inval_epoch();
     let mut targets = [0i32; MAX_CACHES];
     let n = with_state(|st| {
         let mut n = 0;

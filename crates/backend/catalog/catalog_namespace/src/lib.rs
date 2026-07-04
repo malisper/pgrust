@@ -31,14 +31,14 @@ mod visibility;
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
-    RangeVarGetCreationNamespace, ResetTempTableNamespace,
+    QualifiedNameGetCreationNamespace, RangeVarGetCreationNamespace, ResetTempTableNamespace,
 };
 
 pub use lookup::{
     get_collation_oid, get_collation_oid_list, get_namespace_oid, DeconstructQualifiedName,
     FuncCandidate, FuncnameGetCandidates,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
-    OpclassnameGetOpcid, OpernameGetOprid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
+    OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
     TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{

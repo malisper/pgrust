@@ -256,11 +256,15 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
-    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
     predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
     predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
@@ -283,6 +287,7 @@ fn install_xact_periphery_seams() {
     lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
     syscache_seams::search_syscache_exists_reloid::set(|relid| Ok(relid == REL_OID));
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
     relcache_seams::relation_id_get_relation::set(|relid| {
         assert_eq!(relid, REL_OID);
         let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("rel")));
@@ -404,6 +409,29 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
     syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
+    indexcmds_seams::get_default_opclass::set(|_typid, _am| Ok(0));
+    syscache_seams::syscache_hash_value_typeoid::set(|typid| {
+        Ok(typid.wrapping_mul(0x9e37_79b1))
+    });
+    syscache_seams::syscache_hash_value_procoid::set(|funcid| {
+        Ok(funcid.wrapping_mul(0x9e37_79b1))
+    });
+    syscache_seams::lookup_pg_type_typcache_shape::set(|_typid| {
+        Ok(Some(syscache_seams::PgTypeTypcacheShape {
+            typname: types_tuple::NameData::default(),
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+            typstorage: b'p' as i8,
+            typtype: b'b' as i8,
+            typisdefined: true,
+            typrelid: 0,
+            typsubscript: 0,
+            typelem: 0,
+            typarray: 0,
+            typcollation: 0,
+        }))
+    });
     syscache_seams::lookup_pg_type_shape::set(|_typid| {
         Ok(Some(types_tuple::PgTypeShape {
             typlen: 4,
@@ -452,6 +480,9 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
             INT4LE_PROC => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: 16,
                 provariadic: 0,

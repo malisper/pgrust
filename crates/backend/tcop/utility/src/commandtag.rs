@@ -126,7 +126,11 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 .expect("RenameStmt");
             match stmt.renameType {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
-                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    CMDTAG_ALTER_TABLE
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
                 types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
                 types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
                 types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
@@ -177,9 +181,31 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 .expect("GrantStmt");
             if stmt.is_grant { CMDTAG_GRANT } else { CMDTAG_REVOKE }
         }
-        T_GrantRoleStmt => payload_gap("CreateCommandTag", "GrantRoleStmt"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::GrantRoleStmt>()
+                .expect("GrantRoleStmt");
+            if stmt.is_grant { CMDTAG_GRANT_ROLE } else { CMDTAG_REVOKE_ROLE }
+        }
         T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
-        T_DefineStmt => payload_gap("CreateCommandTag", "DefineStmt"),
+        T_DefineStmt => {
+            use types_nodes::parsenodes::ObjectType::*;
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                OBJECT_AGGREGATE => CMDTAG_CREATE_AGGREGATE,
+                OBJECT_OPERATOR => CMDTAG_CREATE_OPERATOR,
+                OBJECT_TYPE => CMDTAG_CREATE_TYPE,
+                OBJECT_TSPARSER => CMDTAG_CREATE_TEXT_SEARCH_PARSER,
+                OBJECT_TSDICTIONARY => CMDTAG_CREATE_TEXT_SEARCH_DICTIONARY,
+                OBJECT_TSTEMPLATE => CMDTAG_CREATE_TEXT_SEARCH_TEMPLATE,
+                OBJECT_TSCONFIGURATION => CMDTAG_CREATE_TEXT_SEARCH_CONFIGURATION,
+                OBJECT_COLLATION => CMDTAG_CREATE_COLLATION,
+                OBJECT_ACCESS_METHOD => CMDTAG_CREATE_ACCESS_METHOD,
+                _ => payload_gap("CreateCommandTag", "DefineStmt"),
+            }
+        }
         T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,
         T_CreateEnumStmt => CMDTAG_CREATE_TYPE,
         T_CreateRangeStmt => CMDTAG_CREATE_TYPE,

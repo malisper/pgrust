@@ -117,6 +117,21 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_Param => {}
         NodeTag::T_AlternativeSubPlan => {
             for a in &node.as_alternative_sub_plan().unwrap().subplans {
@@ -477,6 +492,10 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     }
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
+        // C folds these into my_quals, so make_outerjoininfo's semijoin
+        // analysis sees postponed lateral clauses too.
+        let mut pending_for_sjinfo: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pending_for_sjinfo.extend(pending.iter().copied());
         if !pending.is_empty() {
             let (qualscope, jdomain) = match &items[idx] {
                 JtItem::Plain { qualscope, jdomain, .. }
@@ -525,6 +544,25 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                 inner_join_rels,
                 rtindex,
             } => {
+                let sjinfo_quals = if pending_for_sjinfo.is_empty() {
+                    *quals
+                } else {
+                    let mut l = types_nodes::list::NodeList::nil();
+                    for &c in pending_for_sjinfo.iter() {
+                        l.lappend(mcx, c)?;
+                    }
+                    if let Some(q) = quals {
+                        match q.as_list() {
+                            Some(ql) => {
+                                for c in ql.iter() {
+                                    l.lappend(mcx, c)?;
+                                }
+                            }
+                            None => l.lappend(mcx, *q)?,
+                        }
+                    }
+                    Some(Node::mk_list(mcx, l)?)
+                };
                 let sjinfo = make_outerjoininfo(
                     run,
                     left_rels,
@@ -532,7 +570,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     inner_join_rels,
                     *jointype,
                     *rtindex,
-                    *quals,
+                    sjinfo_quals,
                 )?;
                 // Semijoins build an sjinfo but distribute their quals with
                 // ojscope = NULL and no nonnullable side (C's hybrid case).
@@ -1305,6 +1343,7 @@ fn distribute_qual_to_rels<'mcx>(
 
     check_mergejoinable(run, rinfo)?;
     check_hashjoinable(run, rinfo)?;
+    check_memoizable(run, rinfo)?;
     // C divergence: C routes a mergejoinable qual through the EC machinery
     // (process_equivalence); for a single-rel qual the detour rebuilds this
     // identical clause, and for a join qual the EC would regenerate the same
@@ -1469,9 +1508,34 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     Ok(())
 }
 
+// check_memoizable (initsplan.c): the hasheqoperator fields feed
+// paraminfo_get_equal_hashops; get_memoize_path only reads them off
+// ppi_clauses (join clauses), matching C's call sites.
+fn check_memoizable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
+    if run.root.rinfo(rinfo).pseudoconstant {
+        return Ok(());
+    }
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let Some(o) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return Ok(());
+    };
+    let lefttype = crate::costsize::expr_type_typmod(o.args.nth(0)).0;
+    let righttype = crate::costsize::expr_type_typmod(o.args.nth(1)).0;
+    let flags = typcache::TYPECACHE_HASH_PROC | typcache::TYPECACHE_EQ_OPR;
+    let entry = typcache::lookup_type_cache(lefttype, flags)?;
+    if entry.hash_proc() != 0 && entry.eq_opr() != 0 {
+        run.root.rinfo_mut(rinfo).left_hasheqoperator = entry.eq_opr();
+    }
+    let entry =
+        if lefttype == righttype { entry } else { typcache::lookup_type_cache(righttype, flags)? };
+    if entry.hash_proc() != 0 && entry.eq_opr() != 0 {
+        run.root.rinfo_mut(rinfo).right_hasheqoperator = entry.eq_opr();
+    }
+    Ok(())
+}
+
 // check_hashjoinable (initsplan.c): mark the clause hashable so
-// hash_inner_and_outer can collect it. The hasheqoperator fields (SEMI/ANTI
-// unique) stay unset — the inner-join lane never reads them.
+// hash_inner_and_outer can collect it.
 fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     if run.root.rinfo(rinfo).pseudoconstant {
         return Ok(());
