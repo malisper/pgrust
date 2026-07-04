@@ -48,8 +48,7 @@ pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
     pub info: &'a IndexVacuumInfo<'a, 'mcx>,
     pub stats: &'a mut IndexBulkDeleteResult,
     pub dead_items: Option<&'a [ItemPointerData]>,
-    // C's IndexBulkDeleteCallback shape for callers that never delete
-    // (validate_index): every live heap TID is reported, nothing is removed.
+    // validate_index's never-delete callback: every live heap TID reported.
     pub collect: Option<&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'cb)>,
     pub cycleid: BTCycleId,
     pub pendingpages: PgVec<'mcx, ::types_nbtree::BTPendingFSM>,
@@ -90,7 +89,6 @@ pub fn btbulkdelete<'mcx>(
     Ok(stats)
 }
 
-// btbulkdelete with C's never-delete callback shape (validate_index).
 pub fn btbulkdelete_collect<'mcx>(
     mcx: Mcx<'mcx>,
     info: &IndexVacuumInfo<'_, 'mcx>,
