@@ -33,8 +33,6 @@ miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 
 readfuncs = { path = "../../../nodes/readfuncs" }
 coerce = { path = "../../../parser/coerce" }
-parse_func = { path = "../../../parser/parse_func" }
-parser_small1 = { path = "../../../parser/parser_small1" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }

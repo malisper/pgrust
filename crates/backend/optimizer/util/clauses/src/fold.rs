@@ -1498,11 +1498,9 @@ fn recheck_cast_function_args<'mcx>(
             "function's resolved result type changed during planning".to_string(),
         )));
     }
-    let pstate = parser_small1::make_parsestate(mcx, None);
-    parse_func::make_fn_arguments(
+    clauses_seams::make_fn_arguments_nullstate::call(
         mcx,
-        &pstate,
-        args,
+        &args,
         actual_arg_types.as_slice(),
         declared_arg_types.as_slice(),
     )

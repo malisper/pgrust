@@ -7247,6 +7247,15 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("RoleSpec"))?;
                 *yyval = YYSTYPE::List(list);
             }
+            // func_arg_expr: param_name COLON_EQUALS/EQUALS_GREATER a_expr
+            2295 | 2296 => {
+                let mut n = Node::build::<types_nodes::primnodes::NamedArgExpr>(mcx)?;
+                n.name = Some(view.v(1).str_val());
+                n.arg = Some(view.v(3).node().expect("a_expr"));
+                n.argnumber = -1;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // CallStmt: CALL func_application
             146 => {
                 let mut n = Node::build::<types_nodes::CallStmt>(mcx)?;
