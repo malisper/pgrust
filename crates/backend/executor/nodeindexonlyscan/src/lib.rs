@@ -503,8 +503,7 @@ pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanSt
 // ScanDirection is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_NameCStringAttNums,
-        ioss_PlanNodeId;
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
-        ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
+        ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
 );
