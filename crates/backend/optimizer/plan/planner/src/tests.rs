@@ -5090,3 +5090,64 @@ mod grouping_sets {
         );
     }
 }
+
+mod short_varlena {
+    use super::*;
+
+    fn short_text(payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() + 1 <= 0x7F);
+        let mut v = vec![(((payload.len() + 1) as u8) << 1) | 0x01];
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn long_text(payload: &[u8]) -> Vec<u8> {
+        let total = 4 + payload.len();
+        let mut v = ((total as u32) << 2).to_ne_bytes().to_vec();
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn payload_reads_short_and_4b_headers() {
+        let s = short_text(b"abc");
+        let l = long_text(b"abc");
+        let ds = Datum::from_usize(s.as_ptr() as usize);
+        let dl = Datum::from_usize(l.as_ptr() as usize);
+        assert_eq!(crate::selfuncs::varlena_datum_payload(ds), b"abc");
+        assert_eq!(crate::selfuncs::varlena_datum_payload(dl), b"abc");
+    }
+
+    #[test]
+    fn image_any_expands_short_to_4b() {
+        let ctx = MemoryContext::new("image-any-test");
+        let mcx = ctx.mcx();
+        let s = short_text(b"hello");
+        let l = long_text(b"hello");
+        let expanded =
+            crate::selfuncs::varlena_image_any(mcx, Datum::from_usize(s.as_ptr() as usize))
+                .unwrap();
+        assert_eq!(expanded, &l[..]);
+        let borrowed =
+            crate::selfuncs::varlena_image_any(mcx, Datum::from_usize(l.as_ptr() as usize))
+                .unwrap();
+        assert_eq!(borrowed.as_ptr(), l.as_ptr());
+    }
+
+    #[test]
+    fn endpoint_copy_reads_short_header_size() {
+        let ctx = MemoryContext::new("endpoint-copy-test");
+        let mcx = ctx.mcx();
+        let s = short_text(b"xy");
+        let out = crate::selfuncs::endpoint_datum_copy(
+            mcx,
+            Datum::from_usize(s.as_ptr() as usize),
+            false,
+            -1,
+        )
+        .unwrap();
+        let p = out.as_usize() as *const u8;
+        let copied = unsafe { core::slice::from_raw_parts(p, s.len()) };
+        assert_eq!(copied, &s[..]);
+    }
+}
