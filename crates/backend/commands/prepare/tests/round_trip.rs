@@ -432,6 +432,7 @@ fn execute_with_wrong_parameter_count_is_42601() {
         &exec,
         "EXECUTE pn",
         ParamListHandle::NULL,
+        None,
         &mut dest,
         None,
     )

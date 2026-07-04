@@ -31,6 +31,7 @@ heapam = { path = "../../access/heap/heapam" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_expr = { path = "../../parser/parse_expr" }
 postgres = { path = "../../tcop/postgres" }
+prepare = { path = "../prepare" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 table = { path = "../../access/table/table" }

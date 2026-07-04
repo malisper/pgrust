@@ -361,7 +361,7 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree.as_execute_stmt().unwrap();
             // SAFETY: see unify_execute_lifetime.
             let stmt = unsafe { unify_execute_lifetime(stmt) };
-            prepare::ExecuteQuery(mcx, stmt, source_text, params, dest, qc.as_deref_mut())?;
+            prepare::ExecuteQuery(mcx, stmt, source_text, params, None, dest, qc.as_deref_mut())?;
         }
         T_DeallocateStmt => {
             CheckRestrictedOperation("DEALLOCATE")?;
