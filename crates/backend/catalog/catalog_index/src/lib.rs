@@ -604,6 +604,7 @@ pub fn index_create<'mcx>(
         &form,
         indexTupDesc.natts as i16,
         indexRelationId,
+        None,
         extra.reloptions,
     )?;
     pg_class.close(RowExclusiveLock)?;

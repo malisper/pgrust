@@ -1,6 +1,6 @@
 // pg_type.c TypeCreate insert-arm slice (+ AssignTypeArrayOid from
 // typecmds.c and makeObjectName from indexcmds.c). Loud: shell-type replace,
-// type defaults, non-dependent types (ACL/owner deps), RenameTypeInternal.
+// type defaults, RenameTypeInternal.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -130,13 +130,12 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     let isDependentType = p.isImplicitArray
         || p.typeType == TYPTYPE_MULTIRANGE
         || (p.relationOid != InvalidOid && p.relationKind != RELKIND_COMPOSITE_TYPE);
-    if !isDependentType && has_default_acl_for_type(mcx, p.ownerId, p.typeNamespace)? {
-        panic!(
-            "TypeCreate (pg_type.c): get_user_default_acl found a pg_default_acl entry \
-             for type \"{}\" — non-NULL typacl lane unported",
-            p.typeName
-        );
-    }
+    // Dependent types never get an ACL of their own.
+    let typacl = if isDependentType {
+        None
+    } else {
+        aclchk_seams::get_user_default_acl::call(mcx, b'T', p.ownerId, p.typeNamespace)?
+    };
 
     let mut name = NameData::default();
     name.namestrcpy(p.typeName);
@@ -172,7 +171,10 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     values[28] = Datum::from_oid(p.typeCollation);
     nulls[29] = true; // typdefaultbin
     nulls[30] = true; // typdefault
-    nulls[31] = true; // typacl (dependent types never get one)
+    match typacl.as_deref() {
+        Some(img) => values[31] = Datum::from_usize(img.as_ptr() as usize),
+        None => nulls[31] = true,
+    }
 
     let pg_type_desc = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
 
@@ -201,7 +203,7 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     catalog_indexing::CatalogTupleInsert(mcx, &pg_type_desc, &mut tup)?;
 
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
-        GenerateTypeDependencies(mcx, typeObjectId, p, isDependentType)?;
+        GenerateTypeDependencies(mcx, typeObjectId, p, isDependentType, typacl.as_deref())?;
     }
 
     pg_type_desc.close(RowExclusiveLock)?;
@@ -213,6 +215,7 @@ fn GenerateTypeDependencies<'mcx>(
     typeObjectId: Oid,
     p: &TypeCreateParams<'_>,
     isDependentType: bool,
+    typacl: Option<&[u8]>,
 ) -> PgResult<()> {
     let myself = ObjectAddress::set(TYPE_RELATION_ID, typeObjectId);
     let mut addrs_normal = [ObjectAddress::set(InvalidOid, InvalidOid); 11];
@@ -224,6 +227,16 @@ fn GenerateTypeDependencies<'mcx>(
     }
     if !isDependentType {
         pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, typeObjectId, p.ownerId)?;
+        if let Some(img) = typacl {
+            aclchk_seams::record_dependency_on_new_acl::call(
+                mcx,
+                TYPE_RELATION_ID,
+                typeObjectId,
+                0,
+                p.ownerId,
+                img,
+            )?;
+        }
     }
     // C: makeExtensionDep is true on every TypeCreate path (dependent types
     // get explicit membership too); rebuild is false for fresh rows.
@@ -447,52 +460,3 @@ pub fn moveArrayTypeName(typeOid: Oid, typeName: &str, typeNamespace: Oid) -> Pg
     );
 }
 
-// get_user_default_acl (aclchk.c) reduced to the fresh-initdb decision: any
-// matching pg_default_acl row (per-schema or global, DEFACLOBJ_TYPE) means a
-// non-NULL typacl, which is unported; no row means typacl NULL.
-fn has_default_acl_for_type<'mcx>(mcx: Mcx<'mcx>, ownerId: Oid, nsp: Oid) -> PgResult<bool> {
-    const DEFAULT_ACL_RELATION_ID: Oid = 826;
-    const DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_ID: Oid = 827;
-    const Anum_pg_default_acl_defaclrole: AttrNumber = 2;
-    const Anum_pg_default_acl_defaclnamespace: AttrNumber = 3;
-    const Anum_pg_default_acl_defaclobjtype: AttrNumber = 4;
-    const DEFACLOBJ_TYPE: i8 = b'T' as i8;
-
-    let rel = table::table_open(mcx, DEFAULT_ACL_RELATION_ID, AccessShareLock)?;
-    let oideq = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
-        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
-    let chareq = fmgr_seams::fmgr_info::call(types_core::fmgr::F_CHAREQ)
-        .unwrap_or_else(|e| panic!("fmgr_info(F_CHAREQ) failed: {e:?}"));
-    let mut found = false;
-    for probe_nsp in [nsp, InvalidOid] {
-        let mut key = |attno: AttrNumber, func, arg: Datum| {
-            let mut k = types_scan::scankey::ScanKeyData::empty();
-            k.sk_attno = attno;
-            k.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
-            k.sk_collation = 0;
-            k.sk_func = func;
-            k.sk_argument = arg;
-            k
-        };
-        let keys = [
-            key(Anum_pg_default_acl_defaclrole, oideq.clone(), Datum::from_oid(ownerId)),
-            key(Anum_pg_default_acl_defaclnamespace, oideq.clone(), Datum::from_oid(probe_nsp)),
-            key(Anum_pg_default_acl_defaclobjtype, chareq.clone(), Datum::from_i8(DEFACLOBJ_TYPE)),
-        ];
-        let mut scan = genam::systable_beginscan(
-            mcx,
-            &rel,
-            DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_ID,
-            true,
-            None,
-            &keys,
-        )?;
-        found |= genam::systable_getnext(mcx, &mut scan)?.is_some();
-        genam::systable_endscan(mcx, scan)?;
-        if found {
-            break;
-        }
-    }
-    rel.close(AccessShareLock)?;
-    Ok(found)
-}

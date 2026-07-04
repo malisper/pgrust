@@ -61,21 +61,32 @@ pub fn LargeObjectCreate<'mcx>(mcx: Mcx<'mcx>, loid: Oid) -> PgResult<Oid> {
         )?
     };
     let ownerId = miscinit::GetUserId();
-    // lomacl stays NULL: get_user_default_acl reads pg_default_acl, which no
-    // ported DDL can populate (same invariant pg_namespace relies on), so the
-    // C result is always NULL here.
-    let values = [
+    let lomacl = aclchk_seams::get_user_default_acl::call(mcx, b'L', ownerId, 0)?;
+    let mut values = [
         Datum::from_oid(loid_new),
         Datum::from_oid(ownerId),
         Datum::null(),
     ];
-    let nulls = [false, false, true];
+    let mut nulls = [false, false, true];
+    if let Some(img) = lomacl.as_deref() {
+        values[2] = Datum::from_usize(img.as_ptr() as usize);
+        nulls[2] = false;
+    }
     let mut ntup = heaptuple::heap_form_tuple(mcx, pg_lo_meta.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &pg_lo_meta, &mut ntup)?;
 
     pg_lo_meta.close(RowExclusiveLock)?;
 
-    // recordDependencyOnNewAcl with a NULL acl records nothing (no aclmembers).
+    if let Some(img) = lomacl.as_deref() {
+        aclchk_seams::record_dependency_on_new_acl::call(
+            mcx,
+            LargeObjectRelationId,
+            loid_new,
+            0,
+            ownerId,
+            img,
+        )?;
+    }
     Ok(loid_new)
 }
 

@@ -6,7 +6,8 @@ use types_core::catalog::{
 use types_error::PgResult;
 use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
-    AccessPriv, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt, AlterRoleSetStmt, AlterRoleStmt,
+    AccessPriv, AlterDefaultPrivilegesStmt, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt,
+    AlterRoleSetStmt, AlterRoleStmt,
     AlterTableCmd, AlterTableStmt, AlterTableType,
     CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
     CopyStmt, CreateFunctionStmt, CreatePolicyStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
@@ -6088,6 +6089,73 @@ impl<'mcx> Parser<'mcx> {
             // opt_granted_by: GRANTED BY RoleSpec | EMPTY.
             1083 => *yyval = YYSTYPE::Node(view.v(3).node()),
             1084 => *yyval = YYSTYPE::Node(None),
+            // AlterDefaultPrivilegesStmt: ALTER DEFAULT PRIVILEGES
+            // DefACLOptionList DefACLAction.
+            1085 => {
+                let mut n = Node::build::<AlterDefaultPrivilegesStmt>(mcx)?;
+                n.options = view.v(4).list();
+                n.action = view.v(5).node().map(|a| a.as_grant_stmt().expect("DefACLAction"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1086 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("DefACLOption"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1087 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // DefACLOption: IN SCHEMA name_list | FOR ROLE/USER role_list.
+            1088..=1090 => {
+                let arg = Node::mk_list(mcx, view.v(3).list())?;
+                let d = Node::mk(
+                    mcx,
+                    DefElem {
+                        defnamespace: None,
+                        defname: Some(if rule == 1088 { "schemas" } else { "roles" }),
+                        arg: Some(arg),
+                        defaction: DefElemAction::DEFELEM_UNSPEC,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(d));
+            }
+            // DefACLAction: GRANT/REVOKE [GRANT OPTION FOR] privileges ON
+            // defacl_privilege_target TO/FROM grantee_list.
+            1091 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.is_grant = true;
+                n.privileges = view.v(2).list();
+                n.targtype = GrantTargetType::ACL_TARGET_DEFAULTS;
+                n.objtype = defacl_objtype(view.v(4).ival());
+                n.objects = NodeList::nil();
+                n.grantees = view.v(6).list();
+                n.grant_option = view.v(7).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1092 | 1093 => {
+                let (pi, ti, gi, bi) = if rule == 1092 { (2, 4, 6, 7) } else { (5, 7, 9, 10) };
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.is_grant = false;
+                n.grant_option = rule == 1093;
+                n.privileges = view.v(pi).list();
+                n.targtype = GrantTargetType::ACL_TARGET_DEFAULTS;
+                n.objtype = defacl_objtype(view.v(ti).ival());
+                n.objects = NodeList::nil();
+                n.grantees = view.v(gi).list();
+                n.behavior = drop_behavior(view.v(bi).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // defacl_privilege_target.
+            1094..=1100 => {
+                let t = match rule {
+                    1094 => ObjectType::OBJECT_TABLE,
+                    1095 | 1096 => ObjectType::OBJECT_FUNCTION,
+                    1097 => ObjectType::OBJECT_SEQUENCE,
+                    1098 => ObjectType::OBJECT_TYPE,
+                    1099 => ObjectType::OBJECT_SCHEMA,
+                    _ => ObjectType::OBJECT_LARGEOBJECT,
+                };
+                *yyval = YYSTYPE::Ival(t as i32);
+            }
             // RoleSpec: NonReservedWord | CURRENT_ROLE | CURRENT_USER |
             // SESSION_USER ("public"/"none" are not keywords).
             2458 => {
@@ -8255,6 +8323,22 @@ fn object_type(v: i32) -> ObjectType {
         .copied()
         .find(|t| *t as i32 == v)
         .unwrap_or_else(|| panic!("invalid ObjectType {v}"))
+}
+
+fn defacl_objtype(v: i32) -> ObjectType {
+    for t in [
+        ObjectType::OBJECT_TABLE,
+        ObjectType::OBJECT_FUNCTION,
+        ObjectType::OBJECT_SEQUENCE,
+        ObjectType::OBJECT_TYPE,
+        ObjectType::OBJECT_SCHEMA,
+        ObjectType::OBJECT_LARGEOBJECT,
+    ] {
+        if t as i32 == v {
+            return t;
+        }
+    }
+    panic!("invalid defacl_privilege_target ObjectType {v}")
 }
 
 fn drop_behavior(v: i32) -> DropBehavior {

@@ -10,7 +10,7 @@ use adt_acl::{
     ACL_MAINTAIN, ACL_MODECHG_ADD, ACL_MODECHG_DEL, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT,
     ACL_SET, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use cache_syscache::cacheinfo::{ATTNUM, RELOID};
+use cache_syscache::cacheinfo::{ATTNAME, ATTNUM, RELOID};
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache2, SearchSysCacheLocked1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, SysCacheKey,
@@ -56,7 +56,7 @@ struct InternalGrant<'a, 'mcx> {
     objects: PgVec<'mcx, Oid>,
     all_privs: bool,
     privileges: u64,
-    col_privs: PgVec<'mcx, &'a AccessPriv<'mcx>>,
+    col_privs: PgVec<'mcx, &'a AccessPriv<'a>>,
     grantees: PgVec<'mcx, Oid>,
     grant_option: bool,
     behavior: i32,
@@ -89,7 +89,7 @@ pub fn get_rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> 
     }
 }
 
-fn string_to_privilege(privname: &str) -> PgResult<u64> {
+pub(crate) fn string_to_privilege(privname: &str) -> PgResult<u64> {
     Ok(match privname {
         "insert" => ACL_INSERT,
         "select" => ACL_SELECT,
@@ -115,7 +115,7 @@ fn string_to_privilege(privname: &str) -> PgResult<u64> {
     })
 }
 
-fn privilege_to_string(privilege: u64) -> &'static str {
+pub(crate) fn privilege_to_string(privilege: u64) -> &'static str {
     match privilege {
         ACL_INSERT => "INSERT",
         ACL_SELECT => "SELECT",
@@ -138,7 +138,7 @@ fn privilege_to_string(privilege: u64) -> &'static str {
 
 // merge_acl_with_grant (aclchk.c).
 #[allow(clippy::too_many_arguments)]
-fn merge_acl_with_grant<'mcx>(
+pub(crate) fn merge_acl_with_grant<'mcx>(
     mcx: Mcx<'mcx>,
     old_acl: &[AclItem],
     is_grant: bool,
@@ -353,7 +353,8 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
                         ERRCODE_INVALID_GRANT_OPERATION,
                     ));
                 }
-                panic!("ExecuteGrantStmt (aclchk.c): column privilege list unported (column-priv lane)");
+                istmt.col_privs.push(privnode);
+                continue;
             }
             let priv_name = privnode
                 .priv_name
@@ -727,7 +728,38 @@ fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) 
             unlock_class_tuple(&otid)?;
         }
 
-        debug_assert!(istmt.col_privs.is_empty());
+        for col_privs in istmt.col_privs.iter() {
+            let mut this_privileges = match col_privs.priv_name {
+                None => ACL_ALL_RIGHTS_COLUMN,
+                Some(name) => string_to_privilege(name)?,
+            };
+            if this_privileges & !ACL_ALL_RIGHTS_COLUMN != 0 {
+                return Err(err(
+                    format!(
+                        "invalid privilege type {} for column",
+                        privilege_to_string(this_privileges)
+                    ),
+                    ERRCODE_INVALID_GRANT_OPERATION,
+                ));
+            }
+            if relkind == RELKIND_SEQUENCE && this_privileges & !ACL_SELECT != 0 {
+                // Warning, not error, matching the relation-level rule.
+                warn(
+                    format!("sequence \"{relname}\" only supports SELECT column privileges"),
+                    ERRCODE_INVALID_GRANT_OPERATION,
+                )?;
+                this_privileges &= ACL_SELECT;
+            }
+            expand_col_privileges(
+                &col_privs.cols,
+                rel_oid,
+                &relname,
+                this_privileges,
+                &mut col_privileges,
+            )?;
+            have_col_privileges = true;
+        }
+
         if have_col_privileges {
             for (idx, &privs) in col_privileges.iter().enumerate() {
                 if privs == ACL_NO_RIGHTS {
@@ -756,6 +788,41 @@ fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) 
 
     att_relation.close(RowExclusiveLock)?;
     relation.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+fn expand_col_privileges(
+    colnames: &types_nodes::list::NodeList<'_>,
+    rel_oid: Oid,
+    relname: &str,
+    this_privileges: u64,
+    col_privileges: &mut [u64],
+) -> PgResult<()> {
+    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
+    for cell in colnames.iter() {
+        let colname = cell.as_string().expect("column name").sval;
+        // get_attnum (lsyscache.c): SearchSysCacheAttName misses dropped rows.
+        let attnum = match cache_syscache::SearchSysCacheAttName(rel_oid, colname)? {
+            Some(tuple) => {
+                let n =
+                    SysCacheGetAttrNotNull(ATTNAME, &tuple, ANUM_PG_ATTRIBUTE_ATTNUM)?.as_i16();
+                ReleaseSysCache(tuple);
+                n
+            }
+            None => 0,
+        };
+        if attnum == 0 {
+            return Err(err(
+                format!("column \"{colname}\" of relation \"{relname}\" does not exist"),
+                types_error::ERRCODE_UNDEFINED_COLUMN,
+            ));
+        }
+        let idx = attnum as i32 - FIRST_LOW_INVALID_HEAP_ATTNUM;
+        if idx <= 0 || idx as usize >= col_privileges.len() {
+            return Err(Box::new(PgError::error("column number out of range".to_string())));
+        }
+        col_privileges[idx as usize] |= this_privileges;
+    }
     Ok(())
 }
 

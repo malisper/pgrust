@@ -334,6 +334,10 @@ fn dispatch_switch<'mcx>(
                 aclchk::ExecuteGrantStmt(mcx, stmt)?;
             }
         }
+        T_AlterDefaultPrivilegesStmt => {
+            let stmt = parsetree.as_alter_default_privileges_stmt().unwrap();
+            aclchk::ExecAlterDefaultPrivilegesStmt(mcx, stmt)?;
+        }
         T_GrantRoleStmt => {
             let stmt = parsetree.as_grant_role_stmt().unwrap();
             user::GrantRole(mcx, stmt)?;

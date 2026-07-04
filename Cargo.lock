@@ -18,11 +18,13 @@ dependencies = [
  "aclchk_seams",
  "adt_acl",
  "cache_syscache",
+ "catalog",
  "catalog_indexing",
  "catalog_namespace",
  "catcache",
  "datum",
  "dbcommands_seams",
+ "dependency_seams",
  "elog",
  "genam",
  "guc",
@@ -54,6 +56,7 @@ dependencies = [
 name = "aclchk_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
@@ -1595,6 +1598,7 @@ dependencies = [
 name = "catalog_heap"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "arrayfuncs",
  "catalog",
  "catalog_index_seams",
@@ -7598,6 +7602,7 @@ dependencies = [
 name = "pg_largeobject"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "catalog",
  "catalog_indexing",
  "datum",
@@ -7659,6 +7664,7 @@ version = "0.1.0"
 name = "pg_namespace"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "catalog",
  "catalog_indexing",
  "datum",
@@ -7734,6 +7740,7 @@ dependencies = [
 name = "pg_proc"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
@@ -7886,6 +7893,7 @@ dependencies = [
 name = "pg_type"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "catalog",
  "catalog_indexing",
  "datum",
