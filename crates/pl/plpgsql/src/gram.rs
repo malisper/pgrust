@@ -37,6 +37,8 @@ pub struct Parser<'a, 'mcx> {
     pub fn_rettype: Oid,
     pub fn_retset: bool,
     pub fn_prokind: i8,
+    pub fn_input_collation: Oid,
+    pub fn_is_trigger: bool,
     pub scratch: mcx::Mcx<'mcx>,
 }
 
@@ -605,13 +607,14 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
 
         let body = self.parse_proc_sect(&[K_END, K_EXCEPTION])?;
         t = self.yylex()?;
-        if t.0 == K_EXCEPTION {
-            panic!(
-                "exception_sect (pl_gram.y): EXCEPTION blocks / PL subtransactions \
-                 unported — unit backend-pl-plpgsql-gram"
-            );
-        }
-        debug_assert_eq!(t.0, K_END);
+        let exceptions = if t.0 == K_EXCEPTION {
+            let exc = self.parse_exception_sect(t.2)?;
+            self.expect(K_END, "syntax error")?;
+            Some(exc)
+        } else {
+            debug_assert_eq!(t.0, K_END);
+            None
+        };
         let (end_label, end_loc) = self.opt_label()?;
         self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
         self.comp.ns_pop();
@@ -621,7 +624,105 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             label,
             body,
             initvarnos,
+            exceptions,
         })
+    }
+
+    // exception_sect (pl_gram.y): sqlstate/sqlerrm scoped to the block's
+    // handlers, then WHEN proc_conditions THEN proc_sect list.
+    fn parse_exception_sect(&mut self, exc_loc: i32) -> PgResult<ExceptionBlock> {
+        const TEXTOID: Oid = 25;
+        let lineno = self.lineno(exc_loc);
+        let coll = self.fn_input_collation;
+        let sqlstate_varno = self.comp.build_variable(
+            "sqlstate",
+            lineno,
+            CompState::build_datatype(TEXTOID, -1, coll)?,
+            true,
+        )?;
+        let sqlerrm_varno = self.comp.build_variable(
+            "sqlerrm",
+            lineno,
+            CompState::build_datatype(TEXTOID, -1, coll)?,
+            true,
+        )?;
+        for dno in [sqlstate_varno, sqlerrm_varno] {
+            if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
+                v.isconst = true;
+            }
+        }
+
+        let mut exc_list = Vec::new();
+        loop {
+            let wt = self.expect(K_WHEN, "syntax error")?;
+            let mut conditions = self.parse_proc_condition()?;
+            loop {
+                let t = self.yylex()?;
+                if t.0 == K_OR {
+                    conditions.extend(self.parse_proc_condition()?);
+                } else {
+                    self.push_back(&t)?;
+                    break;
+                }
+            }
+            self.expect(K_THEN, "syntax error")?;
+            let action = self.parse_proc_sect(&[K_WHEN, K_END])?;
+            exc_list.push(PlException {
+                lineno: self.lineno(wt.2),
+                conditions,
+                action,
+            });
+            if self.peek()? != K_WHEN {
+                break;
+            }
+        }
+        Ok(ExceptionBlock { sqlstate_varno, sqlerrm_varno, exc_list })
+    }
+
+    // proc_condition (pl_gram.y): one name may map to several SQLSTATEs.
+    fn parse_proc_condition(&mut self) -> PgResult<Vec<PlCondition>> {
+        let (name, _loc) = self.any_identifier()?;
+        if name == "sqlstate" {
+            let s = self.yylex()?;
+            if s.0 != SCONST {
+                return Err(self.yyerror("syntax error", s.2));
+            }
+            let code = s.1.str_.clone().unwrap_or_default();
+            if code.len() != 5
+                || !code.bytes().all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+            {
+                return Err(self.yyerror("invalid SQLSTATE code", s.2));
+            }
+            let b = code.as_bytes();
+            return Ok(vec![PlCondition {
+                sqlerrstate: types_error::make_sqlstate([b[0], b[1], b[2], b[3], b[4]]),
+                condname: code,
+            }]);
+        }
+        // plpgsql_parse_err_condition (pl_comp.c): OTHERS is grammar-special;
+        // otherwise every plerrcodes entry with the name chains in.
+        if name == "others" {
+            return Ok(vec![PlCondition {
+                sqlerrstate: types_error::SqlState(0),
+                condname: name,
+            }]);
+        }
+        let mut out = Vec::new();
+        for &(n, code) in EXCEPTION_LABEL_MAP {
+            if n == name {
+                out.push(PlCondition {
+                    sqlerrstate: types_error::make_sqlstate(code),
+                    condname: name.clone(),
+                });
+            }
+        }
+        if out.is_empty() {
+            return Err(self.gram_err(
+                types_error::ERRCODE_UNDEFINED_OBJECT,
+                format!("unrecognized exception condition \"{name}\""),
+            ));
+        }
+        Ok(out)
     }
 
     // decl_statement.
@@ -838,10 +939,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_ASSERT => Ok(Some(self.parse_assert(lloc)?)),
             K_GET => Ok(Some(self.parse_getdiag(lloc)?)),
             K_PERFORM => Ok(Some(self.parse_perform(t, lloc)?)),
-            K_EXECUTE => panic!(
-                "stmt_dynexecute (pl_gram.y): EXECUTE (dynamic SQL) unported — \
-                 unit backend-pl-plpgsql-gram"
-            ),
+            K_EXECUTE => Ok(Some(self.parse_dynexecute(lloc)?)),
             K_OPEN | K_FETCH | K_MOVE | K_CLOSE => panic!(
                 "cursor statements (pl_gram.y): OPEN/FETCH/MOVE/CLOSE unported — \
                  unit backend-pl-plpgsql-gram"
@@ -1769,6 +1867,80 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             into: have_into,
             strict: have_strict,
             target,
+        })
+    }
+
+    // stmt_dynexecute (pl_gram.y): INTO and USING accepted in either order.
+    fn parse_dynexecute(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let mut endtoken = 0i32;
+        let query = self.read_sql_construct(
+            K_INTO,
+            K_USING,
+            ';' as i32,
+            "INTO or USING or ;",
+            RawParseMode::RAW_PARSE_PLPGSQL_EXPR,
+            true,
+            true,
+            None,
+            Some(&mut endtoken),
+        )?;
+        let mut into = false;
+        let mut strict = false;
+        let mut target: Dno = -1;
+        let mut params: Vec<PlExpr> = Vec::new();
+        loop {
+            if endtoken == K_INTO {
+                if into {
+                    let t = self.yylex()?;
+                    return Err(self.yyerror("syntax error", t.2));
+                }
+                into = true;
+                let (tgt, s) = self.read_into_target(true)?;
+                target = tgt;
+                strict = s;
+                let t = self.yylex()?;
+                endtoken = t.0;
+                if endtoken != K_USING && endtoken != (';' as i32) {
+                    return Err(self.yyerror("syntax error", t.2));
+                }
+            } else if endtoken == K_USING {
+                if !params.is_empty() {
+                    let t = self.yylex()?;
+                    return Err(self.yyerror("syntax error", t.2));
+                }
+                loop {
+                    let mut term = 0i32;
+                    let expr = self.read_sql_construct(
+                        ',' as i32,
+                        ';' as i32,
+                        K_INTO,
+                        ", or ; or INTO",
+                        RawParseMode::RAW_PARSE_PLPGSQL_EXPR,
+                        true,
+                        true,
+                        None,
+                        Some(&mut term),
+                    )?;
+                    params.push(expr);
+                    endtoken = term;
+                    if term != (',' as i32) {
+                        break;
+                    }
+                }
+            } else if endtoken == (';' as i32) {
+                break;
+            } else {
+                let t = self.yylex()?;
+                return Err(self.yyerror("syntax error", t.2));
+            }
+        }
+        Ok(PlStmt::DynExecute {
+            lineno: self.lineno(lloc),
+            query,
+            into,
+            strict,
+            target,
+            params,
         })
     }
 

@@ -43,3 +43,8 @@ types_portal = { path = "../../_support/types/portal" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 wchar = { path = "../../common/wchar" }
 xact = { path = "../../backend/access/transam/xact" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+types_trigger = { path = "../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../_support/types/types_trigger_call" }
+varlena = { path = "../../backend/utils/adt/varlena" }
