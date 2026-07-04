@@ -195,3 +195,149 @@ fn figure_colname_arms() {
     assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXISTS_SUBLINK)), "exists");
     assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::ANY_SUBLINK)), "?column?");
 }
+
+fn record_var<'mcx>(mcx: Mcx<'mcx>, varno: i32, varattno: i16) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::Var {
+            varno,
+            varattno,
+            vartype: types_core::catalog::RECORDOID,
+            vartypmod: -1,
+            varcollid: types_core::InvalidOid,
+            varnullingrels: types_nodes::Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            varnosyn: varno as types_core::Index,
+            varattnosyn: varattno,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+// A subquery RTE whose tlist is (a int4, b text), with matching eref colnames.
+fn subquery_rte<'mcx>(mcx: Mcx<'mcx>, rtable: NodeList<'mcx>) -> Node<'mcx> {
+    use types_core::catalog::{DEFAULT_COLLATION_OID, INT4OID, TEXTOID};
+    use types_core::InvalidOid;
+    let c1 = Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, datum::Datum::null(), true, true)
+        .unwrap();
+    let c2 = Node::mk_const(
+        mcx,
+        TEXTOID,
+        -1,
+        DEFAULT_COLLATION_OID,
+        -1,
+        datum::Datum::null(),
+        true,
+        false,
+    )
+    .unwrap();
+    let te1 = Node::mk_target_entry(mcx, c1, 1, Some("a"), false).unwrap();
+    let te2 = Node::mk_target_entry(mcx, c2, 2, Some("b"), false).unwrap();
+    let q = mcx::leak_in(
+        mcx::alloc_in(
+            mcx,
+            types_nodes::parsenodes::Query {
+                targetList: NodeList::make2(mcx, te1, te2).unwrap(),
+                rtable,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let eref = Node::mk_mut(
+        mcx,
+        types_nodes::Alias {
+            aliasname: Some("ss"),
+            colnames: NodeList::make2(
+                mcx,
+                Node::mk_string(mcx, "a").unwrap(),
+                Node::mk_string(mcx, "b").unwrap(),
+            )
+            .unwrap(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
+    Node::mk(
+        mcx,
+        types_nodes::RangeTblEntry {
+            rtekind: types_nodes::RTEKind::RTE_SUBQUERY,
+            subquery: Some(q),
+            eref: Some(eref),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn expand_record_variable_whole_row_over_subquery() {
+    use types_core::catalog::{DEFAULT_COLLATION_OID, INT4OID, TEXTOID};
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_rtable.lappend(mcx, subquery_rte(mcx, NodeList::nil())).unwrap();
+
+    let desc =
+        crate::expandRecordVariable(mcx, &pstate, record_var(mcx, 1, 0), 0).unwrap();
+    assert_eq!(desc.natts, 2);
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+    assert_eq!(desc.attr(0).attname.name_str(), b"a");
+    assert_eq!(desc.attr(1).atttypid, TEXTOID);
+    assert_eq!(desc.attr(1).attname.name_str(), b"b");
+    assert_eq!(desc.attr(1).attcollation, DEFAULT_COLLATION_OID);
+}
+
+#[test]
+fn expand_record_variable_drills_through_subquery_var() {
+    use types_core::catalog::{INT4OID, TEXTOID};
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    // Outer subquery's single output is a whole-row RECORD Var over an inner
+    // subquery RTE; the drill recurses through the fake ParseState.
+    let inner_rte = subquery_rte(mcx, NodeList::nil());
+    let te = Node::mk_target_entry(mcx, record_var(mcx, 1, 0), 1, Some("r"), false).unwrap();
+    let q = mcx::leak_in(
+        mcx::alloc_in(
+            mcx,
+            types_nodes::parsenodes::Query {
+                targetList: NodeList::make1(mcx, te).unwrap(),
+                rtable: NodeList::make1(mcx, inner_rte).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let eref = Node::mk_mut(
+        mcx,
+        types_nodes::Alias {
+            aliasname: Some("outer_ss"),
+            colnames: NodeList::make1(mcx, Node::mk_string(mcx, "r").unwrap()).unwrap(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
+    let outer_rte = Node::mk(
+        mcx,
+        types_nodes::RangeTblEntry {
+            rtekind: types_nodes::RTEKind::RTE_SUBQUERY,
+            subquery: Some(q),
+            eref: Some(eref),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    pstate.p_rtable.lappend(mcx, outer_rte).unwrap();
+
+    let desc =
+        crate::expandRecordVariable(mcx, &pstate, record_var(mcx, 1, 1), 0).unwrap();
+    assert_eq!(desc.natts, 2);
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+    assert_eq!(desc.attr(1).atttypid, TEXTOID);
+}

@@ -1689,6 +1689,73 @@ pub fn addRangeTableEntryForENR<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
+// addRangeTableEntryForGroup (parse_relation.c): the RTE_GROUP entry built
+// from the grouping TargetEntries. Not added to the joinlist or namespace —
+// caller (parse_agg's RTE_GROUP rewrite) does that if appropriate. The
+// grouping step is never checked for access rights (no perminfo).
+pub fn addRangeTableEntryForGroup<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    groupClauses: &NodeList<'mcx>,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let mut eref_colnames = NodeList::nil();
+    let mut groupexprs = NodeList::nil();
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, groupClauses.len())?;
+    for (i, te_node) in groupClauses.iter().enumerate() {
+        let te = te_node.as_target_entry().expect("groupClauses are TargetEntries");
+        eref_colnames.lappend(mcx, Node::mk_string(mcx, te.resname.unwrap_or("?column?"))?)?;
+        // C copyObject(te->expr): the sealed expr subtree is shared read-only.
+        groupexprs.lappend(mcx, te.expr)?;
+        nscolumns.push(ParseNamespaceColumn {
+            p_varno: 0,
+            p_varattno: i as AttrNumber + 1,
+            p_vartype: node_funcs::expr_type(te.expr),
+            p_vartypmod: node_funcs::expr_typmod(te.expr),
+            p_varcollid: node_funcs::expr_collation(te.expr),
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: 0,
+            p_varattnosyn: i as AttrNumber + 1,
+            p_dontexpand: false,
+        });
+    }
+    let eref =
+        Node::mk_mut(mcx, Alias { aliasname: Some("*GROUP*"), colnames: eref_colnames })?
+            .seal_ref();
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_GROUP,
+        alias: None,
+        eref: Some(eref),
+        groupexprs,
+        lateral: false,
+        inFromCl: false,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+    for c in nscolumns.iter_mut() {
+        c.p_varno = rtindex as Index;
+        c.p_varnosyn = rtindex as Index;
+    }
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
 // buildVarFromNSColumn (parse_relation.c): joinaliasvars entries; no column
 // SELECT privilege is requested here.
 pub fn buildVarFromNSColumn<'mcx>(
@@ -1912,19 +1979,79 @@ pub fn expandRTE<'mcx>(
             location,
             include_dropped,
         ),
+        RTEKind::RTE_SUBQUERY => {
+            let eref = rte.eref.expect("subquery RTE has eref");
+            let subquery = rte.subquery.expect("RTE_SUBQUERY has subquery");
+            let mut colnames = NodeList::nil();
+            let mut colvars = NodeList::nil();
+            let mut varattno = 0usize;
+            for te_node in &subquery.targetList {
+                let te = te_node.as_target_entry().expect("tlist cell");
+                if te.resjunk {
+                    continue;
+                }
+                varattno += 1;
+                debug_assert_eq!(varattno, te.resno as usize);
+                if varattno > eref.colnames.len() {
+                    return Err(Box::new(PgError::error(format!(
+                        "too few column names for subquery {}",
+                        eref.aliasname.unwrap_or("")
+                    ))));
+                }
+                colnames.lappend(mcx, eref.colnames.nth(varattno - 1))?;
+                colvars.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        Var {
+                            varno: rtindex,
+                            varattno: varattno as AttrNumber,
+                            vartype: node_funcs::expr_type(te.expr),
+                            vartypmod: node_funcs::expr_typmod(te.expr),
+                            varcollid: node_funcs::expr_collation(te.expr),
+                            varnullingrels: types_nodes::Bitmapset::empty(),
+                            varlevelsup: sublevels_up as Index,
+                            varreturningtype: returning_type,
+                            varnosyn: rtindex as Index,
+                            varattnosyn: varattno as AttrNumber,
+                            location,
+                        },
+                    )?,
+                )?;
+            }
+            Ok((colnames, colvars))
+        }
         // C shares this leg across TABLEFUNC/VALUES/CTE/ENR (coltypes lists +
-        // eref colnames); only TABLEFUNC arrives here today.
-        RTEKind::RTE_TABLEFUNC | RTEKind::RTE_NAMEDTUPLESTORE => {
+        // eref colnames); a dropped ENR column has coltype InvalidOid.
+        RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_CTE
+        | RTEKind::RTE_NAMEDTUPLESTORE => {
             let mut colnames = NodeList::nil();
             let mut colvars = NodeList::nil();
             let eref = rte.eref.expect("coltypes-list RTE has eref");
             for varattno in 0..rte.coltypes.len() {
                 let coltype = rte.coltypes.nth(varattno);
-                assert!(
-                    coltype != InvalidOid,
-                    "expandRTE (parse_relation.c): dropped-column arm unported — \
-                     unit backend-parser-relation"
-                );
+                if coltype == InvalidOid {
+                    if include_dropped {
+                        colnames.lappend(mcx, Node::mk_string(mcx, "")?)?;
+                        // C makeNullConst: the claimed type doesn't matter.
+                        colvars.lappend(
+                            mcx,
+                            Node::mk_const(
+                                mcx,
+                                types_core::catalog::INT4OID,
+                                -1,
+                                InvalidOid,
+                                4,
+                                ::datum::Datum::null(),
+                                true,
+                                true,
+                            )?,
+                        )?;
+                    }
+                    continue;
+                }
                 colnames.lappend(mcx, eref.colnames.nth(varattno))?;
                 colvars.lappend(
                     mcx,
@@ -1951,10 +2078,8 @@ pub fn expandRTE<'mcx>(
         RTEKind::RTE_JOIN => {
             expandJoin(mcx, rte, rtindex, sublevels_up, returning_type, location)
         }
-        other => panic!(
-            "expandRTE (parse_relation.c): arm for {other:?} unported — \
-             unit backend-parser-relation"
-        ),
+        // These expose no columns.
+        RTEKind::RTE_RESULT | RTEKind::RTE_GROUP => Ok((NodeList::nil(), NodeList::nil())),
     }
 }
 
@@ -2386,23 +2511,40 @@ fn searchRangeTableForRel<'p, 'mcx>(
 ) -> PgResult<Option<&'mcx RangeTblEntry<'mcx>>> {
     let refname = relation.relname.expect("grammar always sets relname");
 
-    if relation.schemaname.is_none()
-        && (!pstate.p_ctenamespace.is_nil() || !pstate.p_future_ctes.is_nil())
-    {
-        panic!(
-            "searchRangeTableForRel (parse_relation.c): CTE/ENR scan needs the \
-             CommonTableExpr vocabulary — unit backend-parser-medium1"
-        );
-    }
+    // An unqualified name may be a CTE (which hides real relations) or an ENR.
+    let (cte_levelsup, isenr) = if relation.schemaname.is_none() {
+        match scanNameSpaceForCTE(pstate, refname) {
+            Some((_, levelsup)) => (Some(levelsup), false),
+            None => (None, parser_small1::name_matches_visible_ENR(pstate, refname)),
+        }
+    } else {
+        (None, false)
+    };
 
-    let relId =
-        namespace_seams::range_var_get_relid::call(mcx, &to_rel_vocab(relation), NoLock, true)?;
+    let relId = if cte_levelsup.is_none() && !isenr {
+        namespace_seams::range_var_get_relid::call(mcx, &to_rel_vocab(relation), NoLock, true)?
+    } else {
+        InvalidOid
+    };
 
     let mut ps = Some(pstate);
+    let mut levelsup: Index = 0;
     while let Some(p) = ps {
         for rte_node in &p.p_rtable {
             let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
             if rte.rtekind == RTEKind::RTE_RELATION && OidIsValid(relId) && rte.relid == relId {
+                return Ok(Some(rte));
+            }
+            if rte.rtekind == RTEKind::RTE_CTE
+                && cte_levelsup.is_some_and(|c| rte.ctelevelsup + levelsup == c)
+                && rte.ctename == Some(refname)
+            {
+                return Ok(Some(rte));
+            }
+            if rte.rtekind == RTEKind::RTE_NAMEDTUPLESTORE
+                && isenr
+                && rte.enrname == Some(refname)
+            {
                 return Ok(Some(rte));
             }
             if rte.eref.and_then(|e| e.aliasname) == Some(refname) {
@@ -2410,6 +2552,7 @@ fn searchRangeTableForRel<'p, 'mcx>(
             }
         }
         ps = p.parentParseState;
+        levelsup += 1;
     }
     Ok(None)
 }
