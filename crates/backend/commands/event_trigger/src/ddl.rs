@@ -243,7 +243,7 @@ fn insert_event_trigger_tuple<'mcx>(
     let mut tuple = heaptuple::heap_form_tuple(mcx, tgrel.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &tgrel, &mut tuple)?;
 
-    pg_depend::recordDependencyOnOwner(EVENT_TRIGGER_RELATION_ID, trigoid, evt_owner);
+    pg_depend::recordDependencyOnOwner(mcx, EVENT_TRIGGER_RELATION_ID, trigoid, evt_owner)?;
     let myself = ObjectAddress::set(EVENT_TRIGGER_RELATION_ID, trigoid);
     pg_depend::recordDependencyOn(
         mcx,
