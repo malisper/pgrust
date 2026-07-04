@@ -6,8 +6,10 @@ extern crate alloc;
 
 mod fill;
 mod form;
+mod plan;
 mod tuple;
 
 pub use fill::*;
 pub use form::*;
+pub use plan::*;
 pub use tuple::*;

@@ -11,6 +11,7 @@ init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
+heaptuple = { path = "../../access/common/heaptuple" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
