@@ -24,6 +24,7 @@ enum ScramPhase {
     Finished,
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub struct ScramState {
     phase: ScramPhase,
     channel_binding_in_use: bool,
