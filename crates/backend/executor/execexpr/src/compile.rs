@@ -1676,6 +1676,14 @@ fn alloc_array<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
     Ok(raw.cast())
 }
 
+// sqljson categorize carriers (ValCategory/TypeCat) embed droppy FmgrInfo
+// payloads; they live for the ExprState's life and are never dropped, matching
+// C's fn_extra arg_type_cache. No zero-init needed: callers write before read.
+fn alloc_array_nodrop_exempt<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
+    let layout = core::alloc::Layout::array::<T>(n.max(1)).expect("scratch layout");
+    Ok(mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast())
+}
+
 fn alloc_state<'mcx, T>(mcx: Mcx<'mcx>, v: T) -> PgResult<NonNull<T>> {
     const { assert!(!core::mem::needs_drop::<T>()) };
     let layout = core::alloc::Layout::new::<T>();
@@ -2002,13 +2010,13 @@ fn init_json_constructor<'mcx>(
             // by arena drop.
             if is_jsonb {
                 let cat = ::adt_jsonb::tojsonb::json_categorize_type(typid)?;
-                let slot: NonNull<::adt_jsonb::tojsonb::ValCategory> = alloc_array(mcx, 1)?;
+                let slot: NonNull<::adt_jsonb::tojsonb::ValCategory> = alloc_array_nodrop_exempt(mcx, 1)?;
                 // SAFETY: fresh exclusive allocation.
                 unsafe { slot.as_ptr().write(cat) };
                 (None, Some(slot))
             } else {
                 let cat = ::adt_json::tojson::json_categorize_type(typid)?;
-                let slot: NonNull<::adt_json::tojson::TypeCat> = alloc_array(mcx, 1)?;
+                let slot: NonNull<::adt_json::tojson::TypeCat> = alloc_array_nodrop_exempt(mcx, 1)?;
                 // SAFETY: fresh exclusive allocation.
                 unsafe { slot.as_ptr().write(cat) };
                 (Some(slot), None)
