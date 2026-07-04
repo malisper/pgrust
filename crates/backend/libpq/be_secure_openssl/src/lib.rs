@@ -40,7 +40,7 @@ use types_error::{
     ErrorLocation, PgResult, COMMERROR, DEBUG2, DEBUG4, ERRCODE_CONFIG_FILE_ERROR,
     ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
-use types_storage::waiteventset::{WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
+use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
 use guc_tables::consts::{
     PG_TLS1_1_VERSION, PG_TLS1_2_VERSION, PG_TLS1_3_VERSION, PG_TLS1_VERSION, PG_TLS_ANY,
@@ -80,6 +80,7 @@ thread_local! {
     static CONN: RefCell<Option<TlsConn>> = const { RefCell::new(None) };
     static CERT_ERRDETAIL: RefCell<Option<String>> = const { RefCell::new(None) };
     static PASSPHRASE_ERR: Cell<Option<Box<types_error::PgError>>> = const { Cell::new(None) };
+    static PASSPHRASE_PANIC: Cell<Option<Box<dyn std::any::Any + Send>>> = const { Cell::new(None) };
 }
 
 struct TlsConn {
@@ -162,9 +163,10 @@ fn ssl_errmessage(stack: Option<&ErrorStack>) -> String {
         return reason.to_string();
     }
     let code = err.code();
-    // OpenSSL 3 stops mapping system errnos; ERR_SYSTEM_ERROR is the high bit.
+    // OpenSSL 3 stops mapping system errnos; ERR_SYSTEM_ERROR is the high bit
+    // and ERR_GET_REASON is then code & ERR_SYSTEM_MASK (0x7fffffff).
     if code & 0x8000_0000 != 0 {
-        let e = (code & 0x7f_ffff) as i32;
+        let e = (code & 0x7fff_ffff) as i32;
         // SAFETY: strerror returns a valid static/thread-local C string.
         let p = unsafe { libc::strerror(e) };
         if !p.is_null() {
@@ -227,7 +229,10 @@ unsafe extern "C" fn ssl_external_passwd_cb(
             }
             0
         }
-        Err(_) => {
+        Err(p) => {
+            // Panics can't unwind over the OpenSSL FFI frame; re-raised by
+            // be_tls_init.
+            PASSPHRASE_PANIC.set(Some(p));
             if size > 0 {
                 slice[0] = 0;
             }
@@ -532,6 +537,7 @@ pub fn be_tls_init(is_server_start: bool) -> PgResult<i32> {
     default_openssl_tls_init(&mut ctx, is_server_start);
     SSL_IS_SERVER_START.store(is_server_start, Ordering::Relaxed);
     PASSPHRASE_ERR.set(None);
+    PASSPHRASE_PANIC.set(None);
 
     let ssl_cert_file = guc_str(&vars::ssl_cert_file);
     if let Err(st) = ctx.set_certificate_chain_file(&ssl_cert_file) {
@@ -553,6 +559,9 @@ pub fn be_tls_init(is_server_start: bool) -> PgResult<i32> {
     DUMMY_SSL_PASSWD_CB_CALLED.store(false, Ordering::Relaxed);
 
     if let Err(st) = ctx.set_private_key_file(&ssl_key_file, openssl::ssl::SslFiletype::PEM) {
+        if let Some(p) = PASSPHRASE_PANIC.take() {
+            std::panic::resume_unwind(p);
+        }
         if let Some(e) = PASSPHRASE_ERR.take() {
             // The passphrase command's own ereport(ERROR) surfaced inside the
             // OpenSSL callback in C; re-raise it here (can't unwind over FFI).
@@ -930,7 +939,14 @@ pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
                     WL_SOCKET_WRITEABLE
                 };
                 pqcomm::pq_modify_fe_be_wait_set_socket(waitfor)?;
-                pqcomm::pq_wait_event_set_wait_fe_be(-1, WAIT_EVENT_SSL_OPEN_SERVER)?;
+                let events = pqcomm::pq_wait_event_set_wait_fe_be(-1, WAIT_EVENT_SSL_OPEN_SERVER)?;
+                // C waits with WaitLatchOrSocket(NULL latch, ...): the latch is
+                // not in its set. FeBeWaitSet has it, so a set latch must be
+                // consumed or this wait returns immediately forever (busy
+                // spin); no interrupt processing is needed pre-auth, as C notes.
+                if events & WL_LATCH_SET != 0 {
+                    latch_seams::reset_latch_my_latch::call();
+                }
                 result = mid.handshake();
             }
             Err(HandshakeError::Failure(mid)) => {
