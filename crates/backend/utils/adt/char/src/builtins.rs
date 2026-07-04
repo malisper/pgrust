@@ -105,8 +105,6 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
 pub const CHAR_BUILTINS: &[FmgrBuiltin] = &[
     b(33, "charout", 1, fc_charout),
-    b(454, "hashchar", 1, fc_hashchar),
-    b(446, "hashcharextended", 2, fc_hashcharextended),
     b(61, "chareq", 2, fc_chareq),
     b(70, "charne", 2, fc_charne),
     b(72, "charle", 2, fc_charle),
