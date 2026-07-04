@@ -109,11 +109,32 @@ pub(crate) fn name_at(d: Datum) -> String {
     String::from_utf8_lossy(n.name_str()).into_owned()
 }
 
+// Body bytes of a catalog varlena datum, live while the tuple is pinned;
+// external/compressed images detoast into a scratch context.
+pub(crate) fn varlena_body_at(d: Datum) -> Vec<u8> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena attr datum; length read from its own header.
+    unsafe {
+        let b0 = *p;
+        if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+            let len = if b0 == 0x01 {
+                detoast::varsize_any(core::slice::from_raw_parts(p, 2))
+            } else {
+                (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+            };
+            let raw = core::slice::from_raw_parts(p, len);
+            let scratch = mcx::MemoryContext::new("ruleutils detoast");
+            let image =
+                detoast::detoast_attr(scratch.mcx(), raw).expect("detoast catalog varlena");
+            image[datum::varlena::VARHDRSZ..].to_vec()
+        } else {
+            types_fmgr::PackedVarlena::from_ptr(p).data().to_vec()
+        }
+    }
+}
+
 pub(crate) fn text_at(d: Datum) -> String {
-    // SAFETY: catalog text/pg_node_tree datum, live while the tuple is pinned;
-    // PackedVarlena panics loudly on external/compressed images.
-    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-    String::from_utf8(v.data().to_vec()).expect("non-UTF-8 pg_node_tree")
+    String::from_utf8(varlena_body_at(d)).expect("non-UTF-8 catalog text")
 }
 
 // One-dimensional no-null int16 array body (int2vector or int2[]).
@@ -127,9 +148,7 @@ pub(crate) fn oid_array_at(d: Datum) -> Vec<Oid> {
 
 // One-dimensional no-null text array (TYPALIGN_INT elements).
 pub(crate) fn text_array_at(d: Datum) -> Vec<String> {
-    // SAFETY: catalog text[] datum; header fields read bytewise.
-    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-    let b = v.data();
+    let b = varlena_body_at(d);
     let ndim = i32::from_ne_bytes(b[0..4].try_into().unwrap());
     if ndim == 0 {
         return Vec::new();
@@ -159,10 +178,9 @@ pub(crate) fn text_array_at(d: Datum) -> Vec<String> {
 }
 
 pub(crate) fn array_body(d: Datum, elem_width: usize) -> Vec<u8> {
-    // SAFETY: as text_at; header fields read bytewise (short varlena headers
-    // leave the body unaligned).
-    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-    let b = v.data();
+    // Header fields read bytewise (short varlena headers leave the body
+    // unaligned).
+    let b = varlena_body_at(d);
     let ndim = i32::from_ne_bytes(b[0..4].try_into().unwrap());
     if ndim == 0 {
         return Vec::new();
