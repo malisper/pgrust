@@ -268,12 +268,24 @@ pub fn make_join_rel(
         ),
     };
     let (joinrel, restrictlist) = build_join_rel(run, joinrelids, rel1, rel2, &sjinfo)?;
+    // restriction_is_constant_false (joinrels.c): a constant-false clause
+    // makes the joinrel (or one input) dummy in every C leg except FULL with
+    // a non-pushed-down qual, which runs add_paths and evaluates the qual at
+    // execution; the dummy legs stay loud (mark_dummy_rel lane unported).
     for &rid in restrictlist.iter() {
-        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
-        if clause.node_tag() == NodeTag::T_Const {
-            panic!(
-                "restriction_is_constant_false (joinrels.c): constant join qual; M2 lane"
-            );
+        let rinfo = run.root.rinfo(rid);
+        let clause = *run.root.expr_node(rinfo.clause);
+        if let Some(con) = clause.as_const() {
+            if con.constisnull || !con.constvalue.as_bool() {
+                let pushed_down = rinfo.is_pushed_down
+                    || !relids_is_subset(&rinfo.required_relids, &run.root.rel(joinrel).relids);
+                if pushed_down || sjinfo.jointype != types_pathnodes::JOIN_FULL {
+                    panic!(
+                        "populate_joinrel_with_paths (joinrels.c): constant-false join qual; \
+                         mark_dummy_rel lane unported"
+                    );
+                }
+            }
         }
     }
     match sjinfo.jointype {
