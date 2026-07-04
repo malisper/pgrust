@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+copyfuncs = { path = "../../nodes/copyfuncs" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
 event_trigger = { path = "../../commands/event_trigger" }

@@ -95,14 +95,16 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
 
     // C: check_stack_depth() — recursion guard unported repo-wide (stack lane).
 
-    if read_only_tree {
-        // C: pstmt = copyObject(pstmt). Reachable only from plancache-held
-        // trees; node deep-copy lands with the plancache lane.
-        panic!(
-            "standard_ProcessUtility (utility.c:613): readOnlyTree copyObject \
-             needs node clone_in (plancache lane)"
-        );
-    }
+    // C: pstmt = copyObject(pstmt) — consumers scribble on the tree, so a
+    // plancache-held tree is never executed directly.
+    let pstmt: &'p PlannedStmt<'a> = if read_only_tree {
+        let copy = copyfuncs::copy_utility_planned_stmt(mcx, pstmt)?;
+        // Retention contract (unify_stmt_lifetime): the copy lives in the
+        // portal-context mcx, which outlives the utility call.
+        unsafe { core::mem::transmute::<&PlannedStmt<'_>, &'p PlannedStmt<'a>>(copy) }
+    } else {
+        pstmt
+    };
 
     let parsetree: Node<'a> = pstmt
         .utilityStmt
