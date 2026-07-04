@@ -618,16 +618,20 @@ pub fn cost_index(
     path_id: types_pathnodes::PathId,
     loop_count: f64,
 ) -> PgResult<()> {
-    let (baserel_id, indexonly, index_total_pages, indrestrictinfo) = {
+    let (baserel_id, indexonly, index_total_pages, mut cond_sources) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else {
             panic!("cost_index: not an IndexPath")
         };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        // extract_nonindex_conditions source list; ppi_clauses appended below
+        // for a parameterized path.
+        let mut sources: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+        sources.extend(index.indrestrictinfo.borrow().iter().copied());
         (
             index.rel.expect("index rel set"),
             ip.path.pathtype == tag16(NodeTag::T_IndexOnlyScan),
             index.pages,
-            index.indrestrictinfo.borrow().clone(),
+            sources,
         )
     };
     {
@@ -651,10 +655,6 @@ pub fn cost_index(
         }
         v
     };
-    // extract_nonindex_conditions over indrestrictinfo, plus ppi_clauses for
-    // a parameterized path.
-    let mut cond_sources: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
-    cond_sources.extend(indrestrictinfo.iter().copied());
     let new_rows = if let Some(ppi) = run.root.path(path_id).base().param_info.as_deref() {
         cond_sources.extend(ppi.ppi_clauses.iter().copied());
         ppi.ppi_rows
