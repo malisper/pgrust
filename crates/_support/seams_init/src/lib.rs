@@ -182,7 +182,6 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(genfile::GENFILE_BUILTINS);
     fmgr_core::register_late_builtins(guc_funcs::GUC_FUNCS_BUILTINS);
     fmgr_core::register_late_builtins(mbutils::builtins::MBUTILS_BUILTINS);
-    parse_utilcmd::init_seams();
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
