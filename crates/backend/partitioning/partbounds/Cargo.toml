@@ -26,3 +26,5 @@ table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }

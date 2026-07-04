@@ -620,8 +620,7 @@ fn rel_name(mcx: Mcx<'_>, oid: Oid) -> String {
         .unwrap_or_default()
 }
 
-// check_new_partition_bound; parser_errposition cursors are dropped (the
-// C messages carry a position into the CREATE statement; divergence noted).
+// check_new_partition_bound.
 pub fn check_new_partition_bound(
     mcx: Mcx<'_>,
     relname: &str,
@@ -629,7 +628,11 @@ pub fn check_new_partition_bound(
     boundinfo: Option<&PartitionBoundInfoData<'_>>,
     part_oids: &[Oid],
     spec: &PartitionBoundSpec<'_>,
+    sourcetext: Option<&[u8]>,
 ) -> PgResult<()> {
+    let errpos = |loc: i32| {
+        parser_small1::parser_errposition_source(sourcetext, loc, mbutils::GetDatabaseEncoding())
+    };
     if spec.is_default {
         let Some(boundinfo) = boundinfo else { return Ok(()) };
         if !boundinfo.has_default() {
@@ -643,11 +646,13 @@ pub fn check_new_partition_bound(
                     rel_name(mcx, part_oids[boundinfo.default_index as usize])
                 ),
             )
-            .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+            .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .with_cursor_position(errpos(spec.location)),
         ));
     }
     let mut with: i32 = -1;
     let mut overlap = false;
+    let mut overlap_location: i32 = -1;
 
     match key.strategy as u8 {
         PARTITION_STRATEGY_HASH => {
@@ -695,6 +700,7 @@ pub fn check_new_partition_bound(
                 loop {
                     if boundinfo.indexes[remainder as usize] != -1 {
                         overlap = true;
+                        overlap_location = spec.location;
                         with = boundinfo.indexes[remainder as usize];
                         break;
                     }
@@ -715,11 +721,13 @@ pub fn check_new_partition_bound(
                             partition_list_bsearch(key, boundinfo, val.constvalue, &mut equal);
                         if offset >= 0 && equal {
                             overlap = true;
+                            overlap_location = val.location;
                             with = boundinfo.indexes[offset as usize];
                             break;
                         }
                     } else if boundinfo.accepts_nulls() {
                         overlap = true;
+                        overlap_location = spec_const(cell).location;
                         with = boundinfo.null_index;
                         break;
                     }
@@ -772,11 +780,19 @@ pub fn check_new_partition_bound(
                         );
                         if cmpval2 < 0 {
                             overlap = true;
+                            overlap_location = range_datum_location(
+                                &spec.upperdatums,
+                                if cmpval2 == 0 { 0 } else { cmpval2.unsigned_abs() as usize - 1 },
+                            );
                             with = boundinfo.indexes[(offset + 2) as usize];
                         }
                     }
                 } else {
                     overlap = true;
+                    overlap_location = range_datum_location(
+                        &spec.lowerdatums,
+                        if cmpval == 0 { 0 } else { cmpval.unsigned_abs() as usize - 1 },
+                    );
                     with = boundinfo.indexes[(offset + 1) as usize];
                 }
             }
@@ -786,9 +802,19 @@ pub fn check_new_partition_bound(
 
     if overlap {
         debug_assert!(with >= 0);
-        return Err(overlap_error(relname, &rel_name(mcx, part_oids[with as usize])));
+        let e = overlap_error(relname, &rel_name(mcx, part_oids[with as usize]));
+        return Err(Box::new((*e).with_cursor_position(errpos(overlap_location))));
     }
     Ok(())
+}
+
+fn range_datum_location(datums: &types_nodes::NodeList<'_>, idx: usize) -> i32 {
+    datums
+        .iter()
+        .nth(idx)
+        .and_then(|n| n.as_variant::<PartitionRangeDatum>())
+        .map(|d| d.location)
+        .unwrap_or(-1)
 }
 
 // get_range_partbound_string (ruleutils.c) reduced to the Const/inf datum set

@@ -397,6 +397,7 @@ pub fn DefineRelation<'mcx>(
                 pdesc.boundinfo.as_ref(),
                 &pdesc.oids,
                 spec,
+                Some(query_string.as_bytes()),
             )?;
             if let Some(default_rel) = &default_rel {
                 partbounds::check_default_partition_contents(

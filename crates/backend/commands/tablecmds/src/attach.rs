@@ -35,7 +35,7 @@ const InheritsRelationId: Oid = 2611;
 const InheritsRelidSeqnoIndexId: Oid = 2680;
 const InheritsParentIndexId: Oid = 2187;
 const TriggerRelationId: Oid = 2620;
-const TriggerRelidNameIndexId: Oid = 2699;
+const TriggerRelidNameIndexId: Oid = 2701;
 const DependRelationId: Oid = 2608;
 const DependDependerIndexId: Oid = 2673;
 const CONSTRAINT_FOREIGN: u8 = pg_constraint::CONSTRAINT_FOREIGN;
@@ -123,6 +123,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     cmd: &PartitionCmd<'mcx>,
+    query_string: &str,
 ) -> PgResult<()> {
     let pdesc = partdesc::RelationGetPartitionDesc(rel)?;
     let default_part_oid = pdesc
@@ -300,6 +301,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
         pdesc.boundinfo.as_ref(),
         &pdesc.oids,
         spec,
+        Some(query_string.as_bytes()),
     )?;
 
     CreateInheritance(mcx, &attachrel, rel)?;
@@ -359,13 +361,13 @@ fn check_no_transition_table_triggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
 ) -> PgResult<()> {
-    const Anum_pg_trigger_tgname: usize = 3;
+    const Anum_pg_trigger_tgname: usize = 4;
     const Anum_pg_trigger_tgtype: usize = 6;
-    const Anum_pg_trigger_tgoldtable: usize = 16;
-    const Anum_pg_trigger_tgnewtable: usize = 17;
+    const Anum_pg_trigger_tgoldtable: usize = 18;
+    const Anum_pg_trigger_tgnewtable: usize = 19;
     const TRIGGER_TYPE_ROW: i16 = 1;
     let tgrel = table::table_open(mcx, TriggerRelationId, AccessShareLock)?;
-    let keys = [oid_scankey(1, rel.rd_id)];
+    let keys = [oid_scankey(2, rel.rd_id)];
     let mut scan =
         genam::systable_beginscan(mcx, &tgrel, TriggerRelidNameIndexId, true, None, &keys)?;
     let desc = tgrel.descr();
@@ -407,7 +409,7 @@ fn has_row_triggers<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<bool> {
     const Anum_pg_trigger_tgisinternal: usize = 8;
     const TRIGGER_TYPE_ROW: i16 = 1;
     let tgrel = table::table_open(mcx, TriggerRelationId, AccessShareLock)?;
-    let keys = [oid_scankey(1, relid)];
+    let keys = [oid_scankey(2, relid)];
     let mut scan =
         genam::systable_beginscan(mcx, &tgrel, TriggerRelidNameIndexId, true, None, &keys)?;
     let desc = tgrel.descr();
@@ -1447,8 +1449,8 @@ fn check_no_inherited_fks<'mcx>(mcx: Mcx<'mcx>, part_rel: &Relation<'mcx>) -> Pg
 // DropClonedTriggersFromPartition (tablecmds.c:21506).
 fn DropClonedTriggersFromPartition<'mcx>(mcx: Mcx<'mcx>, partition_id: Oid) -> PgResult<()> {
     const Anum_pg_trigger_oid: usize = 1;
-    const Anum_pg_trigger_tgparentid: usize = 4;
-    const Anum_pg_trigger_tgconstrrelid: usize = 11;
+    const Anum_pg_trigger_tgparentid: usize = 3;
+    const Anum_pg_trigger_tgconstrrelid: usize = 9;
     let tgrel = table::table_open(mcx, TriggerRelationId, RowExclusiveLock)?;
     let keys = [oid_scankey(2, partition_id)];
     let mut scan =

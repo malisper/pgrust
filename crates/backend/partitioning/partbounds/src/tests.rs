@@ -135,7 +135,7 @@ fn check_new_hash_partition_no_conflict() {
     let specs = [hash_spec(mcx, 4, 0), hash_spec(mcx, 8, 2)];
     let (info, _) = partition_bounds_create(mcx, &specs, &key).unwrap();
     let new_spec = hash_spec(mcx, 8, 1);
-    check_new_partition_bound(mcx, "p_new", &key, Some(&info), &[100, 101], new_spec).unwrap();
+    check_new_partition_bound(mcx, "p_new", &key, Some(&info), &[100, 101], new_spec, None).unwrap();
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn check_default_against_empty_parent_ok() {
     b.strategy = PARTITION_STRATEGY_LIST;
     b.is_default = true;
     let spec = b.seal_ref();
-    check_new_partition_bound(mcx, "p_def", &key, None, &[], spec).unwrap();
+    check_new_partition_bound(mcx, "p_def", &key, None, &[], spec, None).unwrap();
 }
 
 #[test]
