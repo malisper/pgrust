@@ -3,6 +3,8 @@
 // The XLOG_BTREE_SPLIT record's right-page item stream is replayed
 // (_bt_restore_page semantics) and compared byte-for-byte against the live
 // right page; both NEWROOT records and the leaf-insert stream are decoded.
+// Not miri-runnable: XLogFileInit does real segment file I/O.
+#![cfg(not(miri))]
 use std::cell::Cell;
 use std::ptr::NonNull;
 use std::rc::Rc;
