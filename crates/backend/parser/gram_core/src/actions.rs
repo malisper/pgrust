@@ -7398,8 +7398,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // privilege_target DATABASE/DOMAIN/LANGUAGE/LARGE OBJECT/SCHEMA/
-            // TABLESPACE/TYPE forms (FDW 1049 / SERVER 1050 / PARAMETER 1058
-            // stay louds: fdw lanes).
+            // TABLESPACE/TYPE forms (FDW 1049 / SERVER 1050 stay louds: fdw
+            // lanes).
             1054 | 1055 | 1056 | 1057 | 1059 | 1060 | 1061 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
@@ -7414,6 +7414,35 @@ impl<'mcx> Parser<'mcx> {
                 };
                 n.objects = view.v(if rule == 1057 { 3 } else { 2 }).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1058 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = ObjectType::OBJECT_PARAMETER_ACL;
+                n.objects = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // parameter_name_list / dotted parameter_name (plain-ColId 1044
+            // rides DISPATCH).
+            1042 => {
+                let n = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1043 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1045 => {
+                let a = view.v(1).str_val();
+                let b = view.v(3).str_val();
+                let mut v: mcx::PgVec<'mcx, u8> =
+                    mcx::vec_with_capacity_in(mcx, a.len() + 1 + b.len())?;
+                mcx::vec_append_bytes(&mut v, a.as_bytes())?;
+                v.push(b'.');
+                mcx::vec_append_bytes(&mut v, b.as_bytes())?;
+                // SAFETY: concatenation of valid UTF-8 and '.'.
+                *yyval = YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(v.leak()) });
             }
             // NumericOnly_list.
             664 => {
