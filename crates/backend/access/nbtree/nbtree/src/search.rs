@@ -356,25 +356,31 @@ fn drop_lock_and_maybe_pin(rel: &Relation<'_>, so: &mut BTScanOpaqueData<'_>) ->
 
 /// index_getprocinfo + fmgr_info_copy over the rd_supportinfo rule-5 cache.
 pub fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
-    let mut cache = rel.rd_supportinfo.borrow_mut();
-    if cache.is_empty() {
-        cache.resize_with(rel.indnkeyatts() as usize, || None);
-    }
-    let slot = &mut cache[attno - 1];
-    if slot.is_none() {
-        let opcintype = rel.rd_opcintype[attno - 1];
-        let proc = lsyscache::get_opfamily_proc(
-            rel.rd_opfamily[attno - 1],
-            opcintype,
-            opcintype,
-            BTORDER_PROC as i16,
-        )?;
-        if proc == 0 {
-            return Err(missing_support_function(rel, opcintype, opcintype, attno));
+    {
+        let mut cache = rel.rd_supportinfo.borrow_mut();
+        if cache.is_empty() {
+            cache.resize_with(rel.indnkeyatts() as usize, || None);
         }
-        *slot = Some(fmgr_core::fmgr_info(proc)?);
+        if let Some(fi) = &cache[attno - 1] {
+            return Ok(fi.clone());
+        }
     }
-    Ok(slot.as_ref().expect("filled above").clone())
+    // Borrow released across the lookup: resolving the support proc can scan
+    // pg_amproc, rebuilding relcache entries and re-entering this scan on the
+    // same index.
+    let opcintype = rel.rd_opcintype[attno - 1];
+    let proc = lsyscache::get_opfamily_proc(
+        rel.rd_opfamily[attno - 1],
+        opcintype,
+        opcintype,
+        BTORDER_PROC as i16,
+    )?;
+    if proc == 0 {
+        return Err(missing_support_function(rel, opcintype, opcintype, attno));
+    }
+    let fi = fmgr_core::fmgr_info(proc)?;
+    rel.rd_supportinfo.borrow_mut()[attno - 1] = Some(fi.clone());
+    Ok(fi)
 }
 
 #[cold]

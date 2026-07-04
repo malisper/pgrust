@@ -706,7 +706,8 @@ fn objtype_noun(objtype: ObjectType) -> &'static str {
     }
 }
 
-// object_ownercheck (aclchk.c), pg_class arm only; other classes are loud.
+// object_ownercheck (aclchk.c), pg_class/pg_publication/pg_subscription arms;
+// other classes are loud.
 pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {
         return Ok(true);
@@ -725,10 +726,53 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        PublicationRelationId => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::PUBLICATIONOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for publication {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::PUBLICATIONOID,
+                &tuple,
+                ANUM_PG_PUBLICATION_PUBOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        SubscriptionRelationId => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::SUBSCRIPTIONOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for subscription {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::SUBSCRIPTIONOID,
+                &tuple,
+                ANUM_PG_SUBSCRIPTION_SUBOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
 }
+
+const PublicationRelationId: Oid = 6104;
+const SubscriptionRelationId: Oid = 6100;
+const ANUM_PG_PUBLICATION_PUBOWNER: i32 = 3;
+const ANUM_PG_SUBSCRIPTION_SUBOWNER: i32 = 5;
 
 pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {

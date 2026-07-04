@@ -2,7 +2,8 @@
 // all other classes are named panics.
 use crate::{
     unported, AttrDefaultRelationId, ConstraintRelationId, ObjectAddress, PolicyRelationId,
-    ProcedureRelationId, RewriteRelationId, TriggerRelationId,
+    ProcedureRelationId, PublicationNamespaceRelationId, PublicationRelRelationId,
+    PublicationRelationId, RewriteRelationId, SubscriptionRelationId, TriggerRelationId,
 };
 use datum::Datum;
 use format_type::quote_identifier;
@@ -351,8 +352,93 @@ pub fn getObjectDescription(
                 quote_qualified(nspname.as_deref(), &opfname)
             )))
         }
+        PublicationRelationId => {
+            Ok(lsyscache::get_publication_name(mcx, object.objectId, missing_ok)?
+                .map(|pubname| format!("publication {}", pubname.as_str())))
+        }
+        PublicationNamespaceRelationId => {
+            let Some((pubname, nspname)) =
+                getPublicationSchemaInfo(mcx, object.objectId, missing_ok)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(format!(
+                "publication of schema {nspname} in publication {pubname}"
+            )))
+        }
+        PublicationRelRelationId => {
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cache_syscache::cacheinfo::PUBLICATIONREL,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for publication table {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let prpubid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::PUBLICATIONREL,
+                &tup,
+                2,
+            )?
+            .as_oid();
+            let prrelid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::PUBLICATIONREL,
+                &tup,
+                3,
+            )?
+            .as_oid();
+            cache_syscache::ReleaseSysCache(tup);
+            let pubname = lsyscache::get_publication_name(mcx, prpubid, false)?
+                .expect("missing_ok=false yields a name");
+            let rel = getRelationDescription(prrelid, false)?
+                .expect("publication relation's table exists");
+            Ok(Some(format!(
+                "publication of {rel} in publication {}",
+                pubname.as_str()
+            )))
+        }
+        SubscriptionRelationId => {
+            Ok(lsyscache::get_subscription_name(mcx, object.objectId, missing_ok)?
+                .map(|subname| format!("subscription {}", subname.as_str())))
+        }
         other => unported(&format!("getObjectDescription object class {other}")),
     }
+}
+
+// getPublicationSchemaInfo (objectaddress.c): (pubname, nspname) for a
+// pg_publication_namespace row.
+fn getPublicationSchemaInfo(
+    mcx: Mcx<'_>,
+    psoid: types_core::Oid,
+    missing_ok: bool,
+) -> PgResult<Option<(String, String)>> {
+    let cacheid = cache_syscache::cacheinfo::PUBLICATIONNAMESPACE;
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cacheid,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(psoid)),
+    )?
+    else {
+        if !missing_ok {
+            panic!("cache lookup failed for publication schema {psoid}");
+        }
+        return Ok(None);
+    };
+    let pnpubid = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?.as_oid();
+    let pnnspid = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 3)?.as_oid();
+    cache_syscache::ReleaseSysCache(tup);
+
+    let Some(pubname) = lsyscache::get_publication_name(mcx, pnpubid, missing_ok)? else {
+        return Ok(None);
+    };
+    let Some(nspname) = get_namespace_name(pnnspid)? else {
+        if !missing_ok {
+            panic!("cache lookup failed for schema {pnnspid}");
+        }
+        return Ok(None);
+    };
+    Ok(Some((pubname.as_str().to_string(), nspname)))
 }
 
 // pg_opclass and pg_opfamily share the (method, name, namespace) column
