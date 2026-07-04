@@ -20,6 +20,8 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+tableam_vocab = { path = "../../table/tableam_vocab" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 heapam = { path = "../heapam" }
 heapam_visibility = { path = "../heapam_visibility" }
 init_small = { path = "../../../utils/init/init_small" }
@@ -32,7 +34,6 @@ visibilitymap = { path = "../visibilitymap" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
-tableam_vocab = { path = "../../table/tableam_vocab" }
 datum = { path = "../../../../_support/types/datum" }
 xact_seams = { path = "../../transam/xact_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
@@ -52,7 +53,6 @@ transam_xlog = { path = "../../transam/transam_xlog" }
 xlogutils = { path = "../../transam/xlogutils" }
 varsup = { path = "../../transam/varsup" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
-guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem = { path = "../../../storage/ipc/shmem" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }

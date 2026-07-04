@@ -10,6 +10,8 @@ seam_core::seam!(
         num_all_visible_pages: BlockNumber,
         num_all_frozen_pages: BlockNumber,
         hasindex: bool,
+        frozenxid: types_core::TransactionId,
+        minmulti: types_core::MultiXactId,
         in_outer_xact: bool,
     ) -> PgResult<()>
 );

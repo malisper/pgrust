@@ -133,7 +133,7 @@ pub fn rewrite_heap_tuple<'mcx>(
             state.rs_old_minmxid,
             state.rs_freeze_xid,
             state.rs_cutoff_multi,
-        );
+        )?;
 
         new_hdr.t_ctid = ItemPointerData::invalid();
     }

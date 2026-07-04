@@ -844,7 +844,7 @@ fn vacuum_reclaims_dead_rows_e2e() {
     freespace::init_seams();
     vacuumlazy::init_seams();
     // pg_class isn't in this fixture harness: swallow the relstats write.
-    vacuum_seams::vac_update_relstats::set(|_, _, _, _, _, _, _| Ok(()));
+    vacuum_seams::vac_update_relstats::set(|_, _, _, _, _, _, _, _, _| Ok(()));
     commands_vacuum::init_seams();
     autovacuum::init_seams();
     walwriter::init_seams();

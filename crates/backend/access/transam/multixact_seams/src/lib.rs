@@ -33,6 +33,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // MultiXactIdCreateFromMembers(nmembers, members) (multixact.c).
+    pub fn multi_xact_id_create_from_members(
+        members: &mut [types_storage::multixact::MultiXactMember],
+    ) -> PgResult<types_core::MultiXactId>
+);
+
+seam_core::seam!(
     // StartupMultiXact() (multixact.c).
     pub fn startup_multixact() -> PgResult<()>
 );

@@ -832,7 +832,7 @@ fn boot() {
     seed_reloid_cache();
 
     RELSTATS.lock().unwrap().clear();
-    vacuum_seams::vac_update_relstats::set(|rel, num_pages, num_tuples, allvis, _allfroz, _hasindex, _in_outer| {
+    vacuum_seams::vac_update_relstats::set(|rel, num_pages, num_tuples, allvis, _allfroz, _hasindex, _frozenxid, _minmulti, _in_outer| {
         RELSTATS.lock().unwrap().push((rel.rd_id, num_pages, num_tuples, allvis));
         if rel.rd_id == T_OID {
             *T_RELPAGES.lock().unwrap() = (num_pages as i32, num_tuples as f32);

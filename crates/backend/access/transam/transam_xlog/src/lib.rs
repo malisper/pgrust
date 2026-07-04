@@ -359,6 +359,12 @@ thread_local! {
     pub(crate) static PROC_LAST_REC_PTR: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_REC_END: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_COMMIT_END: Cell<XLogRecPtr> = const { Cell::new(0) };
+    // pgWalUsage.wal_fpi (instrument.h); only the FPI counter is live so far.
+    pub(crate) static WAL_USAGE_FPI: Cell<i64> = const { Cell::new(0) };
+}
+
+pub fn WalUsageFpi() -> i64 {
+    WAL_USAGE_FPI.get()
 }
 
 pub fn ProcLastRecPtr() -> XLogRecPtr {
@@ -384,6 +390,7 @@ pub fn init_seams() {
     s::xlog_logical_info_active::set(XLogLogicalInfoActive);
     s::xlog_standby_info_active::set(XLogStandbyInfoActive);
     s::recovery_in_progress::set(insert::RecoveryInProgress);
+    s::wal_usage_fpi::set(WalUsageFpi);
     s::get_flush_rec_ptr::set(write::get_flush_rec_ptr_seam);
     s::wal_segment_size::set(wal_segment_size);
     s::xact_last_rec_end::set(XactLastRecEnd);

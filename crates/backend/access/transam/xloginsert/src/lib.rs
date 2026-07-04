@@ -826,4 +826,5 @@ pub fn init_seams() {
     s::init_xlog_insert::set(InitXLogInsert);
     s::log_newpage_buffer::set(log_newpage_buffer);
     s::xlog_save_buffer_for_hint::set(XLogSaveBufferForHint);
+    s::xlog_check_buffer_needs_backup::set(XLogCheckBufferNeedsBackup);
 }

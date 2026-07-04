@@ -496,7 +496,7 @@ pub fn XLogInsertRecord(
     rdatas: &[&[u8]],
     fpw_lsn: XLogRecPtr,
     flags: u8,
-    _num_fpi: i32,
+    num_fpi: i32,
     topxid_included: bool,
 ) -> PgResult<XLogRecPtr> {
     let ctl = XLogCtl();
@@ -635,6 +635,9 @@ pub fn XLogInsertRecord(
 
     PROC_LAST_REC_PTR.set(start_pos);
     XACT_LAST_REC_END.set(end_pos);
+    if inserted {
+        crate::WAL_USAGE_FPI.set(crate::WAL_USAGE_FPI.get() + num_fpi as i64);
+    }
 
     Ok(end_pos)
 }

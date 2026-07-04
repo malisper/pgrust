@@ -1,17 +1,16 @@
-//! pruneheap.c: on-access prune lane live (prune loop, HOT-chain walk,
-//! execute, XLOG_HEAP2_PRUNE_ON_ACCESS). Freeze arms and vacuum-only paths
-//! (HEAP_PAGE_PRUNE_FREEZE, PageTruncateLinePointerArray) are loud named
-//! panics for the vacuum lane.
+//! pruneheap.c: prune + freeze lanes live (prune loop, HOT-chain walk,
+//! execute, freeze plans, XLOG_HEAP2_PRUNE_*).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+use ::tableam_vocab::VacuumCutoffs;
 use ::types_core::xact::{
     InvalidTransactionId, TransactionIdFollows, TransactionIdIsNormal, TransactionIdPrecedes,
 };
 use ::types_core::{
-    Buffer, GlobalVisStateHandle, OffsetNumber, TransactionId, TransactionIdIsValid, XLogRecPtr,
-    BLCKSZ,
+    Buffer, GlobalVisStateHandle, MultiXactId, OffsetNumber, TransactionId, TransactionIdIsValid,
+    XLogRecPtr, BLCKSZ,
 };
 use ::types_error::PgResult;
 use ::types_rel::RelationData;
@@ -22,6 +21,10 @@ use ::types_tuple::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
 };
 
+use ::heapam::freeze::{
+    heap_freeze_prepared_tuples, heap_pre_freeze_checks, heap_prepare_freeze_tuple,
+    HeapPageFreeze, HeapTupleFreeze,
+};
 use ::heapam::{HeapTupleHeaderAdvanceConflictHorizon, HeapTupleHeaderGetUpdateXid};
 use ::heapam_visibility::HeapTupleSatisfiesVacuumHorizon;
 
@@ -87,11 +90,16 @@ impl Default for PruneFreezeResult {
     }
 }
 
-// PruneState (pruneheap.c); one stack value per prune, as C. Freeze fields
-// (pagefrz, frozen[]) live in the vacuum lane.
-struct PruneState {
+// PruneState (pruneheap.c); one stack value per prune, as C.
+struct PruneState<'a> {
     vistest: GlobalVisStateHandle,
     mark_unused_now: bool,
+    freeze: bool,
+    cutoffs: Option<&'a VacuumCutoffs>,
+
+    pagefrz: HeapPageFreeze,
+    nfrozen: usize,
+    frozen: [HeapTupleFreeze; MaxHeapTuplesPerPage],
 
     new_prune_xid: TransactionId,
     latest_xid_removed: TransactionId,
@@ -157,9 +165,12 @@ pub fn heap_page_prune_opt(rel: &RelationData<'_>, buffer: Buffer) -> PgResult<(
                 buffer,
                 vistest,
                 0,
+                None,
                 &mut presult,
                 PruneReason::PruneOnAccess,
                 &mut dummy_off_loc,
+                None,
+                None,
             )?;
 
             if presult.ndeleted > presult.nnewlpdead && rel.pgstat_enabled.get() {
@@ -176,30 +187,57 @@ pub fn heap_page_prune_opt(rel: &RelationData<'_>, buffer: Buffer) -> PgResult<(
     Ok(())
 }
 
-/// `heap_page_prune_and_freeze` with `options` restricted to the no-freeze
-/// lane (`HEAP_PAGE_PRUNE_FREEZE` panics; cutoffs/new_relfrozen_xid/
-/// new_relmin_mxid are vacuum-lane parameters and travel with it).
+/// `heap_page_prune_and_freeze`: `cutoffs`, `new_relfrozen_xid` and
+/// `new_relmin_mxid` are required iff `HEAP_PAGE_PRUNE_FREEZE` is set.
+#[allow(clippy::too_many_arguments)]
 pub fn heap_page_prune_and_freeze(
     relation: &RelationData<'_>,
     buffer: Buffer,
     vistest: GlobalVisStateHandle,
     options: i32,
+    cutoffs: Option<&VacuumCutoffs>,
     presult: &mut PruneFreezeResult,
     reason: PruneReason,
     off_loc: &mut OffsetNumber,
+    mut new_relfrozen_xid: Option<&mut TransactionId>,
+    mut new_relmin_mxid: Option<&mut MultiXactId>,
 ) -> PgResult<()> {
-    if (options & HEAP_PAGE_PRUNE_FREEZE) != 0 {
-        unported("heap_prepare_freeze_tuple/heap_pre_freeze_checks (freeze lane; VacuumCutoffs)");
-    }
-
     let page_ptr = bufmgr_seams::buffer_get_page::call(buffer);
     // SAFETY: caller holds a pin + the buffer cleanup lock for the whole call.
     let page = unsafe { PageRef::from_raw(page_ptr) };
     let blockno = bufmgr_seams::buffer_get_block_number::call(buffer);
+    let freeze = (options & HEAP_PAGE_PRUNE_FREEZE) != 0;
+    let fpi_before = transam_xlog_seams::wal_usage_fpi::call();
+
+    let pagefrz = if freeze {
+        let new_relfrozen_xid = new_relfrozen_xid.as_deref_mut().expect("FREEZE needs trackers");
+        let new_relmin_mxid = new_relmin_mxid.as_deref_mut().expect("FREEZE needs trackers");
+        HeapPageFreeze {
+            freeze_required: false,
+            FreezePageRelfrozenXid: *new_relfrozen_xid,
+            NoFreezePageRelfrozenXid: *new_relfrozen_xid,
+            FreezePageRelminMxid: *new_relmin_mxid,
+            NoFreezePageRelminMxid: *new_relmin_mxid,
+        }
+    } else {
+        debug_assert!(new_relfrozen_xid.is_none() && new_relmin_mxid.is_none());
+        HeapPageFreeze {
+            freeze_required: false,
+            FreezePageRelfrozenXid: InvalidTransactionId,
+            NoFreezePageRelfrozenXid: InvalidTransactionId,
+            FreezePageRelminMxid: 0,
+            NoFreezePageRelminMxid: 0,
+        }
+    };
 
     let mut prstate = PruneState {
         vistest,
         mark_unused_now: (options & HEAP_PAGE_PRUNE_MARK_UNUSED_NOW) != 0,
+        freeze,
+        cutoffs,
+        pagefrz,
+        nfrozen: 0,
+        frozen: [HeapTupleFreeze::default(); MaxHeapTuplesPerPage],
         new_prune_xid: InvalidTransactionId,
         latest_xid_removed: InvalidTransactionId,
         nredirected: 0,
@@ -219,10 +257,14 @@ pub fn heap_page_prune_and_freeze(
         recently_dead_tuples: 0,
         hastup: false,
         lpdead_items: 0,
-        all_visible: false,
-        all_frozen: false,
+        // With FREEZE, all_visible/all_frozen start true and are cleared by
+        // any tuple that precludes them; without it they start false so the
+        // tracking body stays dead.
+        all_visible: freeze,
+        all_frozen: freeze,
         visibility_cutoff_xid: InvalidTransactionId,
     };
+    debug_assert!(!freeze || cutoffs.is_some());
 
     let maxoff = page.max_offset_number();
 
@@ -284,6 +326,9 @@ pub fn heap_page_prune_and_freeze(
         offnum -= 1;
     }
 
+    // heap_prune_satisfies_vacuum may have emitted a hint-bit FPI (checksums).
+    let hint_bit_fpi = fpi_before != transam_xlog_seams::wal_usage_fpi::call();
+
     for i in (0..prstate.nroot_items).rev() {
         let offnum = prstate.root_items[i];
         if prstate.processed[offnum as usize] {
@@ -317,7 +362,7 @@ pub fn heap_page_prune_and_freeze(
                 )));
             }
         } else {
-            heap_prune_record_unchanged_lp_normal(page, &mut prstate, offnum);
+            heap_prune_record_unchanged_lp_normal(page, &mut prstate, offnum)?;
         }
     }
 
@@ -331,14 +376,49 @@ pub fn heap_page_prune_and_freeze(
     let do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
     let do_hint = page.prune_xid() != prstate.new_prune_xid || page.is_full();
 
+    let mut do_freeze = false;
+    if prstate.freeze {
+        if prstate.pagefrz.freeze_required {
+            do_freeze = true;
+        } else if prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 {
+            // Opportunistic: freeze if the page would become all-frozen and
+            // an FPI was (or will be) emitted anyway.
+            if relation_needs_wal(relation) {
+                if hint_bit_fpi {
+                    do_freeze = true;
+                } else if do_prune {
+                    if xloginsert_seams::xlog_check_buffer_needs_backup::call(buffer) {
+                        do_freeze = true;
+                    }
+                } else if do_hint
+                    && xlog_hint_bit_is_needed()
+                    && xloginsert_seams::xlog_check_buffer_needs_backup::call(buffer)
+                {
+                    do_freeze = true;
+                }
+            }
+        }
+    }
+
+    if do_freeze {
+        heap_pre_freeze_checks(buffer, &prstate.frozen[..prstate.nfrozen])?;
+    } else if prstate.nfrozen > 0 {
+        // Chose not to freeze prepared plans; the page won't be all-frozen.
+        debug_assert!(!prstate.pagefrz.freeze_required);
+        prstate.all_frozen = false;
+        prstate.nfrozen = 0;
+    }
+
     init_small::globals::StartCriticalSection();
-    let res = prune_apply(relation, buffer, page_ptr, &prstate, reason, do_prune, do_hint);
+    let res = prune_apply(
+        relation, buffer, page_ptr, &mut prstate, reason, do_prune, do_hint, do_freeze,
+    );
     init_small::globals::EndCriticalSection();
     res?;
 
     presult.ndeleted = prstate.ndeleted;
     presult.nnewlpdead = prstate.ndead as i32;
-    presult.nfrozen = 0;
+    presult.nfrozen = prstate.nfrozen as i32;
     presult.live_tuples = prstate.live_tuples;
     presult.recently_dead_tuples = prstate.recently_dead_tuples;
     presult.all_visible = prstate.all_visible && prstate.lpdead_items == 0;
@@ -350,17 +430,38 @@ pub fn heap_page_prune_and_freeze(
         prstate.visibility_cutoff_xid
     };
     presult.lpdead_items = prstate.lpdead_items as i32;
+
+    if prstate.freeze {
+        let new_relfrozen_xid = new_relfrozen_xid.expect("FREEZE needs trackers");
+        let new_relmin_mxid = new_relmin_mxid.expect("FREEZE needs trackers");
+        if presult.nfrozen > 0 {
+            *new_relfrozen_xid = prstate.pagefrz.FreezePageRelfrozenXid;
+            *new_relmin_mxid = prstate.pagefrz.FreezePageRelminMxid;
+        } else {
+            *new_relfrozen_xid = prstate.pagefrz.NoFreezePageRelfrozenXid;
+            *new_relmin_mxid = prstate.pagefrz.NoFreezePageRelminMxid;
+        }
+    }
     Ok(())
 }
 
+// XLogHintBitIsNeeded() (xlog.h); uninstalled slots read as boot defaults.
+fn xlog_hint_bit_is_needed() -> bool {
+    (transam_xlog_seams::data_checksums_enabled::is_installed()
+        && transam_xlog_seams::data_checksums_enabled::call())
+        || (guc_tables::vars::wal_log_hints.installed() && guc_tables::vars::wal_log_hints.read())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prune_apply(
     relation: &RelationData<'_>,
     buffer: Buffer,
     page_ptr: core::ptr::NonNull<u8>,
-    prstate: &PruneState,
+    prstate: &mut PruneState<'_>,
     reason: PruneReason,
     do_prune: bool,
     do_hint: bool,
+    do_freeze: bool,
 ) -> PgResult<()> {
     // SAFETY: cleanup lock held by the caller for the whole prune.
     let mut pm = unsafe { PageMut::from_raw(page_ptr) };
@@ -368,32 +469,75 @@ fn prune_apply(
     if do_hint {
         pm.set_prune_xid(prstate.new_prune_xid);
         pm.clear_full();
-        if !do_prune {
+        if !do_freeze && !do_prune {
             bufmgr_seams::mark_buffer_dirty_hint::call(buffer, true)?;
         }
     }
 
-    if do_prune {
-        heap_page_prune_execute(
-            buffer,
-            false,
-            &prstate.redirected[..prstate.nredirected * 2],
-            &prstate.nowdead[..prstate.ndead],
-            &prstate.nowunused[..prstate.nunused],
-        );
+    if do_prune || do_freeze {
+        if do_prune {
+            heap_page_prune_execute(
+                buffer,
+                false,
+                &prstate.redirected[..prstate.nredirected * 2],
+                &prstate.nowdead[..prstate.ndead],
+                &prstate.nowunused[..prstate.nunused],
+            );
+        }
+
+        if do_freeze {
+            heap_freeze_prepared_tuples(buffer, &prstate.frozen[..prstate.nfrozen]);
+        }
 
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
 
         if relation_needs_wal(relation) {
+            // The record's conflict horizon is the most conservative of the
+            // prune and freeze horizons.
+            let mut frz_conflict_horizon = InvalidTransactionId;
+            if do_freeze {
+                if prstate.all_visible && prstate.all_frozen {
+                    frz_conflict_horizon = prstate.visibility_cutoff_xid;
+                } else {
+                    // Avoids false conflicts when hot_standby_feedback in use.
+                    frz_conflict_horizon =
+                        prstate.cutoffs.expect("freeze lane has cutoffs").OldestXmin;
+                    frz_conflict_horizon = frz_conflict_horizon.wrapping_sub(1);
+                    if !TransactionIdIsNormal(frz_conflict_horizon) {
+                        frz_conflict_horizon = ::types_core::xact::MaxTransactionId;
+                    }
+                }
+            }
+            let conflict_xid =
+                if TransactionIdFollows(frz_conflict_horizon, prstate.latest_xid_removed) {
+                    frz_conflict_horizon
+                } else {
+                    prstate.latest_xid_removed
+                };
+
+            // log_heap_prune_and_freeze sorts the frozen array in place (C
+            // scribbles it too).
+            let PruneState {
+                frozen,
+                nfrozen,
+                redirected,
+                nredirected,
+                nowdead,
+                ndead,
+                nowunused,
+                nunused,
+                ..
+            } = prstate;
             log_heap_prune_and_freeze(
                 relation,
                 buffer,
-                prstate.latest_xid_removed,
+                conflict_xid,
                 true,
                 reason,
-                &prstate.redirected[..prstate.nredirected * 2],
-                &prstate.nowdead[..prstate.ndead],
-                &prstate.nowunused[..prstate.nunused],
+                &mut frozen[..*nfrozen],
+                &redirected[..*nredirected * 2],
+                &nowdead[..*ndead],
+                &nowunused[..*nunused],
             )?;
         }
     }
@@ -404,9 +548,8 @@ fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
 }
 
-// heap_prune_satisfies_vacuum, no-cutoffs form (the OldestXmin arm is the vacuum lane's).
 fn heap_prune_satisfies_vacuum(
-    prstate: &PruneState,
+    prstate: &PruneState<'_>,
     tup: &mut HeapTupleData<'_>,
     buffer: Buffer,
 ) -> PgResult<HTSV_Result> {
@@ -414,6 +557,15 @@ fn heap_prune_satisfies_vacuum(
     let res = HeapTupleSatisfiesVacuumHorizon(tup, buffer, &mut dead_after)?;
     if res != HTSV_Result::HEAPTUPLE_RECENTLY_DEAD {
         return Ok(res);
+    }
+    // VACUUM must prune xmaxes older than OldestXmin: freezing determination
+    // uses it and dead tuples' xmaxes cannot be frozen.
+    if let Some(cutoffs) = prstate.cutoffs {
+        if TransactionIdIsValid(cutoffs.OldestXmin)
+            && TransactionIdPrecedes(dead_after, cutoffs.OldestXmin)
+        {
+            return Ok(HTSV_Result::HEAPTUPLE_DEAD);
+        }
     }
     if procarray_seams::global_vis_test_is_removable_xid::call(prstate.vistest, dead_after)? {
         return Ok(HTSV_Result::HEAPTUPLE_DEAD);
@@ -451,7 +603,7 @@ fn heap_prune_chain(
     blockno: u32,
     maxoff: OffsetNumber,
     rootoffnum: OffsetNumber,
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     presult: &mut PruneFreezeResult,
 ) -> PgResult<()> {
     let mut priorXmax = InvalidTransactionId;
@@ -537,7 +689,7 @@ fn heap_prune_chain(
             i = 1;
         }
         for &item in &chainitems[i..nchain] {
-            heap_prune_record_unchanged_lp_normal(page, prstate, item);
+            heap_prune_record_unchanged_lp_normal(page, prstate, item)?;
         }
     } else if ndeadchain == nchain {
         heap_prune_record_dead_or_unused(presult, prstate, rootoffnum, rootlp.is_normal());
@@ -550,13 +702,13 @@ fn heap_prune_chain(
             heap_prune_record_unused(prstate, item, true);
         }
         for &item in &chainitems[ndeadchain..nchain] {
-            heap_prune_record_unchanged_lp_normal(page, prstate, item);
+            heap_prune_record_unchanged_lp_normal(page, prstate, item)?;
         }
     }
     Ok(())
 }
 
-fn heap_prune_record_prunable(prstate: &mut PruneState, xid: TransactionId) {
+fn heap_prune_record_prunable(prstate: &mut PruneState<'_>, xid: TransactionId) {
     debug_assert!(TransactionIdIsNormal(xid));
     if !TransactionIdIsValid(prstate.new_prune_xid)
         || TransactionIdPrecedes(xid, prstate.new_prune_xid)
@@ -566,7 +718,7 @@ fn heap_prune_record_prunable(prstate: &mut PruneState, xid: TransactionId) {
 }
 
 fn heap_prune_record_redirect(
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     offnum: OffsetNumber,
     rdoffnum: OffsetNumber,
     was_normal: bool,
@@ -585,7 +737,7 @@ fn heap_prune_record_redirect(
 
 fn heap_prune_record_dead(
     presult: &mut PruneFreezeResult,
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     offnum: OffsetNumber,
     was_normal: bool,
 ) {
@@ -604,7 +756,7 @@ fn heap_prune_record_dead(
 
 fn heap_prune_record_dead_or_unused(
     presult: &mut PruneFreezeResult,
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     offnum: OffsetNumber,
     was_normal: bool,
 ) {
@@ -615,7 +767,7 @@ fn heap_prune_record_dead_or_unused(
     }
 }
 
-fn heap_prune_record_unused(prstate: &mut PruneState, offnum: OffsetNumber, was_normal: bool) {
+fn heap_prune_record_unused(prstate: &mut PruneState<'_>, offnum: OffsetNumber, was_normal: bool) {
     debug_assert!(!prstate.processed[offnum as usize]);
     prstate.processed[offnum as usize] = true;
     debug_assert!(prstate.nunused < MaxHeapTuplesPerPage);
@@ -626,18 +778,16 @@ fn heap_prune_record_unused(prstate: &mut PruneState, offnum: OffsetNumber, was_
     }
 }
 
-fn heap_prune_record_unchanged_lp_unused(prstate: &mut PruneState, offnum: OffsetNumber) {
+fn heap_prune_record_unchanged_lp_unused(prstate: &mut PruneState<'_>, offnum: OffsetNumber) {
     debug_assert!(!prstate.processed[offnum as usize]);
     prstate.processed[offnum as usize] = true;
 }
 
-// The freeze-plan arm is the vacuum lane's; all_visible starts false without
-// FREEZE, so the all-visible tracking body is dead here, as in C.
 fn heap_prune_record_unchanged_lp_normal(
     page: PageRef<'_>,
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     offnum: OffsetNumber,
-) {
+) -> PgResult<()> {
     debug_assert!(!prstate.processed[offnum as usize]);
     prstate.processed[offnum as usize] = true;
     prstate.hastup = true;
@@ -651,7 +801,21 @@ fn heap_prune_record_unchanged_lp_normal(
         HTSV_Result::HEAPTUPLE_LIVE => {
             prstate.live_tuples += 1;
             if prstate.all_visible {
-                unported("all-visible tracking (freeze lane; VacuumCutoffs->OldestXmin)");
+                // As with hint bits, PD_ALL_VISIBLE must not be set off an
+                // async-committed inserter; require the hinted bit.
+                if !htup.xmin_committed() {
+                    prstate.all_visible = false;
+                } else {
+                    let xmin = htup.xmin();
+                    let cutoffs = prstate.cutoffs.expect("all_visible only tracked with FREEZE");
+                    if !TransactionIdPrecedes(xmin, cutoffs.OldestXmin) {
+                        prstate.all_visible = false;
+                    } else if TransactionIdFollows(xmin, prstate.visibility_cutoff_xid)
+                        && TransactionIdIsNormal(xmin)
+                    {
+                        prstate.visibility_cutoff_xid = xmin;
+                    }
+                }
             }
         }
         HTSV_Result::HEAPTUPLE_RECENTLY_DEAD => {
@@ -676,11 +840,31 @@ fn heap_prune_record_unchanged_lp_normal(
             panic!("unexpected HeapTupleSatisfiesVacuum result");
         }
     }
+
+    if prstate.freeze {
+        let cutoffs = prstate.cutoffs.expect("freeze lane has cutoffs");
+        let (has_plan, totally_frozen) = heap_prepare_freeze_tuple(
+            htup,
+            cutoffs,
+            &mut prstate.pagefrz,
+            &mut prstate.frozen[prstate.nfrozen],
+        )?;
+        if has_plan {
+            prstate.frozen[prstate.nfrozen].offset = offnum;
+            prstate.nfrozen += 1;
+        }
+        // A tuple neither totally frozen nor freezable-to-frozen keeps the
+        // page off the all-frozen path.
+        if !totally_frozen {
+            prstate.all_frozen = false;
+        }
+    }
+    Ok(())
 }
 
 fn heap_prune_record_unchanged_lp_dead(
     presult: &mut PruneFreezeResult,
-    prstate: &mut PruneState,
+    prstate: &mut PruneState<'_>,
     offnum: OffsetNumber,
 ) {
     debug_assert!(!prstate.processed[offnum as usize]);
@@ -690,7 +874,7 @@ fn heap_prune_record_unchanged_lp_dead(
     prstate.lpdead_items += 1;
 }
 
-fn heap_prune_record_unchanged_lp_redirect(prstate: &mut PruneState, offnum: OffsetNumber) {
+fn heap_prune_record_unchanged_lp_redirect(prstate: &mut PruneState<'_>, offnum: OffsetNumber) {
     debug_assert!(!prstate.processed[offnum as usize]);
     prstate.processed[offnum as usize] = true;
 }
@@ -868,9 +1052,56 @@ pub fn heap_get_root_tuples(
     Ok(())
 }
 
-/// `log_heap_prune_and_freeze`, freeze plans excluded (vacuum lane): emits
-/// XLOG_HEAP2_PRUNE_* with the redirect/dead/unused sub-records as block 0
-/// data and the conflict horizon unaligned after the 2-byte xl_heap_prune.
+fn heap_log_freeze_eq(plan: &[u8; 12], frz: &HeapTupleFreeze) -> bool {
+    u32::from_ne_bytes(plan[0..4].try_into().unwrap()) == frz.xmax
+        && u16::from_ne_bytes(plan[4..6].try_into().unwrap()) == frz.t_infomask2
+        && u16::from_ne_bytes(plan[6..8].try_into().unwrap()) == frz.t_infomask
+        && plan[8] == frz.frzflags
+}
+
+// xlhp_freeze_plan: xmax, t_infomask2, t_infomask, frzflags, pad, ntuples.
+fn heap_log_freeze_new_plan(plan: &mut [u8; 12], frz: &HeapTupleFreeze) {
+    plan[0..4].copy_from_slice(&frz.xmax.to_ne_bytes());
+    plan[4..6].copy_from_slice(&frz.t_infomask2.to_ne_bytes());
+    plan[6..8].copy_from_slice(&frz.t_infomask.to_ne_bytes());
+    plan[8] = frz.frzflags;
+    plan[9] = 0;
+    plan[10..12].copy_from_slice(&1u16.to_ne_bytes());
+}
+
+fn heap_log_freeze_cmp(a: &HeapTupleFreeze, b: &HeapTupleFreeze) -> core::cmp::Ordering {
+    (a.xmax, a.t_infomask2, a.t_infomask, a.frzflags, a.offset)
+        .cmp(&(b.xmax, b.t_infomask2, b.t_infomask, b.frzflags, b.offset))
+}
+
+// heap_log_freeze_plan: dedup tuple freeze plans (sorts `tuples` in place);
+// offsets_out is grouped by plan, ascending within each group.
+fn heap_log_freeze_plan(
+    tuples: &mut [HeapTupleFreeze],
+    plans_out: &mut [[u8; 12]],
+    offsets_out: &mut [OffsetNumber],
+) -> usize {
+    tuples.sort_unstable_by(heap_log_freeze_cmp);
+    let mut nplans = 0usize;
+    for (i, frz) in tuples.iter().enumerate() {
+        if i == 0 || !heap_log_freeze_eq(&plans_out[nplans - 1], frz) {
+            heap_log_freeze_new_plan(&mut plans_out[nplans], frz);
+            nplans += 1;
+        } else {
+            let p = &mut plans_out[nplans - 1];
+            let nt = u16::from_ne_bytes(p[10..12].try_into().unwrap()) + 1;
+            p[10..12].copy_from_slice(&nt.to_ne_bytes());
+        }
+        offsets_out[i] = frz.offset;
+    }
+    debug_assert!(nplans > 0 && nplans <= tuples.len());
+    nplans
+}
+
+/// `log_heap_prune_and_freeze`: emits XLOG_HEAP2_PRUNE_* with freeze-plan,
+/// redirect/dead/unused sub-records and trailing frz offsets as block 0 data;
+/// the conflict horizon rides unaligned after the 2-byte xl_heap_prune.
+/// Scribbles on `frozen` (C contract).
 #[allow(clippy::too_many_arguments)]
 pub fn log_heap_prune_and_freeze(
     _relation: &RelationData<'_>,
@@ -878,6 +1109,7 @@ pub fn log_heap_prune_and_freeze(
     conflict_xid: TransactionId,
     cleanup_lock: bool,
     reason: PruneReason,
+    frozen: &mut [HeapTupleFreeze],
     redirected: &[OffsetNumber],
     dead: &[OffsetNumber],
     unused: &[OffsetNumber],
@@ -889,8 +1121,25 @@ pub fn log_heap_prune_and_freeze(
     let dead_hdr = (dead.len() as u16).to_ne_bytes();
     let unused_hdr = (unused.len() as u16).to_ne_bytes();
 
-    let mut bufdata: [&[u8]; 6] = [&[]; 6];
+    // xlhp_freeze_plans { uint16 nplans; pad[2]; plans[] }.
+    let mut plans = [[0u8; 12]; MaxHeapTuplesPerPage];
+    let mut frz_offsets = [0 as OffsetNumber; MaxHeapTuplesPerPage];
+    let mut freeze_hdr = [0u8; 4];
+    let mut nplans = 0usize;
+    if !frozen.is_empty() {
+        nplans = heap_log_freeze_plan(frozen, &mut plans, &mut frz_offsets);
+        freeze_hdr[0..2].copy_from_slice(&(nplans as u16).to_ne_bytes());
+    }
+    let nfrozen = frozen.len();
+
+    let mut bufdata: [&[u8]; 9] = [&[]; 9];
     let mut n = 0;
+    if nfrozen > 0 {
+        flags |= XLHP_HAS_FREEZE_PLANS;
+        bufdata[n] = &freeze_hdr;
+        bufdata[n + 1] = plans_bytes(&plans[..nplans]);
+        n += 2;
+    }
     if !redirected.is_empty() {
         flags |= XLHP_HAS_REDIRECTIONS;
         bufdata[n] = &redirect_hdr;
@@ -908,6 +1157,10 @@ pub fn log_heap_prune_and_freeze(
         bufdata[n] = &unused_hdr;
         bufdata[n + 1] = offsets_bytes(unused);
         n += 2;
+    }
+    if nfrozen > 0 {
+        bufdata[n] = offsets_bytes(&frz_offsets[..nfrozen]);
+        n += 1;
     }
 
     // RelationIsAccessibleInLogicalDecoding const-false (heapam DML divergence): no XLHP_IS_CATALOG_REL.
@@ -959,10 +1212,9 @@ fn offsets_bytes(offs: &[OffsetNumber]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(offs.as_ptr().cast::<u8>(), offs.len() * 2) }
 }
 
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("unported callee reached from pruneheap.c: {unit}");
+fn plans_bytes(plans: &[[u8; 12]]) -> &[u8] {
+    // SAFETY: [u8; 12] arrays are contiguous; same allocation, len*12 bytes.
+    unsafe { core::slice::from_raw_parts(plans.as_ptr().cast::<u8>(), plans.len() * 12) }
 }
 
 pub fn init_seams() {

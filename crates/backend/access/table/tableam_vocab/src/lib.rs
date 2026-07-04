@@ -60,7 +60,7 @@ pub enum TU_UpdateIndexes {
     TU_Summarizing,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
 pub enum LockTupleMode {
     LockTupleKeyShare = 0,

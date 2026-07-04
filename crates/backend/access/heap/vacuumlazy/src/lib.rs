@@ -1,13 +1,9 @@
-//! vacuumlazy.c phases I (scan/prune), II (index vacuum via ambulkdelete),
-//! III (mark LP_UNUSED), and end-of-vacuum rel truncation, single-table lane.
-//! Loud named panics:
-//! lazy_scan_noprune, parallel vacuum, eager scanning. C divergences (recorded): no HEAP_PAGE_PRUNE_FREEZE (pruneheap's
-//! freeze lane is loud), so page all-visibility is recomputed by
-//! heap_page_is_all_visible after pruning — the shape C asserts equivalent;
-//! relfrozenxid advancement and pg_class relstats writes are skipped
-//! (inplace-update lane unported); the read stream is collapsed to sync
-//! per-block reads (bitmap precedent); dead items are a flat tid vec, not
-//! C 17+'s radix-tree TidStore (rock recorded in CATALOG).
+//! vacuumlazy.c phases I (scan/prune/freeze), II (index vacuum via
+//! ambulkdelete), III (mark LP_UNUSED), and end-of-vacuum rel truncation,
+//! single-table lane. Loud named panics: lazy_scan_noprune, parallel vacuum,
+//! eager scanning. C divergences (recorded): the read stream is collapsed to
+//! sync per-block reads (bitmap precedent); dead items are a flat tid vec,
+//! not C 17+'s radix-tree TidStore (rock recorded in CATALOG).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -48,7 +44,7 @@ use ::types_tuple::{
 use ::bufmgr_seams::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use ::pruneheap::{
     heap_page_prune_and_freeze, log_heap_prune_and_freeze, PruneFreezeResult, PruneReason,
-    HEAP_PAGE_PRUNE_MARK_UNUSED_NOW,
+    HEAP_PAGE_PRUNE_FREEZE, HEAP_PAGE_PRUNE_MARK_UNUSED_NOW,
 };
 use ::visibilitymap::{
     visibilitymap_clear, visibilitymap_count, visibilitymap_get_status, visibilitymap_pin,
@@ -80,6 +76,8 @@ pub struct LVRelState<'a, 'mcx> {
 
     cutoffs: VacuumCutoffs,
     vistest: GlobalVisStateHandle,
+    NewRelfrozenXid: TransactionId,
+    NewRelminMxid: ::types_core::MultiXactId,
     skippedallvis: bool,
 
     rel_pages: BlockNumber,
@@ -178,6 +176,10 @@ pub fn heap_vacuum_rel<'mcx>(
         do_rel_truncate: params.truncate != VacOptValue::Disabled,
         cutoffs,
         vistest,
+        // Trackers start at the removal cutoffs; pruning ratchets them back to
+        // the oldest extant XID/MXID.
+        NewRelfrozenXid: cutoffs.OldestXmin,
+        NewRelminMxid: cutoffs.OldestMxact,
         skippedallvis: false,
         rel_pages,
         scanned_pages: 0,
@@ -223,8 +225,26 @@ pub fn heap_vacuum_rel<'mcx>(
         lazy_truncate_heap(&mut vacrel)?;
     }
 
+    // Aggressive VACUUMs must reach FreezeLimit/MultiXactCutoff.
+    debug_assert!(
+        vacrel.NewRelfrozenXid == vacrel.cutoffs.OldestXmin
+            || ::types_core::xact::TransactionIdPrecedesOrEquals(
+                if vacrel.aggressive { vacrel.cutoffs.FreezeLimit } else { vacrel.cutoffs.relfrozenxid },
+                vacrel.NewRelfrozenXid
+            )
+    );
+    debug_assert!(
+        vacrel.NewRelminMxid == vacrel.cutoffs.OldestMxact
+            || ::types_core::xact::MultiXactIdPrecedesOrEquals(
+                if vacrel.aggressive { vacrel.cutoffs.MultiXactCutoff } else { vacrel.cutoffs.relminmxid },
+                vacrel.NewRelminMxid
+            )
+    );
     if vacrel.skippedallvis {
+        // Skipped all-visible ranges may hold unfrozen XIDs the trackers missed.
         debug_assert!(!vacrel.aggressive);
+        vacrel.NewRelfrozenXid = InvalidTransactionId;
+        vacrel.NewRelminMxid = 0;
     }
 
     let new_rel_pages = vacrel.rel_pages;
@@ -236,8 +256,7 @@ pub fn heap_vacuum_rel<'mcx>(
         new_rel_allfrozen = new_rel_allvisible;
     }
     let _ = orig_rel_pages;
-    // C divergence (recorded): relfrozenxid/relminmxid advancement skipped
-    // (freeze lane); pgstat_report_vacuum skipped (cumulative-stats lane).
+    // C divergence (recorded): pgstat_report_vacuum skipped (cumulative-stats lane).
     vacuum_seams::vac_update_relstats::call(
         rel,
         new_rel_pages,
@@ -245,6 +264,8 @@ pub fn heap_vacuum_rel<'mcx>(
         new_rel_allvisible,
         new_rel_allfrozen,
         vacrel.nindexes > 0,
+        vacrel.NewRelfrozenXid,
+        vacrel.NewRelminMxid,
         false,
     )?;
     Ok(())
@@ -532,28 +553,46 @@ fn lazy_scan_prune(
     all_visible_according_to_vm: bool,
     has_lpdead_items: &mut bool,
 ) -> PgResult<i32> {
-    // C divergence (recorded): HEAP_PAGE_PRUNE_FREEZE is not passed — the
-    // freeze lane is loud in pruneheap — so presult never reports visibility;
-    // all_visible/all_frozen come from heap_page_is_all_visible below, the
-    // recheck C's own assertion holds equivalent to the prune-time answer.
-    let mut prune_options = 0;
+    let mut prune_options = HEAP_PAGE_PRUNE_FREEZE;
     if vacrel.nindexes == 0 {
         prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
     }
 
     let mut presult = PruneFreezeResult::default();
+    let mut new_relfrozen_xid = vacrel.NewRelfrozenXid;
+    let mut new_relmin_mxid = vacrel.NewRelminMxid;
     heap_page_prune_and_freeze(
         vacrel.rel,
         buf,
         vacrel.vistest,
         prune_options,
+        Some(&vacrel.cutoffs),
         &mut presult,
         PruneReason::PruneVacuumScan,
         &mut vacrel.offnum,
+        Some(&mut new_relfrozen_xid),
+        Some(&mut new_relmin_mxid),
     )?;
+    vacrel.NewRelfrozenXid = new_relfrozen_xid;
+    vacrel.NewRelminMxid = new_relmin_mxid;
+    debug_assert!(vacrel.NewRelminMxid != 0);
+    debug_assert!(TransactionIdIsValid(vacrel.NewRelfrozenXid));
 
     if presult.nfrozen > 0 {
+        // Counts pages with newly frozen tuples, not pages newly all-frozen
+        // in the VM.
         vacrel.new_frozen_tuple_pages += 1;
+    }
+
+    // Prune-time visibility must agree with heap_page_is_all_visible (C's
+    // USE_ASSERT_CHECKING cross-check).
+    #[cfg(debug_assertions)]
+    if presult.all_visible {
+        debug_assert!(presult.lpdead_items == 0);
+        let (dbg_av, dbg_af, dbg_cutoff) = heap_page_is_all_visible(vacrel, buf)?;
+        debug_assert!(dbg_av);
+        debug_assert!(presult.all_frozen == dbg_af);
+        debug_assert!(!TransactionIdIsValid(dbg_cutoff) || dbg_cutoff == presult.vm_conflict_horizon);
     }
 
     if presult.lpdead_items > 0 {
@@ -574,13 +613,13 @@ fn lazy_scan_prune(
     }
 
     *has_lpdead_items = presult.lpdead_items > 0;
+    debug_assert!(!presult.all_visible || presult.lpdead_items == 0);
 
-    let (all_visible, all_frozen, vm_conflict_horizon) = if presult.lpdead_items > 0 {
-        (false, false, InvalidTransactionId)
-    } else {
-        let (av, af, cutoff) = heap_page_is_all_visible(vacrel, buf)?;
-        (av, af, cutoff)
-    };
+    let (all_visible, all_frozen, vm_conflict_horizon) = (
+        presult.all_visible,
+        presult.all_frozen,
+        presult.vm_conflict_horizon,
+    );
 
     if !all_visible_according_to_vm && all_visible {
         let mut flags = VISIBILITYMAP_ALL_VISIBLE;
@@ -768,6 +807,8 @@ fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> 
             0,
             0,
             false,
+            InvalidTransactionId,
+            0,
             false,
         )?;
     }
@@ -859,6 +900,7 @@ fn lazy_vacuum_heap_page(
             InvalidTransactionId,
             false,
             PruneReason::PruneVacuumCleanup,
+            &mut [],
             &[],
             &[],
             &unused[..nunused],
