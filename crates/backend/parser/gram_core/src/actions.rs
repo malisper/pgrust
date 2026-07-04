@@ -4856,8 +4856,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_table_cmd: ALTER [COLUMN] col forms (execution is the
-            // tablecmds/parse_utilcmd named gates; 318/327/328 stay loud —
-            // identity-generated and fk-constraints lanes own their inputs).
+            // tablecmds/parse_utilcmd named gates; 327/328 stay loud — the
+            // fk-constraints lane owns their inputs).
             306 => {
                 *yyval = alter_table_cmd(
                     mcx,
@@ -4928,6 +4928,20 @@ impl<'mcx> Parser<'mcx> {
                 };
                 let def = Node::mk_string(mcx, view.v(5).str_val())?;
                 *yyval = alter_table_cmd(mcx, subtype, Some(view.v(3).str_val()), Some(def))?;
+            }
+            // ALTER [COLUMN] col ADD_P GENERATED generated_when AS IDENTITY_P
+            // OptParenthesizedSeqOptList
+            318 => {
+                let mut c = Node::build::<Constraint>(mcx)?;
+                c.contype = ConstrType::CONSTR_IDENTITY;
+                c.generated_when = view.v(6).ival() as u8;
+                c.options = view.v(9).list();
+                c.location = view.l(5);
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AddIdentity;
+                n.name = Some(view.v(3).str_val());
+                n.def = Some(c.seal());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             319 => {
                 let def = Node::mk_list(mcx, view.v(4).list())?;

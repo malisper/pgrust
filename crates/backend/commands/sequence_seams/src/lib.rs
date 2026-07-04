@@ -22,3 +22,19 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn delete_sequence_tuple(relid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // DefineSequence/AlterSequence for tablecmds' identity choreography;
+    // sequence depends on tablecmds, so the ALTER edge is a seam.
+    pub fn define_sequence<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_nodes::rawnodes::CreateSeqStmt<'mcx>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    pub fn alter_sequence<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_nodes::AlterSeqStmt<'mcx>,
+    ) -> PgResult<()>
+);

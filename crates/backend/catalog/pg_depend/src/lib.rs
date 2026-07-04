@@ -551,7 +551,12 @@ pub fn sequenceIsOwned<'mcx>(
 // INTERNAL pg_depend edge from the sequence to (relid, attnum). DIVERGENCE:
 // C also probes get_rel_relkind == RELKIND_SEQUENCE; INTERNAL deps of a
 // column from pg_class are only identity sequences in every ported lane.
-pub fn getIdentitySequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: i32) -> PgResult<Oid> {
+pub fn getIdentitySequence<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i32,
+    missing_ok: bool,
+) -> PgResult<Oid> {
     let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
     let keys = [
         oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
@@ -585,7 +590,7 @@ pub fn getIdentitySequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: i32) -> PgR
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
-    if result == types_core::InvalidOid {
+    if result == types_core::InvalidOid && !missing_ok {
         panic!("no owned sequence found for identity column {relid}.{attnum}");
     }
     Ok(result)

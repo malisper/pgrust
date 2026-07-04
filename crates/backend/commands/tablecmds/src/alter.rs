@@ -29,6 +29,7 @@ const AT_PASS_COL_ATTRS: usize = 7;
 const AT_PASS_ADD_INDEX: usize = 9;
 const AT_PASS_ADD_OTHERCONSTR: usize = 10;
 const AT_PASS_MISC: usize = 11;
+const AT_REWRITE_ALTER_PERSISTENCE: i32 = 1 << 0;
 const AT_REWRITE_DEFAULT_VAL: i32 = 1 << 1;
 const AT_REWRITE_COLUMN_REWRITE: i32 = 1 << 2;
 
@@ -43,6 +44,7 @@ const Anum_pg_attribute_attstorage: usize = 10;
 const Anum_pg_attribute_attcompression: usize = 11;
 pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
 const Anum_pg_attribute_atthasmissing: usize = 14;
+const Anum_pg_attribute_attidentity: usize = 15;
 const Anum_pg_attribute_attgenerated: usize = 16;
 const Anum_pg_attribute_attcollation: usize = 20;
 
@@ -87,9 +89,16 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_DropConstraint
             | AlterTableType::AT_AddIndex
             | AlterTableType::AT_AddIndexConstraint
+            | AlterTableType::AT_AddIdentity
+            | AlterTableType::AT_SetIdentity
+            | AlterTableType::AT_DropIdentity
+            | AlterTableType::AT_SetLogged
+            | AlterTableType::AT_SetUnLogged
             | AlterTableType::AT_SetStorage => AccessExclusiveLock,
             AlterTableType::AT_SetStatistics
-            | AlterTableType::AT_ValidateConstraint => types_rel::ShareUpdateExclusiveLock,
+            | AlterTableType::AT_ValidateConstraint
+            | AlterTableType::AT_ClusterOn
+            | AlterTableType::AT_DropCluster => types_rel::ShareUpdateExclusiveLock,
             AlterTableType::AT_AddConstraint => {
                 let constr = cmd
                     .def
@@ -255,6 +264,8 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     old_desc: std::rc::Rc<TupleDescData<'mcx>>,
     subcmds: [NodeList<'mcx>; AT_NUM_PASSES],
     rewrite: i32,
+    chg_persistence: bool,
+    newrelpersistence: u8,
     has_newvals: bool,
     verify_new_notnull: bool,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
@@ -272,6 +283,8 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             old_desc: rel.rd_att.clone(),
             subcmds: core::array::from_fn(|_| NodeList::nil()),
             rewrite: 0,
+            chg_persistence: false,
+            newrelpersistence: types_core::catalog::RELPERSISTENCE_PERMANENT,
             has_newvals: false,
             verify_new_notnull: false,
             newvals: PgVec::new_in(mcx),
@@ -437,6 +450,35 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_DROP
         }
         AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
+        AlterTableType::AT_AddIdentity => {
+            set_recurse();
+            AT_PASS_ADD_OTHERCONSTR
+        }
+        AlterTableType::AT_SetIdentity => {
+            set_recurse();
+            // C: after AddIdentity, so MISC.
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_DropIdentity => {
+            set_recurse();
+            AT_PASS_DROP
+        }
+        AlterTableType::AT_ClusterOn | AlterTableType::AT_DropCluster => AT_PASS_MISC,
+        AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {
+            if wqueue[tabidx].chg_persistence {
+                return Err(Box::new(
+                    PgError::new(ERROR, "cannot change persistence setting twice".to_string())
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            ATPrepChangePersistence(
+                mcx,
+                &mut wqueue[tabidx],
+                rel,
+                cmd.subtype == AlterTableType::AT_SetLogged,
+            )?;
+            AT_PASS_MISC
+        }
         AlterTableType::AT_EnableRule
         | AlterTableType::AT_EnableAlwaysRule
         | AlterTableType::AT_EnableReplicaRule
@@ -671,6 +713,32 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_DropInherit => {
                     ATExecDropInherit(mcx, &rel, cmd)?;
                 }
+                AlterTableType::AT_AddIdentity => {
+                    let relname = rel.name().to_string();
+                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    run_seq_stmts(mcx, &cxt.blist)?;
+                    debug_assert!(cxt.alist.is_nil());
+                    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                    ATExecAddIdentity(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_SetIdentity => {
+                    let relname = rel.name().to_string();
+                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    run_seq_stmts(mcx, &cxt.blist)?;
+                    debug_assert!(cxt.alist.is_nil());
+                    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                    ATExecSetIdentity(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_DropIdentity => {
+                    ATExecDropIdentity(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_ClusterOn => {
+                    ATExecClusterOn(mcx, &rel, cmd, lockmode)?;
+                }
+                AlterTableType::AT_DropCluster => {
+                    commands_cluster::mark_index_clustered(mcx, &rel, InvalidOid, false)?;
+                }
+                AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {}
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             // C threads each ATExec* return address; only the subcmd count is
@@ -722,11 +790,18 @@ fn ATRewriteTableOne<'mcx>(
     // find_composite_type_dependencies: composite-type columns are unported,
     // so no dependent rowtype uses can exist.
     if tab.rewrite > 0 {
-        if tab.rewrite & !(AT_REWRITE_COLUMN_REWRITE | AT_REWRITE_DEFAULT_VAL) != 0 {
-            unported("ATRewriteTable rewrite flags (persistence/access-method)");
+        if tab.rewrite
+            & !(AT_REWRITE_COLUMN_REWRITE | AT_REWRITE_DEFAULT_VAL | AT_REWRITE_ALTER_PERSISTENCE)
+            != 0
+        {
+            unported("ATRewriteTable rewrite flags (access-method)");
         }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
-        let persistence = old_heap.rd_rel.relpersistence;
+        let persistence = if tab.chg_persistence {
+            tab.newrelpersistence
+        } else {
+            old_heap.rd_rel.relpersistence
+        };
         old_heap.close(NoLock)?;
         let oid_new_heap =
             commands_cluster::make_new_heap(mcx, tab.relid, persistence, lockmode)?;
@@ -743,6 +818,9 @@ fn ATRewriteTableOne<'mcx>(
             multixact::ReadNextMultiXactId()?,
             persistence,
         )?;
+        if tab.chg_persistence {
+            unported("SET LOGGED/UNLOGGED owned-sequence SequenceChangePersistence");
+        }
     } else if !tab.constraints.is_empty()
         || tab.verify_new_notnull
         || tab.partition_constraint.is_some()
@@ -1045,7 +1123,7 @@ fn ATExecAddColumn<'mcx>(
         return Ok(());
     }
 
-    parse_utilcmd::transformAlterTableCmd(mcx, &relname, cnode)?;
+    parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
 
     let pgclass = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -1330,25 +1408,33 @@ fn ATExecColumnDefault<'mcx>(
     }
     let att = rel.rd_att.attr(attnum as usize - 1);
     if att.attidentity != 0 {
-        unported("ATExecColumnDefault on an identity column (C 42601 + DROP IDENTITY hint)");
+        let mut e = PgError::new(
+            ERROR,
+            format!("column \"{col_name}\" of relation \"{relname}\" is an identity column"),
+        )
+        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR);
+        if cmd.def.is_none() {
+            e = e.with_hint(
+                "Use ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY instead.".to_string(),
+            );
+        }
+        return Err(Box::new(e));
     }
     if att.attgenerated != 0 {
-        let e = PgError::new(
+        let mut e = PgError::new(
             ERROR,
             format!("column \"{col_name}\" of relation \"{relname}\" is a generated column"),
         )
         .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR);
-        let e = if cmd.def.is_some() {
-            e.with_hint(
+        if cmd.def.is_some() {
+            e = e.with_hint(
                 "Use ALTER TABLE ... ALTER COLUMN ... SET EXPRESSION instead.".to_string(),
-            )
-        } else if att.attgenerated == b's' as i8 {
-            e.with_hint(
+            );
+        } else if att.attgenerated == types_core::catalog::ATTRIBUTE_GENERATED_STORED as i8 {
+            e = e.with_hint(
                 "Use ALTER TABLE ... ALTER COLUMN ... DROP EXPRESSION instead.".to_string(),
-            )
-        } else {
-            e
-        };
+            );
+        }
         return Err(Box::new(e));
     }
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, cmd.def.is_some())?;
@@ -1605,6 +1691,406 @@ fn ATExecDropExpression<'mcx>(
     )?;
     xact::CommandCounterIncrement()?;
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, false)
+}
+
+// ATParseTransformCmd's beforeStmts leg: the transform only queues
+// CreateSeqStmt/AlterSeqStmt (identity); sequence depends on tablecmds, so
+// execution rides sequence_seams.
+fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
+    for s in stmts.iter() {
+        if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>() {
+            sequence_seams::define_sequence::call(mcx, cs)?;
+        } else if let Some(alt) = s.as_variant::<types_nodes::AlterSeqStmt>() {
+            sequence_seams::alter_sequence::call(mcx, alt)?;
+        } else {
+            unported("ATParseTransformCmd non-sequence queued statement");
+        }
+        xact::CommandCounterIncrement()?;
+    }
+    Ok(())
+}
+
+fn ATExecAddIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let col_name = cmd.name.expect("AT_AddIdentity name");
+    let cdef = cmd
+        .def
+        .expect("AT_AddIdentity ColumnDef")
+        .as_variant::<ColumnDef>()
+        .expect("ColumnDef");
+    let relname = rel.name().to_string();
+    if rel.rd_rel.relispartition {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot add identity to a column of a partition".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &relname));
+    };
+    if attnum <= 0 {
+        return Err(cannot_alter_system_column(col_name));
+    }
+    let att = rel.rd_att.attr(attnum as usize - 1);
+    if !att.attnotnull {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column \"{col_name}\" of relation \"{relname}\" must be declared \
+                     NOT NULL before identity can be added"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    let con = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
+        .unwrap_or_else(|| {
+            panic!(
+                "cache lookup failed for not-null constraint on column \"{col_name}\" of \
+                 relation \"{relname}\""
+            )
+        });
+    if !con.convalidated {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "incompatible NOT VALID constraint \"{}\" on relation \"{relname}\"",
+                    con.name_str()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(
+                "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT."
+                    .to_string(),
+            ),
+        ));
+    }
+    if att.attidentity != 0 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column \"{col_name}\" of relation \"{relname}\" is already an \
+                     identity column"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    if att.atthasdef {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column \"{col_name}\" of relation \"{relname}\" already has a \
+                     default value"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    // C recurses into partitions only; regular inheritance children are
+    // deliberately skipped (identity is not inherited).
+    update_pg_attribute(
+        mcx,
+        rel.rd_id,
+        attnum,
+        &[(Anum_pg_attribute_attidentity, Datum::from_i8(cdef.identity as i8))],
+    )
+}
+
+fn ATExecSetIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let col_name = cmd.name.expect("AT_SetIdentity name");
+    let relname = rel.name().to_string();
+    if rel.rd_rel.relispartition {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot change identity column of a partition".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    let mut generated_el: Option<&types_nodes::parsenodes::DefElem<'_>> = None;
+    if let Some(defnode) = cmd.def {
+        for opt in defnode.as_list().expect("DefElem list").iter() {
+            let defel =
+                opt.as_variant::<types_nodes::parsenodes::DefElem>().expect("DefElem");
+            match defel.defname.expect("defname") {
+                "generated" => {
+                    if generated_el.is_some() {
+                        return Err(Box::new(
+                            PgError::new(
+                                ERROR,
+                                "conflicting or redundant options".to_string(),
+                            )
+                            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                        ));
+                    }
+                    generated_el = Some(defel);
+                }
+                other => panic!("option \"{other}\" not recognized"),
+            }
+        }
+    }
+    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &relname));
+    };
+    if attnum <= 0 {
+        return Err(cannot_alter_system_column(col_name));
+    }
+    if rel.rd_att.attr(attnum as usize - 1).attidentity == 0 {
+        return Err(not_an_identity_column(col_name, &relname));
+    }
+    if let Some(g) = generated_el {
+        let v = g.arg.expect("generated arg").as_integer().expect("Integer").ival;
+        update_pg_attribute(
+            mcx,
+            rel.rd_id,
+            attnum,
+            &[(Anum_pg_attribute_attidentity, Datum::from_i8(v as i8))],
+        )?;
+    }
+    Ok(())
+}
+
+fn ATExecDropIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let col_name = cmd.name.expect("AT_DropIdentity name");
+    let relname = rel.name().to_string();
+    if rel.rd_rel.relispartition {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot drop identity from a column of a partition".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &relname));
+    };
+    if attnum <= 0 {
+        return Err(cannot_alter_system_column(col_name));
+    }
+    if rel.rd_att.attr(attnum as usize - 1).attidentity == 0 {
+        if !cmd.missing_ok {
+            return Err(not_an_identity_column(col_name, &relname));
+        }
+        elog_seams::ereport_msg::call(
+            NOTICE,
+            format!(
+                "column \"{col_name}\" of relation \"{relname}\" is not an identity \
+                 column, skipping"
+            ),
+            None,
+        )?;
+        return Ok(());
+    }
+    update_pg_attribute(
+        mcx,
+        rel.rd_id,
+        attnum,
+        &[(Anum_pg_attribute_attidentity, Datum::from_i8(0))],
+    )?;
+
+    let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, false)?;
+    pg_depend::deleteDependencyRecordsForClass(
+        mcx,
+        RELATION_RELATION_ID,
+        seqid,
+        RELATION_RELATION_ID,
+        pg_depend::DependencyType::Internal,
+    )?;
+    xact::CommandCounterIncrement()?;
+    let seqaddress = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, seqid);
+    catalog_dependency::performDeletion(
+        mcx,
+        &seqaddress,
+        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
+        catalog_dependency::PERFORM_DELETION_INTERNAL,
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn not_an_identity_column(col_name: &str, relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("column \"{col_name}\" of relation \"{relname}\" is not an identity column"),
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+    )
+}
+
+fn ATExecClusterOn<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let index_name = cmd.name.expect("AT_ClusterOn name");
+    let index_oid = lsyscache::get_relname_relid(index_name, rel.rd_rel.relnamespace)?;
+    if index_oid == InvalidOid {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "index \"{index_name}\" for table \"{}\" does not exist",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    commands_cluster::check_index_is_clusterable(mcx, rel, index_oid, lockmode)?;
+    commands_cluster::mark_index_clustered(mcx, rel, index_oid, false)
+}
+
+// ATPrepChangePersistence. GetRelationPublications is const-empty
+// (publications unported), so the publication guard cannot fire.
+fn ATPrepChangePersistence<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    rel: &Relation<'mcx>,
+    to_logged: bool,
+) -> PgResult<()> {
+    match rel.rd_rel.relpersistence {
+        types_core::catalog::RELPERSISTENCE_TEMP => {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot change logged status of table \"{}\" because it is \
+                         temporary",
+                        rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        types_core::catalog::RELPERSISTENCE_PERMANENT if to_logged => return Ok(()),
+        types_core::RELPERSISTENCE_UNLOGGED if !to_logged => return Ok(()),
+        _ => {}
+    }
+
+    let pg_con =
+        table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, types_rel::AccessShareLock)?;
+    let keyattno = if to_logged {
+        pg_constraint::Anum_pg_constraint_conrelid
+    } else {
+        pg_constraint::Anum_pg_constraint_confrelid
+    };
+    let key = [oid_scankey(keyattno as usize, rel.rd_id)];
+    // C uses ConstraintRelidTypidNameIndexId only for the conrelid scan.
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &pg_con,
+        pg_constraint::ConstraintRelidTypidNameIndexId,
+        to_logged,
+        None,
+        &key,
+    )?;
+    let desc = pg_con.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
+        let contype = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_constraint::Anum_pg_constraint_contype as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_i8() as u8;
+        if contype != pg_constraint::CONSTRAINT_FOREIGN {
+            continue;
+        }
+        // SAFETY: as above.
+        let conrelid = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_constraint::Anum_pg_constraint_conrelid as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_oid();
+        // SAFETY: as above.
+        let confrelid = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_constraint::Anum_pg_constraint_confrelid as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_oid();
+        let foreignrelid = if to_logged { confrelid } else { conrelid };
+        if foreignrelid == rel.rd_id {
+            continue;
+        }
+        let foreignrel =
+            relation_seams::relation_open::call(mcx, foreignrelid, types_rel::AccessShareLock)?;
+        let foreign_permanent = foreignrel.rd_rel.relpersistence
+            == types_core::catalog::RELPERSISTENCE_PERMANENT;
+        let fname = foreignrel.name().to_string();
+        if to_logged && !foreign_permanent {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "could not change table \"{}\" to logged because it references \
+                         unlogged table \"{fname}\"",
+                        rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        if !to_logged && foreign_permanent {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "could not change table \"{}\" to unlogged because it references \
+                         logged table \"{fname}\"",
+                        rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        foreignrel.close(types_rel::AccessShareLock)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    pg_con.close(types_rel::AccessShareLock)?;
+
+    tab.rewrite |= AT_REWRITE_ALTER_PERSISTENCE;
+    tab.newrelpersistence = if to_logged {
+        types_core::catalog::RELPERSISTENCE_PERMANENT
+    } else {
+        types_core::RELPERSISTENCE_UNLOGGED
+    };
+    tab.chg_persistence = true;
+    Ok(())
 }
 
 // ATExecDropNotNull + the reachable dropconstraint_internal slice.
