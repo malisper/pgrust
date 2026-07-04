@@ -126,6 +126,8 @@ pub(crate) fn set_deparse_plan<'mcx>(
 
     ps.outer_plan = if let Some(a) = plan.as_append() {
         Some(a.appendplans.nth(0))
+    } else if let Some(m) = plan.as_merge_append() {
+        Some(m.mergeplans.nth(0))
     } else {
         plan_of(plan).lefttree
     };
@@ -214,12 +216,18 @@ pub(crate) fn resolve_special_varno<'mcx>(
     if var.varno == types_nodes::primnodes::OUTER_VAR && ps.outer_tlist.is_some() {
         let tle = get_tle_by_resno(ps.outer_tlist.unwrap(), var.varattno)
             .unwrap_or_else(|| panic!("bogus varattno for OUTER_VAR var: {}", var.varattno));
-        // Descending to an Append's first child: union apprelids into
-        // appendparents for every Var in the resolved subexpression.
-        // (MergeAppend has no node vocabulary; plan_of louds on it first.)
-        let save_appendparents = if let Some(a) = ps.plan.and_then(|p| p.as_append()) {
+        // Descending to an Append/MergeAppend first child: union apprelids
+        // into appendparents for every Var in the resolved subexpression.
+        let node_apprelids = match ps.plan {
+            Some(p) => match p.as_append() {
+                Some(a) => Some(&a.apprelids),
+                None => p.as_merge_append().map(|m| &m.apprelids),
+            },
+            None => None,
+        };
+        let save_appendparents = if let Some(apprelids) = node_apprelids {
             let cur = core::mem::replace(&mut ctx.appendparents, Bitmapset::empty());
-            ctx.appendparents = cur.union(&a.apprelids, ctx.mcx)?;
+            ctx.appendparents = cur.union(apprelids, ctx.mcx)?;
             Some(cur)
         } else {
             None

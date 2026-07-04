@@ -54,6 +54,7 @@ nodesort = { path = "../nodesort" }
 nodeincrementalsort = { path = "../nodeincrementalsort" }
 nodeunique = { path = "../nodeunique" }
 nodeappend = { path = "../nodeappend" }
+nodemergeappend = { path = "../nodemergeappend" }
 nodesetop = { path = "../nodesetop" }
 nodelimit = { path = "../nodelimit" }
 nodehash = { path = "../nodehash" }

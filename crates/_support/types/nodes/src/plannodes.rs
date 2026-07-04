@@ -251,6 +251,36 @@ impl Default for Append<'_> {
     }
 }
 
+/// Per-key arrays as in [`Sort`].
+#[repr(C)]
+pub struct MergeAppend<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub apprelids: Bitmapset<'mcx>,
+    pub mergeplans: NodeList<'mcx>,
+    pub numCols: i32,
+    pub sortColIdx: &'mcx [i16],
+    pub sortOperators: &'mcx [Oid],
+    pub collations: &'mcx [Oid],
+    pub nullsFirst: &'mcx [bool],
+    pub part_prune_index: i32,
+}
+
+impl Default for MergeAppend<'_> {
+    fn default() -> Self {
+        MergeAppend {
+            plan: Plan::default(),
+            apprelids: Bitmapset::empty(),
+            mergeplans: NodeList::nil(),
+            numCols: 0,
+            sortColIdx: &[],
+            sortOperators: &[],
+            collations: &[],
+            nullsFirst: &[],
+            part_prune_index: -1,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct PartitionPruneInfo<'mcx> {
     pub relids: Bitmapset<'mcx>,
@@ -839,6 +869,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Append<'mcx> {
     const TAG: NodeTag = NodeTag::T_Append;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeAppend<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeAppend;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for PartitionPruneInfo<'mcx> {
     const TAG: NodeTag = NodeTag::T_PartitionPruneInfo;
 }
@@ -949,6 +982,7 @@ unsafe impl<'mcx> PlanVariant<'mcx> for BitmapIndexScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapHeapScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Append<'mcx> {}
+unsafe impl<'mcx> PlanVariant<'mcx> for MergeAppend<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for SubqueryScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -1040,6 +1074,8 @@ const _: () = {
     );
     assert!(offset_of!(Append, plan) == 0);
     assert!(offset_of!(NodeRep<Append>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(MergeAppend, plan) == 0);
+    assert!(offset_of!(NodeRep<MergeAppend>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(SubqueryScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<SubqueryScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -1118,6 +1154,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_BitmapIndexScan
             | NodeTag::T_BitmapHeapScan
             | NodeTag::T_Append
+            | NodeTag::T_MergeAppend
             | NodeTag::T_SubqueryScan
             | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
@@ -1267,6 +1304,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_append(self) -> Option<&'mcx Append<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_append(self) -> Option<&'mcx MergeAppend<'mcx>> {
         self.as_variant()
     }
 

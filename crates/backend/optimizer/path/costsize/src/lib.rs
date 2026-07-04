@@ -2148,8 +2148,7 @@ fn get_windowclause_startup_tuples<'mcx>(
 
 const APPEND_CPU_COST_MULTIPLIER: f64 = 0.5;
 
-// cost_append (costsize.c), serial unordered arm; the ordered arm belongs to
-// the MergeAppend/set-ops ordered lane and parallel append has no lane.
+// cost_append (costsize.c), serial arm; parallel append has no lane.
 pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     let (subpaths, parallel_aware, pathkeys_empty) = match run.root.path(path_id) {
         types_pathnodes::PathNode::AppendPath(a) => (
@@ -2173,19 +2172,51 @@ pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     if subpaths.is_empty() {
         return;
     }
-    assert!(
-        pathkeys_empty,
-        "cost_append (costsize.c): ordered append; MergeAppend lane unported (set-ops lane)"
-    );
     let mut rows = 0.0;
     let mut disabled = 0;
+    let mut startup = 0.0;
     let mut total = 0.0;
-    let startup = run.root.path(subpaths[0]).base().startup_cost;
-    for &sp in subpaths.iter() {
-        let s = run.root.path(sp).base();
-        rows += s.rows;
-        disabled += s.disabled_nodes;
-        total += s.total_cost;
+    if pathkeys_empty {
+        startup = run.root.path(subpaths[0]).base().startup_cost;
+        for &sp in subpaths.iter() {
+            let s = run.root.path(sp).base();
+            rows += s.rows;
+            disabled += s.disabled_nodes;
+            total += s.total_cost;
+        }
+    } else {
+        // Ordered append: startup is the SUM of subpath startups, and any
+        // subpath not already ordered is charged a sort.
+        let (pathkeys, limit_tuples) = match run.root.path(path_id) {
+            types_pathnodes::PathNode::AppendPath(a) => (
+                types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &a.path.pathkeys),
+                a.limit_tuples,
+            ),
+            _ => unreachable!(),
+        };
+        for &sp in subpaths.iter() {
+            let s = run.root.path(sp).base();
+            let (s_rows, s_disabled, s_startup, s_total) =
+                if pathkeys_contained_in(&pathkeys, &s.pathkeys) {
+                    (s.rows, s.disabled_nodes, s.startup_cost, s.total_cost)
+                } else {
+                    let width = s.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
+                    let (d, st, t) = cost_sort_shape(
+                        s.disabled_nodes,
+                        s.total_cost,
+                        s.rows,
+                        width,
+                        0.0,
+                        init_small::globals::work_mem(),
+                        limit_tuples,
+                    );
+                    (s.rows, d, st, t)
+                };
+            rows += s_rows;
+            disabled += s_disabled;
+            startup += s_startup;
+            total += s_total;
+        }
     }
     total += gucs::cpu_tuple_cost() * APPEND_CPU_COST_MULTIPLIER * rows;
     let p = run.root.path_mut(path_id).base_mut();
@@ -2193,6 +2224,29 @@ pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     p.disabled_nodes = disabled;
     p.startup_cost = startup;
     p.total_cost = total;
+}
+
+// cost_merge_append (costsize.c): N*log2(N) heap build at startup, log2(N)
+// heap maintenance per tuple, two operator evals per comparison.
+pub fn cost_merge_append(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    n_streams: usize,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    tuples: f64,
+) {
+    let n = if n_streams < 2 { 2.0 } else { n_streams as f64 };
+    let log_n = log2(n);
+    let comparison_cost = 2.0 * gucs::cpu_operator_cost();
+    let startup_cost = comparison_cost * n * log_n;
+    let mut run_cost = tuples * comparison_cost * log_n;
+    run_cost += gucs::cpu_tuple_cost() * APPEND_CPU_COST_MULTIPLIER * tuples;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.disabled_nodes = input_disabled_nodes;
+    p.startup_cost = startup_cost + input_startup_cost;
+    p.total_cost = startup_cost + run_cost + input_total_cost;
 }
 
 // cost_subqueryscan (costsize.c); param_info is always None on this lane.

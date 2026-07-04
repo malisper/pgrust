@@ -1892,6 +1892,12 @@ fn finalize_plan<'mcx>(
                 paramids.add_members(mcx, &child)?;
             }
         }
+        NodeTag::T_MergeAppend => {
+            for sub in &plan.as_merge_append().unwrap().mergeplans {
+                let child = finalize_plan(run, root, sub, &valid)?;
+                paramids.add_members(mcx, &child)?;
+            }
+        }
         NodeTag::T_BitmapAnd => {
             for sub in &plan.as_bitmap_and().unwrap().bitmapplans {
                 let child = finalize_plan(run, root, sub, &valid)?;

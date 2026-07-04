@@ -3862,6 +3862,7 @@ dependencies = [
  "nodelockrows",
  "nodematerial",
  "nodememoize",
+ "nodemergeappend",
  "nodemergejoin",
  "nodemodifytable",
  "nodenamedtuplestorescan",
@@ -6824,6 +6825,23 @@ dependencies = [
  "types_nodes",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "nodemergeappend"
+version = "0.1.0"
+dependencies = [
+ "execpartition",
+ "exectuples",
+ "executils",
+ "init_small",
+ "mcx",
+ "partprune",
+ "postgres_seams",
+ "tuplesort",
+ "types_error",
+ "types_nodes",
+ "types_slot",
 ]
 
 [[package]]

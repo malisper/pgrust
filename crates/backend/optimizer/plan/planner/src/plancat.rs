@@ -339,7 +339,10 @@ fn set_relation_partition_info<'mcx>(
     let key = partcache::RelationGetPartitionKey(relation)?;
     let scheme = find_partition_scheme(run, &key)?;
     let bcopy = match partdesc.boundinfo.as_ref() {
-        Some(bi) => Some(mcx::alloc_in(run.mcx, copy_boundinfo_for_planner(run.mcx, bi, &key)?)?),
+        Some(bi) => Some(mcx::alloc_in(
+            run.mcx,
+            copy_boundinfo_for_planner(run.mcx, bi, &key, partdesc.nparts as i32)?,
+        )?),
         None => None,
     };
     {
@@ -404,6 +407,7 @@ fn copy_boundinfo_for_planner<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     bi: &partbounds::PartitionBoundInfoData<'_>,
     key: &partcache::PartitionKeyData,
+    nparts: i32,
 ) -> PgResult<types_pathnodes::PartitionBoundInfoData<'mcx>> {
     use types_pathnodes::DatumImage;
     let hash = bi.strategy as u8 == b'h';
@@ -472,6 +476,35 @@ fn copy_boundinfo_for_planner<'mcx>(
         }
     }
     out.kind = if has_kind { Some(kinds) } else { None };
+    // Interleaved LIST partitions (create_list_bounds, partbounds.c): C
+    // computes this at bounds-build time; the partdesc cache's boundinfo
+    // predates the field, so it is derived here on the planner copy.
+    if bi.strategy as u8 == b'l' && nparts > 1 {
+        let accepts_nulls = i32::from(bi.null_index != -1);
+        let has_default = i32::from(bi.default_index != -1);
+        if out.ndatums + accepts_nulls + has_default != nparts {
+            let mut last_index = -1;
+            for &index in out.indexes.iter() {
+                if index < last_index
+                    || (bi.null_index != -1 && index == bi.null_index)
+                {
+                    let set = out.interleaved_parts.get_or_insert(mcx::alloc_in(
+                        mcx,
+                        types_nodes::bitmapset::Bitmapset::empty(),
+                    )?);
+                    set.add_member(mcx, index)?;
+                }
+                last_index = index;
+            }
+        }
+        if bi.default_index != -1 {
+            let set = out.interleaved_parts.get_or_insert(mcx::alloc_in(
+                mcx,
+                types_nodes::bitmapset::Bitmapset::empty(),
+            )?);
+            set.add_member(mcx, bi.default_index)?;
+        }
+    }
     Ok(out)
 }
 

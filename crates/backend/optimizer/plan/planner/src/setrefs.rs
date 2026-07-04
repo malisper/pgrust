@@ -758,6 +758,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_Append => {
             return set_append_references(run, plan, rtoffset);
         }
+        NodeTag::T_MergeAppend => {
+            return set_mergeappend_references(run, plan, rtoffset);
+        }
         NodeTag::T_SubqueryScan => {
             return set_subqueryscan_references(run, plan, rtoffset);
         }
@@ -3678,6 +3681,67 @@ fn set_append_references<'mcx>(
             plan.with_mut::<types_nodes::plannodes::Append, _>(|p| p.part_prune_index = new_index)
         }
         .expect("Append node");
+    }
+
+    debug_assert!(plan.as_plan().unwrap().lefttree.is_none());
+    debug_assert!(plan.as_plan().unwrap().righttree.is_none());
+    Ok(plan)
+}
+
+// set_mergeappend_references (setrefs.c); a lone child whose parallel
+// awareness matches elides the MergeAppend entirely.
+fn set_mergeappend_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let mplan = plan.as_merge_append().expect("MergeAppend node");
+    debug_assert!(mplan.plan.qual.is_nil());
+
+    let mut new_children = NodeList::nil();
+    for child in &mplan.mergeplans {
+        new_children.lappend(run.mcx, set_plan_refs(run, child, rtoffset)?)?;
+    }
+    let single = (new_children.len() == 1).then(|| new_children.nth(0));
+    // SAFETY: exclusive plan-tree ownership (prologue note in set_plan_refs).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::MergeAppend, _>(|p| p.mergeplans = new_children)
+    }
+    .expect("MergeAppend node");
+
+    if let Some(child) = single {
+        if child.as_plan().expect("plan node").parallel_aware
+            == plan.as_plan().unwrap().parallel_aware
+        {
+            return clean_up_removed_plan_level(run, plan, child);
+        }
+    }
+
+    set_dummy_tlist_references(run, plan, rtoffset)?;
+    if rtoffset != 0 {
+        let old = &plan.as_merge_append().unwrap().apprelids;
+        let mut shifted = types_nodes::bitmapset::Bitmapset::empty();
+        let mut m = old.next_member(-1);
+        while m >= 0 {
+            shifted.add_member(run.mcx, m + rtoffset)?;
+            m = old.next_member(m);
+        }
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe {
+            plan.with_mut::<types_nodes::plannodes::MergeAppend, _>(|p| p.apprelids = shifted)
+        }
+        .expect("MergeAppend node");
+    }
+    if plan.as_merge_append().unwrap().part_prune_index >= 0 {
+        let old_index = plan.as_merge_append().unwrap().part_prune_index;
+        let new_index = register_partpruneinfo(run, old_index, rtoffset)?;
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe {
+            plan.with_mut::<types_nodes::plannodes::MergeAppend, _>(|p| {
+                p.part_prune_index = new_index
+            })
+        }
+        .expect("MergeAppend node");
     }
 
     debug_assert!(plan.as_plan().unwrap().lefttree.is_none());

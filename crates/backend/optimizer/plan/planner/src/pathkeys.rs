@@ -353,6 +353,84 @@ pub fn build_index_pathkeys<'mcx>(
     Ok(retval)
 }
 
+// build_partition_pathkeys (pathkeys.c): ordering induced by the partition
+// bounds; NULL partition sorts last, so backward scans get nulls_first.
+pub fn build_partition_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    partrel: types_pathnodes::RelId,
+    backward: bool,
+) -> PgResult<(PgVec<'mcx, PathKey>, bool)> {
+    let mut retval: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    let partnatts = run
+        .root
+        .rel(partrel)
+        .part_scheme
+        .as_ref()
+        .expect("build_partition_pathkeys on an unpartitioned rel")
+        .partnatts as usize;
+    for i in 0..partnatts {
+        let (key_col, opfamily, opcintype, collation) = {
+            let rel = run.root.rel(partrel);
+            let scheme = rel.part_scheme.as_ref().unwrap();
+            (
+                *run.root.expr_node(rel.partexprs[i][0]),
+                scheme.partopfamily[i],
+                scheme.partopcintype[i],
+                scheme.partcollation[i],
+            )
+        };
+        let cpathkey = make_pathkey_from_sortinfo(
+            run, key_col, opfamily, opcintype, collation, backward, backward, 0, false,
+        )?;
+        match cpathkey {
+            Some(pk) => {
+                if !pathkey_is_redundant(run, pk, &retval) {
+                    retval.push(pk);
+                }
+            }
+            None => {
+                if !partkey_is_bool_constant_for_query(run, partrel, i) {
+                    return Ok((retval, true));
+                }
+            }
+        }
+    }
+    Ok((retval, false))
+}
+
+// partkey_is_bool_constant_for_query (pathkeys.c).
+fn partkey_is_bool_constant_for_query(
+    run: &PlannerRun<'_>,
+    partrel: types_pathnodes::RelId,
+    partkeycol: usize,
+) -> bool {
+    const BOOL_BTREE_FAM_OID: u32 = 424;
+    const BOOL_HASH_FAM_OID: u32 = 2222;
+    let rel = run.root.rel(partrel);
+    let opfamily = rel.part_scheme.as_ref().unwrap().partopfamily[partkeycol];
+    if opfamily != BOOL_BTREE_FAM_OID && opfamily != BOOL_HASH_FAM_OID {
+        return false;
+    }
+    let partexpr = *run.root.expr_node(rel.partexprs[partkeycol][0]);
+    for &rid in rel.baserestrictinfo.iter() {
+        let rinfo = run.root.rinfo(rid);
+        if rinfo.pseudoconstant {
+            continue;
+        }
+        let clause = *run.root.expr_node(rinfo.clause);
+        if types_nodes::equal(partexpr, clause) {
+            return true;
+        }
+        if clauses::is_notclause(clause) {
+            let arg = clause.as_bool_expr().unwrap().args.nth(0);
+            if types_nodes::equal(partexpr, arg) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn make_canonical_pathkey(
     run: &mut PlannerRun<'_>,
     eclass: EcId,

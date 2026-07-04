@@ -3,7 +3,7 @@
 
 use types_error::PgResult;
 use types_nodes::parsenodes::RTEKind;
-use types_pathnodes::{JoinlistNode, RelId, RELOPT_BASEREL};
+use types_pathnodes::{JoinlistNode, PathId, PathKey, RelId, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL};
 
 use crate::pathnode::{add_path, set_cheapest};
 use crate::run::PlannerRun;
@@ -617,6 +617,8 @@ pub(crate) fn add_paths_to_append_rel(
     let mut subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
     let mut startup_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
     let mut startup_valid = run.root.rel(rel).consider_startup;
+    let mut all_child_pathkeys: mcx::PgVec<'_, mcx::PgVec<'_, PathKey>> =
+        mcx::PgVec::new_in(mcx);
     for &childrel in live_childrels {
         debug_assert!(run.root.rel(childrel).partial_pathlist.is_empty());
         let cheapest_total = run.root.rel(childrel).cheapest_total_path;
@@ -647,88 +649,273 @@ pub(crate) fn add_paths_to_append_rel(
                 None => startup_valid = false,
             }
         }
-        // generate_orderedappend_paths / parameterized appends: without
-        // add_child_rel_equivalences child index paths never carry pathkeys,
-        // so a MergeAppend C might pick is invisible here — stay loud when a
-        // requested pathkey maps onto a child index's leading column.
-        if !run.root.query_pathkeys.is_empty()
-            && !run.root.rel(childrel).indexlist.is_empty()
-        {
-            assert!(
-                !child_index_could_order(run, rel, childrel),
-                "generate_orderedappend_paths (allpaths.c): query pathkey maps to a \
-                 child index leading column; MergeAppend/child-EC lane"
-            );
+        for pi in 0..run.root.rel(childrel).pathlist.len() {
+            let childpath = run.root.rel(childrel).pathlist[pi];
+            let childkeys = &run.root.path(childpath).base().pathkeys;
+            if childkeys.is_empty() {
+                continue;
+            }
+            let found = all_child_pathkeys.iter().any(|existing| {
+                crate::pathkeys::compare_pathkeys(existing, childkeys)
+                    == crate::pathkeys::PathKeysComparison::Equal
+            });
+            if !found {
+                all_child_pathkeys
+                    .push(crate::relnode::pgvec_clone_shallow(mcx, childkeys));
+            }
         }
     }
 
-    let pid = crate::pathnode::create_append_path(run, rel, subpaths, -1.0)?;
+    let pid =
+        crate::pathnode::create_append_path(run, rel, subpaths, mcx::PgVec::new_in(mcx), -1.0)?;
     add_path(run, rel, pid);
     if startup_valid {
-        let pid = crate::pathnode::create_append_path(run, rel, startup_subpaths, -1.0)?;
+        let pid = crate::pathnode::create_append_path(
+            run,
+            rel,
+            startup_subpaths,
+            mcx::PgVec::new_in(mcx),
+            -1.0,
+        )?;
         add_path(run, rel, pid);
+    }
+
+    if !all_child_pathkeys.is_empty() {
+        generate_orderedappend_paths(run, rel, live_childrels, &all_child_pathkeys)?;
     }
     Ok(())
 }
 
-// Overapproximates C's MergeAppend opportunity (opfamily/direction ignored —
-// louder than C ever diverges, never quieter): a query pathkey EC member that
-// is a parent Var whose child translation is the leading column of some child
-// index.
-fn child_index_could_order(run: &PlannerRun<'_>, rel: RelId, childrel: RelId) -> bool {
-    let parent_rti = run.root.rel(rel).relid as i32;
-    let child_rti = run.root.rel(childrel).relid;
-    let Some(appinfo) = run.root.append_rel_array.get(child_rti as usize).and_then(|a| a.as_ref())
-    else {
-        return true;
-    };
-    for pk in run.root.query_pathkeys.iter() {
-        let Some(ec) = pk.pk_eclass else { continue };
-        for &emid in run.root.ec(ec).ec_members.iter() {
-            let em = run.root.em(emid);
-            let expr = *run.root.expr_node(em.em_expr);
-            let Some(v) = expr.as_var() else { continue };
-            if v.varlevelsup != 0 || v.varno != parent_rti || v.varattno <= 0 {
-                continue;
+// generate_orderedappend_paths (allpaths.c): one ordered path set per child
+// ordering; plain Append when the ordering matches the (fwd/rev) partition
+// order, MergeAppend otherwise. No parameterized ordered paths, as C.
+fn generate_orderedappend_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    live_childrels: &[RelId],
+    all_child_pathkeys: &[mcx::PgVec<'mcx, PathKey>],
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let mut partition_pathkeys: mcx::PgVec<'mcx, PathKey> = mcx::PgVec::new_in(mcx);
+    let mut partition_pathkeys_desc: mcx::PgVec<'mcx, PathKey> = mcx::PgVec::new_in(mcx);
+    let mut partition_pathkeys_partial = true;
+    let mut partition_pathkeys_desc_partial = true;
+
+    let is_simple_rel = matches!(
+        run.root.rel(rel).reloptkind,
+        RELOPT_BASEREL | RELOPT_OTHER_MEMBER_REL
+    );
+    let ordered = run.root.rel(rel).part_scheme.is_some()
+        && is_simple_rel
+        && match &run.root.rel(rel).boundinfo {
+            Some(bi) => {
+                crate::partprune::partitions_are_ordered(bi, &run.root.rel(rel).live_parts)
             }
-            let Some(&tid) = appinfo.translated_vars.get(v.varattno as usize - 1) else {
-                continue;
-            };
-            if tid == types_pathnodes::NodeId::default() {
-                continue;
+            None => false,
+        };
+    if ordered {
+        (partition_pathkeys, partition_pathkeys_partial) =
+            crate::pathkeys::build_partition_pathkeys(run, rel, false)?;
+        (partition_pathkeys_desc, partition_pathkeys_desc_partial) =
+            crate::pathkeys::build_partition_pathkeys(run, rel, true)?;
+        // Partition keys that are a subset of the query pathkeys still help
+        // (children supply the lower-order ordering), so no truncation here.
+    }
+
+    for pathkeys in all_child_pathkeys {
+        let mut startup_subpaths: mcx::PgVec<'mcx, PathId> = mcx::PgVec::new_in(mcx);
+        let mut total_subpaths: mcx::PgVec<'mcx, PathId> = mcx::PgVec::new_in(mcx);
+        let mut fractional_subpaths: mcx::PgVec<'mcx, PathId> = mcx::PgVec::new_in(mcx);
+        let mut startup_neq_total = false;
+
+        let mut match_partition_order =
+            crate::pathkeys::pathkeys_contained_in(pathkeys, &partition_pathkeys)
+                || (!partition_pathkeys_partial
+                    && crate::pathkeys::pathkeys_contained_in(&partition_pathkeys, pathkeys));
+        let match_partition_order_desc = !match_partition_order
+            && (crate::pathkeys::pathkeys_contained_in(pathkeys, &partition_pathkeys_desc)
+                || (!partition_pathkeys_desc_partial
+                    && crate::pathkeys::pathkeys_contained_in(
+                        &partition_pathkeys_desc,
+                        pathkeys,
+                    )));
+
+        // Reversed partition order: build the subpath lists back-to-front.
+        let (first_index, end_index, direction) = if match_partition_order_desc {
+            match_partition_order = true;
+            (live_childrels.len() as i32 - 1, -1i32, -1i32)
+        } else {
+            (0i32, live_childrels.len() as i32, 1i32)
+        };
+
+        let mut i = first_index;
+        while i != end_index {
+            let childrel = live_childrels[i as usize];
+            let child_paths =
+                crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(childrel).pathlist);
+            let mut cheapest_startup = crate::pathkeys::get_cheapest_path_for_pathkeys(
+                run,
+                &child_paths,
+                pathkeys,
+                crate::pathnode::CostSelector::Startup,
+                false,
+            );
+            let mut cheapest_total = crate::pathkeys::get_cheapest_path_for_pathkeys(
+                run,
+                &child_paths,
+                pathkeys,
+                crate::pathnode::CostSelector::Total,
+                false,
+            );
+            if cheapest_startup.is_none() || cheapest_total.is_none() {
+                let fallback = run
+                    .root
+                    .rel(childrel)
+                    .cheapest_total_path
+                    .expect("append child has a cheapest total path");
+                debug_assert!(run.root.path(fallback).base().param_info.is_none());
+                cheapest_startup = Some(fallback);
+                cheapest_total = Some(fallback);
             }
-            let Some(cv) = run.root.expr_node(tid).as_var() else { continue };
-            if cv.varno != child_rti as i32 {
-                continue;
-            }
-            for index in run.root.rel(childrel).indexlist.iter() {
-                if index.indexkeys.first() == Some(&(cv.varattno as i32)) {
-                    return true;
+            let cheapest_startup = cheapest_startup.unwrap();
+            let cheapest_total = cheapest_total.unwrap();
+
+            let cheapest_fractional = if run.root.tuple_fraction > 0.0 {
+                let total_rows = run.root.path(cheapest_total).base().rows;
+                debug_assert!(total_rows > 0.0);
+                let mut path_fraction = run.root.tuple_fraction;
+                if path_fraction >= 1.0 {
+                    path_fraction /= total_rows;
                 }
+                Some(
+                    crate::pathkeys::get_cheapest_fractional_path_for_pathkeys(
+                        run,
+                        &child_paths,
+                        pathkeys,
+                        path_fraction,
+                    )
+                    .unwrap_or(cheapest_total),
+                )
+            } else {
+                None
+            };
+
+            if cheapest_startup != cheapest_total {
+                startup_neq_total = true;
+            }
+
+            if match_partition_order {
+                startup_subpaths
+                    .push(get_singleton_append_subpath(&run.root, cheapest_startup));
+                total_subpaths.push(get_singleton_append_subpath(&run.root, cheapest_total));
+                if let Some(f) = cheapest_fractional {
+                    fractional_subpaths.push(get_singleton_append_subpath(&run.root, f));
+                }
+            } else {
+                accumulate_append_subpath(&run.root, cheapest_startup, &mut startup_subpaths);
+                accumulate_append_subpath(&run.root, cheapest_total, &mut total_subpaths);
+                if let Some(f) = cheapest_fractional {
+                    accumulate_append_subpath(&run.root, f, &mut fractional_subpaths);
+                }
+            }
+            i += direction;
+        }
+
+        if match_partition_order {
+            let pid = crate::pathnode::create_append_path(
+                run,
+                rel,
+                startup_subpaths,
+                crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                -1.0,
+            )?;
+            add_path(run, rel, pid);
+            if startup_neq_total {
+                let pid = crate::pathnode::create_append_path(
+                    run,
+                    rel,
+                    total_subpaths,
+                    crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                    -1.0,
+                )?;
+                add_path(run, rel, pid);
+            }
+            if !fractional_subpaths.is_empty() {
+                let pid = crate::pathnode::create_append_path(
+                    run,
+                    rel,
+                    fractional_subpaths,
+                    crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                    -1.0,
+                )?;
+                add_path(run, rel, pid);
+            }
+        } else {
+            let pid = crate::pathnode::create_merge_append_path(
+                run,
+                rel,
+                startup_subpaths,
+                crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+            )?;
+            add_path(run, rel, pid);
+            if startup_neq_total {
+                let pid = crate::pathnode::create_merge_append_path(
+                    run,
+                    rel,
+                    total_subpaths,
+                    crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                )?;
+                add_path(run, rel, pid);
+            }
+            if !fractional_subpaths.is_empty() {
+                let pid = crate::pathnode::create_merge_append_path(
+                    run,
+                    rel,
+                    fractional_subpaths,
+                    crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                )?;
+                add_path(run, rel, pid);
             }
         }
     }
-    false
+    Ok(())
 }
 
 // accumulate_append_subpath (allpaths.c), non-parallel arm: flatten nested
-// serial Appends (multi-level partitioning); MergeAppend children can't
-// exist (ordered append is loud above).
+// serial Appends and MergeAppends (multi-level partitioning).
 fn accumulate_append_subpath(
     root: &types_pathnodes::PlannerInfo<'_>,
     path: types_pathnodes::PathId,
     subpaths: &mut mcx::PgVec<'_, types_pathnodes::PathId>,
 ) {
-    if let types_pathnodes::PathNode::AppendPath(a) = root.path(path) {
-        if !a.path.parallel_aware {
+    match root.path(path) {
+        types_pathnodes::PathNode::AppendPath(a) if !a.path.parallel_aware => {
             debug_assert!(a.first_partial_path as usize == a.subpaths.len());
             for &sp in a.subpaths.iter() {
                 subpaths.push(sp);
             }
-            return;
         }
+        types_pathnodes::PathNode::MergeAppendPath(m) => {
+            for &sp in m.subpaths.iter() {
+                subpaths.push(sp);
+            }
+        }
+        _ => subpaths.push(path),
     }
-    subpaths.push(path);
+}
+
+// get_singleton_append_subpath (allpaths.c): strip single-child (non-
+// parallel-aware) Appends/MergeAppends.
+fn get_singleton_append_subpath(
+    root: &types_pathnodes::PlannerInfo<'_>,
+    path: types_pathnodes::PathId,
+) -> types_pathnodes::PathId {
+    debug_assert!(!root.path(path).base().parallel_aware);
+    match root.path(path) {
+        types_pathnodes::PathNode::AppendPath(a) if a.subpaths.len() == 1 => a.subpaths[0],
+        types_pathnodes::PathNode::MergeAppendPath(m) if m.subpaths.len() == 1 => m.subpaths[0],
+        _ => path,
+    }
 }
 
 // set_function_pathlist (allpaths.c).

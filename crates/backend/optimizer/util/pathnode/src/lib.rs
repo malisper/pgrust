@@ -2201,17 +2201,18 @@ pub fn create_subqueryscan_path<'mcx>(
 }
 
 // create_append_path (pathnode.c), serial arm: no partial subpaths, no
-// parallel append, no required_outer, pathkeys always NIL (ordered-append is
-// the MergeAppend/set-ops ordered lane).
+// parallel append, no required_outer.
 pub fn create_append_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     subpaths: PgVec<'mcx, PathId>,
+    pathkeys: PgVec<'mcx, PathKey>,
     rows: f64,
 ) -> PgResult<PathId> {
     let mut path = base_path(run, NodeTag::T_AppendPath, NodeTag::T_Append, rel_id);
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.pathkeys = pathkeys;
     let first_partial_path = subpaths.len() as i32;
     let limit_tuples = if types_pathnodes::relids::relids_equal(
         &run.root.rel(rel_id).relids,
@@ -2257,6 +2258,99 @@ pub fn create_append_path<'mcx>(
     }
     if rows >= 0.0 {
         run.root.path_mut(id).base_mut().rows = rows;
+    }
+    Ok(id)
+}
+
+// create_merge_append_path (pathnode.c); parameterized MergeAppend paths are
+// never generated (generate_orderedappend_paths).
+pub fn create_merge_append_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpaths: PgVec<'mcx, PathId>,
+    pathkeys: PgVec<'mcx, PathKey>,
+) -> PgResult<PathId> {
+    debug_assert!(types_pathnodes::relids::relids_is_empty(
+        &run.root.rel(rel_id).lateral_relids
+    ));
+    let mut path = base_path(run, NodeTag::T_MergeAppendPath, NodeTag::T_MergeAppend, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.pathkeys = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &pathkeys);
+    let limit_tuples = if types_pathnodes::relids::relids_equal(
+        &run.root.rel(rel_id).relids,
+        &run.root.all_query_rels,
+    ) {
+        run.root.limit_tuples
+    } else {
+        -1.0
+    };
+    let mut rows = 0.0;
+    let mut input_disabled_nodes = 0;
+    let mut input_startup_cost = 0.0;
+    let mut input_total_cost = 0.0;
+    for &sp in subpaths.iter() {
+        let (s_rows, s_safe, s_disabled, s_startup, s_total, sorted, s_width) = {
+            let s = run.root.path(sp).base();
+            debug_assert!(s.param_info.is_none());
+            (
+                s.rows,
+                s.parallel_safe,
+                s.disabled_nodes,
+                s.startup_cost,
+                s.total_cost,
+                types_pathnodes::pathkeys_contained_in(&pathkeys, &s.pathkeys),
+                s.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width),
+            )
+        };
+        rows += s_rows;
+        path.parallel_safe = path.parallel_safe && s_safe;
+        if sorted {
+            input_disabled_nodes += s_disabled;
+            input_startup_cost += s_startup;
+            input_total_cost += s_total;
+        } else {
+            let (d, st, t) = costsize::cost_sort_shape(
+                s_disabled,
+                s_total,
+                s_rows,
+                s_width,
+                0.0,
+                init_small::globals::work_mem(),
+                limit_tuples,
+            );
+            input_disabled_nodes += d;
+            input_startup_cost += st;
+            input_total_cost += t;
+        }
+    }
+    path.rows = rows;
+    let n_streams = subpaths.len();
+    let single = (n_streams == 1).then(|| subpaths[0]);
+    let id = run.root.alloc_path(PathNode::MergeAppendPath(types_pathnodes::MergeAppendPath {
+        path,
+        subpaths,
+        limit_tuples,
+    }));
+    match single {
+        // Single non-parallel-aware child: the MergeAppend is a no-op that
+        // setrefs removes; inherit the input costs.
+        Some(child_id) => {
+            debug_assert!(!run.root.path(child_id).base().parallel_aware);
+            let p = run.root.path_mut(id).base_mut();
+            p.disabled_nodes = input_disabled_nodes;
+            p.startup_cost = input_startup_cost;
+            p.total_cost = input_total_cost;
+        }
+        None => costsize::cost_merge_append(
+            run,
+            id,
+            n_streams,
+            input_disabled_nodes,
+            input_startup_cost,
+            input_total_cost,
+            rows,
+        ),
     }
     Ok(id)
 }
