@@ -404,7 +404,8 @@ fn final_message_error_arms() {
         "unexpected SCRAM channel-binding attribute in client-final-message"
     );
 
-    let err = final_message_err("c=biws,r=wrongnonce,p=eA==");
+    let err =
+        final_message_err("c=biws,r=wrongnonce,p=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
     assert_eq!(err.message(), "invalid SCRAM response");
     assert_eq!(err.detail(), Some("Nonce does not match."));
 }
