@@ -133,6 +133,24 @@ pub fn bytes_to_hex(b: [u8; MD5_DIGEST_LENGTH]) -> [u8; MD5_HASH_LEN] {
     s
 }
 
+pub const MD5_PASSWD_LEN: usize = 35;
+
+pub const MD5_PASSWD_CHARSET: &[u8] = b"0123456789abcdef";
+
+// md5_common.c pg_md5_encrypt: md5(password || salt), lowercase hex, "md5"
+// prefix. Infallible here (C's false/errstr arm is OOM/engine-failure only);
+// the concatenation feeds one incremental engine, no temp buffer.
+pub fn pg_md5_encrypt(passwd: &[u8], salt: &[u8]) -> [u8; MD5_PASSWD_LEN] {
+    let mut ctx = Md5::new();
+    ctx.update(passwd);
+    ctx.update(salt);
+    let hexsum = bytes_to_hex(ctx.finish());
+    let mut buf = [0u8; MD5_PASSWD_LEN];
+    buf[..3].copy_from_slice(b"md5");
+    buf[3..].copy_from_slice(&hexsum);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +205,14 @@ mod tests {
             }
             assert_eq!(ctx.finish(), oneshot);
         }
+    }
+
+    #[test]
+    fn pg_md5_encrypt_role_salt() {
+        assert_eq!(
+            &pg_md5_encrypt(b"secret", b"postgres")[..],
+            b"md553f48b7c4b76a86ce72276c5755f217d"
+        );
+        assert_eq!(&pg_md5_encrypt(b"foo", b"bar")[..], b"md53858f62230ac3c915f300c664312c63f");
     }
 }
