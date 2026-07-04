@@ -105,6 +105,9 @@ struct BatchSoa<'mcx> {
     key_col: Option<u16>,
     // Varlena key: staged into soa column 0 via the varkey pass.
     varkey: Option<::exectuples::SoaVarKeyPlan>,
+    // Precomputed emit_key read column (0 for varkey, key_col for fixed):
+    // one load on the per-row read path.
+    key_read_col: u16,
     // Precomputed !qual_only && key_col.is_none(): one test on the store path.
     publish: bool,
     qual_col: u16,
@@ -263,6 +266,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 qual_only: qual_only && qual.is_some(),
                 key_col: None,
                 varkey: None,
+                key_read_col: 0,
                 publish: !(qual_only && qual.is_some()),
                 qual_col: qual.map_or(0, |(a, _, _)| a),
                 qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
@@ -320,6 +324,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             }
         };
     let soa_cols = if varkey.is_some() { 1 } else { plan.ncols() };
+    let key_read_col = if varkey.is_some() { 0 } else { attnum };
     node.batch_soa = Some(::mcx::PgBox::new_in(
         BatchSoa {
             soa: ::exectuples::SoaBatch::new_in(mcx, soa_cols),
@@ -328,6 +333,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             qual_only: false,
             key_col: Some(attnum),
             varkey,
+            key_read_col,
             publish: false,
             qual_col: 0,
             qual_cmp: ::execexpr::CmpOp::Int4Eq,
@@ -351,7 +357,7 @@ pub fn seq_scan_batch_key<'mcx>(
 ) -> Option<(::datum::Datum, bool)> {
     let b = node.batch_soa.as_deref().expect("direct key feed armed");
     debug_assert!(b.key_col.is_some());
-    let c = if b.varkey.is_some() { 0 } else { b.key_col.unwrap() as usize };
+    let c = b.key_read_col as usize;
     if b.soa.is_fallback(i) {
         return None;
     }
@@ -853,8 +859,8 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed; bloom },
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_only, key_col, varkey, publish, qual_col, qual_cmp,
-        qual_konst, sel, nwords, cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, qual_col,
+        qual_cmp, qual_konst, sel, nwords, cur_word, cur_bits,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );
