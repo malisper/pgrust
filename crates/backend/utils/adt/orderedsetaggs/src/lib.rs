@@ -814,12 +814,40 @@ pub fn fc_mode_final(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
     let mcx = fcinfo.result_mcx();
     let collation = fcinfo.fncollation;
+    // Spilled by-ref values live in recycled slab slots (valid until the
+    // next fetch): held values need C's datumCopy shape (retained scratch).
+    let copy_held = !st.q.typ_by_val && st.sort.as_ref().expect("live sortstate").spilled();
+    let typ_len = st.q.typ_len;
+    // std Vec (justified): per-final-call scratch freed on return; a bump
+    // PgVec would pin the bytes in the agg output context.
+    let mut last_buf: Vec<u8> = Vec::new();
+    let mut mode_buf: Vec<u8> = Vec::new();
     let mut mode_val = Datum::null();
     let mut mode_freq: i64 = 0;
     let mut last_val = Datum::null();
     let mut last_val_freq: i64 = 0;
     let mut last_val_is_mode = false;
     let mut last_abbrev = Datum::null();
+
+    fn held(buf: &mut Vec<u8>, val: Datum, typ_len: i16) -> Datum {
+        let src = val.as_usize() as *const u8;
+        // SAFETY: non-null by-ref datum readable for its full size.
+        let size = unsafe {
+            if typ_len == -1 {
+                ::types_tuple::varatt::varsize_any(src)
+            } else {
+                typ_len as usize
+            }
+        };
+        buf.clear();
+        // SAFETY: reserved; src readable; disjoint.
+        unsafe {
+            buf.reserve(size);
+            core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), size);
+            buf.set_len(size);
+        }
+        Datum::from_usize(buf.as_ptr() as usize)
+    }
 
     loop {
         let Some((nd, abbrev)) =
@@ -832,8 +860,13 @@ pub fn fc_mode_final(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         }
         let val = nd.value;
         if last_val_freq == 0 {
-            mode_val = val;
-            last_val = val;
+            if copy_held {
+                last_val = held(&mut last_buf, val, typ_len);
+                mode_val = held(&mut mode_buf, val, typ_len);
+            } else {
+                mode_val = val;
+                last_val = val;
+            }
             mode_freq = 1;
             last_val_freq = 1;
             last_val_is_mode = true;
@@ -854,13 +887,17 @@ pub fn fc_mode_final(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
                 } else {
                     last_val_freq += 1;
                     if last_val_freq > mode_freq {
-                        mode_val = last_val;
+                        mode_val = if copy_held {
+                            held(&mut mode_buf, last_val, typ_len)
+                        } else {
+                            last_val
+                        };
                         mode_freq = last_val_freq;
                         last_val_is_mode = true;
                     }
                 }
             } else {
-                last_val = val;
+                last_val = if copy_held { held(&mut last_buf, val, typ_len) } else { val };
                 // Reusing abbreviated keys avoids equality calls (C ditto).
                 last_abbrev = abbrev;
                 last_val_freq = 1;
@@ -1049,6 +1086,9 @@ pub fn fc_hypothetical_dense_rank_final(
     let mut have_prev = false;
     // Alternate the two fetch slots so the previous row stays comparable.
     let mut use_extra = false;
+    // Spilled reads recycle slab slots on the next fetch: the held previous
+    // row needs an owned copy (C passes copy=true here unconditionally).
+    let spilled = st.sort.as_ref().unwrap().spilled();
     loop {
         let OsaGroupState { sort, fetch_slot, extra_slot, compare_tuple, gcx, .. } = st;
         let (cur, prev) = if use_extra {
@@ -1056,7 +1096,7 @@ pub fn fc_hypothetical_dense_rank_final(
         } else {
             (fetch_slot.as_mut().unwrap(), extra_slot.as_mut().unwrap())
         };
-        if !sort.as_mut().unwrap().gettupleslot(true, false, cur, *gcx)? {
+        if !sort.as_mut().unwrap().gettupleslot(true, spilled, cur, *gcx)? {
             break;
         }
         exectuples::slot_getsomeattrs(cur, nargs as i32 + 1);
