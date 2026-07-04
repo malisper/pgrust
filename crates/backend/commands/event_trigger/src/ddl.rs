@@ -180,7 +180,7 @@ fn LookupFuncName0(mcx: Mcx<'_>, funcname: &types_nodes::list::NodeList<'_>) -> 
     for n in funcname.iter() {
         parts.push(n.as_string().expect("funcname holds Strings").sval);
     }
-    let candidates = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, false, false)?;
+    let candidates = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, &[], false, false)?;
     for c in candidates.iter() {
         if c.args.is_empty() && OidIsValid(c.oid) {
             return Ok(c.oid);
