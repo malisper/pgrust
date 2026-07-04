@@ -233,6 +233,7 @@ members = [
     "crates/backend/access/table/tableam",
     "crates/backend/storage/lmgr/predicate",
     "crates/backend/storage/lmgr/predicate_seams",
+    "crates/backend/access/common/syncscan",
     "crates/backend/access/common/syncscan_seams",
     "crates/backend/access/heap/pruneheap",
     "crates/backend/access/heap/pruneheap_seams",

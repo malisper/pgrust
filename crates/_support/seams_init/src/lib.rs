@@ -115,6 +115,7 @@ pub fn init_all() {
     dsm_core::init_seams();
     ipc::init_seams();
     ipci::init_seams();
+    syncscan::init_seams();
     latch::init_seams();
     pmsignal::init_seams();
     procarray::init_seams();

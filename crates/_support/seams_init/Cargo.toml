@@ -102,6 +102,7 @@ pmchild = { path = "../../backend/postmaster/pmchild" }
 postmaster = { path = "../../backend/postmaster/postmaster" }
 auxprocess = { path = "../../backend/postmaster/auxprocess" }
 checkpointer = { path = "../../backend/postmaster/checkpointer" }
+syncscan = { path = "../../backend/access/common/syncscan" }
 bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
