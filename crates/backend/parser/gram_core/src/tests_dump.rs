@@ -1440,6 +1440,16 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "arg", a.arg);
         bool_field(out, "absent_on_null", a.absent_on_null);
         out.push('}');
+    } else if let Some(i) = n.as_insert_stmt() {
+        out.push_str("{INSERTSTMT");
+        node_field(out, "relation", i.relation);
+        list_field(out, "cols", &i.cols);
+        node_field(out, "selectStmt", i.selectStmt);
+        node_field(out, "onConflictClause", i.onConflictClause);
+        node_field(out, "returningClause", i.returningClause);
+        node_field(out, "withClause", i.withClause);
+        int_field(out, "override", i.r#override as i32);
+        out.push('}');
     } else if let Some(d) = n.as_delete_stmt() {
         out.push_str("{DELETESTMT");
         node_field(out, "relation", d.relation);
