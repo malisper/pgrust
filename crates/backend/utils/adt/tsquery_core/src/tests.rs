@@ -19,10 +19,11 @@ fn roundtrip(input: &str) -> String {
 fn parse_err(input: &str) -> String {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    match tsquery_in_core(mcx, input.as_bytes(), None) {
+    let msg = match tsquery_in_core(mcx, input.as_bytes(), None) {
         Err(e) => e.message().to_string(),
         Ok(_) => panic!("expected error for {input:?}"),
-    }
+    };
+    msg
 }
 
 #[test]
