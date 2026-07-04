@@ -195,6 +195,12 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "lidx", ix.lidx);
         node_field(out, "uidx", ix.uidx);
         out.push('}');
+    } else if let Some(ma) = n.as_multi_assign_ref() {
+        out.push_str("{MULTIASSIGNREF");
+        node_field(out, "source", ma.source);
+        int_field(out, "colno", ma.colno);
+        int_field(out, "ncolumns", ma.ncolumns);
+        out.push('}');
     } else if let Some(rv) = n.as_range_var() {
         range_var(out, rv);
     } else if let Some(v) = n.as_variant::<types_nodes::rawnodes::ViewStmt>() {

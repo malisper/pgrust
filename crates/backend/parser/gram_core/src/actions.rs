@@ -2465,9 +2465,27 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, target)?);
             }
             // set_clause: '(' set_target_list ')' '=' a_expr
-            1668 => panic!(
-                "gram_core: multiple-assignment SET (MultiAssignRef) not ported"
-            ),
+            1668 => {
+                let targets = view.v(2).list();
+                let source = view.v(5).node();
+                let ncolumns = targets.len() as i32;
+                for (i, col) in targets.iter().enumerate() {
+                    let r = Node::mk(
+                        mcx,
+                        types_nodes::rawnodes::MultiAssignRef {
+                            source,
+                            colno: i as i32 + 1,
+                            ncolumns,
+                        },
+                    )?;
+                    // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                    unsafe {
+                        col.with_mut::<types_nodes::ResTarget, _>(|rt| rt.val = Some(r))
+                            .expect("set_target is ResTarget");
+                    }
+                }
+                *yyval = YYSTYPE::List(targets);
+            }
             // set_target: ColId opt_indirection (check_indirection is a no-op:
             // A_Indices construction is an unported loud).
             1669 => {
