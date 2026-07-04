@@ -158,11 +158,37 @@ fn timestamp_out_of_range() -> Box<PgError> {
     )
 }
 
-/// C: JsonEncodeDateTime (json.c), DATE/TIMESTAMP/TIMESTAMPTZ arms with
-/// tzp=NULL (TIME/TIMETZ belong to jsonpath .datetime(), unported loud).
-/// Returns the encoded length in `buf`.
+/// C: JsonEncodeDateTime with tzp=NULL. Returns the encoded length in `buf`.
 pub fn json_encode_datetime(buf: &mut [u8; MAXDATELEN + 1], val: Datum, typid: Oid) -> PgResult<usize> {
+    json_encode_datetime_tz(buf, val, typid, None)
+}
+
+/// C: JsonEncodeDateTime (json.c). TIMETZOID takes the TimeTzADT by pointer
+/// datum (C ABI); `tzp` applies the zone shift on the TIMESTAMPTZOID arm.
+pub fn json_encode_datetime_tz(
+    buf: &mut [u8; MAXDATELEN + 1],
+    val: Datum,
+    typid: Oid,
+    tzp: Option<i32>,
+) -> PgResult<usize> {
+    use types_core::catalog::{TIMEOID, TIMETZOID};
     let len = match typid {
+        TIMEOID => {
+            let time = val.as_i64();
+            let mut tm = pg_tm::default();
+            let mut fsec = 0;
+            adt_date::time2tm(time, &mut tm, &mut fsec);
+            adt_datetime::encode::EncodeTimeOnly(&tm, fsec, false, 0, USE_XSD_DATES, buf)
+        }
+        TIMETZOID => {
+            // SAFETY: a TIMETZOID datum is a live pointer to TimeTzADT.
+            let time = unsafe { &*(val.as_usize() as *const adt_date::TimeTzADT) };
+            let mut tm = pg_tm::default();
+            let mut fsec = 0;
+            let mut tz = 0;
+            adt_date::timetz2tm(time, &mut tm, &mut fsec, Some(&mut tz));
+            adt_datetime::encode::EncodeTimeOnly(&tm, fsec, true, tz, USE_XSD_DATES, buf)
+        }
         DATEOID => {
             let date = val.as_i32();
             if adt_date::DATE_NOT_FINITE(date) {
@@ -191,23 +217,30 @@ pub fn json_encode_datetime(buf: &mut [u8; MAXDATELEN + 1], val: Datum, typid: O
             }
         }
         TIMESTAMPTZOID => {
-            let timestamp = val.as_i64();
+            let mut timestamp = val.as_i64();
+            let mut tz = 0;
+            if let Some(z) = tzp {
+                tz = z;
+                timestamp -= (z as i64) * adt_datetime::consts::USECS_PER_SEC;
+            }
             if adt_timestamp::TIMESTAMP_NOT_FINITE(timestamp) {
                 adt_timestamp::EncodeSpecialTimestamp(timestamp, buf)
             } else {
                 let mut tm = pg_tm::default();
                 let mut fsec = 0;
-                let mut tz = 0;
                 let mut tzn: Option<&'static str> = None;
                 adt_timestamp::timestamp2tm(
                     timestamp,
-                    Some(&mut tz),
+                    if tzp.is_some() { None } else { Some(&mut tz) },
                     &mut tm,
                     &mut fsec,
-                    Some(&mut tzn),
+                    if tzp.is_some() { None } else { Some(&mut tzn) },
                     None,
                 )
                 .map_err(|_| timestamp_out_of_range())?;
+                if tzp.is_some() {
+                    tm.tm_isdst = 1;
+                }
                 adt_datetime::encode::EncodeDateTime(
                     &mut tm,
                     fsec,

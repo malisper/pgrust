@@ -614,6 +614,32 @@ const TIME_SCALES: [i64; MAX_TIME_PRECISION as usize + 1] =
 const TIME_OFFSETS: [i64; MAX_TIME_PRECISION as usize + 1] =
     [500_000, 50_000, 5_000, 500, 50, 5, 0];
 
+/// C: `anytime_typmod_check` (date.c:70).
+pub fn anytime_typmod_check(istz: bool, typmod: i32) -> PgResult<i32> {
+    let with_tz = if istz { " WITH TIME ZONE" } else { "" };
+    if typmod < 0 {
+        return Err(Box::new(
+            PgError::error(format!(
+                "TIME({typmod}){with_tz} precision must not be negative"
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if typmod > MAX_TIME_PRECISION {
+        elog::ereport(types_error::WARNING)
+            .errmsg(format!(
+                "TIME({typmod}){with_tz} precision reduced to maximum allowed, {MAX_TIME_PRECISION}"
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "date.c",
+                0,
+                "anytime_typmod_check",
+            ))?;
+        return Ok(MAX_TIME_PRECISION);
+    }
+    Ok(typmod)
+}
+
 pub fn AdjustTimeForTypmod(time: &mut TimeADT, typmod: i32) {
     if typmod >= 0 && typmod <= MAX_TIME_PRECISION {
         let scale = TIME_SCALES[typmod as usize];
