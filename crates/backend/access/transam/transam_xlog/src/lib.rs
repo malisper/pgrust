@@ -359,9 +359,10 @@ thread_local! {
     pub(crate) static PROC_LAST_REC_PTR: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_REC_END: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_COMMIT_END: Cell<XLogRecPtr> = const { Cell::new(0) };
-    // pgWalUsage (instrument.h).
-    pub(crate) static WAL_USAGE: Cell<types_core::instrument::WalUsage> = const {
-        Cell::new(types_core::instrument::WalUsage {
+    // pgWalUsage (instrument.h); UnsafeCell so the per-record adds are bare
+    // field increments (single-entry leaf accesses only).
+    pub(crate) static WAL_USAGE: core::cell::UnsafeCell<types_core::instrument::WalUsage> = const {
+        core::cell::UnsafeCell::new(types_core::instrument::WalUsage {
             wal_records: 0,
             wal_fpi: 0,
             wal_bytes: 0,
@@ -370,12 +371,19 @@ thread_local! {
     };
 }
 
+#[inline(always)]
+pub(crate) fn wal_usage_update<R>(f: impl FnOnce(&mut types_core::instrument::WalUsage) -> R) -> R {
+    // SAFETY: thread-local; callers' closures are leaves (no re-entry, no
+    // escaping reference).
+    WAL_USAGE.with(|s| f(unsafe { &mut *s.get() }))
+}
+
 pub fn WalUsageFpi() -> i64 {
-    WAL_USAGE.get().wal_fpi
+    wal_usage_update(|wu| wu.wal_fpi)
 }
 
 pub fn pgWalUsage() -> types_core::instrument::WalUsage {
-    WAL_USAGE.get()
+    wal_usage_update(|wu| *wu)
 }
 
 pub fn ProcLastRecPtr() -> XLogRecPtr {

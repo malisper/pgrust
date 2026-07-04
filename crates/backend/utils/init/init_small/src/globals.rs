@@ -83,6 +83,9 @@ scalar_global! {
         ProcNumber, INVALID_PROC_NUMBER;
 
     MY_DATABASE_ID, MyDatabaseId, SetMyDatabaseId, Oid, InvalidOid;
+    // pgstat.c's `bool pgstat_report_fixed`: written directly by the xlog
+    // insert path, read/cleared by pgstat_report_stat.
+    PGSTAT_REPORT_FIXED, PgStatReportFixed, SetPgStatReportFixed, bool, false;
     MY_DATABASE_TABLE_SPACE, MyDatabaseTableSpace, SetMyDatabaseTableSpace, Oid, InvalidOid;
     MY_DATABASE_HAS_LOGIN_EVENT_TRIGGERS, MyDatabaseHasLoginEventTriggers,
         SetMyDatabaseHasLoginEventTriggers, bool, false;

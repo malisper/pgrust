@@ -93,7 +93,6 @@ fn new_pending_data(key: PgStat_HashKey, mcx: Mcx<'static>) -> PendingData {
 
 thread_local! {
     static STATE: RefCell<Option<ManuallyDrop<PgStatState>>> = const { RefCell::new(None) };
-    static REPORT_FIXED: Cell<bool> = const { Cell::new(false) };
     static FORCE_NEXT_FLUSH: Cell<bool> = const { Cell::new(false) };
     static PENDING_SINCE: Cell<TimestampTz> = const { Cell::new(0) };
     static LAST_FLUSH: Cell<TimestampTz> = const { Cell::new(0) };
@@ -132,11 +131,11 @@ fn pending_is_empty() -> bool {
 }
 
 pub fn pgstat_report_fixed_set() {
-    REPORT_FIXED.with(|c| c.set(true));
+    init_small::globals::SetPgStatReportFixed(true);
 }
 
 pub fn pgstat_report_fixed() -> bool {
-    REPORT_FIXED.with(|c| c.get())
+    init_small::globals::PgStatReportFixed()
 }
 
 pub fn pgstat_force_next_flush() {
@@ -227,7 +226,7 @@ fn report_stat_slow(mut force: bool) -> i64 {
     }
 
     PENDING_SINCE.with(|c| c.set(0));
-    REPORT_FIXED.with(|c| c.set(false));
+    init_small::globals::SetPgStatReportFixed(false);
     HAVE_PENDING.with(|c| c.set(false));
     0
 }
