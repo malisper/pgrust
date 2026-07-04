@@ -1234,7 +1234,7 @@ pub fn addRangeTableEntryForValues<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
-// C addRangeTableEntryForTableFunc (parse_relation.c); XMLTABLE only here.
+// C addRangeTableEntryForTableFunc (parse_relation.c).
 pub fn addRangeTableEntryForTableFunc<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1252,7 +1252,13 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     debug_assert_eq!(tf.coltypmods.len(), ncolumns);
     debug_assert_eq!(tf.colcollations.len(), ncolumns);
 
-    let refname = alias.and_then(|a| a.aliasname).unwrap_or("xmltable");
+    let refname = alias.and_then(|a| a.aliasname).unwrap_or(
+        if tf.functype == types_nodes::primnodes::TableFuncType::TFT_XMLTABLE {
+            "xmltable"
+        } else {
+            "json_table"
+        },
+    );
     let mut eref_colnames = match alias {
         Some(a) => a.colnames.clone_in(mcx)?,
         None => NodeList::nil(),

@@ -144,6 +144,12 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_JsonIsPredicate => cmp!(as_json_is_predicate),
         NodeTag::T_JsonBehavior => cmp!(as_json_behavior),
         NodeTag::T_JsonExpr => cmp!(as_json_expr),
+        NodeTag::T_JsonTablePath => cmp!(as_json_table_path),
+        NodeTag::T_JsonTablePathScan => cmp!(as_json_table_path_scan),
+        NodeTag::T_JsonTableSiblingJoin => cmp!(as_json_table_sibling_join),
+        NodeTag::T_JsonTablePathSpec => cmp!(as_json_table_path_spec),
+        NodeTag::T_JsonTable => cmp!(as_json_table),
+        NodeTag::T_JsonTableColumn => cmp!(as_json_table_column),
         other => panic!(
             "equal() (equalfuncs.c): node type {other:?} not in the carried vocabulary — \
              unit backend-nodes-equalfuncs"
@@ -1171,5 +1177,60 @@ impl NodeEqual for crate::primnodes::JsonExpr<'_> {
             && self.wrapper == b.wrapper
             && self.omit_quotes == b.omit_quotes
             && self.collation == b.collation
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonTablePath<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.value, b.value) && self.name == b.name
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonTablePathScan<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.path, b.path)
+            && self.errorOnError == b.errorOnError
+            && equal_opt(self.child, b.child)
+            && self.colMin == b.colMin
+            && self.colMax == b.colMax
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonTableSiblingJoin<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.lplan, b.lplan) && equal_opt(self.rplan, b.rplan)
+    }
+}
+
+impl NodeEqual for crate::rawnodes::JsonTablePathSpec<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.string, b.string) && self.name == b.name
+    }
+}
+
+impl NodeEqual for crate::rawnodes::JsonTable<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.context_item, b.context_item)
+            && equal_opt(self.pathspec, b.pathspec)
+            && self.passing.node_equal(&b.passing)
+            && self.columns.node_equal(&b.columns)
+            && equal_opt(self.on_error, b.on_error)
+            && eq_ref(self.alias, b.alias)
+            && self.lateral == b.lateral
+    }
+}
+
+impl NodeEqual for crate::rawnodes::JsonTableColumn<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.coltype == b.coltype
+            && self.name == b.name
+            && equal_opt(self.typeName, b.typeName)
+            && equal_opt(self.pathspec, b.pathspec)
+            && eq_ref(self.format, b.format)
+            && self.wrapper == b.wrapper
+            && self.quotes == b.quotes
+            && self.columns.node_equal(&b.columns)
+            && equal_opt(self.on_empty, b.on_empty)
+            && equal_opt(self.on_error, b.on_error)
     }
 }

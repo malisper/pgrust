@@ -1446,6 +1446,42 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "quotes", f.quotes as i32);
         int_field(out, "location", f.location);
         out.push('}');
+    } else if let Some(ps) = n.as_json_table_path_spec() {
+        out.push_str("{JSONTABLEPATHSPEC");
+        node_field(out, "string", ps.string);
+        string_field(out, "name", ps.name);
+        int_field(out, "name_location", ps.name_location);
+        int_field(out, "location", ps.location);
+        out.push('}');
+    } else if let Some(jt) = n.as_json_table() {
+        out.push_str("{JSONTABLE");
+        node_field(out, "context_item", jt.context_item);
+        node_field(out, "pathspec", jt.pathspec);
+        list_field(out, "passing", &jt.passing);
+        list_field(out, "columns", &jt.columns);
+        node_field(out, "on_error", jt.on_error);
+        out.push_str(" :alias ");
+        match jt.alias {
+            Some(a) => alias(out, a),
+            None => out.push_str("<>"),
+        }
+        bool_field(out, "lateral", jt.lateral);
+        int_field(out, "location", jt.location);
+        out.push('}');
+    } else if let Some(jtc) = n.as_json_table_column() {
+        out.push_str("{JSONTABLECOLUMN");
+        int_field(out, "coltype", jtc.coltype as i32);
+        string_field(out, "name", jtc.name);
+        node_field(out, "typeName", jtc.typeName);
+        node_field(out, "pathspec", jtc.pathspec);
+        json_format_field(out, "format", jtc.format);
+        int_field(out, "wrapper", jtc.wrapper as i32);
+        int_field(out, "quotes", jtc.quotes as i32);
+        list_field(out, "columns", &jtc.columns);
+        node_field(out, "on_empty", jtc.on_empty);
+        node_field(out, "on_error", jtc.on_error);
+        int_field(out, "location", jtc.location);
+        out.push('}');
     } else if let Some(kv) = n.as_json_key_value() {
         out.push_str("{JSONKEYVALUE");
         node_field(out, "key", kv.key);

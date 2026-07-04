@@ -438,6 +438,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"MERGEACTION" => self.read_merge_action(),
             b"XMLEXPR" => self.read_xml_expr(),
             b"TABLEFUNC" => self.read_table_func(),
+            b"JSONTABLEPATH" => self.read_json_table_path(),
+            b"JSONTABLEPATHSCAN" => self.read_json_table_path_scan(),
+            b"JSONTABLESIBLINGJOIN" => self.read_json_table_sibling_join(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -1494,13 +1497,40 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         tf.colcollations = self.read_oid_list("colcollations")?;
         tf.colexprs = self.read_opt_node_list("colexprs")?;
         tf.coldefexprs = self.read_opt_node_list("coldefexprs")?;
-        tf.colvalexprs = self.read_node_list("colvalexprs")?;
+        tf.colvalexprs = self.read_opt_node_list("colvalexprs")?;
         tf.passingvalexprs = self.read_node_list("passingvalexprs")?;
         tf.notnulls = self.read_bitmapset("notnulls")?;
         tf.plan = self.read_node("plan")?;
         tf.ordinalitycol = self.read_i32("ordinalitycol");
         tf.location = self.read_location("location");
         Ok(tf.seal())
+    }
+
+    fn read_json_table_path(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut p = Node::build::<types_nodes::primnodes::JsonTablePath>(mcx)?;
+        p.value = self.read_node("value")?;
+        p.name = self.read_str("name")?;
+        Ok(p.seal())
+    }
+
+    fn read_json_table_path_scan(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut s = Node::build::<types_nodes::primnodes::JsonTablePathScan>(mcx)?;
+        s.path = self.read_node("path")?;
+        s.errorOnError = self.read_bool("errorOnError");
+        s.child = self.read_node("child")?;
+        s.colMin = self.read_i32("colMin");
+        s.colMax = self.read_i32("colMax");
+        Ok(s.seal())
+    }
+
+    fn read_json_table_sibling_join(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut j = Node::build::<types_nodes::primnodes::JsonTableSiblingJoin>(mcx)?;
+        j.lplan = self.read_node("lplan")?;
+        j.rplan = self.read_node("rplan")?;
+        Ok(j.seal())
     }
 
     fn read_scalar_array_op_expr(&mut self) -> PgResult<Node<'mcx>> {

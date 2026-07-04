@@ -2434,10 +2434,170 @@ pub(crate) fn get_tablefunc<'mcx>(
 ) -> PgResult<()> {
     match tf.functype {
         types_nodes::TableFuncType::TFT_XMLTABLE => get_xmltable(tf, ctx, showimplicit),
-        types_nodes::TableFuncType::TFT_JSON_TABLE => {
-            gap("get_tablefunc", "JSON_TABLE deparse (JsonTablePathScan vocabulary)")
+        types_nodes::TableFuncType::TFT_JSON_TABLE => get_json_table(tf, ctx, showimplicit),
+    }
+}
+
+fn get_json_table_nested_columns<'mcx>(
+    tf: &'mcx types_nodes::primnodes::TableFunc<'mcx>,
+    plan: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+    needcomma: bool,
+) -> PgResult<()> {
+    if let Some(scan) = plan.as_json_table_path_scan() {
+        if needcomma {
+            ctx.buf.push(',');
+        }
+        ctx.buf.push(' ');
+        append_context_keyword(ctx, "NESTED PATH ", 0, 0, 0);
+        let path = scan.path.expect("path").as_json_table_path().expect("JsonTablePath");
+        get_const_expr(path.value.expect("path value").as_const().expect("Const"), ctx, -1)?;
+        ctx.buf.push_str(" AS ");
+        ctx.buf.push_str(&quote_identifier(path.name.expect("path name")));
+        get_json_table_columns(tf, scan, ctx, showimplicit)
+    } else {
+        let join = plan.as_json_table_sibling_join().expect("JsonTableSiblingJoin");
+        get_json_table_nested_columns(tf, join.lplan.expect("lplan"), ctx, showimplicit, needcomma)?;
+        get_json_table_nested_columns(tf, join.rplan.expect("rplan"), ctx, showimplicit, true)
+    }
+}
+
+fn get_json_table_columns<'mcx>(
+    tf: &'mcx types_nodes::primnodes::TableFunc<'mcx>,
+    scan: &'mcx types_nodes::primnodes::JsonTablePathScan<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonFormatType;
+    use types_nodes::{JsonBehaviorType, JsonExprOp};
+    const TYPCATEGORY_STRING: i8 = b'S' as i8;
+
+    ctx.buf.push(' ');
+    append_context_keyword(ctx, "COLUMNS (", 0, 0, 0);
+    if ctx.pretty_indent() {
+        ctx.indent_level += PRETTYINDENT_VAR;
+    }
+    let mut colnum = 0;
+    for (((colname, typid), typmod), colvalexpr) in tf
+        .colnames
+        .iter()
+        .zip(tf.coltypes.iter())
+        .zip(tf.coltypmods.iter())
+        .zip(tf.colvalexprs.iter())
+    {
+        if scan.colMin < 0 || colnum < scan.colMin {
+            colnum += 1;
+            continue;
+        }
+        if colnum > scan.colMax {
+            break;
+        }
+        if colnum > scan.colMin {
+            ctx.buf.push_str(", ");
+        }
+        colnum += 1;
+        append_context_keyword(ctx, "", 0, 0, 0);
+        ctx.buf
+            .push_str(&quote_identifier(colname.as_string().expect("colnames cell").sval));
+        ctx.buf.push(' ');
+        let Some(colexpr) = colvalexpr else {
+            ctx.buf.push_str("FOR ORDINALITY");
+            continue;
+        };
+        let colexpr = colexpr.as_json_expr().expect("JsonExpr");
+        ctx.buf.push_str(&format_type_with_typemod(typid, typmod)?);
+        let default_behavior;
+        if colexpr.op == JsonExprOp::JSON_EXISTS_OP {
+            ctx.buf.push_str(" EXISTS");
+            default_behavior = JsonBehaviorType::JSON_BEHAVIOR_FALSE;
+        } else {
+            if colexpr.op == JsonExprOp::JSON_QUERY_OP {
+                let (typcategory, _typispreferred) =
+                    lsyscache::get_type_category_preferred(typid)?;
+                if typcategory == TYPCATEGORY_STRING {
+                    ctx.buf.push_str(
+                        if colexpr.format.expect("format").format_type
+                            == JsonFormatType::JS_FORMAT_JSONB
+                        {
+                            " FORMAT JSONB"
+                        } else {
+                            " FORMAT JSON"
+                        },
+                    );
+                }
+            }
+            default_behavior = JsonBehaviorType::JSON_BEHAVIOR_NULL;
+        }
+        ctx.buf.push_str(" PATH ");
+        let path_spec = colexpr.path_spec.expect("path_spec");
+        if let Some(c) = path_spec.as_const() {
+            get_const_expr(c, ctx, -1)?;
+        } else {
+            get_rule_expr(path_spec, ctx, showimplicit)?;
+        }
+        get_json_expr_options(colexpr, ctx, default_behavior)?;
+    }
+    if let Some(child) = scan.child {
+        get_json_table_nested_columns(tf, child, ctx, showimplicit, scan.colMin >= 0)?;
+    }
+    if ctx.pretty_indent() {
+        ctx.indent_level -= PRETTYINDENT_VAR;
+    }
+    append_context_keyword(ctx, ")", 0, 0, 0);
+    Ok(())
+}
+
+fn get_json_table<'mcx>(
+    tf: &'mcx types_nodes::primnodes::TableFunc<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::JsonBehaviorType;
+    let jexpr = tf.docexpr.expect("docexpr").as_json_expr().expect("JsonExpr");
+    let root = tf.plan.expect("plan").as_json_table_path_scan().expect("JsonTablePathScan");
+    ctx.buf.push_str("JSON_TABLE(");
+    if ctx.pretty_indent() {
+        ctx.indent_level += PRETTYINDENT_VAR;
+    }
+    append_context_keyword(ctx, "", 0, 0, 0);
+    get_rule_expr(jexpr.formatted_expr.expect("formatted_expr"), ctx, showimplicit)?;
+    ctx.buf.push_str(", ");
+    let path = root.path.expect("path").as_json_table_path().expect("JsonTablePath");
+    get_const_expr(path.value.expect("path value").as_const().expect("Const"), ctx, -1)?;
+    ctx.buf.push_str(" AS ");
+    ctx.buf.push_str(&quote_identifier(path.name.expect("path name")));
+    if !jexpr.passing_values.is_nil() {
+        ctx.buf.push(' ');
+        append_context_keyword(ctx, "PASSING ", 0, 0, 0);
+        if ctx.pretty_indent() {
+            ctx.indent_level += PRETTYINDENT_VAR;
+        }
+        let mut needcomma = false;
+        for (name, value) in jexpr.passing_names.iter().zip(jexpr.passing_values.iter()) {
+            if needcomma {
+                ctx.buf.push_str(", ");
+            }
+            needcomma = true;
+            append_context_keyword(ctx, "", 0, 0, 0);
+            get_rule_expr(value, ctx, false)?;
+            ctx.buf.push_str(" AS ");
+            ctx.buf.push_str(&quote_identifier(name.as_string().expect("passing name").sval));
+        }
+        if ctx.pretty_indent() {
+            ctx.indent_level -= PRETTYINDENT_VAR;
         }
     }
+    get_json_table_columns(tf, root, ctx, showimplicit)?;
+    let on_error = jexpr.on_error.expect("on_error").as_json_behavior().expect("JsonBehavior");
+    if on_error.btype != JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY {
+        get_json_behavior(on_error, ctx, "ERROR")?;
+    }
+    if ctx.pretty_indent() {
+        ctx.indent_level -= PRETTYINDENT_VAR;
+    }
+    append_context_keyword(ctx, ")", 0, 0, 0);
+    Ok(())
 }
 
 fn get_xmltable<'mcx>(

@@ -1,4 +1,5 @@
-// nodeTableFuncscan.c over adt_xml's XmlTableContext; JSON_TABLE is loud.
+// nodeTableFuncscan.c over adt_xml's XmlTableContext (XMLTABLE) and
+// adt_jsonpath_exec's JsonTableExecContext (JSON_TABLE).
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -6,9 +7,14 @@ extern crate alloc;
 use alloc::rc::Rc;
 use core::ffi::CStr;
 
+use ::adt_jsonpath_exec::json_table::JsonTableExecContext;
+use ::adt_jsonpath_exec::JsonPathVariable;
 use ::adt_xml::xmltable::XmlTableContext;
 use ::datum::{Datum, NullableDatum};
-use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots, ExprState};
+use ::execexpr::{
+    exec_eval_expr, exec_init_expr, exec_init_expr_with_case_test, exec_init_qual, EvalSlots,
+    ExprState,
+};
 use ::execscan::{exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};
@@ -27,10 +33,12 @@ pub struct TableFuncScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     tf: &'mcx TableFunc<'mcx>,
     docexpr: PgBox<'mcx, ExprState<'mcx>>,
-    rowexpr: PgBox<'mcx, ExprState<'mcx>>,
+    rowexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     ns_uris: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     colexprs: PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
     coldefexprs: PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    colvalexprs: PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    passingvalexprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     in_functions: PgVec<'mcx, FmgrInfo>,
     typioparams: PgVec<'mcx, Oid>,
     tupdesc: Rc<TupleDescData<'mcx>>,
@@ -87,12 +95,6 @@ pub fn exec_init_table_func_scan<'mcx>(
         .tablefunc
         .and_then(|n| n.as_table_func())
         .expect("TableFuncScan has a TableFunc");
-    if tf.functype == TableFuncType::TFT_JSON_TABLE {
-        panic!(
-            "ExecInitTableFuncScan (nodeTableFuncscan.c): TFT_JSON_TABLE \
-             unported — jsonpath exec lane"
-        );
-    }
 
     let mut names: PgVec<'_, &str> = PgVec::new_in(mcx);
     for n in &tf.colnames {
@@ -144,7 +146,7 @@ pub fn exec_init_table_func_scan<'mcx>(
         Ok(exec_init_expr(mcx, e, estate.param_bind())?.expect("non-NULL expression"))
     };
     let docexpr = init_one(tf.docexpr, estate)?;
-    let rowexpr = init_one(tf.rowexpr, estate)?;
+    let rowexpr = exec_init_expr(mcx, tf.rowexpr, estate.param_bind())?;
     let mut ns_uris: PgVec<'_, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
     for e in &tf.ns_uris {
         ns_uris.push(init_one(Some(e), estate)?);
@@ -157,6 +159,15 @@ pub fn exec_init_table_func_scan<'mcx>(
     for e in tf.coldefexprs.iter() {
         coldefexprs.push(exec_init_expr(mcx, e, estate.param_bind())?);
     }
+    // NULL cells are FOR ORDINALITY columns.
+    let mut colvalexprs: PgVec<'_, Option<PgBox<'mcx, ExprState<'mcx>>>> = PgVec::new_in(mcx);
+    for e in tf.colvalexprs.iter() {
+        colvalexprs.push(exec_init_expr_with_case_test(mcx, e, estate.param_bind())?);
+    }
+    let mut passingvalexprs: PgVec<'_, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+    for e in tf.passingvalexprs.iter() {
+        passingvalexprs.push(init_one(Some(e), estate)?);
+    }
 
     Ok(TableFuncScanState {
         ss,
@@ -166,6 +177,8 @@ pub fn exec_init_table_func_scan<'mcx>(
         ns_uris,
         colexprs,
         coldefexprs,
+        colvalexprs,
+        passingvalexprs,
         in_functions,
         typioparams,
         tupdesc,
@@ -183,13 +196,112 @@ impl<'mcx> TableFuncScanState<'mcx> {
         let work_mem = init_small::globals::work_mem();
         let mut store = Tuplestore::begin_heap(false, false, work_mem);
 
-        let mut ctx = XmlTableContext::new(self.tupdesc.natts)?;
-        let r = self.fetch_rows_guts(&mut ctx, &mut store, estate, ecxt);
-        ctx.destroy();
-        r?;
+        if self.tf.functype == TableFuncType::TFT_JSON_TABLE {
+            self.fetch_rows_json(&mut store, estate, ecxt)?;
+        } else {
+            let mut ctx = XmlTableContext::new(self.tupdesc.natts)?;
+            let r = self.fetch_rows_guts(&mut ctx, &mut store, estate, ecxt);
+            ctx.destroy();
+            r?;
+        }
 
         store.rescan();
         self.tstore = Some(store);
+        Ok(())
+    }
+
+    // tfuncFetchRows/Initialize/LoadRows, JSON_TABLE shape: PASSING args are
+    // evaluated once at InitOpaque time; a NULL document is an empty table;
+    // column values come from the JsonExpr colvalexprs fed the row pattern via
+    // CaseTestExpr — no input-function conversion, no coldefexprs.
+    fn fetch_rows_json(
+        &mut self,
+        store: &mut Tuplestore,
+        estate: &mut EStateData<'mcx>,
+        ecxt: EcxtId,
+    ) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let je = self
+            .tf
+            .docexpr
+            .and_then(|n| n.as_json_expr())
+            .expect("JSON_TABLE docexpr is JsonExpr");
+        debug_assert_eq!(self.passingvalexprs.len(), je.passing_names.len());
+        let mut args: PgVec<'mcx, JsonPathVariable<'mcx>> = PgVec::new_in(mcx);
+        for i in 0..self.passingvalexprs.len() {
+            let name = je
+                .passing_names
+                .nth(i)
+                .as_string()
+                .expect("passing_names cell is String")
+                .sval;
+            let src = self.tf.passingvalexprs.nth(i);
+            let expr = &mut self.passingvalexprs[i];
+            // PASSING values are read on every row-pattern reset; results go
+            // to the scan-lifetime context (C: perTableCxt).
+            expr.arm_result_mcx(mcx);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+            let NullableDatum { value, isnull } = exec_eval_expr(expr, &mut slots)?;
+            args.push(JsonPathVariable {
+                name: name.as_bytes(),
+                typid: ::nodes_core::node_funcs::expr_type(src),
+                typmod: ::nodes_core::node_funcs::expr_typmod(src),
+                value,
+                isnull,
+            });
+        }
+        let plan = self.tf.plan.expect("JSON_TABLE TableFunc.plan");
+        let mut jt =
+            JsonTableExecContext::init(mcx, plan, args, self.tf.colvalexprs.len())?;
+
+        let NullableDatum { value: doc, isnull } = self.eval(&EvalPick::Doc, estate, ecxt)?;
+        if isnull {
+            return Ok(());
+        }
+        jt.set_document(varlena_payload(mcx, doc)?)?;
+
+        let natts = self.tupdesc.natts as usize;
+        let mut values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
+        let mut nulls: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, true, natts);
+        while jt.fetch_row()? {
+            for colno in 0..natts {
+                let (img, ordinal) = jt.current_row(colno);
+                let (value, isnull) = match img {
+                    None => (Datum::null(), true),
+                    Some(img) => match self.colvalexprs[colno].as_mut() {
+                        Some(expr) => {
+                            expr.set_case_test(NullableDatum {
+                                value: Datum::from_usize(img.as_ptr() as usize),
+                                isnull: false,
+                            });
+                            // SAFETY: the per-tuple context outlives this
+                            // evaluation; results are copied into the
+                            // tuplestore before its reset.
+                            unsafe {
+                                expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
+                            };
+                            let mut slots =
+                                EvalSlots { scan: None, inner: None, outer: None };
+                            let nd = exec_eval_expr(expr, &mut slots)?;
+                            (nd.value, nd.isnull)
+                        }
+                        None => (Datum::from_i32(ordinal), false),
+                    },
+                };
+                if isnull && self.tf.notnulls.is_member(colno as i32) {
+                    return Err(PgError::error(format!(
+                        "null is not allowed in column \"{}\"",
+                        String::from_utf8_lossy(self.tupdesc.attr(colno).attname.name_str())
+                    ))
+                    .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+                    .into());
+                }
+                values[colno] = value;
+                nulls[colno] = isnull;
+            }
+            store.putvalues(&self.tupdesc, &values, &nulls)?;
+            estate.ecxt_mut(ecxt).reset();
+        }
         Ok(())
     }
 
@@ -338,7 +450,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
     ) -> PgResult<NullableDatum> {
         let expr = match *pick {
             EvalPick::Doc => &mut self.docexpr,
-            EvalPick::Row => &mut self.rowexpr,
+            EvalPick::Row => self.rowexpr.as_mut().expect("XMLTABLE row filter expr"),
             EvalPick::NsUri(i) => &mut self.ns_uris[i],
             EvalPick::Col(i) => self.colexprs[i].as_mut().expect("column filter expr"),
             EvalPick::Def(i) => self.coldefexprs[i].as_mut().expect("column default expr"),
@@ -420,7 +532,8 @@ pub fn exec_rescan_table_func_scan_chg<'mcx>(
 mcx::forget_safe_struct!(
     TableFuncScanState<'_> {
         ss, tf, ordinal;
-        docexpr, rowexpr, ns_uris, colexprs, coldefexprs, in_functions,
-        typioparams, tupdesc, tstore, cstr_scratch
+        docexpr, rowexpr, ns_uris, colexprs, coldefexprs, colvalexprs,
+        passingvalexprs, in_functions, typioparams, tupdesc, tstore,
+        cstr_scratch
     },
 );

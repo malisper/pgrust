@@ -1466,7 +1466,31 @@ pub(crate) fn transformJsonFuncExpr<'mcx>(
             )?);
         }
         JsonExprOp::JSON_TABLE_OP => {
-            panic!("transformJsonFuncExpr: JSON_TABLE unported — sqljson-lane loud")
+            let returning = if returning.typid == 0 {
+                Node::mk_mut(
+                    mcx,
+                    JsonReturning {
+                        format: returning.format,
+                        typid: expr_type(formatted_expr),
+                        typmod: -1,
+                    },
+                )?
+                .seal_ref()
+            } else {
+                returning
+            };
+            jsexpr.returning = Some(returning);
+            jsexpr.collation = lsyscache::get_typcollation(returning.typid)?;
+            // ON EMPTY is column-level only; the top level takes EMPTY ARRAY
+            // ON ERROR by default.
+            jsexpr.on_error = Some(transformJsonBehavior(
+                mcx,
+                pstate,
+                &jsexpr,
+                func.on_error,
+                JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY,
+                returning,
+            )?);
         }
     }
 

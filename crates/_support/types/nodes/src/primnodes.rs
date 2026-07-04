@@ -711,7 +711,7 @@ pub struct TableFunc<'mcx> {
     pub colcollations: OidList<'mcx>,
     pub colexprs: OptNodeList<'mcx>,
     pub coldefexprs: OptNodeList<'mcx>,
-    pub colvalexprs: NodeList<'mcx>,
+    pub colvalexprs: OptNodeList<'mcx>,
     pub passingvalexprs: NodeList<'mcx>,
     pub notnulls: Bitmapset<'mcx>,
     pub plan: Option<Node<'mcx>>,
@@ -968,6 +968,33 @@ impl Default for JsonExpr<'_> {
     }
 }
 
+#[derive(Default)]
+pub struct JsonTablePath<'mcx> {
+    pub value: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+}
+
+pub struct JsonTablePathScan<'mcx> {
+    pub path: Option<Node<'mcx>>,
+    // Significant only on the top-level path's plan.
+    pub errorOnError: bool,
+    pub child: Option<Node<'mcx>>,
+    pub colMin: i32,
+    pub colMax: i32,
+}
+
+impl Default for JsonTablePathScan<'_> {
+    fn default() -> Self {
+        JsonTablePathScan { path: None, errorOnError: false, child: None, colMin: -1, colMax: -1 }
+    }
+}
+
+#[derive(Default)]
+pub struct JsonTableSiblingJoin<'mcx> {
+    pub lplan: Option<Node<'mcx>>,
+    pub rplan: Option<Node<'mcx>>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum OnConflictAction {
@@ -1217,6 +1244,15 @@ unsafe impl NodeVariant<'_> for SQLValueFunction {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for XmlExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_XmlExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTablePath<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTablePath;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTablePathScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTablePathScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTableSiblingJoin<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTableSiblingJoin;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TableFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_TableFunc;
@@ -1651,6 +1687,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_table_func(self) -> Option<&'mcx TableFunc<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table_path(self) -> Option<&'mcx JsonTablePath<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table_path_scan(self) -> Option<&'mcx JsonTablePathScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table_sibling_join(self) -> Option<&'mcx JsonTableSiblingJoin<'mcx>> {
         self.as_variant()
     }
 }

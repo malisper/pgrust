@@ -507,7 +507,7 @@ fn enum_values_match_c_headers() {
     use crate::nodes_enums::{CmdType, LimitOption};
     use crate::parsenodes::{QuerySource, RTEKind, SetOperation};
     use crate::primnodes::{CoercionForm, OverridingKind, ParamKind, VarReturningType};
-    use crate::rawnodes::A_Expr_Kind;
+    use crate::rawnodes::{A_Expr_Kind, JsonTableColumnType};
     check_enum!(nodes_h, "CmdType", CmdType, [
         CMD_UNKNOWN, CMD_SELECT, CMD_UPDATE, CMD_INSERT, CMD_DELETE, CMD_MERGE, CMD_UTILITY,
         CMD_NOTHING,
@@ -612,6 +612,9 @@ fn enum_values_match_c_headers() {
         XMLOPTION_DOCUMENT, XMLOPTION_CONTENT,
     ]);
     check_enum!(prim_h, "TableFuncType", TableFuncType, [TFT_XMLTABLE, TFT_JSON_TABLE]);
+    check_enum!(parse_h, "JsonTableColumnType", JsonTableColumnType, [
+        JTC_FOR_ORDINALITY, JTC_REGULAR, JTC_EXISTS, JTC_FORMATTED, JTC_NESTED,
+    ]);
 }
 
 #[test]

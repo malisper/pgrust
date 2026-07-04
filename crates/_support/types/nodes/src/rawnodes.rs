@@ -1465,6 +1465,89 @@ impl Default for JsonFuncExpr<'_> {
     }
 }
 
+// `string` is the A_Const String path literal (makeStringConst shape).
+pub struct JsonTablePathSpec<'mcx> {
+    pub string: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+    pub name_location: ParseLoc,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonTablePathSpec<'_> {
+    fn default() -> Self {
+        JsonTablePathSpec { string: None, name: None, name_location: -1, location: -1 }
+    }
+}
+
+pub struct JsonTable<'mcx> {
+    pub context_item: Option<Node<'mcx>>,
+    pub pathspec: Option<Node<'mcx>>,
+    pub passing: NodeList<'mcx>,
+    pub columns: NodeList<'mcx>,
+    pub on_error: Option<Node<'mcx>>,
+    pub alias: Option<&'mcx crate::primnodes::Alias<'mcx>>,
+    pub lateral: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonTable<'_> {
+    fn default() -> Self {
+        JsonTable {
+            context_item: None,
+            pathspec: None,
+            passing: NodeList::nil(),
+            columns: NodeList::nil(),
+            on_error: None,
+            alias: None,
+            lateral: false,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonTableColumnType {
+    #[default]
+    JTC_FOR_ORDINALITY = 0,
+    JTC_REGULAR = 1,
+    JTC_EXISTS = 2,
+    JTC_FORMATTED = 3,
+    JTC_NESTED = 4,
+}
+
+pub struct JsonTableColumn<'mcx> {
+    pub coltype: JsonTableColumnType,
+    pub name: Option<&'mcx str>,
+    pub typeName: Option<Node<'mcx>>,
+    pub pathspec: Option<Node<'mcx>>,
+    pub format: Option<&'mcx crate::primnodes::JsonFormat>,
+    pub wrapper: crate::primnodes::JsonWrapper,
+    pub quotes: JsonQuotes,
+    pub columns: NodeList<'mcx>,
+    pub on_empty: Option<Node<'mcx>>,
+    pub on_error: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonTableColumn<'_> {
+    fn default() -> Self {
+        JsonTableColumn {
+            coltype: JsonTableColumnType::JTC_FOR_ORDINALITY,
+            name: None,
+            typeName: None,
+            pathspec: None,
+            format: None,
+            wrapper: crate::primnodes::JsonWrapper::JSW_UNSPEC,
+            quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+            columns: NodeList::nil(),
+            on_empty: None,
+            on_error: None,
+            location: -1,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct JsonKeyValue<'mcx> {
     pub key: Option<Node<'mcx>>,
@@ -1611,6 +1694,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for JsonArgument<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for JsonFuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_JsonFuncExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTablePathSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTablePathSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTable<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTable;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonTableColumn<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonTableColumn;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for JsonKeyValue<'mcx> {
     const TAG: NodeTag = NodeTag::T_JsonKeyValue;
 }
@@ -1655,6 +1747,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_json_func_expr(self) -> Option<&'mcx JsonFuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table(self) -> Option<&'mcx JsonTable<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table_column(self) -> Option<&'mcx JsonTableColumn<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_table_path_spec(self) -> Option<&'mcx JsonTablePathSpec<'mcx>> {
         self.as_variant()
     }
 

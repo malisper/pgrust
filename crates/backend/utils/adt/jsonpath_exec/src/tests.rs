@@ -391,3 +391,203 @@ fn last_and_bool_results() {
     assert_eq!(q("[1, 2, 3]", "$[*] > 5"), ["false"]);
     assert_eq!(q("[1, \"a\"]", "$[*] > 1"), ["null"]);
 }
+
+fn jt_path_node<'mcx>(mcx: mcx::Mcx<'mcx>, path: &str) -> types_nodes::Node<'mcx> {
+    use types_nodes::primnodes::JsonTablePath;
+    let img: &[u8] = jp_image(mcx, path).leak();
+    let c = types_nodes::Node::mk_const(
+        mcx,
+        4072,
+        -1,
+        0,
+        -1,
+        datum::Datum::from_usize(img.as_ptr() as usize),
+        false,
+        false,
+    )
+    .unwrap();
+    types_nodes::Node::mk(mcx, JsonTablePath { value: Some(c), name: None }).unwrap()
+}
+
+fn jt_scan<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    path: &str,
+    cols: Option<(i32, i32)>,
+    child: Option<types_nodes::Node<'mcx>>,
+    error_on_error: bool,
+) -> types_nodes::Node<'mcx> {
+    use types_nodes::primnodes::JsonTablePathScan;
+    types_nodes::Node::mk(
+        mcx,
+        JsonTablePathScan {
+            path: Some(jt_path_node(mcx, path)),
+            errorOnError: error_on_error,
+            child,
+            colMin: cols.map_or(-1, |c| c.0),
+            colMax: cols.map_or(-1, |c| c.1),
+        },
+    )
+    .unwrap()
+}
+
+fn jt_row(
+    jt: &crate::json_table::JsonTableExecContext<'_>,
+    mcx: mcx::Mcx<'_>,
+    ncols: usize,
+) -> Vec<(Option<String>, i32)> {
+    (0..ncols)
+        .map(|c| {
+            let (img, ord) = jt.current_row(c);
+            (img.map(|i| out(mcx, &i[4..])), ord)
+        })
+        .collect()
+}
+
+#[test]
+fn json_table_single_path_scan() {
+    setup();
+    let cx = MemoryContext::new("json_table test");
+    let mcx = cx.mcx();
+    let plan = jt_scan(mcx, "$.a[*]", Some((0, 0)), None, false);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, plan, mcx::PgVec::new_in(mcx), 1)
+            .unwrap();
+    let doc = jb_payload(mcx, "{\"a\": [1, 2, 3]}");
+    jt.set_document(&doc[4..]).unwrap();
+    let mut got = Vec::new();
+    while jt.fetch_row().unwrap() {
+        got.extend(jt_row(&jt, mcx, 1));
+    }
+    assert_eq!(
+        got,
+        [
+            (Some("1".to_string()), 1),
+            (Some("2".to_string()), 2),
+            (Some("3".to_string()), 3)
+        ]
+    );
+    // second document through the same context (rescan shape)
+    let doc2 = jb_payload(mcx, "{\"a\": [7]}");
+    jt.set_document(&doc2[4..]).unwrap();
+    assert!(jt.fetch_row().unwrap());
+    assert_eq!(jt_row(&jt, mcx, 1), [(Some("7".to_string()), 1)]);
+    assert!(!jt.fetch_row().unwrap());
+}
+
+#[test]
+fn json_table_nested_outer_join() {
+    setup();
+    let cx = MemoryContext::new("json_table test");
+    let mcx = cx.mcx();
+    let child = jt_scan(mcx, "$.ys[*]", Some((1, 1)), None, false);
+    let root = jt_scan(mcx, "$[*]", Some((0, 0)), Some(child), false);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, root, mcx::PgVec::new_in(mcx), 2)
+            .unwrap();
+    let doc = jb_payload(mcx, "[{\"x\": 1, \"ys\": [10, 11]}, {\"x\": 2, \"ys\": []}]");
+    jt.set_document(&doc[4..]).unwrap();
+    let mut got = Vec::new();
+    while jt.fetch_row().unwrap() {
+        got.push(jt_row(&jt, mcx, 2));
+    }
+    let p1 = "{\"x\": 1, \"ys\": [10, 11]}".to_string();
+    let p2 = "{\"x\": 2, \"ys\": []}".to_string();
+    assert_eq!(
+        got,
+        [
+            vec![(Some(p1.clone()), 1), (Some("10".to_string()), 1)],
+            vec![(Some(p1), 1), (Some("11".to_string()), 2)],
+            // nested path found no rows: outer-join NULL side
+            vec![(Some(p2), 2), (None, 0)],
+        ]
+    );
+}
+
+#[test]
+fn json_table_sibling_join_union() {
+    setup();
+    let cx = MemoryContext::new("json_table test");
+    let mcx = cx.mcx();
+    let l = jt_scan(mcx, "$.a[*]", Some((1, 1)), None, false);
+    let r = jt_scan(mcx, "$.b[*]", Some((2, 2)), None, false);
+    let join = types_nodes::Node::mk(
+        mcx,
+        types_nodes::primnodes::JsonTableSiblingJoin { lplan: Some(l), rplan: Some(r) },
+    )
+    .unwrap();
+    let root = jt_scan(mcx, "$", Some((0, 0)), Some(join), false);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, root, mcx::PgVec::new_in(mcx), 3)
+            .unwrap();
+    let doc = jb_payload(mcx, "{\"a\": [1, 2], \"b\": [3]}");
+    jt.set_document(&doc[4..]).unwrap();
+    let mut got = Vec::new();
+    while jt.fetch_row().unwrap() {
+        let row = jt_row(&jt, mcx, 3);
+        got.push((row[1].clone(), row[2].clone()));
+    }
+    assert_eq!(
+        got,
+        [
+            ((Some("1".to_string()), 1), (None, 0)),
+            ((Some("2".to_string()), 2), (None, 0)),
+            // exhausted left keeps its ordinal but reports a null row pattern
+            ((None, 2), (Some("3".to_string()), 1)),
+        ]
+    );
+}
+
+#[test]
+fn json_table_ordinal_resets_per_parent_row() {
+    setup();
+    let cx = MemoryContext::new("json_table test");
+    let mcx = cx.mcx();
+    let child = jt_scan(mcx, "$.ys[*]", Some((1, 1)), None, false);
+    let root = jt_scan(mcx, "$[*]", Some((0, 0)), Some(child), false);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, root, mcx::PgVec::new_in(mcx), 2)
+            .unwrap();
+    let doc = jb_payload(mcx, "[{\"ys\": [10, 11]}, {\"ys\": [20, 21]}]");
+    jt.set_document(&doc[4..]).unwrap();
+    let mut got = Vec::new();
+    while jt.fetch_row().unwrap() {
+        let row = jt_row(&jt, mcx, 2);
+        got.push((row[0].1, row[1].1, row[1].0.clone()));
+    }
+    assert_eq!(
+        got,
+        [
+            (1, 1, Some("10".to_string())),
+            (1, 2, Some("11".to_string())),
+            (2, 1, Some("20".to_string())),
+            (2, 2, Some("21".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn json_table_row_pattern_errors() {
+    setup();
+    let cx = MemoryContext::new("json_table test");
+    let mcx = cx.mcx();
+    let doc = jb_payload(mcx, "{\"a\": 1}");
+
+    // errorOnError = false: jperIsError leaves found empty (zero rows)
+    let plan = jt_scan(mcx, "strict $.missing", Some((0, 0)), None, false);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, plan, mcx::PgVec::new_in(mcx), 1)
+            .unwrap();
+    jt.set_document(&doc[4..]).unwrap();
+    assert!(!jt.fetch_row().unwrap());
+
+    // errorOnError = true: the jsonpath error surfaces
+    let plan = jt_scan(mcx, "strict $.missing", Some((0, 0)), None, true);
+    let mut jt =
+        crate::json_table::JsonTableExecContext::init(mcx, plan, mcx::PgVec::new_in(mcx), 1)
+            .unwrap();
+    let err = jt.set_document(&doc[4..]).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "JSON object does not contain key \"missing\""
+    );
+}
