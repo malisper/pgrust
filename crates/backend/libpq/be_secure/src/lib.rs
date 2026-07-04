@@ -6,7 +6,7 @@
 
 use elog::ereport;
 use types_core::STATUS_ERROR;
-use types_error::{ErrorLocation, PgResult, DEBUG2, LOG};
+use types_error::{ErrorLocation, PgResult, DEBUG2, ERROR, LOG};
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
 // WAIT_EVENT_CLIENT_READ / WAIT_EVENT_CLIENT_WRITE: PG_WAIT_CLIENT | 0 / 1.
@@ -215,6 +215,17 @@ pub fn init_seams() {
     be_secure_seams::secure_read::set(secure_read);
     be_secure_seams::secure_write::set(secure_write);
     be_secure_seams::secure_close::set(secure_close);
+    be_secure_seams::be_tls_get_certificate_hash::set(|| {
+        match be_tls_get_certificate_hash()? {
+            Some(hash) => Ok(hash),
+            // None (no live TLS conn/cert) is unreachable from the SCRAM
+            // caller, which is gated on ssl_in_use; C would deref NULL here.
+            None => ereport(ERROR)
+                .errmsg_internal("no server certificate available for channel binding")
+                .finish(loc("be_tls_get_certificate_hash"))
+                .map(|()| Vec::new()),
+        }
+    });
 }
 
 #[cfg(test)]

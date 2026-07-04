@@ -16,7 +16,6 @@ funcapi = { path = "../../fmgr/funcapi" }
 heaptuple = { path = "../../../access/common/heaptuple" }
 adt_numeric = { path = "../numeric" }
 varlena = { path = "../varlena" }
-adt_numeric = { path = "../numeric" }
 acl_seams = { path = "../acl_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 
