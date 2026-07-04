@@ -788,7 +788,7 @@ fn slow_switch<'mcx>(
             Ok(None)
         }
 
-        T_CreateStmt => {
+        T_CreateStmt | T_CreateForeignTableStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
@@ -838,6 +838,25 @@ fn slow_switch<'mcx>(
                             relid,
                             toast_options.as_deref(),
                         )?;
+                    }
+                    T_CreateForeignTableStmt => {
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>()
+                            .expect("CreateForeignTableStmt");
+                        table_rv = cstmt.base.relation;
+                        let relid = tablecmds::DefineRelation(
+                            mcx,
+                            &cstmt.base,
+                            types_rel::RELKIND_FOREIGN_TABLE,
+                            types_core::InvalidOid,
+                            source_text,
+                        )?;
+                        foreigncmds::CreateForeignTable(mcx, cstmt, relid)?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            ObjectAddress::set(types_core::RELATION_RELATION_ID, relid),
+                            INVALID_OBJECT_ADDRESS,
+                            CreateCommandTag(stmt),
+                        );
                     }
                     T_TableLikeClause => {
                         // Delayed LIKE expansion: sub-statements run before
@@ -1021,6 +1040,79 @@ fn slow_switch<'mcx>(
         T_DropStmt => {
             exec_drop_stmt(mcx, parsetree, is_top_level)?;
             // No commands stashed for DROP.
+            Ok(None)
+        }
+
+        T_CreateFdwStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateFdwStmt>()
+                .expect("CreateFdwStmt");
+            collect_gap("CREATE FOREIGN DATA WRAPPER");
+            foreigncmds::CreateForeignDataWrapper(mcx, stmt, source_text)?;
+            Ok(None)
+        }
+        T_AlterFdwStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterFdwStmt>()
+                .expect("AlterFdwStmt");
+            collect_gap("ALTER FOREIGN DATA WRAPPER");
+            foreigncmds::AlterForeignDataWrapper(mcx, stmt, source_text)?;
+            Ok(None)
+        }
+        T_CreateForeignServerStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateForeignServerStmt>()
+                .expect("CreateForeignServerStmt");
+            collect_gap("CREATE SERVER");
+            foreigncmds::CreateForeignServer(mcx, stmt)?;
+            Ok(None)
+        }
+        T_AlterForeignServerStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterForeignServerStmt>()
+                .expect("AlterForeignServerStmt");
+            collect_gap("ALTER SERVER");
+            foreigncmds::AlterForeignServer(mcx, stmt)?;
+            Ok(None)
+        }
+        T_CreateUserMappingStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateUserMappingStmt>()
+                .expect("CreateUserMappingStmt");
+            collect_gap("CREATE USER MAPPING");
+            foreigncmds::CreateUserMapping(mcx, stmt)?;
+            Ok(None)
+        }
+        T_AlterUserMappingStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterUserMappingStmt>()
+                .expect("AlterUserMappingStmt");
+            collect_gap("ALTER USER MAPPING");
+            foreigncmds::AlterUserMapping(mcx, stmt)?;
+            Ok(None)
+        }
+        T_DropUserMappingStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::DropUserMappingStmt>()
+                .expect("DropUserMappingStmt");
+            collect_gap("DROP USER MAPPING");
+            foreigncmds::RemoveUserMapping(mcx, stmt)?;
+            Ok(None)
+        }
+        T_ImportForeignSchemaStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::ImportForeignSchemaStmt>()
+                .expect("ImportForeignSchemaStmt");
+            collect_gap("IMPORT FOREIGN SCHEMA");
+            foreigncmds::ImportForeignSchema(mcx, stmt)?;
             Ok(None)
         }
 

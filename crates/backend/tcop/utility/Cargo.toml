@@ -11,6 +11,7 @@ path = "src/lib.rs"
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
 event_trigger = { path = "../../commands/event_trigger" }
+foreigncmds = { path = "../../commands/foreigncmds" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }

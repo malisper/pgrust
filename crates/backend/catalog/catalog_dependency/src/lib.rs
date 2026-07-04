@@ -789,6 +789,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     | types_rel::RELKIND_MATVIEW
                     | types_rel::RELKIND_PARTITIONED_TABLE
                     | types_rel::RELKIND_COMPOSITE_TYPE
+                    | types_rel::RELKIND_FOREIGN_TABLE
             ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
@@ -898,6 +899,24 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             genam::systable_endscan(mcx, scan)?;
             rel.close(RowExclusiveLock)?;
         }
+        types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+            types_core::FOREIGN_DATA_WRAPPER_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::FOREIGN_SERVER_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::FOREIGN_SERVER_RELATION_ID,
+            types_core::FOREIGN_SERVER_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::USER_MAPPING_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::USER_MAPPING_RELATION_ID,
+            types_core::USER_MAPPING_OID_INDEX_ID,
+            object.objectId,
+        )?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

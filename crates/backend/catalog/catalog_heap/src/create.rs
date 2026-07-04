@@ -418,8 +418,9 @@ pub fn heap_create_with_catalog<'mcx>(
             || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE
             || p.relkind == RELKIND_VIEW
             || p.relkind == types_rel::RELKIND_MATVIEW
-            || p.relkind == RELKIND_COMPOSITE_TYPE,
-        "only plain/partitioned tables, toast, sequences, views, matviews and composite types ported"
+            || p.relkind == RELKIND_COMPOSITE_TYPE
+            || p.relkind == types_rel::RELKIND_FOREIGN_TABLE,
+        "only plain/partitioned tables, toast, sequences, views, matviews, composite types and foreign tables ported"
     );
     // C: no rowtype/array pg_type entry where the relation is an
     // implementation detail (toast, sequences, indexes).

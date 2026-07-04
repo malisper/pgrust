@@ -7,6 +7,7 @@
 
 use mcx::Mcx;
 use types_core::primitive::OidIsValid;
+use types_core::InvalidOid;
 use types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
 use types_error::{PgResult, NOTICE};
 use types_nodes::parsenodes::{DropStmt, ObjectType, ObjectWithArgs};
@@ -214,6 +215,9 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
 }
 
 pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
+    if matches!(stmt.removeType, ObjectType::OBJECT_FDW | ObjectType::OBJECT_FOREIGN_SERVER) {
+        return remove_foreign_objects(mcx, stmt);
+    }
     let mut objects = catalog_dependency::ObjectAddresses::new();
 
     for object in stmt.objects.iter() {
@@ -266,4 +270,52 @@ pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()
     }
 
     catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)
+}
+
+// OBJECT_FDW / OBJECT_FOREIGN_SERVER leg: get_object_address name lookup +
+// check_object_ownership + performMultipleDeletions.
+fn remove_foreign_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
+    let is_fdw = stmt.removeType == ObjectType::OBJECT_FDW;
+    let mut objects = catalog_dependency::ObjectAddresses::new();
+    for cell in stmt.objects.iter() {
+        let name = cell.as_string().expect("DROP FDW/SERVER object is a String").sval;
+        let (class_id, oid, owner) = if is_fdw {
+            let oid = foreigncmds::foreign::get_foreign_data_wrapper_oid(name, stmt.missing_ok)?;
+            if oid == InvalidOid {
+                elog_seams::ereport_msg::call(
+                    NOTICE,
+                    format!("foreign-data wrapper \"{name}\" does not exist, skipping"),
+                    None,
+                )?;
+                continue;
+            }
+            let fdw = foreigncmds::foreign::GetForeignDataWrapper(mcx, oid)?;
+            (types_core::FOREIGN_DATA_WRAPPER_RELATION_ID, oid, fdw.owner)
+        } else {
+            let oid = foreigncmds::foreign::get_foreign_server_oid(name, stmt.missing_ok)?;
+            if oid == InvalidOid {
+                elog_seams::ereport_msg::call(
+                    NOTICE,
+                    format!("server \"{name}\" does not exist, skipping"),
+                    None,
+                )?;
+                continue;
+            }
+            let srv = foreigncmds::foreign::GetForeignServer(mcx, oid)?;
+            (types_core::FOREIGN_SERVER_RELATION_ID, oid, srv.owner)
+        };
+        let roleid = miscinit::GetUserId();
+        let owned = superuser::superuser_arg(roleid)? || adt_acl::has_privs_of_role(roleid, owner)?;
+        if !owned {
+            let objtype = if is_fdw {
+                ObjectType::OBJECT_FDW
+            } else {
+                ObjectType::OBJECT_FOREIGN_SERVER
+            };
+            aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
+        }
+        objects.add_exact_object_address(pg_depend::ObjectAddress::set(class_id, oid));
+    }
+    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)?;
+    Ok(())
 }

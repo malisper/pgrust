@@ -180,6 +180,7 @@ pub fn DefineRelation<'mcx>(
             || relkind == types_rel::RELKIND_VIEW
             || relkind == types_rel::RELKIND_MATVIEW
             || relkind == types_rel::RELKIND_COMPOSITE_TYPE
+            || relkind == types_rel::RELKIND_FOREIGN_TABLE
     );
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };

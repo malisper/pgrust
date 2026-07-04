@@ -142,6 +142,7 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
         | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_VIEW
         | types_rel::RELKIND_MATVIEW | types_rel::RELKIND_PARTITIONED_TABLE
         | types_rel::RELKIND_COMPOSITE_TYPE => {}
+        types_rel::RELKIND_FOREIGN_TABLE => delete_foreign_table_tuple(mcx, relid)?,
         other => unported(&format!(
             "heap_drop_with_catalog: relkind {:?} arm",
             other as char
@@ -316,4 +317,26 @@ pub fn DeleteRelationTuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     catalog_indexing::CatalogTupleDelete(&pg_class, &tid)?;
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(RowExclusiveLock)
+}
+
+// heap.c:1846: the pg_foreign_table tuple goes first on DROP FOREIGN TABLE.
+fn delete_foreign_table_tuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let ftrel =
+        table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_scankey(1, relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &ftrel,
+        types_core::FOREIGN_TABLE_RELID_INDEX_ID,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        panic!("cache lookup failed for foreign table {relid}");
+    };
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&ftrel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    ftrel.close(RowExclusiveLock)
 }
