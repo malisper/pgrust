@@ -1198,6 +1198,23 @@ impl Tuplesort {
             .with(|st| matches!(st.variant, SortVariant::Datum { byref_typlen } if byref_typlen != 0))
     }
 
+    /// 0 for by-value datum sorts, else the sorted type's typlen.
+    #[inline]
+    pub fn datum_byref_typlen(&self) -> i16 {
+        self.0.with(|st| match st.variant {
+            SortVariant::Datum { byref_typlen } => byref_typlen,
+            _ => panic!("datum_byref_typlen on a non-datum tuplesort"),
+        })
+    }
+
+    /// True once the sort went external. Returned by-ref values then live in
+    /// recycled slab slots (valid only until the next fetch, as C's
+    /// copy=false), unlike in-memory sorts whose images live until reset/end.
+    #[inline]
+    pub fn spilled(&self) -> bool {
+        self.0.with(|st| st.tapes.is_some())
+    }
+
     /// C divergence (structural lever): batched putdatum — the per-call len
     /// memory round-trip is ~43 cyc/put on V2 (docs/benchmarks/tuplesort.md).
     #[inline]

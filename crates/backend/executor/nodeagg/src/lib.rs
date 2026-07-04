@@ -1414,7 +1414,13 @@ fn process_ordered_aggregates<'mcx>(
         unsafe { fcinfo.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
         let mut sort = ps.sortstate.take().expect("ordered pertrans sort begun");
         sort.performsort()?;
+        // Spilled by-ref values live in recycled slab slots (valid until the
+        // next fetch): the held DISTINCT comparand needs C's datumCopy shape.
+        // The in-memory lever (images live until end, no copy) stays.
+        let spilled = sort.spilled();
         if ps.num_inputs == 1 {
+            let byref_typlen = if spilled { sort.datum_byref_typlen() } else { 0 };
+            let mut old_buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
             let mut old: Option<NullableDatum> = None;
             while let Some(nd) = sort.getdatum(true)? {
                 estate.reset_expr_context(tmp);
@@ -1447,14 +1453,21 @@ fn process_ordered_aggregates<'mcx>(
                     *agg_node,
                     pg,
                 )?;
-                old = Some(nd);
+                old = Some(if byref_typlen != 0 && !nd.isnull {
+                    NullableDatum {
+                        value: copy_scratch_datum(&mut old_buf, nd.value, byref_typlen)?,
+                        isnull: false,
+                    }
+                } else {
+                    nd
+                });
             }
             sort.end();
         } else {
             let mut have_old = false;
             loop {
                 let got =
-                    sort.gettupleslot(true, false, ps.slot1.as_mut().expect("sortslot"), mcx)?;
+                    sort.gettupleslot(true, spilled, ps.slot1.as_mut().expect("sortslot"), mcx)?;
                 if !got {
                     break;
                 }
@@ -1509,6 +1522,32 @@ fn process_ordered_aggregates<'mcx>(
         }
     }
     Ok(())
+}
+
+/// The held-comparand copy for spilled by-ref datum sorts (C datumCopy +
+/// pfree per replaced value; retained scratch here).
+fn copy_scratch_datum<'m>(
+    buf: &mut PgVec<'m, u8>,
+    val: Datum,
+    typlen: i16,
+) -> PgResult<Datum> {
+    let src = val.as_usize() as *const u8;
+    // SAFETY: non-null by-ref datum readable for its full size.
+    let size = unsafe {
+        if typlen == -1 {
+            ::types_tuple::varatt::varsize_any(src)
+        } else {
+            typlen as usize
+        }
+    };
+    buf.clear();
+    buf.reserve(size);
+    // SAFETY: reserved size bytes; src readable per above; regions disjoint.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), size);
+        buf.set_len(size);
+    }
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
 
 /// `ExecAgg` -> `agg_retrieve_direct` (nodeAgg.c), single-group arm: drain the

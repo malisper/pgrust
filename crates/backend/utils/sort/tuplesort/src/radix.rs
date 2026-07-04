@@ -136,7 +136,7 @@ impl<'m> TuplesortData<'m> {
 
         let mut src = pa;
         let mut dst = pb;
-        for &b in &plan[1..npasses] {
+        for &b in plan.get(1..npasses).unwrap_or(&[]) {
             let mut starts = prefix_starts(&hist[b]);
             let shift = b * 8;
             let mut done = 0usize;
