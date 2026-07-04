@@ -19,7 +19,7 @@ use types_nodes::parsenodes::{
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
     CoerceViaIO, Const, ConvertRowtypeExpr, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest,
-    OpExpr, RangeTblRef, RelabelType, ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var,
+    OpExpr, PlaceHolderVar, RangeTblRef, RelabelType, ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var,
     XmlExpr,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
@@ -199,6 +199,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
+        NodeTag::T_PlaceHolderVar => out_place_holder_var(
+            out,
+            node.as_variant::<PlaceHolderVar>().expect("PlaceHolderVar"),
+        )?,
         NodeTag::T_CoalesceExpr => {
             let c = node.as_coalesce_expr().expect("CoalesceExpr");
             w!(
@@ -453,6 +457,17 @@ fn out_var(out: &mut PgString<'_>, v: &Var<'_>) {
         " :varlevelsup {} :varreturningtype {} :varnosyn {} :varattnosyn {} :location -1}}",
         v.varlevelsup, v.varreturningtype as u32, v.varnosyn, v.varattnosyn
     );
+}
+
+fn out_place_holder_var(out: &mut PgString<'_>, phv: &PlaceHolderVar<'_>) -> PgResult<()> {
+    w!(out, "{{PLACEHOLDERVAR :phexpr ");
+    out_node(out, phv.phexpr)?;
+    w!(out, " :phrels ");
+    out_bitmapset(out, &phv.phrels);
+    w!(out, " :phnullingrels ");
+    out_bitmapset(out, &phv.phnullingrels);
+    w!(out, " :phid {} :phlevelsup {}}}", phv.phid, phv.phlevelsup);
+    Ok(())
 }
 
 fn out_const(out: &mut PgString<'_>, c: &Const) {

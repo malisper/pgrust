@@ -40,7 +40,18 @@ impl<'mcx> NodeWalker<'mcx> for PullVarnos<'mcx> {
                 }
                 Ok(false)
             }
-            t @ NodeTag::T_PlaceHolderVar => deferred("pull_varnos_walker", t),
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().unwrap();
+                if phv.phlevelsup as i64 == self.sublevels_up {
+                    // DIVERGENCE: C consults root->placeholder_array and uses
+                    // ph_eval_at once PlaceHolderInfos exist; no root here, so
+                    // this is C's no-phinfo fallback (phrels) in all phases.
+                    self.varnos.add_members(self.mcx, &phv.phrels)?;
+                    self.varnos.add_members(self.mcx, &phv.phnullingrels)?;
+                    return Ok(false);
+                }
+                expression_tree_walker(node, self)
+            }
             NodeTag::T_Query => {
                 let q = node.as_query().unwrap();
                 self.sublevels_up += 1;
@@ -137,7 +148,13 @@ impl<'mcx> NodeWalker<'mcx> for PullVars<'mcx> {
                 }
                 Ok(false)
             }
-            t @ NodeTag::T_PlaceHolderVar => deferred("pull_vars_walker", t),
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().unwrap();
+                if phv.phlevelsup as i64 == self.sublevels_up {
+                    self.vars.lappend(self.mcx, node)?;
+                }
+                Ok(false)
+            }
             NodeTag::T_Query => {
                 let q = node.as_query().unwrap();
                 self.sublevels_up += 1;
@@ -182,7 +199,12 @@ impl<'mcx> NodeWalker<'mcx> for ContainVar {
         match node.node_tag() {
             NodeTag::T_Var => Ok(node.as_var().unwrap().varlevelsup == 0),
             NodeTag::T_CurrentOfExpr => Ok(true),
-            t @ NodeTag::T_PlaceHolderVar => deferred("contain_var_clause_walker", t),
+            NodeTag::T_PlaceHolderVar => {
+                if node.as_place_holder_var().unwrap().phlevelsup == 0 {
+                    return Ok(true);
+                }
+                expression_tree_walker(node, self)
+            }
             _ => expression_tree_walker(node, self),
         }
     }
@@ -202,8 +224,12 @@ impl<'mcx> NodeWalker<'mcx> for ContainVarsOfLevel {
         match node.node_tag() {
             NodeTag::T_Var => Ok(node.as_var().unwrap().varlevelsup as i64 == self.sublevels_up),
             NodeTag::T_CurrentOfExpr => Ok(self.sublevels_up == 0),
-            t @ NodeTag::T_PlaceHolderVar => {
-                deferred("contain_vars_of_level_walker", t)
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().unwrap();
+                if phv.phlevelsup as i64 == self.sublevels_up {
+                    return Ok(true);
+                }
+                expression_tree_walker(node, self)
             }
             NodeTag::T_Query => {
                 let q = node.as_query().unwrap();
@@ -238,7 +264,13 @@ impl<'mcx> NodeWalker<'mcx> for ContainUplevelVars {
         match node.node_tag() {
             NodeTag::T_Var => Ok(node.as_var().unwrap().varlevelsup as i64 >= self.sublevels_up),
             NodeTag::T_CurrentOfExpr => Ok(false),
-            t @ NodeTag::T_PlaceHolderVar => deferred("contain_uplevel_vars_walker", t),
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().unwrap();
+                if phv.phlevelsup as i64 >= self.sublevels_up {
+                    return Ok(true);
+                }
+                expression_tree_walker(node, self)
+            }
             NodeTag::T_Query => {
                 let q = node.as_query().unwrap();
                 self.sublevels_up += 1;
@@ -389,7 +421,20 @@ impl<'mcx> NodeWalker<'mcx> for PullVarClause<'mcx> {
                     )));
                 }
             }
-            t @ NodeTag::T_PlaceHolderVar => deferred("pull_var_clause_walker", t),
+            NodeTag::T_PlaceHolderVar => {
+                if node.as_place_holder_var().unwrap().phlevelsup != 0 {
+                    return Err(upper_level_error("PlaceHolderVar"));
+                }
+                if self.flags & PVC_INCLUDE_PLACEHOLDERS != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_PLACEHOLDERS == 0 {
+                    return Err(Box::new(PgError::error(
+                        "PlaceHolderVar found where not expected".to_string(),
+                    )));
+                }
+            }
             _ => {}
         }
         expression_tree_walker(node, self)
@@ -495,7 +540,27 @@ fn fjav_mutate<'mcx>(
             let newvar = fjav_mutate(mcx, rtable, newvar)?.unwrap_or(newvar);
             Ok(Some(add_nullingrels_if_needed(mcx, newvar, v)?))
         }
-        t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            let new_expr = fjav_mutate(mcx, rtable, phv.phexpr)?.unwrap_or(phv.phexpr);
+            // sublevels_up is pinned at 0 here (Query descent is loud below),
+            // so C's phlevelsup == sublevels_up test is phlevelsup == 0.
+            let phrels = if phv.phlevelsup == 0 {
+                alias_relid_set(rtable, &phv.phrels, mcx)?
+            } else {
+                phv.phrels.clone_in(mcx)?
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::PlaceHolderVar {
+                    phexpr: new_expr,
+                    phrels,
+                    phnullingrels: phv.phnullingrels.clone_in(mcx)?,
+                    phid: phv.phid,
+                    phlevelsup: phv.phlevelsup,
+                },
+            )?))
+        }
         NodeTag::T_Query => {
             // A subquery matters here only if it references a join RTE of an
             // upper level; the sublevels bookkeeping is unported, so scan and
@@ -556,6 +621,24 @@ fn assert_subquery_free_of_upper_join_vars<'mcx>(
     let mut w = W { outer_rtable, levels: 1 };
     query_tree_walker(q, &mut w, nodes_core::QTW_IGNORE_JOINALIASES)?;
     Ok(())
+}
+
+// alias_relid_set (var.c); the RTE_JOIN expansion (get_relids_for_join) is
+// loud until a join-alias PHV shape needs it.
+fn alias_relid_set<'mcx>(
+    rtable: &NodeList<'mcx>,
+    relids: &Bitmapset<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Bitmapset<'mcx>> {
+    let mut out = Bitmapset::empty();
+    for rti in relids.iter() {
+        let rte = rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
+            panic!("alias_relid_set (var.c): RTE_JOIN member (get_relids_for_join) unported");
+        }
+        out.add_member(mcx, rti)?;
+    }
+    Ok(out)
 }
 
 // Deep copy of a joinaliasvars entry along its standard-expression spine
@@ -696,6 +779,9 @@ fn add_nullingrels_if_needed<'mcx>(
 fn is_standard_join_alias_expression(newnode: Node<'_>, oldvar: &types_nodes::Var<'_>) -> bool {
     match newnode.node_tag() {
         NodeTag::T_Var => newnode.as_var().unwrap().varlevelsup == oldvar.varlevelsup,
+        NodeTag::T_PlaceHolderVar => {
+            newnode.as_place_holder_var().unwrap().phlevelsup == oldvar.varlevelsup
+        }
         NodeTag::T_FuncExpr => {
             let f = newnode.as_func_expr().unwrap();
             // Implicit coercions never make non-NULL from NULL; examine only
@@ -738,6 +824,18 @@ fn adjust_standard_join_alias_expression<'mcx>(
                 newnode
                     .with_mut::<types_nodes::Var, _>(|v| {
                         v.varnullingrels.add_members(mcx, &oldvar.varnullingrels)
+                    })
+                    .unwrap()
+            }
+        }
+        NodeTag::T_PlaceHolderVar
+            if newnode.as_place_holder_var().unwrap().phlevelsup == oldvar.varlevelsup =>
+        {
+            // SAFETY: the PHV was freshly built by fjav_mutate's PHV arm.
+            unsafe {
+                newnode
+                    .with_mut::<types_nodes::primnodes::PlaceHolderVar, _>(|phv| {
+                        phv.phnullingrels.add_members(mcx, &oldvar.varnullingrels)
                     })
                     .unwrap()
             }

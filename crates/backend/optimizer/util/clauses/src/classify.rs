@@ -871,7 +871,15 @@ fn find_nonnullable_rels_walker<'mcx>(
                 top_level,
             )?;
         }
-        NodeTag::T_SubPlan | NodeTag::T_PlaceHolderVar => panic!(
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            result = find_nonnullable_rels_walker(mcx, Some(phv.phexpr), top_level)?;
+            // Singleton syntactic scope behaves like a Var of that rel.
+            if phv.phlevelsup == 0 && phv.phrels.num_members() == 1 {
+                result.add_members(mcx, &phv.phrels)?;
+            }
+        }
+        NodeTag::T_SubPlan => panic!(
             "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
@@ -1106,7 +1114,11 @@ fn find_nonnullable_vars_walker<'mcx>(
                 top_level,
             )?;
         }
-        NodeTag::T_SubPlan | NodeTag::T_PlaceHolderVar => panic!(
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            result = find_nonnullable_vars_walker(mcx, Some(phv.phexpr), top_level)?;
+        }
+        NodeTag::T_SubPlan => panic!(
             "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),

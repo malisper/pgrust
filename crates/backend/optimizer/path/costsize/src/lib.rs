@@ -375,6 +375,10 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // No C case: falls to C's expression_tree_walker default.
+        NodeTag::T_PlaceHolderVar => {
+            cost_qual_eval_walker(node.as_place_holder_var().unwrap().phexpr, cost)
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -1653,6 +1657,9 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             let v = node.as_var().unwrap();
             (v.vartype, v.vartypmod)
         }
+        NodeTag::T_PlaceHolderVar => {
+            expr_type_typmod(node.as_place_holder_var().unwrap().phexpr)
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             (r.resulttype, r.resulttypmod)
@@ -1771,7 +1778,7 @@ fn case_expr_typmod(c: &types_nodes::primnodes::CaseExpr<'_>) -> i32 {
     typmod
 }
 
-// set_rel_width (costsize.c); PlaceHolderVars are the M2 subquery lane.
+// set_rel_width (costsize.c).
 pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let relid_idx = run.root.rel(rel).relid;
     let reloid = run.rte(relid_idx as usize).relid;
@@ -1823,6 +1830,17 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
             debug_assert!(item_width > 0);
             run.root.rel_mut(rel).attr_widths[ndx] = item_width;
             tuple_width += item_width as i64;
+        } else if let Some(phv) = node.as_place_holder_var() {
+            // Evaluated elsewhere; bubble-up cost is zero, width from phinfo
+            // (created before placeholdersFrozen, so it must exist here).
+            let phinfo_id = run
+                .root
+                .placeholder_array
+                .get(phv.phid as usize)
+                .copied()
+                .flatten()
+                .expect("set_rel_width: PlaceHolderInfo missing");
+            tuple_width += run.root.phinfo(phinfo_id).ph_width as i64;
         } else {
             if node.node_tag() == NodeTag::T_Var {
                 panic!("set_rel_width (costsize.c): foreign Var in reltarget; M2 join lane");

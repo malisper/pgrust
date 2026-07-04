@@ -1087,6 +1087,15 @@ fn fix_upper_expr<'mcx>(
     num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    if node.node_tag() == NodeTag::T_PlaceHolderVar {
+        let phv = node.as_place_holder_var().unwrap();
+        if let Some(new) =
+            search_tlist_for_phv(run, phv, subplan_tlist, newvarno, NrmMatch::Equal)?
+        {
+            return Ok(new);
+        }
+        return fix_upper_expr(run, phv.phexpr, subplan_tlist, rtoffset, newvarno, num_exec);
+    }
     // search_indexed_tlist_for_non_var: an upper node consuming a value the
     // subplan already computed (Aggref/WindowFunc in a lower tlist) reads it
     // as an OUTER Var instead of re-evaluating.
@@ -1991,6 +2000,11 @@ fn fix_scan_expr_mutator<'mcx>(
         | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
+        }
+        // At scan level, always evaluate the contained expr (C comment).
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            fix_scan_expr_mutator(run, phv.phexpr, rtoffset, num_exec)
         }
         NodeTag::T_Aggref => {
             let prm = find_minmax_agg_replacement_param(&run.root, node)
@@ -3203,6 +3217,28 @@ fn fix_join_expr_mutator<'mcx>(
             }
             panic!("variable not found in subplan target lists");
         }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            if let Some(new) = search_tlist_for_phv(
+                run,
+                phv,
+                outer_tlist,
+                types_nodes::primnodes::OUTER_VAR,
+                nrm_match,
+            )? {
+                return Ok(new);
+            }
+            if let Some(new) = search_tlist_for_phv(
+                run,
+                phv,
+                inner_tlist,
+                types_nodes::primnodes::INNER_VAR,
+                nrm_match,
+            )? {
+                return Ok(new);
+            }
+            fix_join_expr_mutator(run, phv.phexpr, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
+        }
         NodeTag::T_Const | NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
@@ -3862,6 +3898,51 @@ fn search_join_tlist_for_var<'mcx>(
             }
             return Ok(Some(Node::mk(run.mcx, newvar)?));
         }
+    }
+    Ok(None)
+}
+
+// search_indexed_tlist_for_phv (setrefs.c): phid-only match, phnullingrels
+// cross-checked per NrmMatch; the emitted Var is makeVarFromTargetEntry with
+// varnosyn/varattnosyn zeroed (never a plain Var).
+fn search_tlist_for_phv<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    phv: &types_nodes::primnodes::PlaceHolderVar<'mcx>,
+    tlist: &NodeList<'mcx>,
+    newvarno: i32,
+    nrm_match: NrmMatch,
+) -> PgResult<Option<Node<'mcx>>> {
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let Some(sub) = tle.expr.as_place_holder_var() else { continue };
+        if sub.phid != phv.phid {
+            continue;
+        }
+        assert!(
+            match nrm_match {
+                NrmMatch::Superset => sub.phnullingrels.is_subset(&phv.phnullingrels),
+                NrmMatch::Equal => sub.phnullingrels.equal(&phv.phnullingrels),
+            },
+            "wrong phnullingrels for PlaceHolderVar {}",
+            phv.phid
+        );
+        let (vartype, vartypmod) = crate::costsize::expr_type_typmod(tle.expr);
+        return Ok(Some(Node::mk(
+            run.mcx,
+            types_nodes::primnodes::Var {
+                varno: newvarno,
+                varattno: tle.resno,
+                vartype,
+                vartypmod,
+                varcollid: exprs_collation(tle.expr),
+                varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                varlevelsup: 0,
+                varreturningtype: types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                varnosyn: 0,
+                varattnosyn: 0,
+                location: -1,
+            },
+        )?));
     }
     Ok(None)
 }

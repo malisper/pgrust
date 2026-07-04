@@ -112,7 +112,14 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
             return false;
         }
     }
-    debug_assert!(run.root.placeholder_list.is_empty());
+    for i in 0..run.root.placeholder_list.len() {
+        let phinfo = run.root.phinfo(run.root.placeholder_list[i]);
+        if !crate::relnode::relids_is_subset(&phinfo.ph_needed, &rel.relids)
+            && crate::relnode::relids_is_subset(&phinfo.ph_eval_at, &rel.relids)
+        {
+            return false;
+        }
+    }
     if base.pathtype == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) {
         let PathNode::IndexPath(ip) = run.root.path(best_path) else { unreachable!() };
         let info = ip.indexinfo.as_ref().expect("indexinfo set");
@@ -262,7 +269,31 @@ fn replace_nestloop_params_mutator<'mcx>(
         return Ok(Some(crate::paramassign::replace_nestloop_param_var(run, v, node)?));
     }
     if node.node_tag() == NodeTag::T_PlaceHolderVar {
-        panic!("replace_nestloop_params_mutator (createplan.c): PlaceHolderVar");
+        let phv = node.as_place_holder_var().unwrap();
+        debug_assert!(phv.phlevelsup == 0);
+        let id = crate::placeholder::find_placeholder_info(run, phv)?;
+        let eval_at = crate::relnode::relids_copy(run.mcx, &run.root.phinfo(id).ph_eval_at);
+        if !crate::relnode::relids_is_subset(&eval_at, &run.root.curOuterRels) {
+            let new_expr = replace_nestloop_params_mutator(run, phv.phexpr)?;
+            match new_expr {
+                None => return Ok(None),
+                Some(e) => {
+                    return Ok(Some(Node::mk(
+                        run.mcx,
+                        types_nodes::primnodes::PlaceHolderVar {
+                            phexpr: e,
+                            phrels: phv.phrels.clone_in(run.mcx)?,
+                            phnullingrels: phv.phnullingrels.clone_in(run.mcx)?,
+                            phid: phv.phid,
+                            phlevelsup: phv.phlevelsup,
+                        },
+                    )?));
+                }
+            }
+        }
+        panic!(
+            "replace_nestloop_params_mutator (createplan.c):              replace_nestloop_param_placeholdervar (lateral PHV param) unported"
+        );
     }
     clauses::walker::expression_tree_mutator(run.mcx, node, &mut |n| {
         replace_nestloop_params_mutator(run, n)

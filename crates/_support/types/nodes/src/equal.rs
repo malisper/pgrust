@@ -18,7 +18,7 @@ use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
-    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
+    NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     WindowFuncRunCondition, XmlExpr,
 };
@@ -52,6 +52,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Alias => cmp!(as_alias),
         NodeTag::T_RangeVar => cmp!(as_range_var),
         NodeTag::T_Var => cmp!(as_var),
+        NodeTag::T_PlaceHolderVar => cmp!(as_place_holder_var),
         NodeTag::T_Const => cmp!(as_const),
         NodeTag::T_Param => cmp!(as_param),
         NodeTag::T_Aggref => cmp!(as_aggref),
@@ -289,6 +290,15 @@ impl NodeEqual for Var<'_> {
             && self.varnullingrels.equal(&b.varnullingrels)
             && self.varlevelsup == b.varlevelsup
             && self.varreturningtype == b.varreturningtype
+    }
+}
+
+// C: phexpr and phrels are equal_ignore (pathnodes.h).
+impl NodeEqual for PlaceHolderVar<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.phnullingrels.equal(&b.phnullingrels)
+            && self.phid == b.phid
+            && self.phlevelsup == b.phlevelsup
     }
 }
 

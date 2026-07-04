@@ -278,6 +278,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let sp = node.as_sub_plan().unwrap();
             Ok(walk_opt(sp.testexpr, w)? || walk_list(&sp.args, w)?)
         }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            w.visit(phv.phexpr)
+        }
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
             walk_list(&asp.subplans, w)
@@ -1609,6 +1613,22 @@ where
             None => Ok(None),
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            match m(phv.phexpr)? {
+                None => Ok(None),
+                Some(new_expr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: new_expr,
+                        phrels: phv.phrels.clone_in(mcx)?,
+                        phnullingrels: phv.phnullingrels.clone_in(mcx)?,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    },
+                )?)),
+            }
+        }
         // C mutates testexpr and args; the child Plan tree is not expression
         // territory.
         NodeTag::T_SubPlan => {

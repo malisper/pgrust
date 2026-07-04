@@ -79,6 +79,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 _ => types_core::catalog::BOOLOID,
             }
         }
+        NodeTag::T_PlaceHolderVar => {
+            expr_type(node.as_place_holder_var().unwrap().phexpr)
+        }
         NodeTag::T_JsonValueExpr => {
             expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
         }
@@ -227,6 +230,9 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_PlaceHolderVar => {
+            expr_typmod(node.as_place_holder_var().unwrap().phexpr)
+        }
         NodeTag::T_JsonValueExpr => {
             expr_typmod(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
         }
@@ -318,6 +324,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColCollation,
                 _ => 0,
             }
+        }
+        NodeTag::T_PlaceHolderVar => {
+            expr_collation(node.as_place_holder_var().unwrap().phexpr)
         }
         NodeTag::T_JsonValueExpr => {
             expr_collation(

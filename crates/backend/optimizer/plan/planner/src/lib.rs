@@ -19,6 +19,7 @@ pub mod initsplan;
 pub mod joinpath;
 pub mod joinrels;
 pub mod pathkeys;
+pub mod placeholder;
 pub mod planagg;
 pub mod pathnode;
 pub mod plancat;

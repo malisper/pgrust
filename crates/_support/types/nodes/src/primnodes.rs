@@ -132,6 +132,15 @@ pub enum VarReturningType {
     VAR_RETURNING_NEW = 2,
 }
 
+// pathnodes.h PlaceHolderVar (planner-created; never in stored rules).
+pub struct PlaceHolderVar<'mcx> {
+    pub phexpr: Node<'mcx>,
+    pub phrels: Bitmapset<'mcx>,
+    pub phnullingrels: Bitmapset<'mcx>,
+    pub phid: Index,
+    pub phlevelsup: Index,
+}
+
 #[derive(Default)]
 pub struct Alias<'mcx> {
     pub aliasname: Option<&'mcx str>,
@@ -1221,6 +1230,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CollateExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubPlan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for PlaceHolderVar<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PlaceHolderVar;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for AlternativeSubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlternativeSubPlan;
 }
@@ -1584,6 +1596,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sub_plan(self) -> Option<&'mcx SubPlan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_place_holder_var(self) -> Option<&'mcx PlaceHolderVar<'mcx>> {
         self.as_variant()
     }
 
