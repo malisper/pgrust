@@ -3,8 +3,7 @@ use std::rc::Rc;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_nodes::plannodes::WindowAgg;
 use ::types_nodes::rawnodes::{
-    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
-    FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_RANGE, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
 use ::types_tuple::{
     CompactAttribute, FormData_pg_attribute, TupleDescData, TYPALIGN_INT, TYPSTORAGE_PLAIN,
@@ -53,8 +52,7 @@ fn frameoption_defaults_value_matches_c() {
 }
 
 #[test]
-#[should_panic(expected = "GROUPS frame mode")]
-fn groups_frame_panics_at_init() {
+fn groups_frame_inits() {
     let mcx = leaked_mcx();
     let node = Node::mk(
         mcx,
@@ -68,19 +66,9 @@ fn groups_frame_panics_at_init() {
     .unwrap();
     let mut estate = ::executils::EStateData::new_in(mcx);
     let desc = int4_desc(mcx);
-    let _ =
-        exec_init_window_agg(node.as_window_agg().unwrap(), &mut estate, 0, &desc, desc.clone());
-}
-
-#[test]
-#[should_panic(expected = "runCondition")]
-fn run_condition_panics_at_init() {
-    let mcx = leaked_mcx();
-    let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
-    wa.runCondition = NodeList::make1(mcx, Node::mk_string(mcx, "x").unwrap()).unwrap();
-    let node = wa.seal();
-    let mut estate = ::executils::EStateData::new_in(mcx);
-    let desc = int4_desc(mcx);
-    let _ =
-        exec_init_window_agg(node.as_window_agg().unwrap(), &mut estate, 0, &desc, desc.clone());
+    let state =
+        exec_init_window_agg(node.as_window_agg().unwrap(), &mut estate, 0, &desc, desc.clone())
+            .unwrap();
+    assert!(state.frameOptions & FRAMEOPTION_GROUPS != 0);
+    assert_eq!(state.grouptailpos, -1);
 }
