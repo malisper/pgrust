@@ -138,14 +138,7 @@ pub fn record_object_address_dependencies<'mcx>(
     referenced: &mut [ObjectAddress],
     behavior: DependencyType,
 ) -> PgResult<()> {
-    referenced.sort_by(object_address_comparator);
-    let mut kept = 0;
-    for i in 0..referenced.len() {
-        if kept == 0 || referenced[i] != referenced[kept - 1] {
-            referenced[kept] = referenced[i];
-            kept += 1;
-        }
-    }
+    let kept = eliminate_duplicate_dependencies_slice(referenced);
     recordMultipleDependencies(mcx, depender, &referenced[..kept], behavior)
 }
 
@@ -167,6 +160,9 @@ const OPER_CLASS: Oid = 2617;
 const COLL_CLASS: Oid = 3456;
 const DEFAULT_COLLATION_OID: Oid = 100;
 
+// Narrow find_expr_references_walker lane for single-rel expressions. It
+// duplicates arms of catalog_dependency's full walker by constraint:
+// catalog_dependency depends on this crate, so delegating would cycle.
 struct FindExprRefs<'a, 'mcx> {
     rel_id: Oid,
     addrs: &'a mut mcx::PgVec<'mcx, ObjectAddress>,
@@ -229,6 +225,52 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                     node.as_distinct_expr().expect("DistinctExpr").opno,
                 ));
             }
+            T_NullIfExpr => {
+                addrs.push(ObjectAddress::set(
+                    OPER_CLASS,
+                    node.as_null_if_expr().expect("NullIfExpr").opno,
+                ));
+            }
+            T_RowExpr => {
+                addrs.push(ObjectAddress::set(
+                    TYPE_CLASS,
+                    node.as_row_expr().expect("RowExpr").row_typeid,
+                ));
+            }
+            T_RowCompareExpr => {
+                let r = node.as_row_compare_expr().expect("RowCompareExpr");
+                const OPFAMILY_CLASS: Oid = 2753;
+                for opno in &r.opnos {
+                    addrs.push(ObjectAddress::set(OPER_CLASS, opno));
+                }
+                for opfamily in &r.opfamilies {
+                    addrs.push(ObjectAddress::set(OPFAMILY_CLASS, opfamily));
+                }
+            }
+            T_CoerceToDomain => {
+                addrs.push(ObjectAddress::set(
+                    TYPE_CLASS,
+                    node.as_coerce_to_domain().expect("CoerceToDomain").resulttype,
+                ));
+            }
+            T_CollateExpr => {
+                // C records collOid unconditionally, default included.
+                addrs.push(ObjectAddress::set(
+                    COLL_CLASS,
+                    node.as_collate_expr().expect("CollateExpr").collOid,
+                ));
+            }
+            T_SubscriptingRef => {
+                let s = node.as_subscripting_ref().expect("SubscriptingRef");
+                if s.refrestype != s.refcontainertype && s.refrestype != s.refelemtype {
+                    addrs.push(ObjectAddress::set(TYPE_CLASS, s.refrestype));
+                }
+            }
+            T_FieldSelect => panic!(
+                "find_expr_references_walker (dependency.c): FieldSelect column \
+                 dep needs get_typ_typrelid (lsyscache is not a pg_depend dep); \
+                 unported lane"
+            ),
             T_ScalarArrayOpExpr => {
                 addrs.push(ObjectAddress::set(
                     OPER_CLASS,
@@ -305,9 +347,9 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
 // eliminate_duplicate_dependencies (dependency.c): sort, drop identicals; a
 // whole-object ref (subId 0 sorts first) collapses into the first column ref
 // of the same object that follows it.
-fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
+fn eliminate_duplicate_dependencies_slice(addrs: &mut [ObjectAddress]) -> usize {
     if addrs.len() <= 1 {
-        return;
+        return addrs.len();
     }
     addrs.sort_by(object_address_comparator);
     let mut kept = 1;
@@ -326,6 +368,11 @@ fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
         addrs[kept] = this;
         kept += 1;
     }
+    kept
+}
+
+fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
+    let kept = eliminate_duplicate_dependencies_slice(addrs);
     addrs.truncate(kept);
 }
 

@@ -27,6 +27,7 @@ elog = { path = "../../utils/error/elog" }
 mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
 pg_attrdef = { path = "../pg_attrdef" }
 policy_seams = { path = "../../commands/policy_seams" }
 publicationcmds_seams = { path = "../../commands/publicationcmds_seams" }

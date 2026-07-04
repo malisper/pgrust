@@ -3,17 +3,18 @@
 use mcx::Mcx;
 use pg_depend::{object_address_comparator, DependencyType, ObjectAddress};
 use types_core::{
-    catalog::DEFAULT_COLLATION_OID, InvalidOid, Oid, CONSTRAINT_RELATION_ID,
-    RELATION_RELATION_ID, TYPE_RELATION_ID,
+    catalog::{DEFAULT_COLLATION_OID, RECORDOID},
+    InvalidOid, Oid, CONSTRAINT_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{PgError, PgResult};
 use types_nodes::list::NodeList;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{Query, RTEKind};
+use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry, RangeTblFunction};
 use types_nodes::NodeTag;
 
 const OperatorRelationId: Oid = 2617;
+const OperatorFamilyRelationId: Oid = 2753;
 const CollationRelationId: Oid = 3456;
 const InvalidAttrNumber: i16 = 0;
 
@@ -144,7 +145,7 @@ fn walker<'w, 'mcx: 'w>(
                     context.add(RELATION_RELATION_ID, rte.relid, var.varattno as i32);
                 }
                 RTEKind::RTE_FUNCTION => {
-                    walker_unported("process_function_rte_ref (RTE_FUNCTION Var)")
+                    process_function_rte_ref(rte, var.varattno, context)?;
                 }
                 // Join alias Vars reference merged USING columns whose inputs
                 // are covered via the join quals; subquery Vars via recursion.
@@ -173,10 +174,174 @@ fn walker<'w, 'mcx: 'w>(
             context.add(OperatorRelationId, opexpr.opno, 0);
             walk_list(&opexpr.args, context)
         }
+        NodeTag::T_DistinctExpr => {
+            let opexpr = node.as_distinct_expr().unwrap();
+            context.add(OperatorRelationId, opexpr.opno, 0);
+            walk_list(&opexpr.args, context)
+        }
+        NodeTag::T_NullIfExpr => {
+            let opexpr = node.as_null_if_expr().unwrap();
+            context.add(OperatorRelationId, opexpr.opno, 0);
+            walk_list(&opexpr.args, context)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             let opexpr = node.as_scalar_array_op_expr().unwrap();
             context.add(OperatorRelationId, opexpr.opno, 0);
             walk_list(&opexpr.args, context)
+        }
+        NodeTag::T_WindowFunc => {
+            let wfunc = node.as_window_func().unwrap();
+            context.add(types_core::PROCEDURE_RELATION_ID, wfunc.winfnoid, 0);
+            walk_list(&wfunc.args, context)?;
+            walk_opt(wfunc.aggfilter, context)?;
+            walk_list(&wfunc.runCondition, context)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sbsref = node.as_subscripting_ref().unwrap();
+            // Only a custom handler's refrestype needs its own dep; the
+            // container/element types ride with refexpr.
+            if sbsref.refrestype != sbsref.refcontainertype
+                && sbsref.refrestype != sbsref.refelemtype
+            {
+                context.add(TYPE_RELATION_ID, sbsref.refrestype, 0);
+            }
+            for e in sbsref.refupperindexpr.iter() {
+                walk_opt(e, context)?;
+            }
+            for e in sbsref.reflowerindexpr.iter() {
+                walk_opt(e, context)?;
+            }
+            walk_opt(sbsref.refexpr, context)?;
+            walk_opt(sbsref.refassgnexpr, context)
+        }
+        NodeTag::T_SubPlan => {
+            Err(walker_error("already-planned subqueries not supported".into()))
+        }
+        NodeTag::T_FieldSelect => {
+            let fselect = node.as_field_select().unwrap();
+            let argtype = lsyscache::getBaseType(nodes_core::expr_type(fselect.arg))?;
+            let reltype = lsyscache::get_typ_typrelid(argtype)?;
+            // Column dep when the arg's rowtype has a pg_class entry; else the
+            // result type itself (it may appear nowhere else).
+            if reltype != InvalidOid {
+                context.add(RELATION_RELATION_ID, reltype, fselect.fieldnum as i32);
+            } else {
+                context.add(TYPE_RELATION_ID, fselect.resulttype, 0);
+            }
+            if fselect.resultcollid != InvalidOid
+                && fselect.resultcollid != DEFAULT_COLLATION_OID
+            {
+                context.add(CollationRelationId, fselect.resultcollid, 0);
+            }
+            walker(fselect.arg, context)
+        }
+        NodeTag::T_FieldStore => {
+            let fstore = node.as_field_store().unwrap();
+            let reltype = lsyscache::get_typ_typrelid(fstore.resulttype)?;
+            if reltype != InvalidOid {
+                for fieldnum in &fstore.fieldnums {
+                    context.add(RELATION_RELATION_ID, reltype, fieldnum);
+                }
+            } else {
+                context.add(TYPE_RELATION_ID, fstore.resulttype, 0);
+            }
+            walker(fstore.arg, context)?;
+            walk_list(&fstore.newvals, context)
+        }
+        NodeTag::T_CoerceViaIO => {
+            let iocoerce = node.as_coerce_via_io().unwrap();
+            context.add(TYPE_RELATION_ID, iocoerce.resulttype, 0);
+            if iocoerce.resultcollid != InvalidOid
+                && iocoerce.resultcollid != DEFAULT_COLLATION_OID
+            {
+                context.add(CollationRelationId, iocoerce.resultcollid, 0);
+            }
+            walker(iocoerce.arg, context)
+        }
+        // C records collOid unconditionally: an explicit COLLATE always names
+        // a real collation, default included.
+        NodeTag::T_CollateExpr => {
+            let coll = node.as_collate_expr().unwrap();
+            context.add(CollationRelationId, coll.collOid, 0);
+            walker(coll.arg, context)
+        }
+        NodeTag::T_RowExpr => {
+            let rowexpr = node.as_row_expr().unwrap();
+            context.add(TYPE_RELATION_ID, rowexpr.row_typeid, 0);
+            walk_list(&rowexpr.args, context)
+        }
+        NodeTag::T_RowCompareExpr => {
+            let rcexpr = node.as_row_compare_expr().unwrap();
+            for opno in &rcexpr.opnos {
+                context.add(OperatorRelationId, opno, 0);
+            }
+            for opfamily in &rcexpr.opfamilies {
+                context.add(OperatorFamilyRelationId, opfamily, 0);
+            }
+            walk_list(&rcexpr.largs, context)?;
+            walk_list(&rcexpr.rargs, context)
+        }
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            context.add(TYPE_RELATION_ID, cd.resulttype, 0);
+            walker(cd.arg, context)
+        }
+        NodeTag::T_NextValueExpr => {
+            let nve = node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap();
+            context.add(RELATION_RELATION_ID, nve.seqid, 0);
+            Ok(())
+        }
+        NodeTag::T_OnConflictExpr => {
+            let onconflict = node.as_on_conflict_expr().unwrap();
+            if onconflict.constraint != InvalidOid {
+                context.add(CONSTRAINT_RELATION_ID, onconflict.constraint, 0);
+            }
+            walk_list(&onconflict.arbiterElems, context)?;
+            walk_opt(onconflict.arbiterWhere, context)?;
+            walk_list(&onconflict.onConflictSet, context)?;
+            walk_opt(onconflict.onConflictWhere, context)?;
+            walk_list(&onconflict.exclRelTlist, context)
+        }
+        NodeTag::T_WindowClause => {
+            let wc = node.as_window_clause().unwrap();
+            if wc.startInRangeFunc != InvalidOid {
+                context.add(types_core::PROCEDURE_RELATION_ID, wc.startInRangeFunc, 0);
+            }
+            if wc.endInRangeFunc != InvalidOid {
+                context.add(types_core::PROCEDURE_RELATION_ID, wc.endInRangeFunc, 0);
+            }
+            if wc.inRangeColl != InvalidOid && wc.inRangeColl != DEFAULT_COLLATION_OID {
+                context.add(CollationRelationId, wc.inRangeColl, 0);
+            }
+            walk_list(&wc.partitionClause, context)?;
+            walk_list(&wc.orderClause, context)?;
+            walk_opt(wc.startOffset, context)?;
+            walk_opt(wc.endOffset, context)
+        }
+        // C records cycle_mark_collation whenever valid, no default skip.
+        NodeTag::T_CTECycleClause => {
+            let cc = node.as_cte_cycle_clause().unwrap();
+            if cc.cycle_mark_type != InvalidOid {
+                context.add(TYPE_RELATION_ID, cc.cycle_mark_type, 0);
+            }
+            if cc.cycle_mark_collation != InvalidOid {
+                context.add(CollationRelationId, cc.cycle_mark_collation, 0);
+            }
+            if cc.cycle_mark_neop != InvalidOid {
+                context.add(OperatorRelationId, cc.cycle_mark_neop, 0);
+            }
+            walk_opt(cc.cycle_mark_value, context)?;
+            walk_opt(cc.cycle_mark_default, context)
+        }
+        NodeTag::T_CTESearchClause => Ok(()),
+        NodeTag::T_SetOperationStmt => {
+            let setop = node.as_set_operation_stmt().unwrap();
+            walk_list(&setop.groupClauses, context)?;
+            walk_opt(setop.larg, context)?;
+            walk_opt(setop.rarg, context)
+        }
+        NodeTag::T_TableSampleClause => {
+            walker_unported("TableSampleClause (node struct not defined in types_nodes)")
         }
         NodeTag::T_Aggref => {
             let aggref = node.as_aggref().unwrap();
@@ -220,8 +385,7 @@ fn walker<'w, 'mcx: 'w>(
         NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, context),
         // C has no case for CoalesceExpr: expression_tree_walker walks args.
         NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args, context),
-        // C has no XmlExpr/TableFunc case: expression_tree_walker recursion
-        // only, no dependency recorded.
+        // C has no XmlExpr case: expression_tree_walker recursion only.
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
             walk_list(&x.named_args, context)?;
@@ -229,6 +393,14 @@ fn walker<'w, 'mcx: 'w>(
         }
         NodeTag::T_TableFunc => {
             let tf = node.as_table_func().unwrap();
+            for typid in &tf.coltypes {
+                context.add(TYPE_RELATION_ID, typid, 0);
+            }
+            for collid in &tf.colcollations {
+                if collid != InvalidOid && collid != DEFAULT_COLLATION_OID {
+                    context.add(CollationRelationId, collid, 0);
+                }
+            }
             walk_list(&tf.ns_uris, context)?;
             walk_opt(tf.docexpr, context)?;
             walk_opt(tf.rowexpr, context)?;
@@ -272,7 +444,9 @@ fn walker<'w, 'mcx: 'w>(
         }
         NodeTag::T_CommonTableExpr => {
             let cte = node.as_common_table_expr().unwrap();
-            walk_opt(cte.ctequery, context)
+            walk_opt(cte.ctequery, context)?;
+            walk_opt(cte.search_clause, context)?;
+            walk_opt(cte.cycle_clause, context)
         }
         NodeTag::T_SortGroupClause => {
             let sgc = node.as_sort_group_clause().unwrap();
@@ -338,6 +512,54 @@ fn walker<'w, 'mcx: 'w>(
     }
 }
 
+fn process_function_rte_ref<'w, 'mcx: 'w>(
+    rte: &'mcx RangeTblEntry<'mcx>,
+    attnum: i16,
+    context: &mut FindExprContext<'w, 'mcx>,
+) -> PgResult<()> {
+    let mut atts_done: i32 = 0;
+    for f in &rte.functions {
+        let rtfunc = f.as_variant::<RangeTblFunction>().expect("functions holds RangeTblFunction");
+        if attnum as i32 > atts_done && attnum as i32 <= atts_done + rtfunc.funccolcount {
+            // A coldeflist means RECORD: no column dep possible. DIVERGENCE:
+            // C probes get_expr_result_tupdesc(funcexpr, true) and tests
+            // tdtypeid; the funcexpr's resolved result type (base type of
+            // exprType) makes the same named-composite/RECORD/scalar split.
+            if !rtfunc.funccolnames.is_nil() {
+                return Ok(());
+            }
+            let Some(funcexpr) = rtfunc.funcexpr else {
+                return Ok(());
+            };
+            let argtype = lsyscache::getBaseType(nodes_core::expr_type(funcexpr))?;
+            if argtype == RECORDOID {
+                return Ok(());
+            }
+            let reltype = lsyscache::get_typ_typrelid(argtype)?;
+            if reltype != InvalidOid {
+                context.add(RELATION_RELATION_ID, reltype, attnum as i32 - atts_done);
+            }
+            return Ok(());
+        }
+        atts_done += rtfunc.funccolcount;
+    }
+
+    if rte.funcordinality && attnum as i32 == atts_done + 1 {
+        return Ok(());
+    }
+
+    Err(Box::new(
+        PgError::error(format!(
+            "column {} of relation \"{}\" does not exist",
+            attnum,
+            rte.eref
+                .and_then(|e| e.aliasname)
+                .expect("RTE_FUNCTION has an eref aliasname")
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+    ))
+}
+
 fn walk_query<'w, 'mcx: 'w>(
     query: &'mcx Query<'mcx>,
     context: &mut FindExprContext<'w, 'mcx>,
@@ -361,6 +583,18 @@ fn walk_query<'w, 'mcx: 'w>(
                     }
                 }
                 context.rtables.remove(0);
+            }
+            // Tuplestores have no cataloged representation to depend on.
+            RTEKind::RTE_NAMEDTUPLESTORE => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "transition table \"{}\" cannot be referenced in a persistent object",
+                        rte.eref
+                            .and_then(|e| e.aliasname)
+                            .expect("RTE_NAMEDTUPLESTORE has an eref aliasname")
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
             }
             // RTE_CTE/RTE_VALUES collations only duplicate ones referenced
             // elsewhere in the Query (C dependency.c:2153); RTE_FUNCTION
