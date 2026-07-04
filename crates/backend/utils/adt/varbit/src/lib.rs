@@ -10,9 +10,9 @@ use ::datum::Datum;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::{
-    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_STRING_DATA_LENGTH_MISMATCH,
-    ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_STRING_DATA_LENGTH_MISMATCH, ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
 };
 use ::types_fmgr::{
     cstring_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
@@ -201,6 +201,74 @@ pub fn fc_varbit_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     fc_bits_out(fcinfo)
 }
 
+
+// varbit.c anybit_typmodin/out: typmod is the raw bit length (no VARHDRSZ).
+fn anybit_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
+    if tl.len() != 1 {
+        return Err(Box::new(
+            PgError::error("invalid type modifier")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if tl[0] < 1 {
+        return Err(Box::new(
+            PgError::error(format!("length for type {typename} must be at least 1"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    // MaxAttrSize * BITS_PER_BYTE (htup_details.h).
+    const MAX_BITS: i32 = 10 * 1024 * 1024 * 8;
+    if tl[0] > MAX_BITS {
+        return Err(Box::new(
+            PgError::error(format!("length for type {typename} cannot exceed {MAX_BITS}"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    Ok(tl[0])
+}
+
+fn arg_typmod_array(fcinfo: &Fcinfo) -> &[u8] {
+    // SAFETY: strict fn; arg 0 is a non-null cstring[] varlena image.
+    unsafe {
+        let p = fcinfo.arg_ptr(0);
+        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+    }
+}
+
+fn fc_bit_typmodin(fcinfo: &mut Fcinfo, typename: &str) -> PgResult<Datum> {
+    let arr = arg_typmod_array(fcinfo);
+    let mcx = fcinfo.result_mcx();
+    let tl = ::arrayfuncs::construct::array_get_integer_typmods(mcx, arr)?;
+    Ok(Datum::from_i32(anybit_typmodin(&tl, typename)?))
+}
+
+pub fn fc_bittypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_typmodin(fcinfo, "bit")
+}
+
+pub fn fc_varbittypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_typmodin(fcinfo, "bit varying")
+}
+
+fn fc_bit_typmodout(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg(0).as_i32();
+    let mcx = fcinfo.result_mcx();
+    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, 16)?;
+    if typmod >= 0 {
+        ::mcx::vec_append_bytes(&mut out, format!("({typmod})").as_bytes())?;
+    }
+    ::mcx::vec_append_bytes(&mut out, &[0])?;
+    Ok(cstring_result(out))
+}
+
+pub fn fc_bittypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_typmodout(fcinfo)
+}
+
+pub fn fc_varbittypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_typmodout(fcinfo)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -210,4 +278,8 @@ pub const VARBIT_BUILTINS: &[FmgrBuiltin] = &[
     b(1565, "bit_out", 1, fc_bit_out),
     b(1579, "varbit_in", 3, fc_varbit_in),
     b(1580, "varbit_out", 1, fc_varbit_out),
+    b(2902, "varbittypmodin", 1, fc_varbittypmodin),
+    b(2919, "bittypmodin", 1, fc_bittypmodin),
+    b(2920, "bittypmodout", 1, fc_bittypmodout),
+    b(2921, "varbittypmodout", 1, fc_varbittypmodout),
 ];
