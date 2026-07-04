@@ -39,6 +39,7 @@ superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 tablecmds_seams = { path = "../tablecmds_seams" }
+sequence_seams = { path = "../sequence_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_index = { path = "../../catalog/catalog_index" }
