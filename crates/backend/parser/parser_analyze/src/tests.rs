@@ -2559,7 +2559,7 @@ mod from_where {
 
         let err = analyze_sql(
             mcx,
-            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n::int8 FROM w) SELECT * FROM w",
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n + 1.5 FROM w) SELECT * FROM w",
         )
         .map(|_| ())
         .unwrap_err();
@@ -2567,7 +2567,7 @@ mod from_where {
         assert_eq!(
             err.message(),
             "recursive query \"w\" column 1 has type integer in non-recursive term but type \
-             bigint overall"
+             numeric overall"
         );
         assert_eq!(
             err.hint().unwrap_or_default(),

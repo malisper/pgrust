@@ -1293,12 +1293,32 @@ fn with_cte_query(mcx: Mcx<'_>, cterefcount: i32) -> Query<'_> {
 }
 
 #[test]
-fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+fn single_ref_cte_inlines_to_plain_scan() {
     let cx = cx();
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
         with_cte_query(mcx, 1),
+        "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.subplans.len(), 0);
+    assert_eq!(stmt.paramExecTypes.len(), 0);
+    assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_SeqScan);
+}
+
+// Default-policy CTE referenced more than once stays materialized (C
+// SS_process_ctes refcount > 1 arm).
+#[test]
+fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let stmt = planner(
+        mcx,
+        with_cte_query(mcx, 2),
         "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
