@@ -2318,6 +2318,7 @@ dependencies = [
  "mcx",
  "nodes_core",
  "parser_small1",
+ "pg_inherits_seams",
  "syscache_seams",
  "typcache_seams",
  "types_core",
@@ -8375,6 +8376,7 @@ dependencies = [
  "lmgr",
  "lsyscache",
  "mcx",
+ "pg_inherits_seams",
  "snapmgr",
  "syscache_seams",
  "table",
@@ -8383,6 +8385,15 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+]
+
+[[package]]
+name = "pg_inherits_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -11055,6 +11066,7 @@ dependencies = [
  "pg_database",
  "pg_db_role_setting",
  "pg_enum",
+ "pg_inherits",
  "pg_locale",
  "pg_prng",
  "pg_proc",

@@ -49,6 +49,7 @@ pub fn init_all() {
     indexcmds::init_seams();
     catalog_index::init_seams();
     pg_class::init_seams();
+    pg_inherits::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
     execexpr::init_seams();
