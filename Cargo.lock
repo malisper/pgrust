@@ -672,7 +672,9 @@ dependencies = [
 name = "adt_regexp"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "datum",
+ "funcapi_srf",
  "mbutils",
  "mcx",
  "regex",
@@ -681,6 +683,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "varlena",
  "wchar",
 ]
 
@@ -12639,7 +12642,11 @@ dependencies = [
  "numutils",
  "parser_small1",
  "pg_locale_seams",
+ "postgres_seams",
  "pqformat",
+ "regex",
+ "regex_core_seams",
+ "regexp_seams",
  "stringinfo",
  "syscache_seams",
  "types_core",
