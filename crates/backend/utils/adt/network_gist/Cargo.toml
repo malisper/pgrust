@@ -1,0 +1,14 @@
+[package]
+name = "network_gist"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_network = { path = "../network" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_gist = { path = "../../../../_support/types/gist" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

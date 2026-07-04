@@ -6867,6 +6867,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "network_gist"
+version = "0.1.0"
+dependencies = [
+ "adt_network",
+ "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+]
+
+[[package]]
+name = "network_spgist"
+version = "0.1.0"
+dependencies = [
+ "adt_network",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodeagg"
 version = "0.0.0"
 dependencies = [
@@ -11726,6 +11754,8 @@ dependencies = [
  "mcxt_stats",
  "miscinit",
  "multixact",
+ "network_gist",
+ "network_spgist",
  "nodeagg",
  "nodegroup",
  "nodeindexonlyscan",

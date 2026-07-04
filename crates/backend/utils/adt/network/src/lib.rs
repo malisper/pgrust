@@ -562,13 +562,15 @@ fn memcmp(l: &[u8], r: &[u8]) -> i32 {
 
 pub fn bitncommon(l: &[u8], r: &[u8], n: i32) -> i32 {
     let mut nbits = n % 8;
-    let mut byte = 0usize;
-    while byte < (n / 8) as usize {
-        if l[byte] != r[byte] {
+    let nbytes = (n / 8) as usize;
+    let mut byte = nbytes;
+    // zipped whole-byte scan keeps the loop bounds-check-free (penalty gate).
+    for (i, (a, b)) in l[..nbytes].iter().zip(&r[..nbytes]).enumerate() {
+        if a != b {
             nbits = 7;
+            byte = i;
             break;
         }
-        byte += 1;
     }
     if nbits != 0 {
         let diff = (l[byte] ^ r[byte]) as u32;
