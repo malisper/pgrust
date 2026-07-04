@@ -2,7 +2,7 @@
 // pinned) + C-exact framed lane (ROWS/RANGE/GROUPS offsets, EXCLUDE seeks,
 // per-agg carriers, inverse transitions, runCondition pass-through modes).
 // Window functions are enum-dispatched (C: fmgr + WindowObject; the set is
-// closed here). FILTER and by-ref plain transtypes are loud panics at init.
+// closed here). FILTER is a loud panic at init.
 #![allow(non_snake_case)]
 
 use std::ptr::NonNull;
@@ -868,6 +868,26 @@ fn initialize_peragg_default<'mcx>(
             shape.aggkind
         );
     }
+    // C's use_ma_code tree collapses under the pinned default-frame head,
+    // except the safety-forced arm (mfinalmodify 'r', finalmodify not 'r');
+    // the compiled default lane has no moving kernels for it.
+    if shape.aggminvtransfn != 0
+        && shape.aggmfinalmodify == AGGMODIFY_READ_ONLY
+        && shape.aggfinalmodify != AGGMODIFY_READ_ONLY
+    {
+        panic!(
+            "initialize_peragg (nodeWindowAgg.c): safety-forced moving-aggregate \
+             selection not ported in the default-frame lane (aggregate {})",
+            wfunc.winfnoid
+        );
+    }
+    if shape.aggfinalmodify != AGGMODIFY_READ_ONLY {
+        panic!(
+            "initialize_peragg (nodeWindowAgg.c): non-read-only finalfn error arm \
+             (format_procedure) not ported; aggregate {}",
+            wfunc.winfnoid
+        );
+    }
     let transtype = shape.aggtranstype;
     let (translen, byval) = lsyscache::get_typlenbyval(transtype)?;
     trans_typlen.push(translen);
@@ -900,6 +920,18 @@ fn initialize_peragg_default<'mcx>(
     });
     let initval = syscache_seams::pg_aggregate_agginitval::call(mcx, wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
+    // C's IsBinaryCoercible guard for strict transfn + NULL initval; only the
+    // equal-types case is ported (framed-lane precedent).
+    if initval.is_none() && fmgr_core::fmgr_info(shape.aggtransfn)?.fn_strict {
+        let first_type = wfunc.args.first().map(expr_type);
+        if first_type != Some(transtype) {
+            panic!(
+                "initialize_peragg (nodeWindowAgg.c): IsBinaryCoercible input/transtype \
+                 check not ported (aggregate {})",
+                wfunc.winfnoid
+            );
+        }
+    }
     trans_init.push(match initval {
         None => NullableDatum::null(),
         Some(text) => {
