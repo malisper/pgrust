@@ -156,6 +156,10 @@ pub struct MaterialNode<'mcx> {
 pub struct MemoizeNode<'mcx> {
     pub state: ::nodememoize::MemoizeState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    // C outerPlan->chgParam: accumulated changed params of the child; the
+    // child rescan is deferred to the next pull (executor.h ExecProcNode) so
+    // cache hits never touch the child subtree.
+    pub outer_chg: ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 pub struct SortNode<'mcx> {
@@ -587,7 +591,11 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::Memoize(::mcx::alloc_in(
                 mcx,
-                MemoizeNode { state, outer: ::mcx::alloc_in(mcx, outer)? },
+                MemoizeNode {
+                    state,
+                    outer: ::mcx::alloc_in(mcx, outer)?,
+                    outer_chg: ::types_nodes::bitmapset::Bitmapset::empty(),
+                },
             )?)
         }
         NodeTag::T_Sort => {
@@ -1720,7 +1728,28 @@ fn memoize_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let m = &mut **m;
-    ::nodememoize::exec_memoize(&mut m.state, &mut *m.outer, estate)
+    let plan = m.state.plan.plan.lefttree.expect("Memoize outer plan");
+    let mut outer = MemoizeOuter { node: &mut m.outer, plan, chg: &mut m.outer_chg };
+    ::nodememoize::exec_memoize(&mut m.state, &mut outer, estate)
+}
+
+struct MemoizeOuter<'a, 'mcx> {
+    node: &'a mut PlanStateNode<'mcx>,
+    plan: Node<'mcx>,
+    chg: &'a mut ::types_nodes::bitmapset::Bitmapset<'mcx>,
+}
+
+impl<'a, 'mcx> ::nodememoize::MemoizeChild<'mcx> for MemoizeOuter<'a, 'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        if !self.chg.is_empty() {
+            let chg = core::mem::replace(
+                self.chg,
+                ::types_nodes::bitmapset::Bitmapset::empty(),
+            );
+            crate::execami::exec_re_scan_with_chg(self.node, self.plan, estate, &chg)?;
+        }
+        exec_proc_node(self.node, estate)
+    }
 }
 
 #[inline(never)]
@@ -2750,7 +2779,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     AggPlanState<'_> { agg, outer },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
-    MemoizeNode<'_> { state, outer },
+    MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin },
