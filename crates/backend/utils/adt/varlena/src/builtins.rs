@@ -80,6 +80,24 @@ pub fn fc_hashtextextended(
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed)))
 }
 
+// hashvarlena/hashbytea (hashfunc.c): raw-byte hash, no collation leg.
+pub fn fc_hashvarlena(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varlena (strict fn).
+    let key = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_u32(::hashfn::hash_bytes(key.data())))
+}
+
+pub fn fc_hashvarlenaextended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varlena (strict fn).
+    let key = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let [_, seed] = fcinfo.args_n::<2>();
+    let seed = seed.value.as_u64();
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed)))
+}
+
 fn hashtext_nondeterministic(
     collid: types_core::Oid,
     data: &[u8],
@@ -632,6 +650,10 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(2166, "bttext_pattern_cmp", 2, fc_bttext_pattern_cmp),
     b(400, "hashtext", 1, fc_hashtext),
     b(448, "hashtextextended", 2, fc_hashtextextended),
+    b(456, "hashvarlena", 1, fc_hashvarlena),
+    b(772, "hashvarlenaextended", 2, fc_hashvarlenaextended),
+    b(6413, "hashbytea", 1, fc_hashvarlena),
+    b(6414, "hashbyteaextended", 2, fc_hashvarlenaextended),
     b(109, "unknownin", 1, fc_unknownin),
     b(110, "unknownout", 1, fc_unknownout),
     b(157, "textne", 2, fc_textne),
