@@ -1,10 +1,11 @@
 //! jsonpath executor (jsonpath_exec.c): executeItem machinery over the
 //! flattened JsonPath and on-disk jsonb containers, item methods, filter
-//! predicates, and the jsonb_path_* / @? / @@ SQL surface. JSON_TABLE
-//! (JsonbTableRoutine) is unported; the @?/@@ GIN index strategies stay loud
-//! in adt_jsonb::gin.
+//! predicates, the jsonb_path_* / @? / @@ SQL surface, and the JSON_TABLE
+//! plan walk (json_table). The @?/@@ GIN index strategies stay loud in
+//! adt_jsonb::gin.
 
 pub mod builtins;
+pub mod json_table;
 #[cfg(test)]
 mod tests;
 

@@ -413,7 +413,9 @@ fn walker<'w, 'mcx: 'w>(
             for e in tf.coldefexprs.iter() {
                 walk_opt(e, context)?;
             }
-            walk_list(&tf.colvalexprs, context)?;
+            for e in tf.colvalexprs.iter() {
+                walk_opt(e, context)?;
+            }
             walk_list(&tf.passingvalexprs, context)
         }
         NodeTag::T_RangeTblFunction => {

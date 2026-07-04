@@ -329,7 +329,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(tf.rowexpr, w)?
                 || walk_opt_list(&tf.colexprs, w)?
                 || walk_opt_list(&tf.coldefexprs, w)?
-                || walk_list(&tf.colvalexprs, w)?
+                || walk_opt_list(&tf.colvalexprs, w)?
                 || walk_list(&tf.passingvalexprs, w)?)
         }
         NodeTag::T_InferenceElem => walk_opt(node.as_inference_elem().unwrap().expr, w),
@@ -648,6 +648,24 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(f.output, w)?
                 || walk_opt(f.on_empty, w)?
                 || walk_opt(f.on_error, w)?)
+        }
+        NodeTag::T_JsonTable => {
+            let jt = node.as_json_table().unwrap();
+            Ok(walk_opt(jt.context_item, w)?
+                || walk_opt(jt.pathspec, w)?
+                || walk_list(&jt.passing, w)?
+                || walk_list(&jt.columns, w)?
+                || walk_opt(jt.on_error, w)?)
+        }
+        NodeTag::T_JsonTableColumn => {
+            let jtc = node.as_json_table_column().unwrap();
+            Ok(walk_opt(jtc.typeName, w)?
+                || walk_opt(jtc.on_empty, w)?
+                || walk_opt(jtc.on_error, w)?
+                || walk_list(&jtc.columns, w)?)
+        }
+        NodeTag::T_JsonTablePathSpec => {
+            walk_opt(node.as_json_table_path_spec().unwrap().string, w)
         }
         NodeTag::T_JsonOutput => {
             let o = node.as_json_output().unwrap();
@@ -1784,7 +1802,7 @@ where
             };
             let colexprs = mutate_opt_list(mcx, &tf.colexprs, m)?;
             let coldefexprs = mutate_opt_list(mcx, &tf.coldefexprs, m)?;
-            let colvalexprs = mutate_list(mcx, &tf.colvalexprs, m)?;
+            let colvalexprs = mutate_opt_list(mcx, &tf.colvalexprs, m)?;
             let passingvalexprs = mutate_list(mcx, &tf.passingvalexprs, m)?;
             if ns_uris.is_none()
                 && docexpr.is_none()

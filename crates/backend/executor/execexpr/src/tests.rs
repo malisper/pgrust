@@ -100,6 +100,58 @@ fn install_seams() {
             })
         });
         install_domain_seams();
+        install_json_seams();
+    });
+}
+
+const TEXTOID_T: u32 = 25;
+const JSONBOID_T: u32 = 3802;
+const JSONPATHOID_T: u32 = 4072;
+
+fn install_json_seams() {
+    let _ = mbutils::SetDatabaseEncoding(wchar::PG_UTF8);
+    mbutils::init_seams();
+    postgres_seams::check_for_interrupts::set(|| Ok(()));
+    syscache_seams::pg_type_typtype::set(|typid| {
+        Ok(match typid {
+            INT4OID | BOOLOID | TEXTOID_T | JSONBOID_T | JSONPATHOID_T => Some(b'b' as i8),
+            DOMAIN_OID => Some(b'd' as i8),
+            _ => None,
+        })
+    });
+    syscache_seams::pg_type_base_shape::set(|typid| {
+        Ok(matches!(typid, INT4OID | BOOLOID | TEXTOID_T | JSONBOID_T).then_some(
+            syscache_seams::PgTypeBaseShape {
+                typtype: b'b' as i8,
+                typbasetype: 0,
+                typtypmod: -1,
+                typelem: 0,
+                typsubscript: 0,
+            },
+        ))
+    });
+    syscache_seams::pg_type_io_shape::set(|typid| {
+        let mk = |typinput, typoutput, typlen, typbyval| syscache_seams::PgTypeIoShape {
+            oid: typid,
+            typinput,
+            typoutput,
+            typreceive: 0,
+            typsend: 0,
+            typmodin: 0,
+            typmodout: 0,
+            typelem: 0,
+            typlen,
+            typbyval,
+            typalign: b'i' as i8,
+            typdelim: b',' as i8,
+            typisdefined: true,
+        };
+        Ok(match typid {
+            INT4OID => Some(mk(42, 43, 4, true)),
+            TEXTOID_T => Some(mk(46, 47, -1, false)),
+            JSONBOID_T => Some(mk(3806, 3805, -1, false)),
+            _ => None,
+        })
     });
 }
 
@@ -1710,4 +1762,482 @@ fn qual_bitmap_matches_scalar_cmp() {
         &mut sel,
     );
     assert_eq!(sel[0], 0b101);
+}
+
+mod json {
+    use super::*;
+    use ::datum::NullableDatum;
+    use ::types_nodes::primnodes::{
+        CaseTestExpr, JsonBehavior, JsonBehaviorType as JBT, JsonExpr, JsonExprOp as JOP,
+        JsonReturning, JsonWrapper as JW,
+    };
+
+    use crate::compile::exec_init_expr_with_case_test;
+
+    fn jsonb_datum<'m>(mcx: Mcx<'m>, json: &str) -> Datum {
+        let img = adt_jsonb::io::jsonb_in(mcx, json.as_bytes(), None)
+            .unwrap_or_else(|e| panic!("jsonb_in({json:?}): {}", e.message()))
+            .expect("hard path returns Some");
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        core::mem::forget(img);
+        d
+    }
+
+    fn jsonb_const<'m>(mcx: Mcx<'m>, json: &str) -> Node<'m> {
+        Node::mk_const(mcx, JSONBOID_T, -1, 0, -1, jsonb_datum(mcx, json), false, false).unwrap()
+    }
+
+    fn path_const<'m>(mcx: Mcx<'m>, path: &str) -> Node<'m> {
+        let img = adt_jsonpath::path::jsonpath_in(mcx, path.as_bytes(), None)
+            .unwrap_or_else(|e| panic!("jsonpath_in({path:?}): {}", e.message()))
+            .expect("hard path returns Some");
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        core::mem::forget(img);
+        Node::mk_const(mcx, JSONPATHOID_T, -1, 0, -1, d, false, false).unwrap()
+    }
+
+    fn behavior<'m>(mcx: Mcx<'m>, btype: JBT, expr: Node<'m>) -> Node<'m> {
+        Node::mk(mcx, JsonBehavior { btype, expr: Some(expr), coerce: false, location: -1 })
+            .unwrap()
+    }
+
+    fn null_const<'m>(mcx: Mcx<'m>, typid: u32) -> Node<'m> {
+        let (len, byval) = match typid {
+            INT4OID => (4, true),
+            BOOLOID => (1, true),
+            _ => (-1, false),
+        };
+        Node::mk_const(mcx, typid, -1, 0, len, Datum::null(), true, byval).unwrap()
+    }
+
+    fn bool_const<'m>(mcx: Mcx<'m>, b: bool) -> Node<'m> {
+        Node::mk_const(mcx, BOOLOID, -1, 0, 1, Datum::from_bool(b), false, true).unwrap()
+    }
+
+    struct Spec<'m> {
+        op: JOP,
+        formatted: Node<'m>,
+        path: Node<'m>,
+        ret_typid: u32,
+        use_io: bool,
+        use_json: bool,
+        wrapper: JW,
+        omit_quotes: bool,
+        on_empty: Option<Node<'m>>,
+        on_error: Node<'m>,
+        passing: &'m [(&'m str, Node<'m>)],
+    }
+
+    fn mk_json_expr<'m>(mcx: Mcx<'m>, spec: Spec<'m>) -> Node<'m> {
+        let returning: &JsonReturning<'_> = ::mcx::leak_in(
+            ::mcx::alloc_in(
+                mcx,
+                JsonReturning { format: None, typid: spec.ret_typid, typmod: -1 },
+            )
+            .unwrap(),
+        );
+        let mut names = PgVec::new_in(mcx);
+        let mut values = PgVec::new_in(mcx);
+        for &(n, v) in spec.passing {
+            names.push(Node::mk_string(mcx, n).unwrap());
+            values.push(v);
+        }
+        Node::mk(
+            mcx,
+            JsonExpr {
+                op: spec.op,
+                column_name: None,
+                formatted_expr: Some(spec.formatted),
+                format: None,
+                path_spec: Some(spec.path),
+                returning: Some(returning),
+                passing_names: NodeList::from_slice(mcx, &names).unwrap(),
+                passing_values: NodeList::from_slice(mcx, &values).unwrap(),
+                on_empty: spec.on_empty,
+                on_error: Some(spec.on_error),
+                use_io_coercion: spec.use_io,
+                use_json_coercion: spec.use_json,
+                wrapper: spec.wrapper,
+                omit_quotes: spec.omit_quotes,
+                collation: 0,
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn eval<'m>(mcx: Mcx<'m>, expr: Node<'m>) -> ::types_error::PgResult<NullableDatum> {
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        exec_eval_expr(&mut state, &mut slots)
+    }
+
+    fn jsonb_datum_string(mcx: Mcx<'_>, d: Datum) -> std::string::String {
+        // SAFETY: a live 4B-header jsonb image produced by this crate's steps.
+        let payload = unsafe {
+            let p = d.as_usize() as *const u8;
+            let total = ::types_tuple::varatt::varsize_4b(p);
+            core::slice::from_raw_parts(p.add(4), total - 4)
+        };
+        let v = adt_jsonb::io::jsonb_out(mcx, payload).unwrap();
+        std::string::String::from_utf8(v[..v.len() - 1].to_vec()).unwrap()
+    }
+
+    fn text_datum_string(d: Datum) -> std::string::String {
+        // SAFETY: a live 4B-header text image produced by this crate's steps.
+        let bytes = unsafe {
+            let p = d.as_usize() as *const u8;
+            let total = ::types_tuple::varatt::varsize_4b(p);
+            core::slice::from_raw_parts(p.add(4), total - 4)
+        };
+        std::string::String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn exists_spec<'m>(mcx: Mcx<'m>, doc: &str, path: &str, on_error: Node<'m>) -> Spec<'m> {
+        Spec {
+            op: JOP::JSON_EXISTS_OP,
+            formatted: jsonb_const(mcx, doc),
+            path: path_const(mcx, path),
+            ret_typid: BOOLOID,
+            use_io: false,
+            use_json: false,
+            wrapper: JW::JSW_UNSPEC,
+            omit_quotes: false,
+            on_empty: None,
+            on_error,
+            passing: &[],
+        }
+    }
+
+    #[test]
+    fn json_exists_true_false() {
+        with_mcx(|mcx| {
+            for (path, want) in [("$.a", true), ("$.nope", false)] {
+                let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, bool_const(mcx, false));
+                let expr = mk_json_expr(mcx, exists_spec(mcx, r#"{"a": 1}"#, path, on_error));
+                let r = eval(mcx, expr).unwrap();
+                assert_eq!((r.isnull, r.value.as_bool()), (false, want), "{path}");
+            }
+        });
+    }
+
+    #[test]
+    fn json_exists_error_suppressed_to_false() {
+        with_mcx(|mcx| {
+            let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, bool_const(mcx, false));
+            let expr =
+                mk_json_expr(mcx, exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error));
+            let r = eval(mcx, expr).unwrap();
+            assert_eq!((r.isnull, r.value.as_bool()), (false, false));
+        });
+    }
+
+    #[test]
+    fn json_exists_error_on_error_throws() {
+        with_mcx(|mcx| {
+            let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, BOOLOID));
+            let expr =
+                mk_json_expr(mcx, exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error));
+            assert!(eval(mcx, expr).is_err());
+        });
+    }
+
+    #[test]
+    fn json_exists_passing_vars() {
+        with_mcx(|mcx| {
+            for (v, want) in [(5, true), (1, false)] {
+                let passing: &[(&str, Node<'_>)] =
+                    ::mcx::leak_in(::mcx::alloc_in(mcx, [("x", mk_int4_const(mcx, Some(v)))]).unwrap());
+                let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, bool_const(mcx, false));
+                let mut spec = exists_spec(mcx, "3", "$ ? (@ < $x)", on_error);
+                spec.passing = passing;
+                let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+                assert_eq!((r.isnull, r.value.as_bool()), (false, want), "x={v}");
+            }
+        });
+    }
+
+    #[test]
+    fn json_exists_int_coercion() {
+        with_mcx(|mcx| {
+            for (path, want) in [("$.a", 1), ("$.nope", 0)] {
+                let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, mk_int4_const(mcx, Some(0)));
+                let mut spec = exists_spec(mcx, r#"{"a": 1}"#, path, on_error);
+                spec.ret_typid = INT4OID;
+                spec.use_json = true;
+                let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+                assert_eq!((r.isnull, r.value.as_i32()), (false, want), "{path}");
+            }
+        });
+    }
+
+    fn query_spec<'m>(mcx: Mcx<'m>, doc: &str, path: &str, wrapper: JW) -> Spec<'m> {
+        Spec {
+            op: JOP::JSON_QUERY_OP,
+            formatted: jsonb_const(mcx, doc),
+            path: path_const(mcx, path),
+            ret_typid: JSONBOID_T,
+            use_io: false,
+            use_json: false,
+            wrapper,
+            omit_quotes: false,
+            on_empty: Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, JSONBOID_T))),
+            on_error: behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, JSONBOID_T)),
+            passing: &[],
+        }
+    }
+
+    #[test]
+    fn json_query_wrapper_modes() {
+        with_mcx(|mcx| {
+            let doc = r#"{"a": [1, 2, 3]}"#;
+            let cases = [
+                ("$.a[*]", JW::JSW_UNCONDITIONAL, Some("[1, 2, 3]")),
+                ("$.a[*]", JW::JSW_CONDITIONAL, Some("[1, 2, 3]")),
+                ("$.a[0]", JW::JSW_CONDITIONAL, Some("1")),
+                ("$.a", JW::JSW_NONE, Some("[1, 2, 3]")),
+                // multiple items, no wrapper: error, suppressed to NULL ON ERROR
+                ("$.a[*]", JW::JSW_NONE, None),
+            ];
+            for (path, wrapper, want) in cases {
+                let r = eval(mcx, mk_json_expr(mcx, query_spec(mcx, doc, path, wrapper))).unwrap();
+                match want {
+                    Some(s) => {
+                        assert!(!r.isnull, "{path} {wrapper:?}");
+                        assert_eq!(jsonb_datum_string(mcx, r.value), s, "{path} {wrapper:?}");
+                    }
+                    None => assert!(r.isnull, "{path} {wrapper:?}"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn json_query_on_empty_null() {
+        with_mcx(|mcx| {
+            let r = eval(
+                mcx,
+                mk_json_expr(mcx, query_spec(mcx, r#"{"a": 1}"#, "$.nope", JW::JSW_UNSPEC)),
+            )
+            .unwrap();
+            assert!(r.isnull);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "json_populate_type")]
+    fn json_query_omit_quotes_coercion_is_loud() {
+        with_mcx(|mcx| {
+            let mut spec = query_spec(mcx, r#"{"a": "hi"}"#, "$.a", JW::JSW_UNSPEC);
+            spec.omit_quotes = true;
+            spec.use_json = true;
+            let _ = eval(mcx, mk_json_expr(mcx, spec));
+        });
+    }
+
+    fn value_spec<'m>(mcx: Mcx<'m>, doc: &str, path: &str, ret_typid: u32) -> Spec<'m> {
+        Spec {
+            op: JOP::JSON_VALUE_OP,
+            formatted: jsonb_const(mcx, doc),
+            path: path_const(mcx, path),
+            ret_typid,
+            use_io: ret_typid != TEXTOID_T,
+            use_json: false,
+            wrapper: JW::JSW_UNSPEC,
+            omit_quotes: true,
+            on_empty: Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, ret_typid))),
+            on_error: behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, ret_typid)),
+            passing: &[],
+        }
+    }
+
+    #[test]
+    fn json_value_returning_text() {
+        with_mcx(|mcx| {
+            for (doc, path, want) in [
+                (r#"{"a": "hi"}"#, "$.a", "hi"),
+                (r#"{"a": 1.50}"#, "$.a", "1.50"),
+                // C boolout: JSON_VALUE of a boolean renders "t"/"f".
+                (r#"{"a": true}"#, "$.a", "t"),
+            ] {
+                let r = eval(mcx, mk_json_expr(mcx, value_spec(mcx, doc, path, TEXTOID_T)))
+                    .unwrap();
+                assert!(!r.isnull, "{path}");
+                assert_eq!(text_datum_string(r.value), want, "{doc} {path}");
+            }
+        });
+    }
+
+    #[test]
+    fn json_value_returning_int4_io_coercion() {
+        with_mcx(|mcx| {
+            let r = eval(
+                mcx,
+                mk_json_expr(mcx, value_spec(mcx, r#"{"a": 42}"#, "$.a", INT4OID)),
+            )
+            .unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 42));
+        });
+    }
+
+    #[test]
+    fn json_value_returning_jsonb_io_coercion() {
+        with_mcx(|mcx| {
+            let r = eval(
+                mcx,
+                mk_json_expr(mcx, value_spec(mcx, r#"{"a": "hi"}"#, "$.a", JSONBOID_T)),
+            )
+            .unwrap();
+            assert!(!r.isnull);
+            assert_eq!(jsonb_datum_string(mcx, r.value), "\"hi\"");
+        });
+    }
+
+    #[test]
+    fn json_value_io_error_suppressed_to_null() {
+        with_mcx(|mcx| {
+            let r = eval(
+                mcx,
+                mk_json_expr(mcx, value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID)),
+            )
+            .unwrap();
+            assert!(r.isnull);
+        });
+    }
+
+    #[test]
+    fn json_value_io_error_throws_with_error_on_error() {
+        with_mcx(|mcx| {
+            let mut spec = value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID);
+            spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, INT4OID));
+            let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
+            assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+        });
+    }
+
+    #[test]
+    fn json_value_on_error_default_expr() {
+        with_mcx(|mcx| {
+            let mut spec = value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID);
+            spec.on_error =
+                behavior(mcx, JBT::JSON_BEHAVIOR_DEFAULT, mk_int4_const(mcx, Some(7)));
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
+        });
+    }
+
+    #[test]
+    fn json_value_on_empty_null_and_default() {
+        with_mcx(|mcx| {
+            let spec = value_spec(mcx, r#"{"a": 1}"#, "$.nope", INT4OID);
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert!(r.isnull);
+
+            let mut spec = value_spec(mcx, r#"{"a": 1}"#, "$.nope", INT4OID);
+            spec.on_empty = Some(behavior(
+                mcx,
+                JBT::JSON_BEHAVIOR_DEFAULT,
+                mk_int4_const(mcx, Some(5)),
+            ));
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 5));
+        });
+    }
+
+    #[test]
+    fn json_value_error_on_empty_throws_22035() {
+        with_mcx(|mcx| {
+            let mut spec = value_spec(mcx, r#"{"a": 1}"#, "$.nope", INT4OID);
+            spec.on_empty =
+                Some(behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, INT4OID)));
+            let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
+            assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NO_SQL_JSON_ITEM);
+            assert_eq!(e.message(), "no SQL/JSON item found for specified path");
+        });
+    }
+
+    #[test]
+    fn json_value_strict_structural_error_suppressed() {
+        with_mcx(|mcx| {
+            let spec = value_spec(mcx, r#"{"a": 1}"#, "strict $.a.b.c", TEXTOID_T);
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert!(r.isnull);
+        });
+    }
+
+    #[test]
+    fn ext_case_test_value_feeds_expression() {
+        with_mcx(|mcx| {
+            let ct = Node::mk(
+                mcx,
+                CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
+            )
+            .unwrap();
+            let mut state =
+                exec_init_expr_with_case_test(mcx, Some(ct), ParamBind::NONE).unwrap().unwrap();
+            state.arm_result_mcx(mcx);
+            for v in [3i32, -8] {
+                state.set_case_test(NullableDatum { value: Datum::from_i32(v), isnull: false });
+                let mut slots = EvalSlots::default();
+                let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+                assert_eq!((r.isnull, r.value.as_i32()), (false, v));
+            }
+            state.set_case_test(NullableDatum::null());
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(r.isnull);
+        });
+    }
+
+    #[test]
+    fn ext_case_test_feeds_json_expr_formatted_expr() {
+        with_mcx(|mcx| {
+            let ct = Node::mk(
+                mcx,
+                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+            )
+            .unwrap();
+            let mut spec = value_spec(mcx, "{}", "$.a", TEXTOID_T);
+            spec.formatted = ct;
+            let expr = mk_json_expr(mcx, spec);
+            let mut state =
+                exec_init_expr_with_case_test(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            state.arm_result_mcx(mcx);
+            for (doc, want) in [(r#"{"a": "x"}"#, Some("x")), (r#"{"a": "y"}"#, Some("y")), (r#"{"b": 1}"#, None)]
+            {
+                state.set_case_test(NullableDatum {
+                    value: jsonb_datum(mcx, doc),
+                    isnull: false,
+                });
+                let mut slots = EvalSlots::default();
+                let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+                match want {
+                    Some(s) => {
+                        assert!(!r.isnull, "{doc}");
+                        assert_eq!(text_datum_string(r.value), s, "{doc}");
+                    }
+                    None => assert!(r.isnull, "{doc}"),
+                }
+            }
+            // NULL input document -> NULL result via the jump-return-null path.
+            state.set_case_test(NullableDatum::null());
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(r.isnull);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "EEOP_CASE_TESTVAL_EXT")]
+    fn ext_case_test_without_permission_stays_loud() {
+        with_mcx(|mcx| {
+            let ct = Node::mk(
+                mcx,
+                CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
+            )
+            .unwrap();
+            let _ = exec_init_expr(mcx, Some(ct), ParamBind::NONE);
+        });
+    }
 }

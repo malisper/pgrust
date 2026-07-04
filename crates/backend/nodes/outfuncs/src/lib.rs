@@ -360,6 +360,32 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, j.omit_quotes);
             w!(out, " :collation {} :location -1}}", j.collation);
         }
+        NodeTag::T_JsonTablePath => {
+            let p = node.as_json_table_path().expect("JsonTablePath");
+            w!(out, "{{JSONTABLEPATH :value ");
+            out_opt_node(out, p.value)?;
+            w!(out, " :name ");
+            out_str(out, p.name);
+            w!(out, "}}");
+        }
+        NodeTag::T_JsonTablePathScan => {
+            let s = node.as_json_table_path_scan().expect("JsonTablePathScan");
+            w!(out, "{{JSONTABLEPATHSCAN :path ");
+            out_opt_node(out, s.path)?;
+            w!(out, " :errorOnError ");
+            out_bool(out, s.errorOnError);
+            w!(out, " :child ");
+            out_opt_node(out, s.child)?;
+            w!(out, " :colMin {} :colMax {}}}", s.colMin, s.colMax);
+        }
+        NodeTag::T_JsonTableSiblingJoin => {
+            let j = node.as_json_table_sibling_join().expect("JsonTableSiblingJoin");
+            w!(out, "{{JSONTABLESIBLINGJOIN :lplan ");
+            out_opt_node(out, j.lplan)?;
+            w!(out, " :rplan ");
+            out_opt_node(out, j.rplan)?;
+            w!(out, "}}");
+        }
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
@@ -1020,7 +1046,7 @@ fn out_table_func(out: &mut PgString<'_>, tf: &TableFunc<'_>) -> PgResult<()> {
     w!(out, " :coldefexprs ");
     out_opt_list(out, &tf.coldefexprs)?;
     w!(out, " :colvalexprs ");
-    out_list(out, &tf.colvalexprs)?;
+    out_opt_list(out, &tf.colvalexprs)?;
     w!(out, " :passingvalexprs ");
     out_list(out, &tf.passingvalexprs)?;
     w!(out, " :notnulls ");

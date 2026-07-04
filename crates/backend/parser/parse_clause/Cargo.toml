@@ -9,6 +9,10 @@ name = "parse_clause"
 path = "src/lib.rs"
 
 [dependencies]
+adt_json = { path = "../../utils/adt/json" }
+adt_jsonpath = { path = "../../utils/adt/jsonpath" }
+datum = { path = "../../../_support/types/datum" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
 parse_utilcmd = { path = "../parse_utilcmd" }
 catalog = { path = "../../catalog/catalog" }
 table = { path = "../../access/table/table" }
@@ -39,7 +43,6 @@ vars = { path = "../../optimizer/util/vars" }
 
 relation_seams = { path = "../../access/common/relation_seams" }
 [dev-dependencies]
-datum = { path = "../../../_support/types/datum" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

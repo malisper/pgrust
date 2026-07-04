@@ -2891,7 +2891,7 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_TableFunc => {
             let tf = node.as_table_func().unwrap();
             for a in
-                tf.ns_uris.iter().chain(tf.colvalexprs.iter()).chain(tf.passingvalexprs.iter())
+                tf.ns_uris.iter().chain(tf.colvalexprs.iter().flatten()).chain(tf.passingvalexprs.iter())
             {
                 fix_scan_expr_walker(run, a)?;
             }

@@ -360,7 +360,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         }
         NodeTag::T_TableFunc => {
             let tf = node.as_table_func().unwrap();
-            for a in tf.ns_uris.iter().chain(tf.colvalexprs.iter()).chain(tf.passingvalexprs.iter())
+            for a in tf.ns_uris.iter().chain(tf.colvalexprs.iter().flatten()).chain(tf.passingvalexprs.iter())
             {
                 cost_qual_eval_walker(a, cost)?;
             }

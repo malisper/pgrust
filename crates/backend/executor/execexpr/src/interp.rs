@@ -590,6 +590,39 @@ fn run_program<'mcx>(
                     write_out(*out, v, isnull);
                 }
             }
+            Step::IoCoerceSafe { calls, out } => {
+                // SAFETY: 'mcx-owned pair written once at compile.
+                let c = unsafe { calls.as_ref() };
+                let nd = read_out(*out);
+                let strv = if nd.isnull {
+                    NullableDatum { value: Datum::null(), isnull: true }
+                } else {
+                    // SAFETY: arg 0 of the outcall's live fcinfo image.
+                    unsafe {
+                        crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
+                            .write(NullableDatum { value: nd.value, isnull: false })
+                    };
+                    let (v, isnull) = invoke(&c.outcall)?;
+                    NullableDatum { value: v, isnull }
+                };
+                if !c.in_strict || !strv.isnull {
+                    // SAFETY: arg 0 of the incall's live fcinfo image.
+                    unsafe {
+                        crate::steps::arg_slot_of(c.incall.fcinfo, 0)
+                            .write(NullableDatum { value: strv.value, isnull: nd.isnull })
+                    };
+                    let (v, _) = invoke(&c.incall)?;
+                    // SAFETY: context is the compile-armed ErrorSaveNode
+                    // (IoCoerceSafe invariant), no other reference live.
+                    let soft = unsafe { fcinfo_mut(c.incall.fcinfo, 3).soft_error_context() }
+                        .is_some_and(|ctx| ctx.error_occurred());
+                    if soft {
+                        write_out(*out, Datum::null(), true);
+                    } else {
+                        write_out(*out, v, nd.isnull);
+                    }
+                }
+            }
             Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
                 let arr = read_out(*out);
                 let (value, isnull) = eval_scalar_array_op(
@@ -631,6 +664,18 @@ fn run_program<'mcx>(
             }
             Step::JsonConstructor { jcstate, frame, out } => {
                 eval_json_constructor_step(frames, *jcstate, *frame, *out)?;
+            }
+            Step::JsonExprPath { jsestate, frame, out } => {
+                let target = eval_json_expr_path(frames, *jsestate, *frame, *out)?;
+                // SAFETY: jump targets validated < steps.len() at ready.
+                sp = unsafe { base.add(target as usize) };
+                continue;
+            }
+            Step::JsonCoercion { jc, frame, out } => {
+                eval_json_coercion(frames, *jc, *frame, *out)?;
+            }
+            Step::JsonCoercionFinish { jsestate, out } => {
+                eval_json_coercion_finish(*jsestate, *out)?;
             }
             Step::IsJson { exprtype, item_type, unique_keys, frame, out } => {
                 eval_is_json_step(frames, *exprtype, *item_type, *unique_keys, *frame, *out)?;
@@ -1992,6 +2037,423 @@ fn eval_json_constructor(
             panic!("invalid JsonConstructorExpr type {:?} in EEOP_JSON_CONSTRUCTOR", jc.ctor_type)
         }
     }
+}
+
+/// C DatumGetJsonbP/DatumGetJsonPathP: detoast; short varlenas expand to an
+/// aligned 4B-header copy (containers hold int32 words).
+/// # Safety
+/// `d` is a live by-ref varlena datum readable through its header.
+unsafe fn varlena_image_4b<'m>(mcx: ::mcx::Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p))
+        {
+            let image = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+            Ok(detoast_seams::detoast_attr::call(mcx, image)?.leak())
+        } else if varatt::varatt_is_1b(p) {
+            let payload = core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            );
+            let mut v: ::mcx::PgVec<'m, u8> =
+                ::mcx::vec_with_capacity_in(mcx, ::datum::varlena::VARHDRSZ + payload.len())?;
+            ::mcx::vec_append_bytes(
+                &mut v,
+                &::datum::varlena::set_varsize_4b(::datum::varlena::VARHDRSZ + payload.len()),
+            )?;
+            ::mcx::vec_append_bytes(&mut v, payload)?;
+            Ok(v.leak())
+        } else {
+            Ok(core::slice::from_raw_parts(p, varatt::varsize_4b(p)))
+        }
+    }
+}
+
+fn cstring_in<'m>(mcx: ::mcx::Mcx<'m>, bytes: &[u8]) -> PgResult<::mcx::PgVec<'m, u8>> {
+    let mut v = ::mcx::vec_with_capacity_in(mcx, bytes.len() + 1)?;
+    ::mcx::vec_append_bytes(&mut v, bytes)?;
+    v.push(0);
+    Ok(v)
+}
+
+// C ExecGetJsonValueItemString minus the jbvNull leg (the caller's Null
+// variant covers it); NUL-terminated cstring image in mcx.
+fn json_value_item_cstring<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    item: &::adt_jsonpath_exec::JbV<'_>,
+) -> PgResult<::mcx::PgVec<'m, u8>> {
+    use ::adt_formatting::ParsedDatetime;
+    use ::adt_jsonpath_exec::JbV;
+    match item {
+        JbV::Null => panic!("unexpected jbvNull in ExecGetJsonValueItemString"),
+        JbV::String(s) => cstring_in(mcx, s),
+        JbV::Numeric(img) => {
+            let mut buf = alloc::vec::Vec::new();
+            ::adt_numeric::numeric_out_into(::adt_numeric::Num::from_payload(&img[4..]), &mut buf);
+            cstring_in(mcx, &buf)
+        }
+        JbV::Bool(b) => cstring_in(mcx, if *b { b"t" } else { b"f" }),
+        JbV::Datetime { value, .. } => {
+            let mut buf = [0u8; ::adt_datetime::consts::MAXDATELEN + 1];
+            let n = match value {
+                ParsedDatetime::Date(d) => ::adt_date::date_out(*d, &mut buf),
+                ParsedDatetime::Time(t) => ::adt_date::time_out(*t, &mut buf),
+                ParsedDatetime::TimeTz(t) => ::adt_date::timetz_out(t, &mut buf),
+                ParsedDatetime::Timestamp(ts) => ::adt_timestamp::timestamp_out(*ts, &mut buf)?,
+                ParsedDatetime::TimestampTz(ts) => {
+                    ::adt_timestamp::timestamptz_out(*ts, &mut buf)?
+                }
+            };
+            cstring_in(mcx, &buf[..n])
+        }
+        JbV::Binary(_) => {
+            let img = ::adt_jsonpath_exec::jbv_to_jsonb_image(mcx, item)?;
+            ::adt_jsonb::io::jsonb_out(mcx, &img[4..])
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn no_json_item(column_name: Option<&str>) -> Box<PgError> {
+    let msg = match column_name {
+        Some(col) => {
+            format!("no SQL/JSON item found for specified path of column \"{col}\"")
+        }
+        None => "no SQL/JSON item found for specified path".to_string(),
+    };
+    Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_NO_SQL_JSON_ITEM))
+}
+
+// C ExecEvalJsonExprPath (execExprInterp.c:4834); returns the next step
+// address (jump_error/jump_empty/jump_eval_coercion/jump_end).
+#[inline(never)]
+fn eval_json_expr_path(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    jsestate: core::ptr::NonNull<crate::steps::JsonExprState>,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<u32> {
+    use ::adt_jsonpath_exec::{JsonPathQueryResult, JsonPathValueResult};
+    use ::types_core::catalog::{JSONBOID, JSONOID};
+    use ::types_nodes::primnodes::{JsonBehaviorType as JBT, JsonExprOp};
+
+    // The input fn's fcinfo context points into this state: no reference may
+    // live across invoke(); every access below is a short-scoped borrow.
+    let jsp = jsestate.as_ptr();
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+
+    // SAFETY: compile-allocated state; shared borrow of Copy fields, ends here.
+    let (op, formatted, pathspec, wrapper, returning_typid, use_io, use_json, throw_error, nvars, vars_p, var_cells, input_fcinfo, column_name_p, on_error_btype, on_empty_btype, jump_error, jump_empty, jump_eval_coercion, jump_end) = unsafe {
+        let js = &*jsp;
+        (
+            js.op,
+            js.formatted_expr,
+            js.pathspec,
+            js.wrapper,
+            js.returning_typid,
+            js.use_io_coercion,
+            js.use_json_coercion,
+            js.throw_error,
+            js.nvars as usize,
+            js.vars,
+            js.var_cells,
+            js.input_fcinfo,
+            js.column_name,
+            js.on_error_btype,
+            js.on_empty_btype,
+            js.jump_error,
+            js.jump_empty,
+            js.jump_eval_coercion,
+            js.jump_end,
+        )
+    };
+
+    debug_assert!(!formatted.isnull && !pathspec.isnull);
+    // SAFETY: by-ref jsonb/jsonpath datums written by the sub-expr steps just run.
+    let doc_image = unsafe { varlena_image_4b(mcx, formatted.value) }?;
+    // SAFETY: as above.
+    let path_image = unsafe { varlena_image_4b(mcx, pathspec.value) }?;
+    let doc = &doc_image[::datum::varlena::VARHDRSZ..];
+
+    // SAFETY: short-scoped exclusive borrow of the live state.
+    unsafe {
+        let js = &mut *jsp;
+        js.error = NullableDatum { value: Datum::null(), isnull: false };
+        js.empty = NullableDatum { value: Datum::null(), isnull: false };
+        js.escontext.ctx = ::types_error::SoftErrorContext::new(false);
+    }
+
+    // SAFETY: parallel compile-allocated nvars-long arrays; cells were written
+    // by the PASSING arg steps just run.
+    let vars: &[::adt_jsonpath_exec::JsonPathVariable<'static>] = unsafe {
+        for i in 0..nvars {
+            let cell = var_cells.as_ptr().add(i).read();
+            let v = &mut *vars_p.as_ptr().add(i);
+            v.value = cell.value;
+            v.isnull = cell.isnull;
+        }
+        core::slice::from_raw_parts(vars_p.as_ptr(), nvars)
+    };
+
+    let soft = !throw_error;
+    let column_name: Option<&str> = column_name_p.map(|p| {
+        // SAFETY: node-arena str restamped at compile; outlives the program.
+        unsafe { p.as_ref() }
+    });
+    let mut error = false;
+    let mut empty = false;
+    let mut val_string: Option<::mcx::PgVec<'_, u8>> = None;
+
+    match op {
+        JsonExprOp::JSON_EXISTS_OP => {
+            match ::adt_jsonpath_exec::json_path_exists(mcx, doc, path_image, soft, vars)? {
+                None => error = true,
+                Some(exists) => write_out(out, Datum::from_bool(exists), false),
+            }
+        }
+        JsonExprOp::JSON_QUERY_OP => {
+            match ::adt_jsonpath_exec::json_path_query(
+                mcx,
+                doc,
+                path_image,
+                wrapper,
+                soft,
+                vars,
+                column_name,
+            )? {
+                JsonPathQueryResult::Image(img) => write_out(out, image_datum(img), false),
+                JsonPathQueryResult::Empty => {
+                    empty = true;
+                    write_out(out, Datum::null(), true);
+                }
+                JsonPathQueryResult::Error => {
+                    error = true;
+                    write_out(out, Datum::null(), true);
+                }
+            }
+        }
+        JsonExprOp::JSON_VALUE_OP => {
+            match ::adt_jsonpath_exec::json_path_value(
+                mcx,
+                doc,
+                path_image,
+                soft,
+                vars,
+                column_name,
+            )? {
+                JsonPathValueResult::Empty => {
+                    empty = true;
+                    write_out(out, Datum::null(), true);
+                }
+                JsonPathValueResult::Error => {
+                    error = true;
+                    write_out(out, Datum::null(), true);
+                }
+                JsonPathValueResult::Null => write_out(out, Datum::null(), true),
+                JsonPathValueResult::Value(jbv) => {
+                    if returning_typid == JSONOID || returning_typid == JSONBOID {
+                        let img = ::adt_jsonpath_exec::jbv_to_jsonb_image(mcx, &jbv)?;
+                        val_string =
+                            Some(::adt_jsonb::io::jsonb_out(mcx, &img[::datum::varlena::VARHDRSZ..])?);
+                    } else if use_json {
+                        let img = ::adt_jsonpath_exec::jbv_to_jsonb_image(mcx, &jbv)?;
+                        write_out(out, image_datum(img), false);
+                    } else {
+                        let s = json_value_item_cstring(mcx, &jbv)?;
+                        if use_io {
+                            let cur = read_out(out);
+                            write_out(out, cur.value, false);
+                        } else {
+                            // C DirectFunctionCall1(textin, val_string).
+                            let text = &s[..s.len() - 1];
+                            let mut img = ::mcx::vec_with_capacity_in(
+                                mcx,
+                                ::datum::varlena::VARHDRSZ + text.len(),
+                            )?;
+                            ::mcx::vec_append_bytes(
+                                &mut img,
+                                &::datum::varlena::set_varsize_4b(
+                                    ::datum::varlena::VARHDRSZ + text.len(),
+                                ),
+                            )?;
+                            ::mcx::vec_append_bytes(&mut img, text)?;
+                            write_out(out, image_datum(img), false);
+                        }
+                        val_string = Some(s);
+                    }
+                }
+            }
+        }
+        JsonExprOp::JSON_TABLE_OP => {
+            panic!("unrecognized SQL/JSON expression op {op:?} in EEOP_JSONEXPR_PATH")
+        }
+    }
+
+    let cur = read_out(out);
+    if !cur.isnull && use_io {
+        debug_assert!(jump_eval_coercion < 0);
+        let call = input_fcinfo.expect("io-coercion input call resolved at compile");
+        let s = val_string
+            .as_ref()
+            .unwrap_or_else(|| panic!("EEOP_JSONEXPR_PATH: use_io_coercion without a value string"));
+        // SAFETY: arg 0 of the compile-resolved 3-arg input fcinfo.
+        unsafe {
+            crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                value: Datum::from_usize(s.as_ptr() as usize),
+                isnull: false,
+            });
+        }
+        let (v, _) = invoke(&call)?;
+        write_out(out, v, false);
+        // SAFETY: short-scoped shared borrow after the call completed.
+        if unsafe { (*jsp).escontext.ctx.error_occurred() } {
+            error = true;
+        }
+    }
+
+    // SAFETY (all below): short-scoped exclusive borrows of the live state;
+    // no foreign call runs while one is held.
+    if empty {
+        write_out(out, Datum::null(), true);
+        if let Some(on_empty_btype) = on_empty_btype {
+            if on_empty_btype != JBT::JSON_BEHAVIOR_ERROR {
+                unsafe {
+                    let js = &mut *jsp;
+                    js.empty.value = Datum::from_bool(true);
+                    js.escontext.ctx = ::types_error::SoftErrorContext::new(true);
+                }
+                return Ok(if jump_empty >= 0 { jump_empty } else { jump_end } as u32);
+            }
+        } else if on_error_btype != JBT::JSON_BEHAVIOR_ERROR {
+            unsafe {
+                let js = &mut *jsp;
+                js.error.value = Datum::from_bool(true);
+                js.escontext.ctx = ::types_error::SoftErrorContext::new(true);
+            }
+            debug_assert!(soft);
+            return Ok(if jump_error >= 0 { jump_error } else { jump_end } as u32);
+        }
+        return Err(no_json_item(column_name));
+    }
+
+    if error {
+        debug_assert!(soft);
+        write_out(out, Datum::null(), true);
+        unsafe {
+            let js = &mut *jsp;
+            js.error.value = Datum::from_bool(true);
+            js.escontext.ctx = ::types_error::SoftErrorContext::new(true);
+        }
+        return Ok(if jump_error >= 0 { jump_error } else { jump_end } as u32);
+    }
+
+    Ok(if jump_eval_coercion >= 0 { jump_eval_coercion } else { jump_end } as u32)
+}
+
+// C ExecEvalJsonCoercion (execExprInterp.c:5111); every json_populate_type
+// leg is a loud panic (jsonfuncs lane).
+#[inline(never)]
+fn eval_json_coercion(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    jc: core::ptr::NonNull<crate::steps::JsonCoercionState>,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    // SAFETY: compile-allocated state, read-only here.
+    let st = unsafe { jc.as_ref() };
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+
+    if st.exists_coerce {
+        let cur = read_out(out);
+        if st.exists_cast_to_int {
+            if st.exists_check_domain {
+                panic!(
+                    "execexpr EEOP_JSONEXPR_COERCION: domain_check_safe over an EXISTS \
+                     integer-domain RETURNING type (execExprInterp.c:5132) unported — \
+                     jsonfuncs lane"
+                );
+            }
+            write_out(out, Datum::from_i32(cur.value.as_bool() as i32), cur.isnull);
+            return Ok(());
+        }
+        let img = ::adt_jsonb::io::jsonb_in(
+            mcx,
+            if cur.value.as_bool() { b"true" } else { b"false" },
+            None,
+        )?
+        .expect("hard errsave without escontext returns Err");
+        write_out(out, image_datum(img), cur.isnull);
+        if st.targettype == ::types_core::catalog::JSONBOID {
+            // C runs json_populate_type(jsonb -> jsonb, typmod -1): identity.
+            return Ok(());
+        }
+    }
+    panic!(
+        "execexpr EEOP_JSONEXPR_COERCION: json_populate_type (jsonfuncs.c) unported — \
+         jsonfuncs lane (targettype {})",
+        st.targettype
+    )
+}
+
+// C ExecEvalJsonCoercionFinish (execExprInterp.c:5191).
+#[inline(never)]
+fn eval_json_coercion_finish(
+    jsestate: core::ptr::NonNull<crate::steps::JsonExprState>,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    // SAFETY: compile-allocated state, exclusive during this step.
+    let js = unsafe { &mut *jsestate.as_ptr() };
+    if !js.escontext.ctx.error_occurred() {
+        return Ok(());
+    }
+    if js.error.value.as_bool() {
+        return Err(behavior_coercion_error(
+            "ON ERROR",
+            js.on_error_btype,
+            js.escontext.ctx.take_error(),
+        ));
+    }
+    if js.empty.value.as_bool() {
+        return Err(behavior_coercion_error(
+            "ON EMPTY",
+            js.on_empty_btype.expect("ON EMPTY coercion implies on_empty"),
+            js.escontext.ctx.take_error(),
+        ));
+    }
+    write_out(out, Datum::null(), true);
+    js.error.value = Datum::from_bool(true);
+    js.escontext.ctx = ::types_error::SoftErrorContext::new(true);
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn behavior_coercion_error(
+    clause: &str,
+    btype: ::types_nodes::primnodes::JsonBehaviorType,
+    saved: Option<PgError>,
+) -> Box<PgError> {
+    // C GetJsonBehaviorValueString: order matches JsonBehaviorType.
+    const NAMES: [&str; 9] = [
+        "NULL", "ERROR", "EMPTY", "TRUE", "FALSE", "UNKNOWN", "EMPTY ARRAY", "EMPTY OBJECT",
+        "DEFAULT",
+    ];
+    let mut e = PgError::error(format!(
+        "could not coerce {clause} expression ({}) to the RETURNING type",
+        NAMES[btype as usize]
+    ))
+    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+    if let Some(saved) = saved {
+        e = e.with_detail(saved.message().to_string());
+    }
+    Box::new(e)
 }
 
 // C ExecEvalJsonIsPredicate (execExprInterp.c:4735).

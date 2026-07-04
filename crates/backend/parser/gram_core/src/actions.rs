@@ -40,6 +40,7 @@ use types_nodes::rawnodes::{
     JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
     JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg, JsonObjectConstructor,
     JsonOutput, JsonParseExpr, JsonQuotes, JsonScalarExpr, JsonSerializeExpr,
+    JsonTableColumnType,
 };
 
 use types_nodes::rawnodes::CreateDomainStmt;
@@ -9881,10 +9882,200 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // --- json-table-lane arms (append-only) ---
+            // table_ref: json_table opt_alias_clause
+            //          | LATERAL_P json_table opt_alias_clause.
+            1842 | 1843 => {
+                let off = if rule == 1843 { 1 } else { 0 };
+                let jt = view.v(1 + off).node().expect("json_table");
+                let alias = view.v(2 + off).alias();
+                let lateral = rule == 1843;
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    jt.with_mut::<types_nodes::rawnodes::JsonTable, _>(|n| {
+                        n.alias = alias;
+                        if lateral {
+                            n.lateral = true;
+                        }
+                    })
+                    .expect("json_table is JsonTable")
+                };
+                *yyval = YYSTYPE::Node(Some(jt));
+            }
+            // json_table: JSON_TABLE '(' json_value_expr ',' a_expr
+            //   json_table_path_name_opt json_passing_clause_opt
+            //   COLUMNS '(' json_table_column_definition_list ')'
+            //   json_on_error_clause_opt ')'.
+            1921 => {
+                let path = view.v(5).node().expect("a_expr");
+                let is_string_const = path
+                    .as_a_const()
+                    .is_some_and(|c| matches!(c.val, Some(ValUnion::String(_))));
+                if !is_string_const {
+                    return Err(self.errposition_error_code(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "only string constants are supported in JSON_TABLE path specification"
+                            .into(),
+                        view.l(5),
+                    ));
+                }
+                let pathstring = match path.as_a_const().unwrap().val {
+                    Some(ValUnion::String(s)) => s.sval,
+                    _ => unreachable!(),
+                };
+                let name6 = view.v(6);
+                let name = if name6.is_null_node() { None } else { Some(name6.str_val()) };
+                let pathspec =
+                    self.make_json_table_path_spec(pathstring, name, view.l(5), view.l(6))?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::JsonTable {
+                        context_item: view.v(3).node(),
+                        pathspec: Some(pathspec),
+                        passing: view.v(7).list(),
+                        columns: view.v(10).list(),
+                        on_error: view.v(12).node(),
+                        alias: None,
+                        lateral: false,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // json_table_column_definition_list.
+            1924 => {
+                let n = view.v(1).node().expect("json_table_column_definition");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1925 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("json_table_column_definition"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // json_table_column_definition: ColId FOR ORDINALITY.
+            1926 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::JsonTableColumn {
+                        coltype: JsonTableColumnType::JTC_FOR_ORDINALITY,
+                        name: Some(view.v(1).str_val()),
+                        location: view.l(1),
+                        ..Default::default()
+                    },
+                )?));
+            }
+            // ColId Typename [json_format_clause] json_table_column_path_clause_opt
+            //   json_wrapper_behavior json_quotes_clause_opt json_behavior_clause_opt.
+            1927 | 1928 => {
+                let off = if rule == 1928 { 1 } else { 0 };
+                let format = if rule == 1928 {
+                    json_format_ref(view.v(3).node())
+                } else {
+                    json_format_ref(Some(Node::mk(mcx, JsonFormat::default())?))
+                };
+                let behaviors = view.v(6 + off).json_behaviors();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::JsonTableColumn {
+                        coltype: if rule == 1928 {
+                            JsonTableColumnType::JTC_FORMATTED
+                        } else {
+                            JsonTableColumnType::JTC_REGULAR
+                        },
+                        name: Some(view.v(1).str_val()),
+                        typeName: view.v(2).node(),
+                        pathspec: view.v(3 + off).node(),
+                        format,
+                        wrapper: json_wrapper(view.v(4 + off).ival()),
+                        quotes: json_quotes(view.v(5 + off).ival()),
+                        columns: NodeList::nil(),
+                        on_empty: behaviors.on_empty,
+                        on_error: behaviors.on_error,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // ColId Typename EXISTS json_table_column_path_clause_opt
+            //   json_on_error_clause_opt.
+            1929 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::JsonTableColumn {
+                        coltype: JsonTableColumnType::JTC_EXISTS,
+                        name: Some(view.v(1).str_val()),
+                        typeName: view.v(2).node(),
+                        pathspec: view.v(4).node(),
+                        format: json_format_ref(Some(Node::mk(mcx, JsonFormat::default())?)),
+                        wrapper: JsonWrapper::JSW_NONE,
+                        quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+                        columns: NodeList::nil(),
+                        on_empty: None,
+                        on_error: view.v(5).node(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // NESTED path_opt Sconst [AS name] COLUMNS '(' ... ')'.
+            1930 | 1931 => {
+                let (name, name_loc, cols_at) = if rule == 1931 {
+                    (Some(view.v(5).str_val()), view.l(5), 8)
+                } else {
+                    (None, -1, 6)
+                };
+                let pathspec = self.make_json_table_path_spec(
+                    view.v(3).str_val(),
+                    name,
+                    view.l(3),
+                    name_loc,
+                )?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::JsonTableColumn {
+                        coltype: JsonTableColumnType::JTC_NESTED,
+                        pathspec: Some(pathspec),
+                        columns: view.v(cols_at).list(),
+                        location: view.l(1),
+                        ..Default::default()
+                    },
+                )?));
+            }
+            // json_table_column_path_clause_opt: PATH Sconst.
+            1934 => {
+                *yyval = YYSTYPE::Node(Some(self.make_json_table_path_spec(
+                    view.v(2).str_val(),
+                    None,
+                    view.l(2),
+                    -1,
+                )?));
+            }
             // alter_table_cmd ENABLE/DISABLE RULE
             _ => unimplemented_rule(rule),
         }
         Ok(())
+    }
+
+    // makeJsonTablePathSpec (makefuncs.c): the path string re-wraps as an
+    // A_Const String at the string's location.
+    fn make_json_table_path_spec(
+        &self,
+        pathstring: &'mcx str,
+        name: Option<&'mcx str>,
+        string_location: i32,
+        name_location: i32,
+    ) -> PgResult<Node<'mcx>> {
+        let string = Node::mk_a_const(
+            self.mcx,
+            Some(ValUnion::String(types_nodes::String { sval: pathstring })),
+            string_location,
+        )?;
+        Node::mk(
+            self.mcx,
+            types_nodes::rawnodes::JsonTablePathSpec {
+                string: Some(string),
+                name,
+                name_location,
+                location: string_location,
+            },
+        )
     }
 
     // makeColumnRef: leading field selections fold into ColumnRef.fields; the

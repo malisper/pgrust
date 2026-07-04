@@ -305,6 +305,55 @@ pub enum Step {
     // last: preserves the hot variants' discriminants.
     FieldStoreDeForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
     FieldStoreForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
+    // C EEOP_JSONEXPR_PATH: a jumping step — evaluation returns the next step
+    // address (one of the state's jump_* fields).
+    JsonExprPath { jsestate: NonNull<JsonExprState>, frame: u32, out: OutRef },
+    JsonCoercion { jc: NonNull<JsonCoercionState>, frame: u32, out: OutRef },
+    JsonCoercionFinish { jsestate: NonNull<JsonExprState>, out: OutRef },
+    // C EEOP_IOCOERCE_SAFE: input-fn errors save into the fcinfo-armed
+    // ErrorSaveNode instead of throwing.
+    IoCoerceSafe { calls: NonNull<IoCoerceCalls>, out: OutRef },
+}
+
+// C JsonExprState (execnodes.h): resolve-once carrier for EEOP_JSONEXPR_*.
+// jump_* are absolute step addresses in the owning program (-1 = unset);
+// formatted_expr/pathspec/var_cells are written in place by sub-expr steps.
+pub struct JsonExprState {
+    pub op: ::types_nodes::primnodes::JsonExprOp,
+    pub column_name: Option<NonNull<str>>,
+    pub wrapper: ::adt_jsonpath_exec::JsonWrapper,
+    pub returning_typid: Oid,
+    pub use_io_coercion: bool,
+    pub use_json_coercion: bool,
+    pub throw_error: bool,
+    pub on_error_btype: ::types_nodes::primnodes::JsonBehaviorType,
+    pub on_empty_btype: Option<::types_nodes::primnodes::JsonBehaviorType>,
+    pub formatted_expr: NullableDatum,
+    pub pathspec: NullableDatum,
+    pub error: NullableDatum,
+    pub empty: NullableDatum,
+    pub nvars: u16,
+    // Parallel arrays: name/typid/typmod fixed at compile, value/isnull
+    // refreshed per eval from var_cells.
+    pub vars: NonNull<::adt_jsonpath_exec::JsonPathVariable<'static>>,
+    pub var_cells: NonNull<NullableDatum>,
+    pub jump_error: i32,
+    pub jump_empty: i32,
+    pub jump_eval_coercion: i32,
+    pub jump_end: i32,
+    pub input_fcinfo: Option<FuncCall>,
+    pub escontext: ::types_fmgr::ErrorSaveNode,
+}
+
+// C ExprEvalStep d.jsonexpr_coercion minus json_coercion_cache/escontext
+// (their legs are unported louds in the interp).
+pub struct JsonCoercionState {
+    pub targettype: Oid,
+    pub targettypmod: i32,
+    pub omit_quotes: bool,
+    pub exists_coerce: bool,
+    pub exists_cast_to_int: bool,
+    pub exists_check_domain: bool,
 }
 
 // Blessed tupdesc compile-resolved (C: rowcache on first eval); `columns` is
@@ -796,6 +845,13 @@ pub struct ExprState<'mcx> {
     pub(crate) innermost_domain: Option<OutRef>,
     // resmcx fields of allocating array-op step states, armed with frames.
     pub(crate) alloc_mcx_slots: PgVec<'mcx, NonNull<crate::arrayops::ResMcx>>,
+    // C ExprState.escontext: compile-time only; behavior-expr coercions under
+    // a JsonExpr compile against the owning JsonExprState's ErrorSaveNode.
+    pub(crate) escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
+    // C EEOP_CASE_TESTVAL_EXT stand-in: econtext caseValue collapses to one
+    // compile-allocated cell the caller writes via set_case_test (JSON_TABLE).
+    pub(crate) ext_case_test: Option<NonNull<NullableDatum>>,
+    pub(crate) allow_ext_case_test: bool,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -825,6 +881,9 @@ impl<'mcx> ExprState<'mcx> {
                 param_exec_deps: PgVec::new_in(mcx),
                 innermost_domain: None,
                 alloc_mcx_slots: PgVec::new_in(mcx),
+                escontext: None,
+                ext_case_test: None,
+                allow_ext_case_test: false,
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -942,6 +1001,20 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: slot points at a compile-allocated state's resmcx field;
             // the caller guarantees the armed context outlives evaluation.
             unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
+        }
+    }
+
+    /// Writes the externally-supplied CaseTestExpr value (C econtext
+    /// caseValue_datum/caseValue_isNull) read by EEOP_CASE_TESTVAL steps
+    /// compiled through [`crate::exec_init_expr_with_case_test`].
+    pub fn set_case_test(&mut self, nd: NullableDatum) {
+        debug_assert!(
+            self.ext_case_test.is_some(),
+            "set_case_test on a program with no external CaseTestExpr"
+        );
+        if let Some(cell) = self.ext_case_test {
+            // SAFETY: compile-allocated 'mcx cell, sole writer here.
+            unsafe { cell.write(nd) };
         }
     }
 

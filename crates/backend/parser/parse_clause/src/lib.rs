@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+mod parse_jsontable;
+
 #[cfg(test)]
 mod tests;
 
@@ -845,6 +847,15 @@ fn transformFromClauseItem<'mcx>(
             .expect("rtable cell is a RangeTblEntry");
             Ok((rel, nsitem))
         }
+        NodeTag::T_JsonTable => {
+            let nsitem = parse_jsontable::transformJsonTable(
+                mcx,
+                pstate,
+                n.as_json_table().unwrap(),
+            )?;
+            let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
+            Ok((rtr, nsitem))
+        }
         other => panic!(
             "transformFromClauseItem (parse_clause.c): arm for {other:?} \
              unported — unit backend-parser-clause"
@@ -1076,6 +1087,7 @@ fn tablesample_no_repeatable(
 }
 
 // XMLTABLE only; JSON_TABLE arrives as T_JsonTable, not here.
+// XMLTABLE only; JSON_TABLE arrives as T_JsonTable (parse_jsontable module).
 fn transformRangeTableFunc<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,

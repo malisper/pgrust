@@ -157,6 +157,28 @@ pub fn exec_init_expr_subplans_agg<'mcx>(
     Ok(Some(state))
 }
 
+/// [`exec_init_expr`] permitting an externally-supplied CaseTestExpr value
+/// (C EEOP_CASE_TESTVAL's econtext caseValue leg, the JSON_TABLE colvalexpr
+/// shape): the caller writes the cell via [`ExprState::set_case_test`]
+/// before each evaluation.
+pub fn exec_init_expr_with_case_test<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    params: ParamBind<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    let Some(node) = node else {
+        return Ok(None);
+    };
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    state.allow_ext_case_test = true;
+    create_expr_setup_steps(&mut state, mcx, &[node])?;
+    let rout = state.result_out();
+    init_expr_rec(node, &mut state, mcx, rout, None, params, None)?;
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    Ok(Some(state))
+}
+
 /// C `ExecInitQual`: implicit-AND qual list, empty -> None.
 pub fn exec_init_qual<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1563,6 +1585,17 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_CaseExpr => init_case_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CaseTestExpr => match state.innermost_case {
             Some(slot) => push_step(state, mcx, Step::CaseTestVal { slot, out }),
+            None if state.allow_ext_case_test => {
+                let slot = match state.ext_case_test {
+                    Some(s) => s,
+                    None => {
+                        let s = alloc_nullable_datum(mcx)?;
+                        state.ext_case_test = Some(s);
+                        s
+                    }
+                };
+                push_step(state, mcx, Step::CaseTestVal { slot, out })
+            }
             None => unported(
                 "EEOP_CASE_TESTVAL_EXT (externally supplied econtext caseValue — \
                  domain checks / ArrayCoerceExpr)",
@@ -1708,13 +1741,7 @@ pub(crate) fn init_expr_rec<'mcx>(
                 },
             )
         }
-        NodeTag::T_JsonExpr => panic!(
-            "execexpr ExecInitJsonExpr: JSON_EXISTS/JSON_QUERY/JSON_VALUE execution \
-             blocked on the jsonpath lane — interlock: adt_jsonpath jsonpath_exec \
-             (JsonPathExists/JsonPathQuery/JsonPathValue + GetJsonPathVar) and \
-             json_populate_type (jsonfuncs.c) must land, then ExecInitJsonExpr \
-             (execExpr.c:4750) lands here"
-        ),
+        NodeTag::T_JsonExpr => init_json_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
             Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
@@ -2645,6 +2672,314 @@ fn init_json_constructor<'mcx>(
     Ok(())
 }
 
+// The escontext embeds droppy PgError storage; like the categorize carriers
+// it lives for the ExprState's life and is never arena-dropped.
+fn alloc_json_expr_state<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: crate::steps::JsonExprState,
+) -> PgResult<NonNull<crate::steps::JsonExprState>> {
+    let p: NonNull<crate::steps::JsonExprState> = alloc_array_nodrop_exempt(mcx, 1)?;
+    // SAFETY: fresh exclusive allocation.
+    unsafe { p.write(v) };
+    Ok(p)
+}
+
+// C ExecInitJsonExpr (execExpr.c:4750).
+#[allow(clippy::too_many_arguments)]
+fn init_json_expr<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    use ::adt_jsonpath_exec::JsonPathVariable;
+    use ::types_nodes::primnodes::{
+        JsonBehavior, JsonBehaviorType, JsonExprOp, JsonWrapper as NodeWrapper,
+    };
+    use core::ptr::addr_of_mut;
+
+    let jsexpr = node.as_json_expr().unwrap();
+    let on_error: &JsonBehavior<'_> =
+        jsexpr.on_error.expect("JsonExpr.on_error").as_json_behavior().unwrap();
+    let on_empty: Option<&JsonBehavior<'_>> =
+        jsexpr.on_empty.map(|n| n.as_json_behavior().unwrap());
+    let returning = jsexpr.returning.expect("JsonExpr.returning");
+    let returning_domain = lsyscache::get_typtype(returning.typid)? == lsyscache::TYPTYPE_DOMAIN;
+
+    let nvars = jsexpr.passing_values.len();
+    let var_cells: NonNull<::datum::NullableDatum> = alloc_array(mcx, nvars)?;
+    // JsonPathVariable holds a name slice: no zero-init, every entry written below.
+    let vars: NonNull<JsonPathVariable<'static>> = alloc_array_nodrop_exempt(mcx, nvars)?;
+
+    let wrapper = match jsexpr.wrapper {
+        NodeWrapper::JSW_UNSPEC => ::adt_jsonpath_exec::JsonWrapper::Unspec,
+        NodeWrapper::JSW_NONE => ::adt_jsonpath_exec::JsonWrapper::None,
+        NodeWrapper::JSW_CONDITIONAL => ::adt_jsonpath_exec::JsonWrapper::Conditional,
+        NodeWrapper::JSW_UNCONDITIONAL => ::adt_jsonpath_exec::JsonWrapper::Unconditional,
+    };
+    let jsestate = alloc_json_expr_state(
+        mcx,
+        crate::steps::JsonExprState {
+            op: jsexpr.op,
+            // SAFETY: the node arena outlives the program (RowNullState restamp shape).
+            column_name: jsexpr.column_name.map(|s| {
+                NonNull::from(unsafe { core::mem::transmute::<&str, &'static str>(s) })
+            }),
+            wrapper,
+            returning_typid: returning.typid,
+            use_io_coercion: jsexpr.use_io_coercion,
+            use_json_coercion: jsexpr.use_json_coercion,
+            throw_error: on_error.btype == JsonBehaviorType::JSON_BEHAVIOR_ERROR,
+            on_error_btype: on_error.btype,
+            on_empty_btype: on_empty.map(|b| b.btype),
+            formatted_expr: ::datum::NullableDatum::null(),
+            pathspec: ::datum::NullableDatum::null(),
+            error: ::datum::NullableDatum::null(),
+            empty: ::datum::NullableDatum::null(),
+            nvars: nvars as u16,
+            vars,
+            var_cells,
+            jump_error: -1,
+            jump_empty: -1,
+            jump_eval_coercion: -1,
+            jump_end: -1,
+            input_fcinfo: None,
+            escontext: ::types_fmgr::ErrorSaveNode::new(false),
+        },
+    )?;
+    let jsp = jsestate.as_ptr();
+    // SAFETY: field projections of the live compile-allocated state.
+    let (fmt_out, path_out, error_out, empty_out) = unsafe {
+        (
+            OutRef(NonNull::new_unchecked(addr_of_mut!((*jsp).formatted_expr))),
+            OutRef(NonNull::new_unchecked(addr_of_mut!((*jsp).pathspec))),
+            OutRef(NonNull::new_unchecked(addr_of_mut!((*jsp).error))),
+            OutRef(NonNull::new_unchecked(addr_of_mut!((*jsp).empty))),
+        )
+    };
+
+    let mut jumps_return_null: PgVec<'_, usize> = PgVec::new_in(mcx);
+    init_expr_rec(
+        jsexpr.formatted_expr.expect("JsonExpr.formatted_expr"),
+        state,
+        mcx,
+        fmt_out,
+        agg,
+        params,
+        sub,
+    )?;
+    jumps_return_null.push(state.steps.len());
+    push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out: fmt_out })?;
+
+    init_expr_rec(jsexpr.path_spec.expect("JsonExpr.path_spec"), state, mcx, path_out, agg, params, sub)?;
+    jumps_return_null.push(state.steps.len());
+    push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out: path_out })?;
+
+    for (i, (argexpr, argname)) in
+        jsexpr.passing_values.iter().zip(jsexpr.passing_names.iter()).enumerate()
+    {
+        let name = argname.as_string().expect("passing name is a String node").sval;
+        // SAFETY: i < nvars fresh slots; the node arena outlives the program.
+        unsafe {
+            vars.as_ptr().add(i).write(JsonPathVariable {
+                name: core::mem::transmute::<&[u8], &'static [u8]>(name.as_bytes()),
+                typid: expr_type(argexpr),
+                typmod: expr_typmod_closed(argexpr),
+                value: ::datum::Datum::null(),
+                isnull: true,
+            });
+        }
+        // SAFETY: i < nvars slots of the fresh cell array.
+        let cell = unsafe { NonNull::new_unchecked(var_cells.as_ptr().add(i)) };
+        init_expr_rec(argexpr, state, mcx, OutRef(cell), agg, params, sub)?;
+    }
+
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+    push_step(state, mcx, Step::JsonExprPath { jsestate, frame: frame_ix, out })?;
+
+    let null_target = state.steps.len() as u32;
+    for ix in jumps_return_null.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNull { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = null_target;
+            }
+            _ => unreachable!(),
+        }
+    }
+    push_step(state, mcx, Step::Const { value: ::datum::Datum::null(), isnull: true, out })?;
+
+    let soft = on_error.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR;
+    // SAFETY: field projection of the live state; ErrorSaveNode leads with FmNode.
+    let esc_ptr: Option<NonNull<::types_fmgr::ErrorSaveNode>> =
+        soft.then(|| unsafe { NonNull::new_unchecked(addr_of_mut!((*jsp).escontext)) });
+
+    let mut jump_eval_coercion = -1i32;
+    if jsexpr.use_json_coercion {
+        jump_eval_coercion = state.steps.len() as i32;
+        init_json_coercion(
+            state,
+            mcx,
+            returning,
+            jsexpr.omit_quotes,
+            jsexpr.op == JsonExprOp::JSON_EXISTS_OP,
+            out,
+        )?;
+    } else if jsexpr.use_io_coercion {
+        let (typinput, typioparam) = lsyscache::getTypeInputInfo(returning.typid)?;
+        let flinfo = fmgr_core::fmgr_info(typinput)?;
+        let in_frame = FuncFrame::new_in(mcx, flinfo, 3, ::types_core::primitive::InvalidOid)?;
+        // SAFETY: slots 1/2 of the fresh 3-arg fcinfo image, written once at compile.
+        unsafe {
+            in_frame.arg_slot(1).write(::datum::NullableDatum {
+                value: ::datum::Datum::from_oid(typioparam),
+                isnull: false,
+            });
+            in_frame.arg_slot(2).write(::datum::NullableDatum {
+                value: ::datum::Datum::from_i32(returning.typmod),
+                isnull: false,
+            });
+            if let Some(esc) = esc_ptr {
+                crate::steps::fcinfo_mut(in_frame.fcinfo, 3).context = Some(esc.cast());
+            }
+        }
+        let call = FuncCall {
+            fcinfo: in_frame.fcinfo,
+            flinfo: in_frame.flinfo,
+            frame: state.frames.len() as u32,
+            nargs: 3,
+        };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(in_frame);
+        // SAFETY: live compile-allocated state, sole reference here.
+        unsafe { (*jsp).input_fcinfo = Some(call) };
+    }
+    // SAFETY: as above.
+    unsafe { (*jsp).jump_eval_coercion = jump_eval_coercion };
+
+    if jump_eval_coercion >= 0 && soft {
+        push_step(state, mcx, Step::JsonCoercionFinish { jsestate, out })?;
+    }
+
+    let null_const_shortcut = |b: &JsonBehavior<'_>| {
+        b.expr.and_then(|e| e.as_const()).is_some_and(|c| c.constisnull) && !returning_domain
+    };
+    let behavior_needs_finish = |b: &JsonBehavior<'_>| {
+        b.coerce
+            || b.expr.is_some_and(|e| {
+                matches!(e.node_tag(), NodeTag::T_CoerceViaIO | NodeTag::T_CoerceToDomain)
+            })
+    };
+
+    let mut jumps_to_end: PgVec<'_, usize> = PgVec::new_in(mcx);
+    if on_error.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR && !null_const_shortcut(on_error) {
+        // SAFETY: live compile-allocated state, sole reference here.
+        unsafe { (*jsp).jump_error = state.steps.len() as i32 };
+        jumps_to_end.push(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNotTrue { jumpdone: u32::MAX, out: error_out })?;
+
+        let saved_escontext = state.escontext;
+        state.escontext = esc_ptr;
+        init_expr_rec(on_error.expr.expect("JsonBehavior.expr"), state, mcx, out, agg, params, sub)?;
+        state.escontext = saved_escontext;
+
+        if on_error.coerce {
+            init_json_coercion(state, mcx, returning, jsexpr.omit_quotes, false, out)?;
+        }
+        if behavior_needs_finish(on_error) {
+            push_step(state, mcx, Step::JsonCoercionFinish { jsestate, out })?;
+        }
+
+        jumps_to_end.push(state.steps.len());
+        push_step(state, mcx, Step::Jump { jumpdone: u32::MAX })?;
+    }
+
+    if let Some(on_empty) = on_empty {
+        if on_empty.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR
+            && !null_const_shortcut(on_empty)
+        {
+            // SAFETY: live compile-allocated state, sole reference here.
+            unsafe { (*jsp).jump_empty = state.steps.len() as i32 };
+            jumps_to_end.push(state.steps.len());
+            push_step(state, mcx, Step::JumpIfNotTrue { jumpdone: u32::MAX, out: empty_out })?;
+
+            let saved_escontext = state.escontext;
+            state.escontext = esc_ptr;
+            init_expr_rec(
+                on_empty.expr.expect("JsonBehavior.expr"),
+                state,
+                mcx,
+                out,
+                agg,
+                params,
+                sub,
+            )?;
+            state.escontext = saved_escontext;
+
+            if on_empty.coerce {
+                init_json_coercion(state, mcx, returning, jsexpr.omit_quotes, false, out)?;
+            }
+            if behavior_needs_finish(on_empty) {
+                push_step(state, mcx, Step::JsonCoercionFinish { jsestate, out })?;
+            }
+        }
+    }
+
+    let done = state.steps.len() as u32;
+    for ix in jumps_to_end.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNotTrue { jumpdone, .. } | Step::Jump { jumpdone } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    // SAFETY: live compile-allocated state, sole reference here.
+    unsafe { (*jsp).jump_end = done as i32 };
+    Ok(())
+}
+
+// C ExecInitJsonCoercion (execExpr.c:5051).
+fn init_json_coercion<'mcx>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    returning: &::types_nodes::primnodes::JsonReturning<'_>,
+    omit_quotes: bool,
+    exists_coerce: bool,
+    out: OutRef,
+) -> PgResult<()> {
+    let exists_cast_to_int = exists_coerce
+        && lsyscache::getBaseType(returning.typid)? == ::types_core::catalog::INT4OID;
+    let exists_check_domain =
+        exists_coerce && typcache::DomainHasConstraints(returning.typid)?;
+    let jc = alloc_state(
+        mcx,
+        crate::steps::JsonCoercionState {
+            targettype: returning.typid,
+            targettypmod: returning.typmod,
+            omit_quotes,
+            exists_coerce,
+            exists_cast_to_int,
+            exists_check_domain,
+        },
+    )?;
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+    push_step(state, mcx, Step::JsonCoercion { jc, frame: frame_ix, out })
+}
+
 // C ExecInitCoerceToDomain (execExpr.c:3524): constraints baked at compile
 // (post-v10 shape); NOTNULL reads the arg's own out, CHECK evaluates into a
 // shared compile-allocated slot with CoerceToDomainValue reading domainval.
@@ -3060,6 +3395,11 @@ fn init_coerce_via_io<'mcx>(
         frame: state.frames.len() as u32,
         nargs: 3,
     };
+    if let Some(esc) = state.escontext {
+        // SAFETY: fresh 3-arg fcinfo image; the ErrorSaveNode outlives the
+        // program (it lives in the owning JsonExprState).
+        unsafe { crate::steps::fcinfo_mut(frame_in.fcinfo, 3).context = Some(esc.cast()) };
+    }
     state.frames.push(frame_in);
 
     let calls = crate::steps::IoCoerceCalls { outcall, incall, in_strict };
@@ -3069,7 +3409,11 @@ fn init_coerce_via_io<'mcx>(
     let p: NonNull<crate::steps::IoCoerceCalls> = raw.cast();
     // SAFETY: fresh allocation of the exact layout.
     unsafe { p.write(calls) };
-    push_step(state, mcx, Step::IoCoerce { calls: p, out })
+    if state.escontext.is_some() {
+        push_step(state, mcx, Step::IoCoerceSafe { calls: p, out })
+    } else {
+        push_step(state, mcx, Step::IoCoerce { calls: p, out })
+    }
 }
 
 // The elemexpr becomes a standalone program reading one element through its
@@ -3408,6 +3752,13 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             | Step::JsonbSbsrefSubscripts { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "sbsref jump target out of range");
             }
+            Step::JsonExprPath { jsestate, .. } => {
+                // SAFETY: compile-allocated state fully written by init_json_expr.
+                let js = unsafe { jsestate.as_ref() };
+                for j in [js.jump_error, js.jump_empty, js.jump_eval_coercion, js.jump_end] {
+                    assert!(j < len as i32, "jsonexpr jump target out of range");
+                }
+            }
             Step::RowCompareStep { jumpnull, jumpdone, .. } => {
                 assert!((*jumpnull as usize) < len, "rowcompare jump target out of range");
                 assert!((*jumpdone as usize) < len, "rowcompare jump target out of range");
@@ -3651,7 +4002,10 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
         .as_slice()
         .windows(2)
         .any(|w| try_fuse(&w[0], &w[1]).is_some());
-    if !has_pair {
+    // JsonExprPath jump targets live in its state and would not be remapped.
+    let fuse_barrier =
+        state.steps.as_slice().iter().any(|s| matches!(s, Step::JsonExprPath { .. }));
+    if !has_pair || fuse_barrier {
         for s in state.steps.iter_mut() {
             if let Some(t) = thin_single(s) {
                 *s = t;
