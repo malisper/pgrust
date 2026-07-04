@@ -483,7 +483,7 @@ fn insert_row<'mcx>(
     slot.base_mut().tts_tid = tuple.as_tuple_mut().t_self;
     slot.base_mut().tts_tableOid = HEAP_OID;
 
-    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[])
+    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[]).map(|_| ())
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {
