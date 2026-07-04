@@ -55,6 +55,9 @@ pub struct FunctionScanState<'mcx> {
     funcstates: PgVec<'mcx, FunctionScanPerFuncState<'mcx>>,
     // Retained per-row scratch for the general path's column copy.
     scratch: PgVec<'mcx, NullableDatum>,
+    // C argcontext ("Table function arguments"): SRF argument values must
+    // survive the ValuePerCall loop's per-tuple resets; reset per rescan.
+    arg_mcx: ::mcx::MemoryContext,
     eflags: i32,
 }
 
@@ -87,6 +90,7 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     self.eflags & EXEC_FLAG_BACKWARD != 0,
                     estate,
                     self.ss.ps_ExprContext,
+                    &mut self.arg_mcx,
                 )?;
                 store.rescan();
                 fs.tstore = Some(store);
@@ -118,6 +122,7 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     self.eflags & EXEC_FLAG_BACKWARD != 0,
                     estate,
                     self.ss.ps_ExprContext,
+                    &mut self.arg_mcx,
                 )?;
                 store.rescan();
                 fs.tstore = Some(store);
@@ -289,6 +294,7 @@ pub fn exec_init_function_scan<'mcx>(
         ordinal: 0,
         funcstates,
         scratch: PgVec::new_in(mcx),
+        arg_mcx: ::mcx::MemoryContext::new("Table function arguments"),
         eflags,
     })
 }
@@ -407,13 +413,14 @@ fn exec_make_table_function_result<'mcx>(
     random_access: bool,
     estate: &mut EStateData<'mcx>,
     ecxt: ::executils::EcxtId,
+    arg_mcx: &mut ::mcx::MemoryContext,
 ) -> PgResult<Tuplestore> {
     match setexpr.args.len() {
-        0 => run_value_per_call::<0>(setexpr, expected_desc, random_access, estate, ecxt),
-        1 => run_value_per_call::<1>(setexpr, expected_desc, random_access, estate, ecxt),
-        2 => run_value_per_call::<2>(setexpr, expected_desc, random_access, estate, ecxt),
-        3 => run_value_per_call::<3>(setexpr, expected_desc, random_access, estate, ecxt),
-        4 => run_value_per_call::<4>(setexpr, expected_desc, random_access, estate, ecxt),
+        0 => run_value_per_call::<0>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
+        1 => run_value_per_call::<1>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
+        2 => run_value_per_call::<2>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
+        3 => run_value_per_call::<3>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
+        4 => run_value_per_call::<4>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
         n => panic!("ExecMakeTableFunctionResult: {n}-argument SRF — widen the fcinfo dispatch"),
     }
 }
@@ -424,6 +431,7 @@ fn run_value_per_call<'mcx, const N: usize>(
     random_access: bool,
     estate: &mut EStateData<'mcx>,
     ecxt: ::executils::EcxtId,
+    arg_mcx: &mut ::mcx::MemoryContext,
 ) -> PgResult<Tuplestore> {
     let work_mem = init_small::globals::work_mem();
     let mut allowed = SFRM_ValuePerCall | SFRM_Materialize | SFRM_Materialize_Preferred;
@@ -441,12 +449,14 @@ fn run_value_per_call<'mcx, const N: usize>(
     // SAFETY: the ExprContext outlives this loop's stack frame.
     unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
 
-    // ExecEvalFuncArgs; by-ref arg datums (e.g. a built array) land in the
-    // scan econtext's per-tuple memory, which lives across the SRF loop.
+    // ExecEvalFuncArgs; C evaluates the arguments in argContext — by-ref arg
+    // datums must survive the loop's per-tuple resets below (execSRF.c:119).
+    arg_mcx.reset();
     let mut all_null_skip = false;
     for i in 0..N {
-        // SAFETY: the per-tuple context outlives this scan-start call.
-        unsafe { setexpr.args[i].arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+        // SAFETY: arg_mcx is owned by the scan state and outlives this loop;
+        // it is only reset at the next scan start.
+        unsafe { setexpr.args[i].arm_result_mcx_raw(arg_mcx.mcx()) };
         let mut slots = EvalSlots { scan: None, inner: None, outer: None };
         let NullableDatum { value, isnull } = exec_eval_expr(&mut setexpr.args[i], &mut slots)?;
         if isnull {
