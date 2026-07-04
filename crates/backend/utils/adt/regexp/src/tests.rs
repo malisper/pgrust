@@ -393,7 +393,7 @@ fn match_and_matches() {
     assert_eq!(row(&ctx), vec![None]);
 
     assert!(regexp_match(m, b"abc", b"xyz", None, C).unwrap().is_none());
-    let err = regexp_match(m, b"x", b"x", Some(b"g"), C).unwrap_err();
+    let err = regexp_match(m, b"x", b"x", Some(b"g"), C).map(|_| ()).unwrap_err();
     let msg = sqlstate(&err);
     assert!(msg.contains("regexp_match() does not support the \"global\" option"), "{msg}");
     assert!(msg.contains("Use the regexp_matches function instead."), "{msg}");
@@ -440,6 +440,6 @@ fn substr_and_split() {
         vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
     );
     assert_eq!(split(b"", b",", None), vec![b"".to_vec()]);
-    let err = regexp_split_setup(m, b"x", b"x", Some(b"g"), C, "regexp_split_to_array()").unwrap_err();
+    let err = regexp_split_setup(m, b"x", b"x", Some(b"g"), C, "regexp_split_to_array()").map(|_| ()).unwrap_err();
     assert!(sqlstate(&err).contains("regexp_split_to_array() does not support the \"global\" option"));
 }
