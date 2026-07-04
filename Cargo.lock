@@ -1692,6 +1692,7 @@ dependencies = [
  "miscinit",
  "objectaddress_seams",
  "opclasscmds_seams",
+ "parse_func",
  "parse_oper",
  "pg_attrdef",
  "pg_depend",
