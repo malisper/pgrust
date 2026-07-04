@@ -1327,6 +1327,7 @@ fn func_get_detail<'mcx>(
     if OidIsValid(shape.provariadic)
         && shape.prokind != PROKIND_FUNCTION
         && shape.prokind != PROKIND_PROCEDURE
+        && shape.prokind != PROKIND_AGGREGATE
     {
         panic!(
             "func_get_detail (parse_func.c): variadic {} {funcid} unported",

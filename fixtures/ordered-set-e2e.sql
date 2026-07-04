@@ -68,10 +68,12 @@ from generate_series(1,5) x;
 select ten, mode() within group (order by s) from osa_t group by ten order by ten;
 select mode() within group (order by thousand) from osa_t;
 
--- text percentiles + collation propagation
+-- text percentiles (collation-sensitive sort)
 select percentile_disc(array[0.25,0.5,0.75]) within group (order by x)
 from unnest('{fred,jim,fred,jack,jill,fred,jill,jim,jim,sheila,jim,sheila}'::text[]) u(x);
-select pg_collation_for(percentile_disc(1) within group (order by x collate "POSIX"))
+-- pg_collation_for (oid 3162) is unported (pre-existing, out of OSA scope);
+-- collation propagation is covered by the explicit-collation error case below.
+select percentile_disc(1) within group (order by x collate "POSIX")
   from (values ('fred'),('jim')) v(x);
 
 -- GROUP BY variants + FILTER
