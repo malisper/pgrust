@@ -1610,10 +1610,12 @@ impl<'m> TuplesortData<'m> {
         tuplen: i64,
     ) -> PgResult<()> {
         self.avail_mem -= tuplen;
-        self.tuple_mem += tuplen;
 
         match self.status {
             TupSortStatus::Initial => {
+                // C also counts tupleMem on TSS_BOUNDED puts, where it is
+                // dead (bounded sorts never dump): skipped there.
+                self.tuple_mem += tuplen;
                 // Abbrev can only be armed in Initial: set_bound disarms it
                 // before any put (C parity), so Bounded never pays this check.
                 if self.abbrev.is_some() && !isnull1 {
@@ -1648,25 +1650,41 @@ impl<'m> TuplesortData<'m> {
                     self.recompute_put_watermark();
                     return Ok(());
                 }
-                self.inittapes()?;
-                self.dumptuples(false)
+                self.spill_to_tape()
             }
             TupSortStatus::Bounded => {
                 debug_assert!(self.abbrev.is_none());
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
-            TupSortStatus::BuildRuns => {
-                if self.abbrev.is_some() && !isnull1 {
-                    datum1 = self.abbrev_datum1(datum1);
-                }
-                debug_assert!(self.memtuples.len() < self.memtuples.capacity());
-                self.memtuples.push(SortTuple { tuple, datum1, isnull1 });
-                self.dumptuples(false)
-            }
+            TupSortStatus::BuildRuns => self.puttuple_buildruns(tuple, datum1, isnull1, tuplen),
             TupSortStatus::SortedInMem | TupSortStatus::SortedOnTape | TupSortStatus::FinalMerge => {
                 Err(invalid_state("tuplesort_puttuple_common"))
             }
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn spill_to_tape(&mut self) -> PgResult<()> {
+        self.inittapes()?;
+        self.dumptuples(false)
+    }
+
+    #[inline(never)]
+    fn puttuple_buildruns(
+        &mut self,
+        tuple: *mut MinimalTupleData,
+        mut datum1: Datum,
+        isnull1: bool,
+        tuplen: i64,
+    ) -> PgResult<()> {
+        self.tuple_mem += tuplen;
+        if self.abbrev.is_some() && !isnull1 {
+            datum1 = self.abbrev_datum1(datum1);
+        }
+        debug_assert!(self.memtuples.len() < self.memtuples.capacity());
+        self.memtuples.push(SortTuple { tuple, datum1, isnull1 });
+        self.dumptuples(false)
     }
 
     /// `tuplesort_puttuple_common` useAbbrev arm: convert unless
