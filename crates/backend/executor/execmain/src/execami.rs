@@ -151,6 +151,12 @@ pub fn exec_re_scan<'mcx>(
             ::nodeunique::exec_rescan_unique(&mut u.state, estate);
             exec_re_scan(&mut u.outer, estate)
         }
+        // ExecReScanGroup: outer child rescanned when chgParam is NULL
+        // (always, until the Param lanes land).
+        PlanStateNode::Group(g) => {
+            ::nodegroup::exec_rescan_group(&mut g.state, estate);
+            exec_re_scan(&mut g.outer, estate)
+        }
         PlanStateNode::Limit(l) => {
             let crate::procnode::LimitNode { state, outer } = l;
             ::nodelimit::exec_rescan_limit(state, &mut **outer, estate)?;
@@ -465,6 +471,10 @@ pub fn exec_re_scan_with_chg<'mcx>(
         PlanStateNode::Unique(u) => {
             ::nodeunique::exec_rescan_unique(&mut u.state, estate);
             exec_re_scan_with_chg(&mut u.outer, base.lefttree.expect("Unique outer plan"), estate, chg)?;
+        }
+        PlanStateNode::Group(g) => {
+            ::nodegroup::exec_rescan_group(&mut g.state, estate);
+            exec_re_scan_with_chg(&mut g.outer, base.lefttree.expect("Group outer plan"), estate, chg)?;
         }
         PlanStateNode::Limit(l) => {
             let crate::procnode::LimitNode { state, outer } = l;

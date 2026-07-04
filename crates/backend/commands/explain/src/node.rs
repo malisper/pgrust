@@ -467,6 +467,7 @@ pub fn ExplainNode<'mcx>(
                 other => node_gap("ExplainNode", &format!("Agg strategy {other} unrecognized")),
             }
         }
+        NodeTag::T_Group => "Group",
         NodeTag::T_Unique => "Unique",
         NodeTag::T_Sort => "Sort",
         NodeTag::T_IncrementalSort => "Incremental Sort",
@@ -837,6 +838,11 @@ pub fn ExplainNode<'mcx>(
             show_hashagg_info(node, es)?;
             filtered_count_gap(&plan.qual, es);
         }
+        NodeTag::T_Group => {
+            show_group_keys(node, ancestors, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
         NodeTag::T_Material => {
             show_material_info(node, es);
         }
@@ -1199,6 +1205,27 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
     let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
     for &resno in agg.grpColIdx {
+        let tle = get_tle_by_resno(child_tlist, resno)
+            .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, child, Some(&pushed), tle.expr, useprefix, true, &mut buf)?;
+        result.push(buf);
+    }
+    ExplainPropertyList("Group Key", &result, es);
+    Ok(())
+}
+
+// show_group_keys -> show_sort_group_keys (explain.c): key columns resolve in
+// the child plan's tlist; deparsed with showimplicit=true as C.
+fn show_group_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let grp = node.as_group().expect("Group plan node");
+    let child = grp.plan.lefttree.expect("Group has an outer plan");
+    let child_tlist = &plan_of(child).targetlist;
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
+    let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    for &resno in grp.grpColIdx {
         let tle = get_tle_by_resno(child_tlist, resno)
             .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
         let mut buf = PgString::new_in(mcx);

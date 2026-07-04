@@ -52,6 +52,7 @@ nodematerial = { path = "../nodematerial" }
 nodememoize = { path = "../nodememoize" }
 nodesort = { path = "../nodesort" }
 nodeincrementalsort = { path = "../nodeincrementalsort" }
+nodegroup = { path = "../nodegroup" }
 nodeunique = { path = "../nodeunique" }
 nodeappend = { path = "../nodeappend" }
 nodemergeappend = { path = "../nodemergeappend" }

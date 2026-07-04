@@ -1,0 +1,188 @@
+// nodeGroup.c: the copied first tuple of each group feeds the qual and
+// projection as OUTER; match program per execTuplesMatchPrepare.
+#![allow(non_snake_case)]
+
+use std::rc::Rc;
+
+use ::execexpr::{exec_build_grouping_equal, exec_project, exec_qual, EvalSlots, ExprState};
+use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
+use ::types_error::PgResult;
+use ::types_nodes::plannodes::Group;
+use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::types_tuple::TupleDescData;
+
+pub fn init_seams() {}
+
+pub struct GroupState<'mcx> {
+    pub plan: &'mcx Group<'mcx>,
+    pub ps_ExprContext: EcxtId,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
+    pub ps_ResultTupleSlot: ExecSlotId,
+    firsttuple_slot: SlotData<'mcx>,
+    eq: PgBox<'mcx, ExprState<'mcx>>,
+    qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    proj: PgBox<'mcx, ExprState<'mcx>>,
+    grp_done: bool,
+    have_first: bool,
+}
+
+/// `ExecInitGroup` minus child linkage; the caller inits the outer child
+/// and compiles qual/projection under its subplan env.
+pub fn exec_init_group<'mcx>(
+    node: &'mcx Group<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    eflags: i32,
+    outer_desc: &Rc<TupleDescData<'static>>,
+    result_desc: Rc<TupleDescData<'static>>,
+    qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    proj: PgBox<'mcx, ExprState<'mcx>>,
+) -> PgResult<GroupState<'mcx>> {
+    debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
+    let mcx = estate.es_query_cxt;
+    let ps_ExprContext = estate.exec_assign_expr_context();
+    let ps_ResultTupleSlot =
+        estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
+
+    let num_cols = node.numCols as usize;
+    debug_assert!(num_cols > 0 && node.grpColIdx.len() == num_cols);
+    let mut eqfuncoids: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, num_cols)?;
+    for &op in node.grpOperators {
+        eqfuncoids.push(lsyscache::get_opcode(op)?);
+    }
+    let eq = exec_build_grouping_equal(
+        mcx,
+        outer_desc,
+        outer_desc,
+        node.grpColIdx,
+        &eqfuncoids,
+        node.grpCollations,
+    )?;
+    let firsttuple_slot = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::MinimalTuple,
+        Some(outer_desc.clone()),
+    );
+    Ok(GroupState {
+        plan: node,
+        ps_ExprContext,
+        ps_ResultTupleDesc: Some(result_desc),
+        ps_ResultTupleSlot,
+        firsttuple_slot,
+        eq,
+        qual,
+        proj,
+        grp_done: false,
+        have_first: false,
+    })
+}
+
+pub fn exec_group<'mcx, F>(
+    node: &mut GroupState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut fetch_outer: F,
+) -> PgResult<Option<ExecSlotId>>
+where
+    F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+{
+    if init_small::globals::InterruptPending() {
+        postgres_seams::check_for_interrupts::call()?;
+    }
+    if node.grp_done {
+        return Ok(None);
+    }
+
+    if !node.have_first {
+        let Some(outer_id) = fetch_outer(estate)? else {
+            node.grp_done = true;
+            return Ok(None);
+        };
+        node.store_first(estate, outer_id)?;
+        if node.check_qual()? {
+            return node.project(estate);
+        }
+    }
+
+    loop {
+        let matched_id = loop {
+            let Some(outer_id) = fetch_outer(estate)? else {
+                node.grp_done = true;
+                return Ok(None);
+            };
+            // SAFETY: per-tuple context outlives the eval; reset per input
+            // tuple (C ExecQualAndReset).
+            unsafe {
+                node.eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
+            };
+            estate.reset_expr_context(node.ps_ExprContext);
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut node.firsttuple_slot),
+                outer: Some(&mut *outer_slot),
+            };
+            if !exec_qual(Some(&mut node.eq), &mut slots)? {
+                break outer_id;
+            }
+        };
+        node.store_first(estate, matched_id)?;
+        if node.check_qual()? {
+            return node.project(estate);
+        }
+    }
+}
+
+impl<'mcx> GroupState<'mcx> {
+    fn store_first(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        outer_id: ExecSlotId,
+    ) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let outer_slot = estate.slot_mut(outer_id);
+        exectuples::exec_copy_slot(&mut self.firsttuple_slot, outer_slot, mcx, mcx)?;
+        self.have_first = true;
+        Ok(())
+    }
+
+    fn check_qual(&mut self) -> PgResult<bool> {
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
+        exec_qual(self.qual.as_deref_mut(), &mut slots)
+    }
+
+    fn project(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        let mcx = estate.es_query_cxt;
+        let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
+        exec_project(&mut self.proj, &mut slots, result_slot, mcx)?;
+        Ok(Some(self.ps_ResultTupleSlot))
+    }
+}
+
+/// `ExecEndGroup` node-local half; the caller ends the outer child.
+pub fn exec_end_group(node: &mut GroupState<'_>) {
+    node.firsttuple_slot.base_mut().tts_tupleDescriptor = None;
+    node.eq.release_frames();
+    if let Some(q) = node.qual.as_mut() {
+        q.release_frames();
+    }
+    node.proj.release_frames();
+    node.qual = None;
+    node.ps_ResultTupleDesc = None;
+}
+
+/// `ExecReScanGroup`; the caller rescans the outer child.
+pub fn exec_rescan_group<'mcx>(node: &mut GroupState<'mcx>, estate: &mut EStateData<'mcx>) {
+    node.grp_done = false;
+    node.have_first = false;
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(&mut node.firsttuple_slot, mcx);
+}
+
+// Exempt: all released in exec_end_group (eq/qual/proj via release_frames).
+mcx::forget_safe_struct!(
+    GroupState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, grp_done, have_first;
+        ps_ResultTupleDesc, firsttuple_slot, eq, qual, proj },
+);

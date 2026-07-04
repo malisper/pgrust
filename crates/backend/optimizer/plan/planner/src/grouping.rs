@@ -994,10 +994,20 @@ fn add_paths_to_grouping_rel<'mcx>(
                     continue;
                 }
                 if !parse.hasAggs {
-                    panic!(
-                        "create_group_path (pathnode.c): GROUP BY without aggregates \
-                         (nodeGroup); M3 group lane"
+                    assert!(
+                        !parse.groupClause.is_nil(),
+                        "add_paths_to_grouping_rel (planner.c): no aggs and no GROUP BY"
                     );
+                    let group_path = crate::pathnode::create_group_path(
+                        run,
+                        grouped_rel,
+                        sorted,
+                        info.clauses,
+                        crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                        num_groups,
+                    )?;
+                    crate::pathnode::add_path(run, grouped_rel, group_path);
+                    continue;
                 }
                 let strategy = if parse.groupClause.is_nil() {
                     types_pathnodes::AGG_PLAIN

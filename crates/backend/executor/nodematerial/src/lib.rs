@@ -155,6 +155,7 @@ pub fn exec_rescan_material_chg<'mcx>(
     node.eof_underlying = false;
 }
 
+/// Returns true when the caller must rescan the outer child.
 pub fn exec_rescan_material<'mcx>(
     node: &mut MaterialState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -162,10 +163,19 @@ pub fn exec_rescan_material<'mcx>(
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
     if node.eflags != 0 {
-        if let Some(ts) = node.tuplestorestate.as_mut() {
-            ts.rescan();
+        if node.tuplestorestate.is_none() {
+            return false;
         }
-        false
+        // Without REWIND the store can't rewind (MARK-only mergejoin inner):
+        // forget it and re-read the subplan.
+        if node.eflags & EXEC_FLAG_REWIND == 0 {
+            node.tuplestorestate = None;
+            node.eof_underlying = false;
+            true
+        } else {
+            node.tuplestorestate.as_mut().expect("checked above").rescan();
+            false
+        }
     } else {
         node.tuplestorestate = None;
         node.eof_underlying = false;
