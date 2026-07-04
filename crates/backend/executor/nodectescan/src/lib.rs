@@ -200,7 +200,6 @@ pub fn exec_end_cte_scan<'mcx>(node: &mut CteScanState<'mcx>, estate: &mut EStat
     }
 }
 
-/// The chgParam clear+refill arm is dead: uncorrelated subplans only.
 pub fn exec_rescan_cte_scan<'mcx>(
     node: &mut CteScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -214,6 +213,27 @@ pub fn exec_rescan_cte_scan<'mcx>(
     let ts = &mut shared.tuplestore;
     ts.select_read_pointer(node.readptr);
     ts.rescan();
+    Ok(())
+}
+
+/// cteParam in chg == C's leader-cteplanstate-chgParam test; redundant
+/// clears across followers are fine per C.
+pub fn exec_rescan_cte_scan_chg<'mcx>(
+    node: &mut CteScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    if !chg.is_member(node.cte_param) {
+        return exec_rescan_cte_scan(node, estate);
+    }
+    execscan::exec_scan_rescan(&mut node.ss, estate);
+    let param = node.cte_param as usize;
+    let shared = estate
+        .cte_shared_slot(param)
+        .as_mut()
+        .unwrap_or_else(|| panic!("ExecReScanCteScan: es_cte_shared[{param}] missing"));
+    shared.tuplestore.clear();
+    shared.eof_cte = false;
     Ok(())
 }
 

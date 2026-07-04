@@ -14,7 +14,7 @@ use std::rc::Rc;
 use ::datum::{Datum, NullableDatum};
 use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, LocalFcinfo};
 use ::execexpr::{
-    exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
+    exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans, exec_build_agg_trans,
     exec_build_agg_trans_hashed, exec_eval_expr, exec_project, exec_qual, AggBind,
     AggOrderedSpec, AggPerGroup, AggTransSpec, EvalSlots, ExprState,
 };
@@ -447,6 +447,15 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(e, out);
             }
         }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                collect_aggrefs(te, out);
+            }
+            for a in sp.args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
         tag => panic!("ExecInitAgg (nodeAgg.c): Agg tlist node family {tag:?} not ported"),
     }
 }
@@ -747,8 +756,18 @@ pub fn exec_init_agg<'mcx>(
         naggs: numaggs as u16,
         grouping: gs.as_ref().map(|g| g.grouping_cell()),
     };
-    let proj = exec_build_agg_projection_info(mcx, &node.plan.targetlist, None, bind, params)?;
-    let qual = exec_build_agg_qual(mcx, &node.plan.qual, bind, params)?;
+    let (proj, qual) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+        let proj = exec_build_agg_projection_info_subplans(
+            mcx,
+            &node.plan.targetlist,
+            None,
+            bind,
+            params,
+            env,
+        )?;
+        let qual = exec_build_agg_qual_subplans(mcx, &node.plan.qual, bind, params, env)?;
+        Ok((proj, qual))
+    })?;
 
     Ok(AggStateData {
         plan: node,
@@ -1458,6 +1477,19 @@ fn plain_finish<'mcx>(
     node.agg_done = true;
 
     // project_aggregates: the HAVING qual (var-free here) gates the one row.
+    if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ecxt = node.ps_ExprContext;
+        if !::executils::exec_qual_with_subplans(node.qual.as_deref_mut(), estate, ecxt)? {
+            return Ok(None);
+        }
+        ::executils::exec_project_with_subplans(
+            &mut node.proj,
+            estate,
+            ecxt,
+            node.ps_ResultTupleSlot,
+        )?;
+        return Ok(Some(node.ps_ResultTupleSlot));
+    }
     let mut slots = EvalSlots { scan: None, inner: None, outer: None };
     if !exec_qual(node.qual.as_deref_mut(), &mut slots)? {
         return Ok(None);

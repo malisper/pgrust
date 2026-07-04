@@ -213,6 +213,30 @@ pub fn exec_qual_with_subplans<'mcx>(
     }
 }
 
+pub fn exec_eval_expr_with_subplans<'mcx>(
+    state: &mut execexpr::ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<::datum::NullableDatum> {
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let state = &mut *state;
+            with_ecxt_eval_slots(estate, ecxt, None, move |slots, _, _| {
+                execexpr::exec_eval_expr_outcome(state, slots, r)
+            })?
+        };
+        match outcome {
+            execexpr::EvalOutcome::Done(nd) => return Ok(nd),
+            execexpr::EvalOutcome::Suspended(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
 pub fn exec_project_with_subplans<'mcx>(
     state: &mut execexpr::ExprState<'mcx>,
     estate: &mut EStateData<'mcx>,

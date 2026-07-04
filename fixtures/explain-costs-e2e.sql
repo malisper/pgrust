@@ -211,3 +211,27 @@ DROP VIEW ec_vw3;
 DROP VIEW ec_vw2;
 DROP VIEW ec_vw1;
 DROP TABLE ec_ct, ec_cd;
+
+-- correlated + hashed sublink shapes (plan-init-subselect lane)
+CREATE TABLE ec_sc(a int, b int);
+INSERT INTO ec_sc SELECT g, g % 17 FROM generate_series(1, 2500) g;
+CREATE TABLE ec_sd(k int, v int);
+INSERT INTO ec_sd SELECT g % 50, g FROM generate_series(1, 1500) g;
+ANALYZE ec_sc;
+ANALYZE ec_sd;
+-- correlated scalar sublink in the tlist (SubPlan with parParam/args)
+EXPLAIN SELECT a, (SELECT max(v) FROM ec_sd WHERE ec_sd.k = ec_sc.b) FROM ec_sc WHERE a < 40;
+-- correlated scalar sublink in an expression-context qual (CASE shell)
+EXPLAIN SELECT a FROM ec_sc
+  WHERE (CASE WHEN b > 5 THEN (SELECT min(v) FROM ec_sd WHERE ec_sd.k = ec_sc.b) ELSE 0 END) > 10;
+-- hashed ANY (uncorrelated IN under OR keeps the SubPlan un-pulled)
+EXPLAIN SELECT count(*) FROM ec_sc WHERE b IN (SELECT k FROM ec_sd) OR a < 0;
+-- hashed NOT IN (unknownEqFalse hashnulls table)
+EXPLAIN SELECT count(*) FROM ec_sc WHERE b NOT IN (SELECT k FROM ec_sd WHERE v < 900);
+-- EXISTS-to-ANY hashed twin (AlternativeSubPlan choice at setrefs)
+EXPLAIN SELECT count(*) FROM ec_sc
+  WHERE EXISTS (SELECT 1 FROM ec_sd WHERE ec_sd.k = ec_sc.b) OR a < 0;
+-- correlated ANY in a join filter expression context
+EXPLAIN SELECT count(*) FROM ec_sc s1 JOIN ec_sd d1 ON s1.a = d1.v
+  WHERE (CASE WHEN s1.b IN (SELECT k FROM ec_sd WHERE v <= s1.a) THEN 1 ELSE 2 END) = 1;
+DROP TABLE ec_sc, ec_sd;

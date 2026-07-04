@@ -260,10 +260,31 @@ pub fn exec_re_scan_with_chg<'mcx>(
             .nth((sp.plan_id - 1) as usize);
         let ext = &init_plan.as_plan().expect("plan node").extParam;
         if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK {
-            assert!(
-                !chg.overlap(ext),
-                "ExecReScan (execAmi.c): CTE initplan under a changed-param rescan not ported"
-            );
+            if chg.overlap(ext) {
+                // ExecReScanSetParamPlan: cteParam joins chgParam, no
+                // execPlan mark; the deferred CTE rescan runs eagerly.
+                let mcx = estate.es_query_cxt;
+                let owned = match chg_owned.as_mut() {
+                    Some(o) => o,
+                    None => {
+                        chg_owned = Some(chg.clone_in(mcx)?);
+                        chg_owned.as_mut().unwrap()
+                    }
+                };
+                for pid in sp.setParam.iter() {
+                    owned.add_member(mcx, pid)?;
+                }
+                let cell = estate.es_subplanstates[(sp.plan_id - 1) as usize];
+                // SAFETY: cell installed by InitPlan on this estate.
+                let slot =
+                    unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
+                let mut ps = slot.take().unwrap_or_else(|| {
+                    panic!("recursive CTE plan execution (nodeCtescan.c)")
+                });
+                let r = exec_re_scan_with_chg(&mut ps, init_plan, estate, chg);
+                *slot = Some(ps);
+                r?;
+            }
             continue;
         }
         if chg.overlap(ext) {
@@ -283,6 +304,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
         }
     }
     let chg: &types_nodes::bitmapset::Bitmapset<'mcx> = chg_owned.as_ref().unwrap_or(chg);
+    crate::nodesubplan::mark_hashed_subplans_stale(estate, chg);
 
     if let Some(id) = node.ps_expr_context() {
         estate.ecxt_mut(id).rescan();
@@ -317,8 +339,8 @@ pub fn exec_re_scan_with_chg<'mcx>(
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_rescan_table_func_scan_chg(ts, estate)?
         }
-        PlanStateNode::CteScan(_) => {
-            panic!("ExecReScanCteScan (nodeCtescan.c): changed-param rescan not ported")
+        PlanStateNode::CteScan(cs) => {
+            ::nodectescan::exec_rescan_cte_scan_chg(cs, estate, chg)?
         }
         PlanStateNode::WorkTableScan(wts) => {
             ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)

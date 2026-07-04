@@ -192,6 +192,17 @@ pub fn exec_build_agg_qual<'mcx>(
     agg: AggBind,
     params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    exec_build_agg_qual_subplans(mcx, qual, agg, params, None)
+}
+
+/// [`exec_build_agg_qual`] with SubPlan compile support wired.
+pub fn exec_build_agg_qual_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    qual: &NodeList<'mcx>,
+    agg: AggBind,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     if qual.is_nil() {
         return Ok(None);
     }
@@ -201,7 +212,7 @@ pub fn exec_build_agg_qual<'mcx>(
 
     for node in qual.iter() {
         let rout = state.result_out();
-        init_expr_rec(node, &mut state, mcx, rout, Some(Bind::Agg(agg)), params, None)?;
+        init_expr_rec(node, &mut state, mcx, rout, Some(Bind::Agg(agg)), params, sub)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -247,6 +258,18 @@ pub fn exec_build_agg_projection_info<'mcx>(
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     build_projection_info(mcx, target_list, input_desc, Some(Bind::Agg(agg)), params, None)
+}
+
+/// [`exec_build_agg_projection_info`] with SubPlan compile support wired.
+pub fn exec_build_agg_projection_info_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    agg: AggBind,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Agg(agg)), params, sub)
 }
 
 /// WindowAgg-node projection: WindowFuncs bound to the result arrays by

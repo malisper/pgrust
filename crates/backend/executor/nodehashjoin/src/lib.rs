@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_hash32_from_exprs, exec_build_projection_info, exec_init_qual, exec_project,
-    exec_eval_expr, exec_qual, EvalSlots, ExprState, ParamBind,
+    exec_build_hash32_from_exprs, exec_build_projection_info_subplans, exec_init_qual_subplans,
+    exec_project, exec_eval_expr, exec_qual, EvalSlots, ExprState, ParamBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{PgBox, PgVec};
@@ -182,10 +182,21 @@ pub fn exec_init_hash_join<'mcx>(
     let ps_ExprContext = estate.exec_assign_expr_context();
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
-    let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None, ParamBind::NONE)?;
-    let hashclauses = exec_init_qual(mcx, &node.hashclauses, ParamBind::NONE)?;
-    let joinqual = exec_init_qual(mcx, &node.join.joinqual, ParamBind::NONE)?;
-    let otherqual = exec_init_qual(mcx, &node.join.plan.qual, ParamBind::NONE)?;
+    let params = estate.param_bind();
+    let (proj, hashclauses, joinqual, otherqual) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let proj = exec_build_projection_info_subplans(
+                mcx,
+                &node.join.plan.targetlist,
+                None,
+                params,
+                env,
+            )?;
+            let hashclauses = exec_init_qual_subplans(mcx, &node.hashclauses, params, env)?;
+            let joinqual = exec_init_qual_subplans(mcx, &node.join.joinqual, params, env)?;
+            let otherqual = exec_init_qual_subplans(mcx, &node.join.plan.qual, params, env)?;
+            Ok((proj, hashclauses, joinqual, otherqual))
+        })?;
 
     let hash_state = init_hash(estate, inner_desc, &inner_hashfns, &collations)?;
     let hash_node = node
@@ -352,12 +363,7 @@ where
                 }
                 let ecxt = node.ps_ExprContext;
                 let inner_id = hash_state.hash_tuple_slot;
-                let matched = match node.joinqual.as_deref_mut() {
-                    None => true,
-                    joinqual @ Some(_) => {
-                        with_probe_slots(ecxt, inner_id, estate, |slots| exec_qual(joinqual, slots))?
-                    }
-                };
+                let matched = eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, inner_id, estate)?;
                 if matched {
                     node.hj_MatchedOuter = true;
                     // SAFETY: hj_CurTuple set by scan_hash_bucket this pass.
@@ -379,12 +385,8 @@ where
                     if node.plan.join.jointype == JoinType::JOIN_RIGHT_ANTI {
                         continue;
                     }
-                    let pass = match node.otherqual.as_deref_mut() {
-                        None => true,
-                        otherqual @ Some(_) => with_probe_slots(ecxt, inner_id, estate, |slots| {
-                            exec_qual(otherqual, slots)
-                        })?,
-                    };
+                    let pass =
+                        eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, inner_id, estate)?;
                     if pass {
                         return Ok(Some(project_result(node, inner_id, estate)?));
                     }
@@ -396,12 +398,8 @@ where
                     let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
                     estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(null_inner);
                     let ecxt = node.ps_ExprContext;
-                    let pass = match node.otherqual.as_deref_mut() {
-                        None => true,
-                        otherqual @ Some(_) => with_probe_slots(ecxt, null_inner, estate, |slots| {
-                            exec_qual(otherqual, slots)
-                        })?,
-                    };
+                    let pass =
+                        eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, null_inner, estate)?;
                     if pass {
                         return Ok(Some(project_result(node, null_inner, estate)?));
                     }
@@ -416,12 +414,8 @@ where
                 estate.ecxt_mut(node.ps_ExprContext).ecxt_outertuple = Some(null_outer);
                 let ecxt = node.ps_ExprContext;
                 let inner_id = hash_state.hash_tuple_slot;
-                let pass = match node.otherqual.as_deref_mut() {
-                    None => true,
-                    otherqual @ Some(_) => with_probe_slots(ecxt, inner_id, estate, |slots| {
-                        exec_qual(otherqual, slots)
-                    })?,
-                };
+                let pass =
+                    eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, inner_id, estate)?;
                 if pass {
                     return Ok(Some(project_result(node, inner_id, estate)?));
                 }
@@ -824,6 +818,22 @@ pub fn exec_rescan_hash_join<'mcx>(
     Ok(rescan_inner)
 }
 
+fn eval_probe_qual<'mcx>(
+    qual: Option<&mut ExprState<'mcx>>,
+    ecxt: EcxtId,
+    inner_id: ExecSlotId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if qual.is_none() {
+        return Ok(true);
+    }
+    if qual.as_ref().is_some_and(|q| q.has_subplan()) {
+        estate.ecxt_mut(ecxt).ecxt_innertuple = Some(inner_id);
+        return ::executils::exec_qual_with_subplans(qual, estate, ecxt);
+    }
+    with_probe_slots(ecxt, inner_id, estate, |slots| exec_qual(qual, slots))
+}
+
 // The outer/inner slot pair for qual eval, disjoint &mut of es_tupleTable.
 fn with_probe_slots<'mcx, R>(
     ecxt: EcxtId,
@@ -848,6 +858,13 @@ fn project_result<'mcx>(
     inner_id: ExecSlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ExecSlotId> {
+    if node.proj.has_subplan() {
+        let ecxt = node.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_innertuple = Some(inner_id);
+        let result_id = node.ps_ResultTupleSlot;
+        ::executils::exec_project_with_subplans(&mut node.proj, estate, ecxt, result_id)?;
+        return Ok(result_id);
+    }
     let mcx = estate.es_query_cxt;
     let outer_id = estate
         .ecxt(node.ps_ExprContext)
