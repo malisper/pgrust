@@ -35,14 +35,19 @@ pub fn exec_init_bitmap_index_scan<'mcx>(
 pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     mcx: Mcx<'mcx>,
     node: &BitmapIndexScan<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     _eflags: i32,
     index_rel: Relation<'mcx>,
 ) -> PgResult<BitmapIndexScanState<'mcx>> {
     if node.isshared {
         panic!("nodebitmapindexscan: isshared (parallel bitmap scan lane) not ported");
     }
-    let biss_ScanKeys = exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual)?;
+    let (biss_ScanKeys, runtime_keys) =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, estate.param_bind())?;
+    assert!(
+        runtime_keys.is_empty(),
+        "nodebitmapindexscan: runtime keys pending the bitmap runtime-key lane"
+    );
     Ok(BitmapIndexScanState {
         biss_ScanDesc: None,
         biss_RelationDesc: Some(index_rel),

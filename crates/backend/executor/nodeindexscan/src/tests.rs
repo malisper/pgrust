@@ -709,14 +709,14 @@ fn end_scan_without_fetch_releases_nothing() {
 }
 
 #[test]
-fn runtime_key_qual_panics_loudly_at_init() {
+fn runtime_key_qual_builds_deferred_scan_key() {
     let _g = serial();
     with_mcx(|mcx| {
         let heap_oid = fresh_oid();
         let index_oid = fresh_oid();
         register_indexed_table(heap_oid, index_oid, &[1]);
         let index_rel = index_relation(mcx, index_oid, heap_oid);
-        // indexkey op (non-Const): Var on both sides.
+        // indexkey op (non-Const): Var on the right => runtime key.
         let lvar = Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
         let rvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
         let args = NodeList::make2(mcx, lvar, rvar).unwrap();
@@ -735,8 +735,44 @@ fn runtime_key_qual_panics_loudly_at_init() {
         )
         .unwrap();
         let quals = NodeList::make1(mcx, op).unwrap();
+        let (keys, runtime) =
+            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].scan_key, 0);
+        assert!(!runtime[0].key_toastable);
+        assert_eq!(keys[0].sk_flags & SK_ISNULL, 0);
+        assert_eq!(keys[0].sk_argument, Datum::from_usize(0));
+        assert_eq!(keys[0].sk_strategy, BTEqualStrategyNumber);
+    });
+}
+
+#[test]
+fn saop_qual_panics_loudly_at_init() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_indexed_table(heap_oid, index_oid, &[1]);
+        let index_rel = index_relation(mcx, index_oid, heap_oid);
+        let saop = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::ScalarArrayOpExpr {
+                opno: OP_INT4EQ,
+                opfuncid: F_INT4EQ,
+                hashfuncid: 0,
+                negfuncid: 0,
+                useOr: true,
+                inputcollid: 0,
+                args: NodeList::nil(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let quals = NodeList::make1(mcx, saop).unwrap();
         let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = exec_index_build_scan_keys(mcx, &index_rel, &quals).map(|k| k.len());
+            let _ = exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE)
+                .map(|(k, _)| k.len());
         }))
         .unwrap_err();
         let msg = err
@@ -744,6 +780,6 @@ fn runtime_key_qual_panics_loudly_at_init() {
             .cloned()
             .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default();
-        assert!(msg.contains("runtime key"), "unexpected panic: {msg}");
+        assert!(msg.contains("ScalarArrayOpExpr"), "unexpected panic: {msg}");
     });
 }
