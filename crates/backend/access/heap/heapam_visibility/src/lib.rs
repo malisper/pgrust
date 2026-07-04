@@ -754,6 +754,21 @@ fn satisfies_mvcc_res<R: MvccXidResolve>(
     debug_assert!(htup.t_tableOid != InvalidOid);
     let tuple = htup.t_data_mut();
 
+    if tuple.xmin_raw() == 0 && !tuple.xmin_committed() && !tuple.xmin_invalid() {
+        // SAFETY: header is at least SizeofHeapTupleHeader readable bytes.
+        let hdr_bytes =
+            unsafe { core::slice::from_raw_parts(tuple as *const _ as *const u8, 24) };
+        std::eprintln!(
+            "TOASTPROBE vis xmin=0: tid={:?} len={} infomask={:#x} infomask2={:#x} hoff={} hdr={:02x?}",
+            htup.t_self,
+            htup.t_len,
+            tuple.t_infomask,
+            tuple.t_infomask2,
+            tuple.t_hoff,
+            hdr_bytes
+        );
+    }
+
     if !tuple.xmin_committed() {
         if tuple.xmin_invalid() {
             return Ok(false);
