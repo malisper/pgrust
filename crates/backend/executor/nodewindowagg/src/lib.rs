@@ -2686,8 +2686,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(())
     }
 
-    // advance_windowaggregate (nodeWindowAgg.c), byval closed set.
-    fn advance_windowaggregate(&mut self, aggno: usize, which: WhichSlot) -> PgResult<()> {
+    // advance_windowaggregate (nodeWindowAgg.c); transfns run over the
+    // per-input-tuple context (C tmpcontext).
+    fn advance_windowaggregate(
+        &mut self,
+        estate: &EStateData<'mcx>,
+        aggno: usize,
+        which: WhichSlot,
+    ) -> PgResult<()> {
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
@@ -2740,6 +2746,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
                 fcinfo.context = Some(pa.agg_state.cast());
+                // SAFETY: the per-tuple context outlives this call.
+                unsafe { fcinfo.set_result_mcx(estate.ecxt(self.tmpcontext).per_tuple_mcx()) };
                 fcinfo.args[0] = pa.trans_value;
                 fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
                 let mut newval = transfn.invoke(&mut fcinfo)?;
@@ -2764,7 +2772,11 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
     // advance_windowaggregate_base: remove the oldest row via the inverse
     // transition; false forces a restart.
-    fn advance_windowaggregate_base(&mut self, aggno: usize) -> PgResult<bool> {
+    fn advance_windowaggregate_base(
+        &mut self,
+        estate: &EStateData<'mcx>,
+        aggno: usize,
+    ) -> PgResult<bool> {
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
@@ -2802,6 +2814,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
                 fcinfo.context = Some(pa.agg_state.cast());
+                // SAFETY: the per-tuple context outlives this call.
+                unsafe { fcinfo.set_result_mcx(estate.ecxt(self.tmpcontext).per_tuple_mcx()) };
                 fcinfo.args[0] = pa.trans_value;
                 fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
                 let mut newval = invtransfn.invoke(&mut fcinfo)?;
@@ -2932,7 +2946,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 if self.peragg[aggno].restart {
                     continue;
                 }
-                if !self.advance_windowaggregate_base(aggno)? {
+                if !self.advance_windowaggregate_base(estate, aggno)? {
                     self.peragg[aggno].restart = true;
                     numaggs_restart += 1;
                 }
@@ -2997,7 +3011,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     {
                         continue;
                     }
-                    self.advance_windowaggregate(aggno, WhichSlot::AggRow)?;
+                    self.advance_windowaggregate(estate, aggno, WhichSlot::AggRow)?;
                 }
             }
             estate.reset_expr_context(self.tmpcontext);
