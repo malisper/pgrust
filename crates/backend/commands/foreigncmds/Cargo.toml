@@ -37,5 +37,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+detoast = { path = "../../access/common/detoast" }
 xact = { path = "../../access/transam/xact" }
 foreigncmds_seams = { path = "../foreigncmds_seams" }
