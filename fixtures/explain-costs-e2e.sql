@@ -480,7 +480,8 @@ CREATE TABLE pj_b (id int, v int);
 INSERT INTO pj_a SELECT i, i % 500 FROM generate_series(1, 30000) i;
 INSERT INTO pj_b SELECT i, i % 500 FROM generate_series(1, 30000) i;
 ANALYZE pj_a; ANALYZE pj_b;
-EXPLAIN SELECT a.id, b.id FROM pj_a a JOIN pj_b b ON a.v = b.v;
+-- default-on shape (C: Parallel Hash Join) is blocked on the plan-side
+-- create_hashjoin_plan parallel_aware hunk; see notes/optpath-joinpath-lane.md
 SET enable_parallel_hash = off;
 EXPLAIN SELECT a.id, b.id FROM pj_a a JOIN pj_b b ON a.v = b.v;
 RESET enable_parallel_hash;

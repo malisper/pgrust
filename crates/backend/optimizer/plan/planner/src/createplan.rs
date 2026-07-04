@@ -3364,15 +3364,6 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     hash_plan.plan.total_cost = i_total;
     hash_plan.plan.startup_cost = i_total;
     let _ = i_startup;
-    // Parallel-aware Hash: the executor sizes the shared table from the total
-    // (undivided) inner row estimate.
-    if run.root.path(path_id).base().parallel_aware {
-        hash_plan.plan.parallel_aware = true;
-        hash_plan.rows_total = match run.root.path(path_id) {
-            PathNode::HashPath(hp) => hp.inner_rows_total,
-            _ => unreachable!(),
-        };
-    }
     let hash_node = hash_plan.seal();
 
     // make_hashjoin.
