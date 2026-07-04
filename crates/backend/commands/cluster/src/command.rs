@@ -217,9 +217,7 @@ pub fn cluster_rel<'mcx>(
             RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE
         ));
 
-        if xact::IsolationIsSerializable() {
-            unported("cluster_rel: TransferPredicateLocksToHeapRelation (predicate.c)");
-        }
+        predicate_seams::transfer_predicate_locks_to_heap_relation::call(&old_heap)?;
 
         rebuild_relation(mcx, old_heap, index, verbose)
     })();

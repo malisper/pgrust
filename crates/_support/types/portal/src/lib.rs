@@ -19,6 +19,7 @@ pub const CMDTAG_FETCH: CommandTag = CommandTag(154);
 pub const CMDTAG_INSERT: CommandTag = CommandTag(158);
 pub const CMDTAG_MERGE: CommandTag = CommandTag(163);
 pub const CMDTAG_MOVE: CommandTag = CommandTag(164);
+pub const CMDTAG_REFRESH_MATERIALIZED_VIEW: CommandTag = CommandTag(169);
 pub const CMDTAG_SELECT: CommandTag = CommandTag(179);
 pub const CMDTAG_UPDATE: CommandTag = CommandTag(191);
 

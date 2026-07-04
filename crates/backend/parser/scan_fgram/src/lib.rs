@@ -276,6 +276,12 @@ impl<'mcx> Scanner<'mcx> {
         self.yylloc
     }
 
+    /// Byte position just past the last-returned token (pl_scanner's
+    /// yytext-length reads; flex exposes this as yyleng).
+    pub fn tok_end(&self) -> usize {
+        self.pos
+    }
+
     pub fn scanner_errposition(&self, location: i32) -> i32 {
         parser_small1::parser_errposition_source(Some(self.scanbuf), location, self.encoding)
     }

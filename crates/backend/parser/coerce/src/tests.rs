@@ -101,6 +101,9 @@ fn install_fixture() {
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == BPCHAR_LEN_COERCION_FUNC).then_some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: BPCHAROID,
                 provariadic: InvalidOid,

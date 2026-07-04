@@ -653,7 +653,7 @@ fn offset_and_pull_down<'mcx>(
             if v.varlevelsup == 0 {
                 nv.varno += rtoffset;
                 if nv.varnosyn > 0 {
-                    nv.varnosyn += rtoffset as u32;
+                    nv.varnosyn = nv.varnosyn.wrapping_add(rtoffset as u32);
                 }
             } else {
                 nv.varlevelsup -= 1;
@@ -1675,6 +1675,9 @@ fn finalize_plan<'mcx>(
         | NodeTag::T_IncrementalSort
         | NodeTag::T_Agg
         | NodeTag::T_Material => {}
+        NodeTag::T_Memoize => {
+            finalize_primnode_list(run, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
+        }
         // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
         NodeTag::T_CteScan => {
             let plan_id = plan.as_cte_scan().unwrap().ctePlanId;

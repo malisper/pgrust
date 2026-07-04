@@ -233,24 +233,19 @@ mod heap {
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        assert!(
-            bistate.is_none(),
-            "heapam_tuple_insert (heapam_handler.c): heap_insert bistate arm not \
-             wired for single-tuple inserts (bulk callers go through multi_insert)"
-        );
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
         let t_self = match slot {
             SlotData::Heap(h) => {
                 let tuple = h.tuple.as_mut().expect("materialized heap slot holds a tuple");
                 tuple.t_tableOid = rel.rd_id;
-                ::heapam::heap_insert(rel, tuple, cid, options)?;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
                 tuple.t_self
             }
             SlotData::BufferHeap(b) => {
                 let tuple = b.base.tuple.as_mut().expect("materialized heap slot holds a tuple");
                 tuple.t_tableOid = rel.rd_id;
-                ::heapam::heap_insert(rel, tuple, cid, options)?;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
                 tuple.t_self
             }
             // ExecFetchSlotHeapTuple copy arm (virtual/minimal source slots,
@@ -258,7 +253,7 @@ mod heap {
             _ => {
                 let mut tuple = exectuples::exec_copy_slot_heap_tuple(slot, mcx, mcx)?;
                 tuple.t_tableOid = rel.rd_id;
-                ::heapam::heap_insert(rel, &mut tuple, cid, options)?;
+                ::heapam::heap_insert(rel, &mut tuple, cid, options, bistate)?;
                 tuple.t_self
             }
         };
@@ -292,7 +287,7 @@ mod heap {
         .expect("materialized heap slot holds a tuple");
         tuple.t_tableOid = rel.rd_id;
         tuple.t_data_mut().set_speculative_token(spec_token);
-        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE)?;
+        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE, bistate)?;
         let t_self = tuple.t_self;
         slot.base_mut().tts_tid = t_self;
         Ok(())
@@ -873,6 +868,33 @@ pub fn table_scan_getnextslot<'mcx>(
     }
 }
 
+pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => {
+            (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0 && h.rs_base.rs_parallel.is_none()
+        }
+    }
+}
+
+/// Page-batch scan feed (upstream batch scan API, CF 6176): 0 = exhausted.
+pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_getnextpagebatch(h),
+    }
+}
+
+/// Store tuple `i` of the staged page batch into `slot`.
+pub fn table_scan_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+    }
+}
+
 pub fn table_beginscan_tidrange<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1024,6 +1046,35 @@ pub fn table_index_fetch_tuple<'mcx>(
         IndexFetchTableData::Heap(h) => ::heapam_handler::heapam_index_fetch_tuple(
             mcx, h, tid, snapshot, slot, call_again, all_dead,
         ),
+    }
+}
+
+pub use ::heapam_handler::{BatchFetch, INDEX_FETCH_BATCH_MAX};
+
+pub fn table_index_fetch_batch_fill<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    first_tid: &ItemPointerData,
+    rest: &[ItemPointerData],
+    snapshot: &Snapshot<'mcx>,
+) -> PgResult<()> {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_fill(mcx, h, first_tid, rest, snapshot)
+        }
+    }
+}
+
+pub fn table_index_fetch_batch_next<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    tid: &mut ItemPointerData,
+    slot: &mut SlotData<'mcx>,
+) -> ::heapam_handler::BatchFetch {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_next(mcx, h, tid, slot)
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use types_core::{Buffer, GlobalVisStateHandle, TransactionId};
 use types_error::PgResult;
-use types_snapshot::{HTSV_Result, SnapshotData};
+use types_snapshot::{HTSV_Result, SnapshotData, XidVisMemo};
 use types_tuple::{HeapTupleData, HeapTupleHeaderData};
 
 seam_core::seam!(
@@ -9,6 +9,17 @@ seam_core::seam!(
         htup: &'a mut HeapTupleData<'tup>,
         snapshot: &'a SnapshotData<'mcx>,
         buffer: Buffer,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // HeapTupleSatisfiesMVCC with a per-page xid-status memo (page-batch
+    // visibility): pagemode collect resolves each distinct xid once per page.
+    pub fn heap_tuple_satisfies_mvcc_page<'a, 'tup, 'mcx>(
+        htup: &'a mut HeapTupleData<'tup>,
+        snapshot: &'a SnapshotData<'mcx>,
+        buffer: Buffer,
+        memo: &'a mut XidVisMemo,
     ) -> PgResult<bool>
 );
 

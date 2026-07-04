@@ -276,8 +276,11 @@ fn install_fake_bufmgr() {
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     catalog_seams::is_catalog_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);
@@ -529,7 +532,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
-        rd_hastriggers: false,
+        rd_hastriggers: false, rd_hasrules: false,
         rd_trigdesc: Default::default(),
         rd_isvalid: Cell::new(true),
         rd_createSubid: Cell::new(0),
@@ -778,7 +781,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     for v in 1u8..=3 {
         let img = raw_tuple(0, &vec![v; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
     }
     assert_eq!(xact::GetTopTransactionIdIfAny(), COMMITTED_XID);
@@ -788,7 +791,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     {
         let img = raw_tuple(0, &vec![4u8; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         assert_eq!(tup.t_self, ItemPointerData::new(0, 4));
     }
     assert_eq!(xact::GetTopTransactionIdIfAny(), ABORTED_XID);
@@ -830,7 +833,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     for v in 5u8..=13 {
         let img = raw_tuple(0, &vec![v; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         let want = if v <= 9 {
             ItemPointerData::new(1, (v - 4) as u16)
         } else {

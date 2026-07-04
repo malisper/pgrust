@@ -197,15 +197,77 @@ pub fn fc_pg_get_viewdef_name_ext(
     viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(pretty), crate::viewdef::WRAP_COLUMN_DEFAULT)
 }
 
-pub fn fc_pg_get_ruledef(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    crate::gap("pg_get_ruledef", "make_ruledef (non-view rule deparse)")
+fn ruledef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    pretty_flags: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_ruledef");
+    let res = crate::pg_get_ruledef_worker(ctx.mcx(), fcinfo.arg_oid(0), pretty_flags)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_ruledef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_ruledef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ruledef(flinfo, fcinfo, PRETTYFLAG_INDENT)
+}
+
+pub fn fc_pg_get_ruledef_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let pretty = fcinfo.arg_bool(1);
+    ruledef(flinfo, fcinfo, get_pretty_flags(pretty))
 }
 
 pub fn fc_pg_get_functiondef(
-    _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    crate::gap("pg_get_functiondef", "CREATE FUNCTION deparse (function lane in flight)")
+    let ctx = MemoryContext::new("pg_get_functiondef");
+    let res = crate::pg_get_functiondef_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_functiondef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_function_arguments(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_function_arguments");
+    let res = crate::pg_get_function_arguments_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_function_arguments", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_function_identity_arguments(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_function_identity_arguments");
+    let res = crate::pg_get_function_identity_arguments_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_function_identity_arguments", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_function_result(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_function_result");
+    let res = crate::pg_get_function_result_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_function_result", &s),
+        None => fcinfo.return_null(),
+    })
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -222,7 +284,10 @@ pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
     b(1643, "pg_get_indexdef", 1, fc_pg_get_indexdef),
     b(1716, "pg_get_expr", 2, fc_pg_get_expr),
     b(2098, "pg_get_functiondef", 1, fc_pg_get_functiondef),
-    b(2504, "pg_get_ruledef_ext", 2, fc_pg_get_ruledef),
+    b(2162, "pg_get_function_arguments", 1, fc_pg_get_function_arguments),
+    b(2165, "pg_get_function_result", 1, fc_pg_get_function_result),
+    b(2232, "pg_get_function_identity_arguments", 1, fc_pg_get_function_identity_arguments),
+    b(2504, "pg_get_ruledef_ext", 2, fc_pg_get_ruledef_ext),
     b(2505, "pg_get_viewdef_name_ext", 2, fc_pg_get_viewdef_name_ext),
     b(2506, "pg_get_viewdef_ext", 2, fc_pg_get_viewdef_ext),
     b(2507, "pg_get_indexdef_ext", 3, fc_pg_get_indexdef_ext),

@@ -367,6 +367,28 @@ fn pull_up_simple_subquery<'mcx>(
     })? {
         parse.returningList = l;
     }
+    // perform_pullup_replace_vars: MERGE action targetlists/quals and the
+    // join condition reference the source rel too.
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = replace_opt(mcx, action.qual, varno, &off_tlist)?;
+        let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &off_tlist)
+        })? {
+            Some(l) => l,
+            None => action.targetList.clone_in(mcx)?,
+        };
+        // SAFETY: pre-seal tree owned by this planner invocation.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.qual = new_qual;
+                a.targetList = new_tlist;
+            })
+        }
+        .expect("MergeAction");
+    }
+    parse.mergeJoinCondition =
+        replace_opt(mcx, parse.mergeJoinCondition, varno, &off_tlist)?;
 
     // pullup_replace_vars over the jointree: substitute Vars in every qual
     // and splice the offset sub-jointree in place of the RangeTblRef.
@@ -718,7 +740,7 @@ fn offset_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>, rtoffset: i32) -> PgResult<Va
         },
         varlevelsup: v.varlevelsup,
         varreturningtype: v.varreturningtype,
-        varnosyn: if v.varnosyn > 0 { v.varnosyn + rtoffset as u32 } else { v.varnosyn },
+        varnosyn: if v.varnosyn > 0 { v.varnosyn.wrapping_add(rtoffset as u32) } else { v.varnosyn },
         varattnosyn: v.varattnosyn,
         location: v.location,
     })
@@ -1016,6 +1038,20 @@ fn get_tle_by_resno<'a, 'mcx>(
 // levels_delta is C's IncrementVarSublevelsUp(newnode, sublevels_up, 0) after
 // substitution into a deeper query level.
 fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes as pn;
+    let copy_list = |mcx: Mcx<'mcx>, l: &NodeList<'mcx>| -> PgResult<NodeList<'mcx>> {
+        let mut out = NodeList::nil();
+        for n in l {
+            out.lappend(mcx, copy_expr(mcx, n, levels_delta)?)?;
+        }
+        Ok(out)
+    };
+    let copy_opt = |mcx: Mcx<'mcx>, n: Option<Node<'mcx>>| -> PgResult<Option<Node<'mcx>>> {
+        match n {
+            Some(n) => Ok(Some(copy_expr(mcx, n, levels_delta)?)),
+            None => Ok(None),
+        }
+    };
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().expect("Var");
@@ -1024,35 +1060,60 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             Node::mk(mcx, nv)
         }
         NodeTag::T_Const => Node::mk(mcx, *node.as_const().expect("Const")),
-        NodeTag::T_OpExpr => {
-            let o = node.as_op_expr().expect("OpExpr");
-            let mut args = NodeList::nil();
-            for a in &o.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
+        NodeTag::T_Param => Node::mk(mcx, *node.as_param().expect("Param")),
+        NodeTag::T_CaseTestExpr => {
+            Node::mk(mcx, *node.as_case_test_expr().expect("CaseTestExpr"))
+        }
+        NodeTag::T_SetToDefault => Node::mk(mcx, *node.as_set_to_default().expect("SetToDefault")),
+        NodeTag::T_SQLValueFunction => {
+            let s = node.as_sql_value_function().expect("SQLValueFunction");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::OpExpr {
+                pn::SQLValueFunction {
+                    op: s.op,
+                    r#type: s.r#type,
+                    typmod: s.typmod,
+                    location: s.location,
+                },
+            )
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().expect("OpExpr");
+            Node::mk(
+                mcx,
+                pn::OpExpr {
                     opno: o.opno,
                     opfuncid: o.opfuncid,
                     opresulttype: o.opresulttype,
                     opretset: o.opretset,
                     opcollid: o.opcollid,
                     inputcollid: o.inputcollid,
-                    args,
+                    args: copy_list(mcx, &o.args)?,
                     location: o.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().expect("DistinctExpr");
+            Node::mk(
+                mcx,
+                pn::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid: d.opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args: copy_list(mcx, &d.args)?,
+                    location: d.location,
                 },
             )
         }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().expect("FuncExpr");
-            let mut args = NodeList::nil();
-            for a in &f.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
             Node::mk(
                 mcx,
-                types_nodes::primnodes::FuncExpr {
+                pn::FuncExpr {
                     funcid: f.funcid,
                     funcresulttype: f.funcresulttype,
                     funcretset: f.funcretset,
@@ -1060,28 +1121,49 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                     funcformat: f.funcformat,
                     funccollid: f.funccollid,
                     inputcollid: f.inputcollid,
-                    args,
+                    args: copy_list(mcx, &f.args)?,
                     location: f.location,
                 },
             )
         }
-        NodeTag::T_ArrayExpr => {
-            let a = node.as_array_expr().expect("ArrayExpr");
-            let mut elements = NodeList::nil();
-            for e in &a.elements {
-                elements.lappend(mcx, copy_expr(mcx, e, levels_delta)?)?;
-            }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::ArrayExpr {
-                    array_typeid: a.array_typeid,
-                    array_collid: a.array_collid,
-                    element_typeid: a.element_typeid,
-                    elements,
-                    multidims: a.multidims,
-                    list_start: a.list_start,
-                    list_end: a.list_end,
-                    location: a.location,
+                pn::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args: copy_list(mcx, &sa.args)?,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().expect("BoolExpr");
+            Node::mk(
+                mcx,
+                pn::BoolExpr {
+                    boolop: b.boolop,
+                    args: copy_list(mcx, &b.args)?,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().expect("RelabelType");
+            Node::mk(
+                mcx,
+                pn::RelabelType {
+                    arg: copy_expr(mcx, r.arg, levels_delta)?,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
                 },
             )
         }
@@ -1089,7 +1171,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             let c = node.as_coerce_via_io().expect("CoerceViaIO");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::CoerceViaIO {
+                pn::CoerceViaIO {
                     arg: copy_expr(mcx, c.arg, levels_delta)?,
                     resulttype: c.resulttype,
                     resultcollid: c.resultcollid,
@@ -1098,16 +1180,105 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().expect("RelabelType");
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().expect("NullTest");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::RelabelType {
-                    arg: copy_expr(mcx, r.arg, levels_delta)?,
-                    resulttype: r.resulttype,
-                    resulttypmod: r.resulttypmod,
-                    resultcollid: r.resultcollid,
-                    relabelformat: r.relabelformat,
+                pn::NullTest {
+                    arg: copy_opt(mcx, nt.arg)?,
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().expect("BooleanTest");
+            Node::mk(
+                mcx,
+                pn::BooleanTest {
+                    arg: copy_opt(mcx, bt.arg)?,
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_CaseExpr => {
+            let ce = node.as_case_expr().expect("CaseExpr");
+            Node::mk(
+                mcx,
+                pn::CaseExpr {
+                    casetype: ce.casetype,
+                    casecollid: ce.casecollid,
+                    arg: copy_opt(mcx, ce.arg)?,
+                    args: copy_list(mcx, &ce.args)?,
+                    defresult: copy_opt(mcx, ce.defresult)?,
+                    location: ce.location,
+                },
+            )
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().expect("CaseWhen");
+            Node::mk(
+                mcx,
+                pn::CaseWhen {
+                    expr: copy_opt(mcx, cw.expr)?,
+                    result: copy_opt(mcx, cw.result)?,
+                    location: cw.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().expect("CoalesceExpr");
+            Node::mk(
+                mcx,
+                pn::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args: copy_list(mcx, &co.args)?,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().expect("MinMaxExpr");
+            Node::mk(
+                mcx,
+                pn::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args: copy_list(mcx, &mm.args)?,
+                    location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            Node::mk(
+                mcx,
+                pn::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements: copy_list(mcx, &a.elements)?,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().expect("RowExpr");
+            Node::mk(
+                mcx,
+                pn::RowExpr {
+                    args: copy_list(mcx, &r.args)?,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
                     location: r.location,
                 },
             )
@@ -1186,6 +1357,15 @@ fn reduce_outer_joins_pass1<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<
         NodeTag::T_RangeTblRef => {
             result.relids.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
         }
+        NodeTag::T_FromExpr => {
+            let f = node.as_variant::<FromExpr>().unwrap();
+            for child in &f.fromlist {
+                let sub = reduce_outer_joins_pass1(mcx, child)?;
+                result.relids.add_members(mcx, &sub.relids)?;
+                result.contains_outer |= sub.contains_outer;
+                result.sub_states.push(sub);
+            }
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().unwrap();
             if j.jointype.is_outer_join() {
@@ -1213,6 +1393,33 @@ fn reduce_outer_joins_pass2<'mcx>(
     nonnullable_rels: &types_nodes::Bitmapset<'mcx>,
     forced_null_vars: &clauses::MultiBitmapset<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    if let Some(f) = node.as_variant::<FromExpr>() {
+        let mut pass_nonnullable = clauses::find_nonnullable_rels(mcx, f.quals)?;
+        pass_nonnullable.add_members(mcx, nonnullable_rels)?;
+        let mut pass_forced = clauses::find_forced_null_vars(mcx, f.quals)?;
+        clauses::mbms_add_members(mcx, &mut pass_forced, forced_null_vars)?;
+        debug_assert_eq!(f.fromlist.len(), state1.sub_states.len());
+        let mut fromlist = NodeList::nil();
+        for (child, sub) in f.fromlist.iter().zip(state1.sub_states.iter()) {
+            if sub.contains_outer {
+                fromlist.lappend(
+                    mcx,
+                    reduce_outer_joins_pass2(
+                        mcx,
+                        parse,
+                        child,
+                        sub,
+                        inner_reduced,
+                        &pass_nonnullable,
+                        &pass_forced,
+                    )?,
+                )?;
+            } else {
+                fromlist.lappend(mcx, child)?;
+            }
+        }
+        return Node::mk(mcx, FromExpr { fromlist, quals: f.quals });
+    }
     let j = node
         .as_join_expr()
         .unwrap_or_else(|| panic!("reduce_outer_joins_pass2: reached {:?}", node.node_tag()));
@@ -1403,6 +1610,12 @@ fn remove_nulling_relids<'mcx>(
     }
     for te in &parse.returningList {
         w.visit(te)?;
+    }
+    for a in &parse.mergeActionList {
+        w.visit(a)?;
+    }
+    if let Some(jc) = parse.mergeJoinCondition {
+        w.visit(jc)?;
     }
     if let Some(h) = parse.havingQual {
         w.visit(h)?;
@@ -1757,4 +1970,101 @@ mod tests {
         let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
         assert_eq!((out_var.varno, out_var.varattno), (3, 1));
     }
+}
+
+// transform_MERGE_to_join (prepjointree.c): replace the MERGE jointree (the
+// bare source) with a join between the target and the source. WHEN NOT
+// MATCHED BY SOURCE is the loud arm: it needs the outer-target join with
+// source-var nulling marks and the executor's join-condition recheck.
+pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    use types_nodes::jointype::JoinType;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::primnodes::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
+
+    if parse.commandType != CmdType::CMD_MERGE {
+        return Ok(());
+    }
+
+    let mut have_action = [false; NUM_MERGE_MATCH_KINDS];
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        if action.commandType != CmdType::CMD_NOTHING {
+            have_action[action.matchKind as usize] = true;
+        }
+    }
+    if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize] {
+        panic!(
+            "transform_MERGE_to_join (prepjointree.c): WHEN NOT MATCHED BY SOURCE \
+             (outer-target join + add_nulling_relids + executor join-condition \
+             recheck) unported — MERGE by-source lane"
+        );
+    }
+    let jointype =
+        if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize] {
+            JoinType::JOIN_RIGHT
+        } else {
+            JoinType::JOIN_INNER
+        };
+
+    let eref = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("*MERGE*"), colnames: NodeList::nil() },
+    )?);
+    let joinrte = RangeTblEntry {
+        rtekind: RTEKind::RTE_JOIN,
+        jointype,
+        eref: Some(eref),
+        inFromCl: true,
+        ..Default::default()
+    };
+    parse.rtable.lappend(mcx, Node::mk(mcx, joinrte)?)?;
+    let joinrti = parse.rtable.len() as i32;
+
+    let jt = parse.jointree.expect("MERGE jointree is a FromExpr");
+    let rtr = Node::mk(
+        mcx,
+        types_nodes::primnodes::RangeTblRef { rtindex: parse.mergeTargetRelation },
+    )?;
+    let target = Node::mk(
+        mcx,
+        FromExpr { fromlist: NodeList::make1(mcx, rtr)?, quals: jt.quals },
+    )?;
+    assert_eq!(jt.fromlist.len(), 1, "MERGE jointree carries exactly the source");
+    let source = jt.fromlist.nth(0);
+    debug_assert!(matches!(
+        source.node_tag(),
+        NodeTag::T_RangeTblRef | NodeTag::T_JoinExpr
+    ));
+
+    let joinexpr = Node::mk(
+        mcx,
+        types_nodes::primnodes::JoinExpr {
+            jointype,
+            isNatural: false,
+            larg: target,
+            rarg: source,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: parse.mergeJoinCondition,
+            alias: None,
+            rtindex: joinrti,
+        },
+    )?;
+    parse.jointree = Some(
+        Node::mk_mut(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, joinexpr)?, quals: None },
+        )?
+        .seal_ref(),
+    );
+
+    // A non-empty targetList here means a trigger-updatable view target
+    // (add_nulling_relids over its wholerow Var) — the view lane is loud
+    // upstream in the rewriter.
+    debug_assert!(parse.targetList.is_nil());
+
+    // Without BY SOURCE actions the executor never rechecks the join
+    // condition; C drops it to save planning/execution cycles.
+    parse.mergeJoinCondition = None;
+    Ok(())
 }

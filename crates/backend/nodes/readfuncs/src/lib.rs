@@ -13,14 +13,15 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
-    Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation,
-    SetOperationStmt, SortGroupClause,
+    CTEMaterialize, CommonTableExpr, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
+    RangeTblFunction, SetOperation, SetOperationStmt, SortGroupClause, WindowClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MinMaxExpr,
     MinMaxOp, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
-    RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var, VarReturningType,
+    CollateExpr, RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var,
+    VarReturningType, WindowFunc,
 };
 use types_nodes::Node;
 
@@ -368,12 +369,107 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"SUBLINK" => self.read_sub_link(),
             b"PARAM" => self.read_param(),
             b"ARRAYEXPR" => self.read_array_expr(),
+            b"SETTODEFAULT" => self.read_set_to_default(),
+            b"BOOLEANTEST" => self.read_boolean_test(),
+            b"WINDOWFUNC" => self.read_window_func(),
+            b"WINDOWCLAUSE" => self.read_window_clause(),
+            b"COMMONTABLEEXPR" => self.read_common_table_expr(),
+            b"COLLATEEXPR" => self.read_collate_expr(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
                 String::from_utf8_lossy(other)
             ),
         }
+    }
+
+    fn read_boolean_test(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut bt = Node::build::<types_nodes::primnodes::BooleanTest>(mcx)?;
+        bt.arg = self.read_node("arg")?;
+        bt.booltesttype = bool_test_type(self.read_u32("booltesttype"));
+        bt.location = self.read_location("location");
+        Ok(bt.seal())
+    }
+
+    fn read_window_func(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut w = Node::build::<WindowFunc>(mcx)?;
+        w.winfnoid = self.read_u32("winfnoid");
+        w.wintype = self.read_u32("wintype");
+        w.wincollid = self.read_u32("wincollid");
+        w.inputcollid = self.read_u32("inputcollid");
+        w.args = self.read_node_list("args")?;
+        w.aggfilter = self.read_node("aggfilter")?;
+        w.runCondition = self.read_node_list("runCondition")?;
+        w.winref = self.read_u32("winref");
+        w.winstar = self.read_bool("winstar");
+        w.winagg = self.read_bool("winagg");
+        w.location = self.read_location("location");
+        Ok(w.seal())
+    }
+
+    fn read_window_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut w = Node::build::<WindowClause>(mcx)?;
+        w.name = self.read_str("name")?;
+        w.refname = self.read_str("refname")?;
+        w.partitionClause = self.read_node_list("partitionClause")?;
+        w.orderClause = self.read_node_list("orderClause")?;
+        w.frameOptions = self.read_i32("frameOptions");
+        w.startOffset = self.read_node("startOffset")?;
+        w.endOffset = self.read_node("endOffset")?;
+        w.startInRangeFunc = self.read_u32("startInRangeFunc");
+        w.endInRangeFunc = self.read_u32("endInRangeFunc");
+        w.inRangeColl = self.read_u32("inRangeColl");
+        w.inRangeAsc = self.read_bool("inRangeAsc");
+        w.inRangeNullsFirst = self.read_bool("inRangeNullsFirst");
+        w.winref = self.read_u32("winref");
+        w.copiedOrder = self.read_bool("copiedOrder");
+        Ok(w.seal())
+    }
+
+    fn read_common_table_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<CommonTableExpr>(mcx)?;
+        c.ctename = self.read_str("ctename")?;
+        c.aliascolnames = self.read_node_list("aliascolnames")?;
+        c.ctematerialized = cte_materialize(self.read_u32("ctematerialized"));
+        c.ctequery = self.read_node("ctequery")?;
+        c.search_clause = match self.read_node("search_clause")? {
+            None => None,
+            Some(_) => panic!("_readCTESearchClause (readfuncs.c): SEARCH clause unported"),
+        };
+        c.cycle_clause = match self.read_node("cycle_clause")? {
+            None => None,
+            Some(_) => panic!("_readCTECycleClause (readfuncs.c): CYCLE clause unported"),
+        };
+        c.location = self.read_location("location");
+        c.cterecursive = self.read_bool("cterecursive");
+        c.cterefcount = self.read_i32("cterefcount");
+        c.ctecolnames = self.read_node_list("ctecolnames")?;
+        c.ctecoltypes = self.read_oid_list("ctecoltypes")?;
+        c.ctecoltypmods = self.read_int_list("ctecoltypmods")?;
+        c.ctecolcollations = self.read_oid_list("ctecolcollations")?;
+        Ok(c.seal())
+    }
+
+    fn read_collate_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let arg = self.read_node("arg")?.expect("CollateExpr has an arg");
+        let collOid = self.read_u32("collOid");
+        let location = self.read_location("location");
+        Node::mk(mcx, CollateExpr { arg, collOid, location })
+    }
+
+    fn read_set_to_default(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::primnodes::SetToDefault>(mcx)?;
+        d.typeId = self.read_u32("typeId");
+        d.typeMod = self.read_i32("typeMod");
+        d.collation = self.read_u32("collation");
+        d.location = self.read_location("location");
+        Ok(d.seal())
     }
 
     // _readQuery (readfuncs.funcs.c); queryId is read_write_ignore/read_as(0).
@@ -476,6 +572,20 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             RTEKind::RTE_FUNCTION => {
                 rte.functions = self.read_node_list("functions")?;
                 rte.funcordinality = self.read_bool("funcordinality");
+            }
+            RTEKind::RTE_VALUES => {
+                rte.values_lists = self.read_node_list("values_lists")?;
+                rte.coltypes = self.read_oid_list("coltypes")?;
+                rte.coltypmods = self.read_int_list("coltypmods")?;
+                rte.colcollations = self.read_oid_list("colcollations")?;
+            }
+            RTEKind::RTE_CTE => {
+                rte.ctename = self.read_str("ctename")?;
+                rte.ctelevelsup = self.read_u32("ctelevelsup");
+                rte.self_reference = self.read_bool("self_reference");
+                rte.coltypes = self.read_oid_list("coltypes")?;
+                rte.coltypmods = self.read_int_list("coltypmods")?;
+                rte.colcollations = self.read_oid_list("colcollations")?;
             }
             other => panic!(
                 "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
@@ -966,6 +1076,19 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
     }
 }
 
+fn bool_test_type(v: u32) -> types_nodes::primnodes::BoolTestType {
+    use types_nodes::primnodes::BoolTestType::*;
+    match v {
+        0 => IS_TRUE,
+        1 => IS_NOT_TRUE,
+        2 => IS_FALSE,
+        3 => IS_NOT_FALSE,
+        4 => IS_UNKNOWN,
+        5 => IS_NOT_UNKNOWN,
+        other => panic!("readfuncs.c: bad BoolTestType {other}"),
+    }
+}
+
 fn cmd_type(v: u32) -> CmdType {
     match v {
         0 => CmdType::CMD_UNKNOWN,
@@ -1029,6 +1152,15 @@ fn overriding_kind(v: u32) -> OverridingKind {
         1 => OverridingKind::OVERRIDING_USER_VALUE,
         2 => OverridingKind::OVERRIDING_SYSTEM_VALUE,
         other => panic!("readfuncs.c: bad OverridingKind {other}"),
+    }
+}
+
+fn cte_materialize(v: u32) -> CTEMaterialize {
+    match v {
+        0 => CTEMaterialize::CTEMaterializeDefault,
+        1 => CTEMaterialize::CTEMaterializeAlways,
+        2 => CTEMaterialize::CTEMaterializeNever,
+        other => panic!("readfuncs.c: bad CTEMaterialize {other}"),
     }
 }
 

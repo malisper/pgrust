@@ -110,10 +110,14 @@ fn install_seams() {
             VIS_CALLS.fetch_add(1, Ordering::Relaxed);
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            VIS_CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
 
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
         predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
 
@@ -306,7 +310,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, None)
 }
@@ -773,6 +777,21 @@ static DML_INIT: Once = Once::new();
 static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize)>> = Mutex::new(Vec::new());
 static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
 
+pub(crate) fn wal_insert_record_hook(
+    _rmid: u8,
+    info: u8,
+    _record_flags: u8,
+    main_data: &[&[u8]],
+    blocks: &[crate::wal::RegBlock<'_>],
+) -> ::types_error::PgResult<::types_core::XLogRecPtr> {
+    let mut main = Vec::new();
+    for frag in main_data {
+        main.extend_from_slice(frag);
+    }
+    XLOG_RECS.lock().unwrap().push((info, main, blocks.len()));
+    Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
+}
+
 fn install_dml_seams() {
     install_seams();
     DML_INIT.call_once(|| {
@@ -819,19 +838,13 @@ fn install_dml_seams() {
         combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
         multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));
         freespace_seams::record_and_get_page_with_free_space::set(|_rel, _old, _avail, _need| {
             Ok(InvalidBlockNumber)
         });
         freespace_seams::record_page_with_free_space::set(|_rel, _blk, _avail| Ok(()));
-        xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, main_data, bufs| {
-            let mut main = Vec::new();
-            for frag in main_data {
-                main.extend_from_slice(frag);
-            }
-            XLOG_RECS.lock().unwrap().push((info, main, bufs.len()));
-            Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
-        });
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_rel| false);
         snapmgr_seams::transaction_xmin::set(|| FAKE_XID);
@@ -891,7 +904,7 @@ fn dml_insert_extends_stamps_and_logs() {
     let _ = take_xlog();
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
-    dml::heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
     assert_eq!(tup.t_self, ItemPointerData::new(0, 1));
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -901,7 +914,7 @@ fn dml_insert_extends_stamps_and_logs() {
     assert_eq!(stored.t_data().t_ctid, tup.t_self);
 
     let mut tup2 = make_writable_tuple(&tuple_image(0, 0, 42));
-    dml::heap_insert(&rel, &mut tup2, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup2, 7, 0, None).unwrap();
     assert_eq!(tup2.t_self, ItemPointerData::new(0, 2));
 
     let recs = take_xlog();
@@ -1185,7 +1198,7 @@ fn dml_speculative_insert_finish() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(7);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -1222,7 +1235,7 @@ fn dml_speculative_insert_abort_super_deletes() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(9);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
     let _ = take_xlog();
 

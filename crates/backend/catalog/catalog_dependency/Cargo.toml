@@ -23,9 +23,12 @@ init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
 statscmds = { path = "../../commands/statscmds" }
+trigger = { path = "../../commands/trigger" }
 pg_constraint = { path = "../pg_constraint" }
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_shdepend = { path = "../pg_shdepend" }
+pg_largeobject = { path = "../pg_largeobject" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -34,3 +37,5 @@ types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 xact = { path = "../../access/transam/xact" }
+functioncmds = { path = "../../commands/functioncmds" }
+extension = { path = "../../commands/extension" }

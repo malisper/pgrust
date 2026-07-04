@@ -223,6 +223,16 @@ pub struct TuplestoreInstrumentation {
     pub max_space: i64,
 }
 
+// C MemoizeInstrumentation (execnodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoizeInstrumentation {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub cache_overflows: u64,
+    pub mem_peak: u64,
+}
+
 // C BitmapHeapScanInstrumentation (execnodes.h).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BitmapHeapScanInstrumentation {

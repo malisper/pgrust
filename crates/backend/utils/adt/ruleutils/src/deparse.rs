@@ -31,6 +31,7 @@ pub(crate) struct DeparseContext<'mcx> {
     pub namespaces: Vec<Rc<DeparseNamespace<'mcx>>>,
     pub result_desc: Option<Rc<Vec<String>>>,
     pub target_list: Option<&'mcx NodeList<'mcx>>,
+    pub window_clause: Option<&'mcx NodeList<'mcx>>,
     pub varprefix: bool,
     pub pretty_flags: i32,
     pub wrap_column: i32,
@@ -48,6 +49,7 @@ impl<'mcx> DeparseContext<'mcx> {
             namespaces: Vec::new(),
             result_desc: None,
             target_list: None,
+            window_clause: None,
             varprefix: false,
             pretty_flags,
             wrap_column: -1,
@@ -185,6 +187,7 @@ pub(crate) fn walk_varnos(node: Node<'_>, f: &mut impl FnMut(i32, u32)) {
         }
         NodeTag::T_RelabelType => walk_varnos(node.as_relabel_type().unwrap().arg, f),
         NodeTag::T_CoerceViaIO => walk_varnos(node.as_coerce_via_io().unwrap().arg, f),
+        NodeTag::T_CollateExpr => walk_varnos(node.as_collate_expr().unwrap().arg, f),
         NodeTag::T_NullTest => {
             if let Some(arg) = node.as_null_test().unwrap().arg {
                 walk_varnos(arg, f);
@@ -209,6 +212,20 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),
         NodeTag::T_Param => get_parameter(node.as_param().unwrap(), ctx),
         NodeTag::T_Aggref => get_agg_expr(node.as_aggref().unwrap(), ctx),
+        NodeTag::T_WindowFunc => get_windowfunc_expr(node.as_window_func().unwrap(), ctx),
+        NodeTag::T_CollateExpr => {
+            let collate = node.as_collate_expr().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(collate.arg, ctx, showimplicit, Some(node))?;
+            let collname = crate::generate_collation_name(ctx.mcx, collate.collOid)?;
+            ctx.buf.push_str(&format!(" COLLATE {collname}"));
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
         NodeTag::T_OpExpr => get_oper_expr(node, node.as_op_expr().unwrap(), ctx),
         NodeTag::T_FuncExpr => get_func_expr(node, node.as_func_expr().unwrap(), ctx, showimplicit),
         NodeTag::T_ScalarArrayOpExpr => {
@@ -631,9 +648,10 @@ pub(crate) fn get_const_expr(
     get_const_collation(c, ctx)
 }
 
-fn get_const_collation(c: &Const, _ctx: &mut DeparseContext<'_>) -> PgResult<()> {
+fn get_const_collation(c: &Const, ctx: &mut DeparseContext<'_>) -> PgResult<()> {
     if c.constcollid != InvalidOid && c.constcollid != lsyscache::get_typcollation(c.consttype)? {
-        gap("get_const_collation", "generate_collation_name (COLLATE clause)");
+        let collname = crate::generate_collation_name(ctx.mcx, c.constcollid)?;
+        ctx.buf.push_str(&format!(" COLLATE {collname}"));
     }
     Ok(())
 }
@@ -735,8 +753,9 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
     if aggref.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
         gap("get_agg_expr", "partial/combining aggregate deparse");
     }
-    if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
-        gap("get_agg_expr", "ordered-set/hypothetical aggregate deparse");
+    let ordered_set = matches!(aggref.aggkind, AGGKIND_ORDERED_SET | AGGKIND_HYPOTHETICAL);
+    if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL && !ordered_set {
+        gap("get_agg_expr", "unrecognized aggkind");
     }
     let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
     let funcname = generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, aggref.aggvariadic)?;
@@ -745,7 +764,20 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
     if !aggref.aggdistinct.is_nil() {
         ctx.buf.push_str("DISTINCT ");
     }
-    if aggref.aggstar {
+    if ordered_set {
+        debug_assert!(!aggref.aggvariadic);
+        let mut first = true;
+        for arg in aggref.aggdirectargs.iter() {
+            if !first {
+                ctx.buf.push_str(", ");
+            }
+            first = false;
+            get_rule_expr(arg, ctx, true)?;
+        }
+        debug_assert!(!aggref.aggorder.is_nil());
+        ctx.buf.push_str(") WITHIN GROUP (ORDER BY ");
+        query::get_rule_orderby(&aggref.aggorder, &aggref.args, false, ctx)?;
+    } else if aggref.aggstar {
         ctx.buf.push('*');
     } else {
         let mut i = 0;
@@ -761,7 +793,7 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
             get_rule_expr(tle.expr, ctx, true)?;
         }
     }
-    if !aggref.aggorder.is_nil() {
+    if !ordered_set && !aggref.aggorder.is_nil() {
         ctx.buf.push_str(" ORDER BY ");
         query::get_rule_orderby(&aggref.aggorder, &aggref.args, false, ctx)?;
     }
@@ -770,6 +802,59 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
         get_rule_expr(filter, ctx, false)?;
     }
     ctx.buf.push(')');
+    Ok(())
+}
+
+const AGGKIND_ORDERED_SET: i8 = b'o' as i8;
+const AGGKIND_HYPOTHETICAL: i8 = b'h' as i8;
+
+fn get_windowfunc_expr<'mcx>(
+    wfunc: &'mcx types_nodes::primnodes::WindowFunc<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let mut argtypes = Vec::with_capacity(wfunc.args.len());
+    for arg in wfunc.args.iter() {
+        if arg.node_tag() == NodeTag::T_NamedArgExpr {
+            gap("get_windowfunc_expr", "NamedArgExpr arguments");
+        }
+        argtypes.push(parse_expr::expr_type(arg));
+    }
+    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, false)?;
+    ctx.buf.push_str(&funcname);
+    ctx.buf.push('(');
+    if wfunc.winstar {
+        ctx.buf.push('*');
+    } else {
+        let mut first = true;
+        for arg in wfunc.args.iter() {
+            if !first {
+                ctx.buf.push_str(", ");
+            }
+            first = false;
+            get_rule_expr(arg, ctx, true)?;
+        }
+    }
+    if let Some(filter) = wfunc.aggfilter {
+        ctx.buf.push_str(") FILTER (WHERE ");
+        get_rule_expr(filter, ctx, false)?;
+    }
+    ctx.buf.push_str(") OVER ");
+
+    let Some(wclauses) = ctx.window_clause else {
+        gap("get_windowfunc_expr", "plan-tree OVER (WindowAgg namespace search)");
+    };
+    let wc = wclauses
+        .iter()
+        .map(|n| n.as_window_clause().expect("windowClause entry"))
+        .find(|wc| wc.winref == wfunc.winref)
+        .unwrap_or_else(|| panic!("could not find window clause for winref {}", wfunc.winref));
+    match wc.name {
+        Some(name) => ctx.buf.push_str(&quote_identifier(name)),
+        None => {
+            let tlist = ctx.target_list.expect("query deparse has a targetList");
+            query::get_rule_windowspec(wc, tlist, ctx)?;
+        }
+    }
     Ok(())
 }
 

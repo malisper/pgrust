@@ -77,7 +77,9 @@ pub fn end(h: TuplestoreHandle) {
             _ => None,
         }
     });
-    drop(entry);
+    if let Some(e) = entry {
+        e.store.end();
+    }
 }
 
 // The slot's own allocator IS C's tts_mcxt; ambient there, carried here.

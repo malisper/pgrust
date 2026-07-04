@@ -138,8 +138,9 @@ pub fn construct_array_image<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let align = align_of_typalign(elmalign);
     let mut nbytes = ARR_1D_HDRSZ;
+    // C pads AFTER each element (att_align_nominal in construct_md_array), so
+    // the last odd-length element carries trailing pad in the stored image.
     for &v in values {
-        nbytes = (nbytes + align - 1) & !(align - 1);
         nbytes += if elmlen > 0 {
             elmlen as usize
         } else if elmlen == -1 {
@@ -153,6 +154,7 @@ pub fn construct_array_image<'mcx>(
         } else {
             panic!("construct_array_image: unsupported typlen {elmlen}")
         };
+        nbytes = (nbytes + align - 1) & !(align - 1);
     }
     let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, nbytes)?;
     out.resize(nbytes, 0);
@@ -167,7 +169,6 @@ pub fn construct_array_image<'mcx>(
     w(&mut out, 20, 1);
     let mut off = ARR_1D_HDRSZ;
     for &v in values {
-        off = (off + align - 1) & !(align - 1);
         if elmbyval {
             let bytes = v.as_u64().to_ne_bytes();
             out[off..off + elmlen as usize].copy_from_slice(&bytes[..elmlen as usize]);
@@ -206,6 +207,7 @@ pub fn construct_array_image<'mcx>(
                 }
             }
         }
+        off = (off + align - 1) & !(align - 1);
     }
     debug_assert!(off == nbytes);
     Ok(out)
