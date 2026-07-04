@@ -641,7 +641,7 @@ fn fjav_copy<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
             }
             Node::mk(
                 mcx,
-                types_nodes::CoalesceExpr {
+                types_nodes::primnodes::CoalesceExpr {
                     coalescetype: c.coalescetype,
                     coalescecollid: c.coalescecollid,
                     args,
