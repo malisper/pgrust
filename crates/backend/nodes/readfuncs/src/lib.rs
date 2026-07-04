@@ -13,15 +13,16 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
-    CTEMaterialize, CommonTableExpr, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
-    RangeTblFunction, SetOperation, SetOperationStmt, SortGroupClause, WindowClause,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, Query, QuerySource, RTEKind,
+    RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation, SetOperationStmt,
+    SortGroupClause, WindowClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
-    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MinMaxExpr,
-    MinMaxOp, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
-    CollateExpr, RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var,
-    VarReturningType, WindowFunc,
+    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MergeAction,
+    MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr,
+    OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType, ScalarArrayOpExpr,
+    SubLink, SubLinkType, TargetEntry, Var, VarReturningType, WindowFunc,
 };
 use types_nodes::Node;
 
@@ -398,7 +399,11 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"WINDOWFUNC" => self.read_window_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
             b"COMMONTABLEEXPR" => self.read_common_table_expr(),
+            b"CTESEARCHCLAUSE" => self.read_cte_search_clause(),
+            b"CTECYCLECLAUSE" => self.read_cte_cycle_clause(),
             b"COLLATEEXPR" => self.read_collate_expr(),
+            b"NAMEDARGEXPR" => self.read_named_arg_expr(),
+            b"MERGEACTION" => self.read_merge_action(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -489,14 +494,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.aliascolnames = self.read_node_list("aliascolnames")?;
         c.ctematerialized = cte_materialize(self.read_u32("ctematerialized"));
         c.ctequery = self.read_node("ctequery")?;
-        c.search_clause = match self.read_node("search_clause")? {
-            None => None,
-            Some(_) => panic!("_readCTESearchClause (readfuncs.c): SEARCH clause unported"),
-        };
-        c.cycle_clause = match self.read_node("cycle_clause")? {
-            None => None,
-            Some(_) => panic!("_readCTECycleClause (readfuncs.c): CYCLE clause unported"),
-        };
+        c.search_clause = self.read_node("search_clause")?;
+        c.cycle_clause = self.read_node("cycle_clause")?;
         c.location = self.read_location("location");
         c.cterecursive = self.read_bool("cterecursive");
         c.cterefcount = self.read_i32("cterefcount");
@@ -505,6 +504,54 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.ctecoltypmods = self.read_int_list("ctecoltypmods")?;
         c.ctecolcollations = self.read_oid_list("ctecolcollations")?;
         Ok(c.seal())
+    }
+
+    fn read_cte_search_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut s = Node::build::<CTESearchClause>(mcx)?;
+        s.search_col_list = self.read_node_list("search_col_list")?;
+        s.search_breadth_first = self.read_bool("search_breadth_first");
+        s.search_seq_column = self.read_str("search_seq_column")?;
+        s.location = self.read_location("location");
+        Ok(s.seal())
+    }
+
+    fn read_cte_cycle_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<CTECycleClause>(mcx)?;
+        c.cycle_col_list = self.read_node_list("cycle_col_list")?;
+        c.cycle_mark_column = self.read_str("cycle_mark_column")?;
+        c.cycle_mark_value = self.read_node("cycle_mark_value")?;
+        c.cycle_mark_default = self.read_node("cycle_mark_default")?;
+        c.cycle_path_column = self.read_str("cycle_path_column")?;
+        c.location = self.read_location("location");
+        c.cycle_mark_type = self.read_u32("cycle_mark_type");
+        c.cycle_mark_typmod = self.read_i32("cycle_mark_typmod");
+        c.cycle_mark_collation = self.read_u32("cycle_mark_collation");
+        c.cycle_mark_neop = self.read_u32("cycle_mark_neop");
+        Ok(c.seal())
+    }
+
+    fn read_named_arg_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut n = Node::build::<NamedArgExpr>(mcx)?;
+        n.arg = self.read_node("arg")?;
+        n.name = self.read_str("name")?;
+        n.argnumber = self.read_i32("argnumber");
+        n.location = self.read_location("location");
+        Ok(n.seal())
+    }
+
+    fn read_merge_action(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut m = Node::build::<MergeAction>(mcx)?;
+        m.matchKind = merge_match_kind(self.read_u32("matchKind"));
+        m.commandType = cmd_type(self.read_u32("commandType"));
+        m.r#override = overriding_kind(self.read_u32("override"));
+        m.qual = self.read_node("qual")?;
+        m.targetList = self.read_node_list("targetList")?;
+        m.updateColnos = self.read_int_list("updateColnos")?;
+        Ok(m.seal())
     }
 
     fn read_collate_expr(&mut self) -> PgResult<Node<'mcx>> {
@@ -1234,6 +1281,15 @@ fn overriding_kind(v: u32) -> OverridingKind {
         1 => OverridingKind::OVERRIDING_USER_VALUE,
         2 => OverridingKind::OVERRIDING_SYSTEM_VALUE,
         other => panic!("readfuncs.c: bad OverridingKind {other}"),
+    }
+}
+
+fn merge_match_kind(v: u32) -> MergeMatchKind {
+    match v {
+        0 => MergeMatchKind::MERGE_WHEN_MATCHED,
+        1 => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+        2 => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET,
+        other => panic!("readfuncs.c: bad MergeMatchKind {other}"),
     }
 }
 

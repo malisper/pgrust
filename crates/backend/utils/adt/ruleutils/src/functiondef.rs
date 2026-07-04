@@ -373,7 +373,7 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
         buf.push_str(&format!(" ROWS {}", fmt_g(proc.prorows)));
     }
     if proc.prosupport != InvalidOid {
-        let name = generate_function_name(mcx, proc.prosupport, &[INTERNALOID], false)?;
+        let name = generate_function_name(mcx, proc.prosupport, &[INTERNALOID], &[], false)?;
         buf.push_str(&format!(" SUPPORT {name}"));
     }
     if oldlen != buf.len() {

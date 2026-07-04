@@ -228,6 +228,14 @@ pub(crate) fn get_rule_expr<'mcx>(
         }
         NodeTag::T_OpExpr => get_oper_expr(node, node.as_op_expr().unwrap(), ctx),
         NodeTag::T_FuncExpr => get_func_expr(node, node.as_func_expr().unwrap(), ctx, showimplicit),
+        NodeTag::T_NamedArgExpr => {
+            let na = node.as_named_arg_expr().unwrap();
+            ctx.buf.push_str(&format!(
+                "{} => ",
+                quote_identifier(na.name.expect("NamedArgExpr has a name"))
+            ));
+            get_rule_expr(na.arg.expect("NamedArgExpr has an arg"), ctx, showimplicit)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             get_saop_expr(node, node.as_scalar_array_op_expr().unwrap(), ctx)
         }
@@ -933,28 +941,209 @@ fn get_func_expr<'mcx>(
         let coerced_typmod = func_expr_length_coercion_typmod(expr);
         return get_coercion_expr(arg, ctx, expr.funcresulttype, coerced_typmod, node);
     }
-    if expr.funcformat == CoercionForm::COERCE_SQL_SYNTAX {
-        gap("get_func_expr", "COERCE_SQL_SYNTAX (get_func_sql_syntax)");
+    if expr.funcformat == CoercionForm::COERCE_SQL_SYNTAX && get_func_sql_syntax(node, expr, ctx)? {
+        return Ok(());
     }
 
     let mut argtypes = Vec::with_capacity(expr.args.len());
+    let mut argnames = Vec::new();
     for arg in expr.args.iter() {
-        if arg.node_tag() == NodeTag::T_NamedArgExpr {
-            gap("get_func_expr", "NamedArgExpr arguments");
+        if let Some(na) = arg.as_named_arg_expr() {
+            argnames.push(na.name.expect("NamedArgExpr has a name"));
         }
         argtypes.push(parse_expr::expr_type(arg));
     }
-    let funcname = generate_function_name(ctx.mcx, expr.funcid, &argtypes, expr.funcvariadic)?;
+    let funcname =
+        generate_function_name(ctx.mcx, expr.funcid, &argtypes, &argnames, expr.funcvariadic)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
+    let nargs = expr.args.len();
     for (i, arg) in expr.args.iter().enumerate() {
         if i > 0 {
             ctx.buf.push_str(", ");
+        }
+        if expr.funcvariadic && i == nargs - 1 {
+            ctx.buf.push_str("VARIADIC ");
         }
         get_rule_expr(arg, ctx, true)?;
     }
     ctx.buf.push(')');
     Ok(())
+}
+
+const F_TIMEZONE_INTERVAL_TIMESTAMP: Oid = 2070;
+const F_TIMEZONE_INTERVAL_TIMESTAMPTZ: Oid = 1026;
+const F_TIMEZONE_INTERVAL_TIMETZ: Oid = 2038;
+const F_TIMEZONE_TEXT_TIMESTAMP: Oid = 2069;
+const F_TIMEZONE_TEXT_TIMESTAMPTZ: Oid = 1159;
+const F_TIMEZONE_TEXT_TIMETZ: Oid = 2037;
+const F_TIMEZONE_TIMESTAMP: Oid = 6335;
+const F_TIMEZONE_TIMESTAMPTZ: Oid = 6334;
+const F_TIMEZONE_TIMETZ: Oid = 6336;
+const F_OVERLAPS_OIDS: [Oid; 13] =
+    [1271, 1304, 1305, 1306, 1307, 1308, 1309, 1310, 1311, 2041, 2042, 2043, 2044];
+const F_EXTRACT_OIDS: [Oid; 6] = [6199, 6200, 6201, 6202, 6203, 6204];
+const F_IS_NORMALIZED: Oid = 4351;
+const F_PG_COLLATION_FOR: Oid = 3162;
+const F_NORMALIZE: Oid = 4350;
+const F_OVERLAY_OIDS: [Oid; 6] = [749, 752, 1404, 1405, 3030, 3031];
+const F_POSITION_OIDS: [Oid; 3] = [849, 1698, 2014];
+const F_SUBSTRING_FROM_OIDS: [Oid; 6] = [936, 937, 1680, 1699, 2012, 2013];
+const F_SUBSTRING_TEXT_TEXT_TEXT: Oid = 2074;
+const F_BTRIM_OIDS: [Oid; 3] = [884, 885, 2015];
+const F_LTRIM_OIDS: [Oid; 3] = [875, 881, 6195];
+const F_RTRIM_OIDS: [Oid; 3] = [876, 882, 6196];
+const F_SYSTEM_USER: Oid = 6311;
+
+fn text_const_str(arg: Node<'_>) -> String {
+    let c = arg.as_const().expect("SQL-syntax option arg is a Const");
+    debug_assert!(c.consttype == types_core::TEXTOID && !c.constisnull);
+    crate::text_at(c.constvalue)
+}
+
+fn get_func_sql_syntax<'mcx>(
+    node: Node<'mcx>,
+    expr: &FuncExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<bool> {
+    let funcoid = expr.funcid;
+    match funcoid {
+        F_TIMEZONE_INTERVAL_TIMESTAMP
+        | F_TIMEZONE_INTERVAL_TIMESTAMPTZ
+        | F_TIMEZONE_INTERVAL_TIMETZ
+        | F_TIMEZONE_TEXT_TIMESTAMP
+        | F_TIMEZONE_TEXT_TIMESTAMPTZ
+        | F_TIMEZONE_TEXT_TIMETZ => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(1), ctx, false, Some(node))?;
+            ctx.buf.push_str(" AT TIME ZONE ");
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_TIMEZONE_TIMESTAMP | F_TIMEZONE_TIMESTAMPTZ | F_TIMEZONE_TIMETZ => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push_str(" AT LOCAL)");
+            Ok(true)
+        }
+        _ if F_OVERLAPS_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("((");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(", ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(") OVERLAPS (");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            ctx.buf.push_str(", ");
+            get_rule_expr(expr.args.nth(3), ctx, false)?;
+            ctx.buf.push_str("))");
+            Ok(true)
+        }
+        _ if F_EXTRACT_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("EXTRACT(");
+            ctx.buf.push_str(&text_const_str(expr.args.nth(0)));
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_IS_NORMALIZED => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push_str(" IS");
+            if expr.args.len() == 2 {
+                ctx.buf.push(' ');
+                ctx.buf.push_str(&text_const_str(expr.args.nth(1)));
+            }
+            ctx.buf.push_str(" NORMALIZED)");
+            Ok(true)
+        }
+        F_PG_COLLATION_FOR => {
+            ctx.buf.push_str("COLLATION FOR (");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_NORMALIZE => {
+            ctx.buf.push_str("NORMALIZE(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            if expr.args.len() == 2 {
+                ctx.buf.push_str(", ");
+                ctx.buf.push_str(&text_const_str(expr.args.nth(1)));
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_OVERLAY_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("OVERLAY(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" PLACING ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            if expr.args.len() == 4 {
+                ctx.buf.push_str(" FOR ");
+                get_rule_expr(expr.args.nth(3), ctx, false)?;
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_POSITION_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("POSITION((");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(") IN (");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str("))");
+            Ok(true)
+        }
+        _ if F_SUBSTRING_FROM_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("SUBSTRING(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            if expr.args.len() == 3 {
+                ctx.buf.push_str(" FOR ");
+                get_rule_expr(expr.args.nth(2), ctx, false)?;
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_SUBSTRING_TEXT_TEXT_TEXT => {
+            ctx.buf.push_str("SUBSTRING(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" SIMILAR ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(" ESCAPE ");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_BTRIM_OIDS.contains(&funcoid)
+            || F_LTRIM_OIDS.contains(&funcoid)
+            || F_RTRIM_OIDS.contains(&funcoid) =>
+        {
+            ctx.buf.push_str(if F_BTRIM_OIDS.contains(&funcoid) {
+                "TRIM(BOTH"
+            } else if F_LTRIM_OIDS.contains(&funcoid) {
+                "TRIM(LEADING"
+            } else {
+                "TRIM(TRAILING"
+            });
+            if expr.args.len() == 2 {
+                ctx.buf.push(' ');
+                get_rule_expr(expr.args.nth(1), ctx, false)?;
+            }
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_SYSTEM_USER => {
+            ctx.buf.push_str("SYSTEM_USER");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
@@ -966,7 +1155,8 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
         gap("get_agg_expr", "unrecognized aggkind");
     }
     let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
-    let funcname = generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, aggref.aggvariadic)?;
+    let funcname =
+        generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, &[], aggref.aggvariadic)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if !aggref.aggdistinct.is_nil() {
@@ -988,6 +1178,11 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
     } else if aggref.aggstar {
         ctx.buf.push('*');
     } else {
+        let nargs = aggref
+            .args
+            .iter()
+            .filter(|n| !n.as_target_entry().expect("Aggref args are TargetEntries").resjunk)
+            .count();
         let mut i = 0;
         for tle_node in aggref.args.iter() {
             let tle = tle_node.as_target_entry().expect("Aggref args are TargetEntries");
@@ -998,6 +1193,9 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
                 ctx.buf.push_str(", ");
             }
             i += 1;
+            if aggref.aggvariadic && i == nargs {
+                ctx.buf.push_str("VARIADIC ");
+            }
             get_rule_expr(tle.expr, ctx, true)?;
         }
     }
@@ -1021,13 +1219,14 @@ fn get_windowfunc_expr<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     let mut argtypes = Vec::with_capacity(wfunc.args.len());
+    let mut argnames = Vec::new();
     for arg in wfunc.args.iter() {
-        if arg.node_tag() == NodeTag::T_NamedArgExpr {
-            gap("get_windowfunc_expr", "NamedArgExpr arguments");
+        if let Some(na) = arg.as_named_arg_expr() {
+            argnames.push(na.name.expect("NamedArgExpr has a name"));
         }
         argtypes.push(parse_expr::expr_type(arg));
     }
-    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, false)?;
+    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, &argnames, false)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if wfunc.winstar {

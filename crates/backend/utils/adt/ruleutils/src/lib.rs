@@ -10,6 +10,7 @@ mod functiondef;
 mod plan;
 mod query;
 mod ruledef;
+mod triggerdef;
 mod viewdef;
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,7 @@ pub use functiondef::{
     pg_get_functiondef_worker,
 };
 pub use ruledef::pg_get_ruledef_worker;
+pub use triggerdef::pg_get_triggerdef_worker;
 pub use viewdef::pg_get_viewdef_worker;
 pub use format_type::quote_identifier;
 
@@ -107,7 +109,7 @@ pub(crate) fn text_at(d: Datum) -> String {
 }
 
 // One-dimensional no-null int16 array body (int2vector or int2[]).
-fn i16_array_at(d: Datum) -> Vec<i16> {
+pub(crate) fn i16_array_at(d: Datum) -> Vec<i16> {
     array_body(d, 2).chunks_exact(2).map(|c| i16::from_ne_bytes([c[0], c[1]])).collect()
 }
 
@@ -300,29 +302,34 @@ pub(crate) fn generate_function_name(
     mcx: Mcx<'_>,
     funcid: Oid,
     argtypes: &[Oid],
+    argnames: &[&str],
     has_variadic: bool,
 ) -> PgResult<String> {
     let proname = lsyscache::get_func_name(mcx, funcid)?
         .ok_or_else(|| cache_lookup_failed("function", funcid))?;
     let proname = proname.as_str().to_owned();
-    if has_variadic {
-        gap("generate_function_name", "VARIADIC call deparse");
-    }
+    // C threads use_variadic into func_get_detail: expand_variadic is off
+    // when the call prints with the VARIADIC keyword.
     let cands = catalog_namespace::FuncnameGetCandidates(
         mcx,
         &[&proname],
         argtypes.len() as i16,
-        true,
+        !has_variadic,
         true,
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
-    if best.is_none() && !cands.is_empty() {
+    if best.is_none() && !cands.is_empty() && argnames.is_empty() {
         let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
         best = match matched.len() {
             0 => None,
             1 => Some(matched[0].oid),
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
+    }
+    if best.is_none() && !argnames.is_empty() {
+        // C's MatchNamedCall leg is unported; in-order named args resolve on
+        // the exact-argtypes match above.
+        gap("generate_function_name", "out-of-order named-argument resolution");
     }
     if best.is_none() && argtypes.len() == 1 {
         // func_get_detail falls back to the FuncNameAsType coercion arm only
