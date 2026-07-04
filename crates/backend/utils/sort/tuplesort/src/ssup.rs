@@ -17,6 +17,7 @@ const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_RANGE_SORTSUPPORT: Oid = 6391;
+const F_MACADDR_SORTSUPPORT: Oid = 3359;
 const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 const F_BTNAMESORTSUPPORT: Oid = 3135;
@@ -458,9 +459,9 @@ pub fn comparator_for_opfamily(
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
         F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
-        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
-        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
-        0 | F_RANGE_SORTSUPPORT => {
+        // C DIVERGENCE: range_sortsupport 6391 + macaddr_sortsupport 3359 fast
+        // cmps unported; the BTORDER_PROC shim is order-identical (perf watch).
+        0 | F_RANGE_SORTSUPPORT | F_MACADDR_SORTSUPPORT => {
             // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
             // once; comparisons go through the resolved fn pointer.
             let sort_function =
@@ -528,9 +529,9 @@ pub fn comparator_for_index_col(
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
         F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
-        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
-        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
-        0 | F_RANGE_SORTSUPPORT => {
+        // C DIVERGENCE: range_sortsupport 6391 + macaddr_sortsupport 3359 fast
+        // cmps unported; the BTORDER_PROC shim is order-identical (perf watch).
+        0 | F_RANGE_SORTSUPPORT | F_MACADDR_SORTSUPPORT => {
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
             if sort_function == 0 {
