@@ -1,13 +1,13 @@
-// Runtime/array keys loud-panic in the shared scankey builder.
+// Array keys loud-panic in the shared scankey builder; runtime keys are live.
 #![allow(non_snake_case)]
 
-use ::executils::EStateData;
+use ::executils::{EStateData, EcxtId};
 use ::indexam::{
     index_beginscan_bitmap, index_close, index_endscan, index_getbitmap, index_rescan,
     IndexScanDescData,
 };
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::nodeindexscan::exec_index_build_scan_keys;
+use ::nodeindexscan::{exec_index_build_scan_keys, exec_index_eval_runtime_keys, IndexRuntimeKeyInfo};
 use ::tidbitmap::TIDBitmap;
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::BitmapIndexScan;
@@ -20,6 +20,9 @@ pub struct BitmapIndexScanState<'mcx> {
     pub biss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub biss_RelationDesc: Option<Relation<'mcx>>,
     pub biss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    pub biss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    pub biss_RuntimeKeysReady: bool,
+    pub biss_RuntimeContext: Option<EcxtId>,
 }
 
 pub fn exec_init_bitmap_index_scan<'mcx>(
@@ -42,16 +45,20 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     if node.isshared {
         panic!("nodebitmapindexscan: isshared (parallel bitmap scan lane) not ported");
     }
-    let (biss_ScanKeys, runtime_keys) =
+    let (biss_ScanKeys, biss_RuntimeKeys) =
         exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, estate.param_bind())?;
-    assert!(
-        runtime_keys.is_empty(),
-        "nodebitmapindexscan: runtime keys pending the bitmap runtime-key lane"
-    );
+    let biss_RuntimeContext = if biss_RuntimeKeys.is_empty() {
+        None
+    } else {
+        Some(estate.exec_assign_expr_context())
+    };
     Ok(BitmapIndexScanState {
         biss_ScanDesc: None,
         biss_RelationDesc: Some(index_rel),
         biss_ScanKeys,
+        biss_RuntimeKeys,
+        biss_RuntimeKeysReady: false,
+        biss_RuntimeContext,
     })
 }
 
@@ -62,6 +69,9 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
     tbm: &mut TIDBitmap<'_>,
 ) -> PgResult<f64> {
     let mcx = estate.es_query_cxt;
+    if !node.biss_RuntimeKeysReady && !node.biss_RuntimeKeys.is_empty() {
+        exec_rescan_bitmap_index_scan(node, estate)?;
+    }
     if node.biss_ScanDesc.is_none() {
         let snapshot = estate
             .es_snapshot
@@ -73,7 +83,9 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
             snapshot,
             node.biss_ScanKeys.len() as i32,
         )?;
-        index_rescan(&mut scandesc, Some(&node.biss_ScanKeys), None)?;
+        if node.biss_RuntimeKeys.is_empty() || node.biss_RuntimeKeysReady {
+            index_rescan(&mut scandesc, Some(&node.biss_ScanKeys), None)?;
+        }
         node.biss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
     }
 
@@ -106,8 +118,22 @@ pub fn exec_end_bitmap_index_scan(node: &mut BitmapIndexScanState<'_>) -> PgResu
     Ok(())
 }
 
-/// Runtime/array key arms unreachable (init loud-panics on non-Const quals).
-pub fn exec_rescan_bitmap_index_scan(node: &mut BitmapIndexScanState<'_>) -> PgResult<()> {
+/// `ExecReScanBitmapIndexScan`; array keys stay loud in the shared builder.
+pub fn exec_rescan_bitmap_index_scan<'mcx>(
+    node: &mut BitmapIndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if !node.biss_RuntimeKeys.is_empty() {
+        let ecxt = node.biss_RuntimeContext.expect("runtime keys have their econtext");
+        estate.reset_expr_context(ecxt);
+        exec_index_eval_runtime_keys(
+            estate,
+            ecxt,
+            &mut node.biss_RuntimeKeys,
+            &mut node.biss_ScanKeys,
+        )?;
+    }
+    node.biss_RuntimeKeysReady = true;
     if let Some(scandesc) = node.biss_ScanDesc.as_deref_mut() {
         index_rescan(scandesc, Some(&node.biss_ScanKeys), None)?;
     }
@@ -122,9 +148,16 @@ fn check_for_interrupts() -> types_error::PgResult<()> {
     Ok(())
 }
 
-// Exempt (every field): droppy owners, all released in
-// exec_end_bitmap_index_scan; the destructure keeps the census exhaustive.
+// Exempt (droppy owners released in exec_end_bitmap_index_scan); the
+// destructure keeps the census exhaustive.
 unsafe impl mcx::ForgetSafe for BitmapIndexScanState<'_> {}
 const _: fn(&BitmapIndexScanState<'_>) = |v| {
-    let BitmapIndexScanState { biss_ScanDesc: _, biss_RelationDesc: _, biss_ScanKeys: _ } = v;
+    let BitmapIndexScanState {
+        biss_ScanDesc: _,
+        biss_RelationDesc: _,
+        biss_ScanKeys: _,
+        biss_RuntimeKeys: _,
+        biss_RuntimeKeysReady: _,
+        biss_RuntimeContext: _,
+    } = v;
 };
