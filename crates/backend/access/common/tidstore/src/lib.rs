@@ -66,12 +66,16 @@ unsafe impl RtValue for BlocktableEntry {
 }
 
 impl BlocktableEntry {
+    // The full image extends past size_of::<BlocktableEntry>() (flexible
+    // array): tail reads must go through the tree's raw pointer — a `&self`
+    // retag grants only the 8-byte header (Miri).
     #[inline]
-    unsafe fn word(&self, wordnum: usize) -> BitmapWord {
-        debug_assert!(wordnum < self.nwords as usize);
-        // SAFETY: wordnum < nwords; the full image sits behind this header.
+    unsafe fn word(page: NonNull<BlocktableEntry>, wordnum: usize) -> BitmapWord {
+        // SAFETY: caller guarantees wordnum < nwords; the full image sits
+        // behind `page`.
         unsafe {
-            (self as *const BlocktableEntry)
+            debug_assert!(wordnum < (*page.as_ptr()).nwords as usize);
+            page.as_ptr()
                 .cast::<u8>()
                 .add(offset_of!(BlocktableEntry, words))
                 .cast::<BitmapWord>()
@@ -80,16 +84,20 @@ impl BlocktableEntry {
         }
     }
 
-    fn is_member(&self, off: OffsetNumber) -> bool {
-        if self.nwords == 0 {
-            self.full_offsets.contains(&off)
-        } else {
-            let wordnum = off as usize / BITS_PER_BITMAPWORD;
-            let bitnum = off as usize % BITS_PER_BITMAPWORD;
-            if wordnum >= self.nwords as usize {
-                return false;
+    unsafe fn is_member(page: NonNull<BlocktableEntry>, off: OffsetNumber) -> bool {
+        // SAFETY: live entry image behind the tree; no mutation while read.
+        unsafe {
+            let nwords = (*page.as_ptr()).nwords;
+            if nwords == 0 {
+                (*page.as_ptr()).full_offsets.contains(&off)
+            } else {
+                let wordnum = off as usize / BITS_PER_BITMAPWORD;
+                let bitnum = off as usize % BITS_PER_BITMAPWORD;
+                if wordnum >= nwords as usize {
+                    return false;
+                }
+                Self::word(page, wordnum) & (1 << bitnum) != 0
             }
-            unsafe { self.word(wordnum) & (1 << bitnum) != 0 }
         }
     }
 }
@@ -171,8 +179,7 @@ fn is_member_in_tree<S: RtStore>(tree: &Tree<BlocktableEntry, S>, tid: &ItemPoin
     let Some(page) = tree.find_ptr(blk as u64) else {
         return false;
     };
-    // SAFETY: live entry image behind the tree; no mutation while borrowed.
-    unsafe { page.as_ref() }.is_member(off)
+    unsafe { BlocktableEntry::is_member(page, off) }
 }
 
 pub struct TidStore {
@@ -317,13 +324,15 @@ impl TidStoreIterResult<'_> {
     /// Fills `offsets` ascending; a return value exceeding `offsets.len()`
     /// reports the required buffer size.
     pub fn block_offsets(&self, offsets: &mut [OffsetNumber]) -> usize {
-        // SAFETY: the entry image is pinned by the iterator's tree borrow.
-        let page = unsafe { self.internal_page.as_ref() };
+        // SAFETY: the entry image is pinned by the iterator's tree borrow;
+        // reads stay on the raw pointer (header retag covers 8 bytes only).
+        let page = self.internal_page;
+        let nwords = unsafe { (*page.as_ptr()).nwords };
         let max_offsets = offsets.len();
         let mut num_offsets = 0usize;
 
-        if page.nwords == 0 {
-            for &off in &page.full_offsets {
+        if nwords == 0 {
+            for &off in unsafe { &(*page.as_ptr()).full_offsets } {
                 if off != InvalidOffsetNumber {
                     if num_offsets < max_offsets {
                         offsets[num_offsets] = off;
@@ -332,8 +341,8 @@ impl TidStoreIterResult<'_> {
                 }
             }
         } else {
-            for wordnum in 0..page.nwords as usize {
-                let mut w = unsafe { page.word(wordnum) };
+            for wordnum in 0..nwords as usize {
+                let mut w = unsafe { BlocktableEntry::word(page, wordnum) };
                 let mut off = wordnum * BITS_PER_BITMAPWORD;
                 while w != 0 {
                     if w & 1 != 0 {
