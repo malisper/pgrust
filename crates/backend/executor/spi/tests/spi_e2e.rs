@@ -383,6 +383,22 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
     syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
+    syscache_seams::lookup_pg_type_typcache_shape::set(|_typid| {
+        Ok(Some(syscache_seams::PgTypeTypcacheShape {
+            typname: types_tuple::NameData::default(),
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+            typstorage: b'p' as i8,
+            typtype: b'b' as i8,
+            typisdefined: true,
+            typrelid: 0,
+            typsubscript: 0,
+            typelem: 0,
+            typarray: 0,
+            typcollation: 0,
+        }))
+    });
     syscache_seams::lookup_pg_type_shape::set(|_typid| {
         Ok(Some(types_tuple::PgTypeShape {
             typlen: 4,

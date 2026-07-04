@@ -186,6 +186,7 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_status_seams::pgstat_report_activity::set(|_, _| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
@@ -350,6 +351,17 @@ fn install_catalog_fixture() {
             _ => {}
         }
         Ok(v)
+    });
+    syscache_seams::pg_proc_proname::set(|funcid| {
+        let name = match funcid {
+            1066 | 1067 => "generate_series",
+            2803 => "count",
+            2108 => "sum",
+            _ => return Ok(None),
+        };
+        let mut n = types_tuple::NameData::default();
+        n.namestrcpy(name);
+        Ok(Some(n))
     });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
