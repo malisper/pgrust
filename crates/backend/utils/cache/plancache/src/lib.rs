@@ -2,7 +2,8 @@
 // on drop; registry handles are generation-checked (C's dangling pointer made
 // loud). CachedPlan.refcount IS C's refcount. Divergences (each loud or
 // vacuously equal until its lane lands): raw parse trees are not retained
-// (classification bits captured at create; the invalidated-replan arm panics),
+// (classification bits captured at create; the invalidated-replan arm re-parses
+// via the source's installed ReanalyzeFn, and panics when none is installed),
 // query-side (source) invalItems are not collected — the generic plan's
 // invalItems (recorded by setrefs) carry the function dependency and drive
 // PlanCacheObjectCallback's generic-plan arm; source invalidation would force
@@ -40,6 +41,19 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CachedPlanSourceHandle(pub u64);
 
+/// Analyze-and-rewrite the source's statement into `qmcx` with the resolved
+/// param types; `arg` is C's parserSetupArg.
+pub type ReanalyzeFn = fn(
+    qmcx: Mcx<'static>,
+    query_string: &'static str,
+    param_types: &'static [Oid],
+    arg: i32,
+) -> PgResult<PgVec<'static, Query<'static>>>;
+
+pub fn SetCachedPlanReanalyze(h: CachedPlanSourceHandle, f: ReanalyzeFn, arg: i32) {
+    with_source(h, |src| src.reanalyze = Some((f, arg)));
+}
+
 struct CachedPlanSource {
     handle_gen: u32,
     query_string: &'static str,
@@ -50,6 +64,7 @@ struct CachedPlanSource {
     requires_reval: bool,
     requires_snapshot: bool,
     is_xact_exit_stmt: bool,
+    reanalyze: Option<(ReanalyzeFn, i32)>,
     query_list: &'static [Query<'static>],
     relation_oids: &'static [Oid],
     search_path: Option<SearchPathMatcher<'static>>,
@@ -231,6 +246,7 @@ pub fn CreateCachedPlan(
             requires_reval,
             requires_snapshot,
             is_xact_exit_stmt,
+            reanalyze: None,
             query_list: &[],
             relation_oids: &[],
             search_path: None,
@@ -593,11 +609,86 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         AcquirePlannerLocks(query_list, false)?;
     }
 
-    panic!(
-        "RevalidateCachedQuery (plancache.c): plan for {:?} was invalidated; re-analysis \
-         needs a retained raw parse tree (analyze-rewrite hooks lane)",
-        with_source(h, |src| src.commandTag)
-    );
+    let Some((reanalyze, arg)) = with_source(h, |src| src.reanalyze) else {
+        panic!(
+            "RevalidateCachedQuery (plancache.c): plan for {:?} was invalidated; re-analysis \
+             needs a retained raw parse tree (analyze-rewrite hooks lane)",
+            with_source(h, |src| src.commandTag)
+        );
+    };
+
+    // An analysis error below leaves the source invalid with empty lists
+    // (retried on the next fetch), exactly as C's longjmp.
+    ReleaseGenericPlan(h);
+    let (old_qctx, query_string, param_types, fixed_result, source_ctx) = with_cache(|pc| {
+        let src = source_mut(pc, h);
+        src.is_valid = false;
+        src.query_list = &[];
+        src.relation_oids = &[];
+        src.search_path = None;
+        (src.query_ctx, src.query_string, src.param_types, src.fixed_result, src.source_ctx)
+    });
+
+    let new_qctx = leak_ctx("CachedPlanQuery");
+    let rebuilt = (|| -> PgResult<_> {
+        let qmcx = ctx_mcx(new_qctx);
+        let query_list = reanalyze(qmcx, query_string, param_types, arg)?;
+        let query_list: &'static [Query<'static>] = mcx::vec_borrow_in(qmcx, query_list)?;
+        let mut oids: PgVec<'static, Oid> = PgVec::new_in(qmcx);
+        for q in query_list {
+            extract_query_relation_deps(q, &mut oids)?;
+        }
+        let relation_oids = mcx::vec_borrow_in(qmcx, oids)?;
+        let search_path = catalog_namespace::GetSearchPathMatcher(qmcx)?;
+        let result_desc = plan_cache_compute_result_desc(ctx_mcx(source_ctx), query_list)?;
+        Ok((query_list, relation_oids, search_path, result_desc))
+    })();
+    let (query_list, relation_oids, search_path, result_desc) = match rebuilt {
+        Ok(r) => r,
+        Err(e) => {
+            reclaim_ctx(new_qctx);
+            return Err(e);
+        }
+    };
+
+    let old_desc = with_source(h, |src| src.result_desc.clone());
+    let desc_equal = match (&old_desc, &result_desc) {
+        (None, None) => true,
+        (Some(o), Some(n)) => tupdesc::equalRowTypes(o, n),
+        _ => false,
+    };
+    if !desc_equal && fixed_result {
+        reclaim_ctx(new_qctx);
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("cached plan must not change result type")
+            .into_error()
+            .into());
+    }
+
+    let depends_on_rls = query_list.iter().any(|q| q.hasRowSecurity);
+    let rewrite_role_id = miscinit::GetUserId();
+    let rewrite_row_security = guc_tables::backing::row_security();
+    with_cache(|pc| {
+        let src = source_mut(pc, h);
+        src.query_ctx = new_qctx;
+        src.query_list = query_list;
+        src.relation_oids = relation_oids;
+        src.search_path = Some(search_path);
+        if !desc_equal {
+            src.result_desc = result_desc;
+        }
+        src.depends_on_rls = depends_on_rls;
+        src.rewrite_role_id = rewrite_role_id;
+        src.rewrite_row_security = rewrite_row_security;
+        src.is_valid = true;
+    });
+    // Custom plans share query-arena subnodes (see `dead`): the old arena is
+    // reclaimed only when no live plan can still reference it.
+    if with_cache(|pc| !pc.plans.iter().flatten().any(|p| p.source == h)) {
+        reclaim_ctx(old_qctx);
+    }
+    Ok(())
 }
 
 fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
