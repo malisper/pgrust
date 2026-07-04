@@ -269,9 +269,11 @@ impl<'mcx> YYSTYPE<'mcx> {
             // SAFETY: built by FuncAlias() from &'mcx Alias (coldeflist NIL-asserted).
             T_FUNC_ALIAS => (unsafe { (self.p as *const Alias<'mcx>).as_ref() }, NodeList::nil()),
             T_FUNC_ALIAS_COLS => {
-                // SAFETY: built by FuncAliasV() from &'mcx FuncAliasCols.
+                // SAFETY: built by FuncAliasV() from &'mcx FuncAliasCols; the
+                // list is arena-owned with no drop glue and each carrier is
+                // consumed exactly once (table_ref reduce).
                 let c = unsafe { &*(self.p as *const FuncAliasCols<'mcx>) };
-                (c.alias, c.coldeflist)
+                (c.alias, unsafe { core::ptr::read(&c.coldeflist) })
             }
             _ => confusion("FuncAlias"),
         }
