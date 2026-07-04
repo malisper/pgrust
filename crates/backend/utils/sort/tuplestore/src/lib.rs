@@ -454,6 +454,7 @@ impl Tuplestore {
                 return Ok(true);
             }
             let count = st.memtuples.len();
+            let memtupdeleted = st.memtupdeleted;
             let rp = &mut st.readptrs[st.activeptr];
             if forward {
                 if rp.eof_reached {
@@ -468,16 +469,20 @@ impl Tuplestore {
                 Ok(false)
             } else {
                 debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
-                let cur = if rp.eof_reached { count } else { rp.current };
-                // C: n+1 backward steps then one forward re-read; net effect
-                // is current -= n with the tuple floor at position 1.
-                if cur > n {
+                // C tuplestore.c:1213-1227: the first backward step from EOF
+                // re-reads the last tuple without moving (ntuples--); the
+                // floor is memtupdeleted, not 0.
+                let mut n = n;
+                if rp.eof_reached {
+                    rp.current = count;
                     rp.eof_reached = false;
-                    rp.current = cur - n;
+                    n -= 1;
+                }
+                if rp.current - memtupdeleted > n {
+                    rp.current -= n;
                     return Ok(true);
                 }
-                rp.eof_reached = false;
-                rp.current = 0;
+                rp.current = memtupdeleted;
                 Ok(false)
             }
         })
