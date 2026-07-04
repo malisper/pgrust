@@ -673,6 +673,36 @@ pub fn default_reloptions<'mcx>(
     build_std(mcx, options, validate, kind)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AttributeOpts {
+    pub n_distinct: f64,
+    pub n_distinct_inherited: f64,
+}
+
+pub fn attribute_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<AttributeOpts>> {
+    let values = parseRelOptions(mcx, options, validate, RELOPT_KIND_ATTRIBUTE)?;
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut out = AttributeOpts { n_distinct: 0.0, n_distinct_inherited: 0.0 };
+    for v in values.iter() {
+        match v.def.name {
+            "n_distinct" => out.n_distinct = v.real_val(),
+            "n_distinct_inherited" => out.n_distinct_inherited = v.real_val(),
+            other => {
+                if validate {
+                    panic!("reloption \"{other}\" not found in parse table");
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 pub fn heap_reloptions<'mcx>(
     mcx: Mcx<'mcx>,
     relkind: u8,
