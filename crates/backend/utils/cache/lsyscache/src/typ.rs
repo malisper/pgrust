@@ -143,6 +143,9 @@ pub fn get_typdefault<'mcx>(
     fcinfo.set_arg(1, datum::Datum::from_oid(getTypeIOParam(&io)));
     fcinfo.set_arg(2, datum::Datum::from_i32(-1));
     let d = flinfo.invoke(&mut fcinfo)?;
+    // Pre-convention input wrappers return FmgrInfo-scratch; copy into mcx
+    // so the Const outlives the frame (C's makeConst datum already does).
+    let d = adt_scalar::datum_copy(mcx, d, io.typbyval, io.typlen)?;
     let coll = get_typcollation(typid)?;
     Ok(Some(types_nodes::Node::mk_const(
         mcx,
