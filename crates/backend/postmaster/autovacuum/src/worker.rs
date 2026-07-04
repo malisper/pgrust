@@ -357,7 +357,7 @@ pub fn do_autovacuum() -> PgResult<()> {
             if row.relkind != RELKIND_RELATION && row.relkind != RELKIND_MATVIEW {
                 continue;
             }
-            if row.relpersistence == types_rel::pg_class::RELPERSISTENCE_TEMP {
+            if row.relpersistence == types_core::RELPERSISTENCE_TEMP {
                 if catalog_namespace::checkTempNamespaceStatus(row.relnamespace)?
                     == TempNamespaceStatus::Idle
                 {
@@ -397,7 +397,7 @@ pub fn do_autovacuum() -> PgResult<()> {
             if row.relkind != RELKIND_TOASTVALUE {
                 continue;
             }
-            if row.relpersistence == types_rel::pg_class::RELPERSISTENCE_TEMP {
+            if row.relpersistence == types_core::RELPERSISTENCE_TEMP {
                 continue;
             }
             let mut avopts = row.avopts;
@@ -439,7 +439,7 @@ pub fn do_autovacuum() -> PgResult<()> {
             continue;
         };
         if !((row.relkind == RELKIND_RELATION || row.relkind == RELKIND_MATVIEW)
-            && row.relpersistence == types_rel::pg_class::RELPERSISTENCE_TEMP)
+            && row.relpersistence == types_core::RELPERSISTENCE_TEMP)
         {
             lmgr::UnlockRelationOid(relid, AccessExclusiveLock)?;
             continue;
