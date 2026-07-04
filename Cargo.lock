@@ -1485,6 +1485,7 @@ dependencies = [
  "pg_depend",
  "pg_largeobject",
  "pg_namespace",
+ "pg_shdepend",
  "pg_type",
  "rewrite_define_seams",
  "sequence_seams",
@@ -1689,6 +1690,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaddress_seams",
  "opclasscmds_seams",
  "parse_oper",
  "pg_attrdef",
@@ -6284,6 +6286,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectaddress_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6955,11 +6967,13 @@ dependencies = [
 name = "pg_db_role_setting"
 version = "0.0.0"
 dependencies = [
+ "catalog_indexing",
  "datum",
  "fmgr_seams",
  "genam",
  "mcx",
  "pg_db_role_setting_seams",
+ "table",
  "types_core",
  "types_error",
  "types_guc",
@@ -6994,6 +7008,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "pg_shdepend",
  "table",
  "types_core",
  "types_error",
@@ -7175,6 +7190,7 @@ dependencies = [
  "miscinit",
  "parse_oper",
  "pg_depend",
+ "pg_shdepend",
  "superuser",
  "syscache_seams",
  "table",
@@ -7259,12 +7275,19 @@ version = "0.1.0"
 name = "pg_shdepend"
 version = "0.0.0"
 dependencies = [
+ "catalog",
  "catalog_indexing",
  "datum",
+ "dbcommands_seams",
  "fmgr_seams",
  "genam",
  "heaptuple",
+ "init_small",
+ "lmgr",
  "mcx",
+ "miscinit_seams",
+ "objectaddress_seams",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",
@@ -9346,6 +9369,7 @@ dependencies = [
  "catalog_dependency",
  "catalog_index",
  "catalog_namespace",
+ "catalog_objectaddress",
  "catalog_storage",
  "catcache",
  "checkpointer",
@@ -9504,6 +9528,7 @@ dependencies = [
  "twophase_config",
  "typcache",
  "types_fmgr",
+ "user",
  "utility",
  "vacuumlazy",
  "variable",
@@ -11404,6 +11429,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "user"
+version = "0.1.0"
+dependencies = [
+ "adt_acl",
+ "adt_bool",
+ "adt_timestamp",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catcache",
+ "crypt",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "guc",
+ "guc_tables",
+ "heaptuple",
+ "lmgr",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "pg_db_role_setting",
+ "pg_shdepend",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
 name = "utility"
 version = "0.1.0"
 dependencies = [
@@ -11473,6 +11536,7 @@ dependencies = [
  "types_rel",
  "types_storage",
  "types_tuple",
+ "user",
  "utility_seams",
  "xact",
 ]

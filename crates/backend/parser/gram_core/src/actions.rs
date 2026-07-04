@@ -6,13 +6,17 @@ use types_core::catalog::{
 use types_error::PgResult;
 use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
-    AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateFunctionStmt, CreateSchemaStmt,
-    DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, FunctionParameter, FunctionParameterMode, CheckPointStmt, LoadStmt, LockStmt,
-    AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
-    GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
-    RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
-    VacuumRelation, ReplicaIdentityStmt,
-    VacuumStmt, ClusterStmt, ReindexObjectType, ReindexStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    AccessPriv, AlterRoleSetStmt, AlterRoleStmt, AlterTableCmd, AlterTableStmt, AlterTableType,
+    CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
+    CopyStmt, CreateFunctionStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
+    DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, DropBehavior,
+    DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
+    FunctionParameterMode, GrantRoleStmt, GrantStmt, GrantTargetType, GroupingSetKind,
+    ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectType, PrepareStmt, ReassignOwnedStmt,
+    ReindexObjectType, ReindexStmt, RenameStmt, ReplicaIdentityStmt, RoleSpec, RoleSpecType,
+    RoleStmtType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
+    UnlistenStmt, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
+    VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
     REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_INDEX,
@@ -3686,8 +3690,9 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
-            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
-            2140..=2148 => {
+            // CURRENT_DATE .. CURRENT_SCHEMA (makeSQLValueFunction; 2152
+            // SYSTEM_USER is a makeFuncCall, not an SVFOP — stays a loud).
+            2140..=2151 | 2153..=2155 => {
                 use SQLValueFunctionOp as Op;
                 let (op, typmod) = match rule {
                     2140 => (Op::SVFOP_CURRENT_DATE, -1),
@@ -3698,7 +3703,13 @@ impl<'mcx> Parser<'mcx> {
                     2145 => (Op::SVFOP_LOCALTIME, -1),
                     2146 => (Op::SVFOP_LOCALTIME_N, view.v(3).ival()),
                     2147 => (Op::SVFOP_LOCALTIMESTAMP, -1),
-                    _ => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2148 => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2149 => (Op::SVFOP_CURRENT_ROLE, -1),
+                    2150 => (Op::SVFOP_CURRENT_USER, -1),
+                    2151 => (Op::SVFOP_SESSION_USER, -1),
+                    2153 => (Op::SVFOP_USER, -1),
+                    2154 => (Op::SVFOP_CURRENT_CATALOG, -1),
+                    _ => (Op::SVFOP_CURRENT_SCHEMA, -1),
                 };
                 let n = Node::mk(
                     mcx,
@@ -3802,6 +3813,19 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            217 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("role");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(2).str_val() })),
+                    view.l(2),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.location = view.l(2);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // set_rest_more: SESSION AUTHORIZATION NonReservedWord_or_Sconst | DEFAULT.
             218 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -3886,6 +3910,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = make_a_const(mcx, v, view.l(1))?;
             }
             248 => *yyval = view.v(2),
+            // SetResetClause: VariableResetStmt (node -> vsetstmt cast in C).
+            256 => *yyval = view.v(1),
             // reset_rest: TIME ZONE / TRANSACTION ISOLATION LEVEL / SESSION AUTHORIZATION.
             250 | 251 | 252 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -5462,6 +5488,244 @@ impl<'mcx> Parser<'mcx> {
                     _ => RoleSpecType::ROLESPEC_SESSION_USER,
                 };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            2457 => {
+                let spec =
+                    view.v(1).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                match spec.roletype {
+                    RoleSpecType::ROLESPEC_CSTRING => {
+                        *yyval = YYSTYPE::Str(spec.rolename.expect("rolename"));
+                    }
+                    other => {
+                        let message = match other {
+                            RoleSpecType::ROLESPEC_PUBLIC => {
+                                "role name \"public\" is reserved".into()
+                            }
+                            RoleSpecType::ROLESPEC_SESSION_USER => {
+                                "SESSION_USER cannot be used as a role name here".into()
+                            }
+                            RoleSpecType::ROLESPEC_CURRENT_USER => {
+                                "CURRENT_USER cannot be used as a role name here".into()
+                            }
+                            _ => "CURRENT_ROLE cannot be used as a role name here".into(),
+                        };
+                        return Err(Box::new(
+                            (*self.errposition_error(message, view.l(1)))
+                                .with_sqlstate(types_error::ERRCODE_RESERVED_NAME),
+                        ));
+                    }
+                }
+            }
+            2462 => {
+                let r = view.v(1).node().expect("RoleSpec");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, r)?);
+            }
+            2463 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("RoleSpec"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            147 | 170 | 185 => {
+                let mut n = Node::build::<CreateRoleStmt>(mcx)?;
+                n.stmt_type = match rule {
+                    147 => RoleStmtType::ROLESTMT_ROLE,
+                    170 => RoleStmtType::ROLESTMT_USER,
+                    _ => RoleStmtType::ROLESTMT_GROUP,
+                };
+                n.role = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            151 | 153 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("role option"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            155 | 157 => {
+                let s = view.v(if rule == 157 { 3 } else { 2 }).str_val();
+                *yyval =
+                    def_elem(mcx, "password", Some(Node::mk_string(mcx, s)?), view.l(1))?;
+            }
+            156 => *yyval = def_elem(mcx, "password", None, view.l(1))?,
+            158 => {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "UNENCRYPTED PASSWORD is no longer supported".into(),
+                        view.l(1),
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_hint(
+                        "Remove UNENCRYPTED to store the password in encrypted form instead.",
+                    ),
+                ));
+            }
+            159 => {
+                let b = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "inherit", Some(b), view.l(1))?;
+            }
+            160 => {
+                let i = Node::mk(mcx, Integer { ival: view.v(3).ival() })?;
+                *yyval = def_elem(mcx, "connectionlimit", Some(i), view.l(1))?;
+            }
+            161 => {
+                let s = Node::mk_string(mcx, view.v(3).str_val())?;
+                *yyval = def_elem(mcx, "validUntil", Some(s), view.l(1))?;
+            }
+            162 => {
+                let l = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "rolemembers", Some(l), view.l(1))?;
+            }
+            163 => {
+                let name = view.v(1).str_val();
+                let loc = view.l(1);
+                let (defname, value) = match name {
+                    "superuser" => ("superuser", true),
+                    "nosuperuser" => ("superuser", false),
+                    "createrole" => ("createrole", true),
+                    "nocreaterole" => ("createrole", false),
+                    "replication" => ("isreplication", true),
+                    "noreplication" => ("isreplication", false),
+                    "createdb" => ("createdb", true),
+                    "nocreatedb" => ("createdb", false),
+                    "login" => ("canlogin", true),
+                    "nologin" => ("canlogin", false),
+                    "bypassrls" => ("bypassrls", true),
+                    "nobypassrls" => ("bypassrls", false),
+                    "noinherit" => ("inherit", false),
+                    _ => {
+                        return Err(self.errposition_error(
+                            format!("unrecognized role option \"{name}\""),
+                            loc,
+                        ));
+                    }
+                };
+                let b = Node::mk(mcx, Boolean { boolval: value })?;
+                *yyval = def_elem(mcx, defname, Some(b), loc)?;
+            }
+            165 => {
+                let i = Node::mk(mcx, Integer { ival: view.v(2).ival() })?;
+                *yyval = def_elem(mcx, "sysid", Some(i), view.l(1))?;
+            }
+            166 | 167 => {
+                let name = if rule == 166 { "adminmembers" } else { "rolemembers" };
+                let l = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, name, Some(l), view.l(1))?;
+            }
+            168 | 169 => {
+                let l = Node::mk_list(mcx, view.v(3).list())?;
+                *yyval = def_elem(mcx, "addroleto", Some(l), view.l(1))?;
+            }
+            171 | 172 => {
+                let role =
+                    view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleStmt { role, options: view.v(5).list(), action: 1 },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            175..=178 => {
+                let role = if rule == 175 || rule == 177 {
+                    Some(view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec"))
+                } else {
+                    None
+                };
+                let setstmt = view
+                    .v(5)
+                    .node()
+                    .expect("SetResetClause")
+                    .as_variable_set_stmt()
+                    .expect("VariableSetStmt");
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleSetStmt { role, database: opt_str(view.v(4)), setstmt },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            179..=184 => {
+                let missing_ok = rule % 2 == 0;
+                let mut n = Node::build::<DropRoleStmt>(mcx)?;
+                n.missing_ok = missing_ok;
+                n.roles = view.v(if missing_ok { 5 } else { 3 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            186 => {
+                let role =
+                    view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let members = Node::mk_list(mcx, view.v(6).list())?;
+                let d = def_elem(mcx, "rolemembers", Some(members), view.l(6))?
+                    .node()
+                    .unwrap();
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleStmt {
+                        role,
+                        options: NodeList::make1(mcx, d)?,
+                        action: view.v(4).ival(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            187 => *yyval = YYSTYPE::Ival(1),
+            188 => *yyval = YYSTYPE::Ival(-1),
+            916 => {
+                let mut n = Node::build::<DropOwnedStmt>(mcx)?;
+                n.roles = view.v(4).list();
+                n.behavior = drop_behavior(view.v(5).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            917 => {
+                let newrole =
+                    view.v(6).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let n =
+                    Node::mk(mcx, ReassignOwnedStmt { roles: view.v(4).list(), newrole })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1073 | 1074 => {
+                let (opt, byi) =
+                    if rule == 1074 { (view.v(6).list(), 7) } else { (NodeList::nil(), 5) };
+                let mut n = Node::build::<GrantRoleStmt>(mcx)?;
+                n.is_grant = true;
+                n.granted_roles = view.v(2).list();
+                n.grantee_roles = view.v(4).list();
+                n.opt = opt;
+                n.grantor = view.v(byi).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1075 | 1076 => {
+                let mut n = Node::build::<GrantRoleStmt>(mcx)?;
+                n.is_grant = false;
+                let (pi, gi, byi, bi) = if rule == 1076 {
+                    let b = Node::mk(mcx, Boolean { boolval: false })?;
+                    let opt = def_elem(mcx, view.v(2).str_val(), Some(b), view.l(2))?
+                        .node()
+                        .unwrap();
+                    n.opt = NodeList::make1(mcx, opt)?;
+                    (5, 7, 8, 9)
+                } else {
+                    (2, 4, 5, 6)
+                };
+                n.granted_roles = view.v(pi).list();
+                n.grantee_roles = view.v(gi).list();
+                n.grantor = view.v(byi).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                n.behavior = drop_behavior(view.v(bi).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1077 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("grant_role_opt"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1078 => {
+                let d = view.v(1).node().expect("grant_role_opt");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            1079 => {
+                *yyval = def_elem(mcx, view.v(1).str_val(), view.v(2).node(), view.l(1))?;
+            }
+            1080..=1082 => {
+                let b = Node::mk(mcx, Boolean { boolval: rule != 1082 })?;
+                *yyval = YYSTYPE::Node(Some(b));
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
             969 => *yyval = YYSTYPE::Boolean(true),

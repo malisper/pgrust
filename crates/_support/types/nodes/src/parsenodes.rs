@@ -1018,6 +1018,62 @@ pub struct AccessPriv<'mcx> {
     pub cols: NodeList<'mcx>,
 }
 
+#[derive(Default)]
+pub struct GrantRoleStmt<'mcx> {
+    pub granted_roles: NodeList<'mcx>,
+    pub grantee_roles: NodeList<'mcx>,
+    pub is_grant: bool,
+    pub opt: NodeList<'mcx>,
+    pub grantor: Option<&'mcx RoleSpec<'mcx>>,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RoleStmtType {
+    #[default]
+    ROLESTMT_ROLE = 0,
+    ROLESTMT_USER = 1,
+    ROLESTMT_GROUP = 2,
+}
+
+#[derive(Default)]
+pub struct CreateRoleStmt<'mcx> {
+    pub stmt_type: RoleStmtType,
+    pub role: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+pub struct AlterRoleStmt<'mcx> {
+    pub role: &'mcx RoleSpec<'mcx>,
+    pub options: NodeList<'mcx>,
+    pub action: i32,
+}
+
+// C: role == NULL means ALTER ROLE ALL.
+pub struct AlterRoleSetStmt<'mcx> {
+    pub role: Option<&'mcx RoleSpec<'mcx>>,
+    pub database: Option<&'mcx str>,
+    pub setstmt: &'mcx VariableSetStmt<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropRoleStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
+pub struct DropOwnedStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub behavior: DropBehavior,
+}
+
+pub struct ReassignOwnedStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub newrole: &'mcx RoleSpec<'mcx>,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -1082,6 +1138,27 @@ unsafe impl<'mcx> NodeVariant<'mcx> for GrantStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AccessPriv<'mcx> {
     const TAG: NodeTag = NodeTag::T_AccessPriv;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for GrantRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GrantRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterRoleSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterRoleSetStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropOwnedStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropOwnedStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReassignOwnedStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReassignOwnedStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableShowStmt;
@@ -1322,6 +1399,41 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_grant_stmt(self) -> Option<&'mcx GrantStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_grant_role_stmt(self) -> Option<&'mcx GrantRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_role_stmt(self) -> Option<&'mcx CreateRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_role_stmt(self) -> Option<&'mcx AlterRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_role_set_stmt(self) -> Option<&'mcx AlterRoleSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_drop_role_stmt(self) -> Option<&'mcx DropRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_drop_owned_stmt(self) -> Option<&'mcx DropOwnedStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_reassign_owned_stmt(self) -> Option<&'mcx ReassignOwnedStmt<'mcx>> {
         self.as_variant()
     }
 

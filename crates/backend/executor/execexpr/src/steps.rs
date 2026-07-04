@@ -211,12 +211,13 @@ pub enum Step {
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
     NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
-    // timetz: compile-allocated 12-byte TimeTz image, rewritten per eval —
-    // valid until the next eval, the window C's per-tuple context reset gives.
+    // scratch: compile-allocated by-ref result image (12-byte TimeTz or
+    // 64-byte NameData), rewritten per eval — valid until the next eval, the
+    // window C's per-tuple context reset gives.
     SqlValueFunction {
         op: ::types_nodes::primnodes::SQLValueFunctionOp,
         typmod: i32,
-        timetz: NonNull<u8>,
+        scratch: NonNull<u8>,
         out: OutRef,
     },
 }

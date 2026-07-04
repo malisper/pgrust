@@ -31,6 +31,15 @@ use types_rel::{
 
 pub use pg_depend::ObjectAddress;
 
+pub fn init_seams() {
+    objectaddress_seams::get_object_description::set(
+        |mcx, class_id, object_id, object_sub_id, missing_ok| {
+            let object = ObjectAddress::sub_set(class_id, object_id, object_sub_id);
+            getObjectDescription(mcx, &object, missing_ok)
+        },
+    );
+}
+
 pub const ProcedureRelationId: Oid = types_core::PROCEDURE_RELATION_ID;
 pub const ConstraintRelationId: Oid = 2606;
 pub const AttrDefaultRelationId: Oid = 2604;

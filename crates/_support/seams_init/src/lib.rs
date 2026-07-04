@@ -99,6 +99,7 @@ pub fn init_all() {
     rewrite_handler::init_seams();
     rewrite_define::init_seams();
     opclasscmds::init_seams();
+    catalog_objectaddress::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
@@ -189,6 +190,7 @@ pub fn init_all() {
     guc_funcs::init_seams();
     variable::init_seams();
     gin::init_seams();
+    user::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
     stack_depth::init_seams();

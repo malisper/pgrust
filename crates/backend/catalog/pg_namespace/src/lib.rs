@@ -47,7 +47,7 @@ pub fn NamespaceCreate<'mcx>(
     catalog_indexing::CatalogTupleInsert(mcx, &nspdesc, &mut tup)?;
     nspdesc.close(RowExclusiveLock)?;
 
-    pg_depend::recordDependencyOnOwner(NAMESPACE_RELATION_ID, nspoid, ownerId);
+    pg_depend::recordDependencyOnOwner(mcx, NAMESPACE_RELATION_ID, nspoid, ownerId)?;
     Ok(nspoid)
 }
 

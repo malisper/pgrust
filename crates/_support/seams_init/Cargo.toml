@@ -43,6 +43,7 @@ be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
 large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
+catalog_objectaddress = { path = "../../backend/catalog/objectaddress" }
 commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
 clauses = { path = "../../backend/optimizer/util/clauses" }
@@ -181,6 +182,7 @@ guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
 variable = { path = "../../backend/commands/variable" }
+user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
 queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }

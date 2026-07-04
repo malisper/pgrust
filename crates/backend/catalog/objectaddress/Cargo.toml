@@ -39,4 +39,5 @@ parse_oper = { path = "../../parser/parse_oper" }
 opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
 rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
+objectaddress_seams = { path = "../objectaddress_seams" }
 adt_regproc = { path = "../../utils/adt/regproc" }

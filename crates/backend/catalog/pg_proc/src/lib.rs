@@ -529,7 +529,7 @@ pub fn ProcedureCreate<'mcx>(
     )?;
 
     if !is_update {
-        pg_depend::recordDependencyOnOwner(PROCEDURE_RELATION_ID, retval, a.proowner);
+        pg_depend::recordDependencyOnOwner(mcx, PROCEDURE_RELATION_ID, retval, a.proowner)?;
     }
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, is_update)?;
     // recordDependencyOnNewAcl: no-op — proacl is always NULL here.

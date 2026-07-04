@@ -14,8 +14,9 @@ mod tests;
 
 pub use io::{aclitemin, aclitemout, aclparse, ACL_ALL_RIGHTS_STR};
 pub use membership::{
-    get_role_oid, get_role_oid_or_public, has_privs_of_role, initialize_acl, is_member_of_role,
-    is_member_of_role_nosuper, member_can_set_role, RoleMembershipCacheCallback,
+    get_role_oid, get_role_oid_or_public, has_privs_of_role, initialize_acl, is_admin_of_role,
+    is_member_of_role, is_member_of_role_nosuper, member_can_set_role, select_best_admin,
+    RoleMembershipCacheCallback,
 };
 pub(crate) use membership::RoleRecurseType;
 pub use ops::{
