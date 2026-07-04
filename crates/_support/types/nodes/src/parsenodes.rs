@@ -1147,6 +1147,95 @@ impl Default for DeallocateStmt<'_> {
     }
 }
 
+#[derive(Default)]
+pub struct PublicationTable<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub columns: NodeList<'mcx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum PublicationObjSpecType {
+    #[default]
+    PUBLICATIONOBJ_TABLE = 0,
+    PUBLICATIONOBJ_TABLES_IN_SCHEMA = 1,
+    PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA = 2,
+    PUBLICATIONOBJ_CONTINUATION = 3,
+}
+
+#[derive(Default)]
+pub struct PublicationObjSpec<'mcx> {
+    pub pubobjtype: PublicationObjSpecType,
+    pub name: Option<&'mcx str>,
+    pub pubtable: Option<&'mcx PublicationTable<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct CreatePublicationStmt<'mcx> {
+    pub pubname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub pubobjects: NodeList<'mcx>,
+    pub for_all_tables: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterPublicationAction {
+    #[default]
+    AP_AddObjects = 0,
+    AP_DropObjects = 1,
+    AP_SetObjects = 2,
+}
+
+#[derive(Default)]
+pub struct AlterPublicationStmt<'mcx> {
+    pub pubname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub pubobjects: NodeList<'mcx>,
+    pub for_all_tables: bool,
+    pub action: AlterPublicationAction,
+}
+
+#[derive(Default)]
+pub struct CreateSubscriptionStmt<'mcx> {
+    pub subname: Option<&'mcx str>,
+    pub conninfo: Option<&'mcx str>,
+    pub publication: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterSubscriptionType {
+    #[default]
+    ALTER_SUBSCRIPTION_OPTIONS = 0,
+    ALTER_SUBSCRIPTION_CONNECTION = 1,
+    ALTER_SUBSCRIPTION_SET_PUBLICATION = 2,
+    ALTER_SUBSCRIPTION_ADD_PUBLICATION = 3,
+    ALTER_SUBSCRIPTION_DROP_PUBLICATION = 4,
+    ALTER_SUBSCRIPTION_REFRESH = 5,
+    ALTER_SUBSCRIPTION_ENABLED = 6,
+    ALTER_SUBSCRIPTION_SKIP = 7,
+}
+
+#[derive(Default)]
+pub struct AlterSubscriptionStmt<'mcx> {
+    pub kind: AlterSubscriptionType,
+    pub subname: Option<&'mcx str>,
+    pub conninfo: Option<&'mcx str>,
+    pub publication: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropSubscriptionStmt<'mcx> {
+    pub subname: Option<&'mcx str>,
+    pub missing_ok: bool,
+    pub behavior: DropBehavior,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
     const TAG: NodeTag = NodeTag::T_Query;
@@ -1360,6 +1449,27 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreatePolicyStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterPolicyStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterPolicyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PublicationTable<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PublicationTable;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PublicationObjSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PublicationObjSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatePublicationStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatePublicationStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterPublicationStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterPublicationStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateSubscriptionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateSubscriptionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterSubscriptionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterSubscriptionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropSubscriptionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropSubscriptionStmt;
 }
 
 impl<'mcx> Node<'mcx> {

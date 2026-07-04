@@ -166,6 +166,8 @@ pub fn init_all() {
     typcache::init_seams();
     clauses::init_seams();
     pg_enum::init_seams();
+    pg_publication::init_seams();
+    pg_subscription::init_seams();
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
