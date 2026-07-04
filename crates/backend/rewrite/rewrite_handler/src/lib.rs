@@ -1457,13 +1457,28 @@ pub fn AcquireRewriteLocks<'mcx>(
     }
 
     if parsetree.hasSubLinks {
-        panic!(
-            "AcquireRewriteLocks (rewriteHandler.c): sublink descent needs the \
-             walker's T_SubLink arm (SubLink vocabulary unported)"
-        );
+        let mut w = LocksOnSubLinks { mcx, for_execute: forExecute };
+        nodes_core::query_tree_walker(parsetree, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
     }
 
     Ok(())
+}
+
+// acquireLocksOnSubLinks (rewriteHandler.c).
+struct LocksOnSubLinks<'mcx> {
+    mcx: Mcx<'mcx>,
+    for_execute: bool,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for LocksOnSubLinks<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(sl) = node.as_sub_link() {
+            if let Some(q) = sl.subselect.as_query() {
+                AcquireRewriteLocks(self.mcx, q, self.for_execute, false)?;
+            }
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
 }
 
 fn rte_of<'mcx>(node: Node<'mcx>) -> &'mcx RangeTblEntry<'mcx> {
