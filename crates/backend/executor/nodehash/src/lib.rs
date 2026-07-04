@@ -187,7 +187,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         nbatch: i32,
         space_allowed: usize,
         form_plan: Option<MinimalFormPlan>,
-        ntuples_est: f64,
+        bloom_est: Option<f64>,
     ) -> PgResult<HashJoinTable<'mcx>> {
         debug_assert!(nbuckets.is_power_of_two());
         let mut buckets = vec_with_capacity_in(mcx, nbuckets as usize)?;
@@ -213,7 +213,9 @@ impl<'mcx> HashJoinTable<'mcx> {
             outer_batch_file: PgVec::new_in(mcx),
             batch_cxt: estate.create_aux_context("HashBatchContext"),
             form_plan,
-            bloom: (nbatch == 1).then(|| ProbeBloom::new_in(mcx, ntuples_est)),
+            bloom: bloom_est
+                .filter(|_| nbatch == 1)
+                .map(|est| ProbeBloom::new_in(mcx, est)),
         };
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
@@ -705,12 +707,14 @@ pub fn exec_init_hash<'mcx>(
 pub fn exec_hash_table_create<'mcx>(
     hs: &HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
+    want_filter: bool,
 ) -> PgResult<HashJoinTable<'mcx>> {
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
         exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true);
     let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
-    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, hs.ntuples_est)
+    let bloom_est = want_filter.then_some(hs.ntuples_est);
+    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, bloom_est)
 }
 
 #[inline(always)]

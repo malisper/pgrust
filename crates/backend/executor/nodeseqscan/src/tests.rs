@@ -591,3 +591,44 @@ fn bloom_sparse_filter_admits_only_tested_hashes() {
         teardown(state, &mut estate);
     });
 }
+
+#[test]
+fn bloom_adaptive_disarm_on_nonselective_scan() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let all: Vec<i32> = (0..1600).collect();
+        let pages: Vec<&[i32]> = all.chunks(100).collect();
+        let (mut estate, mut state) = setup(mcx, &pages, &node);
+        state.batch_allowed = true;
+        let bf = mk_bloom(mcx, &all);
+        assert!(seq_scan_set_bloom(&mut state, &mut estate, Some((bf, 0))).unwrap());
+        assert_eq!(drain(&mut state, &mut estate), all);
+        // Non-selective filter disarms at a page boundary past 1024 rows;
+        // the per-tuple walk resumed without skipping or repeating a row.
+        assert_eq!(state.variant(), SeqScanVariant::Plain);
+        teardown(state, &mut estate);
+    });
+}
+
+#[test]
+fn bloom_selective_scan_stays_armed() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, matching_tlist(mcx), NodeList::default());
+        let all: Vec<i32> = (0..1600).collect();
+        let pages: Vec<&[i32]> = all.chunks(100).collect();
+        let (mut estate, mut state) = setup(mcx, &pages, &node);
+        state.batch_allowed = true;
+        let bf = mk_bloom(mcx, &[5, 500, 1500]);
+        assert!(seq_scan_set_bloom(&mut state, &mut estate, Some((bf.clone(), 0))).unwrap());
+        let expect: Vec<i32> = all
+            .iter()
+            .copied()
+            .filter(|v| bf.test(::hashfn::hash_bytes_uint32(*v as u32)))
+            .collect();
+        assert_eq!(drain(&mut state, &mut estate), expect);
+        assert_eq!(state.variant(), SeqScanVariant::PlainBloom);
+        teardown(state, &mut estate);
+    });
+}

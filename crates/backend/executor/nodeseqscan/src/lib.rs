@@ -58,6 +58,8 @@ struct BloomScan<'mcx> {
     nwords: u32,
     cur_word: u32,
     cur_bits: u64,
+    seen: u32,
+    kept: u32,
 }
 
 impl BloomScan<'_> {
@@ -621,6 +623,8 @@ pub fn seq_scan_set_bloom<'mcx>(
             nwords: 0,
             cur_word: 0,
             cur_bits: 0,
+            seen: 0,
+            kept: 0,
         },
         mcx,
     ));
@@ -642,6 +646,17 @@ fn exec_seq_scan_bloom<'mcx>(
     loop {
         let next = node.bloom.as_deref_mut().expect("bloom drive armed").next_selected();
         let Some(i) = next else {
+            // Page boundary: rs_cindex parks at page end, so the per-tuple
+            // walk resumes on the NEXT page — disarming here is order-exact.
+            // Break-even ~9% rejected (filter ~45 instr/row vs ~500 saved).
+            {
+                let b = node.bloom.as_deref().expect("bloom drive armed");
+                if b.seen >= 1024 && 8 * (b.kept as u64) > 7 * (b.seen as u64) {
+                    node.bloom = None;
+                    node.variant = SeqScanVariant::Plain;
+                    return exec_scan_extended::<_, false, false>(node, estate);
+                }
+            }
             node.ensure_scandesc(estate)?;
             let SeqScanState { ss, bloom, .. } = node;
             // SAFETY: written by ensure_scandesc when None.
@@ -665,6 +680,8 @@ fn exec_seq_scan_bloom<'mcx>(
             b.nwords = nwords as u32;
             b.cur_word = 0;
             b.cur_bits = b.sel[0];
+            b.seen += n;
+            b.kept += b.sel[..nwords].iter().map(|w| w.count_ones()).sum::<u32>();
             continue;
         };
         let mcx = estate.es_query_cxt;
@@ -822,5 +839,5 @@ mcx::forget_safe_struct!(
         plan, soa, qual_armed, qual_only, key_col, publish, qual_col, qual_cmp, qual_konst,
         sel, nwords, cur_word, cur_bits,
     },
-    BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits; filter },
+    BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );
