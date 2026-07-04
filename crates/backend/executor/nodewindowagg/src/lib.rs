@@ -198,8 +198,10 @@ pub struct WindowAggStateData<'mcx> {
     end_offset_state: Option<PgBox<'mcx, ExprState<'mcx>>>,
     start_offset_value: Datum,
     end_offset_value: Datum,
-    start_offset_typ: (i16, bool),
-    end_offset_typ: (i16, bool),
+    start_offset_typlen: i16,
+    start_offset_byval: bool,
+    end_offset_typlen: i16,
+    end_offset_byval: bool,
     start_in_range: Option<FmgrInfo>,
     end_in_range: Option<FmgrInfo>,
     runcondition: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -654,18 +656,12 @@ pub fn exec_init_window_agg<'mcx>(
 
     let start_offset_state = exec_init_expr(mcx, node.startOffset, params)?;
     let end_offset_state = exec_init_expr(mcx, node.endOffset, params)?;
-    let start_offset_typ = match node.startOffset {
-        Some(off) => {
-            let (len, byval) = lsyscache::get_typlenbyval(expr_type(off))?;
-            (len, byval)
-        }
+    let (start_offset_typlen, start_offset_byval) = match node.startOffset {
+        Some(off) => lsyscache::get_typlenbyval(expr_type(off))?,
         None => (0, true),
     };
-    let end_offset_typ = match node.endOffset {
-        Some(off) => {
-            let (len, byval) = lsyscache::get_typlenbyval(expr_type(off))?;
-            (len, byval)
-        }
+    let (end_offset_typlen, end_offset_byval) = match node.endOffset {
+        Some(off) => lsyscache::get_typlenbyval(expr_type(off))?,
         None => (0, true),
     };
     let runcondition = exec_init_qual(mcx, &node.runCondition, params)?;
@@ -737,8 +733,10 @@ pub fn exec_init_window_agg<'mcx>(
         end_offset_state,
         start_offset_value: Datum::null(),
         end_offset_value: Datum::null(),
-        start_offset_typ,
-        end_offset_typ,
+        start_offset_typlen,
+        start_offset_byval,
+        end_offset_typlen,
+        end_offset_byval,
         start_in_range,
         end_in_range,
         runcondition,
@@ -1968,10 +1966,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
             if nd.isnull {
                 return Err(frame_offset_null(true));
             }
-            self.start_offset_value = if self.start_offset_typ.1 {
+            self.start_offset_value = if self.start_offset_byval {
                 nd.value
             } else {
-                datum_copy(mcx, nd.value, self.start_offset_typ.0)?
+                datum_copy(mcx, nd.value, self.start_offset_typlen)?
             };
             if fo & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS) != 0 && nd.value.as_i64() < 0 {
                 return Err(frame_offset_negative(true));
@@ -1984,10 +1982,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
             if nd.isnull {
                 return Err(frame_offset_null(false));
             }
-            self.end_offset_value = if self.end_offset_typ.1 {
+            self.end_offset_value = if self.end_offset_byval {
                 nd.value
             } else {
-                datum_copy(mcx, nd.value, self.end_offset_typ.0)?
+                datum_copy(mcx, nd.value, self.end_offset_typlen)?
             };
             if fo & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS) != 0 && nd.value.as_i64() < 0 {
                 return Err(frame_offset_negative(false));
@@ -3027,8 +3025,9 @@ mcx::forget_safe_struct!(
         frametail_ptr, currentgroup, frameheadgroup, frametailgroup,
         groupheadpos, grouptailpos, grouptail_valid, grouptail_ptr,
         aggregatedbase, aggregatedupto, spooled_rows,
-        start_offset_value, end_offset_value, start_offset_typ,
-        end_offset_typ, use_pass_through, top_window, all_first,
+        start_offset_value, end_offset_value, start_offset_typlen,
+        start_offset_byval, end_offset_typlen, end_offset_byval,
+        use_pass_through, top_window, all_first,
         partition_spooled, more_partitions, next_partition, status;
         ps_ResultTupleDesc, proj, part_eq, ord_eq, buffer, scan_slot,
         first_part_slot, agg_row_slot, temp_slot_1, temp_slot_2,
