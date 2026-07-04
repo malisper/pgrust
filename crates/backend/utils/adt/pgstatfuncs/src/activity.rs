@@ -205,18 +205,36 @@ pub fn fc_pg_stat_get_activity(
             values[17] = text_datum(fcinfo, miscinit::GetBackendTypeDesc(be.st_backendType))?;
 
             if be.st_ssl {
-                panic!(
-                    "pg_stat_get_activity (pgstatfuncs.c): PgBackendSSLStatus \
-                     unported — be-secure-openssl lane"
-                );
+                values[18] = Datum::from_bool(true);
+                values[19] = text_datum(fcinfo, &be.st_ssl_version)?;
+                values[20] = text_datum(fcinfo, &be.st_ssl_cipher)?;
+                values[21] = Datum::from_i32(be.st_ssl_bits);
+                if !be.st_ssl_client_dn.is_empty() {
+                    values[22] = text_datum(fcinfo, &be.st_ssl_client_dn)?;
+                } else {
+                    nulls[22] = true;
+                }
+                if !be.st_ssl_client_serial.is_empty() {
+                    let img = adt_numeric::numeric_in(&be.st_ssl_client_serial, -1, None)?
+                        .expect("hard-error path returns Err");
+                    values[23] = types_fmgr::byref_result(fcinfo.result_mcx(), img.as_bytes())?;
+                } else {
+                    nulls[23] = true;
+                }
+                if !be.st_ssl_issuer_dn.is_empty() {
+                    values[24] = text_datum(fcinfo, &be.st_ssl_issuer_dn)?;
+                } else {
+                    nulls[24] = true;
+                }
+            } else {
+                values[18] = Datum::from_bool(false);
+                nulls[19] = true;
+                nulls[20] = true;
+                nulls[21] = true;
+                nulls[22] = true;
+                nulls[23] = true;
+                nulls[24] = true;
             }
-            values[18] = Datum::from_bool(false);
-            nulls[19] = true;
-            nulls[20] = true;
-            nulls[21] = true;
-            nulls[22] = true;
-            nulls[23] = true;
-            nulls[24] = true;
 
             if be.st_gss {
                 panic!(

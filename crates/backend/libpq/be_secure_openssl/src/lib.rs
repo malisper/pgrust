@@ -1193,6 +1193,36 @@ pub fn be_tls_get_cipher() -> Option<String> {
     })
 }
 
+// C returns "" for these when there is no peer certificate; None maps to ""
+// at the pgstat consumer.
+pub fn be_tls_get_peer_subject_name() -> Option<String> {
+    CONN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|conn| conn.peer.as_ref())
+            .map(|peer| x509_name_to_cstring(peer.subject_name()))
+    })
+}
+
+pub fn be_tls_get_peer_issuer_name() -> Option<String> {
+    CONN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|conn| conn.peer.as_ref())
+            .map(|peer| x509_name_to_cstring(peer.issuer_name()))
+    })
+}
+
+pub fn be_tls_get_peer_serial() -> Option<String> {
+    CONN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|conn| conn.peer.as_ref())
+            .and_then(|peer| peer.serial_number().to_bn().ok())
+            .and_then(|b| b.to_dec_str().ok().map(|s| s.to_string()))
+    })
+}
+
 const NID_MD5: libc::c_int = 4;
 const NID_SHA1: libc::c_int = 64;
 

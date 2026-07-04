@@ -43,6 +43,7 @@ pub struct PgBackendStatus {
     pub st_clientaddr: SyncCell<SockAddr>,
     pub st_clienthostname: SyncCell<[u8; NAMELEN]>,
     pub st_ssl: SyncCell<bool>,
+    pub st_sslstatus: PgBackendSSLStatus,
     pub st_gss: SyncCell<bool>,
     pub st_state: SyncCell<BackendState>,
     pub st_appname: SyncCell<[u8; NAMELEN]>,
@@ -51,6 +52,39 @@ pub struct PgBackendStatus {
     pub st_progress_param: [SyncCell<i64>; PGSTAT_NUM_PROGRESS_PARAM],
     pub st_query_id: SyncCell<i64>,
     pub st_plan_id: SyncCell<i64>,
+}
+
+// PgBackendSSLStatus (backend_status.h); contents only meaningful while
+// st_ssl is true.
+pub struct PgBackendSSLStatus {
+    pub ssl_bits: SyncCell<i32>,
+    pub ssl_version: SyncCell<[u8; NAMELEN]>,
+    pub ssl_cipher: SyncCell<[u8; NAMELEN]>,
+    pub ssl_client_dn: SyncCell<[u8; NAMELEN]>,
+    pub ssl_client_serial: SyncCell<[u8; NAMELEN]>,
+    pub ssl_issuer_dn: SyncCell<[u8; NAMELEN]>,
+}
+
+impl PgBackendSSLStatus {
+    fn zeroed() -> PgBackendSSLStatus {
+        PgBackendSSLStatus {
+            ssl_bits: SyncCell::new(0),
+            ssl_version: SyncCell::new([0; NAMELEN]),
+            ssl_cipher: SyncCell::new([0; NAMELEN]),
+            ssl_client_dn: SyncCell::new([0; NAMELEN]),
+            ssl_client_serial: SyncCell::new([0; NAMELEN]),
+            ssl_issuer_dn: SyncCell::new([0; NAMELEN]),
+        }
+    }
+
+    fn reset(&self) {
+        self.ssl_bits.set(0);
+        self.ssl_version.set([0; NAMELEN]);
+        self.ssl_cipher.set([0; NAMELEN]);
+        self.ssl_client_dn.set([0; NAMELEN]);
+        self.ssl_client_serial.set([0; NAMELEN]);
+        self.ssl_issuer_dn.set([0; NAMELEN]);
+    }
 }
 
 // SAFETY: every field is an atomic or a SyncCell whose cross-thread access is
@@ -224,6 +258,7 @@ pub fn BackendStatusShmemInit() -> PgResult<()> {
             st_clientaddr: SyncCell::new(SockAddr::zeroed()),
             st_clienthostname: SyncCell::new([0; NAMELEN]),
             st_ssl: SyncCell::new(false),
+            st_sslstatus: PgBackendSSLStatus::zeroed(),
             st_gss: SyncCell::new(false),
             st_state: SyncCell::new(BackendState::STATE_UNDEFINED),
             st_appname: SyncCell::new([0; NAMELEN]),
@@ -258,6 +293,7 @@ pub fn BackendStatusShmemResetAfterCrash() {
         e.st_clientaddr.set(SockAddr::zeroed());
         e.st_clienthostname.set([0; NAMELEN]);
         e.st_ssl.set(false);
+        e.st_sslstatus.reset();
         e.st_gss.set(false);
         e.st_state.set(BackendState::STATE_UNDEFINED);
         e.st_appname.set([0; NAMELEN]);
@@ -336,14 +372,41 @@ pub fn pgstat_bestart_initial() -> PgResult<()> {
     Ok(())
 }
 
+// USE_SSL arm live; no ENABLE_GSS arm in this build (gss stays false, as C
+// built without gssapi).
 pub fn pgstat_bestart_security() -> PgResult<()> {
     let beentry = my_beentry();
     assert!(g::HaveMyProcPort());
 
-    // No USE_SSL / ENABLE_GSS arms in this build: both report false, as C.
+    let mut ssl = false;
+    let mut lssl = PgBackendSSLStatus::zeroed();
+    if g::WithMyProcPort(|p| p.ssl_in_use) {
+        ssl = true;
+        lssl.ssl_bits.set(be_secure_openssl::be_tls_get_cipher_bits());
+        lssl.ssl_version
+            .set(str_to_name(&be_secure_openssl::be_tls_get_version().unwrap_or_default()));
+        lssl.ssl_cipher
+            .set(str_to_name(&be_secure_openssl::be_tls_get_cipher().unwrap_or_default()));
+        lssl.ssl_client_dn.set(str_to_name(
+            &be_secure_openssl::be_tls_get_peer_subject_name().unwrap_or_default(),
+        ));
+        lssl.ssl_client_serial.set(str_to_name(
+            &be_secure_openssl::be_tls_get_peer_serial().unwrap_or_default(),
+        ));
+        lssl.ssl_issuer_dn.set(str_to_name(
+            &be_secure_openssl::be_tls_get_peer_issuer_name().unwrap_or_default(),
+        ));
+    }
+
     begin_write_activity(beentry);
-    beentry.st_ssl.set(false);
+    beentry.st_ssl.set(ssl);
     beentry.st_gss.set(false);
+    beentry.st_sslstatus.ssl_bits.set(lssl.ssl_bits.get());
+    beentry.st_sslstatus.ssl_version.set(lssl.ssl_version.get());
+    beentry.st_sslstatus.ssl_cipher.set(lssl.ssl_cipher.get());
+    beentry.st_sslstatus.ssl_client_dn.set(lssl.ssl_client_dn.get());
+    beentry.st_sslstatus.ssl_client_serial.set(lssl.ssl_client_serial.get());
+    beentry.st_sslstatus.ssl_issuer_dn.set(lssl.ssl_issuer_dn.get());
     end_write_activity(beentry);
     Ok(())
 }
@@ -578,6 +641,12 @@ pub struct LocalPgBackendStatus {
     pub st_clientaddr: SockAddr,
     pub st_clienthostname: String,
     pub st_ssl: bool,
+    pub st_ssl_bits: i32,
+    pub st_ssl_version: String,
+    pub st_ssl_cipher: String,
+    pub st_ssl_client_dn: String,
+    pub st_ssl_client_serial: String,
+    pub st_ssl_issuer_dn: String,
     pub st_gss: bool,
     pub st_state: BackendState,
     pub st_appname: String,
@@ -627,6 +696,12 @@ fn pgstat_read_current_status() {
                 st_clientaddr: beentry.st_clientaddr.get(),
                 st_clienthostname: name_to_string(&beentry.st_clienthostname.get()),
                 st_ssl: beentry.st_ssl.get(),
+                st_ssl_bits: beentry.st_sslstatus.ssl_bits.get(),
+                st_ssl_version: name_to_string(&beentry.st_sslstatus.ssl_version.get()),
+                st_ssl_cipher: name_to_string(&beentry.st_sslstatus.ssl_cipher.get()),
+                st_ssl_client_dn: name_to_string(&beentry.st_sslstatus.ssl_client_dn.get()),
+                st_ssl_client_serial: name_to_string(&beentry.st_sslstatus.ssl_client_serial.get()),
+                st_ssl_issuer_dn: name_to_string(&beentry.st_sslstatus.ssl_issuer_dn.get()),
                 st_gss: beentry.st_gss.get(),
                 st_state: beentry.st_state.get(),
                 st_appname: name_to_string(&beentry.st_appname.get()),

@@ -14,6 +14,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 ip = { path = "../../../../common/ip" }
 init_small = { path = "../../init/init_small" }
+be_secure_openssl = { path = "../../../libpq/be_secure_openssl" }
 miscinit = { path = "../../init/miscinit" }
 guc_tables = { path = "../../misc/guc_tables" }
 mbutils = { path = "../../mb/mbutils" }
