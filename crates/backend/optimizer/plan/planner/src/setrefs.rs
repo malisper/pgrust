@@ -328,6 +328,30 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
             }
         }
+        NodeTag::T_TableFuncScan => {
+            let s = plan.as_table_func_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if let Some(tf) = s.tablefunc {
+                fix_scan_expr_walker(run, tf)?;
+            }
+            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::TableFuncScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TableFuncScan node");
+            }
+        }
         NodeTag::T_ValuesScan => {
             let s = plan.as_values_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -1159,6 +1183,20 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_upper_expr(run, f.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
             let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
@@ -1795,6 +1833,20 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_scan_expr_mutator(run, f.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
@@ -2267,6 +2319,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
         }
+        NodeTag::T_FieldSelect => {
+            fix_scan_expr_walker(run, node.as_field_select().unwrap().arg)
+        }
         NodeTag::T_CoerceToDomain => {
             fix_scan_expr_walker(run, node.as_coerce_to_domain().unwrap().arg)
         }
@@ -2360,6 +2415,31 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             Ok(())
         }
         NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter().chain(x.args.iter()) {
+                fix_scan_expr_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            for a in
+                tf.ns_uris.iter().chain(tf.colvalexprs.iter()).chain(tf.passingvalexprs.iter())
+            {
+                fix_scan_expr_walker(run, a)?;
+            }
+            for a in tf.colexprs.iter().chain(tf.coldefexprs.iter()).flatten() {
+                fix_scan_expr_walker(run, a)?;
+            }
+            if let Some(d) = tf.docexpr {
+                fix_scan_expr_walker(run, d)?;
+            }
+            if let Some(r) = tf.rowexpr {
+                fix_scan_expr_walker(run, r)?;
+            }
+            Ok(())
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
@@ -2867,6 +2947,20 @@ fn fix_join_expr_mutator<'mcx>(
                     resultcollid: c.resultcollid,
                     coercionformat: c.coercionformat,
                     location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_join_expr_mutator(run, f.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
                 },
             )
         }

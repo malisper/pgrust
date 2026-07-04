@@ -129,6 +129,8 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_JsonScalarExpr => json::transformJsonScalarExpr(mcx, pstate, expr),
         NodeTag::T_JsonSerializeExpr => json::transformJsonSerializeExpr(mcx, pstate, expr),
         NodeTag::T_JsonFuncExpr => json::transformJsonFuncExpr(mcx, pstate, expr),
+        NodeTag::T_XmlExpr => transformXmlExpr(mcx, pstate, expr),
+        NodeTag::T_XmlSerialize => transformXmlSerialize(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         NodeTag::T_CurrentOfExpr => transformCurrentOfExpr(pstate, expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
@@ -1004,6 +1006,239 @@ fn make_nulltest_from_distinct<'mcx>(
     )
 }
 
+fn xml_name_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    ident: &str,
+    fully_escaped: bool,
+    escape_period: bool,
+) -> PgResult<&'mcx str> {
+    let v = adt_xml::map_sql_identifier_to_xml_name(ident.as_bytes(), fully_escaped, escape_period)?;
+    let b = mcx::slice_borrow_in(mcx, &v)?;
+    Ok(core::str::from_utf8(b).expect("xml name stays server-encoded UTF-8"))
+}
+
+fn transformXmlExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::{INT4OID, TEXTOID, XMLOID};
+    use types_nodes::primnodes::{XmlExpr, XmlExprOp};
+
+    let x = expr.as_xml_expr().unwrap();
+    let name = match x.name {
+        Some(n) => Some(xml_name_in(mcx, n, false, false)?),
+        None => None,
+    };
+
+    let mut named_args = types_nodes::NodeList::nil();
+    let mut arg_names = types_nodes::NodeList::nil();
+    for r_node in &x.named_args {
+        let r = r_node.as_res_target().expect("XML named arg is ResTarget");
+        let val = r.val.expect("grammar sets ResTarget.val");
+        let e = transformExprRecurse(mcx, pstate, val)?;
+        let argname = if let Some(n) = r.name {
+            xml_name_in(mcx, n, false, false)?
+        } else if let Some(cr) = val.as_column_ref() {
+            // FigureColname's ColumnRef arm: last String field.
+            let mut fname: Option<&str> = None;
+            for f in &cr.fields {
+                if let Some(s) = f.as_string() {
+                    fname = Some(s.sval);
+                }
+            }
+            xml_name_in(mcx, fname.unwrap_or("?column?"), true, false)?
+        } else {
+            return Err(xml_syntax_error(
+                pstate,
+                if x.op == XmlExprOp::IS_XMLELEMENT {
+                    "unnamed XML attribute value must be a column reference".to_string()
+                } else {
+                    "unnamed XML element value must be a column reference".to_string()
+                },
+                r.location,
+            ));
+        };
+        if x.op == XmlExprOp::IS_XMLELEMENT {
+            for prior in &arg_names {
+                if prior.as_string().map(|s| s.sval) == Some(argname) {
+                    return Err(xml_syntax_error(
+                        pstate,
+                        format!("XML attribute name \"{argname}\" appears more than once"),
+                        r.location,
+                    ));
+                }
+            }
+        }
+        named_args.lappend(mcx, e)?;
+        arg_names.lappend(mcx, Node::mk_string(mcx, argname)?)?;
+    }
+
+    let mut args = types_nodes::NodeList::nil();
+    for (i, e) in x.args.iter().enumerate() {
+        let newe = transformExprRecurse(mcx, pstate, e)?;
+        let cst = |newe, target, cname| {
+            coerce::coerce_to_specific_type(
+                mcx,
+                pstate,
+                newe,
+                expr_type(newe),
+                expr_location(newe),
+                target,
+                cname,
+            )
+        };
+        let newe = match x.op {
+            XmlExprOp::IS_XMLCONCAT => cst(newe, XMLOID, "XMLCONCAT")?,
+            XmlExprOp::IS_XMLELEMENT => newe,
+            XmlExprOp::IS_XMLFOREST => cst(newe, XMLOID, "XMLFOREST")?,
+            XmlExprOp::IS_XMLPARSE => {
+                if i == 0 {
+                    cst(newe, TEXTOID, "XMLPARSE")?
+                } else {
+                    coerce::coerce_to_boolean(
+                        mcx,
+                        pstate,
+                        newe,
+                        expr_type(newe),
+                        expr_location(newe),
+                        "XMLPARSE",
+                    )?
+                }
+            }
+            XmlExprOp::IS_XMLPI => cst(newe, TEXTOID, "XMLPI")?,
+            XmlExprOp::IS_XMLROOT => match i {
+                0 => cst(newe, XMLOID, "XMLROOT")?,
+                1 => cst(newe, TEXTOID, "XMLROOT")?,
+                _ => cst(newe, INT4OID, "XMLROOT")?,
+            },
+            XmlExprOp::IS_XMLSERIALIZE => {
+                unreachable!("XMLSERIALIZE goes through transformXmlSerialize")
+            }
+            XmlExprOp::IS_DOCUMENT => cst(newe, XMLOID, "IS DOCUMENT")?,
+        };
+        args.lappend(mcx, newe)?;
+    }
+
+    Node::mk(
+        mcx,
+        XmlExpr {
+            op: x.op,
+            name,
+            named_args,
+            arg_names,
+            args,
+            xmloption: x.xmloption,
+            indent: false,
+            r#type: XMLOID,
+            typmod: -1,
+            location: x.location,
+        },
+    )
+}
+
+fn transformXmlSerialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::{TEXTOID, XMLOID};
+    use types_nodes::primnodes::{XmlExpr, XmlExprOp};
+
+    let xs = expr
+        .as_variant::<types_nodes::rawnodes::XmlSerialize>()
+        .expect("T_XmlSerialize is XmlSerialize");
+    let inner = transformExprRecurse(mcx, pstate, xs.expr.expect("grammar sets XmlSerialize.expr"))?;
+    let arg = coerce::coerce_to_specific_type(
+        mcx,
+        pstate,
+        inner,
+        expr_type(inner),
+        expr_location(inner),
+        XMLOID,
+        "XMLSERIALIZE",
+    )?;
+
+    let tn = xs.typeName.and_then(|n| n.as_type_name()).expect("grammar sets XmlSerialize.typeName");
+    let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
+
+    let xexpr = Node::mk(
+        mcx,
+        XmlExpr {
+            op: XmlExprOp::IS_XMLSERIALIZE,
+            name: None,
+            named_args: types_nodes::NodeList::nil(),
+            arg_names: types_nodes::NodeList::nil(),
+            args: types_nodes::NodeList::make1(mcx, arg)?,
+            xmloption: xs.xmloption,
+            indent: xs.indent,
+            r#type: target_type,
+            typmod: target_typmod,
+            location: xs.location,
+        },
+    )?;
+
+    match coerce::coerce_to_target_type(
+        mcx,
+        pstate,
+        xexpr,
+        TEXTOID,
+        target_type,
+        target_typmod,
+        coerce::COERCION_IMPLICIT,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )? {
+        Some(r) => Ok(r),
+        None => Err(cannot_cast_xmlserialize(pstate, target_type, xs.location)?),
+    }
+}
+
+#[cold]
+fn xml_syntax_error(
+    pstate: &ParseState<'_, '_>,
+    msg: std::string::String,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg)
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformXmlExpr")),
+    )
+}
+
+#[cold]
+fn cannot_cast_xmlserialize(
+    pstate: &ParseState<'_, '_>,
+    target_type: types_core::Oid,
+    location: i32,
+) -> PgResult<Box<types_error::PgError>> {
+    use types_error::{ErrorLocation, ERRCODE_CANNOT_COERCE, ERROR};
+    Ok(Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_CANNOT_COERCE)
+            .errmsg(format!(
+                "cannot cast XMLSERIALIZE result to {}",
+                format_type::format_type_be(target_type)?
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformXmlSerialize")),
+    ))
+}
+
 fn transformBooleanTest<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1511,9 +1746,28 @@ fn transformWholeRowRef<'mcx>(
         None => false,
     };
     if !(is_eref || nsitem.p_returning_type != VarReturningType::VAR_RETURNING_DEFAULT) {
-        panic!(
-            "transformWholeRowRef (parse_expr.c): JOIN USING alias RowExpr expansion \
-             unported — unit backend-parser-expr"
+        // A JOIN USING alias exposes only the merged columns, so a whole-row
+        // Var cannot represent it; expand to a RowExpr immediately.
+        let (_, fields) = parse_relation::expandRTE(
+            mcx,
+            rte,
+            nsitem.p_rtindex,
+            sublevels_up,
+            nsitem.p_returning_type,
+            location,
+            false,
+        )?;
+        let mut args = fields;
+        args.truncate(nsitem.p_names.colnames.len());
+        return Node::mk(
+            mcx,
+            types_nodes::RowExpr {
+                args,
+                row_typeid: types_core::catalog::RECORDOID,
+                row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                colnames: nsitem.p_names.colnames.clone_in(mcx)?,
+                location,
+            },
         );
     }
     let mut var = nodes_core::makefuncs::make_whole_row_var(

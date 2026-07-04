@@ -366,7 +366,7 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
             if nulls[i] {
                 continue;
             }
-            let v = ::types_fmgr::function_call1_coll(&mut ams.proc, 0, d)?;
+            let v = crate::io::call1_armed(&mut ams.proc, mcx, d)?;
             // SAFETY: out fns return NUL-terminated cstrings.
             let cs = unsafe {
                 core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)
@@ -387,6 +387,143 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 
 const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+}
+
+
+// C array_cat (array_userfuncs.c), hosted with the array machinery it
+// consumes; catalog unit backend-utils-adt-array-user.
+pub fn fc_array_cat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    if fcinfo.argisnull(0) {
+        if fcinfo.argisnull(1) {
+            return Ok(fcinfo.return_null());
+        }
+        let v = arg_array_bytes(fcinfo, 1, mcx)?;
+        return ::types_fmgr::byref_result(mcx, &v);
+    }
+    if fcinfo.argisnull(1) {
+        let v = arg_array_bytes(fcinfo, 0, mcx)?;
+        return ::types_fmgr::byref_result(mcx, &v);
+    }
+    let v1 = arg_array_bytes(fcinfo, 0, mcx)?;
+    let v2 = arg_array_bytes(fcinfo, 1, mcx)?;
+
+    use crate::foundation as f;
+    let element_type1 = f::arr_elemtype(&v1);
+    let element_type2 = f::arr_elemtype(&v2);
+    if element_type1 != element_type2 {
+        return Err(Box::new(
+            PgError::error(alloc::format!("cannot concatenate incompatible arrays"))
+                .with_detail(alloc::format!(
+                    "Arrays with element types {} and {} are not compatible for concatenation.",
+                    ::format_type::format_type_be(element_type1)?,
+                    ::format_type::format_type_be(element_type2)?
+                ))
+                .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
+    let element_type = element_type1;
+
+    let (ndims1, dims1, lbs1) = f::read_dims_lbounds(&v1);
+    let (ndims2, dims2, lbs2) = f::read_dims_lbounds(&v2);
+    if ndims1 == 0 && ndims2 > 0 {
+        return ::types_fmgr::byref_result(mcx, &v2);
+    }
+    if ndims2 == 0 {
+        return ::types_fmgr::byref_result(mcx, &v1);
+    }
+    if ndims1 != ndims2 && ndims1 != ndims2 - 1 && ndims1 != ndims2 + 1 {
+        return Err(cat_incompatible(&alloc::format!(
+            "Arrays of {ndims1} and {ndims2} dimensions are not compatible for concatenation."
+        )));
+    }
+
+    let nitems1 = ::arrayutils::array_get_n_items(ndims1, &dims1)?;
+    let nitems2 = ::arrayutils::array_get_n_items(ndims2, &dims2)?;
+    let ndatabytes1 = f::arr_size(&v1) - f::arr_data_offset(&v1);
+    let ndatabytes2 = f::arr_size(&v2) - f::arr_data_offset(&v2);
+
+    let mut dims = [0i32; f::MAXDIM];
+    let mut lbs = [0i32; f::MAXDIM];
+    let ndims;
+    if ndims1 == ndims2 {
+        ndims = ndims1;
+        dims[0] = dims1[0] + dims2[0];
+        lbs[0] = lbs1[0];
+        for i in 1..ndims as usize {
+            if dims1[i] != dims2[i] || lbs1[i] != lbs2[i] {
+                return Err(cat_incompatible(
+                    "Arrays with differing element dimensions are not compatible for \
+                     concatenation.",
+                ));
+            }
+            dims[i] = dims1[i];
+            lbs[i] = lbs1[i];
+        }
+    } else if ndims1 == ndims2 - 1 {
+        ndims = ndims2;
+        dims[..ndims as usize].copy_from_slice(&dims2[..ndims as usize]);
+        lbs[..ndims as usize].copy_from_slice(&lbs2[..ndims as usize]);
+        dims[0] += 1;
+        for i in 0..ndims1 as usize {
+            if dims1[i] != dims[i + 1] || lbs1[i] != lbs[i + 1] {
+                return Err(cat_incompatible(
+                    "Arrays with differing dimensions are not compatible for concatenation.",
+                ));
+            }
+        }
+    } else {
+        ndims = ndims1;
+        dims[..ndims as usize].copy_from_slice(&dims1[..ndims as usize]);
+        lbs[..ndims as usize].copy_from_slice(&lbs1[..ndims as usize]);
+        dims[0] += 1;
+        for i in 0..ndims2 as usize {
+            if dims2[i] != dims[i + 1] || lbs2[i] != lbs[i + 1] {
+                return Err(cat_incompatible(
+                    "Arrays with differing dimensions are not compatible for concatenation.",
+                ));
+            }
+        }
+    }
+
+    let nitems = ::arrayutils::array_get_n_items(ndims, &dims)?;
+    ::arrayutils::array_check_bounds(ndims, &dims, &lbs)?;
+
+    let ndatabytes = ndatabytes1 + ndatabytes2;
+    let hasnull = f::arr_hasnull(&v1) || f::arr_hasnull(&v2);
+    let (dataoffset, nbytes) = if hasnull {
+        let d = f::arr_overhead_withnulls(ndims, nitems);
+        (d as i32, ndatabytes + d)
+    } else {
+        (0i32, ndatabytes + f::arr_overhead_nonulls(ndims))
+    };
+    let mut out: ::mcx::PgVec<u8> = vec_with_capacity_in(mcx, nbytes)?;
+    out.resize(nbytes, 0);
+    crate::construct::write_header(&mut out, nbytes, ndims, dataoffset, element_type);
+    crate::construct::write_dims_lbounds(&mut out, ndims, &dims, &lbs);
+    let dstoff = f::arr_data_offset(&out);
+    out[dstoff..dstoff + ndatabytes1]
+        .copy_from_slice(&v1[f::arr_data_offset(&v1)..f::arr_data_offset(&v1) + ndatabytes1]);
+    out[dstoff + ndatabytes1..dstoff + ndatabytes]
+        .copy_from_slice(&v2[f::arr_data_offset(&v2)..f::arr_data_offset(&v2) + ndatabytes2]);
+    if hasnull {
+        let dest_bo = f::arr_nullbitmap_off(&out).expect("hasnull result has a bitmap");
+        let src1 = f::arr_nullbitmap_off(&v1).map(|o| (&v1[..], o));
+        let src2 = f::arr_nullbitmap_off(&v2).map(|o| (&v2[..], o));
+        crate::element::array_bitmap_copy(&mut out, dest_bo, 0, src1, 0, nitems1);
+        crate::element::array_bitmap_copy(&mut out, dest_bo, nitems1, src2, 0, nitems2);
+    }
+    ::types_fmgr::byref_result(mcx, &out)
+}
+
+#[cold]
+#[inline(never)]
+fn cat_incompatible(detail: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(alloc::format!("cannot concatenate incompatible arrays"))
+            .with_detail(detail)
+            .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -624,6 +761,7 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(751, "array_out", 1, fc_array_out),
     b(395, "array_to_text", 2, fc_array_to_text),
     b(2176, "array_length", 2, fc_array_length),
+    b(383, "array_cat", 2, fc_array_cat),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),

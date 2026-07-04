@@ -11,8 +11,8 @@ pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById};
 pub use exec::{ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache};
 pub use queue::{
     AfterTriggerBeginQuery, AfterTriggerBeginSubXact, AfterTriggerBeginXact, AfterTriggerEndQuery,
-    AfterTriggerEndSubXact, AfterTriggerEndXact, AfterTriggerFireDeferred, ExecARDeleteTriggers,
-    ExecARInsertTriggers, ExecARUpdateTriggers,
+    AfterTriggerEndSubXact, AfterTriggerEndXact, AfterTriggerFireDeferred,
+    AfterTriggerPendingOnRel, ExecARDeleteTriggers, ExecARInsertTriggers, ExecARUpdateTriggers,
 };
 pub use state::AfterTriggerSetState;
 
@@ -22,6 +22,7 @@ pub fn init_seams() {
     trigger_seams::after_trigger_end_xact::set(AfterTriggerEndXact);
     trigger_seams::after_trigger_begin_sub_xact::set(AfterTriggerBeginSubXact);
     trigger_seams::after_trigger_end_sub_xact::set(AfterTriggerEndSubXact);
+    trigger_seams::after_trigger_pending_on_rel::set(AfterTriggerPendingOnRel);
 }
 
 #[cfg(test)]

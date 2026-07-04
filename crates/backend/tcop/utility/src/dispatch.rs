@@ -1288,6 +1288,98 @@ fn exec_rename_stmt_inner<'mcx>(
         }
         types_nodes::parsenodes::ObjectType::OBJECT_POLICY => {
             // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateExtensionStmt>()
+                .expect("CreateExtensionStmt");
+            extension::CreateExtension(mcx, stmt)?;
+        }
+        T_AlterExtensionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterExtensionStmt>()
+                .expect("AlterExtensionStmt");
+            extension::ExecAlterExtensionStmt(mcx, stmt)?;
+        }
+        T_CreateDomainStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_create_domain_stmt()
+                .expect("CreateDomainStmt");
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
+            parser_small1::free_parsestate(pstate)?;
+        }
+        T_CompositeTypeStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CompositeTypeStmt>()
+                .expect("CompositeTypeStmt");
+            typecmds::DefineCompositeType(
+                mcx,
+                stmt.typevar.expect("CompositeTypeStmt.typevar"),
+                stmt.coldeflist.clone_in(mcx)?,
+                source_text,
+            )?;
+        }
+        T_CreateEnumStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_create_enum_stmt().expect("CreateEnumStmt");
+            typecmds::DefineEnum(mcx, stmt)?;
+        }
+        T_AlterEnumStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
+            typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_AlterDomainStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
+                .expect("AlterDomainStmt");
+            typecmds::AlterDomain(mcx, stmt)?;
+        }
+        T_AlterObjectSchemaStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
+                .expect("AlterObjectSchemaStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    let names = stmt
+                        .object
+                        .expect("AlterObjectSchemaStmt.object")
+                        .as_list()
+                        .expect("name list");
+                    typecmds::AlterTypeNamespace(
+                        mcx,
+                        names,
+                        stmt.newschema.expect("newschema"),
+                        stmt.objectType,
+                    )?;
+                }
+                other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
+            }
+        }
+        T_RuleStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::RuleStmt>()
+                .expect("RuleStmt");
             let stmt = unsafe {
                 core::mem::transmute::<
                     &types_nodes::parsenodes::RenameStmt<'_>,

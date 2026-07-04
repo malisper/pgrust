@@ -520,6 +520,17 @@ macro_rules! dispatch_cmp {
                     };
                     $body
                 }
+                SortComparator::NumericAbbrev => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.$meth(SortComparator::NumericAbbrev, a, b)
+                    };
+                    $body
+                }
+                // cmp_numerics dominates full numeric compares; nothing to fold.
+                SortComparator::Numeric => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
                 // Shim'd comparisons are fmgr calls; nothing to fold.
                 SortComparator::Shim(_) => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);

@@ -502,18 +502,31 @@ fn markTargetListOrigin<'mcx>(
             }
         }
         RTEKind::RTE_CTE => {
-            // search/cycle extra columns are dead here (loud in the grammar);
-            // a self-reference has no analyzed subquery to copy up from.
+            // A self-reference has no analyzed subquery to copy up from.
             if attnum != 0 && !rte.self_reference {
                 let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
-                let tl = &cte_node
-                    .as_common_table_expr()
-                    .expect("ctenamespace cell")
+                let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
+                let tl = &cte
                     .ctequery
                     .expect("analyzed CTE")
                     .as_query()
                     .expect("analyzed CTE is a Query")
                     .targetList;
+                // The RTE carries the search/cycle columns but the subquery
+                // does not yet; skip origin lookups for those.
+                let mut extra_cols: i16 = 0;
+                if cte.search_clause.is_some() {
+                    extra_cols += 1;
+                }
+                if cte.cycle_clause.is_some() {
+                    extra_cols += 2;
+                }
+                if extra_cols > 0
+                    && attnum > tl.len() as i16
+                    && attnum <= tl.len() as i16 + extra_cols
+                {
+                    return Ok(());
+                }
                 let ste = tl
                     .iter()
                     .map(|n| n.as_target_entry().expect("tlist cell"))
@@ -544,8 +557,9 @@ fn markTargetListOrigin<'mcx>(
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_TABLEFUNC
         | RTEKind::RTE_NAMEDTUPLESTORE
+        | RTEKind::RTE_JOIN
         | RTEKind::RTE_RESULT => {}
-        other @ (RTEKind::RTE_JOIN | RTEKind::RTE_GROUP) => panic!(
+        other @ RTEKind::RTE_GROUP => panic!(
             "markTargetListOrigin (parse_target.c): {other:?} recursion arm unported — \
              unit backend-parser-parse-target"
         ),
@@ -888,6 +902,30 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
         NodeTag::T_RowExpr => {
             *name = Some("row");
             2
+        }
+        NodeTag::T_XmlExpr => {
+            use types_nodes::XmlExprOp::*;
+            let n = match node.as_xml_expr().unwrap().op {
+                IS_XMLCONCAT => Some("xmlconcat"),
+                IS_XMLELEMENT => Some("xmlelement"),
+                IS_XMLFOREST => Some("xmlforest"),
+                IS_XMLPARSE => Some("xmlparse"),
+                IS_XMLPI => Some("xmlpi"),
+                IS_XMLROOT => Some("xmlroot"),
+                IS_XMLSERIALIZE => Some("xmlserialize"),
+                IS_DOCUMENT => None,
+            };
+            match n {
+                Some(v) => {
+                    *name = Some(v);
+                    1
+                }
+                None => 0,
+            }
+        }
+        NodeTag::T_XmlSerialize => {
+            *name = Some("xmlserialize");
+            1
         }
         NodeTag::T_SQLValueFunction => {
             use types_nodes::SQLValueFunctionOp::*;

@@ -1934,23 +1934,17 @@ fn lookup_pg_statistic_bundle<'mcx>(
         if kind == 0 {
             continue;
         }
-        let numbers_image = varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + i)?
-            .unwrap_or(PgVec::new_in(mcx));
-        let (values_image, valuetype) =
-            match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + i)? {
-                Some(img) => {
-                    let elemtype = datum::array_build::array_image_elemtype(&img);
-                    (img, elemtype)
-                }
-                None => (PgVec::new_in(mcx), InvalidOid),
-            };
-        slots.push(syscache_seams::PgStatisticSlotData::from_images(
+        // Array images stay in the tuple until a consumer asks (C's
+        // get_attstatsslot laziness via lookup_pg_statistic_slot_images).
+        slots.push(syscache_seams::PgStatisticSlotData::lazy(
             kind,
             getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid(),
             getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid(),
-            valuetype,
-            values_image,
-            numbers_image,
+            mcx,
+            relid,
+            attnum,
+            inh,
+            i,
         ));
     }
     let bundle = syscache_seams::PgStatisticBundle {
@@ -1962,6 +1956,38 @@ fn lookup_pg_statistic_bundle<'mcx>(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(bundle))
+}
+
+fn lookup_pg_statistic_slot_images<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+    inh: bool,
+    pos: i32,
+) -> PgResult<syscache_seams::PgStatisticSlotImages<'mcx>> {
+    let tuple = SearchSysCache3(
+        STATRELATTINH,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    .unwrap_or_else(|| {
+        panic!("pg_statistic row ({relid},{attnum},{inh}) vanished between bundle probe and slot fetch")
+    });
+    let t = tuple.tuple();
+    let numbers_image = varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + pos)?
+        .unwrap_or(PgVec::new_in(mcx));
+    let (values_image, valuetype) =
+        match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + pos)? {
+            Some(img) => {
+                let elemtype = datum::array_build::array_image_elemtype(&img);
+                (img, elemtype)
+            }
+            None => (PgVec::new_in(mcx), InvalidOid),
+        };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(syscache_seams::PgStatisticSlotImages { valuetype, values_image, numbers_image })
 }
 
 fn decode_pg_statistic_values<'mcx>(
@@ -2450,6 +2476,7 @@ pub(crate) fn install() {
 pub(crate) fn install_pg_statistic() {
     syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
     syscache_seams::lookup_pg_statistic_bundle::set(lookup_pg_statistic_bundle);
+    syscache_seams::lookup_pg_statistic_slot_images::set(lookup_pg_statistic_slot_images);
     syscache_seams::decode_pg_statistic_values::set(decode_pg_statistic_values);
     syscache_seams::decode_pg_statistic_numbers::set(decode_pg_statistic_numbers);
     syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);

@@ -109,6 +109,7 @@ pub fn init_all() {
     opclasscmds::init_seams();
     catalog_objectaddress::init_seams();
     aio_config::init_seams();
+    aio_uring::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
     dsm_core::init_seams();
@@ -159,6 +160,7 @@ pub fn init_all() {
     adt_float::init_seams();
     pg_locale::init_seams();
     varlena::init_seams();
+    adt_xml::init_seams();
     cache_syscache::init_seams();
     catcache::init_seams();
     inval::init_seams();

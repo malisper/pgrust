@@ -8,7 +8,8 @@ use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
     AccessPriv, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt, AlterRoleSetStmt, AlterRoleStmt,
     AlterTableCmd, AlterTableStmt, AlterTableType,
-    CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt,
+    CommentStmt, CommonTableExpr,
     CopyStmt, CreateFunctionStmt, CreatePolicyStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
     DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, DropBehavior,
     DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
@@ -41,6 +42,8 @@ use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
+use types_nodes::primnodes::{XmlExpr, XmlExprOp, XmlOptionType};
+use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol};
 use types_nodes::rawnodes::{
     AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
     CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem, IndexStmt,
@@ -78,7 +81,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{FuncAliasCols, JoinQualUsing, JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -1895,9 +1898,47 @@ impl<'mcx> Parser<'mcx> {
                     _ => CTEMaterialize::CTEMaterializeDefault,
                 };
                 n.ctequery = view.v(6).node();
-                // SEARCH/CYCLE productions are unported louds; only the
-                // NULL-yielding empty variants can reach here.
-                debug_assert!(view.v(8).node().is_none() && view.v(9).node().is_none());
+                n.search_clause = view.v(8).node();
+                n.cycle_clause = view.v(9).node();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_search_clause: SEARCH DEPTH|BREADTH FIRST_P BY columnList SET ColId
+            1735 | 1736 => {
+                let mut n = Node::build::<CTESearchClause>(mcx)?;
+                n.search_col_list = view.v(5).list();
+                n.search_breadth_first = rule == 1736;
+                n.search_seq_column = Some(view.v(7).str_val());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_cycle_clause: CYCLE columnList SET ColId [TO AexprConst
+            // DEFAULT AexprConst] USING ColId
+            1738 => {
+                let mut n = Node::build::<CTECycleClause>(mcx)?;
+                n.cycle_col_list = view.v(2).list();
+                n.cycle_mark_column = Some(view.v(4).str_val());
+                n.cycle_mark_value = view.v(6).node();
+                n.cycle_mark_default = view.v(8).node();
+                n.cycle_path_column = Some(view.v(10).str_val());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1739 => {
+                let mut n = Node::build::<CTECycleClause>(mcx)?;
+                n.cycle_col_list = view.v(2).list();
+                n.cycle_mark_column = Some(view.v(4).str_val());
+                n.cycle_mark_value = Some(Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Boolean(Boolean { boolval: true })),
+                    -1,
+                )?);
+                n.cycle_mark_default = Some(Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Boolean(Boolean { boolval: false })),
+                    -1,
+                )?);
+                n.cycle_path_column = Some(view.v(6).str_val());
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
@@ -2528,10 +2569,28 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rf));
             }
-            // func_alias_clause coldeflist arms stay unimplemented-rule louds.
             1858 => {
                 let alias = view.v(1).alias();
                 *yyval = YYSTYPE::FuncAlias(alias, NodeList::nil());
+            }
+            1859..=1861 => {
+                let (alias, cols) = match rule {
+                    1859 => (None, view.v(3).list()),
+                    1860 | 1861 => {
+                        let off = if rule == 1860 { 1 } else { 0 };
+                        let a = Node::mk_mut(
+                            mcx,
+                            Alias {
+                                aliasname: Some(view.v(1 + off).str_val()),
+                                colnames: NodeList::nil(),
+                            },
+                        )?;
+                        (Some(a.seal_ref()), view.v(3 + off).list())
+                    }
+                    _ => unreachable!(),
+                };
+                let c = mcx::leak_in(mcx::alloc_in(mcx, FuncAliasCols { alias, coldeflist: cols })?);
+                *yyval = YYSTYPE::FuncAliasV(c);
             }
             1862 => {
                 *yyval = YYSTYPE::FuncAlias(None, NodeList::nil());
@@ -2548,6 +2607,356 @@ impl<'mcx> Parser<'mcx> {
             }
             1891 => *yyval = YYSTYPE::Boolean(true),
             1892 => *yyval = YYSTYPE::Boolean(false),
+            // table_ref: xmltable opt_alias_clause | LATERAL_P xmltable opt_alias_clause
+            1836 | 1837 => {
+                let off = if rule == 1837 { 1 } else { 0 };
+                let n = view.v(1 + off).node().expect("xmltable");
+                let alias = view.v(2 + off).alias();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    n.with_mut::<RangeTableFunc, _>(|t| {
+                        t.lateral = rule == 1837;
+                        t.alias = alias;
+                    })
+                    .expect("xmltable is RangeTableFunc");
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1900 | 1905 | 1917 | 2206 => {
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, view.v(1).node().expect("el"))?)
+            }
+            1901 | 1906 | 1918 | 2207 => {
+                let mut l = view.v(1).list();
+                l.lappend(mcx, view.v(3).node().expect("el"))?;
+                *yyval = YYSTYPE::List(l);
+            }
+            // TableFuncElement: ColId Typename opt_collate_clause
+            1902 => {
+                let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.colname = Some(view.v(1).str_val());
+                n.typeName = view.v(2).node();
+                n.is_local = true;
+                n.collClause = view.v(3).node();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1903 | 1904 => {
+                let off = if rule == 1904 { 5 } else { 0 };
+                let mut n = Node::build::<RangeTableFunc>(mcx)?;
+                n.rowexpr = view.v(3 + off).node();
+                n.docexpr = view.v(4 + off).node();
+                n.columns = view.v(6 + off).list();
+                if rule == 1904 {
+                    n.namespaces = view.v(5).list();
+                }
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1907 | 1908 => {
+                let mut n = Node::build::<RangeTableFuncCol>(mcx)?;
+                n.colname = Some(view.v(1).str_val());
+                n.typeName = view.v(2).node();
+                n.location = view.l(1);
+                if rule == 1908 {
+                    let mut nullability_seen = false;
+                    for opt in view.v(3).list().iter() {
+                        let d = opt.as_def_elem().expect("DefElem");
+                        match d.defname {
+                            Some("default") => {
+                                if n.coldefexpr.is_some() {
+                                    return Err(self.errposition_error(
+                                        "only one DEFAULT value is allowed".into(),
+                                        d.location,
+                                    ));
+                                }
+                                n.coldefexpr = d.arg;
+                            }
+                            Some("path") => {
+                                if n.colexpr.is_some() {
+                                    return Err(self.errposition_error(
+                                        "only one PATH value per column is allowed".into(),
+                                        d.location,
+                                    ));
+                                }
+                                n.colexpr = d.arg;
+                            }
+                            Some("__pg__is_not_null") => {
+                                if nullability_seen {
+                                    return Err(self.errposition_error(
+                                        format!(
+                                            "conflicting or redundant NULL / NOT NULL declarations for column \"{}\"",
+                                            n.colname.unwrap()
+                                        ),
+                                        d.location,
+                                    ));
+                                }
+                                n.is_not_null =
+                                    d.arg.and_then(|a| a.as_boolean()).expect("Boolean").boolval;
+                                nullability_seen = true;
+                            }
+                            other => {
+                                return Err(self.errposition_error(
+                                    format!(
+                                        "unrecognized column option \"{}\"",
+                                        other.unwrap_or("?")
+                                    ),
+                                    d.location,
+                                ));
+                            }
+                        }
+                    }
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1909 => {
+                let mut n = Node::build::<RangeTableFuncCol>(mcx)?;
+                n.colname = Some(view.v(1).str_val());
+                n.for_ordinality = true;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1910 => *yyval = YYSTYPE::List(NodeList::make1(mcx, view.v(1).node().expect("opt"))?),
+            1911 => {
+                let mut l = view.v(1).list();
+                l.lappend(mcx, view.v(2).node().expect("opt"))?;
+                *yyval = YYSTYPE::List(l);
+            }
+            1912 => {
+                let name = view.v(1).str_val();
+                if name == "__pg__is_not_null" {
+                    return Err(self.errposition_error(
+                        format!("option name \"{name}\" cannot be used in XMLTABLE"),
+                        view.l(1),
+                    ));
+                }
+                *yyval = def_elem(mcx, name, view.v(2).node(), view.l(1))?;
+            }
+            1913 => *yyval = def_elem(mcx, "default", view.v(2).node(), view.l(1))?,
+            1914 | 1915 => {
+                let arg = Node::mk(mcx, Boolean { boolval: rule == 1914 })?;
+                *yyval = def_elem(mcx, "__pg__is_not_null", Some(arg), view.l(1))?;
+            }
+            1916 => *yyval = def_elem(mcx, "path", view.v(2).node(), view.l(1))?,
+            // xml_namespace_el: b_expr AS ColLabel | DEFAULT b_expr;
+            // xml_attribute_el: a_expr AS ColLabel | a_expr
+            1919 | 2208 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::ResTarget {
+                        name: Some(view.v(3).str_val()),
+                        indirection: NodeList::nil(),
+                        val: view.v(1).node(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            1920 | 2209 => {
+                let at = if rule == 1920 { 2 } else { 1 };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::ResTarget {
+                        name: None,
+                        indirection: NodeList::nil(),
+                        val: view.v(at).node(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // a_expr/b_expr IS [NOT] DOCUMENT_P
+            2081 | 2110 => {
+                let args = NodeList::make1(mcx, view.v(1).node().expect("a_expr"))?;
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_DOCUMENT,
+                    None,
+                    NodeList::nil(),
+                    args,
+                    view.l(2),
+                )?));
+            }
+            2082 | 2111 => {
+                let args = NodeList::make1(mcx, view.v(1).node().expect("a_expr"))?;
+                let x =
+                    make_xml_expr(mcx, XmlExprOp::IS_DOCUMENT, None, NodeList::nil(), args, view.l(2))?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    BoolExpr {
+                        boolop: BoolExprType::NOT_EXPR,
+                        args: NodeList::make1(mcx, x)?,
+                        location: view.l(2),
+                    },
+                )?));
+            }
+            2174 => {
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLCONCAT,
+                    None,
+                    NodeList::nil(),
+                    view.v(3).list(),
+                    view.l(1),
+                )?));
+            }
+            2175..=2178 => {
+                let name = Some(view.v(4).str_val());
+                let (named_args, args) = match rule {
+                    2176 => (view.v(6).list(), NodeList::nil()),
+                    2177 => (NodeList::nil(), view.v(6).list()),
+                    2178 => (view.v(6).list(), view.v(8).list()),
+                    _ => (NodeList::nil(), NodeList::nil()),
+                };
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLELEMENT,
+                    name,
+                    named_args,
+                    args,
+                    view.l(1),
+                )?));
+            }
+            // xmlexists(A PASSING [BY REF] B [BY REF]) -> xmlexists(A, B)
+            2179 => {
+                let args = NodeList::make2(
+                    mcx,
+                    view.v(3).node().expect("c_expr"),
+                    view.v(4).node().expect("xmlexists_argument"),
+                )?;
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "xmlexists")?,
+                    args,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            2180 => {
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLFOREST,
+                    None,
+                    view.v(3).list(),
+                    NodeList::nil(),
+                    view.l(1),
+                )?));
+            }
+            2181 => {
+                let ws = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Boolean(Boolean { boolval: view.v(5).boolean() })),
+                    -1,
+                )?;
+                let args = NodeList::make2(mcx, view.v(4).node().expect("a_expr"), ws)?;
+                let x = make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLPARSE,
+                    None,
+                    NodeList::nil(),
+                    args,
+                    view.l(1),
+                )?;
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    x.with_mut::<XmlExpr, _>(|n| n.xmloption = xml_option_from_ival(view.v(3).ival()))
+                        .expect("XmlExpr");
+                }
+                *yyval = YYSTYPE::Node(Some(x));
+            }
+            2182 | 2183 => {
+                let args = if rule == 2183 {
+                    NodeList::make1(mcx, view.v(6).node().expect("a_expr"))?
+                } else {
+                    NodeList::nil()
+                };
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLPI,
+                    Some(view.v(4).str_val()),
+                    NodeList::nil(),
+                    args,
+                    view.l(1),
+                )?));
+            }
+            2184 => {
+                let args = NodeList::make3(
+                    mcx,
+                    view.v(3).node().expect("a_expr"),
+                    view.v(5).node().expect("xml_root_version"),
+                    view.v(6).node().expect("opt_xml_root_standalone"),
+                )?;
+                *yyval = YYSTYPE::Node(Some(make_xml_expr(
+                    mcx,
+                    XmlExprOp::IS_XMLROOT,
+                    None,
+                    NodeList::nil(),
+                    args,
+                    view.l(1),
+                )?));
+            }
+            2185 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::XmlSerialize {
+                        xmloption: xml_option_from_ival(view.v(3).ival()),
+                        expr: view.v(4).node(),
+                        typeName: view.v(6).node(),
+                        indent: view.v(7).boolean(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2200 => *yyval = YYSTYPE::Node(Some(Node::mk_a_const(mcx, None, -1)?)),
+            2201..=2204 => {
+                let v = match rule {
+                    2201 => 0,
+                    2202 => 1,
+                    2203 => 2,
+                    _ => 3,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Integer(Integer { ival: v })),
+                    -1,
+                )?));
+            }
+            2210 => *yyval = YYSTYPE::Ival(0),
+            2211 => *yyval = YYSTYPE::Ival(1),
+            2212 | 2215 => *yyval = YYSTYPE::Boolean(true),
+            2213 | 2214 | 2216 | 2217 => *yyval = YYSTYPE::Boolean(false),
+            // CompositeTypeStmt: CREATE TYPE_P any_name AS '(' OptTableFuncElementList ')'
+            853 => {
+                let names = view.v(3).list();
+                let mut it = names.iter();
+                let (c, s, r) = match names.len() {
+                    1 => (None, None, it.next()),
+                    2 => (None, it.next(), it.next()),
+                    3 => (it.next(), it.next(), it.next()),
+                    _ => return Err(self.improper_qualified_name(None, &names, view.l(3))),
+                };
+                let sval = |n: Option<Node<'mcx>>| {
+                    n.and_then(|n| n.as_string()).map(|s| s.sval)
+                };
+                // makeRangeVarFromAnyName: makeNode zero-fill => inh false.
+                let rv = Node::mk(
+                    mcx,
+                    RangeVar {
+                        catalogname: sval(c),
+                        schemaname: sval(s),
+                        relname: sval(r),
+                        inh: false,
+                        relpersistence: RELPERSISTENCE_PERMANENT,
+                        alias: None,
+                        location: view.l(3),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::CompositeTypeStmt {
+                        typevar: rv.as_range_var(),
+                        coldeflist: view.v(6).list(),
+                    },
+                )?));
+            }
             // relation_expr: qualified_name; extended_relation_expr:
             //   qualified_name '*' | ONLY qualified_name | ONLY '(' q_n ')'
             1936 => {
@@ -3079,8 +3488,8 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
-            // b_expr: the a_expr forms without boolean/IS tails (DISTINCT and
-            // IS DOCUMENT arms 2108-2111 stay unimplemented-rule loud).
+            // b_expr: the a_expr forms without boolean/IS tails (DISTINCT
+            // arms 2108/2109 stay unimplemented-rule loud).
             2091 => {
                 let arg = view.v(1).node();
                 let t = view.v(3).node().expect("Typename");
@@ -4589,26 +4998,35 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(j));
             }
             // joined_table: CROSS JOIN | join_type JOIN ... join_qual |
-            // JOIN ... join_qual | NATURAL variants (unported louds).
-            1845 | 1846 | 1847 => {
-                let (jointype, rarg_at, qual_at) = match rule {
-                    1845 => (JoinType::JOIN_INNER, 4, 0),
-                    1846 => (join_type_from_ival(view.v(2).ival()), 4, 5),
-                    _ => (JoinType::JOIN_INNER, 3, 4),
+            // JOIN ... join_qual | NATURAL join_type JOIN | NATURAL JOIN.
+            1845 | 1846 | 1847 | 1848 | 1849 => {
+                let (jointype, is_natural, rarg_at, qual_at) = match rule {
+                    1845 => (JoinType::JOIN_INNER, false, 4, 0),
+                    1846 => (join_type_from_ival(view.v(2).ival()), false, 4, 5),
+                    1847 => (JoinType::JOIN_INNER, false, 3, 4),
+                    1848 => (join_type_from_ival(view.v(3).ival()), true, 5, 0),
+                    _ => (JoinType::JOIN_INNER, true, 4, 0),
                 };
-                let quals = if qual_at == 0 { None } else { view.v(qual_at).node() };
-                // join_qual USING is a loud unported rule (1869), so quals
-                // here is always the ON expression.
-                debug_assert!(!quals.is_some_and(|q| q.node_tag() == NodeTag::T_List));
+                let (using_clause, join_using_alias, quals) = if qual_at == 0 {
+                    (NodeList::nil(), None, None)
+                } else {
+                    let q = view.v(qual_at);
+                    if q.is_join_using() {
+                        let (cols, alias) = q.join_using();
+                        (cols, alias, None)
+                    } else {
+                        (NodeList::nil(), None, q.node())
+                    }
+                };
                 let n = Node::mk(
                     mcx,
                     JoinExpr {
                         jointype,
-                        isNatural: false,
+                        isNatural: is_natural,
                         larg: view.v(1).node().expect("table_ref"),
                         rarg: view.v(rarg_at).node().expect("table_ref"),
-                        usingClause: NodeList::nil(),
-                        join_using_alias: None,
+                        usingClause: using_clause,
+                        join_using_alias,
                         quals,
                         alias: None,
                         rtindex: 0,
@@ -4616,15 +5034,23 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
             }
-            1848 | 1849 => panic!(
-                "gram_core: NATURAL JOIN unimplemented (rule {rule}); join-using lane"
-            ),
+            // opt_alias_clause_for_join_using: AS ColId (empty rides DISPATCH).
+            1856 => {
+                let name = view.v(2).str_val();
+                *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
+            }
             // join_type: FULL/LEFT/RIGHT/INNER opt_outer.
             1863 => *yyval = YYSTYPE::Ival(JoinType::JOIN_FULL as i32),
             1864 => *yyval = YYSTYPE::Ival(JoinType::JOIN_LEFT as i32),
             1865 => *yyval = YYSTYPE::Ival(JoinType::JOIN_RIGHT as i32),
             1866 => *yyval = YYSTYPE::Ival(JoinType::JOIN_INNER as i32),
-            1869 => panic!("gram_core: JOIN USING unimplemented (rule 1869); join-using lane"),
+            // join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using.
+            1869 => {
+                *yyval = YYSTYPE::JoinUsing(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    JoinQualUsing { cols: view.v(3).list(), alias: view.v(5).alias() },
+                )?));
+            }
             2171 => {
                 let n = Node::mk(
                     mcx,
@@ -8248,6 +8674,28 @@ fn make_string_const_cast<'mcx>(
 
 fn make_int_const<'mcx>(mcx: mcx::Mcx<'mcx>, ival: i32, location: i32) -> PgResult<Node<'mcx>> {
     Node::mk_a_const(mcx, Some(ValUnion::Integer(Integer { ival })), location)
+}
+
+// makeXmlExpr (gram.y): xmloption/indent/type/typmod stay makeNode zero-fill.
+fn make_xml_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    op: XmlExprOp,
+    name: Option<&'mcx str>,
+    named_args: NodeList<'mcx>,
+    args: NodeList<'mcx>,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    let mut n = Node::build::<XmlExpr>(mcx)?;
+    n.op = op;
+    n.name = name;
+    n.named_args = named_args;
+    n.args = args;
+    n.location = location;
+    Ok(n.seal())
+}
+
+fn xml_option_from_ival(v: i32) -> XmlOptionType {
+    if v == 1 { XmlOptionType::XMLOPTION_CONTENT } else { XmlOptionType::XMLOPTION_DOCUMENT }
 }
 
 fn system_func_name<'mcx>(mcx: mcx::Mcx<'mcx>, name: &'mcx str) -> PgResult<NodeList<'mcx>> {

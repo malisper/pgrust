@@ -867,3 +867,46 @@ fn not_an_enum(type_oid: Oid) -> PgResult<Box<PgError>> {
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
     ))
 }
+
+/// `DefineCompositeType` (typecmds.c): CREATE TYPE name AS (coldeflist).
+pub fn DefineCompositeType<'mcx>(
+    mcx: Mcx<'mcx>,
+    typevar: &'mcx types_nodes::primnodes::RangeVar<'mcx>,
+    coldeflist: types_nodes::NodeList<'mcx>,
+    query_string: &str,
+) -> PgResult<ObjectAddress> {
+    let relname = typevar.relname.expect("RangeVar.relname");
+    let creation_rv = rel_vocab::RangeVar {
+        catalogname: typevar.catalogname,
+        schemaname: typevar.schemaname,
+        relname,
+        inh: typevar.inh,
+        relpersistence: typevar.relpersistence,
+        location: typevar.location,
+    };
+    let type_namespace = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
+    catalog_namespace::RangeVarAdjustRelationPersistence(typevar.relpersistence, type_namespace)?;
+    let old_type_oid =
+        syscache_seams::lookup_pg_type_oid_by_name::call(relname, type_namespace)?;
+    if old_type_oid != InvalidOid
+        && !pg_type::moveArrayTypeName(old_type_oid, relname, type_namespace)?
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("type \"{relname}\" already exists"))
+                .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    let create_stmt = types_nodes::rawnodes::CreateStmt {
+        relation: Some(typevar),
+        tableElts: coldeflist,
+        ..Default::default()
+    };
+    let relid = tablecmds::DefineRelation(
+        mcx,
+        &create_stmt,
+        types_rel::RELKIND_COMPOSITE_TYPE,
+        InvalidOid,
+        query_string,
+    )?;
+    Ok(ObjectAddress::set(types_core::RELATION_RELATION_ID, relid))
+}

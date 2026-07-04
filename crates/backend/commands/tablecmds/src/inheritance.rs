@@ -698,7 +698,7 @@ fn too_many_columns() -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
-fn duplicate_column(colname: &str) -> Box<PgError> {
+pub(crate) fn duplicate_column(colname: &str) -> Box<PgError> {
     Box::new(
         PgError::new(ERROR, format!("column \"{colname}\" specified more than once"))
             .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),

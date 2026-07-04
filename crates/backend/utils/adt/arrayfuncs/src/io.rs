@@ -8,11 +8,21 @@ use ::types_core::{primitive::InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_fmgr::{
-    function_call1_coll, input_function_call_safe, receive_function_call, send_function_call,
+    function_call1_coll_in, input_function_call_safe, receive_function_call, send_function_call,
     ErrorSaveNode, FmgrInfo,
 };
 
 use crate::construct::{construct_empty_array, construct_md_array, deconstruct_array};
+// C OutputFunctionCall arms CurrentMemoryContext implicitly; the local-frame
+// helper must arm explicitly for out fns that allocate (record_out).
+pub(crate) fn call1_armed(
+    flinfo: &mut ::types_fmgr::FmgrInfo,
+    mcx: ::mcx::Mcx<'_>,
+    arg: ::datum::Datum,
+) -> ::types_error::PgResult<::datum::Datum> {
+    ::types_fmgr::function_call1_coll_in(flinfo, ::types_core::InvalidOid, mcx, arg)
+}
+
 use crate::foundation::*;
 use ::arrayutils::{array_check_bounds, array_get_n_items};
 
@@ -600,7 +610,11 @@ pub fn array_out<'mcx>(
             b"NULL"
         } else {
             // SAFETY: as above.
-            let d = function_call1_coll(proc, InvalidOid, unsafe { *elems_s.get_unchecked(k) })?;
+            // mcx-armed: out procs of packed-capable elements (numeric)
+            // detoast-expand short images into the frame's result mcx.
+            let d = function_call1_coll_in(proc, InvalidOid, mcx, unsafe {
+                *elems_s.get_unchecked(k)
+            })?;
             cstring_datum(d)
         };
         let quote = !is_null && element_needs_quote(bytes, meta.typdelim);

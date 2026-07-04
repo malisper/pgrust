@@ -196,6 +196,7 @@ pub fn init_seams() {
     s::lock_release::set(|tag, mode, session| LockRelease(&tag, mode, session));
     s::mark_lock_clear::set(|tag, mode| MarkLockClear(&tag, mode));
     s::lock_held_by_me::set(|tag, mode, orstronger| LockHeldByMe(&tag, mode, orstronger));
+    s::lock_has_waiters::set(|tag, mode| LockHasWaiters(&tag, mode, false));
     s::do_lock_modes_conflict::set(DoLockModesConflict);
     s::lock_release_all::set(|lockmethodid, all_locks| {
         let id = if lockmethodid == DEFAULT_LOCKMETHOD {

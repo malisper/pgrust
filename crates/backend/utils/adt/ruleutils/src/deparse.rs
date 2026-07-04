@@ -966,6 +966,14 @@ pub(crate) fn get_variable<'mcx>(
                 .clone()
                 .unwrap_or_else(|| "?dropped?column?".to_string()),
         )
+    } else if rte.rtekind == RTEKind::RTE_RELATION {
+        // C get_rte_attribute_name: system columns always use the pg_attribute name.
+        Some(
+            lsyscache::get_attname(ctx.mcx, rte.relid, attnum, false)?
+                .expect("get_attname missing_ok=false")
+                .as_str()
+                .to_string(),
+        )
     } else {
         // get_rte_attribute_name -> get_attname: fixed system-column names.
         Some(

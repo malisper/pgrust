@@ -197,12 +197,26 @@ fn walker<'w, 'mcx: 'w>(
         // result types; no dependency recorded).
         NodeTag::T_SQLValueFunction => Ok(()),
         NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, context),
+        // C has no case for CoalesceExpr: expression_tree_walker walks args.
+        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args, context),
         NodeTag::T_TargetEntry => walker(node.as_target_entry().unwrap().expr, context),
         NodeTag::T_RangeTblRef => Ok(()),
+        NodeTag::T_Param => {
+            let param = node.as_variant::<types_nodes::primnodes::Param>().unwrap();
+            context.add(TYPE_RELATION_ID, param.paramtype, 0);
+            if param.paramcollid != InvalidOid && param.paramcollid != DEFAULT_COLLATION_OID {
+                context.add(CollationRelationId, param.paramcollid, 0);
+            }
+            Ok(())
+        }
         NodeTag::T_SubLink => {
             let sublink = node.as_sub_link().unwrap();
             walk_opt(sublink.testexpr, context)?;
             walker(sublink.subselect, context)
+        }
+        NodeTag::T_CommonTableExpr => {
+            let cte = node.as_common_table_expr().unwrap();
+            walk_opt(cte.ctequery, context)
         }
         NodeTag::T_SortGroupClause => {
             let sgc = node.as_sort_group_clause().unwrap();
@@ -292,7 +306,9 @@ fn walk_query<'w, 'mcx: 'w>(
                 }
                 context.rtables.remove(0);
             }
-            RTEKind::RTE_SUBQUERY => {}
+            // RTE_CTE/RTE_VALUES collations only duplicate ones referenced
+            // elsewhere in the Query (C dependency.c:2153).
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_CTE => {}
             other => walker_unported(&format!("rtekind {other:?}")),
         }
     }
@@ -364,7 +380,7 @@ fn walk_query_fields<'w, 'mcx: 'w>(
             RTEKind::RTE_SUBQUERY => {
                 walk_query(rte.subquery.expect("RTE_SUBQUERY has a subquery"), context)?
             }
-            RTEKind::RTE_JOIN => {}
+            RTEKind::RTE_JOIN | RTEKind::RTE_CTE => {}
             other => walker_unported(&format!("rtekind {other:?}")),
         }
         walk_list(&rte.securityQuals, context)?;

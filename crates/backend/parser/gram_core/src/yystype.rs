@@ -5,6 +5,13 @@ use core::ptr::NonNull;
 
 use types_nodes::{Alias, LimitOption, Node, NodeList};
 
+// func_alias_clause's (alias, coldeflist) pair; arena carrier for the
+// non-NIL-coldeflist forms.
+pub struct FuncAliasCols<'mcx> {
+    pub alias: Option<&'mcx Alias<'mcx>>,
+    pub coldeflist: NodeList<'mcx>,
+}
+
 // gram.y's SelectLimit carrier (a tagless parsenodes.h struct; lives only
 // between limit_clause and insertSelectOptions).
 pub struct SelectLimit<'mcx> {
@@ -46,6 +53,13 @@ pub struct JsonBehaviors<'mcx> {
     pub on_error: Option<Node<'mcx>>,
 }
 
+// join_qual's list_make2(name_list, opt_alias_clause_for_join_using) pair,
+// live only between join_qual and the JoinExpr build.
+pub struct JoinQualUsing<'mcx> {
+    pub cols: NodeList<'mcx>,
+    pub alias: Option<&'mcx Alias<'mcx>>,
+}
+
 pub struct YYSTYPE<'mcx> {
     p: *mut u8,
     meta: u64,
@@ -70,7 +84,9 @@ const T_LIMIT: u32 = 11;
 const T_DISTINCT_ALL: u32 = 12;
 const T_KEY_ACTION: u32 = 13;
 const T_KEY_ACTIONS: u32 = 14;
-const T_JSON_BEHAVIORS: u32 = 15;
+const T_FUNC_ALIAS_COLS: u32 = 15;
+const T_JOIN_USING: u32 = 16;
+const T_JSON_BEHAVIORS: u32 = 17;
 
 #[cold]
 #[inline(never)]
@@ -159,8 +175,8 @@ impl<'mcx> YYSTYPE<'mcx> {
         Self::mk(p, T_LIMIT, 0)
     }
 
-    // func_alias_clause's list_make2(alias, coldeflist): every producer today
-    // passes NIL coldeflist (ROWS FROM lands an arena carrier when needed).
+    // func_alias_clause's list_make2(alias, coldeflist): NIL coldeflist packs
+    // the bare alias pointer; non-NIL rides a FuncAliasCols arena carrier.
     #[inline(always)]
     pub fn FuncAlias(alias: Option<&'mcx Alias<'mcx>>, coldeflist: NodeList<'mcx>) -> Self {
         assert!(coldeflist.is_nil(), "gram_core: non-NIL coldeflist needs an arena carrier");
@@ -185,6 +201,25 @@ impl<'mcx> YYSTYPE<'mcx> {
     #[inline(always)]
     pub fn KeyActionsV(a: &'mcx mut KeyActions<'mcx>) -> Self {
         Self::mk(a as *mut KeyActions<'mcx> as *mut u8, T_KEY_ACTIONS, 0)
+    }
+
+    #[inline(always)]
+    pub fn JoinUsing(j: &'mcx mut JoinQualUsing<'mcx>) -> Self {
+        Self::mk(j as *mut JoinQualUsing<'mcx> as *mut u8, T_JOIN_USING, 0)
+    }
+
+    #[inline]
+    pub fn is_join_using(&self) -> bool {
+        self.tag() == T_JOIN_USING
+    }
+
+    pub fn join_using(self) -> (NodeList<'mcx>, Option<&'mcx Alias<'mcx>>) {
+        if self.tag() != T_JOIN_USING {
+            confusion("JoinQualUsing");
+        }
+        // SAFETY: built by JoinUsing() from &'mcx mut; moved, never duplicated.
+        let j = unsafe { &mut *(self.p as *mut JoinQualUsing<'mcx>) };
+        (core::mem::replace(&mut j.cols, NodeList::nil()), j.alias)
     }
 
     pub fn key_action(self) -> &'mcx mut KeyAction<'mcx> {
@@ -278,11 +313,23 @@ impl<'mcx> YYSTYPE<'mcx> {
     }
 
     pub fn func_alias(self) -> (Option<&'mcx Alias<'mcx>>, NodeList<'mcx>) {
-        if self.tag() != T_FUNC_ALIAS {
-            confusion("FuncAlias");
+        match self.tag() {
+            // SAFETY: built by FuncAlias() from &'mcx Alias (coldeflist NIL-asserted).
+            T_FUNC_ALIAS => (unsafe { (self.p as *const Alias<'mcx>).as_ref() }, NodeList::nil()),
+            T_FUNC_ALIAS_COLS => {
+                // SAFETY: built by FuncAliasV() from &'mcx FuncAliasCols; the
+                // list is arena-owned with no drop glue and each carrier is
+                // consumed exactly once (table_ref reduce).
+                let c = unsafe { &*(self.p as *const FuncAliasCols<'mcx>) };
+                (c.alias, unsafe { core::ptr::read(&c.coldeflist) })
+            }
+            _ => confusion("FuncAlias"),
         }
-        // SAFETY: built by FuncAlias() from &'mcx Alias (coldeflist NIL-asserted).
-        (unsafe { (self.p as *const Alias<'mcx>).as_ref() }, NodeList::nil())
+    }
+
+    #[inline(always)]
+    pub fn FuncAliasV(c: &'mcx FuncAliasCols<'mcx>) -> Self {
+        Self::mk(c as *const FuncAliasCols<'mcx> as *mut u8, T_FUNC_ALIAS_COLS, 0)
     }
 
     pub fn group(self) -> (bool, NodeList<'mcx>) {

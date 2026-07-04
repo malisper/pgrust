@@ -23,6 +23,7 @@ nbtree = { path = "../../../access/nbtree/nbtree" }
 varlena = { path = "../../../utils/adt/varlena" }
 adt_uuid = { path = "../../adt/uuid" }
 adt_network = { path = "../../adt/network" }
+adt_numeric = { path = "../../adt/numeric" }
 pg_locale = { path = "../../adt/pg_locale" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }

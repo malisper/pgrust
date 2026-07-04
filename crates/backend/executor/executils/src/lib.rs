@@ -751,6 +751,7 @@ impl<'mcx> EStateData<'mcx> {
                 | RTEKind::RTE_FUNCTION
                 | RTEKind::RTE_VALUES
                 | RTEKind::RTE_JOIN
+                | RTEKind::RTE_TABLEFUNC
                 | RTEKind::RTE_CTE => {}
                 // A pulled-up (dead) subquery RTE stays in the range table
                 // for its lock/ACL surface, as in C; a live subquery is the

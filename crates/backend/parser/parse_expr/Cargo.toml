@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_jsonb = { path = "../../utils/adt/jsonb" }
+adt_xml = { path = "../../utils/adt/xml" }
 analyze_seams = { path = "../analyze_seams" }
 datum = { path = "../../../_support/types/datum" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }

@@ -1134,3 +1134,228 @@ fn mksort_null_leading_key() {
     });
     assert_eq!(got, oracle);
 }
+
+// ---- numeric sortsupport / abbreviation ----
+
+fn numeric_blob(s: &str) -> Box<[u64]> {
+    let img = match s {
+        "NaN" => ::adt_numeric::NumericImage::nan(),
+        "Infinity" => ::adt_numeric::NumericImage::pinf(),
+        "-Infinity" => ::adt_numeric::NumericImage::ninf(),
+        _ => ::adt_numeric::numeric_in(s, -1, None).unwrap().unwrap(),
+    };
+    let bytes = img.as_bytes();
+    let mut blob = vec![0u64; bytes.len().div_ceil(8)].into_boxed_slice();
+    // SAFETY: fresh buffer of >= bytes.len() bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), blob.as_mut_ptr().cast::<u8>(), bytes.len());
+    }
+    blob
+}
+
+fn numeric_key(nulls_first: bool, reverse: bool) -> SortSupport {
+    SortSupport {
+        ssup_collation: 0,
+        ssup_reverse: reverse,
+        ssup_nulls_first: nulls_first,
+        ssup_attno: 1,
+        comparator: SortComparator::NumericAbbrev,
+    }
+}
+
+fn numeric_abbrev_arm() -> AbbrevArm {
+    AbbrevArm { kind: AbbrevKind::Numeric, full_comparator: SortComparator::Numeric }
+}
+
+fn numeric_corpus(n: usize, seed: u64) -> Vec<Option<String>> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            let r = lcg(&mut s) % 23;
+            Some(match r {
+                0 => return None,
+                1 => "NaN".to_string(),
+                2 => "Infinity".to_string(),
+                3 => "-Infinity".to_string(),
+                4 => "0".to_string(),
+                5 => format!("1e{}", 80 + (lcg(&mut s) % 30)),
+                6 => format!("-1e{}", 80 + (lcg(&mut s) % 30)),
+                7 => format!("1e-{}", 40 + (lcg(&mut s) % 20)),
+                // Same 7-word prefix, differing tail: abbrev tie, full-cmp
+                // decides (exceeds the 4 packed digit words).
+                8 => format!("123456789012345678901234567890.{:04}", lcg(&mut s) % 10000),
+                _ => {
+                    let sign = if lcg(&mut s) % 2 == 0 { "" } else { "-" };
+                    let int = lcg(&mut s) % 1_000_000_000;
+                    let frac = lcg(&mut s) % 100_000;
+                    format!("{sign}{int}.{frac}")
+                }
+            })
+        })
+        .collect()
+}
+
+fn numeric_oracle(vals: &[Option<String>], nulls_first: bool) -> Vec<Option<Vec<u8>>> {
+    let imgs: Vec<Option<::adt_numeric::NumericImage>> = vals
+        .iter()
+        .map(|v| {
+            v.as_ref().map(|s| match s.as_str() {
+                "NaN" => ::adt_numeric::NumericImage::nan(),
+                "Infinity" => ::adt_numeric::NumericImage::pinf(),
+                "-Infinity" => ::adt_numeric::NumericImage::ninf(),
+                _ => ::adt_numeric::numeric_in(s, -1, None).unwrap().unwrap(),
+            })
+        })
+        .collect();
+    let mut idx: Vec<usize> = (0..imgs.len()).collect();
+    idx.sort_by(|&i, &j| {
+        use std::cmp::Ordering;
+        match (&imgs[i], &imgs[j]) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => if nulls_first { Ordering::Less } else { Ordering::Greater },
+            (Some(_), None) => if nulls_first { Ordering::Greater } else { Ordering::Less },
+            (Some(x), Some(y)) => ::adt_numeric::cmp_numerics(x.num(), y.num()).cmp(&0),
+        }
+    });
+    idx.iter()
+        .map(|&i| imgs[i].as_ref().map(|img| img.as_bytes().to_vec()))
+        .collect()
+}
+
+fn drain_numeric_datums(ts: &mut Tuplesort) -> Vec<Option<Vec<u8>>> {
+    let mut got = Vec::new();
+    while let Some(nd) = ts.getdatum(true).unwrap() {
+        if nd.isnull {
+            got.push(None);
+            continue;
+        }
+        let p = nd.value.as_usize() as *const u8;
+        // SAFETY: sort-owned datumCopy image (the ORIGINAL, never the word).
+        got.push(Some(unsafe {
+            std::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)).to_vec()
+        }));
+    }
+    got
+}
+
+#[test]
+fn abbrev_numeric_datum_sort_matches_cmp_numerics_order() {
+    let vals = numeric_corpus(800, 0x5eed);
+    let mut ts = Tuplesort::begin_common(
+        1024,
+        TUPLESORT_NONE,
+        &[numeric_key(false, false)],
+        false,
+        Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
+        SortVariant::Datum { byref_typlen: -1 },
+    );
+    let blobs: Vec<Option<Box<[u64]>>> =
+        vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
+    for b in &blobs {
+        match b {
+            Some(blob) => ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap(),
+            None => ts.putdatum(Datum::null(), true).unwrap(),
+        }
+    }
+    ts.performsort().unwrap();
+    assert_eq!(drain_numeric_datums(&mut ts), numeric_oracle(&vals, false));
+    ts.end();
+}
+
+#[test]
+fn abbrev_numeric_datum_sort_reverse_nulls_first() {
+    let vals = numeric_corpus(300, 0xd06);
+    let mut ts = Tuplesort::begin_common(
+        1024,
+        TUPLESORT_NONE,
+        &[numeric_key(true, true)],
+        false,
+        Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
+        SortVariant::Datum { byref_typlen: -1 },
+    );
+    let blobs: Vec<Option<Box<[u64]>>> =
+        vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
+    for b in &blobs {
+        match b {
+            Some(blob) => ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap(),
+            None => ts.putdatum(Datum::null(), true).unwrap(),
+        }
+    }
+    ts.performsort().unwrap();
+    let mut oracle = numeric_oracle(&vals, false);
+    oracle.reverse();
+    assert_eq!(drain_numeric_datums(&mut ts), oracle);
+    ts.end();
+}
+
+#[test]
+fn numeric_abbrev_abort_low_cardinality_still_sorts() {
+    // One distinct value through the 16384 abbrevNext checkpoint (the first
+    // one past C's 10000-row floor): numeric_abbrev_abort fires; REMOVEABBREV
+    // restores originals and the full comparator finishes the sort.
+    let mut vals: Vec<Option<String>> = (0..17000).map(|_| Some("42.5".to_string())).collect();
+    vals.extend((0..200).map(|i| Some(format!("{}.25", i % 97))));
+    let mut ts = Tuplesort::begin_common(
+        4096,
+        TUPLESORT_NONE,
+        &[numeric_key(false, false)],
+        false,
+        Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
+        SortVariant::Datum { byref_typlen: -1 },
+    );
+    let blobs: Vec<Option<Box<[u64]>>> =
+        vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
+    for b in &blobs {
+        ts.putdatum(Datum::from_usize(b.as_ref().unwrap().as_ptr() as usize), false).unwrap();
+    }
+    ts.0.with(|st| assert!(st.abbrev.is_none(), "abort should have fired"));
+    ts.0.with(|st| {
+        assert!(matches!(st.sort_keys[0].comparator, SortComparator::Numeric));
+    });
+    ts.performsort().unwrap();
+    assert_eq!(drain_numeric_datums(&mut ts), numeric_oracle(&vals, false));
+    ts.end();
+}
+
+#[test]
+fn numeric_bounded_sort_disarms_abbrev() {
+    let vals = numeric_corpus(400, 0xb0b);
+    let mut ts = Tuplesort::begin_common(
+        1024,
+        TUPLESORT_ALLOWBOUNDED,
+        &[numeric_key(false, false)],
+        false,
+        Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
+        SortVariant::Datum { byref_typlen: -1 },
+    );
+    ts.set_bound(20);
+    ts.0.with(|st| {
+        assert!(st.abbrev.is_none());
+        assert!(matches!(st.sort_keys[0].comparator, SortComparator::Numeric));
+    });
+    let blobs: Vec<Option<Box<[u64]>>> =
+        vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
+    for b in &blobs {
+        match b {
+            Some(blob) => ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap(),
+            None => ts.putdatum(Datum::null(), true).unwrap(),
+        }
+    }
+    ts.performsort().unwrap();
+    assert!(ts.used_bound());
+    let mut got = Vec::new();
+    for _ in 0..20 {
+        let nd = ts.getdatum(true).unwrap().expect("bound rows present");
+        got.push(if nd.isnull {
+            None
+        } else {
+            let p = nd.value.as_usize() as *const u8;
+            // SAFETY: sort-owned datumCopy image.
+            Some(unsafe {
+                std::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)).to_vec()
+            })
+        });
+    }
+    assert_eq!(got[..], numeric_oracle(&vals, false)[..20]);
+    ts.end();
+}

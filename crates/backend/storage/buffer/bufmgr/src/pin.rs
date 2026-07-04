@@ -140,6 +140,16 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
 }
 
 #[inline]
+pub(crate) fn ForgetBufferPin(b: Buffer) {
+    resowner::ResourceOwnerForget(
+        resowner::CurrentResourceOwner(),
+        Datum::from_i32(b),
+        &BUFFER_PIN_DESC,
+    )
+    .expect("ResourceOwnerForgetBuffer");
+}
+
+#[inline]
 pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
     resowner::ResourceOwnerForget(
@@ -276,6 +286,9 @@ pub fn UnlockBuffers() {
 /// AtEOXact_Buffers (bufmgr.c): leak check only — pins remembered on the
 /// resource owner were already dropped by ResourceOwnerRelease(BEFORE_LOCKS).
 pub fn AtEOXact_Buffers(is_commit: bool) {
+    // In-flight/uncollected uring prefetch reads hold thread-owned pins; wait
+    // them out before the leak check (order: pinned pages can carry live DMA).
+    crate::uring::drain_own();
     if cfg!(debug_assertions) {
         CheckForBufferLeaks();
     }
