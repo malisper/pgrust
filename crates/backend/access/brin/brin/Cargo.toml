@@ -24,3 +24,5 @@ table = { path = "../../table/table" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 xact = { path = "../../transam/xact" }
 brin_minmax_multi = { path = "../brin_minmax_multi" }
+brin_bloom = { path = "../brin_bloom" }
+brin_inclusion = { path = "../brin_inclusion" }

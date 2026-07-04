@@ -40,9 +40,11 @@ pub fn brin_minmax_multi_opcinfo(_typoid: Oid) -> BrinColInfo {
         oi_nstored: 1,
         oi_regular_nulls: true,
         kind: BrinOpcKind::MinMaxMulti,
-        oi_typids: [PG_BRIN_MINMAX_MULTI_SUMMARYOID, 0],
+        oi_typids: [PG_BRIN_MINMAX_MULTI_SUMMARYOID, 0, 0],
         minmax: MinmaxOpaque::default(),
         distance_procinfo: core::cell::RefCell::new(None),
+        bloom: None,
+        inclusion: None,
     }
 }
 

@@ -238,6 +238,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(spgist_quadtree::SPGIST_QUAD_BUILTINS);
     fmgr_core::register_late_builtins(spgist_kdtree::SPGIST_KD_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
+    fmgr_core::register_late_builtins(brin_bloom::BLOOM_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(orderedsetaggs::ORDEREDSETAGGS_BUILTINS);
     funcapi::init_seams();
