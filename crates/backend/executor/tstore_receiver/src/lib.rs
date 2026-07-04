@@ -1,9 +1,14 @@
-// tstoreReceiver.c; detoast + tupmap arms are loud panics naming their lanes.
+// tstoreReceiver.c; the tupmap arm is a loud panic naming its lane.
 #![allow(non_snake_case)]
 
+use ::datum::Datum;
+use ::mcx::MemoryContext;
 use ::types_error::PgResult;
 use ::types_portal::TuplestoreHandle;
 use ::types_slot::SlotData;
+use ::types_tuple::varatt::{
+    varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b, vartag_size, VARHDRSZ_EXTERNAL,
+};
 use ::types_tuple::TupleDescData;
 
 #[cfg(test)]
@@ -12,10 +17,12 @@ mod tests;
 pub struct DrTstore {
     tstore: TuplestoreHandle,
     detoast: bool,
+    needtoast: bool,
+    scratch: Option<MemoryContext>,
 }
 
 pub fn tstore_create_DR() -> DrTstore {
-    DrTstore { tstore: TuplestoreHandle::NULL, detoast: false }
+    DrTstore { tstore: TuplestoreHandle::NULL, detoast: false, needtoast: false, scratch: None }
 }
 
 // C's tContext lives inside the store behind the handle.
@@ -26,24 +33,68 @@ pub fn set_params(myState: &mut DrTstore, tstore: TuplestoreHandle, detoast: boo
 
 impl DrTstore {
     pub fn startup(&mut self, _operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
-        if self.detoast {
-            let natts = typeinfo.natts as usize;
-            for attr in &typeinfo.compact_attrs[..natts] {
-                if !attr.attisdropped && attr.attlen == -1 {
-                    panic!(
-                        "tstoreReceiveSlot_detoast: forced detoast \
-                         (WITH HOLD cursor lane, tstoreReceiver.c) not ported"
-                    );
-                }
-            }
+        let natts = typeinfo.natts as usize;
+        self.needtoast = self.detoast
+            && typeinfo.compact_attrs[..natts]
+                .iter()
+                .any(|attr| !attr.attisdropped && attr.attlen == -1);
+        if self.needtoast && self.scratch.is_none() {
+            self.scratch = Some(MemoryContext::new_bump("tstoreReceiver detoast"));
         }
         Ok(())
     }
 
     pub fn receive_slot(&mut self, slot: &mut SlotData<'_>) -> PgResult<bool> {
-        tuplestore::hold::puttupleslot(self.tstore, slot)?;
+        if !self.needtoast {
+            tuplestore::hold::puttupleslot(self.tstore, slot)?;
+            return Ok(true);
+        }
+        exectuples::slot_getallattrs(slot);
+        let ctx = self.scratch.as_mut().expect("startup ran before receive_slot");
+        {
+            let mcx = ctx.mcx();
+            let base = slot.base();
+            let desc = base
+                .tts_tupleDescriptor
+                .as_ref()
+                .expect("tstoreReceiveSlot_detoast: slot without descriptor");
+            let natts = desc.natts as usize;
+            let mut outvalues = ::mcx::vec_with_capacity_in(mcx, natts)?;
+            for i in 0..natts {
+                let mut val = base.tts_values[i];
+                let attr = &desc.compact_attrs[i];
+                if !attr.attisdropped && attr.attlen == -1 && !base.tts_isnull[i] {
+                    // SAFETY: non-null deformed varlena datum.
+                    if unsafe { varatt_is_1b_e(val.as_usize() as *const u8) } {
+                        // SAFETY: as above.
+                        let flat = detoast::detoast_external_attr(mcx, unsafe { va_slice(val) })?;
+                        val = Datum::from_usize(flat.leak().as_ptr() as usize);
+                    }
+                }
+                outvalues.push(val);
+            }
+            tuplestore::hold::putvalues(self.tstore, desc, &outvalues, &base.tts_isnull[..natts])?;
+        }
+        ctx.reset();
         Ok(true)
     }
 
     pub fn shutdown(&mut self) {}
+}
+
+/// # Safety
+/// `d` is a pointer datum to a live varlena.
+unsafe fn va_slice<'a>(d: Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract.
+    unsafe {
+        let len = if varatt_is_1b_e(p) {
+            VARHDRSZ_EXTERNAL + vartag_size(*p.add(1))
+        } else if varatt_is_1b(p) {
+            varsize_1b(p)
+        } else {
+            varsize_4b(p)
+        };
+        core::slice::from_raw_parts(p, len)
+    }
 }

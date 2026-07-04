@@ -1,7 +1,7 @@
 // pg_inherits.c: StoreSingleInheritance + find_inheritance_children +
 // find_all_inheritors + has_superclass + DeleteInheritsTuple, plus
-// get_partition_parent (C: catalog/partition.c; hosted here for the
-// pg_inherits scan machinery). DETACH CONCURRENTLY loud.
+// get_partition_parent + get_partition_ancestors (C: catalog/partition.c;
+// hosted here for the pg_inherits scan machinery). DETACH CONCURRENTLY loud.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use datum::Datum;
@@ -212,12 +212,46 @@ pub fn DeleteInheritsTuple<'mcx>(
 
 pub fn get_partition_parent(mcx: Mcx<'_>, relid: Oid, even_if_detached: bool) -> PgResult<Oid> {
     let rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
+    let (result, detach_pending) = get_partition_parent_worker(mcx, &rel, relid)?;
+    rel.close(AccessShareLock)?;
+    if result == InvalidOid {
+        panic!("could not find tuple for parent of relation {relid}");
+    }
+    if detach_pending && !even_if_detached {
+        panic!("relation {relid} has no parent because it's being detached");
+    }
+    Ok(result)
+}
+
+// C: partition.c get_partition_ancestors — bottom-up parent chain, stopping
+// at a detach-pending edge.
+pub fn get_partition_ancestors<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'mcx, Oid>> {
+    let rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
+    let mut ancestors: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut current = relid;
+    loop {
+        let (parent, detach_pending) = get_partition_parent_worker(mcx, &rel, current)?;
+        if parent == InvalidOid || detach_pending {
+            break;
+        }
+        ancestors.push(parent);
+        current = parent;
+    }
+    rel.close(AccessShareLock)?;
+    Ok(ancestors)
+}
+
+fn get_partition_parent_worker<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    relid: Oid,
+) -> PgResult<(Oid, bool)> {
     let keys = [
         eq_key(Anum_pg_inherits_inhrelid, F_OIDEQ, Datum::from_oid(relid)),
         eq_key(Anum_pg_inherits_inhseqno, F_INT4EQ, Datum::from_i32(1)),
     ];
     let mut scan =
-        genam::systable_beginscan(mcx, &rel, InheritsRelidSeqnoIndexId, true, None, &keys)?;
+        genam::systable_beginscan(mcx, rel, InheritsRelidSeqnoIndexId, true, None, &keys)?;
     let desc = rel.descr();
     let mut result = InvalidOid;
     let mut detach_pending = false;
@@ -240,12 +274,5 @@ pub fn get_partition_parent(mcx: Mcx<'_>, relid: Oid, even_if_detached: bool) ->
         .as_bool();
     }
     genam::systable_endscan(mcx, scan)?;
-    rel.close(AccessShareLock)?;
-    if result == InvalidOid {
-        panic!("could not find tuple for parent of relation {relid}");
-    }
-    if detach_pending && !even_if_detached {
-        panic!("relation {relid} has no parent because it's being detached");
-    }
-    Ok(result)
+    Ok((result, detach_pending))
 }

@@ -13,5 +13,6 @@ tuplestore = { path = "../../utils/sort/tuplestore" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

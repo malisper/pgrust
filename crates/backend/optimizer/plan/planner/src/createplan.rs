@@ -1081,6 +1081,24 @@ fn fix_indexqual_clause<'mcx>(
                 },
             )
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let saop = clause.as_scalar_array_op_expr().unwrap();
+            debug_assert!(saop.args.len() == 2);
+            let fixed_arg = fix_indexqual_operand(run, index, indexcol, saop.args.nth(0))?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ScalarArrayOpExpr {
+                    opno: saop.opno,
+                    opfuncid: saop.opfuncid,
+                    hashfuncid: saop.hashfuncid,
+                    negfuncid: saop.negfuncid,
+                    useOr: saop.useOr,
+                    inputcollid: saop.inputcollid,
+                    args: NodeList::make2(mcx, fixed_arg, saop.args.nth(1))?,
+                    location: saop.location,
+                },
+            )
+        }
         NodeTag::T_NullTest => {
             let nt = clause.as_null_test().unwrap();
             let fixed_arg =

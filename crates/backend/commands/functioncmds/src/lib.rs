@@ -366,10 +366,29 @@ fn interpret_AS_clause<'a>(
             ERRCODE_INVALID_FUNCTION_DEFINITION,
         ));
     };
-    if languageOid == ClanguageId {
-        unported("LANGUAGE c (probin/dlopen)");
-    }
     let items = as_item.arg.expect("AS DefElem arg").as_list().expect("func_as is a List");
+    if languageOid == ClanguageId {
+        // File name in probin, link symbol in prosrc; omitted or "-" symbol
+        // substitutes the function name.
+        let mut it = items.iter();
+        let probin = it
+            .next()
+            .and_then(|n| n.as_string())
+            .expect("func_as items are Strings")
+            .sval;
+        let prosrc = match it.next() {
+            None => funcname,
+            Some(n) => {
+                let s = n.as_string().expect("func_as items are Strings").sval;
+                if s == "-" {
+                    funcname
+                } else {
+                    s
+                }
+            }
+        };
+        return Ok(AsClause { prosrc, probin: Some(probin) });
+    }
     if items.len() != 1 {
         return Err(err(
             format!("only one AS item needed for language \"{languageName}\""),
@@ -485,9 +504,9 @@ pub fn CreateFunction<'mcx>(
     cache_syscache::ReleaseSysCache(lang_tuple);
 
     if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId
-        && language != "plpgsql"
+        && languageOid != ClanguageId && language != "plpgsql"
     {
-        unported("languages beyond sql, internal and plpgsql (c, ...)");
+        unported("languages beyond sql, internal, c and plpgsql");
     }
 
     if lanpltrusted {

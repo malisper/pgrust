@@ -209,10 +209,28 @@ fn ExplainOneUtility<'mcx>(
             "ExplainOneUtility (explain.c): CREATE TABLE AS arm needs \
              CreateTableAsStmt vocabulary (CTAS lane)"
         ),
-        NodeTag::T_DeclareCursorStmt => panic!(
-            "ExplainOneUtility (explain.c): DECLARE CURSOR arm needs \
-             DeclareCursorStmt vocabulary (portalcmds lane)"
-        ),
+        NodeTag::T_DeclareCursorStmt => {
+            let options = stmt.as_declare_cursor_stmt().expect("tag checked").options;
+            // C copyObject(dcs->query) then rewrites the copy; EXPLAIN never
+            // reads dcs->query again (no portal is created), so the Query
+            // moves out instead.
+            // SAFETY: this call holds the only live access to the
+            // DeclareCursorStmt tree.
+            let query_node = unsafe {
+                stmt.with_mut::<types_nodes::parsenodes::DeclareCursorStmt, _>(|d| {
+                    d.query.take()
+                })
+            }
+            .flatten()
+            .expect("EXPLAIN DECLARE CURSOR without analyzed query");
+            // SAFETY: as above.
+            let query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+                .expect("DECLARE CURSOR query is not an analyzed Query");
+            let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
+            assert!(rewritten.len() == 1, "DECLARE rewrite yielded {} queries", rewritten.len());
+            let query = rewritten.into_iter().next().expect("len == 1");
+            return ExplainOneQuery(mcx, query, options, es, query_string, params, query_env);
+        }
         NodeTag::T_ExecuteStmt => {
             if es.memory {
                 panic!(

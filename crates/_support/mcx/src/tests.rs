@@ -1017,7 +1017,7 @@ mod acct_pool {
             (*p1.as_ptr()).weak.set(0);
         }
         acct_give_to(&pool, p1);
-        assert_eq!(pool.with(|s| s.len()), 1, "allocation parked for reuse");
+        assert_eq!(pool.try_with(|s| s.len()).unwrap(), 1, "allocation parked for reuse");
 
         let p2 = acct_take_from(&pool);
         assert_eq!(p1.as_ptr(), p2.as_ptr(), "parked allocation reused");

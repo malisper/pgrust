@@ -126,6 +126,8 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+pg_proc = { path = "../../backend/catalog/pg_proc" }
+regress_lib = { path = "../../backend/test_regress" }
 plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
@@ -156,6 +158,8 @@ gistproc = { path = "../../backend/access/gist/gistproc" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
+genfile = { path = "../../backend/utils/adt/genfile" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
 partbounds = { path = "../../backend/partitioning/partbounds" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }

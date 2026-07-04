@@ -271,7 +271,7 @@ fn write_dims_lbounds(out: &mut [u8], ndim: i32, dims: &[i32], lbs: &[i32]) {
 }
 
 // CopyArrayEls over the fully-headered image: writes packed data + null bitmap.
-fn copy_array_els(
+pub(crate) fn copy_array_els(
     image: &mut [u8],
     values: &[Datum],
     nulls: Option<&[bool]>,

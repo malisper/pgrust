@@ -194,14 +194,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
     if volatile_defexprs {
         unported("FROM with volatile default expressions (CIM_SINGLE lane)");
     }
-    if tup_desc
-        .constr
-        .as_deref()
-        .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
-    {
-        unported("FROM with generated columns (ExecComputeStoredGenerated lane)");
-    }
-
     let src = match filename {
         Some(filename) => {
             let fd = fd::AllocateFile(filename, "rb")?;
@@ -375,6 +367,11 @@ fn copy_from_body<'mcx>(
         unsafe { q.arm_result_mcx_raw(mcx) };
     }
 
+    let has_generated_stored =
+        rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored);
+    let mut generated_exprs = None;
+    let mut virtual_nn_exprs = None;
+
     // std Vec: SlotData owns droppy state via the arena-erased views; the
     // slot pool itself is per-statement (CopyMultiInsertBuffer.slots).
     let mut slots: Vec<types_slot::SlotData<'mcx>> = Vec::new();
@@ -422,12 +419,26 @@ fn copy_from_body<'mcx>(
             }
         }
 
+        if has_generated_stored {
+            nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, rel, slot)?;
+        }
+
         if let Some(constr) = rel.rd_att.constr.as_deref() {
             if constr.num_check > 0 || !constr.check.is_empty() {
                 panic!("ExecConstraints (execMain.c): CHECK constraints not ported");
             }
             if constr.has_not_null {
                 not_null_constraints(rel, slot)?;
+                if constr.has_generated_virtual {
+                    if let Some(i) = nodemodifytable::exec_rel_gen_virtual_notnull(
+                        mcx,
+                        &mut virtual_nn_exprs,
+                        rel,
+                        slot,
+                    )? {
+                        return Err(not_null_violation(rel, i));
+                    }
+                }
             }
         }
 
@@ -587,6 +598,9 @@ fn not_null_constraints<'mcx>(
 ) -> PgResult<()> {
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
+        if att.attgenerated == types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8 {
+            continue;
+        }
         if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
             return Err(not_null_violation(rel, i));
         }

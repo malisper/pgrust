@@ -2201,8 +2201,12 @@ pub fn initial_cost_hashjoin(
     let mut startup_cost = o_startup;
     let mut run_cost = o_total - o_startup;
     startup_cost += i_total;
-    startup_cost += (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost()) * i_rows;
-    run_cost += gucs::cpu_operator_cost() * num_hashclauses * o_rows;
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+    // fuses `cost += expr * rows`); EXPLAIN costs are byte-compared and a
+    // 42.425-style display boundary exposes the one-ulp difference.
+    startup_cost = (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost())
+        .mul_add(i_rows, startup_cost);
+    run_cost = (gucs::cpu_operator_cost() * num_hashclauses).mul_add(o_rows, run_cost);
 
     let inner_width = run.root.path_pathtarget(inner_path).width;
     let (numbuckets, numbatches, _skew) =
@@ -2266,22 +2270,25 @@ pub fn final_cost_hashjoin(
 
     let virtualbuckets = numbuckets as f64 * numbatches as f64;
 
-    // No extended stats on this lane: estimate_multivariate_bucketsize is
-    // the identity (returns every hashclause) and each clause's bucketsize
-    // comes from estimate_hash_bucket_stats. A unique-ified inner is assumed
-    // perfectly hashable (C's UniquePath arm).
+    // A unique-ified inner is assumed perfectly hashable (C's UniquePath arm).
     let mut innerbucketsize = 1.0f64;
     let mut innermcvfreq = 1.0f64;
-    if inner_is_unique_path {
-        innerbucketsize = 1.0 / virtualbuckets;
-        innermcvfreq = 0.0;
-    }
     let inner_relids = run.root.rel(inner_parent).relids.clone();
     let hcls = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_hashclauses);
-    for &hcl in hcls.iter() {
-        if inner_is_unique_path {
-            break;
-        }
+    let otherclauses = if inner_is_unique_path {
+        innerbucketsize = 1.0 / virtualbuckets;
+        innermcvfreq = 0.0;
+        PgVec::new_in(run.mcx)
+    } else {
+        let (other, bs) = planner_seams::estimate_multivariate_bucketsize::call(
+            run,
+            inner_parent,
+            &hcls,
+        )?;
+        innerbucketsize = bs;
+        other
+    };
+    for &hcl in otherclauses.iter() {
         let right_is_inner = {
             let r = run.root.rinfo(hcl);
             types_pathnodes::relids::relids_is_subset(&r.right_relids, &inner_relids)

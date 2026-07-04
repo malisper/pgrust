@@ -384,10 +384,8 @@ pub(crate) fn clause_selectivity_node<'mcx>(
         }
         // C's catch-all default: no way to estimate, use 0.5.
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
-        // C's final else: boolvarsel. examine_variable's index-expression
-        // stats leg is unported repo-wide, so a CASE never has a statsTuple
-        // and C's fallback constant applies.
-        NodeTag::T_CaseExpr => Ok(0.5),
+        // C's final else: boolvarsel.
+        NodeTag::T_CaseExpr => crate::selfuncs::boolvarsel(run, clause, varrelid),
         other => panic!("clause_selectivity_ext (clausesel.c): {other:?}; M2 qual lane"),
     }
 }

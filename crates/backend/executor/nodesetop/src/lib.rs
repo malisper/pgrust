@@ -361,7 +361,7 @@ fn emit_group_tuple<'mcx>(
     let mcx = estate.es_query_cxt;
     let tup = exectuples::exec_fetch_slot_minimal_tuple(first_slot, mcx, mcx)?;
     let ptr = match tup {
-        exectuples::FetchedMinimalTuple::Slot(t) => core::ptr::NonNull::from(t),
+        exectuples::FetchedMinimalTuple::Slot(t, _) => t,
         exectuples::FetchedMinimalTuple::Copied(_) => {
             unreachable!("group first slot was materialized by exec_copy_slot")
         }

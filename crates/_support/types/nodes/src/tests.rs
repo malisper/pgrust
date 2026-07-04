@@ -1402,3 +1402,160 @@ fn equal_aggref_ignores_transtype_and_presorted() {
     // aggno/aggtransno ARE compared (not equal_ignore in C).
     assert!(!crate::equal(agg(20, false, 0), agg(20, false, 1)));
 }
+
+#[test]
+fn bms_add_range() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let mut b = Bitmapset::empty();
+    b.add_range(mcx, 5, 2).unwrap();
+    assert!(b.is_empty());
+    b.add_range(mcx, -5, -10).unwrap();
+    assert!(b.is_empty());
+
+    b.add_range(mcx, 3, 3).unwrap();
+    assert_eq!(b.iter().collect::<Vec<_>>(), [3]);
+
+    let mut b = Bitmapset::empty();
+    b.add_range(mcx, 0, 63).unwrap();
+    check_invariants(&b);
+    assert_eq!(b.nwords(), 1);
+    assert_eq!(b.num_members(), 64);
+
+    let mut b = Bitmapset::empty();
+    b.add_range(mcx, 63, 65).unwrap();
+    check_invariants(&b);
+    assert_eq!(b.iter().collect::<Vec<_>>(), [63, 64, 65]);
+
+    let mut b = Bitmapset::empty();
+    b.add_range(mcx, 10, 200).unwrap();
+    check_invariants(&b);
+    assert_eq!(b.num_members(), 191);
+    assert!(!b.is_member(9));
+    assert!(b.is_member(10));
+    assert!(b.is_member(200));
+    assert!(!b.is_member(201));
+
+    let mut b = Bitmapset::make_singleton(mcx, 300).unwrap();
+    b.add_range(mcx, 64, 127).unwrap();
+    check_invariants(&b);
+    assert!(b.is_member(300));
+    assert_eq!(b.num_members(), 65);
+
+    let mut rng = XorShift(0xC0FFEE1234567891);
+    for _ in 0..100 {
+        let mut rset: BTreeSet<i32> = BTreeSet::new();
+        for _ in 0..(rng.next() % 16) {
+            rset.insert((rng.next() % 300) as i32);
+        }
+        let mut b = from_set(mcx, &rset);
+        let lower = (rng.next() % 300) as i32;
+        let upper = lower + (rng.next() % 150) as i32 - 20;
+        b.add_range(mcx, lower, upper).unwrap();
+        for x in lower..=upper {
+            rset.insert(x);
+        }
+        check_invariants(&b);
+        assert_eq!(b.iter().collect::<Vec<_>>(), rset.iter().copied().collect::<Vec<_>>());
+    }
+}
+
+#[test]
+#[should_panic(expected = "negative bitmapset member")]
+fn bms_add_range_negative_lower_is_loud() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let mut b = Bitmapset::empty();
+    let _ = b.add_range(mcx, -1, 5);
+}
+
+#[test]
+fn bms_join() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let a = from_set(mcx, &BTreeSet::from([1, 70]));
+    let b = Bitmapset::empty();
+    let j = Bitmapset::join(a, b);
+    assert_eq!(j.iter().collect::<Vec<_>>(), [1, 70]);
+
+    let a = Bitmapset::empty();
+    let b = from_set(mcx, &BTreeSet::from([2]));
+    let j = Bitmapset::join(a, b);
+    assert_eq!(j.iter().collect::<Vec<_>>(), [2]);
+
+    for swap in [false, true] {
+        let shorter = from_set(mcx, &BTreeSet::from([0, 5]));
+        let longer = from_set(mcx, &BTreeSet::from([3, 130]));
+        let j = if swap {
+            Bitmapset::join(longer, shorter)
+        } else {
+            Bitmapset::join(shorter, longer)
+        };
+        check_invariants(&j);
+        assert_eq!(j.iter().collect::<Vec<_>>(), [0, 3, 5, 130]);
+    }
+}
+
+#[test]
+fn bms_replace_members() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let mut a = from_set(mcx, &BTreeSet::from([1, 200]));
+    a.replace_members(mcx, &Bitmapset::empty()).unwrap();
+    assert!(a.is_empty());
+
+    let b = from_set(mcx, &BTreeSet::from([7, 90]));
+    a.replace_members(mcx, &b).unwrap();
+    check_invariants(&a);
+    assert_eq!(a.iter().collect::<Vec<_>>(), [7, 90]);
+
+    let shrunk = from_set(mcx, &BTreeSet::from([4]));
+    a.replace_members(mcx, &shrunk).unwrap();
+    check_invariants(&a);
+    assert_eq!(a.iter().collect::<Vec<_>>(), [4]);
+
+    let grown = from_set(mcx, &BTreeSet::from([9, 400]));
+    a.replace_members(mcx, &grown).unwrap();
+    check_invariants(&a);
+    assert_eq!(a.iter().collect::<Vec<_>>(), [9, 400]);
+}
+
+#[test]
+fn bms_member_index() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let b = from_set(mcx, &BTreeSet::from([0, 5, 63, 64, 128, 300]));
+    for (i, x) in b.iter().enumerate() {
+        assert_eq!(b.member_index(x), i as i32, "member_index({x})");
+    }
+    assert_eq!(b.member_index(1), -1);
+    assert_eq!(b.member_index(299), -1);
+    assert_eq!(b.member_index(1000), -1);
+    assert_eq!(Bitmapset::empty().member_index(0), -1);
+}
+
+#[test]
+fn bms_overlap_list() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let b = from_set(mcx, &BTreeSet::from([3, 130]));
+    assert!(b.overlap_list(&[99, 130]));
+    assert!(b.overlap_list(&[3]));
+    assert!(!b.overlap_list(&[4, 129, 131, 500]));
+    assert!(!b.overlap_list(&[]));
+    assert!(!Bitmapset::empty().overlap_list(&[-1, 2]));
+}
+
+#[test]
+#[should_panic(expected = "negative bitmapset member")]
+fn bms_overlap_list_negative_is_loud() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let b = from_set(mcx, &BTreeSet::from([1]));
+    b.overlap_list(&[-3]);
+}

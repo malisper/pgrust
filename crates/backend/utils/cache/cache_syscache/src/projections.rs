@@ -1334,6 +1334,24 @@ fn lookup_pg_proc_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<P
     Ok(out)
 }
 
+fn lookup_pg_proc_probin<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    const ANUM_PG_PROC_PROBIN: i32 = 27;
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROBIN)? {
+        Some(img) => {
+            let s = core::str::from_utf8(&img[4..]).expect("probin is server-encoding text");
+            Some(PgString::from_str_in(s, mcx)?)
+        }
+        None => None,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(out)
+}
+
 fn lookup_pg_proc_name_candidates<'mcx>(
     mcx: Mcx<'mcx>,
     proname: &str,
@@ -2302,6 +2320,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_language_fmgr::set(lookup_pg_language_fmgr);
     syscache_seams::lookup_pg_language_name::set(lookup_pg_language_name);
     syscache_seams::lookup_pg_proc_prosrc::set(lookup_pg_proc_prosrc);
+    syscache_seams::lookup_pg_proc_probin::set(lookup_pg_proc_probin);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
