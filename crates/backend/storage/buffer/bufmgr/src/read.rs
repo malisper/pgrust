@@ -580,3 +580,45 @@ pub fn ReadRecentBuffer(
     }
     Ok(false)
 }
+
+/// C PrefetchBuffer/PrefetchSharedBuffer collapsed to an outcome enum
+/// (recent_buffer is never surfaced: our callers only steer a distance
+/// heuristic). Advisory only — never changes what a later read returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefetchOutcome {
+    /// Block already in shared buffers (C result.recent_buffer valid).
+    Cached,
+    /// posix_fadvise issued (C result.initiated_io).
+    Issued,
+    /// Local/temp relation, direct I/O, or missing file — nothing issued.
+    Skipped,
+}
+
+pub fn PrefetchBuffer(
+    rel: &types_rel::RelationData<'_>,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+) -> PgResult<PrefetchOutcome> {
+    debug_assert!(blkno != P_NEW);
+    if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
+        return Ok(PrefetchOutcome::Skipped);
+    }
+    let smgr = crate::rel_locator_backend(rel);
+    let tag = init_buffer_tag(smgr.locator, forknum, blkno);
+    let hash = BufTableHashCode(&tag);
+    let partition_lock = BufMappingPartitionLock(hash);
+    LWLockAcquire(partition_lock, LW_SHARED, init_small::globals::MyProcNumber())?;
+    let buf_id = BufTableLookup(&tag, hash)?;
+    LWLockRelease(partition_lock)?;
+    if buf_id >= 0 {
+        return Ok(PrefetchOutcome::Cached);
+    }
+    if fd::io_direct_flags() & types_storage::IO_DIRECT_DATA != 0 {
+        return Ok(PrefetchOutcome::Skipped);
+    }
+    Ok(if smgr_seams::smgr_prefetch::call(smgr, forknum, blkno, 1)? {
+        PrefetchOutcome::Issued
+    } else {
+        PrefetchOutcome::Skipped
+    })
+}
