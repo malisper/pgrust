@@ -364,6 +364,16 @@ pub(crate) fn query_desc_tuplestore_instrument_seam(
     }
 }
 
+pub(crate) fn query_desc_memoize_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::MemoizeInstrumentation> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::Memoize(m) => Some(m),
+        _ => None,
+    }
+}
+
 pub(crate) fn query_desc_bitmap_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

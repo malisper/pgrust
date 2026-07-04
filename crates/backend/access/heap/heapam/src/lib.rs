@@ -45,6 +45,7 @@ pub mod freeze;
 pub mod hio;
 pub mod index_delete;
 pub mod inplace;
+pub(crate) mod wal;
 pub use fetch::{heap_fetch, heap_fetch_dirty, heap_get_latest_tid, heap_hot_search_buffer};
 pub use index_delete::heap_index_delete_tuples;
 pub use dml::{heap_abort_speculative, heap_delete, heap_finish_speculative, heap_insert, heap_lock_tuple, heap_multi_insert, heap_update, simple_heap_delete, simple_heap_insert, simple_heap_update};

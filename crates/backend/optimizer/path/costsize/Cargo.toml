@@ -23,5 +23,6 @@ table = { path = "../../../access/table/table" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 nodeagg = { path = "../../../executor/nodeagg" }
 nodehash = { path = "../../../executor/nodehash" }
+nodememoize = { path = "../../../executor/nodememoize" }
 vars = { path = "../../util/vars" }
 nodes_core = { path = "../../../nodes/nodes_core" }

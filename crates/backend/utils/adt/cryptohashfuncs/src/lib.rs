@@ -1,4 +1,4 @@
-//! cryptohashfuncs.c MD5 half; SHA-2 rows stay unregistered (= loud) until a SHA-2 engine lands.
+//! cryptohashfuncs.c: MD5 (hex text) + SHA-2 (bytea digest) halves.
 
 use ::datum::Datum;
 use ::types_core::Oid;
@@ -23,6 +23,34 @@ pub fn fc_md5_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     md5_common(fcinfo)
 }
 
+// bytea shares text's varlena image; only the type OID differs.
+fn sha_common(
+    fcinfo: &mut Fcinfo,
+    digest: fn(&[u8]) -> Vec<u8>,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena; strict fn.
+    let input = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let d = digest(input.data());
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(varlena::cstring_to_text(mcx, &d)?))
+}
+
+pub fn fc_sha224_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    sha_common(fcinfo, |d| pg_sha2::sha224(d).to_vec())
+}
+
+pub fn fc_sha256_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    sha_common(fcinfo, |d| pg_sha2::sha256(d).to_vec())
+}
+
+pub fn fc_sha384_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    sha_common(fcinfo, |d| pg_sha2::sha384(d).to_vec())
+}
+
+pub fn fc_sha512_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    sha_common(fcinfo, |d| pg_sha2::sha512(d).to_vec())
+}
+
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs: 1, strict: true, retset: false, func }
 }
@@ -30,4 +58,8 @@ const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
 pub const CRYPTOHASH_BUILTINS: &[FmgrBuiltin] = &[
     b(2311, "md5_text", fc_md5_text),
     b(2321, "md5_bytea", fc_md5_bytea),
+    b(3419, "sha224_bytea", fc_sha224_bytea),
+    b(3420, "sha256_bytea", fc_sha256_bytea),
+    b(3421, "sha384_bytea", fc_sha384_bytea),
+    b(3422, "sha512_bytea", fc_sha512_bytea),
 ];

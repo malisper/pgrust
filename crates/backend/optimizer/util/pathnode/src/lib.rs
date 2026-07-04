@@ -13,7 +13,7 @@ use types_pathnodes::{
 use costsize::{clamp_width_est, cost_qual_eval_node, gucs, JoinCostWorkspace};
 use types_pathnodes::run::PlannerRun;
 use types_pathnodes::{
-    compare_pathkeys, HashPath, JoinPath, MaterialPath, MergePath, NestPath,
+    compare_pathkeys, HashPath, JoinPath, MaterialPath, MemoizePath, MergePath, NestPath,
     PathKeysComparison, RinfoId, SemiAntiJoinFactors, SpecialJoinInfo,
 };
 
@@ -2272,6 +2272,57 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
             path,
             subpath: Some(subpath),
         }))
+}
+
+// create_memoize_path (pathnode.c).
+#[allow(clippy::too_many_arguments)]
+pub fn create_memoize_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    subpath: PathId,
+    param_exprs: PgVec<'mcx, types_pathnodes::NodeId>,
+    hash_operators: PgVec<'mcx, u32>,
+    singlerow: bool,
+    binary_mode: bool,
+    calls: f64,
+) -> PathId {
+    let mcx = run.mcx;
+    let sub = run.root.path(subpath).base();
+    debug_assert!(sub.parent == rel);
+    debug_assert!(gucs::enable_memoize());
+    let param_info = sub
+        .param_info
+        .as_ref()
+        .map(|pi| mcx::box_new_in(mcx, types_pathnodes::ParamPathInfo::clone(pi)));
+    let pathkeys = types_pathnodes::relids::pgvec_clone_shallow(mcx, &sub.pathkeys);
+
+    let path = Path {
+        type_: tag16(NodeTag::T_MemoizePath),
+        pathtype: tag16(NodeTag::T_Memoize),
+        parent: rel,
+        pathtarget_id: run.root.rel(rel).pathtarget_id,
+        param_info,
+        parallel_aware: false,
+        parallel_safe: run.root.rel(rel).consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: sub.rows,
+        disabled_nodes: sub.disabled_nodes,
+        // The rescan costing is cost_memoize_rescan's job; creation charges
+        // only the first entry's caching.
+        startup_cost: sub.startup_cost + gucs::cpu_tuple_cost(),
+        total_cost: sub.total_cost + gucs::cpu_tuple_cost(),
+        pathkeys,
+    };
+    run.root.alloc_path(types_pathnodes::PathNode::MemoizePath(MemoizePath {
+        path,
+        subpath: Some(subpath),
+        hash_operators,
+        param_exprs,
+        singlerow,
+        binary_mode,
+        calls: costsize::clamp_row_est(calls),
+        est_entries: 0,
+    }))
 }
 
 // create_nestloop_path (pathnode.c).

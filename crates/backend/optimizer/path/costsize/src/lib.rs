@@ -1886,7 +1886,66 @@ pub struct JoinCostWorkspace {
     pub inner_rescan_run_cost: f64,
 }
 
-pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
+// cost_memoize_rescan (costsize.c); writes back mpath->est_entries.
+fn cost_memoize_rescan(run: &mut PlannerRun<'_>, path: PathId) -> PgResult<(f64, f64)> {
+    let (subpath, calls, param_exprs) = match run.root.path(path) {
+        types_pathnodes::PathNode::MemoizePath(mp) => (
+            mp.subpath.expect("Memoize subpath"),
+            mp.calls,
+            types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &mp.param_exprs),
+        ),
+        other => panic!("cost_memoize_rescan: pathtype {}", other.base().pathtype),
+    };
+    let (input_startup_cost, input_total_cost, tuples) = {
+        let sub = run.root.path(subpath).base();
+        (sub.startup_cost, sub.total_cost, sub.rows)
+    };
+    let width = run.root.path_pathtarget(subpath).width;
+
+    let hash_mem_bytes = nodehash::get_hash_memory_limit() as f64;
+    let mut est_entry_bytes = crate::relation_byte_size(tuples, width)
+        + nodememoize::exec_estimate_cache_entry_overhead_bytes(tuples);
+    for &e in param_exprs.iter() {
+        est_entry_bytes += get_expr_width(run, e)? as f64;
+    }
+    let est_cache_entries = (hash_mem_bytes / est_entry_bytes).floor();
+
+    let mut group_exprs: PgVec<'_, (NodeId, Node<'_>)> = PgVec::new_in(run.mcx);
+    for &e in param_exprs.iter() {
+        group_exprs.push((e, *run.root.expr_node(e)));
+    }
+    let (mut ndistinct, used_default) =
+        planner_seams::estimate_num_groups_estinfo::call(run, &group_exprs, calls)?;
+    // A default ndistinct makes memoization too risky: assume every call has
+    // unique parameters so the path never survives add_path.
+    if used_default {
+        ndistinct = calls;
+    }
+
+    let est_entries = ndistinct.min(est_cache_entries).min(u32::MAX as f64) as u32;
+    match run.root.path_mut(path) {
+        types_pathnodes::PathNode::MemoizePath(mp) => mp.est_entries = est_entries,
+        _ => unreachable!(),
+    }
+
+    let evict_ratio = 1.0 - est_cache_entries.min(ndistinct) / ndistinct;
+    let hit_ratio =
+        ((calls - ndistinct) / calls) * (est_cache_entries / ndistinct.max(est_cache_entries));
+    debug_assert!((0.0..=1.0).contains(&hit_ratio));
+
+    let mut total_cost = input_total_cost * (1.0 - hit_ratio) + gucs::cpu_operator_cost();
+    total_cost += gucs::cpu_tuple_cost() * evict_ratio;
+    // Per-tuple eviction is just a pfree: a tenth of cpu_operator_cost.
+    total_cost += gucs::cpu_operator_cost() / 10.0 * evict_ratio * tuples;
+    total_cost += gucs::cpu_tuple_cost() + gucs::cpu_operator_cost() * tuples;
+
+    let mut startup_cost = input_startup_cost * (1.0 - hit_ratio);
+    startup_cost += gucs::cpu_tuple_cost();
+
+    Ok((startup_cost, total_cost))
+}
+
+pub fn cost_rescan(run: &mut PlannerRun<'_>, path: PathId) -> PgResult<(f64, f64)> {
     let p = run.root.path(path).base();
     let pathtype = p.pathtype;
     if pathtype == tag16(NodeTag::T_Material)
@@ -1911,11 +1970,11 @@ pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
             let npages = (nbytes / 8192.0).ceil();
             run_cost += gucs::seq_page_cost() * npages;
         }
-        (0.0, run_cost)
+        Ok((0.0, run_cost))
     } else if pathtype == tag16(NodeTag::T_FunctionScan) {
         // nodeFunctionscan materializes into a tuplestore: function eval is
         // all startup cost, rescans pay only the per-row freight.
-        (0.0, p.total_cost - p.startup_cost)
+        Ok((0.0, p.total_cost - p.startup_cost))
     } else if pathtype == tag16(NodeTag::T_HashJoin) {
         // Rescan of a single-batch hashjoin repays only the run cost.
         let num_batches = match run.root.path(path) {
@@ -1923,30 +1982,29 @@ pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
             _ => panic!("cost_rescan: T_HashJoin pathtype on non-HashPath"),
         };
         if num_batches == 1 {
-            (0.0, p.total_cost - p.startup_cost)
+            Ok((0.0, p.total_cost - p.startup_cost))
         } else {
-            (p.startup_cost, p.total_cost)
+            Ok((p.startup_cost, p.total_cost))
         }
     } else if pathtype == tag16(NodeTag::T_Memoize) {
-        panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");
+        cost_memoize_rescan(run, path)
     } else {
-        (p.startup_cost, p.total_cost)
+        Ok((p.startup_cost, p.total_cost))
     }
 }
 
 pub fn initial_cost_nestloop(
-    run: &PlannerRun<'_>,
+    run: &mut PlannerRun<'_>,
     jointype: u32,
     inner_unique: bool,
     outer_path: PathId,
     inner_path: PathId,
-) -> JoinCostWorkspace {
+) -> PgResult<JoinCostWorkspace> {
+    let (inner_rescan_start, inner_rescan_total) = cost_rescan(run, inner_path)?;
     let outer = run.root.path(outer_path).base();
     let inner = run.root.path(inner_path).base();
     let mut disabled_nodes = if gucs::enable_nestloop() { 0 } else { 1 };
     disabled_nodes += inner.disabled_nodes + outer.disabled_nodes;
-
-    let (inner_rescan_start, inner_rescan_total) = cost_rescan(run, inner_path);
 
     let mut startup_cost = 0.0;
     let mut run_cost = 0.0;
@@ -1968,7 +2026,7 @@ pub fn initial_cost_nestloop(
         }
     }
 
-    JoinCostWorkspace {
+    Ok(JoinCostWorkspace {
         startup_cost,
         total_cost: startup_cost + run_cost,
         run_cost,
@@ -1977,7 +2035,7 @@ pub fn initial_cost_nestloop(
         inner_run_cost: if early_stop { inner_run_cost } else { 0.0 },
         inner_rescan_run_cost: if early_stop { inner_rescan_run_cost } else { 0.0 },
         ..Default::default()
-    }
+    })
 }
 
 pub fn final_cost_nestloop(

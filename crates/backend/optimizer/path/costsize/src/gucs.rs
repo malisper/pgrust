@@ -53,6 +53,7 @@ bool_guc!(ENABLE_NESTLOOP, enable_nestloop, set_enable_nestloop, true);
 bool_guc!(ENABLE_HASHJOIN, enable_hashjoin, set_enable_hashjoin, true);
 bool_guc!(ENABLE_MERGEJOIN, enable_mergejoin, set_enable_mergejoin, true);
 bool_guc!(ENABLE_MATERIAL, enable_material, set_enable_material, true);
+bool_guc!(ENABLE_MEMOIZE, enable_memoize, set_enable_memoize, true);
 bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
 bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
 bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
@@ -91,6 +92,8 @@ pub fn install() {
         .install(GucVarAccessors { get: enable_mergejoin, set: set_enable_mergejoin });
     guc_tables::vars::enable_material
         .install(GucVarAccessors { get: enable_material, set: set_enable_material });
+    guc_tables::vars::enable_memoize
+        .install(GucVarAccessors { get: enable_memoize, set: set_enable_memoize });
     guc_tables::vars::enable_incremental_sort
         .install(GucVarAccessors { get: enable_incremental_sort, set: set_enable_incremental_sort });
     guc_tables::vars::enable_hashagg

@@ -41,6 +41,17 @@ aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+partcache = { path = "../../utils/cache/partcache" }
+partdesc = { path = "../../partitioning/partdesc" }
+indexam = { path = "../../access/index/indexam" }
+relcache = { path = "../../utils/cache/relcache" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+pg_depend = { path = "../../catalog/pg_depend" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
 
 clauses = { path = "../../optimizer/util/clauses" }
 vars = { path = "../../optimizer/util/vars" }

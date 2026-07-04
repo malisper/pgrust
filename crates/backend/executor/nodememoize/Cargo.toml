@@ -1,0 +1,28 @@
+[package]
+name = "nodememoize"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
+hashfn = { path = "../../../common/hashfn" }
+heaptuple = { path = "../../access/common/heaptuple" }
+init_small = { path = "../../utils/init/init_small" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mcx = { path = "../../../_support/mcx" }
+nodehash = { path = "../nodehash" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

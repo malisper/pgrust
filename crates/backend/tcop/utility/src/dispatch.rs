@@ -953,10 +953,24 @@ fn exec_index_stmt<'mcx>(
                   old_rel_id: types_core::Oid|
      -> PgResult<()> { range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id) };
     let relid = catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
+    // Partitioned recursion locks every partition up front (deadlock
+    // avoidance) and pre-checks partition relkinds.
     if rv.inh
         && lsyscache::get_rel_relkind(relid)? as u8 == types_rel::RELKIND_PARTITIONED_TABLE
     {
-        handler_gap("CREATE INDEX partitioned-table recursion");
+        let inheritors = pg_inherits::find_all_inheritors(mcx, relid, lockmode)?;
+        for &partrelid in inheritors.iter() {
+            let relkind = lsyscache::get_rel_relkind(partrelid)? as u8;
+            if relkind != types_rel::RELKIND_RELATION
+                && relkind != types_rel::RELKIND_MATVIEW
+                && relkind != types_rel::RELKIND_PARTITIONED_TABLE
+            {
+                panic!(
+                    "unexpected relkind \"{}\" on partition \"{}\"",
+                    relkind as char, rv.relname
+                );
+            }
+        }
     }
     let is_alter_table = stmt.transformed;
     parse_clause::transformIndexStmt(mcx, relid, stmt_node, source_text)?;
@@ -968,6 +982,8 @@ fn exec_index_stmt<'mcx>(
         mcx,
         relid,
         stmt,
+        types_core::InvalidOid,
+        types_core::InvalidOid,
         types_core::InvalidOid,
         is_alter_table,
         true,

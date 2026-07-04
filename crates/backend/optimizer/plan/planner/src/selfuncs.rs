@@ -1891,6 +1891,17 @@ pub fn estimate_num_groups<'mcx>(
     estimate_num_groups_pgset(run, group_exprs, input_rows, None)
 }
 
+/// C's non-NULL `estinfo` form: also reports SELFLAG_USED_DEFAULT.
+pub fn estimate_num_groups_estinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+) -> PgResult<(f64, bool)> {
+    let mut used_default = false;
+    let n = estimate_num_groups_core(run, group_exprs, input_rows, None, Some(&mut used_default))?;
+    Ok((n, used_default))
+}
+
 /// C's `pgset` form: a grouping set given as 0-based indexes into
 /// `group_exprs`; exprs outside the set are skipped.
 pub fn estimate_num_groups_pgset<'mcx>(
@@ -1898,6 +1909,16 @@ pub fn estimate_num_groups_pgset<'mcx>(
     group_exprs: &[(NodeId, Node<'mcx>)],
     input_rows: f64,
     pgset: Option<&[i32]>,
+) -> PgResult<f64> {
+    estimate_num_groups_core(run, group_exprs, input_rows, pgset, None)
+}
+
+fn estimate_num_groups_core<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+    pgset: Option<&[i32]>,
+    mut estinfo_used_default: Option<&mut bool>,
 ) -> PgResult<f64> {
     let input_rows = crate::costsize::clamp_row_est(input_rows);
     if group_exprs.is_empty() || pgset.is_some_and(|s| s.is_empty()) {
@@ -1908,6 +1929,7 @@ pub fn estimate_num_groups_pgset<'mcx>(
         var: NodeId,
         rel: RelId,
         ndistinct: f64,
+        isdefault: bool,
     }
     let mcx = run.mcx;
     let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
@@ -1950,11 +1972,12 @@ pub fn estimate_num_groups_pgset<'mcx>(
             continue;
         }
         let vardata = examine_variable(run, id, node, 0)?;
-        let (ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
+        let (ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
         varinfos.push(GroupVarInfo {
             var: id,
             rel: vardata.rel.expect("grouping Var has a base rel"),
             ndistinct,
+            isdefault,
         });
     }
     if varinfos.is_empty() {
@@ -2009,6 +2032,11 @@ pub fn estimate_num_groups_pgset<'mcx>(
                 relmaxndistinct = vi.ndistinct;
             }
             relvarcount += 1;
+            if vi.isdefault {
+                if let Some(flag) = estinfo_used_default.as_deref_mut() {
+                    *flag = true;
+                }
+            }
         }
         let (rel_tuples, rel_rows) = {
             let rel = run.root.rel(rel_id);

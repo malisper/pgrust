@@ -1,14 +1,13 @@
 //! joinpath.c nestloop + mergejoin + hashjoin arms (incl. SEMI/ANTI and
 //! unique-ified semijoin inputs) with their pathnode.c/costsize.c join-cost
-//! slices. Lateral-driven parameterized inners are live; Memoize is unported
-//! (enable_memoize=off is the parity envelope).
+//! slices. Lateral-driven parameterized inners and Memoize are live.
 
 use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::NodeTag;
 use types_pathnodes::{
-    HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path, PathId,
-    PathKey, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
+    HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path,
+    PathId, PathKey, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
 };
 
 use crate::gucs;
@@ -23,7 +22,7 @@ use crate::costsize::{
 };
 use crate::pathnode::{
     add_path_precheck, compare_path_costs, create_hashjoin_path, create_material_path,
-    create_mergejoin_path, create_nestloop_path, tag16, CostSelector,
+    create_memoize_path, create_mergejoin_path, create_nestloop_path, tag16, CostSelector,
 };
 pub use types_pathnodes::{is_outer_join, SemiAntiJoinFactors};
 use crate::run::PlannerRun;
@@ -615,14 +614,24 @@ fn match_unsorted_outer<'mcx>(
             let ict = inner_cheapest_total.expect("checked above");
             try_nestloop_path(run, joinrel, outerpath, ict, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
         } else if nestjoin_ok {
-            // get_memoize_path: Memoize is unported; enable_memoize=off is
-            // the documented parity envelope for lateral/param plans.
             let inner_candidates = crate::relnode::pgvec_clone_shallow(
                 run.mcx,
                 &run.root.rel(innerrel).cheapest_parameterized_paths,
             );
             for &innerpath in inner_candidates.iter() {
                 try_nestloop_path(run, joinrel, outerpath, innerpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
+                if let Some(mpath) = get_memoize_path(
+                    run,
+                    innerrel,
+                    outerrel,
+                    innerpath,
+                    outerpath,
+                    jointype,
+                    inner_unique,
+                    restrictlist,
+                )? {
+                    try_nestloop_path(run, joinrel, outerpath, mpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
+                }
             }
             if let Some(mp) = matpath {
                 try_nestloop_path(run, joinrel, outerpath, mp, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
@@ -661,6 +670,188 @@ fn exec_materializes_output(pathtype: u16) -> bool {
         || pathtype == tag16(NodeTag::T_CteScan)
         || pathtype == tag16(NodeTag::T_NamedTuplestoreScan)
         || pathtype == tag16(NodeTag::T_WorkTableScan)
+}
+
+// extract_lateral_vars_from_PHVs (joinpath.c): placeholder_list is empty
+// tree-wide (loud at creation), so the PHV crawl reduces to its guards.
+fn extract_lateral_vars_from_phvs(run: &PlannerRun<'_>) {
+    debug_assert!(run.root.placeholder_list.is_empty());
+}
+
+// paraminfo_get_equal_hashops (joinpath.c). None = not hashable.
+#[allow(clippy::type_complexity)]
+fn paraminfo_get_equal_hashops<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    inner_path: PathId,
+    outerrel: RelId,
+    innerrel: RelId,
+) -> PgResult<Option<(PgVec<'mcx, types_pathnodes::NodeId>, PgVec<'mcx, u32>, bool)>> {
+    let mcx = run.mcx;
+    let mut param_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut operators: PgVec<'mcx, u32> = PgVec::new_in(mcx);
+    let mut binary_mode = false;
+
+    let ppi_clauses: PgVec<'mcx, RinfoId> =
+        match &run.root.path(inner_path).base().param_info {
+            Some(pi) => crate::relnode::pgvec_clone_shallow(mcx, &pi.ppi_clauses),
+            None => PgVec::new_in(mcx),
+        };
+    for &rid in ppi_clauses.iter() {
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        let Some(opexpr) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+            return Ok(None);
+        };
+        if !clause_sides_match_join(run, rid, outerrel, innerrel) {
+            return Ok(None);
+        }
+        let ri = run.root.rinfo(rid);
+        let (expr, hasheqoperator) = if ri.outer_is_left {
+            (opexpr.args.nth(0), ri.left_hasheqoperator)
+        } else {
+            (opexpr.args.nth(1), ri.right_hasheqoperator)
+        };
+        if hasheqoperator == 0 {
+            return Ok(None);
+        }
+        if !param_exprs.iter().any(|&e| types_nodes::equal(*run.root.expr_node(e), expr)) {
+            operators.push(hasheqoperator);
+            param_exprs.push(run.intern_expr(expr));
+        }
+        // A non-hashable join operator may distinguish values the hash
+        // equality operator cannot (-0.0 vs +0.0): compare bit by bit.
+        if run.root.rinfo(rid).hashjoinoperator == 0 {
+            binary_mode = true;
+        }
+    }
+
+    let lateral_vars =
+        crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(innerrel).lateral_vars);
+    for &id in lateral_vars.iter() {
+        let expr = *run.root.expr_node(id);
+        if clauses::contain_volatile_functions(expr)? {
+            return Ok(None);
+        }
+        let typ = crate::costsize::expr_type_typmod(expr).0;
+        let entry = typcache::lookup_type_cache(
+            typ,
+            typcache::TYPECACHE_HASH_PROC | typcache::TYPECACHE_EQ_OPR,
+        )?;
+        if entry.hash_proc() == 0 || entry.eq_opr() == 0 {
+            return Ok(None);
+        }
+        if !param_exprs.iter().any(|&e| types_nodes::equal(*run.root.expr_node(e), expr)) {
+            operators.push(entry.eq_opr());
+            param_exprs.push(id);
+        }
+        // Lateral Vars flow into opaque expressions: binary mode always.
+        binary_mode = true;
+    }
+    Ok(Some((param_exprs, operators, binary_mode)))
+}
+
+// get_memoize_path (joinpath.c).
+#[allow(clippy::too_many_arguments)]
+fn get_memoize_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    innerrel: RelId,
+    outerrel: RelId,
+    inner_path: PathId,
+    outer_path: PathId,
+    jointype: u32,
+    inner_unique: bool,
+    restrictlist: &[RinfoId],
+) -> PgResult<Option<PathId>> {
+    use types_pathnodes::{JOIN_ANTI, JOIN_SEMI};
+    if !gucs::enable_memoize() {
+        return Ok(None);
+    }
+    // A single expected outer row can never repeat a parameter value.
+    if run.root.rel(run.root.path(outer_path).base().parent).rows < 2.0 {
+        return Ok(None);
+    }
+    extract_lateral_vars_from_phvs(run);
+    let has_ppi_clauses = run
+        .root
+        .path(inner_path)
+        .base()
+        .param_info
+        .as_ref()
+        .is_some_and(|pi| !pi.ppi_clauses.is_empty());
+    if !has_ppi_clauses && run.root.rel(innerrel).lateral_vars.is_empty() {
+        return Ok(None);
+    }
+    // Non-unique SEMI/ANTI nestloops don't scan the inner to completion, so
+    // cache entries could never be marked complete.
+    if !inner_unique && (jointype == JOIN_SEMI || jointype == JOIN_ANTI) {
+        return Ok(None);
+    }
+    // Unique joins skip to the next outer tuple on the first match; singlerow
+    // caching only works when the whole join condition is parameterized.
+    if inner_unique {
+        let serials = {
+            let Some(pi) = &run.root.path(inner_path).base().param_info else {
+                return Ok(None);
+            };
+            crate::relnode::relids_copy(run.mcx, &pi.ppi_serials)
+        };
+        for &rid in restrictlist {
+            if !crate::relnode::relids_is_member(run.root.rinfo(rid).rinfo_serial, &serials) {
+                return Ok(None);
+            }
+        }
+    }
+    // A cache hit would skip volatile-function calls the query expects.
+    {
+        let exprs = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel_reltarget(innerrel).exprs,
+        );
+        for &e in exprs.iter() {
+            if clauses::contain_volatile_functions(*run.root.expr_node(e))? {
+                return Ok(None);
+            }
+        }
+        let base_rinfos = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel(innerrel).baserestrictinfo,
+        );
+        for &rid in base_rinfos.iter() {
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            if clauses::contain_volatile_functions(clause)? {
+                return Ok(None);
+            }
+        }
+        let ppi_clauses: PgVec<'mcx, RinfoId> =
+            match &run.root.path(inner_path).base().param_info {
+                Some(pi) => crate::relnode::pgvec_clone_shallow(run.mcx, &pi.ppi_clauses),
+                None => PgVec::new_in(run.mcx),
+            };
+        for &rid in ppi_clauses.iter() {
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            if clauses::contain_volatile_functions(clause)? {
+                return Ok(None);
+            }
+        }
+    }
+    debug_assert!(crate::relnode::relids_is_empty(
+        &run.root.rel(outerrel).top_parent_relids
+    ));
+    let Some((param_exprs, hash_operators, binary_mode)) =
+        paraminfo_get_equal_hashops(run, inner_path, outerrel, innerrel)?
+    else {
+        return Ok(None);
+    };
+    let calls = run.root.path(outer_path).base().rows;
+    Ok(Some(create_memoize_path(
+        run,
+        innerrel,
+        inner_path,
+        param_exprs,
+        hash_operators,
+        inner_unique,
+        binary_mode,
+        calls,
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -727,7 +918,7 @@ fn try_nestloop_path<'mcx>(
         }
     }
 
-    let workspace = initial_cost_nestloop(run, jointype, inner_unique, outer_path, inner_path);
+    let workspace = initial_cost_nestloop(run, jointype, inner_unique, outer_path, inner_path)?;
 
     if add_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.startup_cost, workspace.total_cost, pathkeys, &required_outer) {
         let path = create_nestloop_path(
