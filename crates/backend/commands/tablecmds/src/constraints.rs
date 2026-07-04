@@ -19,6 +19,21 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 const Anum_pg_class_relchecks: AttrNumber = 20;
 
+pub(crate) fn eq_key(
+    attno: AttrNumber,
+    func: types_core::RegProcedure,
+    arg: Datum,
+) -> ScanKeyData {
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = attno;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(func)
+        .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
+    key.sk_argument = arg;
+    key
+}
+
 pub(crate) struct CookedCon<'mcx> {
     pub contype: ConstrType,
     pub conoid: Oid,
@@ -33,6 +48,26 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
     rel: &Relation<'mcx>,
     new_col_defaults: &[(AttrNumber, Node<'mcx>, u8)],
     new_constraints: &NodeList<'mcx>,
+    query_string: &str,
+) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
+    add_relation_new_constraints_ext(
+        mcx,
+        rel,
+        new_col_defaults,
+        new_constraints,
+        false,
+        true,
+        query_string,
+    )
+}
+
+pub(crate) fn add_relation_new_constraints_ext<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    new_col_defaults: &[(AttrNumber, Node<'mcx>, u8)],
+    new_constraints: &NodeList<'mcx>,
+    allow_merge: bool,
+    is_local: bool,
     query_string: &str,
 ) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     let numoldchecks = match rel.rd_att.constr.as_deref() {
@@ -89,15 +124,101 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
 
     let mut numchecks = numoldchecks;
     let mut checknames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    let mut nnnames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
     for cnode in new_constraints.iter() {
         let cdef = cnode.as_variant::<Constraint>().expect("Constraint");
+        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+        if cdef.contype == ConstrType::CONSTR_NOTNULL {
+            let colname = cdef.keys.nth(0).as_string().expect("not-null keys").sval;
+            let Some((colnum, _)) =
+                crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
+            else {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "column \"{colname}\" of relation \"{relname}\" does not exist"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+                ));
+            };
+            if colnum < 0 {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "cannot add not-null constraint on system column \"{colname}\""
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            debug_assert!(cdef.initially_valid != cdef.skip_validation);
+            if pg_constraint::AdjustNotNullInheritance(
+                mcx,
+                rel.rd_id,
+                colnum,
+                cdef.conname,
+                is_local,
+                cdef.is_no_inherit,
+                cdef.skip_validation,
+                relname,
+                colname,
+            )? {
+                continue;
+            }
+            let nnname = match cdef.conname {
+                Some(name) => {
+                    if pg_constraint::ConstraintNameIsUsed(
+                        mcx,
+                        pg_constraint::ConstraintCategory::Relation,
+                        rel.rd_id,
+                        name,
+                    )? {
+                        return Err(Box::new(
+                            PgError::error(format!(
+                                "constraint \"{name}\" for relation \"{relname}\" already exists"
+                            ))
+                            .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+                        ));
+                    }
+                    mcx::PgString::from_str_in(name, mcx)?
+                }
+                None => pg_constraint::ChooseConstraintName(
+                    mcx,
+                    relname,
+                    Some(colname),
+                    "not_null",
+                    rel.rd_rel.relnamespace,
+                    &nnnames,
+                )?,
+            };
+            nnnames.push(str_in(mcx, nnname.as_str())?);
+            let conkey = [colnum];
+            let mut entry = pg_constraint::ConstraintEntry::base(
+                nnname.as_str(),
+                rel.rd_rel.relnamespace,
+                pg_constraint::CONSTRAINT_NOTNULL,
+                rel.rd_id,
+            );
+            entry.conkey = &conkey;
+            entry.n_keys = 1;
+            entry.is_validated = cdef.initially_valid;
+            entry.is_local = is_local;
+            entry.inhcount = if is_local { 0 } else { 1 };
+            entry.is_no_inherit = cdef.is_no_inherit;
+            let con_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+            cooked.push(CookedCon {
+                contype: ConstrType::CONSTR_NOTNULL,
+                conoid: con_oid,
+                name: str_in(mcx, nnname.as_str())?,
+                attnum: colnum,
+                expr: None,
+                skip_validation: cdef.skip_validation,
+            });
+            continue;
+        }
         if cdef.contype != ConstrType::CONSTR_CHECK {
             panic!(
                 "AddRelationNewConstraints (heap.c): {:?} arm unported (CHECK only)",
                 cdef.contype
             );
         }
-        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
         let expr = match cdef.raw_expr {
             Some(e) => {
                 debug_assert!(cdef.cooked_expr.is_none());
@@ -117,20 +238,18 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                     return Err(check_constraint_exists(name));
                 }
                 checknames.push(name);
-                // MergeWithExistingConstraint probe: allow_merge is only true
-                // in unported recursing/re-add lanes, so a hit is an error.
-                if pg_constraint::ConstraintNameIsUsed(
+                if merge_with_existing_constraint(
                     mcx,
-                    pg_constraint::ConstraintCategory::Relation,
-                    rel.rd_id,
+                    rel,
                     name,
+                    expr,
+                    allow_merge,
+                    is_local,
+                    cdef.is_enforced,
+                    cdef.initially_valid,
+                    cdef.is_no_inherit,
                 )? {
-                    return Err(Box::new(
-                        PgError::error(format!(
-                            "constraint \"{name}\" for relation \"{relname}\" already exists"
-                        ))
-                        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
-                    ));
+                    continue;
                 }
                 mcx::PgString::from_str_in(name, mcx)?
             }
@@ -174,6 +293,8 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             expr,
             cdef.is_enforced,
             cdef.initially_valid,
+            is_local,
+            if is_local { 0 } else { 1 },
             cdef.is_no_inherit,
         )?;
         numchecks += 1;
@@ -575,6 +696,8 @@ fn store_rel_check<'mcx>(
     expr: Node<'mcx>,
     is_enforced: bool,
     is_validated: bool,
+    is_local: bool,
+    inhcount: i16,
     is_no_inherit: bool,
 ) -> PgResult<Oid> {
     let ccbin = outfuncs::nodeToString(mcx, expr)?;
@@ -596,10 +719,170 @@ fn store_rel_check<'mcx>(
     entry.n_keys = att_nos.len();
     entry.is_enforced = is_enforced;
     entry.is_validated = is_validated;
+    entry.is_local = is_local;
+    entry.inhcount = inhcount;
     entry.is_no_inherit = is_no_inherit;
     entry.conbin = Some(ccbin.as_str());
     entry.con_expr = Some(expr);
     pg_constraint::CreateConstraintEntry(mcx, &entry)
+}
+
+// MergeWithExistingConstraint (heap.c): returns true when the new CHECK
+// constraint merged into an identical pre-existing one.
+fn merge_with_existing_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    ccname: &str,
+    expr: Node<'mcx>,
+    mut allow_merge: bool,
+    is_local: bool,
+    is_enforced: bool,
+    is_initially_valid: bool,
+    is_no_inherit: bool,
+) -> PgResult<bool> {
+    let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+    let con_rel = table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let namebuf = {
+        assert!(ccname.len() < 64, "makeObjectName truncation unported: {ccname:?}");
+        let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 64)?;
+        mcx::vec_append_bytes(&mut buf, ccname.as_bytes())?;
+        mcx::vec_append_bytes(&mut buf, &[0u8; 64][..64 - ccname.len()])?;
+        buf
+    };
+    let keys = [
+        eq_key(pg_constraint::Anum_pg_constraint_conrelid, types_core::fmgr::F_OIDEQ, Datum::from_oid(rel.rd_id)),
+        eq_key(pg_constraint::Anum_pg_constraint_contypid, types_core::fmgr::F_OIDEQ, Datum::from_oid(types_core::InvalidOid)),
+        eq_key(
+            pg_constraint::Anum_pg_constraint_conname,
+            types_core::fmgr::F_NAMEEQ,
+            Datum::from_usize(namebuf.as_ptr() as usize),
+        ),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        pg_constraint::ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        genam::systable_endscan(mcx, scan)?;
+        con_rel.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let get = |anum: AttrNumber| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_constraint columns under its descriptor.
+        unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+    };
+    let contype = get(pg_constraint::Anum_pg_constraint_contype).as_i8() as u8;
+    let mut found = false;
+    if contype == pg_constraint::CONSTRAINT_CHECK {
+        let mut isnull = false;
+        // SAFETY: conbin under pg_constraint's descriptor; null-checked below.
+        let val = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_constraint::Anum_pg_constraint_conbin as i32,
+                desc,
+                &mut isnull,
+            )
+        };
+        if isnull {
+            panic!("null conbin for rel {relname}");
+        }
+        let p = val.as_usize() as *const u8;
+        // SAFETY: live varlena text image through its extent.
+        let image =
+            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(mcx, image)?;
+        let conbin =
+            core::str::from_utf8(payload.as_bytes()).expect("conbin UTF-8").to_string();
+        let existing = readfuncs::stringToNode(mcx, &conbin)?;
+        if types_nodes::equal::equal(expr, existing) {
+            found = true;
+        }
+    }
+    let conislocal = get(pg_constraint::Anum_pg_constraint_conislocal).as_bool();
+    let connoinherit = get(pg_constraint::Anum_pg_constraint_connoinherit).as_bool();
+    let coninhcount = get(pg_constraint::Anum_pg_constraint_coninhcount).as_i16();
+    let conenforced = get(pg_constraint::Anum_pg_constraint_conenforced).as_bool();
+    let convalidated = get(pg_constraint::Anum_pg_constraint_convalidated).as_bool();
+    let con_oid = get(pg_constraint::Anum_pg_constraint_oid).as_oid();
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(RowExclusiveLock)?;
+
+    if is_local && !conislocal && !rel.rd_rel.relispartition {
+        allow_merge = true;
+    }
+    if !found || !allow_merge {
+        return Err(Box::new(
+            PgError::error(format!(
+                "constraint \"{ccname}\" for relation \"{relname}\" already exists"
+            ))
+            .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    if connoinherit {
+        return Err(merge_conflict(ccname, relname, "non-inherited"));
+    }
+    if coninhcount > 0 && is_no_inherit {
+        return Err(merge_conflict(ccname, relname, "inherited"));
+    }
+    if is_initially_valid && conenforced && !convalidated {
+        return Err(merge_conflict(ccname, relname, "NOT VALID"));
+    }
+    if (!is_local && is_enforced && !conenforced) || (is_local && !is_enforced && conenforced) {
+        return Err(merge_conflict(ccname, relname, "NOT ENFORCED"));
+    }
+
+    elog_seams::ereport::call(PgError::new(
+        types_error::NOTICE,
+        format!("merging constraint \"{ccname}\" with inherited definition"),
+    ))?;
+
+    let mut fields: PgVec<'mcx, (AttrNumber, Datum)> = PgVec::new_in(mcx);
+    if rel.rd_rel.relispartition {
+        fields.push((pg_constraint::Anum_pg_constraint_coninhcount, Datum::from_i16(1)));
+        fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(false)));
+    } else if is_local {
+        fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true)));
+    } else {
+        if coninhcount == i16::MAX {
+            return Err(Box::new(
+                PgError::error("too many inheritance parents".to_string())
+                    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        fields.push((
+            pg_constraint::Anum_pg_constraint_coninhcount,
+            Datum::from_i16(coninhcount + 1),
+        ));
+    }
+    if is_no_inherit {
+        debug_assert!(is_local);
+        fields.push((pg_constraint::Anum_pg_constraint_connoinherit, Datum::from_bool(true)));
+    }
+    if is_enforced && !conenforced {
+        debug_assert!(is_local);
+        fields.push((pg_constraint::Anum_pg_constraint_conenforced, Datum::from_bool(true)));
+        fields.push((pg_constraint::Anum_pg_constraint_convalidated, Datum::from_bool(true)));
+    }
+    pg_constraint::update_constraint_fields(mcx, con_oid, &fields)?;
+    Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+fn merge_conflict(ccname: &str, relname: &str, kind: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "constraint \"{ccname}\" conflicts with {kind} constraint on relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+    )
 }
 
 // SetRelationNumChecks (heap.c): update pg_class.relchecks (also fires the

@@ -791,7 +791,8 @@ fn column_conflict(
     sqlstate: types_error::SqlState,
 ) -> Box<PgError> {
     let msg = template.replacen("{}", attname, 1);
-    Box::new(PgError::new(ERROR, msg).with_detail(detail).with_sqlstate(sqlstate))
+    let e = PgError::new(ERROR, msg).with_sqlstate(sqlstate);
+    Box::new(if detail.is_empty() { e } else { e.with_detail(detail) })
 }
 
 #[cold]
@@ -819,4 +820,745 @@ fn collation_conflict(
             .with_detail(format!("\"{prevname}\" versus \"{newname}\""))
             .with_sqlstate(types_error::ERRCODE_COLLATION_MISMATCH),
     ))
+}
+
+const Anum_pg_attribute_attislocal: usize = 18;
+const Anum_pg_attribute_attinhcount: usize = 19;
+
+fn desc_attno_by_name(desc: &types_tuple::TupleDescData<'_>, name: &[u8]) -> Option<AttrNumber> {
+    (0..desc.natts as usize)
+        .find(|&i| !desc.attr(i).attisdropped && desc.attr(i).attname.name_str() == name)
+        .map(|i| (i + 1) as AttrNumber)
+}
+
+// ATExecAddInherit (tablecmds.c). Transition-table triggers are loud at
+// CREATE TRIGGER, so FindTriggerIncompatibleWithInheritance cannot match.
+pub(crate) fn ATExecAddInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    prv: &types_nodes::RangeVar<'_>,
+) -> PgResult<()> {
+    let rv = rel_vocab::RangeVar {
+        catalogname: prv.catalogname,
+        schemaname: prv.schemaname,
+        relname: prv.relname.expect("RangeVar.relname"),
+        inh: prv.inh,
+        relpersistence: prv.relpersistence,
+        location: prv.location,
+    };
+    let parent_oid =
+        catalog_namespace::RangeVarGetRelid(&rv, types_rel::ShareUpdateExclusiveLock, false)?;
+    let parent_rel = table::table_open(mcx, parent_oid, NoLock)?;
+    // ATSimplePermissions(parent): superuser fastpath; foreign tables loud.
+    if !superuser::superuser_arg(miscinit::GetUserId())? {
+        unported("ATExecAddInherit object_ownercheck for non-superusers");
+    }
+    if child_rel.rd_rel.relkind != RELKIND_RELATION {
+        unported("ATExecAddInherit: non-plain-table child relkind");
+    }
+    if parent_rel.rd_rel.relkind != RELKIND_RELATION
+        && parent_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
+    {
+        unported("ATExecAddInherit: parent relkind outside table/partitioned");
+    }
+    let parent_name = parent_rel.name().to_string();
+    let child_name = child_rel.name().to_string();
+    if parent_rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+        && child_rel.rd_rel.relpersistence != types_core::RELPERSISTENCE_TEMP
+    {
+        return Err(wrong_parent(format!(
+            "cannot inherit from temporary relation \"{parent_name}\""
+        )));
+    }
+    if parent_rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+        && !parent_rel.rd_islocaltemp
+    {
+        return Err(wrong_parent(
+            "cannot inherit from temporary relation of another session".to_string(),
+        ));
+    }
+    if child_rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+        && !child_rel.rd_islocaltemp
+    {
+        return Err(wrong_parent(
+            "cannot inherit to temporary relation of another session".to_string(),
+        ));
+    }
+    if parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        return Err(wrong_parent(format!(
+            "cannot inherit from partitioned table \"{}\"",
+            rv.relname
+        )));
+    }
+    if parent_rel.rd_rel.relispartition {
+        return Err(wrong_parent("cannot inherit from a partition".to_string()));
+    }
+
+    let children =
+        pg_inherits::find_all_inheritors(mcx, child_rel.rd_id, types_rel::AccessShareLock)?;
+    if children.contains(&parent_oid) {
+        return Err(Box::new(
+            PgError::new(ERROR, "circular inheritance not allowed".to_string())
+                .with_detail(format!(
+                    "\"{}\" is already a child of \"{child_name}\".",
+                    rv.relname
+                ))
+                .with_sqlstate(types_error::ERRCODE_DUPLICATE_TABLE),
+        ));
+    }
+
+    CreateInheritance(mcx, child_rel, &parent_rel, false)?;
+    // Keep the lock on the parent relation until commit.
+    parent_rel.close(NoLock)
+}
+
+// CreateInheritance (tablecmds.c). DIVERGENCE: C holds one pg_inherits handle
+// open across the seqno scan and StoreCatalogInheritance1; the port's
+// StoreSingleInheritance re-opens it (catalog-only, same lock level).
+pub(crate) fn CreateInheritance<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_rel: &Relation<'mcx>,
+    ispartition: bool,
+) -> PgResult<()> {
+    let catalog_rel =
+        table::table_open(mcx, pg_inherits::InheritsRelationId, types_rel::RowExclusiveLock)?;
+    let key = crate::alter::oid_scankey(
+        pg_inherits::Anum_pg_inherits_inhrelid as usize,
+        child_rel.rd_id,
+    );
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &catalog_rel,
+        pg_inherits::InheritsRelidSeqnoIndexId,
+        true,
+        None,
+        &[key],
+    )?;
+    let desc = catalog_rel.descr();
+    let mut inhseqno: i32 = 0;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_inherits columns under its descriptor.
+        let inhparent = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_inherits::Anum_pg_inherits_inhparent as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_oid();
+        if inhparent == parent_rel.rd_id {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "relation \"{}\" would be inherited from more than once",
+                        parent_rel.name()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_DUPLICATE_TABLE),
+            ));
+        }
+        // SAFETY: as above.
+        let seqno = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_inherits::Anum_pg_inherits_inhseqno as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_i32();
+        if seqno > inhseqno {
+            inhseqno = seqno;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    catalog_rel.close(types_rel::RowExclusiveLock)?;
+
+    MergeAttributesIntoExisting(mcx, child_rel, parent_rel, ispartition)?;
+    MergeConstraintsIntoExisting(mcx, child_rel, parent_rel)?;
+
+    pg_inherits::StoreSingleInheritance(mcx, child_rel.rd_id, parent_rel.rd_id, inhseqno + 1)?;
+    let childobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, child_rel.rd_id);
+    let parentobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, parent_rel.rd_id);
+    pg_depend::recordDependencyOn(
+        mcx,
+        &childobject,
+        &parentobject,
+        if parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            pg_depend::DependencyType::Auto
+        } else {
+            pg_depend::DependencyType::Normal
+        },
+    )?;
+    crate::partition::SetRelationHasSubclass(mcx, parent_rel.rd_id, true)
+}
+
+// MergeAttributesIntoExisting (tablecmds.c).
+fn MergeAttributesIntoExisting<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_rel: &Relation<'mcx>,
+    ispartition: bool,
+) -> PgResult<()> {
+    let parent_desc = parent_rel.descr();
+    let child_desc = child_rel.descr();
+    let child_name = child_rel.name().to_string();
+    for parent_attno in 1..=parent_desc.natts as usize {
+        let parent_att = parent_desc.attr(parent_attno - 1);
+        if parent_att.attisdropped {
+            continue;
+        }
+        let attname_bytes = parent_att.attname.name_str();
+        let parent_attname =
+            core::str::from_utf8(attname_bytes).expect("attname UTF-8").to_string();
+        let Some(child_attno) = desc_attno_by_name(child_desc, attname_bytes) else {
+            return Err(column_conflict(
+                "child table is missing column \"{}\"",
+                &parent_attname,
+                String::new(),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        };
+        let child_att = child_desc.attr(child_attno as usize - 1);
+        if parent_att.atttypid != child_att.atttypid
+            || parent_att.atttypmod != child_att.atttypmod
+        {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "child table \"{child_name}\" has different type for column \
+                         \"{parent_attname}\""
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+            ));
+        }
+        if parent_att.attcollation != child_att.attcollation {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "child table \"{child_name}\" has different collation for column \
+                         \"{parent_attname}\""
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_COLLATION_MISMATCH),
+            ));
+        }
+        if parent_att.attnotnull && !child_att.attnotnull {
+            if let Some(con) = pg_constraint::findNotNullConstraintAttnum(
+                mcx,
+                parent_rel.rd_id,
+                parent_attno as AttrNumber,
+            )? {
+                if !con.connoinherit {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "column \"{parent_attname}\" in child table \"{child_name}\" \
+                                 must be marked NOT NULL"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ));
+                }
+            }
+        }
+        if parent_att.attgenerated != 0 && child_att.attgenerated == 0 {
+            return Err(column_conflict(
+                "column \"{}\" in child table must be a generated column",
+                &parent_attname,
+                String::new(),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+        if child_att.attgenerated != 0 && parent_att.attgenerated == 0 {
+            return Err(column_conflict(
+                "column \"{}\" in child table must not be a generated column",
+                &parent_attname,
+                String::new(),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+        if parent_att.attgenerated != 0
+            && child_att.attgenerated != 0
+            && parent_att.attgenerated != child_att.attgenerated
+        {
+            let kind = |g: i8| if g == b's' as i8 { "STORED" } else { "VIRTUAL" };
+            return Err(column_conflict(
+                "column \"{}\" inherits from generated column of different kind",
+                &parent_attname,
+                format!(
+                    "Parent column is {}, child column is {}.",
+                    kind(parent_att.attgenerated),
+                    kind(child_att.attgenerated)
+                ),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+        debug_assert!(!ispartition, "ATTACH PARTITION unported");
+        if child_att.attinhcount == i16::MAX {
+            return Err(too_many_parents());
+        }
+        let mut fields: PgVec<'mcx, (usize, datum::Datum)> = PgVec::new_in(mcx);
+        fields.push((
+            Anum_pg_attribute_attinhcount,
+            datum::Datum::from_i16(child_att.attinhcount + 1),
+        ));
+        if parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            debug_assert!(child_att.attinhcount + 1 == 1);
+            fields.push((Anum_pg_attribute_attislocal, datum::Datum::from_bool(false)));
+        }
+        crate::alter::update_pg_attribute(mcx, child_rel.rd_id, child_attno, &fields)?;
+    }
+    Ok(())
+}
+
+struct ConRow {
+    oid: Oid,
+    contype: u8,
+    conname: String,
+    connoinherit: bool,
+    condeferrable: bool,
+    condeferred: bool,
+    conenforced: bool,
+    convalidated: bool,
+    coninhcount: i16,
+    decompiled: Option<String>,
+    nn_attname: Option<String>,
+}
+
+// std Vec: ConRow owns Strings (drop glue), cold DDL scratch — PgVec forbids
+// droppy payloads.
+fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<ConRow>> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::RowExclusiveLock,
+    )?;
+    let key = crate::constraints::eq_key(
+        pg_constraint::Anum_pg_constraint_conrelid,
+        types_core::fmgr::F_OIDEQ,
+        datum::Datum::from_oid(rel.rd_id),
+    );
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        pg_constraint::ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &[key],
+    )?;
+    let desc = con_rel.descr();
+    let mut rows: Vec<ConRow> = Vec::new();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let get = |anum: types_core::AttrNumber| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_constraint columns under its descriptor.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        let contype = get(pg_constraint::Anum_pg_constraint_contype).as_i8() as u8;
+        if contype != pg_constraint::CONSTRAINT_CHECK
+            && contype != pg_constraint::CONSTRAINT_NOTNULL
+        {
+            continue;
+        }
+        // SAFETY: NameData column is a 64-byte in-tuple buffer.
+        let namebytes = unsafe {
+            core::slice::from_raw_parts(
+                get(pg_constraint::Anum_pg_constraint_conname).as_usize() as *const u8,
+                64,
+            )
+        };
+        let namelen = namebytes.iter().position(|&b| b == 0).unwrap_or(64);
+        let conname =
+            core::str::from_utf8(&namebytes[..namelen]).expect("conname UTF-8").to_string();
+        let decompiled = if contype == pg_constraint::CONSTRAINT_CHECK {
+            let mut isnull = false;
+            // SAFETY: conbin under pg_constraint's descriptor; null-checked below.
+            let val = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    pg_constraint::Anum_pg_constraint_conbin as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            if isnull {
+                panic!("null conbin for constraint \"{conname}\"");
+            }
+            // decompile_conbin: DirectFunctionCall2(pg_get_expr); the result
+            // text lives in flinfo's fn_extra scratch — copy out before drop.
+            let mut flinfo = fmgr_seams::fmgr_info::call(1716)?;
+            let text = fmgr_core::function_call2_coll(
+                &mut flinfo,
+                types_core::InvalidOid,
+                val,
+                datum::Datum::from_oid(rel.rd_id),
+            )?;
+            let p = text.as_usize() as *const u8;
+            // SAFETY: live varlena text result through its extent (flinfo
+            // scratch alive until end of scope).
+            let image =
+                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+            let payload = varlena::open_image(mcx, image)?;
+            Some(core::str::from_utf8(payload.as_bytes()).expect("text UTF-8").to_string())
+        } else {
+            None
+        };
+        let nn_attname = if contype == pg_constraint::CONSTRAINT_NOTNULL {
+            let attnum = pg_constraint::extractNotNullColumn(mcx, tup, desc)?;
+            let att = rel.rd_att.attr(attnum as usize - 1);
+            if att.attisdropped {
+                panic!("found not-null constraint on dropped columns");
+            }
+            Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").to_string())
+        } else {
+            None
+        };
+        rows.push(ConRow {
+            oid: get(pg_constraint::Anum_pg_constraint_oid).as_oid(),
+            contype,
+            conname,
+            connoinherit: get(pg_constraint::Anum_pg_constraint_connoinherit).as_bool(),
+            condeferrable: get(pg_constraint::Anum_pg_constraint_condeferrable).as_bool(),
+            condeferred: get(pg_constraint::Anum_pg_constraint_condeferred).as_bool(),
+            conenforced: get(pg_constraint::Anum_pg_constraint_conenforced).as_bool(),
+            convalidated: get(pg_constraint::Anum_pg_constraint_convalidated).as_bool(),
+            coninhcount: get(pg_constraint::Anum_pg_constraint_coninhcount).as_i16(),
+            decompiled,
+            nn_attname,
+        });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::RowExclusiveLock)?;
+    Ok(rows)
+}
+
+// MergeConstraintsIntoExisting (tablecmds.c). constraints_equivalent's
+// decompile rides pg_get_expr through fmgr (C DirectFunctionCall2); NOT NULL
+// column matching is by attribute name (C's build_attrmap_by_name by-name map).
+fn MergeConstraintsIntoExisting<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    let parent_cons = collect_con_rows(mcx, parent_rel)?;
+    let child_cons = collect_con_rows(mcx, child_rel)?;
+    let child_name = child_rel.name().to_string();
+    for pcon in parent_cons.iter() {
+        if pcon.connoinherit {
+            continue;
+        }
+        let mut found = false;
+        for ccon in child_cons.iter() {
+            if ccon.contype != pcon.contype {
+                continue;
+            }
+            if ccon.contype == pg_constraint::CONSTRAINT_CHECK {
+                if ccon.conname != pcon.conname {
+                    continue;
+                }
+            } else if ccon.nn_attname != pcon.nn_attname {
+                continue;
+            }
+            if ccon.contype == pg_constraint::CONSTRAINT_CHECK
+                && (ccon.condeferrable != pcon.condeferrable
+                    || ccon.condeferred != pcon.condeferred
+                    || ccon.decompiled != pcon.decompiled)
+            {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "child table \"{child_name}\" has different definition for check \
+                             constraint \"{}\"",
+                            pcon.conname
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                ));
+            }
+            if ccon.connoinherit {
+                return Err(child_con_conflict(
+                    &ccon.conname,
+                    &child_name,
+                    "non-inherited",
+                ));
+            }
+            if pcon.convalidated && ccon.conenforced && !ccon.convalidated {
+                return Err(child_con_conflict(&ccon.conname, &child_name, "NOT VALID"));
+            }
+            if pcon.conenforced && !ccon.conenforced {
+                return Err(child_con_conflict(&ccon.conname, &child_name, "NOT ENFORCED"));
+            }
+            if ccon.coninhcount == i16::MAX {
+                return Err(too_many_parents());
+            }
+            let mut fields: PgVec<'mcx, (AttrNumber, datum::Datum)> = PgVec::new_in(mcx);
+            fields.push((
+                pg_constraint::Anum_pg_constraint_coninhcount,
+                datum::Datum::from_i16(ccon.coninhcount + 1),
+            ));
+            if parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+                debug_assert!(ccon.coninhcount + 1 == 1);
+                fields.push((
+                    pg_constraint::Anum_pg_constraint_conislocal,
+                    datum::Datum::from_bool(false),
+                ));
+            }
+            pg_constraint::update_constraint_fields(mcx, ccon.oid, &fields)?;
+            found = true;
+            break;
+        }
+        if !found {
+            if pcon.contype == pg_constraint::CONSTRAINT_NOTNULL {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "column \"{}\" in child table \"{child_name}\" must be marked \
+                             NOT NULL",
+                            pcon.nn_attname.as_deref().expect("nn attname")
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                ));
+            }
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("child table is missing constraint \"{}\"", pcon.conname),
+                )
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ATExecDropInherit (tablecmds.c).
+pub(crate) fn ATExecDropInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    prv: &types_nodes::RangeVar<'_>,
+) -> PgResult<()> {
+    if rel.rd_rel.relispartition {
+        return Err(wrong_parent("cannot change inheritance of a partition".to_string()));
+    }
+    let rv = rel_vocab::RangeVar {
+        catalogname: prv.catalogname,
+        schemaname: prv.schemaname,
+        relname: prv.relname.expect("RangeVar.relname"),
+        inh: prv.inh,
+        relpersistence: prv.relpersistence,
+        location: prv.location,
+    };
+    let parent_oid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, false)?;
+    let parent_rel = table::table_open(mcx, parent_oid, NoLock)?;
+    RemoveInheritance(mcx, rel, &parent_rel, false)?;
+    // Keep the lock on the parent relation until commit.
+    parent_rel.close(NoLock)
+}
+
+// RemoveInheritance (tablecmds.c).
+pub(crate) fn RemoveInheritance<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_rel: &Relation<'mcx>,
+    expect_detached: bool,
+) -> PgResult<()> {
+    let is_partitioning = parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
+    let child_name = child_rel.name().to_string();
+    let parent_name = parent_rel.name().to_string();
+    let found = pg_inherits::DeleteInheritsTuple(
+        mcx,
+        child_rel.rd_id,
+        parent_rel.rd_id,
+        expect_detached,
+        Some(&child_name),
+    )?;
+    if !found {
+        let msg = if is_partitioning {
+            format!(
+                "relation \"{child_name}\" is not a partition of relation \"{parent_name}\""
+            )
+        } else {
+            format!("relation \"{parent_name}\" is not a parent of relation \"{child_name}\"")
+        };
+        return Err(Box::new(
+            PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_UNDEFINED_TABLE),
+        ));
+    }
+
+    let child_desc = child_rel.descr();
+    let parent_desc = parent_rel.descr();
+    for i in 0..child_desc.natts as usize {
+        let att = child_desc.attr(i);
+        if att.attisdropped || att.attinhcount <= 0 {
+            continue;
+        }
+        if desc_attno_by_name(parent_desc, att.attname.name_str()).is_none() {
+            continue;
+        }
+        let newcount = att.attinhcount - 1;
+        let mut fields: PgVec<'mcx, (usize, datum::Datum)> = PgVec::new_in(mcx);
+        fields.push((Anum_pg_attribute_attinhcount, datum::Datum::from_i16(newcount)));
+        if newcount == 0 {
+            fields.push((Anum_pg_attribute_attislocal, datum::Datum::from_bool(true)));
+        }
+        crate::alter::update_pg_attribute(mcx, child_rel.rd_id, (i + 1) as AttrNumber, &fields)?;
+    }
+
+    let parent_cons = collect_con_rows(mcx, parent_rel)?;
+    let child_cons = collect_con_rows(mcx, child_rel)?;
+    let mut connames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    let mut nncolumns: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    for pcon in parent_cons.iter() {
+        if pcon.connoinherit {
+            continue;
+        }
+        if pcon.contype == pg_constraint::CONSTRAINT_CHECK {
+            connames.push(&pcon.conname);
+        }
+        if pcon.contype == pg_constraint::CONSTRAINT_NOTNULL {
+            nncolumns.push(pcon.nn_attname.as_deref().expect("nn attname"));
+        }
+    }
+    for ccon in child_cons.iter() {
+        let matched = if ccon.contype == pg_constraint::CONSTRAINT_CHECK {
+            match connames.iter().position(|&n| n == ccon.conname) {
+                Some(i) => {
+                    connames.swap_remove(i);
+                    true
+                }
+                None => false,
+            }
+        } else if ccon.contype == pg_constraint::CONSTRAINT_NOTNULL {
+            let nn = ccon.nn_attname.as_deref().expect("nn attname");
+            match nncolumns.iter().position(|&n| n == nn) {
+                Some(i) => {
+                    nncolumns.swap_remove(i);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !matched {
+            continue;
+        }
+        if ccon.coninhcount <= 0 {
+            panic!(
+                "relation {} has non-inherited constraint \"{}\"",
+                child_rel.rd_id, ccon.conname
+            );
+        }
+        let newcount = ccon.coninhcount - 1;
+        let mut fields: PgVec<'mcx, (AttrNumber, datum::Datum)> = PgVec::new_in(mcx);
+        fields.push((
+            pg_constraint::Anum_pg_constraint_coninhcount,
+            datum::Datum::from_i16(newcount),
+        ));
+        if newcount == 0 {
+            fields.push((
+                pg_constraint::Anum_pg_constraint_conislocal,
+                datum::Datum::from_bool(true),
+            ));
+        }
+        pg_constraint::update_constraint_fields(mcx, ccon.oid, &fields)?;
+    }
+    if !connames.is_empty() || !nncolumns.is_empty() {
+        panic!(
+            "{} unmatched constraints while removing inheritance from \"{child_name}\" to \
+             \"{parent_name}\"",
+            connames.len() + nncolumns.len()
+        );
+    }
+
+    drop_parent_dependency(
+        mcx,
+        child_rel.rd_id,
+        parent_rel.rd_id,
+        if is_partitioning {
+            pg_depend::DependencyType::Auto
+        } else {
+            pg_depend::DependencyType::Normal
+        },
+    )
+}
+
+// drop_parent_dependency (tablecmds.c), pg_class-referencing arm.
+fn drop_parent_dependency<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    refobjid: Oid,
+    deptype: pg_depend::DependencyType,
+) -> PgResult<()> {
+    let dep_rel =
+        table::table_open(mcx, pg_depend::DependRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [
+        crate::alter::oid_scankey(1, RELATION_RELATION_ID),
+        crate::alter::oid_scankey(2, relid),
+        crate::alter::int4_key(3, 0),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &dep_rel,
+        pg_depend::DependDependerIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = dep_rel.descr();
+    let mut tids: PgVec<'mcx, types_tuple::ItemPointerData> = PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
+        let refclassid =
+            unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
+        // SAFETY: as above.
+        let dep_refobjid =
+            unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
+        // SAFETY: as above.
+        let refobjsubid =
+            unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
+        // SAFETY: as above.
+        let dtype =
+            unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
+        if refclassid == RELATION_RELATION_ID
+            && dep_refobjid == refobjid
+            && refobjsubid == 0
+            && dtype == deptype.as_char()
+        {
+            tids.push(tup.t_self);
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    for tid in tids.iter() {
+        catalog_indexing::CatalogTupleDelete(&dep_rel, tid)?;
+    }
+    dep_rel.close(types_rel::RowExclusiveLock)
+}
+
+#[cold]
+#[inline(never)]
+fn child_con_conflict(conname: &str, child_name: &str, kind: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "constraint \"{conname}\" conflicts with {kind} constraint on child table \
+                 \"{child_name}\""
+            ),
+        )
+        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+    )
 }

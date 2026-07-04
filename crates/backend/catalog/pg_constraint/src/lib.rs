@@ -1130,3 +1130,128 @@ pub fn ConstraintSetParentConstraint<'mcx>(
 
     con_rel.close(RowExclusiveLock)
 }
+
+// extractNotNullColumn (pg_constraint.c), callable from external
+// pg_constraint scans.
+pub fn extractNotNullColumn<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &types_tuple::HeapTupleData<'mcx>,
+    desc: &types_tuple::TupleDescData<'mcx>,
+) -> PgResult<AttrNumber> {
+    extract_notnull_column(mcx, tup, desc)
+}
+
+// Single-row pg_constraint fixed-width field update by constraint OID.
+pub fn update_constraint_fields<'mcx>(
+    mcx: Mcx<'mcx>,
+    con_id: Oid,
+    fields: &[(AttrNumber, Datum)],
+) -> PgResult<()> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let desc = con_rel.descr();
+    let natts = desc.natts as usize;
+    let mut values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
+    let nulls: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+    let mut replace: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+    for &(anum, v) in fields {
+        values[anum as usize - 1] = v;
+        replace[anum as usize - 1] = true;
+    }
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+    con_rel.close(RowExclusiveLock)
+}
+
+// AdjustNotNullInheritance (pg_constraint.c): relname/attname supplied by the
+// caller (C reads them via syscache getters).
+pub fn AdjustNotNullInheritance<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+    new_conname: Option<&str>,
+    is_local: bool,
+    is_no_inherit: bool,
+    is_notvalid: bool,
+    relname: &str,
+    attname: &str,
+) -> PgResult<bool> {
+    let Some(con) = findNotNullConstraintAttnum(mcx, relid, attnum)? else {
+        return Ok(false);
+    };
+    if is_no_inherit != con.connoinherit {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{relname}\"",
+                    con.name_str()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(
+                "You might need to make the existing constraint inheritable using \
+                 ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.",
+            ),
+        ));
+    }
+    if !is_notvalid && !con.convalidated {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "incompatible NOT VALID constraint \"{}\" on relation \"{relname}\"",
+                    con.name_str()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT."),
+        ));
+    }
+    if is_local {
+        if let Some(newname) = new_conname {
+            if newname != con.name_str() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot create not-null constraint \"{newname}\" on column \
+                             \"{attname}\" of table \"{relname}\""
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .with_detail(format!(
+                        "A not-null constraint named \"{}\" already exists for this column.",
+                        con.name_str()
+                    )),
+                ));
+            }
+        }
+    }
+    if !is_local {
+        if con.coninhcount == i16::MAX {
+            return Err(Box::new(
+                PgError::new(ERROR, "too many inheritance parents".to_string())
+                    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        update_constraint_fields(
+            mcx,
+            con.oid,
+            &[(Anum_pg_constraint_coninhcount, Datum::from_i16(con.coninhcount + 1))],
+        )?;
+    } else if !con.conislocal {
+        update_constraint_fields(
+            mcx,
+            con.oid,
+            &[(Anum_pg_constraint_conislocal, Datum::from_bool(true))],
+        )?;
+    }
+    Ok(true)
+}

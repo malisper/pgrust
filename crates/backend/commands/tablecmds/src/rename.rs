@@ -12,8 +12,8 @@ use types_nodes::parsenodes::RenameStmt;
 use types_rel::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock, RELKIND_RELATION};
 
 use crate::alter::{
-    check_for_column_name_collision, find_inheritance_children_exist, update_pg_attribute,
-    AlterTableLookupRangeVar, Anum_pg_attribute_attname,
+    check_for_column_name_collision, update_pg_attribute, AlterTableLookupRangeVar,
+    Anum_pg_attribute_attname,
 };
 
 fn unported(what: &str) -> ! {
@@ -46,6 +46,8 @@ pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
         stmt.subname.expect("RenameStmt.subname"),
         stmt.newname.expect("RenameStmt.newname"),
         stmt.relation.expect("RenameStmt.relation").inh,
+        false,
+        0,
     )
 }
 
@@ -55,14 +57,44 @@ fn renameatt_internal<'mcx>(
     oldattname: &str,
     newattname: &str,
     recurse: bool,
+    recursing: bool,
+    expected_parents: i32,
 ) -> PgResult<()> {
     let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
     // renameatt_check: relkind gate; ownership rode the lookup callback.
+    let _ = recursing;
     if rel.rd_rel.relkind != RELKIND_RELATION {
         unported("renameatt_check: non-plain-table relkind");
     }
-    if recurse && find_inheritance_children_exist(mcx, relid)? {
-        unported("renameatt_internal inheritance recursion");
+    if recurse {
+        let (child_oids, child_numparents) =
+            pg_inherits::find_all_inheritors_numparents(mcx, relid, AccessExclusiveLock)?;
+        for (i, &childrelid) in child_oids.iter().enumerate() {
+            if childrelid == relid {
+                continue;
+            }
+            renameatt_internal(
+                mcx,
+                childrelid,
+                oldattname,
+                newattname,
+                false,
+                true,
+                child_numparents[i],
+            )?;
+        }
+    } else if expected_parents == 0
+        && !pg_inherits::find_inheritance_children(mcx, relid, types_rel::NoLock)?.is_empty()
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "inherited column \"{oldattname}\" must be renamed in child tables too"
+                ),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
     }
     let relname = rel.name().to_string();
     let Some((attnum, attinhcount)) = attname_lookup_local(mcx, relid, oldattname)? else {
@@ -77,7 +109,7 @@ fn renameatt_internal<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    if attinhcount > 0 {
+    if attinhcount as i32 > expected_parents {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -132,6 +164,8 @@ pub fn RenameConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult
         stmt.subname.expect("RenameStmt.subname"),
         stmt.newname.expect("RenameStmt.newname"),
         stmt.relation.map(|r| r.inh).unwrap_or(false),
+        false,
+        0,
     )
 }
 
@@ -141,8 +175,11 @@ fn rename_constraint_internal<'mcx>(
     oldconname: &str,
     newconname: &str,
     recurse: bool,
+    recursing: bool,
+    expected_parents: i32,
 ) -> PgResult<()> {
     let rel = relation_seams::relation_open::call(mcx, myrelid, AccessExclusiveLock)?;
+    let _ = recursing;
     if rel.rd_rel.relkind != RELKIND_RELATION {
         unported("rename_constraint_internal: non-plain-table relkind");
     }
@@ -164,10 +201,26 @@ fn rename_constraint_internal<'mcx>(
     ) && !con.connoinherit
     {
         if recurse {
-            if find_inheritance_children_exist(mcx, myrelid)? {
-                unported("rename_constraint_internal inheritance recursion");
+            let (child_oids, child_numparents) =
+                pg_inherits::find_all_inheritors_numparents(mcx, myrelid, AccessExclusiveLock)?;
+            for (i, &childrelid) in child_oids.iter().enumerate() {
+                if childrelid == myrelid {
+                    continue;
+                }
+                rename_constraint_internal(
+                    mcx,
+                    childrelid,
+                    oldconname,
+                    newconname,
+                    false,
+                    true,
+                    child_numparents[i],
+                )?;
             }
-        } else if find_inheritance_children_exist(mcx, myrelid)? {
+        } else if expected_parents == 0
+            && !pg_inherits::find_inheritance_children(mcx, myrelid, types_rel::NoLock)?
+                .is_empty()
+        {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
@@ -179,7 +232,7 @@ fn rename_constraint_internal<'mcx>(
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
             ));
         }
-        if con.coninhcount > 0 {
+        if con.coninhcount as i32 > expected_parents {
             return Err(Box::new(
                 PgError::new(
                     ERROR,

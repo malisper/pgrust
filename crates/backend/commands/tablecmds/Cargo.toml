@@ -46,6 +46,9 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_index = { path = "../../catalog/catalog_index" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
+varlena = { path = "../../utils/adt/varlena" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 readfuncs = { path = "../../nodes/readfuncs" }
 clauses = { path = "../../optimizer/util/clauses" }
@@ -90,9 +93,6 @@ indexcmds_seams = { path = "../indexcmds_seams" }
 partcache = { path = "../../utils/cache/partcache" }
 partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }
-pg_inherits = { path = "../../catalog/pg_inherits" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 planner = { path = "../../optimizer/plan/planner" }
 execindexing = { path = "../../executor/execindexing" }
-fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
-varlena = { path = "../../utils/adt/varlena" }
