@@ -12,6 +12,17 @@ seam_core::seam!(
     pub fn get_fdw_routine_by_rel_id(mcx: Mcx<'_>, relid: Oid) -> PgResult<()>
 );
 
+seam_core::seam!(
+    // get_foreign_data_wrapper_oid (foreign.c) — has_foreign_data_wrapper_privilege
+    // name resolution (a direct adt_acl -> foreigncmds dep would cycle).
+    pub fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // get_foreign_server_oid (foreign.c) — has_server_privilege name resolution.
+    pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
 pub mod builtins {
     use super::*;
     use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};

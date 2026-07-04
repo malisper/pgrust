@@ -635,7 +635,7 @@ fn dispatch_switch<'mcx>(
         }
         T_AlterRoleSetStmt => {
             let stmt = parsetree.as_alter_role_set_stmt().unwrap();
-            user::AlterRoleSet(stmt)
+            user::AlterRoleSet(mcx, stmt)?;
         }
         T_DropRoleStmt => {
             let stmt = parsetree.as_drop_role_stmt().unwrap();

@@ -1,6 +1,3 @@
-//! ifaddr.c: IP netmask arithmetic. pg_foreach_ifaddr (interface
-//! enumeration for samehost/samenet) is deferred loud.
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,15 +74,95 @@ pub fn pg_sockaddr_cidr_mask(
     }
 }
 
-#[cold]
-pub fn pg_foreach_ifaddr<F>(_callback: F) -> std::io::Result<()>
+fn run_ifaddr_callback<F>(callback: &mut F, addr: IpAddr, mask: Option<IpAddr>)
 where
     F: FnMut(IpAddr, IpAddr),
 {
-    panic!(
-        "pg_foreach_ifaddr: backend-libpq-ifaddr interface enumeration unported \
-         (pg_hba samehost/samenet records)"
-    );
+    let mask = mask.filter(|m| mask_is_valid_for_addr(&addr, m));
+    let mask = match mask {
+        Some(m) => m,
+        None => {
+            let family = match addr {
+                IpAddr::V4(_) => AddressFamily::Inet,
+                IpAddr::V6(_) => AddressFamily::Inet6,
+            };
+            pg_sockaddr_cidr_mask(None, family).expect("full mask for INET/INET6")
+        }
+    };
+    callback(addr, mask);
+}
+
+fn mask_is_valid_for_addr(addr: &IpAddr, mask: &IpAddr) -> bool {
+    match (addr, mask) {
+        (IpAddr::V4(_), IpAddr::V4(m)) => *m != Ipv4Addr::UNSPECIFIED,
+        (IpAddr::V6(_), IpAddr::V6(m)) => *m != Ipv6Addr::UNSPECIFIED,
+        _ => false,
+    }
+}
+
+// C passes non-IP families (AF_LINK/AF_PACKET) through to the callback, which
+// ignores them; filtering at decode is behaviorally identical.
+#[cfg(unix)]
+unsafe fn sockaddr_to_ipaddr(sa: *const libc::sockaddr) -> Option<IpAddr> {
+    if sa.is_null() {
+        return None;
+    }
+    // SAFETY: caller guarantees sa points to a sockaddr sized for its
+    // sa_family (getifaddrs contract).
+    unsafe {
+        match (*sa).sa_family as i32 {
+            libc::AF_INET => {
+                let sin = &*(sa as *const libc::sockaddr_in);
+                Some(IpAddr::V4(Ipv4Addr::from_bits(u32::from_be(
+                    sin.sin_addr.s_addr,
+                ))))
+            }
+            libc::AF_INET6 => {
+                let sin6 = &*(sa as *const libc::sockaddr_in6);
+                Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
+            }
+            _ => None,
+        }
+    }
+}
+
+// getifaddrs build variant; WIN32/SIOCGIFCONF arms are out of build config.
+#[cfg(unix)]
+pub fn pg_foreach_ifaddr<F>(mut callback: F) -> std::io::Result<()>
+where
+    F: FnMut(IpAddr, IpAddr),
+{
+    unsafe {
+        let mut ifa: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifa) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut l = ifa;
+        while !l.is_null() {
+            // SAFETY: list nodes and their sockaddrs are owned by libc until
+            // freeifaddrs.
+            if let Some(addr) = sockaddr_to_ipaddr((*l).ifa_addr) {
+                let mask = sockaddr_to_ipaddr((*l).ifa_netmask);
+                run_ifaddr_callback(&mut callback, addr, mask);
+            }
+            l = (*l).ifa_next;
+        }
+        libc::freeifaddrs(ifa);
+    }
+    Ok(())
+}
+
+// C's last-resort fallback: loopback only.
+#[cfg(not(unix))]
+pub fn pg_foreach_ifaddr<F>(mut callback: F) -> std::io::Result<()>
+where
+    F: FnMut(IpAddr, IpAddr),
+{
+    let mask = pg_sockaddr_cidr_mask(Some("8"), AddressFamily::Inet).unwrap();
+    run_ifaddr_callback(&mut callback, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), Some(mask));
+    let mask6 = pg_sockaddr_cidr_mask(Some("128"), AddressFamily::Inet6).unwrap();
+    run_ifaddr_callback(&mut callback, IpAddr::V6(Ipv6Addr::LOCALHOST), Some(mask6));
+    Ok(())
 }
 
 // strtol(s, &endptr, 10) + the C caller's *numbits=='\0' || *endptr!='\0' check.
@@ -184,5 +261,43 @@ mod tests {
         let m128 = pg_sockaddr_cidr_mask(Some("128"), AddressFamily::Inet6).unwrap();
         assert!(pg_range_sockaddr(&v6, &v6, &m128));
         assert!(!pg_range_sockaddr(&a, &v6, &m128));
+    }
+
+    #[test]
+    fn callback_mask_substitution() {
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let full = IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255));
+        let mut seen = Vec::new();
+        run_ifaddr_callback(&mut |a, m| seen.push((a, m)), addr, None);
+        run_ifaddr_callback(
+            &mut |a, m| seen.push((a, m)),
+            addr,
+            Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        );
+        run_ifaddr_callback(
+            &mut |a, m| seen.push((a, m)),
+            addr,
+            Some(IpAddr::V6(Ipv6Addr::from([0xffu8; 16]))),
+        );
+        assert_eq!(seen, vec![(addr, full), (addr, full), (addr, full)]);
+        seen.clear();
+        let m8 = IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0));
+        run_ifaddr_callback(&mut |a, m| seen.push((a, m)), addr, Some(m8));
+        assert_eq!(seen, vec![(addr, m8)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreach_ifaddr_reports_loopback_and_sane_masks() {
+        let mut seen: Vec<(IpAddr, IpAddr)> = Vec::new();
+        pg_foreach_ifaddr(|addr, mask| seen.push((addr, mask))).unwrap();
+        assert!(seen.iter().any(|(a, _)| *a == IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        for (addr, mask) in &seen {
+            assert_eq!(addr.is_ipv4(), mask.is_ipv4());
+            match mask {
+                IpAddr::V4(m) => assert_ne!(*m, Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(m) => assert_ne!(*m, Ipv6Addr::UNSPECIFIED),
+            }
+        }
     }
 }

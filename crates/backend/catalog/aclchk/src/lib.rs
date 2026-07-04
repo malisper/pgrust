@@ -1039,6 +1039,7 @@ pub fn init_seams() {
     aclchk_seams::object_aclcheck_ext::set(object_aclcheck_ext);
     aclchk_seams::has_lo_priv_byid::set(lo::has_lo_priv_byid);
     aclchk_seams::pg_parameter_aclcheck_set::set(pg_parameter_aclcheck_set);
+    aclchk_seams::pg_parameter_aclcheck::set(pg_parameter_aclcheck);
     aclchk_seams::pg_class_aclcheck_ext::set(pg_class_aclcheck_ext);
     aclchk_seams::pg_class_aclmask::set(|table_oid, roleid, mask, how_all| {
         let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
