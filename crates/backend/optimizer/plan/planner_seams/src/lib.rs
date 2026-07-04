@@ -329,5 +329,5 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn inet_ref<'a>(d: Datum) -> adt_network::InetRef<'a>
+    pub fn inet_ref(d: Datum) -> adt_network::InetRef<'static>
 );
