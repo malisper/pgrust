@@ -673,20 +673,43 @@ fn check_recovery_consistency() -> PgResult<()> {
 }
 
 // The XLOG-rmgr record types handled by the recovery driver itself.
-fn xlogrecovery_redo(rec: &Recovery) -> PgResult<()> {
-    let record = &rec.reader.v;
+fn xlogrecovery_redo(rec: &mut Recovery) -> PgResult<()> {
     let info = rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK;
     debug_assert_eq!(rec.reader.XLogRecGetRmid(), transam_xlog::RM_XLOG_ID);
 
     if info == transam_xlog::XLOG_OVERWRITE_CONTRECORD {
-        panic!(
-            "XLOG_OVERWRITE_CONTRECORD verification not ported \
-             (torn-record overwrite; lands with CreateOverwriteContrecordRecord)"
+        // xl_overwrite_contrecord: overwritten_lsn 0..8, overwrite_time 8..16.
+        let data = rec.reader.XLogRecGetData();
+        let overwritten_lsn = u64::from_ne_bytes(data[..8].try_into().unwrap());
+        let overwrite_time = i64::from_ne_bytes(data[8..16].try_into().unwrap());
+        if overwritten_lsn != rec.reader.overwrittenRecPtr {
+            return ereport(FATAL)
+                .errmsg(format!(
+                    "mismatching overwritten LSN {} -> {}",
+                    lsn_fmt(overwritten_lsn),
+                    lsn_fmt(rec.reader.overwrittenRecPtr)
+                ))
+                .finish(loc("xlogrecovery_redo"));
+        }
+
+        rec.aborted_rec_ptr = InvalidXLogRecPtr;
+        rec.missing_contrec_ptr = InvalidXLogRecPtr;
+
+        let _ = elog(
+            LOG,
+            format!(
+                "successfully skipped missing contrecord at {}, overwritten at {}",
+                lsn_fmt(overwritten_lsn),
+                timestamp_seams::timestamptz_to_str::call(overwrite_time)
+            ),
         );
+
+        // Verifying the record should only happen once.
+        rec.reader.overwrittenRecPtr = InvalidXLogRecPtr;
     } else if info == transam_xlog::XLOG_BACKUP_END {
         // backupStartPoint is nonzero only under backup_label recovery
         // (panics at init); C's mismatch arm is a DEBUG2, elided.
-        let data = record.record.as_ref().expect("no decoded record");
+        let data = rec.reader.v.record.as_ref().expect("no decoded record");
         // SAFETY: main_data points into the reader's decode buffer.
         let startpoint =
             u64::from_ne_bytes(unsafe { data.main_data_bytes() }[..8].try_into().unwrap());

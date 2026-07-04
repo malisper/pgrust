@@ -378,7 +378,12 @@ pub fn StartupXLOG() -> PgResult<()> {
     LocalSetXLogInsertAllowed();
 
     if !XLogRecPtrIsInvalid(end_of_recovery_info.abortedRecPtr) {
-        panic!("CreateOverwriteContrecordRecord not ported (torn final record)");
+        debug_assert!(!XLogRecPtrIsInvalid(end_of_recovery_info.missingContrecPtr));
+        CreateOverwriteContrecordRecord(
+            end_of_recovery_info.abortedRecPtr,
+            end_of_recovery_info.missingContrecPtr,
+            new_tli,
+        )?;
     }
 
     insert.fullPageWrites.store(LAST_FULL_PAGE_WRITES.get(), Relaxed);
@@ -401,6 +406,87 @@ pub fn StartupXLOG() -> PgResult<()> {
     LWLockRelease(ControlFileLock())?;
 
     Ok(())
+}
+
+// xlog.c CreateOverwriteContrecordRecord: after recovery ended at a broken
+// continuation record, mark the page and write XLOG_OVERWRITE_CONTRECORD as
+// the first record at page_ptr so downstream readers skip the torn record.
+fn CreateOverwriteContrecordRecord(
+    aborted_lsn: XLogRecPtr,
+    page_ptr: XLogRecPtr,
+    new_tli: TimeLineID,
+) -> PgResult<XLogRecPtr> {
+    if !RecoveryInProgress() {
+        ereport(ERROR)
+            .errmsg("can only be used at end of recovery")
+            .finish(loc("CreateOverwriteContrecordRecord"))?;
+    }
+    if page_ptr % XLOG_BLCKSZ as u64 != 0 {
+        ereport(ERROR)
+            .errmsg(format!(
+                "invalid position for missing continuation record {:X}/{:X}",
+                page_ptr >> 32,
+                page_ptr as u32
+            ))
+            .finish(loc("CreateOverwriteContrecordRecord"))?;
+    }
+
+    // The current WAL insert position should be right after the page header.
+    let mut start_pos = page_ptr;
+    if XLogSegmentOffset(start_pos, wal_segment_size()) == 0 {
+        start_pos += SizeOfXLogLongPHD as u64;
+    } else {
+        start_pos += SizeOfXLogShortPHD as u64;
+    }
+    let recptr = crate::insert::GetXLogInsertRecPtr();
+    if recptr != start_pos {
+        ereport(ERROR)
+            .errmsg(format!(
+                "invalid WAL insert position {:X}/{:X} for OVERWRITE_CONTRECORD",
+                recptr >> 32,
+                recptr as u32
+            ))
+            .finish(loc("CreateOverwriteContrecordRecord"))?;
+    }
+
+    init_small::globals::StartCriticalSection();
+
+    // Initialize the XLOG page header (by GetXLogBuffer) and set the
+    // XLP_FIRST_IS_OVERWRITE_CONTRECORD flag; startup is the only WAL writer
+    // here, the insertion lock is pro forma (C keeps it too).
+    crate::insert::WALInsertLockAcquire();
+    let pagehdr = crate::insert::GetXLogBuffer(page_ptr, new_tli);
+    // SAFETY: pagehdr is the page-aligned start of an XLOG buffer page;
+    // xlp_info is the u16 at offset 2 of XLogPageHeaderData.
+    unsafe {
+        let info = pagehdr.add(2).cast::<u16>();
+        info.write(info.read() | XLP_FIRST_IS_OVERWRITE_CONTRECORD);
+    }
+    WALInsertLockRelease();
+
+    // xl_overwrite_contrecord: overwritten_lsn 0..8, overwrite_time 8..16.
+    let mut body = [0u8; 16];
+    body[0..8].copy_from_slice(&aborted_lsn.to_ne_bytes());
+    body[8..16]
+        .copy_from_slice(&timestamp_seams::get_current_timestamp::call().to_ne_bytes());
+    let recptr = xloginsert_seams::xlog_insert::call(RM_XLOG_ID, XLOG_OVERWRITE_CONTRECORD, &[&body])?;
+
+    if ProcLastRecPtr() != start_pos {
+        let last = ProcLastRecPtr();
+        ereport(ERROR)
+            .errmsg(format!(
+                "OVERWRITE_CONTRECORD was inserted to unexpected position {:X}/{:X}",
+                last >> 32,
+                last as u32
+            ))
+            .finish(loc("CreateOverwriteContrecordRecord"))?;
+    }
+
+    XLogFlush(recptr)?;
+
+    init_small::globals::EndCriticalSection();
+
+    Ok(recptr)
 }
 
 fn PerformRecoveryXLogAction() -> PgResult<()> {

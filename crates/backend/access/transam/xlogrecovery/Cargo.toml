@@ -29,6 +29,7 @@ rmgr = { path = "../rmgr" }
 varsup = { path = "../varsup" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 startup_seams = { path = "../../../postmaster/startup_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 libc = "0.2"
 
 [dev-dependencies]
