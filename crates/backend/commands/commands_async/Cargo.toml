@@ -18,7 +18,7 @@ latch = { path = "../../storage/ipc/latch" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 mcx = { path = "../../../_support/mcx" }
-parallel = { path = "../../access/transam/parallel" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 pqformat = { path = "../../libpq/pqformat" }
 procsignal = { path = "../../storage/ipc/procsignal" }

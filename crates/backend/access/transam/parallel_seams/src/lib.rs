@@ -17,3 +17,11 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn parallel_worker_report_last_rec_end(last_rec_end: XLogRecPtr) -> PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn handle_parallel_message_interrupt()
+);
+
+seam_core::seam!(
+    pub fn process_parallel_messages() -> PgResult<()>
+);

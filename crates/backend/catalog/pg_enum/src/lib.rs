@@ -63,6 +63,14 @@ pub fn EnumUncommitted(enum_id: Oid) -> bool {
     UNCOMMITTED.with(|u| u.borrow().values.as_ref().is_some_and(|v| v.contains(&enum_id)))
 }
 
+pub fn HasUncommittedEnums() -> bool {
+    UNCOMMITTED.with(|u| {
+        let u = u.borrow();
+        u.types.as_ref().is_some_and(|v| !v.is_empty())
+            || u.values.as_ref().is_some_and(|v| !v.is_empty())
+    })
+}
+
 fn EnumTypeUncommitted(typ_id: Oid) -> bool {
     UNCOMMITTED.with(|u| u.borrow().types.as_ref().is_some_and(|v| v.contains(&typ_id)))
 }

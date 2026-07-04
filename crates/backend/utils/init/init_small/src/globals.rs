@@ -53,6 +53,7 @@ scalar_global! {
         bool, false;
     LOG_MEMORY_CONTEXT_PENDING, LogMemoryContextPending, SetLogMemoryContextPending,
         bool, false;
+    PARALLEL_MESSAGE_PENDING, ParallelMessagePending, SetParallelMessagePending, bool, false;
     IDLE_STATS_UPDATE_TIMEOUT_PENDING, IdleStatsUpdateTimeoutPending,
         SetIdleStatsUpdateTimeoutPending, bool, false;
 

@@ -55,6 +55,21 @@ pub fn RelFileLocatorSkippingWAL(rlocator: RelFileLocator) -> bool {
     PENDING_SYNCS.with_borrow(|p| p.iter().any(|s| s.rlocator == rlocator))
 }
 
+pub fn SerializePendingSyncs() -> Vec<(RelFileLocator, bool)> {
+    PENDING_SYNCS.with_borrow(|p| p.iter().map(|s| (s.rlocator, s.is_truncated)).collect())
+}
+
+pub fn RestorePendingSyncs(syncs: &[(RelFileLocator, bool)]) {
+    PENDING_SYNCS.with_borrow_mut(|p| {
+        debug_assert!(p.is_empty());
+        p.extend(
+            syncs
+                .iter()
+                .map(|&(rlocator, is_truncated)| PendingRelSync { rlocator, is_truncated }),
+        );
+    });
+}
+
 pub fn RelationCreateStorage(
     rlocator: RelFileLocator,
     relpersistence: u8,
