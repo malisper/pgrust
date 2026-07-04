@@ -1460,9 +1460,7 @@ pub fn all_rows_selectable<'mcx>(
         return Ok(false);
     }
 
-    if aclchk::pg_class_aclcheck(rte.relid, userid, adt_acl::ACL_SELECT)?
-        == aclchk::ACLCHECK_OK
-    {
+    if aclchk_seams::pg_class_aclmask::call(rte.relid, userid, adt_acl::ACL_SELECT, false)? != 0 {
         return Ok(true);
     }
 
@@ -1684,12 +1682,12 @@ fn gistcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     Ok(AmCostEstimate {
         index_startup_cost: costs.index_startup_cost,
@@ -1738,12 +1736,12 @@ fn spgcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     Ok(AmCostEstimate {
         index_startup_cost: costs.index_startup_cost,
@@ -1868,7 +1866,11 @@ fn genericcostestimate(
 
     let index_startup_cost = qual_arg_cost;
     index_total_cost += qual_arg_cost;
-    index_total_cost += num_index_tuples * num_sa_scans * (gucs::cpu_index_tuple_cost() + qual_op_cost);
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+    // fuses `cost += expr * tuples`); odd numIndexTuples puts the total on a
+    // half-cent display boundary, exposing the one-ulp difference.
+    index_total_cost = (num_index_tuples * num_sa_scans)
+        .mul_add(gucs::cpu_index_tuple_cost() + qual_op_cost, index_total_cost);
 
     costs.index_startup_cost = index_startup_cost;
     costs.index_total_cost = index_total_cost;
@@ -2263,12 +2265,12 @@ fn btcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = (index_tuples.ln() / 2.0f64.ln()).ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (index_tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     // btcost_correlation over the leading column; expression columns read the
     // index's own pg_statistic row (colnum 1, inh false), as C.
@@ -2406,23 +2408,56 @@ fn estimate_num_groups_core<'mcx>(
             work.push((run.intern_expr(v), v));
         }
     }
+    // add_unique_group_var (selfuncs.c): drop exact duplicates; among
+    // known-equal vars of different rels keep the smaller ndistinct. The
+    // probe var is compared with nullingrels stripped, per C.
     for &(id, node) in work.iter() {
+        let vardata = examine_variable(run, id, node, 0)?;
+        let (id, node) = {
+            let v = node.as_var().unwrap();
+            if v.varnullingrels.is_empty() {
+                (id, node)
+            } else {
+                let stripped = types_nodes::primnodes::Var {
+                    varnullingrels: types_nodes::Bitmapset::empty(),
+                    ..*v
+                };
+                let n = Node::mk(mcx, stripped)?;
+                (run.intern_expr(n), n)
+            }
+        };
         let v = node.as_var().unwrap();
-        let dup = varinfos.iter().any(|vi| {
-            let u = run.root.expr_node(vi.var).as_var().unwrap();
-            u.varno == v.varno && u.varattno == v.varattno
-        });
-        if dup {
+        let (ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
+        let rel = vardata.rel.expect("grouping Var has a base rel");
+        let mut keep_new = true;
+        let mut i = 0;
+        while i < varinfos.len() {
+            let u = run.root.expr_node(varinfos[i].var).as_var().unwrap();
+            if u.varno == v.varno && u.varattno == v.varattno {
+                keep_new = false;
+                break;
+            }
+            if varinfos[i].rel != rel
+                && crate::equivclass::exprs_known_equal(
+                    run,
+                    node,
+                    *run.root.expr_node(varinfos[i].var),
+                    0,
+                )
+            {
+                if varinfos[i].ndistinct <= ndistinct {
+                    keep_new = false;
+                    break;
+                }
+                varinfos.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+        if !keep_new {
             continue;
         }
-        let vardata = examine_variable(run, id, node, 0)?;
-        let (ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
-        varinfos.push(GroupVarInfo {
-            var: id,
-            rel: vardata.rel.expect("grouping Var has a base rel"),
-            ndistinct,
-            isdefault,
-        });
+        varinfos.push(GroupVarInfo { var: id, rel, ndistinct, isdefault });
     }
     if varinfos.is_empty() {
         return Ok(1.0);
@@ -3615,9 +3650,17 @@ fn generic_restriction_selectivity<'mcx>(
         // with a bump scratch (C leaks into the planner context).
         let scratch = ::mcx::MemoryContext::new_bump("generic_restriction_selectivity");
         let smcx = scratch.mcx();
+        // C evaluates via raw fcinfo: a NULL result counts as no-match
+        // (jsonb @@ can return NULL), never an error.
         let armed_test = |opproc: &mut FmgrInfo, v: Datum| -> PgResult<bool> {
             let (a0, a1) = if varonleft { (v, constval) } else { (constval, v) };
-            Ok(types_fmgr::function_call2_coll_in(opproc, collation, smcx, a0, a1)?.as_bool())
+            let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(collation);
+            // SAFETY: smcx outlives this single call.
+            unsafe { fcinfo.set_result_mcx(smcx) };
+            fcinfo.set_arg(0, a0);
+            fcinfo.set_arg(1, a1);
+            let result = opproc.invoke(&mut fcinfo)?;
+            Ok(!fcinfo.isnull && result.as_bool())
         };
 
         let stats_usable =

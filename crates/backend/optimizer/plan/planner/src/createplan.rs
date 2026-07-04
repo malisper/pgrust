@@ -45,6 +45,7 @@ fn create_plan_recurse<'mcx>(
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_WorkTableScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
         {
             create_scan_plan(run, path_id, flags)
@@ -54,6 +55,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
         PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
+        PathNode::RecursiveUnionPath(_) => create_recursiveunion_plan(run, path_id),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::ProjectSetPath(_) => create_project_set_plan(run, path_id),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
@@ -335,6 +337,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_CteScan) => {
             create_ctescan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_WorkTableScan) => {
+            create_worktablescan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_SubqueryScan) => {
             create_subqueryscan_plan(run, best_path, tlist, scan_clauses)?
@@ -647,6 +652,42 @@ fn create_resultscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
+// create_worktablescan_plan (createplan.c): the wt param ID comes from the
+// cteroot, resolved at set_worktable_pathlist time (the parent-root chain is
+// detached here; see PlannerInfo.self_ref_wt_param).
+fn create_worktablescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(rte.self_reference);
+    let wt_param = run.root.self_ref_wt_param;
+    assert!(
+        wt_param >= 0,
+        "could not find param ID for CTE \"{}\"",
+        rte.ctename.unwrap_or("?")
+    );
+    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::WorkTableScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.wtParam = wt_param;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
 // create_ctescan_plan (createplan.c).
 fn create_ctescan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -691,7 +732,8 @@ fn create_indexscan_plan<'mcx>(
         debug_assert!(p.indexorderbys.is_empty());
         let mut rids = mcx::PgVec::new_in(mcx);
         for ic in p.indexclauses.iter() {
-            rids.push((ic.rinfo.expect("IndexClause rinfo"), ic.lossy));
+            let rid = ic.rinfo.expect("IndexClause rinfo");
+            rids.push((rid, ic.lossy, run.root.rinfo(rid).parent_ec));
         }
         (
             p.indexinfo.as_ref().expect("indexinfo set").indexoid,
@@ -711,9 +753,15 @@ fn create_indexscan_plan<'mcx>(
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        // is_redundant_with_indexclauses: no EC parents, so rinfo identity;
-        // a lossy indexclause does not enforce the condition exactly.
-        if indexclause_rinfos.iter().any(|&(c, lossy)| c == rid && !lossy) {
+        if indexclause_rinfos
+            .iter()
+            .any(|&(c, lossy, parent_ec)| {
+                !lossy
+                    && (c == rid
+                        || (parent_ec.is_some()
+                            && run.root.rinfo(rid).parent_ec == parent_ec))
+            })
+        {
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
@@ -725,7 +773,13 @@ fn create_indexscan_plan<'mcx>(
         qpqual_rinfos.push(rid);
     }
     let ordered = order_qual_clauses(run, &qpqual_rinfos)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut stripped_indexquals = stripped_indexquals;
+    if run.root.path(best_path).base().param_info.is_some() {
+        stripped_indexquals = replace_nestloop_params_list(run, &stripped_indexquals)?;
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     if indexonly {
         let indextlist = ios_indextlist_copy(run, best_path, true)?;
@@ -785,8 +839,7 @@ fn ios_indextlist_copy<'mcx>(
     Ok(tlist)
 }
 
-// create_bitmap_scan_plan (createplan.c). indexECs bookkeeping is dead while
-// eq_classes are empty; nestloop-param replacement loud upstream (param_info).
+// create_bitmap_scan_plan (createplan.c).
 fn create_bitmap_scan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -804,7 +857,7 @@ fn create_bitmap_scan_plan<'mcx>(
     let scan_relid = run.root.rel(baserelid).relid;
     debug_assert!(scan_relid > 0);
 
-    let (bitmapqualplan, indexquals, mut bitmapqualorig) =
+    let (bitmapqualplan, indexquals, mut bitmapqualorig, _indexecs) =
         create_bitmap_subplan(run, bitmapqual)?;
 
     // scan_clauses minus indexquals (C list_member -> equal()).
@@ -848,12 +901,17 @@ fn create_bitmap_scan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_bitmap_subplan (createplan.c) -> (plan, indexquals, bitmapqualorig).
-// indexECs output is dropped (eq_classes empty on this lane).
+// create_bitmap_subplan (createplan.c)
+// -> (plan, indexquals, bitmapqualorig, indexECs).
 fn create_bitmap_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     bitmapqual: PathId,
-) -> PgResult<(Node<'mcx>, NodeList<'mcx>, NodeList<'mcx>)> {
+) -> PgResult<(
+    Node<'mcx>,
+    NodeList<'mcx>,
+    NodeList<'mcx>,
+    mcx::PgVec<'mcx, types_pathnodes::EcId>,
+)> {
     let mcx = run.mcx;
     match run.root.path(bitmapqual) {
         PathNode::BitmapAndPath(ap) => {
@@ -868,11 +926,14 @@ fn create_bitmap_subplan<'mcx>(
             let mut subplans = NodeList::nil();
             let mut subquals = NodeList::nil();
             let mut subindexquals = NodeList::nil();
+            let mut indexecs: mcx::PgVec<'mcx, types_pathnodes::EcId> = mcx::PgVec::new_in(mcx);
             for &sub in subs.iter() {
-                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                let (subplan, subindexqual, subqual, subindexec) =
+                    create_bitmap_subplan(run, sub)?;
                 subplans.lappend(mcx, subplan)?;
                 list_concat_unique(mcx, &mut subquals, &subqual)?;
                 list_concat_unique(mcx, &mut subindexquals, &subindexqual)?;
+                indexecs.extend(subindexec.iter().copied());
             }
             let mut plan = Node::build::<types_nodes::plannodes::BitmapAnd<'mcx>>(mcx)?;
             plan.bitmapplans = subplans;
@@ -884,7 +945,7 @@ fn create_bitmap_subplan<'mcx>(
             plan.plan.plan_width = 0;
             plan.plan.parallel_aware = false;
             plan.plan.parallel_safe = parallel_safe;
-            return Ok((plan.seal(), subindexquals, subquals));
+            return Ok((plan.seal(), subindexquals, subquals, indexecs));
         }
         PathNode::BitmapOrPath(op) => {
             let subs = op.bitmapquals.clone();
@@ -901,7 +962,9 @@ fn create_bitmap_subplan<'mcx>(
             let mut const_true_subqual = false;
             let mut const_true_subindexqual = false;
             for &sub in subs.iter() {
-                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                // Per-arm indexECs are dropped: EC-derived quals can't be
+                // redundant across OR arms.
+                let (subplan, subindexqual, subqual, _) = create_bitmap_subplan(run, sub)?;
                 subplans.lappend(mcx, subplan)?;
                 if subqual.is_nil() {
                     const_true_subqual = true;
@@ -950,7 +1013,7 @@ fn create_bitmap_subplan<'mcx>(
                 l.lappend(mcx, clauses::make_orclause(mcx, subindexquals)?)?;
                 l
             };
-            return Ok((plan, indexqual, qual));
+            return Ok((plan, indexqual, qual, mcx::PgVec::new_in(mcx)));
         }
         _ => {}
     }
@@ -999,12 +1062,22 @@ fn create_bitmap_subplan<'mcx>(
 
     let mut subquals = NodeList::nil();
     let mut subindexquals = NodeList::nil();
+    let mut indexecs: mcx::PgVec<'mcx, types_pathnodes::EcId> = mcx::PgVec::new_in(mcx);
     for ic in indexclauses.iter() {
         let rid = ic.rinfo.expect("IndexClause rinfo");
         debug_assert!(!run.root.rinfo(rid).pseudoconstant);
+        if let Some(pec) = run.root.rinfo(rid).parent_ec {
+            // Derived from the same EC as an already-included clause.
+            if indexecs.contains(&pec) {
+                continue;
+            }
+        }
         subquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
         for &qid in ic.indexquals.iter() {
             subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
+        }
+        if let Some(pec) = run.root.rinfo(rid).parent_ec {
+            indexecs.push(pec);
         }
     }
     // Index predicate conditions not implied by the pushed-down quals must be
@@ -1016,7 +1089,7 @@ fn create_bitmap_subplan<'mcx>(
             subindexquals.lappend(mcx, pred)?;
         }
     }
-    Ok((plan.seal(), subindexquals, subquals))
+    Ok((plan.seal(), subindexquals, subquals, indexecs))
 }
 
 // predicate_implied_by (predtest.c), strong form: one restriction clause vs
@@ -1062,6 +1135,7 @@ fn fix_indexqual_clause<'mcx>(
     clause: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    let clause = replace_nestloop_params(run, clause)?;
     match clause.node_tag() {
         NodeTag::T_OpExpr => {
             let o = clause.as_op_expr().unwrap();
@@ -3240,6 +3314,63 @@ fn create_setop_plan<'mcx>(
     plan.cmpOperators = mcx::slice_borrow_in(mcx, &cmp_operators)?;
     plan.cmpCollations = mcx::slice_borrow_in(mcx, &cmp_collations)?;
     plan.cmpNullsFirst = mcx::slice_borrow_in(mcx, &cmp_nulls_first)?;
+    plan.numGroups = clamp_cardinality_to_long(num_groups);
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_recursiveunion_plan + make_recursive_union (createplan.c).
+fn create_recursiveunion_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (target_id, leftpath, rightpath, wt_param, distinct_ids, num_groups) =
+        match run.root.path(path_id) {
+            PathNode::RecursiveUnionPath(p) => (
+                p.path.pathtarget_id.expect("RecursiveUnion path has a pathtarget"),
+                p.leftpath.expect("RecursiveUnion leftpath"),
+                p.rightpath.expect("RecursiveUnion rightpath"),
+                p.wtParam,
+                crate::relnode::pgvec_clone_shallow(mcx, &p.distinctList),
+                p.numGroups,
+            ),
+            _ => unreachable!(),
+        };
+    // Both children must produce the same tlist.
+    let leftplan = create_plan_recurse(run, leftpath, CP_EXACT_TLIST)?;
+    let rightplan = create_plan_recurse(run, rightpath, CP_EXACT_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let mut dup_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut dup_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut dup_collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    for &gid in distinct_ids.iter() {
+        let sortcl = *run
+            .root
+            .expr_node(gid)
+            .as_sort_group_clause()
+            .expect("distinctList holds SortGroupClauses");
+        let tle = tlist
+            .iter()
+            .map(|n| n.as_target_entry().expect("tlist cell"))
+            .find(|t| t.ressortgroupref == sortcl.tleSortGroupRef)
+            .expect("grouping column matches a tlist entry");
+        dup_col_idx.push(tle.resno);
+        debug_assert!(sortcl.eqop != 0);
+        dup_operators.push(sortcl.eqop);
+        dup_collations.push(expr_collation(tle.expr));
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::RecursiveUnion<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.lefttree = Some(leftplan);
+    plan.plan.righttree = Some(rightplan);
+    plan.wtParam = wt_param;
+    plan.numCols = dup_col_idx.len() as i32;
+    plan.dupColIdx = mcx::slice_borrow_in(mcx, &dup_col_idx)?;
+    plan.dupOperators = mcx::slice_borrow_in(mcx, &dup_operators)?;
+    plan.dupCollations = mcx::slice_borrow_in(mcx, &dup_collations)?;
     plan.numGroups = clamp_cardinality_to_long(num_groups);
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())

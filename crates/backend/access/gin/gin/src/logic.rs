@@ -25,6 +25,7 @@ pub(crate) fn bool_consistent(state: &GinState, key: &mut GinScanKeyData) -> boo
         key.nuserentries as usize,
         key.queryValues.as_slice(),
         key.queryCategories.as_slice(),
+        key.jspOps.as_slice(),
         &mut recheck,
     );
     key.recheckCurItem = recheck;
@@ -44,5 +45,6 @@ pub(crate) fn tri_consistent(state: &GinState, key: &mut GinScanKeyData) -> GinT
         key.nuserentries as usize,
         key.queryValues.as_slice(),
         key.queryCategories.as_slice(),
+        key.jspOps.as_slice(),
     )
 }

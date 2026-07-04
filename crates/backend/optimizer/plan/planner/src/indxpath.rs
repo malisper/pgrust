@@ -1,6 +1,5 @@
-//! indxpath.c slice: create_index_paths over restriction clauses for the
-//! Var-op-Const btree shape; everything else loud or dead upstream.
-
+//! indxpath.c: index path generation over restriction, join, and
+//! EC-derived clauses; SAOP/boolean/RowCompare matching stays loud.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -22,14 +21,13 @@ impl<'mcx> IndexClauseSet<'mcx> {
         for _ in 0..ncols {
             indexclauses.push(PgVec::new_in(mcx));
         }
-        IndexClauseSet { nonempty: false, indexclauses }
+        IndexClauseSet {
+            nonempty: false,
+            indexclauses,
+        }
     }
 }
 
-// check_index_predicates (indxpath.c). generate_join_implied_equalities is a
-// no-op under eclass-lite ECs (joinrels.rs note): derivable join equalities
-// stay in joininfo, which the movable-clause scan below already covers; the
-// richer-EC case stays loud.
 pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();
@@ -47,30 +45,45 @@ pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> P
         return Ok(());
     }
 
-    let ec_can_derive = (0..run.root.eq_classes.len()).any(|i| {
-        let ec = run.root.ec(types_pathnodes::EcId(i as u32));
-        ec.ec_members.len() > 1 || ec.ec_has_const
-    });
-    assert!(
-        !ec_can_derive,
-        "check_index_predicates (indxpath.c): EC-derivable join clauses; M2 join lane"
-    );
-
-    let mut clauselist: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
-        let rid = run.root.rel(rel).baserestrictinfo[i];
-        clauselist.push(*run.root.expr_node(run.root.rinfo(rid).clause));
-    }
+    let mut clause_rids: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+    clause_rids.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
     for i in 0..run.root.rel(rel).joininfo.len() {
         let rid = run.root.rel(rel).joininfo[i];
         if join_clause_is_movable_to(run, rid, rel) {
-            clauselist.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+            clause_rids.push(rid);
         }
+    }
+    assert!(
+        run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL,
+        "check_index_predicates (indxpath.c): child rel; appendrel EC lane"
+    );
+    let mut otherrels =
+        crate::relnode::relids_difference(mcx, &run.root.all_query_rels, &run.root.rel(rel).relids);
+    otherrels =
+        crate::relnode::relids_difference(mcx, &otherrels, &run.root.rel(rel).nulling_relids);
+    if !crate::relnode::relids_is_empty(&otherrels) {
+        let join_relids = crate::relnode::relids_union(mcx, &run.root.rel(rel).relids, &otherrels);
+        let derived = crate::equivclass::generate_join_implied_equalities(
+            run,
+            &join_relids,
+            &otherrels,
+            rel,
+            None,
+        )?;
+        clause_rids.extend(derived.iter().copied());
+    }
+    let mut clauselist: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for &rid in clause_rids.iter() {
+        clauselist.push(*run.root.expr_node(run.root.rinfo(rid).clause));
     }
 
     let relid = run.root.rel(rel).relid;
     let is_target_rel = relids_is_member(relid as i32, &run.root.all_result_relids)
-        || run.root.rowMarks.iter().any(|&rm| run.rowmark(rm).rti == relid);
+        || run
+            .root
+            .rowMarks
+            .iter()
+            .any(|&rm| run.rowmark(rm).rti == relid);
 
     for i in 0..nindexes {
         let index = run.root.rel(rel).indexlist[i];
@@ -82,9 +95,12 @@ pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> P
             indpred.push(*run.root.expr_node(pid));
         }
         if !index.predOK.get() {
-            index
-                .predOK
-                .set(crate::predtest::predicate_implied_by(mcx, &indpred, &clauselist, false)?);
+            index.predOK.set(crate::predtest::predicate_implied_by(
+                mcx,
+                &indpred,
+                &clauselist,
+                false,
+            )?);
         }
         // Target rels keep implied quals for EvalPlanQual rechecks; a
         // !amoptionalkey index must keep first-column quals to stay scannable.
@@ -128,40 +144,44 @@ fn join_clause_is_movable_to(run: &PlannerRun<'_>, rid: RinfoId, rel: RelId) -> 
     true
 }
 
-// create_index_paths (indxpath.c), restriction-clause arm; join/eclass
-// matching is dead while joininfo/eq_classes are empty (asserted).
+// create_index_paths (indxpath.c).
 pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    let mcx = run.mcx;
     if run.root.rel(rel).indexlist.is_empty() {
         return Ok(());
     }
-    // Every EC here is a single-member sort-expr EC (initsplan distributes
-    // mergejoinable quals directly), and generate_implied_equalities_for_column
-    // derives nothing from one: a lone const member never matches an index
-    // column, and a lone non-const member is skipped outright. A merged
-    // (multi-member) EC would derive join clauses — loud until the equivclass
-    // unit lands.
-    let ec_can_derive = (0..run.root.eq_classes.len()).any(|i| {
-        let ec = run.root.ec(types_pathnodes::EcId(i as u32));
-        ec.ec_members.len() > 1
-    });
-    assert!(
-        !ec_can_derive,
-        "match_eclass_clauses_to_index (indxpath.c): merged EC; M2 join lane"
-    );
-    // DIVERGENCE: match_join_clauses_to_index is skipped -- it only yields
-    // parameterized index paths, which every consumer on this lane rejects
-    // loudly; plan choice (not results) can differ where one would win.
 
-    let mut bitindexpaths: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
+    let mut bitindexpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut bitjoinpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut joinorclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
     let nindexes = run.root.rel(rel).indexlist.len();
     for idx in 0..nindexes {
         let index = run.root.rel(rel).indexlist[idx];
         if !index.indpred.is_empty() && !index.predOK.get() {
             continue;
         }
-        let mut rclauseset = IndexClauseSet::new(run.mcx, index.nkeycolumns as usize);
+        let mut rclauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
         match_restriction_clauses_to_index(run, &index, &mut rclauseset)?;
         get_index_paths(run, rel, &index, &rclauseset, &mut bitindexpaths)?;
+
+        // "Loose" join clauses not absorbed into ECs.
+        let mut jclauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
+        match_join_clauses_to_index(run, rel, &index, &mut jclauseset, &mut joinorclauses)?;
+
+        let mut eclauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
+        match_eclass_clauses_to_index(run, &index, &mut eclauseset)?;
+
+        if jclauseset.nonempty || eclauseset.nonempty {
+            consider_index_join_clauses(
+                run,
+                rel,
+                &index,
+                &rclauseset,
+                &jclauseset,
+                &eclauseset,
+                &mut bitjoinpaths,
+            )?;
+        }
     }
 
     // C calls generate_bitmap_or_paths unconditionally; the OR pre-scan skips
@@ -171,18 +191,424 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         clauses::is_orclause(*run.root.expr_node(run.root.rinfo(rid).clause))
     });
     if has_or {
-        let mut baserestrict: PgVec<'mcx, RinfoId> = PgVec::new_in(run.mcx);
+        let mut baserestrict: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
         baserestrict.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
         let orpaths = generate_bitmap_or_paths(run, rel, &baserestrict, &[])?;
         bitindexpaths.extend(orpaths.iter().copied());
     }
+    if !joinorclauses.is_empty() {
+        let mut baserestrict: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+        baserestrict.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
+        let orpaths = generate_bitmap_or_paths(run, rel, &joinorclauses, &baserestrict)?;
+        bitjoinpaths.extend(orpaths.iter().copied());
+    }
 
     if !bitindexpaths.is_empty() {
         let bitmapqual = choose_bitmap_and(run, rel, &bitindexpaths)?;
-        let bpath = crate::pathnode::create_bitmap_heap_path(run, rel, bitmapqual, 1.0)?;
+        let lateral_relids = crate::relnode::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        let bpath =
+            crate::pathnode::create_bitmap_heap_path(run, rel, bitmapqual, &lateral_relids, 1.0)?;
         add_path(run, rel, bpath);
+        debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+    }
+
+    if !bitjoinpaths.is_empty() {
+        // One BitmapHeapPath per distinct parameterization seen among the
+        // join bitmap index paths.
+        let mut all_path_outers: PgVec<'mcx, types_pathnodes::Relids<'mcx>> = PgVec::new_in(mcx);
+        for &p in bitjoinpaths.iter() {
+            let req = crate::relnode::relids_copy(
+                mcx,
+                crate::pathnode::path_req_outer(run.root.path(p).base()),
+            );
+            if !all_path_outers
+                .iter()
+                .any(|o| crate::relnode::relids_equal(o, &req))
+            {
+                all_path_outers.push(req);
+            }
+        }
+        for max_outers in all_path_outers.iter() {
+            let mut this_path_set: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+            for &p in bitjoinpaths.iter() {
+                if relids_is_subset(
+                    crate::pathnode::path_req_outer(run.root.path(p).base()),
+                    max_outers,
+                ) {
+                    this_path_set.push(p);
+                }
+            }
+            this_path_set.extend(bitindexpaths.iter().copied());
+            let bitmapqual = choose_bitmap_and(run, rel, &this_path_set)?;
+            let required_outer = crate::relnode::relids_copy(
+                mcx,
+                crate::pathnode::path_req_outer(run.root.path(bitmapqual).base()),
+            );
+            let cur_relid = run.root.rel(rel).relid;
+            let loop_count = get_loop_count(run, cur_relid, &required_outer)?;
+            let bpath = crate::pathnode::create_bitmap_heap_path(
+                run,
+                rel,
+                bitmapqual,
+                &required_outer,
+                loop_count,
+            )?;
+            add_path(run, rel, bpath);
+        }
     }
     Ok(())
+}
+
+// consider_index_join_clauses (indxpath.c).
+#[allow(clippy::too_many_arguments)]
+fn consider_index_join_clauses<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    index: &'mcx IndexOptInfo<'mcx>,
+    rclauseset: &IndexClauseSet<'mcx>,
+    jclauseset: &IndexClauseSet<'mcx>,
+    eclauseset: &IndexClauseSet<'mcx>,
+    bitindexpaths: &mut PgVec<'mcx, PathId>,
+) -> PgResult<()> {
+    let mut considered_clauses = 0usize;
+    let mut considered_relids: PgVec<'mcx, types_pathnodes::Relids<'mcx>> = PgVec::new_in(run.mcx);
+    for indexcol in 0..index.nkeycolumns as usize {
+        considered_clauses += jclauseset.indexclauses[indexcol].len();
+        consider_index_join_outer_rels(
+            run,
+            rel,
+            index,
+            rclauseset,
+            jclauseset,
+            eclauseset,
+            bitindexpaths,
+            &jclauseset.indexclauses[indexcol],
+            considered_clauses,
+            &mut considered_relids,
+        )?;
+        considered_clauses += eclauseset.indexclauses[indexcol].len();
+        consider_index_join_outer_rels(
+            run,
+            rel,
+            index,
+            rclauseset,
+            jclauseset,
+            eclauseset,
+            bitindexpaths,
+            &eclauseset.indexclauses[indexcol],
+            considered_clauses,
+            &mut considered_relids,
+        )?;
+    }
+    Ok(())
+}
+
+// consider_index_join_outer_rels (indxpath.c).
+#[allow(clippy::too_many_arguments)]
+fn consider_index_join_outer_rels<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    index: &'mcx IndexOptInfo<'mcx>,
+    rclauseset: &IndexClauseSet<'mcx>,
+    jclauseset: &IndexClauseSet<'mcx>,
+    eclauseset: &IndexClauseSet<'mcx>,
+    bitindexpaths: &mut PgVec<'mcx, PathId>,
+    indexjoinclauses: &[IndexClause<'mcx>],
+    considered_clauses: usize,
+    considered_relids: &mut PgVec<'mcx, types_pathnodes::Relids<'mcx>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    for iclause in indexjoinclauses {
+        let rid = iclause.rinfo.expect("IndexClause rinfo");
+        let clause_relids = crate::relnode::relids_copy(mcx, &run.root.rinfo(rid).clause_relids);
+        let parent_ec = run.root.rinfo(rid).parent_ec;
+        if considered_relids
+            .iter()
+            .any(|r| crate::relnode::relids_equal(r, &clause_relids))
+        {
+            continue;
+        }
+        // Union with each previously-tried set, capped at
+        // 10 * considered_clauses relid sets.
+        let num_considered_relids = considered_relids.len();
+        for pos in 0..num_considered_relids {
+            let oldrelids = crate::relnode::relids_copy(mcx, &considered_relids[pos]);
+            if crate::relnode::relids_subset_compare(&clause_relids, &oldrelids)
+                != crate::relnode::SubsetCmp::Different
+            {
+                continue;
+            }
+            if parent_ec.is_some()
+                && eclass_already_used(run, parent_ec, &oldrelids, indexjoinclauses)
+            {
+                continue;
+            }
+            if considered_relids.len() >= 10 * considered_clauses {
+                break;
+            }
+            let union = crate::relnode::relids_union(mcx, &clause_relids, &oldrelids);
+            get_join_index_paths(
+                run,
+                rel,
+                index,
+                rclauseset,
+                jclauseset,
+                eclauseset,
+                bitindexpaths,
+                &union,
+                considered_relids,
+            )?;
+        }
+        get_join_index_paths(
+            run,
+            rel,
+            index,
+            rclauseset,
+            jclauseset,
+            eclauseset,
+            bitindexpaths,
+            &clause_relids,
+            considered_relids,
+        )?;
+    }
+    Ok(())
+}
+
+// get_join_index_paths (indxpath.c).
+#[allow(clippy::too_many_arguments)]
+fn get_join_index_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    index: &'mcx IndexOptInfo<'mcx>,
+    rclauseset: &IndexClauseSet<'mcx>,
+    jclauseset: &IndexClauseSet<'mcx>,
+    eclauseset: &IndexClauseSet<'mcx>,
+    bitindexpaths: &mut PgVec<'mcx, PathId>,
+    relids: &types_pathnodes::Relids<'mcx>,
+    considered_relids: &mut PgVec<'mcx, types_pathnodes::Relids<'mcx>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    if considered_relids
+        .iter()
+        .any(|r| crate::relnode::relids_equal(r, relids))
+    {
+        return Ok(());
+    }
+    let mut clauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
+    for indexcol in 0..index.nkeycolumns as usize {
+        for ic in jclauseset.indexclauses[indexcol].iter() {
+            let rid = ic.rinfo.expect("IndexClause rinfo");
+            if relids_is_subset(&run.root.rinfo(rid).clause_relids, relids) {
+                clauseset.indexclauses[indexcol].push(ic.clone());
+            }
+        }
+        // EC clauses per column are mutually redundant: use at most one.
+        for ic in eclauseset.indexclauses[indexcol].iter() {
+            let rid = ic.rinfo.expect("IndexClause rinfo");
+            if relids_is_subset(&run.root.rinfo(rid).clause_relids, relids) {
+                clauseset.indexclauses[indexcol].push(ic.clone());
+                break;
+            }
+        }
+        for ic in rclauseset.indexclauses[indexcol].iter() {
+            clauseset.indexclauses[indexcol].push(ic.clone());
+        }
+        if !clauseset.indexclauses[indexcol].is_empty() {
+            clauseset.nonempty = true;
+        }
+    }
+    debug_assert!(clauseset.nonempty);
+    get_index_paths(run, rel, index, &clauseset, bitindexpaths)?;
+    considered_relids.push(crate::relnode::relids_copy(mcx, relids));
+    Ok(())
+}
+
+// eclass_already_used (indxpath.c).
+fn eclass_already_used(
+    run: &PlannerRun<'_>,
+    parent_ec: Option<types_pathnodes::EcId>,
+    oldrelids: &types_pathnodes::Relids<'_>,
+    indexjoinclauses: &[IndexClause<'_>],
+) -> bool {
+    for iclause in indexjoinclauses {
+        let rid = iclause.rinfo.expect("IndexClause rinfo");
+        let ri = run.root.rinfo(rid);
+        if ri.parent_ec == parent_ec && relids_is_subset(&ri.clause_relids, oldrelids) {
+            return true;
+        }
+    }
+    false
+}
+
+// get_loop_count (indxpath.c).
+pub(crate) fn get_loop_count(
+    run: &mut PlannerRun<'_>,
+    cur_relid: u32,
+    outer_relids: &types_pathnodes::Relids<'_>,
+) -> PgResult<f64> {
+    if outer_relids.is_none() {
+        return Ok(1.0);
+    }
+    let mut members: PgVec<'_, i32> = PgVec::new_in(run.mcx);
+    members.extend(crate::relnode::relids_members(outer_relids));
+    let mut result = 0.0f64;
+    for outer_relid in members {
+        if outer_relid >= run.root.simple_rel_array_size {
+            continue;
+        }
+        let Some(outer_rel) = run.root.simple_rel_array[outer_relid as usize] else {
+            continue;
+        };
+        debug_assert_eq!(run.root.rel(outer_rel).relid, outer_relid as u32);
+        if crate::joinrels::is_dummy_rel(&run.root, outer_rel) {
+            continue;
+        }
+        let outer_rows = run.root.rel(outer_rel).rows;
+        debug_assert!(outer_rows > 0.0);
+        let rowcount =
+            adjust_rowcount_for_semijoins(run, cur_relid, outer_relid as u32, outer_rows)?;
+        if result == 0.0 || result > rowcount {
+            result = rowcount;
+        }
+    }
+    Ok(if result > 0.0 { result } else { 1.0 })
+}
+
+// adjust_rowcount_for_semijoins (indxpath.c).
+fn adjust_rowcount_for_semijoins(
+    run: &mut PlannerRun<'_>,
+    cur_relid: u32,
+    outer_relid: u32,
+    mut rowcount: f64,
+) -> PgResult<f64> {
+    let mcx = run.mcx;
+    for i in 0..run.root.join_info_list.len() {
+        let (is_semi, in_left, in_right) = {
+            let sj = &run.root.join_info_list[i];
+            (
+                sj.jointype == types_pathnodes::JOIN_SEMI,
+                relids_is_member(cur_relid as i32, &sj.syn_lefthand),
+                relids_is_member(outer_relid as i32, &sj.syn_righthand),
+            )
+        };
+        if is_semi && in_left && in_right {
+            let (syn_righthand, rhs_exprs) = {
+                let sj = &run.root.join_info_list[i];
+                (
+                    crate::relnode::relids_copy(mcx, &sj.syn_righthand),
+                    crate::relnode::pgvec_clone_shallow(mcx, &sj.semi_rhs_exprs),
+                )
+            };
+            let nraw = approximate_joinrel_size(run, &syn_righthand);
+            let mut exprs: PgVec<'_, (types_pathnodes::NodeId, Node<'_>)> = PgVec::new_in(mcx);
+            for &id in rhs_exprs.iter() {
+                exprs.push((id, *run.root.expr_node(id)));
+            }
+            let nunique = crate::selfuncs::estimate_num_groups(run, &exprs, nraw)?;
+            if rowcount > nunique {
+                rowcount = nunique;
+            }
+        }
+    }
+    Ok(rowcount)
+}
+
+// approximate_joinrel_size (indxpath.c).
+fn approximate_joinrel_size(run: &PlannerRun<'_>, relids: &types_pathnodes::Relids<'_>) -> f64 {
+    let mut rowcount = 1.0f64;
+    for relid in crate::relnode::relids_members(relids) {
+        if relid >= run.root.simple_rel_array_size {
+            continue;
+        }
+        let Some(rel) = run.root.simple_rel_array[relid as usize] else {
+            continue;
+        };
+        debug_assert_eq!(run.root.rel(rel).relid, relid as u32);
+        if crate::joinrels::is_dummy_rel(&run.root, rel) {
+            continue;
+        }
+        debug_assert!(run.root.rel(rel).rows > 0.0);
+        rowcount *= run.root.rel(rel).rows;
+    }
+    rowcount
+}
+
+// match_join_clauses_to_index (indxpath.c).
+fn match_join_clauses_to_index<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    index: &IndexOptInfo<'mcx>,
+    clauseset: &mut IndexClauseSet<'mcx>,
+    joinorclauses: &mut PgVec<'mcx, RinfoId>,
+) -> PgResult<()> {
+    let joininfo = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).joininfo);
+    for &rid in joininfo.iter() {
+        if !join_clause_is_movable_to(run, rid, rel) {
+            continue;
+        }
+        if clauses::is_orclause(*run.root.expr_node(run.root.rinfo(rid).clause))
+            && !joinorclauses.iter().any(|&x| x == rid)
+        {
+            joinorclauses.push(rid);
+        }
+        match_clause_to_index(run, rid, index, clauseset)?;
+    }
+    Ok(())
+}
+
+// match_eclass_clauses_to_index (indxpath.c).
+fn match_eclass_clauses_to_index<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &IndexOptInfo<'mcx>,
+    clauseset: &mut IndexClauseSet<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let rel = index.rel.expect("index rel set");
+    if !run.root.rel(rel).has_eclass_joins {
+        return Ok(());
+    }
+    for indexcol in 0..index.nkeycolumns as usize {
+        let lateral_referencers =
+            crate::relnode::relids_copy(mcx, &run.root.rel(rel).lateral_referencers);
+        let clauses = crate::equivclass::generate_implied_equalities_for_column(
+            run,
+            rel,
+            |run, _rel, ec, em| ec_member_matches_indexcol(run, ec, em, index, indexcol),
+            &lateral_referencers,
+        )?;
+        // Recheck against the index: non-btree EC operators may not be in
+        // the index opclass (cf ec_member_matches_indexcol).
+        for &rid in clauses.iter() {
+            match_clause_to_index(run, rid, index, clauseset)?;
+        }
+    }
+    Ok(())
+}
+
+// ec_member_matches_indexcol (indxpath.c).
+fn ec_member_matches_indexcol(
+    run: &PlannerRun<'_>,
+    ec: types_pathnodes::EcId,
+    em: types_pathnodes::EmId,
+    index: &IndexOptInfo<'_>,
+    indexcol: usize,
+) -> bool {
+    use types_core::BTREE_AM_OID;
+    debug_assert!(indexcol < index.nkeycolumns as usize);
+    let cur_family = index.opfamily[indexcol];
+    let cur_collation = index.indexcollations[indexcol];
+    if index.relam == BTREE_AM_OID && !run.root.ec(ec).ec_opfamilies.contains(&cur_family) {
+        return false;
+    }
+    if !index_coll_matches_expr_coll(cur_collation, run.root.ec(ec).ec_collation) {
+        return false;
+    }
+    match_index_to_operand(
+        run,
+        *run.root.expr_node(run.root.em(em).em_expr),
+        indexcol,
+        index,
+    )
 }
 
 fn match_restriction_clauses_to_index<'mcx>(
@@ -210,13 +636,15 @@ fn match_clause_to_index<'mcx>(
     {
         let r = run.root.rinfo(rinfo);
         let index_rel = index.rel.expect("index rel set");
-        if !(r.security_level <= run.root.rel(index_rel).baserestrict_min_security || r.leakproof)
-        {
+        if !(r.security_level <= run.root.rel(index_rel).baserestrict_min_security || r.leakproof) {
             return Ok(());
         }
     }
     for indexcol in 0..index.nkeycolumns as usize {
-        if clauseset.indexclauses[indexcol].iter().any(|ic| ic.rinfo == Some(rinfo)) {
+        if clauseset.indexclauses[indexcol]
+            .iter()
+            .any(|ic| ic.rinfo == Some(rinfo))
+        {
             return Ok(());
         }
         if let Some(iclause) = match_clause_to_indexcol(run, rinfo, indexcol, index)? {
@@ -228,8 +656,109 @@ fn match_clause_to_index<'mcx>(
     Ok(())
 }
 
-// match_clause_to_indexcol (indxpath.c). Boolean opfamilies (BOOL_BTREE 424 /
-// BOOL_HASH 2222) take the match_boolean_index_clause arm in C.
+const BOOL_BTREE_FAM_OID: u32 = 424;
+const BOOL_HASH_FAM_OID: u32 = 2222;
+const BOOLEAN_EQUAL_OPERATOR: u32 = 91;
+const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
+
+fn is_boolean_opfamily(opfamily: u32) -> PgResult<bool> {
+    if opfamily < FIRST_NORMAL_OBJECT_ID {
+        Ok(opfamily == BOOL_BTREE_FAM_OID || opfamily == BOOL_HASH_FAM_OID)
+    } else {
+        lsyscache::op_in_opfamily(BOOLEAN_EQUAL_OPERATOR, opfamily)
+    }
+}
+
+fn match_boolean_index_clause<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<Option<IndexClause<'mcx>>> {
+    let mcx = run.mcx;
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let mut op = None;
+    if match_index_to_operand(run, clause, indexcol, index) {
+        op = Some(crate::like_support::make_opclause(
+            mcx,
+            BOOLEAN_EQUAL_OPERATOR,
+            clause,
+            clauses::make_bool_const(mcx, true, false)?,
+            0,
+        )?);
+    } else if clauses::is_notclause(clause) {
+        let arg = clause
+            .as_bool_expr()
+            .unwrap()
+            .args
+            .first()
+            .expect("NOT has one arg");
+        if match_index_to_operand(run, arg, indexcol, index) {
+            op = Some(crate::like_support::make_opclause(
+                mcx,
+                BOOLEAN_EQUAL_OPERATOR,
+                arg,
+                clauses::make_bool_const(mcx, false, false)?,
+                0,
+            )?);
+        }
+    } else if clause.node_tag() == NodeTag::T_BooleanTest {
+        use types_nodes::primnodes::BoolTestType;
+        let btest = clause.as_boolean_test().unwrap();
+        let arg = btest.arg.expect("BooleanTest carries its arg");
+        let wanted = match btest.booltesttype {
+            BoolTestType::IS_TRUE => Some(true),
+            BoolTestType::IS_FALSE => Some(false),
+            _ => None,
+        };
+        if let Some(v) = wanted {
+            if match_index_to_operand(run, arg, indexcol, index) {
+                op = Some(crate::like_support::make_opclause(
+                    mcx,
+                    BOOLEAN_EQUAL_OPERATOR,
+                    arg,
+                    clauses::make_bool_const(mcx, v, false)?,
+                    0,
+                )?);
+            }
+        }
+    }
+    let Some(op) = op else { return Ok(None) };
+    let mut indexquals = PgVec::new_in(mcx);
+    indexquals.push(crate::initsplan::make_restrictinfo(
+        run, op, true, false, false, false, 0, None, None, None,
+    )?);
+    Ok(Some(IndexClause {
+        rinfo: Some(rinfo),
+        indexquals,
+        lossy: false,
+        indexcol: indexcol as i16,
+        indexcols: PgVec::new_in(mcx),
+    }))
+}
+
+pub fn indexcol_is_bool_constant_for_query<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &IndexOptInfo<'mcx>,
+    indexcol: usize,
+) -> PgResult<bool> {
+    if !is_boolean_opfamily(index.opfamily[indexcol])? {
+        return Ok(false);
+    }
+    let rel = index.rel.expect("index carries its rel");
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        if run.root.rinfo(rid).pseudoconstant {
+            continue;
+        }
+        if match_boolean_index_clause(run, rid, indexcol, index)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// match_clause_to_indexcol (indxpath.c).
 fn match_clause_to_indexcol<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rinfo: RinfoId,
@@ -237,11 +766,12 @@ fn match_clause_to_indexcol<'mcx>(
     index: &IndexOptInfo<'mcx>,
 ) -> PgResult<Option<IndexClause<'mcx>>> {
     debug_assert!(indexcol < index.nkeycolumns as usize);
-    const BOOL_BTREE_FAM_OID: u32 = 424;
-    const BOOL_HASH_FAM_OID: u32 = 2222;
     let opfamily = index.opfamily[indexcol];
-    if opfamily == BOOL_BTREE_FAM_OID || opfamily == BOOL_HASH_FAM_OID {
-        panic!("match_boolean_index_clause (indxpath.c): M2 boolean-index lane");
+    if is_boolean_opfamily(opfamily)? {
+        let iclause = match_boolean_index_clause(run, rinfo, indexcol, index)?;
+        if iclause.is_some() {
+            return Ok(iclause);
+        }
     }
 
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
@@ -265,9 +795,9 @@ fn match_clause_to_indexcol<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_RelabelType => panic!(
-            "match_clause_to_indexcol (indxpath.c): RelabelType clause; M2 lane"
-        ),
+        NodeTag::T_RelabelType => {
+            panic!("match_clause_to_indexcol (indxpath.c): RelabelType clause; M2 lane")
+        }
         NodeTag::T_NullTest if index.amsearchnulls => {
             let nt = clause.as_null_test().unwrap();
             if !nt.argisrow
@@ -337,9 +867,7 @@ fn match_opclause_to_indexcol<'mcx>(
             }));
         }
         let opfuncid = lsyscache::get_opcode(op.opno)?;
-        if let Some(ic) =
-            get_index_clause_from_support(run, rinfo, opfuncid, 0, indexcol, index)?
-        {
+        if let Some(ic) = get_index_clause_from_support(run, rinfo, opfuncid, 0, indexcol, index)? {
             return Ok(Some(ic));
         }
     }
@@ -348,7 +876,27 @@ fn match_opclause_to_indexcol<'mcx>(
         && !relids_is_member(index_relid as i32, &run.root.rinfo(rinfo).left_relids)
         && !clauses::contain_volatile_functions(leftop)?
     {
-        panic!("commute_restrictinfo (indxpath.c): const-op-indexkey; M2 commutation lane");
+        if index_coll_matches_expr_coll(idxcollation, op.inputcollid) {
+            let comm_op = lsyscache::get_commutator(op.opno)?;
+            if comm_op != 0 && lsyscache::op_in_opfamily(comm_op, opfamily)? {
+                let commrinfo = crate::initsplan::commute_restrictinfo(run, rinfo, comm_op)?;
+                return Ok(Some(IndexClause {
+                    rinfo: Some(rinfo),
+                    indexquals: {
+                        let mut v = PgVec::new_in(run.mcx);
+                        v.push(commrinfo);
+                        v
+                    },
+                    lossy: false,
+                    indexcol: indexcol as i16,
+                    indexcols: PgVec::new_in(run.mcx),
+                }));
+            }
+        }
+        let opfuncid = lsyscache::get_opcode(op.opno)?;
+        if let Some(ic) = get_index_clause_from_support(run, rinfo, opfuncid, 1, indexcol, index)? {
+            return Ok(Some(ic));
+        }
     }
 
     Ok(None)
@@ -446,9 +994,7 @@ fn get_index_clause_from_support<'mcx>(
             funcid,
             index.opfamily[indexcol],
         )?,
-        other => panic!(
-            "get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"
-        ),
+        other => panic!("get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"),
     };
     let Some(exprs) = exprs else {
         return Ok(None);
@@ -468,7 +1014,6 @@ fn get_index_clause_from_support<'mcx>(
         indexcols: PgVec::new_in(run.mcx),
     }))
 }
-
 
 // match_network_function (network.c).
 fn match_network_function<'mcx>(
@@ -509,33 +1054,38 @@ fn match_network_subset<'mcx>(
     opfamily: u32,
 ) -> PgResult<Option<PgVec<'mcx, Node<'mcx>>>> {
     const INETOID: u32 = 869;
-    let Some(c) = rightop.as_const() else { return Ok(None) };
+    let Some(c) = rightop.as_const() else {
+        return Ok(None);
+    };
     if c.constisnull {
         return Ok(None);
     }
     let rightopval = c.constvalue;
 
-    let inet_const = |run: &mut PlannerRun<'mcx>,
-                      v: adt_network::InetValue|
-     -> PgResult<Node<'mcx>> {
-        let (img, len) = v.image();
-        let copy = mcx::slice_borrow_in(run.mcx, &img[..len])?;
-        types_nodes::Node::mk(
-            run.mcx,
-            types_nodes::primnodes::Const {
-                consttype: INETOID,
-                consttypmod: -1,
-                constcollid: 0,
-                constlen: -1,
-                constvalue: datum::Datum::from_usize(copy.as_ptr() as usize),
-                constisnull: false,
-                constbyval: false,
-                location: -1,
-            },
-        )
-    };
+    let inet_const =
+        |run: &mut PlannerRun<'mcx>, v: adt_network::InetValue| -> PgResult<Node<'mcx>> {
+            let (img, len) = v.image();
+            let copy = mcx::slice_borrow_in(run.mcx, &img[..len])?;
+            types_nodes::Node::mk(
+                run.mcx,
+                types_nodes::primnodes::Const {
+                    consttype: INETOID,
+                    consttypmod: -1,
+                    constcollid: 0,
+                    constlen: -1,
+                    constvalue: datum::Datum::from_usize(copy.as_ptr() as usize),
+                    constisnull: false,
+                    constbyval: false,
+                    location: -1,
+                },
+            )
+        };
 
-    let cmp1 = if is_eq { types_pathnodes::COMPARE_GE } else { types_pathnodes::COMPARE_GT };
+    let cmp1 = if is_eq {
+        types_pathnodes::COMPARE_GE
+    } else {
+        types_pathnodes::COMPARE_GT
+    };
     let opr1oid = lsyscache::get_opfamily_member_for_cmptype(opfamily, INETOID, INETOID, cmp1)?;
     if opr1oid == 0 {
         return Ok(None);
@@ -551,14 +1101,17 @@ fn match_network_subset<'mcx>(
     if opr2oid == 0 {
         return Ok(None);
     }
-    let opr2right =
-        adt_network::network_scan_last(crate::network_selfuncs::inet_ref(rightopval))?;
+    let opr2right = adt_network::network_scan_last(crate::network_selfuncs::inet_ref(rightopval))?;
 
     let mut result: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(run.mcx, 2)?;
     let c1 = inet_const(run, opr1right)?;
-    result.push(crate::like_support::make_opclause(run.mcx, opr1oid, leftop, c1, 0)?);
+    result.push(crate::like_support::make_opclause(
+        run.mcx, opr1oid, leftop, c1, 0,
+    )?);
     let c2 = inet_const(run, opr2right)?;
-    result.push(crate::like_support::make_opclause(run.mcx, opr2oid, leftop, c2, 0)?);
+    result.push(crate::like_support::make_opclause(
+        run.mcx, opr2oid, leftop, c2, 0,
+    )?);
     Ok(Some(result))
 }
 
@@ -596,7 +1149,10 @@ pub fn match_index_to_operand(
                 pos += 1;
             }
         }
-        let id = *index.indexprs.get(pos).expect("wrong number of index expressions");
+        let id = *index
+            .indexprs
+            .get(pos)
+            .expect("wrong number of index expressions");
         let mut indexkey = *run.root.expr_node(id);
         if indexkey.node_tag() == NodeTag::T_RelabelType {
             indexkey = indexkey.as_relabel_type().unwrap().arg;
@@ -653,22 +1209,26 @@ fn build_index_paths<'mcx>(
     let mut result: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
 
     let mut index_clauses: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    let mut outer_relids = crate::relnode::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
     for indexcol in 0..index.nkeycolumns as usize {
         for ic in clauses.indexclauses[indexcol].iter() {
             let rid = ic.rinfo.expect("IndexClause rinfo");
-            debug_assert!(relids_is_subset(
+            outer_relids = crate::relnode::relids_union(
+                mcx,
+                &outer_relids,
                 &run.root.rinfo(rid).clause_relids,
-                &run.root.rel(rel).relids
-            ));
+            );
             index_clauses.push(ic.clone());
         }
         if index_clauses.is_empty() && !index.amoptionalkey {
             return Ok(result);
         }
     }
+    outer_relids =
+        crate::relnode::relids_del_member(mcx, &outer_relids, run.root.rel(rel).relid as i32);
 
-    let loop_count = 1.0;
+    let cur_relid = run.root.rel(rel).relid;
+    let loop_count = get_loop_count(run, cur_relid, &outer_relids)?;
 
     // has_useful_pathkeys (allpaths.c); amcanorderbyop is false for btree so
     // the match_pathkeys_to_index arm is dead. Bitmap scans never provide
@@ -676,6 +1236,7 @@ fn build_index_paths<'mcx>(
     let pathkeys_possibly_useful = !bitmap
         && (!run.root.rel(rel).joininfo.is_empty()
             || run.root.rel(rel).has_eclass_joins
+            || !run.root.group_pathkeys.is_empty()
             || !run.root.query_pathkeys.is_empty());
     let index_is_ordered = !index.sortopfamily.is_empty();
     let useful_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> =
@@ -709,6 +1270,7 @@ fn build_index_paths<'mcx>(
             useful_pathkeys,
             types_pathnodes::ForwardScanDirection,
             index_only_scan,
+            &outer_relids,
             loop_count,
         )?;
         result.push(ipath);
@@ -732,6 +1294,7 @@ fn build_index_paths<'mcx>(
                 useful_pathkeys,
                 types_pathnodes::BackwardScanDirection,
                 index_only_scan,
+                &outer_relids,
                 loop_count,
             )?;
             result.push(ipath);
@@ -781,7 +1344,12 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
     true
 }
 
-fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut mcx::PgVec<'_, i16>) {
+fn collect_varattnos(
+    run: &PlannerRun<'_>,
+    node: Node<'_>,
+    relid: i32,
+    out: &mut mcx::PgVec<'_, i16>,
+) {
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().unwrap();
@@ -813,12 +1381,18 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
                 collect_varattnos(run, e, relid, out);
             }
         }
-        NodeTag::T_NullTest => {
-            collect_varattnos(run, node.as_null_test().unwrap().arg.expect("NullTest.arg"), relid, out)
-        }
+        NodeTag::T_NullTest => collect_varattnos(
+            run,
+            node.as_null_test().unwrap().arg.expect("NullTest.arg"),
+            relid,
+            out,
+        ),
         NodeTag::T_BooleanTest => collect_varattnos(
             run,
-            node.as_boolean_test().unwrap().arg.expect("BooleanTest.arg"),
+            node.as_boolean_test()
+                .unwrap()
+                .arg
+                .expect("BooleanTest.arg"),
             relid,
             out,
         ),
@@ -923,19 +1497,20 @@ fn assert_no_similar_or_groups<'mcx>(
                 relids_is_member(relid, &r.right_relids),
             )
         };
-        let (opno, nonconst) = if in_right && !in_left && !clauses::contain_volatile_functions(leftop)? {
-            let comm = lsyscache::get_commutator(op.opno)?;
-            if comm == 0 {
+        let (opno, nonconst) =
+            if in_right && !in_left && !clauses::contain_volatile_functions(leftop)? {
+                let comm = lsyscache::get_commutator(op.opno)?;
+                if comm == 0 {
+                    keys.push(None);
+                    continue;
+                }
+                (comm, rightop)
+            } else if in_left && !in_right && !clauses::contain_volatile_functions(rightop)? {
+                (op.opno, leftop)
+            } else {
                 keys.push(None);
                 continue;
-            }
-            (comm, rightop)
-        } else if in_left && !in_right && !clauses::contain_volatile_functions(rightop)? {
-            (op.opno, leftop)
-        } else {
-            keys.push(None);
-            continue;
-        };
+            };
         let mut key = None;
         let nindexes = run.root.rel(rel).indexlist.len();
         'indexes: for indexnum in 0..nindexes {
@@ -945,7 +1520,12 @@ fn assert_no_similar_or_groups<'mcx>(
             }
             for colnum in 0..index.nkeycolumns as usize {
                 if match_index_to_operand(run, nonconst, colnum, index) {
-                    key = Some(Key { indexnum, colnum, opno, inputcollid: op.inputcollid });
+                    key = Some(Key {
+                        indexnum,
+                        colnum,
+                        opno,
+                        inputcollid: op.inputcollid,
+                    });
                     break 'indexes;
                 }
             }
@@ -1080,12 +1660,9 @@ pub fn generate_bitmap_or_paths<'mcx>(
                     il.extend(sub.iter().copied());
                     il
                 }
-                Arm::Simple(arid) => build_paths_for_or(
-                    run,
-                    rel,
-                    core::slice::from_ref(arid),
-                    &all_clauses,
-                )?,
+                Arm::Simple(arid) => {
+                    build_paths_for_or(run, rel, core::slice::from_ref(arid), &all_clauses)?
+                }
             };
             if indlist.is_empty() {
                 matched_all = false;
@@ -1129,9 +1706,9 @@ pub fn choose_bitmap_and<'mcx>(
             infos.push(info);
             continue;
         }
-        let dup = infos.iter().position(|e| {
-            !e.unclassifiable && info.clauseids.equal(&e.clauseids)
-        });
+        let dup = infos
+            .iter()
+            .position(|e| !e.unclassifiable && info.clauseids.equal(&e.clauseids));
         match dup {
             Some(i) => {
                 let (ncost, _) = crate::costsize::cost_bitmap_tree_node(run, info.path);
@@ -1154,7 +1731,10 @@ pub fn choose_bitmap_and<'mcx>(
         let (bc, bsel) = crate::costsize::cost_bitmap_tree_node(run, b.path);
         ac.partial_cmp(&bc)
             .expect("bitmap path cost is not NaN")
-            .then(asel.partial_cmp(&bsel).expect("bitmap selectivity is not NaN"))
+            .then(
+                asel.partial_cmp(&bsel)
+                    .expect("bitmap selectivity is not NaN"),
+            )
     });
 
     let mut bestpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
@@ -1219,7 +1799,13 @@ fn classify_index_clause_usage<'mcx>(
         let pos = find_list_position(preds[i], clauselist);
         clauseids.add_member(mcx, pos as i32)?;
     }
-    Ok(PathClauseUsage { path, quals, preds, clauseids, unclassifiable: false })
+    Ok(PathClauseUsage {
+        path,
+        quals,
+        preds,
+        clauseids,
+        unclassifiable: false,
+    })
 }
 
 fn find_indexpath_quals<'mcx>(
@@ -1272,7 +1858,14 @@ fn bitmap_scan_cost_est<'mcx>(
     rel: RelId,
     ipath: PathId,
 ) -> PgResult<f64> {
-    let bpath = crate::pathnode::create_bitmap_heap_path(run, rel, ipath, 1.0)?;
+    let required_outer = crate::relnode::relids_copy(
+        run.mcx,
+        crate::pathnode::path_req_outer(run.root.path(ipath).base()),
+    );
+    let cur_relid = run.root.rel(rel).relid;
+    let loop_count = get_loop_count(run, cur_relid, &required_outer)?;
+    let bpath =
+        crate::pathnode::create_bitmap_heap_path(run, rel, ipath, &required_outer, loop_count)?;
     Ok(run.root.path(bpath).base().total_cost)
 }
 

@@ -188,9 +188,16 @@ fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> b
         (rel2, rel1)
     };
     let other_relids = &run.root.rel(other).relids;
-    run.root.rel(probe).joininfo.iter().any(|&rid| {
+    let result = run.root.rel(probe).joininfo.iter().any(|&rid| {
         relids_overlap(other_relids, &run.root.rinfo(rid).required_relids)
-    })
+    });
+    if !result
+        && run.root.rel(rel1).has_eclass_joins
+        && run.root.rel(rel2).has_eclass_joins
+    {
+        return crate::equivclass::have_relevant_eclass_joinclause(run, rel1, rel2);
+    }
+    result
 }
 
 // is_dummy_rel (joinrels.c). C's dummy marker is a childless Append; ours is
@@ -509,7 +516,7 @@ fn build_join_rel<'mcx>(
         let jr = run.root.join_rel_list[i];
         if relids_equal(&run.root.rel(jr).relids, &joinrelids) {
             let restrictlist =
-                build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel);
+                build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel, sjinfo)?;
             return Ok((jr, restrictlist));
         }
     }
@@ -546,13 +553,12 @@ fn build_join_rel<'mcx>(
             if crate::relnode::relids_is_empty(&d) { None } else { d };
     }
 
-    let restrictlist = build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel);
+    let restrictlist =
+        build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel, sjinfo)?;
     build_joinrel_joinlist(run, joinrel, outer_rel, inner_rel);
 
-    // generate_join_implied_equalities is a no-op here: eclass-lite ECs are
-    // single-expr and never merged, so join equality clauses stay in the
-    // joininfo lists (initsplan divergence note) and restrictlist already
-    // carries them.
+    let he = crate::equivclass::has_relevant_eclass_joinclause(run, joinrel);
+    run.root.rel_mut(joinrel).has_eclass_joins = he;
 
     set_joinrel_size_estimates(run, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 
@@ -638,15 +644,14 @@ fn build_joinrel_tlist<'mcx>(
     Ok(())
 }
 
-// build_joinrel_restrictlist (relnode.c); the generate_join_implied_equalities
-// leg is dead while eq_classes stay empty (initsplan.rs EC divergence keeps
-// join equality clauses in the joininfo lists instead).
+// build_joinrel_restrictlist (relnode.c).
 fn build_joinrel_restrictlist<'mcx>(
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     joinrelids: &Relids<'mcx>,
     outer_rel: RelId,
     inner_rel: RelId,
-) -> PgVec<'mcx, types_pathnodes::RinfoId> {
+    sjinfo: &SpecialJoinInfo<'mcx>,
+) -> PgResult<PgVec<'mcx, types_pathnodes::RinfoId>> {
     let mut result: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
     for &input in [outer_rel, inner_rel].iter() {
         for &rid in run.root.rel(input).joininfo.iter() {
@@ -659,7 +664,17 @@ fn build_joinrel_restrictlist<'mcx>(
             }
         }
     }
-    result
+    // EC-derived clauses cannot duplicate the joininfo ones.
+    let outer_relids = relids_copy(run.mcx, &run.root.rel(outer_rel).relids);
+    let eq = crate::equivclass::generate_join_implied_equalities(
+        run,
+        joinrelids,
+        &outer_relids,
+        inner_rel,
+        Some(sjinfo),
+    )?;
+    result.extend(eq.iter().copied());
+    Ok(result)
 }
 
 fn build_joinrel_joinlist(run: &mut PlannerRun<'_>, joinrel: RelId, outer_rel: RelId, inner_rel: RelId) {

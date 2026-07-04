@@ -116,7 +116,11 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             set_subquery_pathlist(run, rel, rti)?;
         }
         RTEKind::RTE_CTE => {
-            crate::cte::set_cte_pathlist(run, rel, rti)?;
+            if rte.self_reference {
+                crate::cte::set_worktable_pathlist(run, rel, rti)?;
+            } else {
+                crate::cte::set_cte_pathlist(run, rel, rti)?;
+            }
         }
         RTEKind::RTE_RESULT => {
             crate::costsize::set_result_size_estimates(run, rel)?;
@@ -169,7 +173,7 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         rte.subquery.expect("RTE_SUBQUERY has a subquery"),
     )?;
     run.push_root()?;
-    crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
     run.root.rel_mut(rel).subroot_idx = Some(idx);
     // Isolate the params needed by this specific subplan.
@@ -411,10 +415,12 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         "set_append_rel_size (allpaths.c): joininfo translation \
          (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
     );
-    // add_child_rel_equivalences: only feeds child index-path pathkeys and
-    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
-    // stays loud where those could change the chosen plan.
-    debug_assert!(!run.root.rel(rel).has_eclass_joins);
+    // C divergence: add_child_rel_equivalences is unported (appendrel EC
+    // lane) — child EC members only feed child parameterized index paths and
+    // MergeAppend orderings; the indexlist gate in add_paths_to_append_rel
+    // stays loud where those could change the chosen plan. Join enforcement
+    // is unaffected: the parent appendrel's members drive
+    // generate_join_implied_equalities at the join level.
 
     let mut has_live_children = false;
     let mut parent_tuples = 0.0f64;
