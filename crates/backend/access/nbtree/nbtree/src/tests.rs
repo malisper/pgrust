@@ -37,11 +37,18 @@ struct FakePage([u8; BLCKSZ]);
 struct Img<const N: usize>([u8; N]);
 
 const HEAP_BUF_BASE: Buffer = 10000;
+
+fn leak_page(p: Box<FakePage>) -> core::ptr::NonNull<FakePage> {
+    core::ptr::NonNull::from(Box::leak(p))
+}
 const HEAP_OID: Oid = 4999;
 
+// Pages are leaked and stored as raw pointers with one stable tag: repeated
+// borrow_mut()+as_mut_ptr retags invalidated outstanding page pointers under
+// Miri stacked borrows.
 thread_local! {
-    static PAGES: RefCell<Vec<Box<FakePage>>> = const { RefCell::new(Vec::new()) };
-    static HEAP_PAGES: RefCell<Vec<Box<FakePage>>> = const { RefCell::new(Vec::new()) };
+    static PAGES: RefCell<Vec<core::ptr::NonNull<FakePage>>> = const { RefCell::new(Vec::new()) };
+    static HEAP_PAGES: RefCell<Vec<core::ptr::NonNull<FakePage>>> = const { RefCell::new(Vec::new()) };
     static PINS: Cell<i32> = const { Cell::new(0) };
     static READS: Cell<u32> = const { Cell::new(0) };
     static DIRTY_HINTS: Cell<u32> = const { Cell::new(0) };
@@ -87,17 +94,9 @@ fn install() {
         });
         bufmgr_seams::buffer_get_page::set(|buf| {
             if buf > HEAP_BUF_BASE {
-                HEAP_PAGES.with(|p| {
-                    core::ptr::NonNull::new(
-                        p.borrow_mut()[(buf - HEAP_BUF_BASE - 1) as usize].0.as_mut_ptr(),
-                    )
-                    .expect("page")
-                })
+                HEAP_PAGES.with(|p| p.borrow()[(buf - HEAP_BUF_BASE - 1) as usize].cast::<u8>())
             } else {
-                PAGES.with(|p| {
-                    core::ptr::NonNull::new(p.borrow_mut()[(buf - 1) as usize].0.as_mut_ptr())
-                        .expect("page")
-                })
+                PAGES.with(|p| p.borrow()[(buf - 1) as usize].cast::<u8>())
             }
         });
         bufmgr_seams::incr_buffer_ref_count::set(|_buf| PINS.with(|c| c.set(c.get() + 1)));
@@ -113,7 +112,7 @@ fn install() {
             assert!(flags & bufmgr_seams::EB_LOCK_FIRST != 0);
             let buf = PAGES.with(|p| {
                 let mut pages = p.borrow_mut();
-                pages.push(Box::new(FakePage([0u8; BLCKSZ])));
+                pages.push(leak_page(Box::new(FakePage([0u8; BLCKSZ]))));
                 pages.len() as Buffer
             });
             PINS.with(|c| c.set(c.get() + 1));
@@ -265,8 +264,8 @@ fn build_single_leaf_index(values: &[i32]) {
     PAGES.with(|p| {
         let mut pages = p.borrow_mut();
         pages.clear();
-        pages.push(meta_page(1, 0));
-        pages.push(leaf);
+        pages.push(leak_page(meta_page(1, 0)));
+        pages.push(leak_page(leaf));
     });
     READS.with(|c| c.set(0));
 }
@@ -634,7 +633,8 @@ fn kill_prior_tuple_marks_lp_dead() {
     // offnum 2 (value 20) is LP_DEAD; BTP_HAS_GARBAGE set.
     PAGES.with(|p| {
         let pages = p.borrow();
-        let leaf = &pages[1].0;
+        // SAFETY: leaked page, stable tag.
+        let leaf = &unsafe { pages[1].as_ref() }.0;
         let iid_off = SizeOfPageHeaderData + 4; // second line pointer
         // SAFETY: reading the owned page image.
         let iid = unsafe {
@@ -778,7 +778,7 @@ fn build_empty_index(allequalimage: bool) {
     PAGES.with(|p| {
         let mut pages = p.borrow_mut();
         pages.clear();
-        pages.push(meta_page_opts(P_NONE, 0, allequalimage));
+        pages.push(leak_page(meta_page_opts(P_NONE, 0, allequalimage)));
     });
     HEAP_PAGES.with(|p| p.borrow_mut().clear());
     READS.with(|c| c.set(0));
@@ -961,7 +961,7 @@ fn unique_index_rejects_live_duplicate() {
     install();
     build_empty_index(false);
     HEAP_PAGES.with(|p| {
-        p.borrow_mut().push(build_heap_page(&[10, 20, 30]));
+        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
     });
     let cx = MemoryContext::new("t");
     let rel = index_rel_opts(cx.mcx(), true);
@@ -1002,7 +1002,7 @@ fn unique_check_partial_reports_conflict_and_inserts_anyway() {
     install();
     build_empty_index(false);
     HEAP_PAGES.with(|p| {
-        p.borrow_mut().push(build_heap_page(&[10, 20, 30]));
+        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
     });
     let cx = MemoryContext::new("t");
     let rel = index_rel_opts(cx.mcx(), true);
@@ -1302,8 +1302,9 @@ fn build_dead_heap_page(n: usize) -> Box<FakePage> {
 // killitems-shape LP_DEAD stores over every data item on leaf block `blk`.
 fn mark_leaf_items_dead(blk: usize) {
     PAGES.with(|p| {
-        let mut pages = p.borrow_mut();
-        let page = &mut pages[blk];
+        let pages = p.borrow();
+        // SAFETY: leaked page, stable tag; harness is single-threaded.
+        let page = unsafe { &mut *pages[blk].as_ptr() };
         let lower = u16::from_ne_bytes([page.0[12], page.0[13]]) as usize;
         let nitems = (lower - SizeOfPageHeaderData) / 4;
         for i in 0..nitems {
@@ -1330,8 +1331,8 @@ fn lp_dead_page_fill_runs_simple_deletion_instead_of_split() {
     // 220 x (28B tuple, 32B stride) + 220 line pointers fits one page
     HEAP_PAGES.with(|p| {
         let mut pages = p.borrow_mut();
-        pages.push(build_dead_heap_page(220));
-        pages.push(build_dead_heap_page(220));
+        pages.push(leak_page(build_dead_heap_page(220)));
+        pages.push(leak_page(build_dead_heap_page(220)));
     });
 
     let setup = 380u32;

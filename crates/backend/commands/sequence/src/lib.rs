@@ -1245,11 +1245,13 @@ mod tests {
 
     #[test]
     fn seq_tuple_layout_roundtrip() {
-        let mut img = [0u8; 64];
+        #[repr(align(8))]
+        struct Img([u8; 64]);
+        let mut img = Img([0u8; 64]);
         let hoff = 24u8;
-        img[22] = hoff; // t_hoff offset within HeapTupleHeaderData
+        img.0[22] = hoff; // t_hoff offset within HeapTupleHeaderData
         let tup = SeqTuple {
-            data: img.as_mut_ptr(),
+            data: img.0.as_mut_ptr(),
             t_len: 64,
             #[cfg(debug_assertions)]
             buf: types_core::InvalidBuffer,
