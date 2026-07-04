@@ -232,9 +232,10 @@ fn query_first_common(fcinfo: &mut Fcinfo, tz: bool) -> PgResult<Datum> {
             args.silent,
             tz,
         )?
+        .map(image_result)
     };
     match img {
-        Some(img) => Ok(image_result(img)),
+        Some(d) => Ok(d),
         None => Ok(fcinfo.return_null()),
     }
 }
