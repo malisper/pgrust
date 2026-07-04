@@ -1851,8 +1851,3 @@ fn row_type_mismatch_dropped(i: usize) -> alloc::boxed::Box<PgError> {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn invalid_role_oid(roleid: ::types_core::Oid) -> Box<::types_error::PgError> {
-    Box::new(::types_error::PgError::error(format!("invalid role OID: {roleid}")))
-}
