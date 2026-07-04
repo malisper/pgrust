@@ -184,7 +184,7 @@ pub fn fc_set_config_by_name(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    use types_guc::{GucAction, GUC_ACTION_LOCAL, GUC_ACTION_SET};
+    use guc::{GucAction, GUC_ACTION_LOCAL, GUC_ACTION_SET};
     let [a, b, c] = *fcinfo.args_n::<3>();
     if a.isnull {
         return Err(Box::new(
