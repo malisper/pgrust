@@ -406,7 +406,7 @@ fn convert_column_priv_string(priv_type: &str) -> PgResult<u64> {
 fn convert_column_name(fcinfo: &Fcinfo, tableoid: Oid, i: usize) -> PgResult<i16> {
     use cache_syscache::cacheinfo::ATTNAME;
     use cache_syscache::{ReleaseSysCache, SearchSysCache2, SysCacheGetAttrNotNull, SysCacheKey};
-    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 6;
+    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
     const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
 
     let colname = arg_text_str(fcinfo, i)?;
