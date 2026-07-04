@@ -4,6 +4,7 @@
 mod tests;
 
 use mcx::{Mcx, PgVec};
+use nodes_core::node_funcs;
 use parser_small1::{
     parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
 };
@@ -503,10 +504,27 @@ fn markRTEForSelectPriv(
             }
             .expect("perminfoindex resolves to RTEPermissionInfo")?;
         }
-        RTEKind::RTE_JOIN => panic!(
-            "markRTEForSelectPriv (parse_relation.c): RTE_JOIN arm (whole-row/USING \
-             propagation) unported — unit backend-parser-relation join lane"
-        ),
+        // A whole-row join reference propagates to both inputs; merged USING
+        // columns need nothing (the join qual already marked the inputs).
+        RTEKind::RTE_JOIN => {
+            if col == InvalidAttrNumber {
+                let j = pstate
+                    .p_joinexprs
+                    .get(rtindex as usize - 1)
+                    .copied()
+                    .flatten()
+                    .and_then(|n| n.as_join_expr())
+                    .expect("could not find JoinExpr for whole-row reference");
+                for arg in [j.larg, j.rarg] {
+                    let varno = match arg.node_tag() {
+                        NodeTag::T_RangeTblRef => arg.as_range_tbl_ref().unwrap().rtindex,
+                        NodeTag::T_JoinExpr => arg.as_join_expr().unwrap().rtindex,
+                        other => panic!("unrecognized node type: {other:?}"),
+                    };
+                    markRTEForSelectPriv(mcx, pstate, varno, InvalidAttrNumber)?;
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1588,11 +1606,65 @@ pub fn expandRTE<'mcx>(
             }
             Ok((colnames, colvars))
         }
+        RTEKind::RTE_JOIN => {
+            expandJoin(mcx, rte, rtindex, sublevels_up, returning_type, location)
+        }
         other => panic!(
             "expandRTE (parse_relation.c): arm for {other:?} unported — \
              unit backend-parser-relation"
         ),
     }
+}
+
+// expandRTE's RTE_JOIN arm: a simple-Var joinaliasvars entry is copied with
+// adjusted varlevelsup; a merged USING column becomes a join alias Var,
+// matching expandNSItemVars' output for "join.*".
+fn expandJoin<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    rtindex: i32,
+    sublevels_up: i32,
+    returning_type: VarReturningType,
+    location: ParseLoc,
+) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>)> {
+    let eref = rte.eref.expect("join RTE has eref");
+    assert_eq!(eref.colnames.len(), rte.joinaliasvars.len());
+    let mut colnames = NodeList::nil();
+    let mut colvars = NodeList::nil();
+    for (i, (colname, avar)) in eref.colnames.iter().zip(rte.joinaliasvars.iter()).enumerate() {
+        colnames.lappend(mcx, colname)?;
+        let varnode = if let Some(v) = avar.as_var() {
+            Var {
+                varno: v.varno,
+                varattno: v.varattno,
+                vartype: v.vartype,
+                vartypmod: v.vartypmod,
+                varcollid: v.varcollid,
+                varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                varlevelsup: sublevels_up as Index,
+                varreturningtype: returning_type,
+                varnosyn: v.varnosyn,
+                varattnosyn: v.varattnosyn,
+                location,
+            }
+        } else {
+            Var {
+                varno: rtindex,
+                varattno: i as AttrNumber + 1,
+                vartype: node_funcs::expr_type(avar),
+                vartypmod: node_funcs::expr_typmod(avar),
+                varcollid: node_funcs::expr_collation(avar),
+                varnullingrels: types_nodes::Bitmapset::empty(),
+                varlevelsup: sublevels_up as Index,
+                varreturningtype: returning_type,
+                varnosyn: rtindex as Index,
+                varattnosyn: i as AttrNumber + 1,
+                location,
+            }
+        };
+        colvars.lappend(mcx, Node::mk(mcx, varnode)?)?;
+    }
+    Ok((colnames, colvars))
 }
 
 fn expandFunction<'mcx>(

@@ -5,7 +5,7 @@ mod tests;
 
 use mcx::Mcx;
 use parse_expr::{
-    expr_collation, expr_location, expr_location_list, expr_type, transformExpr,
+    expr_collation, expr_location, expr_location_list, expr_type, expr_typmod, transformExpr,
     ParseExprKindName,
 };
 use parse_relation::{addRangeTableEntry, checkNameSpaceConflicts};
@@ -158,12 +158,6 @@ fn transformJoinExpr<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
     j: &types_nodes::JoinExpr<'mcx>,
 ) -> PgResult<(Node<'mcx>, mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>)> {
-    if j.isNatural || !j.usingClause.is_nil() || j.join_using_alias.is_some() {
-        panic!(
-            "transformFromClauseItem (parse_clause.c): JOIN USING/NATURAL \
-             (transformJoinUsingClause/buildMergedJoinVar) unported — join-using lane"
-        );
-    }
     if !matches!(
         j.jointype,
         types_nodes::JoinType::JOIN_INNER
@@ -204,9 +198,83 @@ fn transformJoinExpr<'mcx>(
         my_namespace.push(it);
     }
 
-    let quals = match j.quals {
-        Some(q) => Some(transformJoinOnClause(mcx, pstate, q, &my_namespace)?),
+    let l_nscolumns = l_nsitem.p_nscolumns;
+    let l_colnames = &l_nsitem.p_names.colnames;
+    let r_nscolumns = r_nsitem.p_nscolumns;
+    let r_colnames = &r_nsitem.p_names.colnames;
+
+    let mut using_clause = j.usingClause;
+    if j.isNatural {
+        debug_assert!(using_clause.is_nil());
+        let mut rlist = NodeList::nil();
+        for lx in l_colnames {
+            let l_colname = lx.as_string().expect("eref colnames are String nodes").sval;
+            if l_colname.is_empty() {
+                continue;
+            }
+            let matched = r_colnames.iter().any(|rx| {
+                rx.as_string().expect("eref colnames are String nodes").sval == l_colname
+            });
+            if matched {
+                rlist.lappend(mcx, Node::mk_string(mcx, l_colname)?)?;
+            }
+        }
+        using_clause = rlist;
+    }
+
+    // The USING columns become the alias's column list.
+    let join_using_alias = match j.join_using_alias {
+        Some(a) => Some(
+            Node::mk_mut(
+                mcx,
+                types_nodes::Alias { aliasname: a.aliasname, colnames: using_clause },
+            )?
+            .seal_ref(),
+        ),
         None => None,
+    };
+
+    let l_count = l_colnames.len();
+    let r_count = r_colnames.len();
+    let mut res_colnames = NodeList::nil();
+    let mut res_colvars = NodeList::nil();
+    let mut res_nscolumns: mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, l_count + r_count)?;
+    let mut l_colnos = types_nodes::list::IntList::nil();
+    let mut r_colnos = types_nodes::list::IntList::nil();
+
+    let quals = if !using_clause.is_nil() {
+        debug_assert!(j.quals.is_none());
+        let mut l_usingvars = NodeList::nil();
+        let mut r_usingvars = NodeList::nil();
+        for ucol in &using_clause {
+            let u_colname = ucol.as_string().expect("USING names are String nodes").sval;
+            debug_assert!(!u_colname.is_empty());
+            for col in &res_colnames {
+                if col.as_string().expect("String").sval == u_colname {
+                    return Err(using_column_duplicate(u_colname));
+                }
+            }
+            let l_index = scanForUsingColumn(l_colnames, u_colname, "left")?;
+            l_colnos.lappend(mcx, l_index as i32 + 1)?;
+            let r_index = scanForUsingColumn(r_colnames, u_colname, "right")?;
+            r_colnos.lappend(mcx, r_index as i32 + 1)?;
+            l_usingvars.lappend(
+                mcx,
+                parse_relation::buildVarFromNSColumn(mcx, pstate, &l_nscolumns[l_index])?,
+            )?;
+            r_usingvars.lappend(
+                mcx,
+                parse_relation::buildVarFromNSColumn(mcx, pstate, &r_nscolumns[r_index])?,
+            )?;
+            res_colnames.lappend(mcx, ucol)?;
+        }
+        Some(transformJoinUsingClause(mcx, pstate, &l_usingvars, &r_usingvars)?)
+    } else {
+        match j.quals {
+            Some(q) => Some(transformJoinOnClause(mcx, pstate, q, &my_namespace)?),
+            None => None,
+        }
     };
 
     let rtindex = pstate.p_rtable.len() as i32 + 1;
@@ -224,19 +292,42 @@ fn transformJoinExpr<'mcx>(
         _ => {}
     }
 
-    let l_count = l_nsitem.p_names.colnames.len();
-    let r_count = r_nsitem.p_names.colnames.len();
-    let mut res_colnames = NodeList::nil();
-    let mut res_colvars = NodeList::nil();
-    let mut res_nscolumns: mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn> =
-        mcx::vec_with_capacity_in(mcx, l_count + r_count)?;
-    let mut l_colnos = types_nodes::list::IntList::nil();
-    let mut r_colnos = types_nodes::list::IntList::nil();
+    // Merged-column alias Vars are rebuilt here rather than reused from the
+    // qual loop: they must carry this join's nulling bit.
+    for (l_no, r_no) in l_colnos.iter().zip(r_colnos.iter()) {
+        let l_index = l_no as usize - 1;
+        let r_index = r_no as usize - 1;
+        let l_colvar =
+            parse_relation::buildVarFromNSColumn(mcx, pstate, &l_nscolumns[l_index])?;
+        let r_colvar =
+            parse_relation::buildVarFromNSColumn(mcx, pstate, &r_nscolumns[r_index])?;
+        let u_colvar = buildMergedJoinVar(mcx, pstate, j.jointype, l_colvar, r_colvar)?;
+        res_colvars.lappend(mcx, u_colvar)?;
+        let res_colindex = res_nscolumns.len();
+        if u_colvar.ptr_eq(l_colvar) {
+            res_nscolumns.push(l_nscolumns[l_index]);
+        } else if u_colvar.ptr_eq(r_colvar) {
+            res_nscolumns.push(r_nscolumns[r_index]);
+        } else {
+            res_nscolumns.push(parser_small1::ParseNamespaceColumn {
+                p_varno: rtindex as Index,
+                p_varattno: res_colindex as i16 + 1,
+                p_vartype: expr_type(u_colvar),
+                p_vartypmod: expr_typmod(u_colvar),
+                p_varcollid: expr_collation(u_colvar),
+                p_varreturningtype: types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                p_varnosyn: rtindex as Index,
+                p_varattnosyn: res_colindex as i16 + 1,
+                p_dontexpand: false,
+            });
+        }
+    }
+
     extractRemainingColumns(
         mcx,
         pstate,
-        l_nsitem.p_nscolumns,
-        &l_nsitem.p_names.colnames,
+        l_nscolumns,
+        l_colnames,
         &mut l_colnos,
         &mut res_colnames,
         &mut res_colvars,
@@ -245,8 +336,8 @@ fn transformJoinExpr<'mcx>(
     extractRemainingColumns(
         mcx,
         pstate,
-        r_nsitem.p_nscolumns,
-        &r_nsitem.p_names.colnames,
+        r_nscolumns,
+        r_colnames,
         &mut r_colnos,
         &mut res_colnames,
         &mut res_colvars,
@@ -267,11 +358,11 @@ fn transformJoinExpr<'mcx>(
         &res_colnames,
         res_nscolumns,
         j.jointype,
-        0,
+        using_clause.len() as i32,
         res_colvars,
         l_colnos,
         r_colnos,
-        None,
+        join_using_alias,
         j.alias,
         true,
     )?;
@@ -281,11 +372,11 @@ fn transformJoinExpr<'mcx>(
         mcx,
         types_nodes::JoinExpr {
             jointype: j.jointype,
-            isNatural: false,
+            isNatural: j.isNatural,
             larg,
             rarg,
-            usingClause: NodeList::nil(),
-            join_using_alias: None,
+            usingClause: using_clause,
+            join_using_alias,
             quals,
             alias: j.alias,
             rtindex,
@@ -297,6 +388,26 @@ fn transformJoinExpr<'mcx>(
     }
     pstate.p_joinexprs.push(Some(jnode));
     debug_assert_eq!(pstate.p_joinexprs.len(), rtindex as usize);
+
+    if let Some(jua) = join_using_alias {
+        let jnsitem = &*mcx::leak_in(mcx::alloc_in(
+            mcx,
+            ParseNamespaceItem {
+                p_names: jua,
+                p_rte: nsitem.p_rte,
+                p_rtindex: nsitem.p_rtindex,
+                p_perminfo: None,
+                p_nscolumns: nsitem.p_nscolumns,
+                p_rel_visible: true,
+                p_cols_visible: true,
+                p_lateral_only: core::cell::Cell::new(false),
+                p_lateral_ok: core::cell::Cell::new(true),
+                p_returning_type: types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            },
+        )?);
+        checkNameSpaceConflicts(&[jnsitem], my_namespace.as_slice())?;
+        my_namespace.push(jnsitem);
+    }
 
     // With an alias the contained RTEs are hidden completely; otherwise they
     // stay visible as table names but not for unqualified column access.
@@ -373,8 +484,244 @@ fn transformJoinOnClause<'mcx>(
     Ok(result?.expect("quals in, quals out"))
 }
 
-// extractRemainingColumns (parse_clause.c); USING is loud upstream so no
-// columns are ever pre-merged and the prevcols bitmapset degenerates.
+fn scanForUsingColumn(
+    colnames: &NodeList<'_>,
+    u_colname: &str,
+    side: &'static str,
+) -> PgResult<usize> {
+    let mut index: Option<usize> = None;
+    for (ndx, col) in colnames.iter().enumerate() {
+        if col.as_string().expect("eref colnames are String nodes").sval == u_colname {
+            if index.is_some() {
+                return Err(using_column_ambiguous(u_colname, side));
+            }
+            index = Some(ndx);
+        }
+    }
+    index.ok_or_else(|| using_column_missing(u_colname, side))
+}
+
+#[cold]
+fn using_column_duplicate(name: &str) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_DUPLICATE_COLUMN)
+            .errmsg(format!(
+                "column name \"{name}\" appears more than once in USING clause"
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformFromClauseItem",
+            )),
+    )
+}
+
+#[cold]
+fn using_column_ambiguous(name: &str, side: &'static str) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_AMBIGUOUS_COLUMN)
+            .errmsg(format!(
+                "common column name \"{name}\" appears more than once in {side} table"
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformFromClauseItem",
+            )),
+    )
+}
+
+#[cold]
+fn using_column_missing(name: &str, side: &'static str) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!(
+                "column \"{name}\" specified in USING clause does not exist in {side} table"
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformFromClauseItem",
+            )),
+    )
+}
+
+fn copy_var_node<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let v = n.as_var().expect("USING vars are Vars");
+    Node::mk(
+        mcx,
+        types_nodes::Var {
+            varno: v.varno,
+            varattno: v.varattno,
+            vartype: v.vartype,
+            vartypmod: v.vartypmod,
+            varcollid: v.varcollid,
+            varnullingrels: v.varnullingrels.clone_in(mcx)?,
+            varlevelsup: v.varlevelsup,
+            varreturningtype: v.varreturningtype,
+            varnosyn: v.varnosyn,
+            varattnosyn: v.varattnosyn,
+            location: v.location,
+        },
+    )
+}
+
+// transformJoinUsingClause (parse_clause.c): an untransformed "=" operator
+// tree over the already-built Vars; transformExpr colludes (T_Var passes
+// through), so SELECT privilege is marked here.
+fn transformJoinUsingClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    left_vars: &NodeList<'mcx>,
+    right_vars: &NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mut andargs = NodeList::nil();
+    for (lvar, rvar) in left_vars.iter().zip(right_vars.iter()) {
+        parse_relation::markVarForSelectPriv(mcx, pstate, lvar.as_var().expect("Var"))?;
+        parse_relation::markVarForSelectPriv(mcx, pstate, rvar.as_var().expect("Var"))?;
+        let e = Node::mk_a_expr(
+            mcx,
+            types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP,
+            NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?,
+            Some(copy_var_node(mcx, lvar)?),
+            Some(copy_var_node(mcx, rvar)?),
+            -1,
+        )?;
+        andargs.lappend(mcx, e)?;
+    }
+    let expr = if andargs.len() == 1 {
+        andargs.nth(0)
+    } else {
+        Node::mk(
+            mcx,
+            types_nodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::AND_EXPR,
+                args: andargs,
+                location: -1,
+            },
+        )?
+    };
+    let result = transformExpr(mcx, pstate, expr, ParseExprKind::EXPR_KIND_JOIN_USING)?;
+    coerce::coerce_to_boolean(
+        mcx,
+        pstate,
+        result,
+        expr_type(result),
+        expr_location(result),
+        "JOIN/USING",
+    )
+}
+
+// buildMergedJoinVar (parse_clause.c). A typmod difference can only be input
+// typmod vs -1, so a RelabelType marks it; coerce_type_typmod is never needed.
+fn buildMergedJoinVar<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    jointype: types_nodes::JoinType,
+    l_colvar: Node<'mcx>,
+    r_colvar: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let (l_type, l_typmod) = (expr_type(l_colvar), expr_typmod(l_colvar));
+    let (r_type, r_typmod) = (expr_type(r_colvar), expr_typmod(r_colvar));
+    let outcoltype = coerce::select_common_type(
+        pstate,
+        &[(l_type, expr_location(l_colvar)), (r_type, expr_location(r_colvar))],
+        Some("JOIN/USING"),
+    )?;
+    let outcoltypmod =
+        coerce::select_common_typmod(&[(l_type, l_typmod), (r_type, r_typmod)], outcoltype);
+
+    let l_node = if l_type != outcoltype {
+        coerce::coerce_type(
+            mcx,
+            pstate,
+            l_colvar,
+            l_type,
+            outcoltype,
+            outcoltypmod,
+            coerce::COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?
+    } else if l_typmod != outcoltypmod {
+        Node::mk(
+            mcx,
+            types_nodes::RelabelType {
+                arg: l_colvar,
+                resulttype: outcoltype,
+                resulttypmod: outcoltypmod,
+                resultcollid: InvalidOid,
+                relabelformat: CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )?
+    } else {
+        l_colvar
+    };
+    let r_node = if r_type != outcoltype {
+        coerce::coerce_type(
+            mcx,
+            pstate,
+            r_colvar,
+            r_type,
+            outcoltype,
+            outcoltypmod,
+            coerce::COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?
+    } else if r_typmod != outcoltypmod {
+        Node::mk(
+            mcx,
+            types_nodes::RelabelType {
+                arg: r_colvar,
+                resulttype: outcoltype,
+                resulttypmod: outcoltypmod,
+                resultcollid: InvalidOid,
+                relabelformat: CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )?
+    } else {
+        r_colvar
+    };
+
+    let res_node = match jointype {
+        types_nodes::JoinType::JOIN_INNER => {
+            if l_node.node_tag() == NodeTag::T_Var {
+                l_node
+            } else if r_node.node_tag() == NodeTag::T_Var {
+                r_node
+            } else {
+                l_node
+            }
+        }
+        types_nodes::JoinType::JOIN_LEFT => l_node,
+        types_nodes::JoinType::JOIN_RIGHT => r_node,
+        types_nodes::JoinType::JOIN_FULL => Node::mk(
+            mcx,
+            types_nodes::CoalesceExpr {
+                coalescetype: outcoltype,
+                coalescecollid: InvalidOid,
+                args: NodeList::make2(mcx, l_node, r_node)?,
+                location: -1,
+            },
+        )?,
+        other => panic!("unrecognized join type: {other:?}"),
+    };
+
+    parse_collate::assign_expr_collations(mcx, pstate, res_node)?;
+    Ok(res_node)
+}
+
+// extractRemainingColumns (parse_clause.c); src_colnos carries the already-
+// merged USING attnums on entry.
 #[allow(clippy::too_many_arguments)]
 fn extractRemainingColumns<'mcx>(
     mcx: Mcx<'mcx>,
@@ -386,12 +733,15 @@ fn extractRemainingColumns<'mcx>(
     res_colvars: &mut NodeList<'mcx>,
     res_nscolumns: &mut mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn>,
 ) -> PgResult<()> {
-    debug_assert!(src_colnos.is_nil());
+    let mut prevcols = types_nodes::Bitmapset::empty();
+    for colno in src_colnos.iter() {
+        prevcols.add_member(mcx, colno)?;
+    }
     for (i, colname_node) in src_colnames.iter().enumerate() {
         let colname = colname_node.as_string().expect("eref colnames are String nodes").sval;
         let attnum = i as i32 + 1;
         // Dropped columns carry empty names.
-        if colname.is_empty() || src_nscolumns[i].p_dontexpand {
+        if colname.is_empty() || src_nscolumns[i].p_dontexpand || prevcols.is_member(attnum) {
             continue;
         }
         src_colnos.lappend(mcx, attnum)?;

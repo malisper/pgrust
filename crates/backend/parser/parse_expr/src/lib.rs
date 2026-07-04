@@ -1732,9 +1732,28 @@ fn transformWholeRowRef<'mcx>(
         None => false,
     };
     if !(is_eref || nsitem.p_returning_type != VarReturningType::VAR_RETURNING_DEFAULT) {
-        panic!(
-            "transformWholeRowRef (parse_expr.c): JOIN USING alias RowExpr expansion \
-             unported — unit backend-parser-expr"
+        // A JOIN USING alias exposes only the merged columns, so a whole-row
+        // Var cannot represent it; expand to a RowExpr immediately.
+        let (_, fields) = parse_relation::expandRTE(
+            mcx,
+            rte,
+            nsitem.p_rtindex,
+            sublevels_up,
+            nsitem.p_returning_type,
+            location,
+            false,
+        )?;
+        let mut args = fields;
+        args.truncate(nsitem.p_names.colnames.len());
+        return Node::mk(
+            mcx,
+            types_nodes::RowExpr {
+                args,
+                row_typeid: types_core::catalog::RECORDOID,
+                row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                colnames: nsitem.p_names.colnames.clone_in(mcx)?,
+                location,
+            },
         );
     }
     let mut var = nodes_core::makefuncs::make_whole_row_var(
