@@ -923,7 +923,7 @@ pub fn DefineIndex<'mcx>(
 
 // ResolveOpClass (indexcmds.c), named-opclass arm; the NIL arm stays inline
 // in ComputeIndexAttrs.
-fn ResolveOpClass(
+pub(crate) fn ResolveOpClass(
     opclass: &types_nodes::NodeList<'_>,
     attrType: Oid,
     accessMethodName: &str,

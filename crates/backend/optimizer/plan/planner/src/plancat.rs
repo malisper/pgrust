@@ -1039,9 +1039,7 @@ pub fn infer_arbiter_indexes<'mcx>(
 }
 
 // get_relation_constraints (plancat.c) for the constraint-exclusion refutation
-// leg. include_partition is loud: partition_qual/set_baserel_partition_constraint
-// are unported (reachable only under constraint_exclusion=on on a directly
-// named partition).
+// leg.
 pub fn get_relation_constraints<'mcx>(
     run: &mut PlannerRun<'mcx>,
     relation_object_id: Oid,
@@ -1117,11 +1115,13 @@ pub fn get_relation_constraints<'mcx>(
             }
         }
     }
-    assert!(
-        !(include_partition && relation.rd_rel.relispartition),
-        "get_relation_constraints (plancat.c): partition constraint under \
-         constraint_exclusion=on; set_baserel_partition_constraint unported"
-    );
+    if include_partition && relation.rd_rel.relispartition {
+        set_baserel_partition_constraint(run, rel, &relation)?;
+        for i in 0..run.root.rel(rel).partition_qual.len() {
+            let id = run.root.rel(rel).partition_qual[i];
+            result.push(*run.root.expr_node(id));
+        }
+    }
     relation.close(NoLock)?;
     Ok(result)
 }

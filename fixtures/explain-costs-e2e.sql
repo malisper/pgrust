@@ -384,3 +384,49 @@ EXPLAIN SELECT count(*) FROM ec_big a LEFT JOIN ec_small b ON a.b = b.x LEFT JOI
 EXPLAIN SELECT count(*) FROM ec_big a LEFT JOIN ec_small b ON a.b = b.x LEFT JOIN ec_dup c ON b.y = c.k WHERE c.v IS NULL;
 EXPLAIN SELECT count(*) FROM ec_small a LEFT JOIN ec_dup b ON a.x = b.k LEFT JOIN ec_big c ON b.v = c.a AND a.y = c.b;
 EXPLAIN SELECT count(*) FROM ec_small a LEFT JOIN (ec_dup b LEFT JOIN ec_big c ON b.v = c.a) ON a.x = b.k;
+
+-- expression partition keys: static + runtime pruning shapes
+CREATE TABLE ec_pe (a int, b int, c int) PARTITION BY RANGE (a, abs(b));
+CREATE TABLE ec_pe_p1 PARTITION OF ec_pe FOR VALUES FROM (0, 0) TO (10, 10);
+CREATE TABLE ec_pe_p2 PARTITION OF ec_pe FOR VALUES FROM (10, 10) TO (20, 20);
+INSERT INTO ec_pe SELECT i % 20, i % 20, i FROM generate_series(0, 799) i;
+ANALYZE ec_pe_p1; ANALYZE ec_pe_p2;
+EXPLAIN SELECT * FROM ec_pe WHERE a = 5 AND abs(b) = 5;
+EXPLAIN SELECT * FROM ec_pe WHERE a = 15 AND abs(b) = 15;
+EXPLAIN SELECT * FROM ec_pe WHERE a = 15 AND abs(b) < 12;
+-- no leading-key clause: no pruning
+EXPLAIN SELECT * FROM ec_pe WHERE abs(b) = 5;
+-- runtime (init) pruning over the expression key via a generic plan
+PREPARE ec_pe_q (int, int) AS SELECT * FROM ec_pe WHERE a = $1 AND abs(b) = $2;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN EXECUTE ec_pe_q (5, 5);
+RESET plan_cache_mode;
+DEALLOCATE ec_pe_q;
+-- boolean expression list key
+CREATE TABLE ec_pb (a bool) PARTITION BY LIST ((NOT a));
+CREATE TABLE ec_pb_t PARTITION OF ec_pb FOR VALUES IN (true);
+CREATE TABLE ec_pb_f PARTITION OF ec_pb FOR VALUES IN (false);
+INSERT INTO ec_pb SELECT i % 2 = 0 FROM generate_series(0, 99) i;
+ANALYZE ec_pb_t; ANALYZE ec_pb_f;
+EXPLAIN SELECT * FROM ec_pb WHERE NOT a;
+EXPLAIN SELECT * FROM ec_pb WHERE a;
+-- named opclass on a column partition key (ResolveOpClass)
+CREATE TABLE ec_poc (b varchar, a int) PARTITION BY LIST (b varchar_ops);
+CREATE TABLE ec_poc_ab PARTITION OF ec_poc FOR VALUES IN ('ab', 'cd');
+CREATE TABLE ec_poc_ef PARTITION OF ec_poc FOR VALUES IN ('ef', 'gh');
+INSERT INTO ec_poc SELECT case when i % 4 = 0 then 'ab' when i % 4 = 1 then 'cd' when i % 4 = 2 then 'ef' else 'gh' end, i FROM generate_series(0, 199) i;
+ANALYZE ec_poc_ab; ANALYZE ec_poc_ef;
+EXPLAIN SELECT * FROM ec_poc WHERE b = 'cd';
+-- expression-keyed partition-wise join
+SET enable_partitionwise_join = on;
+CREATE TABLE ec_pe2 (a int, b int) PARTITION BY RANGE (a, abs(b));
+CREATE TABLE ec_pe2_p1 PARTITION OF ec_pe2 FOR VALUES FROM (0, 0) TO (10, 10);
+CREATE TABLE ec_pe2_p2 PARTITION OF ec_pe2 FOR VALUES FROM (10, 10) TO (20, 20);
+INSERT INTO ec_pe2 SELECT i % 20, i % 20 FROM generate_series(0, 399) i;
+ANALYZE ec_pe2_p1; ANALYZE ec_pe2_p2;
+EXPLAIN SELECT * FROM ec_pe t1 JOIN ec_pe2 t2 ON t1.a = t2.a AND abs(t1.b) = abs(t2.b);
+RESET enable_partitionwise_join;
+DROP TABLE ec_pe2;
+DROP TABLE ec_poc;
+DROP TABLE ec_pb;
+DROP TABLE ec_pe;
