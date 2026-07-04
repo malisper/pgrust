@@ -266,11 +266,24 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                     addrs.push(ObjectAddress::set(TYPE_CLASS, s.refrestype));
                 }
             }
-            T_FieldSelect => panic!(
-                "find_expr_references_walker (dependency.c): FieldSelect column \
-                 dep needs get_typ_typrelid (lsyscache is not a pg_depend dep); \
-                 unported lane"
-            ),
+            T_FieldSelect => {
+                let fselect =
+                    node.as_variant::<types_nodes::primnodes::FieldSelect>().expect("FieldSelect");
+                let argtype = lsyscache::getBaseType(nodes_core::expr_type(fselect.arg))?;
+                let reltype = lsyscache::get_typ_typrelid(argtype)?;
+                if reltype != 0 {
+                    addrs.push(ObjectAddress::sub_set(
+                        RELATION_CLASS,
+                        reltype,
+                        fselect.fieldnum as i32,
+                    ));
+                } else {
+                    addrs.push(ObjectAddress::set(TYPE_CLASS, fselect.resulttype));
+                }
+                if fselect.resultcollid != 0 && fselect.resultcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, fselect.resultcollid));
+                }
+            }
             T_ScalarArrayOpExpr => {
                 addrs.push(ObjectAddress::set(
                     OPER_CLASS,
