@@ -959,6 +959,36 @@ fn slow_switch<'mcx>(
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
         }
+        T_DefineStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_COLLATION => {
+                    let mut pstate = parser_small1::make_parsestate(mcx, None);
+                    {
+                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                        pstate.p_sourcetext = Some(v.leak());
+                    }
+                    // C: address = DefineCollation; the ported form returns no address.
+                    collect_gap("CREATE COLLATION");
+                    collationcmds::DefineCollation(mcx, &mut pstate, stmt)?;
+                    parser_small1::free_parsestate(pstate)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
+                    debug_assert!(!stmt.oldstyle);
+                    // C: address = DefineOperator; the ported form returns no address.
+                    collect_gap("CREATE OPERATOR");
+                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+            }
+            Ok(None)
+        }
         T_CreateEnumStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
@@ -1041,23 +1071,6 @@ fn slow_switch<'mcx>(
             // C: address = AlterPolicy; the ported form returns no address.
             collect_gap("ALTER POLICY");
             commands_policy::AlterPolicy(mcx, stmt)?;
-            Ok(None)
-        }
-
-        T_DefineStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::DefineStmt>()
-                .expect("DefineStmt");
-            match stmt.kind {
-                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
-                    debug_assert!(!stmt.oldstyle);
-                    // C: address = DefineOperator; the ported form returns no address.
-                    collect_gap("CREATE OPERATOR");
-                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
-                }
-                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
-            }
             Ok(None)
         }
 

@@ -35,7 +35,8 @@ pub use temp::{
 };
 
 pub use lookup::{
-    get_collation_oid, get_collation_oid_list, get_namespace_oid, DeconstructQualifiedName,
+    get_collation_oid, get_collation_oid_list, get_namespace_oid, is_encoding_supported_by_icu,
+    DeconstructQualifiedName,
     FuncCandidate, FuncnameGetCandidates, FuncnameGetCandidatesExtended,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
     OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,

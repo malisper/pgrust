@@ -69,9 +69,11 @@ const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
 const ANUM_PG_COLLATION_COLLNAMESPACE: i32 = 3;
 const ANUM_PG_COLLATION_COLLPROVIDER: i32 = 5;
 const ANUM_PG_COLLATION_COLLISDETERMINISTIC: i32 = 6;
+const ANUM_PG_COLLATION_COLLENCODING: i32 = 7;
 const ANUM_PG_COLLATION_COLLCOLLATE: i32 = 8;
 const ANUM_PG_COLLATION_COLLCTYPE: i32 = 9;
 const ANUM_PG_COLLATION_COLLLOCALE: i32 = 10;
+const ANUM_PG_COLLATION_COLLICURULES: i32 = 11;
 const ANUM_PG_COLLATION_COLLVERSION: i32 = 12;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 const ANUM_PG_OPERATOR_OID: i32 = 1;
@@ -1717,9 +1719,11 @@ fn lookup_pg_collation_locale_row<'mcx>(
         collprovider: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLPROVIDER).as_i8() as u8,
         collisdeterministic: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLISDETERMINISTIC)
             .as_bool(),
+        collencoding: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLENCODING).as_i32(),
         collcollate: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLCOLLATE)?,
         collctype: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLCTYPE)?,
         colllocale: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLLOCALE)?,
+        collicurules: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLICURULES)?,
         collversion: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLVERSION)?,
     };
     ReleaseSysCache(tuple);

@@ -30,8 +30,8 @@ pub use list::{IntList, List, ListFlavor, NodeList, OidList, OptNodeList, XidLis
 pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVariant, String};
 pub use nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 pub use parsenodes::{
-    AclMode, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction,
-    RowMarkClause, SetOperation,
+    AclMode, DefineStmt, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
+    RangeTblFunction, RowMarkClause, SetOperation,
 };
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
