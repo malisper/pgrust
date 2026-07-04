@@ -26,6 +26,12 @@ pub struct SpiCursor {
     stmts: StmtListHandle,
 }
 
+impl SpiCursor {
+    pub(crate) fn found(portal: Portal<'static>) -> Self {
+        SpiCursor { portal, stmts: StmtListHandle::NULL }
+    }
+}
+
 // C SPI_cursor_open_internal's copyParamList into portal->portalContext: the
 // param array must survive _SPI_end_call's exec-context reset, so it gets
 // portal lifetime. Storing the handle in portalParams immediately makes

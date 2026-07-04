@@ -184,6 +184,7 @@ pub fn init_all() {
     parse_utilcmd::init_seams();
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
+    fmgr_core::register_late_builtins(xmlmap::builtins::XMLMAP_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
     sql_functions::init_seams();
     pg_proc::init_seams();
