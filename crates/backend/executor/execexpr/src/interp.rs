@@ -2260,6 +2260,11 @@ fn eval_json_expr_path(
                         let img = ::adt_jsonpath_exec::jbv_to_jsonb_image(mcx, &jbv)?;
                         val_string =
                             Some(::adt_jsonb::io::jsonb_out(mcx, &img[::datum::varlena::VARHDRSZ..])?);
+                        // C leaves resnull untouched here (zeroed = false on the
+                        // reachable path); the io-coercion guard below must see
+                        // non-null for val_string to reach the input function.
+                        let cur = read_out(out);
+                        write_out(out, cur.value, false);
                     } else if use_json {
                         let img = ::adt_jsonpath_exec::jbv_to_jsonb_image(mcx, &jbv)?;
                         write_out(out, image_datum(img), false);
