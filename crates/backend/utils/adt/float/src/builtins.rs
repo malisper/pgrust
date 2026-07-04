@@ -288,7 +288,13 @@ fc_in_range! {
 // hashfloat4 widens to float8 first (cross-type hash joins); ±0 hashes as 0 /
 // bare seed, NaNs collapse to the standard float8 NaN bit pattern (hashfunc.c).
 pub(crate) fn float8_hash_image(key: f64) -> [u8; 8] {
-    let key = if key.is_nan() { f64::NAN } else { key };
+    let key = if key.is_nan() {
+        f64::NAN
+    } else if key == 0.0 {
+        0.0
+    } else {
+        key
+    };
     key.to_ne_bytes()
 }
 
