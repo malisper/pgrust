@@ -41,7 +41,6 @@ genam = { path = "../../access/index/genam" }
 format_type = { path = "../../utils/adt/format_type" }
 mbutils = { path = "../../utils/mb/mbutils" }
 elog = { path = "../../utils/error/elog" }
-tablecmds = { path = "../tablecmds" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
