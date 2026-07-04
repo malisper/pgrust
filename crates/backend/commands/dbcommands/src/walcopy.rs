@@ -93,7 +93,7 @@ fn ScanSourceDatabasePgClass(
             ForkNumber::MAIN_FORKNUM,
             blkno,
             ReadBufferMode::Normal,
-            bstrategy,
+            bstrategy.clone(),
             true,
         )?;
 

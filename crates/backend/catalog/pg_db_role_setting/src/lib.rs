@@ -270,7 +270,7 @@ pub fn ApplySetting(
                 &entries,
                 types_guc::GucContext::PGC_SUSET,
                 source,
-                types_guc::GucAction::GUC_ACTION_SET,
+                guc::GUC_ACTION_SET,
             )?;
         }
     }

@@ -2,9 +2,11 @@ use datum::Datum;
 use elog::ereport;
 use mcx::Mcx;
 use pg_database::{
-    Anum_pg_database_datallowconn, Anum_pg_database_datconnlimit, Anum_pg_database_datistemplate,
-    Anum_pg_database_datname, Anum_pg_database_dattablespace, DatabaseNameIndexId,
-    Natts_pg_database, DATCONNLIMIT_UNLIMITED,
+    Anum_pg_database_datacl, Anum_pg_database_datallowconn, Anum_pg_database_datcollate,
+    Anum_pg_database_datcollversion, Anum_pg_database_datconnlimit, Anum_pg_database_datdba,
+    Anum_pg_database_datistemplate, Anum_pg_database_datlocale, Anum_pg_database_datlocprovider,
+    Anum_pg_database_datname, Anum_pg_database_dattablespace, Anum_pg_database_oid,
+    DatabaseNameIndexId, Natts_pg_database, DATCONNLIMIT_UNLIMITED,
 };
 use pg_database_seams::COLLPROVIDER_LIBC;
 use types_core::catalog::DATABASE_RELATION_ID;
@@ -29,14 +31,6 @@ use crate::{
     errdetail_busy_db, get_db_info, have_createdb_privilege, loc, name_key,
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY, XLOG_DBASE_DROP,
 };
-
-const Anum_pg_database_oid: i32 = 1;
-const Anum_pg_database_datdba: i32 = 3;
-const Anum_pg_database_datlocprovider: i32 = 5;
-const Anum_pg_database_datcollate: i32 = 13;
-const Anum_pg_database_datlocale: i32 = 15;
-const Anum_pg_database_datcollversion: i32 = 17;
-const Anum_pg_database_datacl: i32 = 18;
 
 fn text_datum_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
     let p = d.as_usize() as *const u8;

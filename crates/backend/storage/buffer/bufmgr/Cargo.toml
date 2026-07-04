@@ -42,12 +42,12 @@ types_hash = { path = "../../../../_support/types/hash" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 latch = { path = "../../ipc/latch" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 
 [dev-dependencies]
 shmem_seams = { path = "../../ipc/shmem_seams" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
 pg_sema = { path = "../../../port/pg_sema" }
-postgres_seams = { path = "../../../tcop/postgres_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 waiteventset = { path = "../../ipc/waiteventset" }

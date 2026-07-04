@@ -44,7 +44,7 @@ fn RelationCopyStorageUsingBuffer(
             fork_num,
             blkno,
             ReadBufferMode::Normal,
-            bstrategy_src,
+            bstrategy_src.clone(),
             permanent,
         )?;
         LockBuffer(src_buf, BUFFER_LOCK_SHARE)?;
@@ -54,7 +54,7 @@ fn RelationCopyStorageUsingBuffer(
             fork_num,
             BufferGetBlockNumber(src_buf),
             ReadBufferMode::ZeroAndLock,
-            bstrategy_dst,
+            bstrategy_dst.clone(),
             permanent,
         )?;
 

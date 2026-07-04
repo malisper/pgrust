@@ -7184,6 +7184,23 @@ impl<'mcx> Parser<'mcx> {
                 n.newname = Some(view.v(6).str_val());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER DATABASE name RENAME TO name
+            1277 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_DATABASE;
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(6).str_val());
+                n.missing_ok = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER DATABASE name OWNER TO RoleSpec
+            1383 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_DATABASE;
+                n.object = Some(Node::mk_string(mcx, view.v(3).str_val())?);
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // RenameStmt: ALTER PUBLICATION/SUBSCRIPTION name RENAME TO name
             1289 | 1293 => {
                 let mut n = Node::build::<RenameStmt>(mcx)?;
