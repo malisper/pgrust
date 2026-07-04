@@ -427,10 +427,11 @@ pub fn preprocess_expression<'mcx>(
 ) -> PgResult<Option<Node<'mcx>>> {
     let Some(mut expr) = expr else { return Ok(None) };
 
-    // flatten_join_alias_vars: INNER JOIN ... ON produces no join-alias Vars
-    // (join nscolumns reference the base rels), so C's rewrite is the identity
-    // here; the post-seal assert_no_join_alias_vars sweep keeps the merged
-    // USING/NATURAL and whole-row shapes loud.
+    // C skips flattening only for RTFUNC/VALUES/TABLESAMPLE/TABLEFUNC kinds
+    // (the last two have no EXPRKIND here yet).
+    if run.root.hasJoinRTEs && kind != EXPRKIND_RTFUNC && kind != EXPRKIND_VALUES {
+        expr = vars::flatten_join_alias_vars(run.mcx, run.root.parse, expr)?;
+    }
     if kind != EXPRKIND_RTFUNC {
         expr = clauses::eval_const_expressions_with_params(
             run.mcx,
