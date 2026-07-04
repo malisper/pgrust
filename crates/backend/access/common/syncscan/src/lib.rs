@@ -32,6 +32,7 @@ struct SsLruItem {
     location: BlockNumber,
 }
 
+#[derive(Clone, Copy)]
 struct ScanLocations {
     head: u8,
     tail: u8,
