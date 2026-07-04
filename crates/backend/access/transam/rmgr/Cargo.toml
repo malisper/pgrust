@@ -28,6 +28,7 @@ nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
 hash_xlog = { path = "../../hash/hash_xlog" }
 sequence_xlog = { path = "../../../commands/sequence_xlog" }
 brin_xlog = { path = "../../brin/brin_xlog" }
+generic_xlog = { path = "../generic_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }
 gin_xlog = { path = "../../gin/gin_xlog" }
