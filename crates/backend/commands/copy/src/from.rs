@@ -634,7 +634,9 @@ fn copy_from_partitioned_body<'mcx>(
             let slot = &mut buf.slots[buf.nused];
             exectuples::exec_copy_slot(slot, &mut rootslot, mcx, mcx)?;
             slot.base_mut().tts_tableOid = lrel.rd_id;
-            nodemodifytable::exec_constraints(mcx, &mut leaf_checks[leaf], lrel, slot)?;
+            // Virtual-generated columns on a routed-into partition panic above,
+            // so the virtual-NN compile cache is never populated.
+            nodemodifytable::exec_constraints(mcx, &mut leaf_checks[leaf], &mut None, lrel, slot)?;
             // Routed rows skip ExecPartitionCheck (bound proven on descent;
             // the DEFAULT-partition re-check runs inside find_partition).
             buf.linenos[buf.nused] = cstate.cur_lineno;
