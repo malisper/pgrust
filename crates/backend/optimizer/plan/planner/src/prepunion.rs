@@ -947,7 +947,7 @@ pub(crate) fn generate_setop_child_grouplist<'mcx>(
 }
 
 // assignSortGroupRef (parse_clause.c).
-fn assign_sort_group_ref<'mcx>(tle_node: Node<'mcx>, tlist: &NodeList<'mcx>) -> u32 {
+pub(crate) fn assign_sort_group_ref<'mcx>(tle_node: Node<'mcx>, tlist: &NodeList<'mcx>) -> u32 {
     let tle = tle_node.as_target_entry().expect("tlist cell");
     if tle.ressortgroupref != 0 {
         return tle.ressortgroupref;
