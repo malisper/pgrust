@@ -1,7 +1,5 @@
-// dfmgr.c, in-process ported-library slice: probin is a registry KEY, never a
-// file. The Rust backend exposes no C ABI, so libraries whose C bodies are
-// ported in-process (regress, ...) resolve here; there is NO dlopen — a probin
-// that names no registered library raises C's file-access error.
+// probin is a registry KEY, never a file: no C ABI exists to dlopen, so an
+// unregistered library must stay loud with C's file-access error.
 
 use std::sync::Mutex;
 
@@ -17,8 +15,7 @@ static BUILTIN_LIBRARIES: Mutex<Vec<BuiltinLibraryEntry>> = Mutex::new(Vec::new(
 
 const KNOWN_DLSUFFIXES: [&str; 3] = [".so", ".dylib", ".dll"];
 
-// `$libdir/regress`, `/abs/path/regress.so`, `regress.dylib` → `regress`.
-// The key is platform-independent: the name is looked up, never opened.
+// Key is platform-independent (any suffix strips): looked up, never opened.
 pub fn simple_library_name(name: &str) -> Option<&str> {
     let base = name.rsplit('/').next().unwrap_or(name);
     let base = KNOWN_DLSUFFIXES
@@ -32,7 +29,6 @@ pub fn simple_library_name(name: &str) -> Option<&str> {
     }
 }
 
-// Idempotent per name (a double init_seams is harmless).
 pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
     let mut libs = BUILTIN_LIBRARIES.lock().unwrap();
     match libs.iter_mut().find(|e| e.name == entry.name) {
@@ -54,10 +50,8 @@ fn registry_resolve(key: &str, funcname: &str) -> Option<Option<PGFunction>> {
     Some((entry.lookup)(funcname))
 }
 
-// load_external_function(filename, funcname, signalNotFound, filehandle)
-// (dfmgr.c) over the registry. An unregistered library is the C stat() miss
-// (`could not access file`); a registered library that lacks the symbol is the
-// C lookup miss (`could not find function`), suppressed when !signal_not_found.
+// Unregistered library = C's stat() miss; registered-but-missing symbol = the
+// C lookup miss, suppressed when !signal_not_found.
 pub fn load_external_function(
     filename: &str,
     funcname: &str,

@@ -1,7 +1,5 @@
-// regress.c (src/test/regress) as an in-process ported library: the fmgr-v1
-// bodies test_setup.sql & friends create with CREATE FUNCTION ... AS
-// '$libdir/regress' LANGUAGE C. Registered under the `regress` key in dfmgr's
-// ported-library registry; there is no real .so.
+// regress.c as an in-process ported library: registered under the dfmgr
+// registry key `regress`; there is no real .so.
 #![allow(non_upper_case_globals)]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -38,7 +36,6 @@ fn out_text(fcinfo: &Fcinfo, payload: &[u8]) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(fcinfo.result_mcx(), payload)?))
 }
 
-// Strict text/bytea arg's payload bytes (PG_GETARG_TEXT_PP / VARDATA_ANY).
 // SAFETY contract of callers: the declared arg is a non-null live varlena.
 unsafe fn arg_text<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
     Ok(unsafe { fcinfo.arg_varlena_packed(i) }?.data())
@@ -87,7 +84,6 @@ fn fc_overpaid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
         let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_from_elem_in(mcx, true, ncolumns);
         heap_deform_tuple(&tuple, &tupdesc, &mut values, &mut nulls);
 
-        // GetAttributeByName(tuple, "salary", &isnull) (execUtils.c).
         let mut attrno: Option<usize> = None;
         for i in 0..ncolumns {
             let att = &tupdesc.attrs[i];
@@ -268,8 +264,8 @@ fn fc_reverse_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
 fn fc_int44in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: typinput arg0 is a non-null cstring.
     let bytes = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
-    // sscanf(input, "%d, %d, %d, %d", ...): %d skips whitespace then wants
-    // [+-]?digits; the ',' literal must match exactly; missing slots are 0.
+    // sscanf "%d, %d, %d, %d": the ',' literal must match exactly; missing
+    // slots are 0.
     let mut result = [0i32; 4];
     let mut p = 0usize;
     let mut i = 0usize;
@@ -365,7 +361,6 @@ fn fc_regress_setenv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     if !superuser::superuser()? {
         return Err(err("must be superuser to change environment variables".to_string()));
     }
-    // One backend = one thread; mirrors C's setenv(_, _, 1).
     std::env::set_var(&envvar, &envval);
     Ok(Datum::null())
 }
@@ -642,8 +637,6 @@ fn fc_test_enc_setup(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResul
 /* ============ test_enc_conversion(bytea, name, name, bool) =============== */
 
 fn fc_test_enc_conversion(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // Its CREATE FUNCTION is blocked upstream on OUT-parameter support
-    // (functioncmds); the record-returning body follows that lane.
     panic!("regress: test_enc_conversion requires OUT-parameter functions (functioncmds unported)");
 }
 
@@ -859,6 +852,8 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "test_text_to_wchars" => fc_test_text_to_wchars,
         "test_wchars_to_text" => fc_test_wchars_to_text,
         "test_valid_server_encoding" => fc_test_valid_server_encoding,
+        "binary_coercible" => fc_binary_coercible,
+        "test_relpath" => fc_test_relpath,
         _ => return None,
     })
 }
@@ -896,8 +891,32 @@ mod tests {
 
     #[test]
     fn relpath_maxlen_matches_c() {
-        // relpath.h: 9+1+10+1+15+1+10+1+1+6+1+10+1+4 with PG_18_202506291.
         assert_eq!(REL_PATH_STR_MAXLEN, 71);
+    }
+
+    #[test]
+    fn lookup_covers_every_regress_symbol() {
+        for sym in [
+            "interpt_pp", "overpaid", "widget_in", "widget_out", "pt_in_widget",
+            "reverse_name", "trigger_return_old", "int44in", "int44out",
+            "test_canonicalize_path", "make_tuple_indirect", "get_environ",
+            "regress_setenv", "wait_pid", "test_atomic_ops", "test_fdw_handler",
+            "is_catalog_text_unique_index_oid", "test_support_func",
+            "test_opclass_options_func", "test_enc_setup", "test_enc_conversion",
+            "test_bytea_to_text", "test_text_to_bytea", "test_mblen_func",
+            "test_text_to_wchars", "test_wchars_to_text",
+            "test_valid_server_encoding", "binary_coercible", "test_relpath",
+        ] {
+            assert!(lookup(sym).is_some(), "regress symbol {sym} missing from lookup");
+        }
+        assert!(lookup("nosuchsymbol").is_none());
+    }
+
+    #[test]
+    fn registry_roundtrip() {
+        init_seams();
+        assert!(dfmgr::load_external_function("$libdir/regress", "binary_coercible", true).is_ok());
+        assert!(dfmgr::library_present("/x/y/regress.so"));
     }
 
     #[test]
