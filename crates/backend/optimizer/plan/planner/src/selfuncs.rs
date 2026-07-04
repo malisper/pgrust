@@ -1460,9 +1460,7 @@ pub fn all_rows_selectable<'mcx>(
         return Ok(false);
     }
 
-    if aclchk::pg_class_aclcheck(rte.relid, userid, adt_acl::ACL_SELECT)?
-        == aclchk::ACLCHECK_OK
-    {
+    if aclchk_seams::pg_class_aclmask::call(rte.relid, userid, adt_acl::ACL_SELECT, false)? != 0 {
         return Ok(true);
     }
 
