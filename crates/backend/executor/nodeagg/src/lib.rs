@@ -757,6 +757,10 @@ pub fn exec_init_agg<'mcx>(
         grouping: gs.as_ref().map(|g| g.grouping_cell()),
     };
     let (proj, qual) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+        let env = env.map(|mut e| {
+            e.agg = Some(bind);
+            e
+        });
         let proj = exec_build_agg_projection_info_subplans(
             mcx,
             &node.plan.targetlist,

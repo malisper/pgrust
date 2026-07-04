@@ -385,16 +385,18 @@ unsafe fn drop_subplan_expr_state(p: NonNull<()>) {
 pub(crate) unsafe fn subplan_expr_init_hook(
     estate_p: NonNull<()>,
     node: Node<'_>,
+    agg: Option<::execexpr::AggBind>,
 ) -> PgResult<NonNull<()>> {
     // SAFETY: caller contract; the erased lifetime is the estate's own.
     let estate = unsafe { &mut *estate_p.cast::<EStateData<'_>>().as_ptr() };
     let node = unsafe { core::mem::transmute::<Node<'_>, Node<'_>>(node) };
-    exec_init_sub_plan_expr(node.as_sub_plan().expect("SubPlan node"), estate)
+    exec_init_sub_plan_expr(node.as_sub_plan().expect("SubPlan node"), estate, agg)
 }
 
 fn exec_init_sub_plan_expr<'mcx>(
     subplan: &SubPlan<'mcx>,
     estate: &mut EStateData<'mcx>,
+    agg: Option<::execexpr::AggBind>,
 ) -> PgResult<NonNull<()>> {
     let mcx = estate.es_query_cxt;
     assert!(
@@ -440,9 +442,15 @@ fn exec_init_sub_plan_expr<'mcx>(
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
         init: subplan_expr_init_hook,
+        agg,
     };
-    let testexpr =
-        ::execexpr::exec_init_expr_subplans(mcx, subplan.testexpr, params, Some(nested_env))?;
+    let testexpr = ::execexpr::exec_init_expr_subplans_agg(
+        mcx,
+        subplan.testexpr,
+        params,
+        Some(nested_env),
+        agg,
+    )?;
 
     let mut par_param: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     par_param.extend(subplan.parParam.iter());
@@ -450,7 +458,7 @@ fn exec_init_sub_plan_expr<'mcx>(
     param_ids.extend(subplan.paramIds.iter());
 
     let hashed = if subplan.useHashTable {
-        Some(init_hashed_state(subplan, estate, params)?)
+        Some(init_hashed_state(subplan, estate, params, agg)?)
     } else {
         None
     };
@@ -486,6 +494,7 @@ fn init_hashed_state<'mcx>(
     subplan: &SubPlan<'mcx>,
     estate: &mut EStateData<'mcx>,
     params: ::execexpr::ParamBind<'mcx>,
+    agg: Option<::execexpr::AggBind>,
 ) -> PgResult<HashedSubPlanState<'mcx>> {
     let mcx = estate.es_query_cxt;
     let testexpr = subplan.testexpr.expect("hashed SubPlan has a testexpr");
@@ -586,14 +595,25 @@ fn init_hashed_state<'mcx>(
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
         init: subplan_expr_init_hook,
+        agg,
     };
-    let proj_left = ::execexpr::exec_build_projection_info_subplans(
-        mcx,
-        &lefttlist,
-        None,
-        params,
-        Some(nested_env),
-    )?;
+    let proj_left = match agg {
+        Some(a) => ::execexpr::exec_build_agg_projection_info_subplans(
+            mcx,
+            &lefttlist,
+            None,
+            a,
+            params,
+            Some(nested_env),
+        )?,
+        None => ::execexpr::exec_build_projection_info_subplans(
+            mcx,
+            &lefttlist,
+            None,
+            params,
+            Some(nested_env),
+        )?,
+    };
     let proj_right = ::execexpr::exec_build_projection_info(mcx, &righttlist, None, params)?;
 
     Ok(HashedSubPlanState {
