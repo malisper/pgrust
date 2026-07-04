@@ -559,3 +559,62 @@ fn wide_bitmap_form_roundtrip() {
         }
     }
 }
+
+#[test]
+fn planned_form_matches_generic() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let shapes: &[&[CompactAttribute]] = &[
+        &[attr(4, true, 4)],
+        &[attr(4, true, 4), attr(8, true, 8)],
+        &[attr(8, true, 8), attr(1, true, 1), attr(2, true, 2), attr(4, true, 4)],
+        &[
+            attr(1, true, 1),
+            attr(8, true, 8),
+            attr(2, true, 2),
+            attr(4, true, 4),
+            attr(4, true, 4),
+            attr(1, true, 1),
+            attr(2, true, 2),
+            attr(8, true, 8),
+        ],
+    ];
+    let pool = [
+        Datum::from_i64(-1),
+        Datum::from_i64(0x0102_0304_0506_0708),
+        Datum::from_i32(42),
+        Datum::from_i16(-7),
+        Datum::from_char(9),
+        Datum::from_i64(i64::MIN),
+        Datum::from_i32(i32::MAX),
+        Datum::from_i16(i16::MIN),
+    ];
+    for cols in shapes {
+        let desc = make_desc(mcx, cols);
+        let plan = MinimalFormPlan::try_new(&desc).expect("all-byval shape must plan");
+        assert_eq!(plan.natts(), cols.len());
+        let values = &pool[..cols.len()];
+        let isnull = vec![false; cols.len()];
+        for extra in [0usize, 16] {
+            let generic = heap_form_minimal_tuple(mcx, &desc, values, &isnull, extra).unwrap();
+            let planned = heap_form_minimal_tuple_planned(mcx, &plan, values, extra).unwrap();
+            assert_eq!(planned.as_bytes(), generic.as_bytes());
+            assert_eq!(planned.t_len(), generic.t_len());
+        }
+    }
+}
+
+#[test]
+fn form_plan_gates() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &[attr(-1, false, 4)])).is_none());
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &[attr(-2, false, 1)])).is_none());
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &[attr(16, false, 8)])).is_none());
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &[])).is_none());
+    let nine = vec![attr(4, true, 4); 9];
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &nine)).is_none());
+    let mut dropped = attr(4, true, 4);
+    dropped.attisdropped = true;
+    assert!(MinimalFormPlan::try_new(&make_desc(mcx, &[dropped])).is_none());
+}

@@ -5,8 +5,8 @@ use core::ptr::NonNull;
 use ::datum::Datum;
 use ::heaptuple::{
     heap_copy_minimal_tuple, heap_copy_tuple_as_datum, heap_copytuple, heap_form_minimal_tuple,
-    heap_form_tuple, heap_tuple_from_minimal_tuple, minimal_tuple_from_heap_tuple, HeapTuple,
-    MinimalTuple,
+    heap_form_minimal_tuple_planned, heap_form_tuple, heap_tuple_from_minimal_tuple,
+    minimal_tuple_from_heap_tuple, HeapTuple, MinimalFormPlan, MinimalTuple,
 };
 use ::mcx::{vec_with_capacity_in, Allocator, Mcx, PgVec};
 use ::types_core::{AttrNumber, Buffer, BufferIsValid, InvalidBuffer, TransactionId};
@@ -684,6 +684,28 @@ pub fn exec_copy_slot_minimal_tuple<'mcx, 'out>(
             heap_copy_minimal_tuple(out_mcx, unsafe { minimal_bytes(p) }, extra)
         }
     }
+}
+
+/// [`exec_copy_slot_minimal_tuple`] with the caller's resolve-once
+/// [`MinimalFormPlan`] on the no-null virtual-slot arm; bytes identical.
+#[inline]
+pub fn exec_copy_slot_minimal_tuple_planned<'mcx, 'out>(
+    slot: &mut SlotData<'mcx>,
+    slot_mcx: Mcx<'mcx>,
+    out_mcx: Mcx<'out>,
+    extra: usize,
+    plan: &MinimalFormPlan,
+) -> PgResult<MinimalTuple<'out>> {
+    if let SlotData::Virtual(v) = slot {
+        debug_assert_eq!(
+            plan.natts(),
+            v.base.tts_tupleDescriptor.as_ref().expect("copy without descriptor").natts as usize
+        );
+        if !v.base.tts_isnull[..plan.natts()].contains(&true) {
+            return heap_form_minimal_tuple_planned(out_mcx, plan, &v.base.tts_values, extra);
+        }
+    }
+    exec_copy_slot_minimal_tuple(slot, slot_mcx, out_mcx, extra)
 }
 
 /// C returns (tuple, *shouldFree); the variants carry the ownership instead.

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use ::execexpr::{exec_build_hash32_from_exprs, exec_eval_expr, EvalSlots, ExprState, ParamBind};
 use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
 use ::fd::buffile::BufFile;
+use ::heaptuple::MinimalFormPlan;
 use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::instrument::HashInstrumentation;
 use ::types_core::Oid;
@@ -103,6 +104,7 @@ pub struct HashJoinTable<'mcx> {
     pub inner_batch_file: PgVec<'mcx, Option<BufFile<'mcx>>>,
     pub outer_batch_file: PgVec<'mcx, Option<BufFile<'mcx>>>,
     batch_cxt: AuxCxtId,
+    form_plan: Option<MinimalFormPlan>,
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
@@ -112,6 +114,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         nbuckets: u32,
         nbatch: i32,
         space_allowed: usize,
+        form_plan: Option<MinimalFormPlan>,
     ) -> PgResult<HashJoinTable<'mcx>> {
         debug_assert!(nbuckets.is_power_of_two());
         let mut buckets = vec_with_capacity_in(mcx, nbuckets as usize)?;
@@ -136,6 +139,7 @@ impl<'mcx> HashJoinTable<'mcx> {
             inner_batch_file: PgVec::new_in(mcx),
             outer_batch_file: PgVec::new_in(mcx),
             batch_cxt: estate.create_aux_context("HashBatchContext"),
+            form_plan,
         };
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
@@ -229,12 +233,21 @@ impl<'mcx> HashJoinTable<'mcx> {
         let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
         if batchno == self.curbatch {
             let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
-            let mut tup = exectuples::exec_copy_slot_minimal_tuple(
-                slot,
-                query_mcx,
-                batch_mcx,
-                HJTUPLE_OVERHEAD,
-            )?;
+            let mut tup = match &self.form_plan {
+                Some(plan) => exectuples::exec_copy_slot_minimal_tuple_planned(
+                    slot,
+                    query_mcx,
+                    batch_mcx,
+                    HJTUPLE_OVERHEAD,
+                    plan,
+                )?,
+                None => exectuples::exec_copy_slot_minimal_tuple(
+                    slot,
+                    query_mcx,
+                    batch_mcx,
+                    HJTUPLE_OVERHEAD,
+                )?,
+            };
             tup.data_mut().clear_match();
             let t_len = tup.t_len();
             let hdr = tup.forget_base().as_ptr().cast::<HashJoinTupleHdr>();
@@ -543,7 +556,6 @@ pub struct HashState<'mcx> {
     pub ps_ExprContext: EcxtId,
     ntuples_est: f64,
     tupwidth: i32,
-    #[allow(dead_code)]
     inner_desc: Option<Rc<TupleDescData<'static>>>,
 }
 
@@ -609,7 +621,8 @@ pub fn exec_hash_table_create<'mcx>(
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
         exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true);
-    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed)
+    let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
+    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan)
 }
 
 #[inline(always)]
