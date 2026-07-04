@@ -7622,6 +7622,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "arrayfuncs",
  "cache_syscache",
  "catalog_namespace",
  "coerce",
@@ -7632,6 +7633,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "guc_tables",
+ "heaptuple",
  "lsyscache",
  "mcx",
  "nodes_core",
@@ -7653,7 +7655,10 @@ dependencies = [
  "types_nodes",
  "types_portal",
  "types_rel",
+ "types_trigger",
+ "types_trigger_call",
  "types_tuple",
+ "varlena",
  "wchar",
  "xact",
 ]
