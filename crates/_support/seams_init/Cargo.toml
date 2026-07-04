@@ -41,6 +41,7 @@ xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 rls = { path = "../../backend/utils/misc/rls" }
 commands_policy = { path = "../../backend/commands/policy" }
+commands_publicationcmds = { path = "../../backend/commands/publicationcmds" }
 be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
 large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
@@ -180,6 +181,8 @@ relcache_build = { path = "../../backend/utils/cache/relcache_build" }
 relmapper = { path = "../../backend/utils/cache/relmapper" }
 typcache = { path = "../../backend/utils/cache/typcache" }
 pg_enum = { path = "../../backend/catalog/pg_enum" }
+pg_publication = { path = "../../backend/catalog/pg_publication" }
+pg_subscription = { path = "../../backend/catalog/pg_subscription" }
 elog = { path = "../../backend/utils/error/elog" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }

@@ -440,6 +440,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "pg_locale",
+ "postgres_seams",
  "stack_depth",
  "syscache_seams",
  "types_core",
@@ -1575,6 +1576,7 @@ dependencies = [
  "pg_shdepend",
  "pg_type",
  "policy_seams",
+ "publicationcmds_seams",
  "rewrite_define_seams",
  "sequence_seams",
  "statscmds",
@@ -2128,7 +2130,9 @@ dependencies = [
  "adt_acl",
  "catalog_namespace",
  "dbcommands",
+ "elog",
  "explain",
+ "guc_tables",
  "mbutils",
  "mcx",
  "miscinit",
@@ -2163,6 +2167,38 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_tuple",
+]
+
+[[package]]
+name = "commands_alter"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catalog_objectaddress",
+ "commands_publicationcmds",
+ "datum",
+ "dbcommands",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "pg_publication",
+ "pg_subscription",
+ "subscriptioncmds",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
@@ -2575,6 +2611,58 @@ dependencies = [
  "rel_vocab",
  "syscache_seams",
  "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
+name = "commands_publicationcmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "dbcommands",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "inval",
+ "lmgr",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "nodes_core",
+ "parse_clause",
+ "parse_collate",
+ "parse_relation",
+ "parser_small1",
+ "pg_depend",
+ "pg_inherits",
+ "pg_publication",
+ "pg_shdepend",
+ "publicationcmds_seams",
+ "readfuncs",
+ "rel_vocab",
+ "relcache",
+ "superuser",
+ "table",
+ "transam_xlog",
  "types_core",
  "types_error",
  "types_nodes",
@@ -7534,6 +7622,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "guc_tables",
+ "hashfn",
  "init_small",
  "libc",
  "lsyscache",
@@ -7670,6 +7759,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_publication"
+version = "0.1.0"
+dependencies = [
+ "adt_int",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catalog_namespace",
+ "catcache",
+ "datum",
+ "detoast",
+ "fmgr_core",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "heaptuple",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "outfuncs",
+ "pg_class_seams",
+ "pg_depend",
+ "pg_inherits",
+ "syscache_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_sema"
 version = "0.0.0"
 dependencies = [
@@ -7726,6 +7853,33 @@ name = "pg_strong_random"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "pg_subscription"
+version = "0.1.0"
+dependencies = [
+ "adt_quote",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "detoast",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -9012,6 +9166,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "publicationcmds_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "queryenvironment"
 version = "0.1.0"
 dependencies = [
@@ -9921,6 +10085,7 @@ dependencies = [
  "commands_createas",
  "commands_matview",
  "commands_policy",
+ "commands_publicationcmds",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -10007,8 +10172,10 @@ dependencies = [
  "pg_locale",
  "pg_prng",
  "pg_proc",
+ "pg_publication",
  "pg_sema",
  "pg_string",
+ "pg_subscription",
  "pgstat",
  "pgtz",
  "plancache",
@@ -10806,6 +10973,45 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "types_error",
+]
+
+[[package]]
+name = "subscriptioncmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "adt_pg_lsn",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "commands_define",
+ "datum",
+ "dbcommands",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "guc",
+ "heaptuple",
+ "init_small",
+ "lmgr",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "pg_shdepend",
+ "pg_subscription",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_tuple",
+ "varlena",
+ "xact",
 ]
 
 [[package]]
@@ -12042,6 +12248,7 @@ dependencies = [
  "checkpointer_seams",
  "cmdtag",
  "collationcmds",
+ "commands_alter",
  "commands_analyze",
  "commands_async",
  "commands_cluster",
@@ -12050,6 +12257,7 @@ dependencies = [
  "commands_dropcmds",
  "commands_matview",
  "commands_policy",
+ "commands_publicationcmds",
  "commands_vacuum",
  "commands_view",
  "copy_cmd",
@@ -12086,6 +12294,7 @@ dependencies = [
  "schemacmds",
  "sequence",
  "statscmds",
+ "subscriptioncmds",
  "superuser",
  "syscache_seams",
  "tablecmds",

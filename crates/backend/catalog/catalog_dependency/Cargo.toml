@@ -26,6 +26,7 @@ init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
 policy_seams = { path = "../../commands/policy_seams" }
+publicationcmds_seams = { path = "../../commands/publicationcmds_seams" }
 statscmds = { path = "../../commands/statscmds" }
 trigger = { path = "../../commands/trigger" }
 pg_constraint = { path = "../pg_constraint" }

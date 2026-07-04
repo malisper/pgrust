@@ -61,6 +61,9 @@ const AuthMemRelationId: Oid = 1261;
 const TriggerRelationId: Oid = 2620;
 const EventTriggerRelationId: Oid = 3466;
 const EventTriggerOidIndexId: Oid = 3468;
+const PublicationRelationId: Oid = 6104;
+const PublicationRelRelationId: Oid = 6106;
+const PublicationNamespaceRelationId: Oid = 6237;
 
 #[cold]
 #[inline(never)]
@@ -794,6 +797,15 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
         PolicyRelationId => policy_seams::remove_policy_by_id::call(mcx, object.objectId)?,
+        PublicationRelationId => {
+            publicationcmds_seams::remove_publication_by_id::call(mcx, object.objectId)?
+        }
+        PublicationRelRelationId => {
+            publicationcmds_seams::remove_publication_rel_by_id::call(mcx, object.objectId)?
+        }
+        PublicationNamespaceRelationId => {
+            publicationcmds_seams::remove_publication_schema_by_id::call(mcx, object.objectId)?
+        }
         pg_largeobject::LargeObjectRelationId => {
             pg_largeobject::LargeObjectDrop(mcx, object.objectId)?
         }

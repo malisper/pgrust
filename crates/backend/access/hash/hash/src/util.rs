@@ -25,25 +25,30 @@ pub(crate) fn _hash_checkqual() -> bool {
 /// index_getprocinfo(rel, 1, HASHSTANDARD_PROC) through the relcache
 /// rd_supportinfo resolved-once cache (proc slot 1 is preloaded for hash).
 pub fn hash_procinfo(rel: &Relation<'_>) -> PgResult<FmgrInfo> {
-    let mut cache = rel.rd_supportinfo.borrow_mut();
-    if cache.is_empty() {
-        cache.resize_with(rel.indnkeyatts() as usize, || None);
-    }
-    let slot = &mut cache[0];
-    if slot.is_none() {
-        let opcintype = rel.rd_opcintype[0];
-        let proc = lsyscache::get_opfamily_proc(
-            rel.rd_opfamily[0],
-            opcintype,
-            opcintype,
-            HASHSTANDARD_PROC as i16,
-        )?;
-        if proc == 0 {
-            return Err(missing_support_function(rel, opcintype, opcintype));
+    {
+        let mut cache = rel.rd_supportinfo.borrow_mut();
+        if cache.is_empty() {
+            cache.resize_with(rel.indnkeyatts() as usize, || None);
         }
-        *slot = Some(fmgr_core::fmgr_info(proc)?);
+        if let Some(fi) = &cache[0] {
+            return Ok(fi.clone());
+        }
     }
-    Ok(slot.as_ref().expect("filled above").clone())
+    // Borrow released across the lookup: resolving the support proc can scan
+    // pg_amproc, rebuilding relcache entries and re-entering this scan.
+    let opcintype = rel.rd_opcintype[0];
+    let proc = lsyscache::get_opfamily_proc(
+        rel.rd_opfamily[0],
+        opcintype,
+        opcintype,
+        HASHSTANDARD_PROC as i16,
+    )?;
+    if proc == 0 {
+        return Err(missing_support_function(rel, opcintype, opcintype));
+    }
+    let fi = fmgr_core::fmgr_info(proc)?;
+    rel.rd_supportinfo.borrow_mut()[0] = Some(fi.clone());
+    Ok(fi)
 }
 
 #[inline]

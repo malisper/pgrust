@@ -132,7 +132,26 @@ fn RelationReloadIndexInfo(
         ));
     };
     let mcx = cache_mcx();
-    let ii = relcache_build_seams::relation_init_index_access_info::call(mcx, relid, &scanned.form)?;
+    // System indexes keep their access info without re-reading pg_index — the
+    // INDEXRELID syscache load can recurse back into this reload (C gates the
+    // refresh on !IsSystemRelation for the same reason, relcache.c:2444).
+    let is_system = scanned.form.relnamespace == types_core::PG_CATALOG_NAMESPACE
+        || scanned.form.relnamespace == types_core::PG_TOAST_NAMESPACE;
+    let (index, opcintype, opfamily, indoption, indcollation, support) = if is_system {
+        let held_index = held.rd_index.as_ref().expect("system index rd_index");
+        (
+            clone_pg_index(mcx, held_index)?,
+            vec_clone_in(mcx, &held.rd_opcintype)?,
+            vec_clone_in(mcx, &held.rd_opfamily)?,
+            vec_clone_in(mcx, &held.rd_indoption)?,
+            vec_clone_in(mcx, &held.rd_indcollation)?,
+            vec_clone_in(mcx, &held.rd_support)?,
+        )
+    } else {
+        let ii =
+            relcache_build_seams::relation_init_index_access_info::call(mcx, relid, &scanned.form)?;
+        (ii.index, ii.opcintype, ii.opfamily, ii.indoption, ii.indcollation, ii.support)
+    };
 
     let newrel = Rc::new(RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: relid,
@@ -146,17 +165,19 @@ fn RelationReloadIndexInfo(
         rd_lockInfo: lmgr::RelationInitLockInfo(relid, scanned.form.relisshared),
         rd_rel: scanned.form,
         rd_att: Rc::clone(&held.rd_att),
-        rd_index: Some(ii.index),
-        rd_opcintype: ii.opcintype,
-        rd_opfamily: ii.opfamily,
-        rd_indoption: ii.indoption,
-        rd_indcollation: ii.indcollation,
+        rd_index: Some(index),
+        rd_opcintype: opcintype,
+        rd_opfamily: opfamily,
+        rd_indoption: indoption,
+        rd_indcollation: indcollation,
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
-        rd_support: ii.support,
-        rd_supportinfo: Default::default(),
+        rd_support: support,
+        // Preserved like rd_support: resolving a support proc scans
+        // pg_amproc, which needs these very indexes searchable.
+        rd_supportinfo: core::cell::RefCell::new(held.rd_supportinfo.borrow().clone()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
@@ -169,6 +190,44 @@ fn RelationReloadIndexInfo(
         }
     });
     Ok(newrel)
+}
+
+fn vec_clone_in<'mcx, T: Copy>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgVec<'_, T>,
+) -> PgResult<mcx::PgVec<'mcx, T>> {
+    let mut out: mcx::PgVec<'mcx, T> = mcx::vec_with_capacity_in(mcx, src.len())?;
+    out.extend(src.iter().copied());
+    Ok(out)
+}
+
+fn clone_pg_index<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &types_rel::FormData_pg_index<'_>,
+) -> PgResult<types_rel::FormData_pg_index<'mcx>> {
+    Ok(types_rel::FormData_pg_index {
+        indexrelid: src.indexrelid,
+        indrelid: src.indrelid,
+        indnatts: src.indnatts,
+        indnkeyatts: src.indnkeyatts,
+        indisunique: src.indisunique,
+        indnullsnotdistinct: src.indnullsnotdistinct,
+        indisprimary: src.indisprimary,
+        indisexclusion: src.indisexclusion,
+        indimmediate: src.indimmediate,
+        indisvalid: src.indisvalid,
+        indisready: src.indisready,
+        indkey: vec_clone_in(mcx, &src.indkey)?,
+        has_indpred: src.has_indpred,
+        indexprs_src: match &src.indexprs_src {
+            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        },
+        indpred_src: match &src.indpred_src {
+            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        },
+    })
 }
 
 // RelationReloadNailed: only rd_rel content (relfrozenxid etc.) can change.

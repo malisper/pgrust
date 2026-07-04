@@ -32,6 +32,7 @@ pub fn init_all() {
     aclchk::init_seams();
     rls::init_seams();
     commands_policy::init_seams();
+    commands_publicationcmds::init_seams();
     be_fsstubs::init_seams();
     large_object::init_seams();
     catalog_namespace::init_seams();
@@ -169,6 +170,8 @@ pub fn init_all() {
     typcache::init_seams();
     clauses::init_seams();
     pg_enum::init_seams();
+    pg_publication::init_seams();
+    pg_subscription::init_seams();
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);

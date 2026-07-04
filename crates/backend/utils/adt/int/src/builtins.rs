@@ -1,7 +1,5 @@
 //! fmgr-shaped wrappers (`fc_<cname>`) and the registry table (`INT_BUILTINS`)
-//! the fmgr-core unit consumes. int2vectorin/out and the recv/send functions
-//! are not registrable yet: they need an allocation/wire convention at the
-//! frame (fmgr-core / pqcomm units); their value cores live in the crate root.
+//! the fmgr-core unit consumes; value cores live in the crate root.
 
 use alloc::string::String;
 
@@ -44,6 +42,44 @@ pub fn fc_int2out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
     })
+}
+
+pub fn fc_int2vectorin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: the result context outlives this call frame (set_result_mcx
+    // contract); detached so isnull stays assignable on the soft-error path.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let num = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    match crate::int2vectorin(mcx, &num, esc)? {
+        Some(img) => {
+            let d = Datum::from_usize(img.as_ptr() as usize);
+            core::mem::forget(img);
+            Ok(d)
+        }
+        None => {
+            fcinfo.isnull = true;
+            Ok(Datum::null())
+        }
+    }
+}
+
+pub fn fc_int2vectorout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const u8;
+    // SAFETY: int2vector datums are never toasted (plain storage); header +
+    // dim1 i16 payload are readable in-tuple bytes.
+    let (hdr, values) = unsafe {
+        let hdr = core::ptr::read_unaligned(p.cast::<types_array::int2vector>());
+        let n = hdr.dim1.max(0) as usize;
+        let vals =
+            core::slice::from_raw_parts(p.add(crate::INT2VECTOR_HDRSZ).cast::<i16>(), n);
+        (hdr, vals)
+    };
+    let mut out = crate::int2vectorout(mcx, hdr.ndim, hdr.dataoffset, hdr.elemtype, values)?;
+    out.push(0);
+    Ok(::types_fmgr::cstring_result(out))
 }
 
 pub fn fc_int4in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -345,9 +381,8 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
-// pg_proc.dat rows for int.c. Not present: int2vectorin/out (40/41) and
-// int2vectorrecv/send (2410/2411) — see module doc. recv/send ride the
-// binary-wire fmgr frame (types_fmgr::wire).
+// pg_proc.dat rows for int.c. Not present: int2vectorrecv/send (2410/2411)
+// ride the binary-wire fmgr frame (types_fmgr::wire).
 pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(2404, "int2recv", 1, fc_int2recv),
     b(2405, "int2send", 1, fc_int2send),
@@ -358,6 +393,8 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(3994, "generate_series_int4_support", 1, fc_generate_series_int4_support),
     b(38, "int2in", 1, fc_int2in),
     b(39, "int2out", 1, fc_int2out),
+    b(40, "int2vectorin", 1, fc_int2vectorin),
+    b(41, "int2vectorout", 1, fc_int2vectorout),
     b(42, "int4in", 1, fc_int4in),
     b(43, "int4out", 1, fc_int4out),
     b(313, "i2toi4", 1, fc_i2toi4),
