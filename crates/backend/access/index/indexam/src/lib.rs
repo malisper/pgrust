@@ -3,6 +3,8 @@
 
 pub use types_relscan::*;
 
+mod prefetch;
+
 #[cfg(test)]
 mod tests;
 
@@ -357,6 +359,7 @@ pub fn index_rescan<'mcx>(
 
     scan.kill_prior_tuple = false; // for safety
     scan.xs_heap_continue = false;
+    scan.xs_prefetch = types_relscan::IndexPrefetchState::reset();
 
     am_rescan(scan, keys, orderbys)
 }
@@ -455,6 +458,9 @@ pub fn index_fetch_heap<'mcx>(
     if let Some(found) = batch_outcome(scan, outcome) {
         return Ok(found);
     }
+
+    // New heap block (or non-batch row): keep the readahead window primed.
+    prefetch::on_heap_fetch(scan)?;
 
     // Start a run when the index holds more TIDs for this heap page. MVCC
     // verdicts are fill-time-independent; non-MVCC keeps the per-tuple path.
@@ -988,6 +994,7 @@ mod mock {
             xs_heap_continue: false,
             xs_heapfetch: None,
             xs_recheck: false,
+            xs_prefetch: types_relscan::IndexPrefetchState::reset(),
             xs_pgstat_index_tuples: 0,
             xs_pgstat_heap_fetches: 0,
             xs_pgstat_index_scans: 0,

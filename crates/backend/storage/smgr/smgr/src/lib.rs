@@ -836,6 +836,11 @@ pub fn init_seams() {
             Ok(result)
         })?
     });
+    smgr_seams::smgr_prefetch::set(|rlocator, forknum, blocknum, nblocks| {
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdprefetch(rlocator, &mut r.md, forknum, blocknum, nblocks),
+        })?
+    });
     smgr_seams::smgr_read::set(|rlocator, forknum, blocknum, buffer| {
         // smgrread(smgropen(rlocator), ...): one probe, as above.
         opened(rlocator, |r| {

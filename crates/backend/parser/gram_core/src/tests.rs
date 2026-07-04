@@ -1712,3 +1712,123 @@ fn alter_table_enable_disable_rule() {
         assert_eq!(cmd.name, Some(name), "{sql}");
     }
 }
+
+#[test]
+fn drop_function_shapes() {
+    use types_nodes::parsenodes::{DropBehavior, ObjectType};
+    let list = parse("DROP FUNCTION f(int, text), s.g() CASCADE");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_FUNCTION);
+    assert!(!d.missing_ok);
+    assert_eq!(d.behavior, DropBehavior::DROP_CASCADE);
+    assert_eq!(d.objects.len(), 2);
+    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert!(!f.args_unspecified);
+    assert_eq!(f.objname.len(), 1);
+    assert_eq!(f.objname.nth(0).as_string().unwrap().sval, "f");
+    assert_eq!(f.objargs.len(), 2);
+    assert_eq!(f.objfuncargs.len(), 2);
+    let g = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(g.objname.len(), 2);
+    assert_eq!(g.objargs.len(), 0);
+    assert!(!g.args_unspecified);
+
+    let list = parse("DROP FUNCTION IF EXISTS f");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert!(d.missing_ok);
+    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert!(f.args_unspecified);
+    assert_eq!(f.objargs.len(), 0);
+
+    let list = parse("DROP PROCEDURE p(OUT a int, INOUT b text, VARIADIC c int)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_PROCEDURE);
+    let p = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(p.objfuncargs.len(), 3);
+    assert_eq!(p.objargs.len(), 2);
+
+    let list = parse("DROP AGGREGATE agg(int), agg2(*)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_AGGREGATE);
+    let a = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(a.objargs.len(), 1);
+    let a2 = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(a2.objargs.len(), 0);
+    assert!(!a2.args_unspecified);
+}
+
+#[test]
+fn comment_on_function_shape() {
+    use types_nodes::parsenodes::ObjectType;
+    let list = parse("COMMENT ON FUNCTION s.f(int) IS 'c'");
+    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    assert_eq!(c.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(c.comment, Some("c"));
+    let f = c.object.unwrap().as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(f.objname.len(), 2);
+    assert_eq!(f.objargs.len(), 1);
+
+    let list = parse("COMMENT ON AGGREGATE agg(text) IS NULL");
+    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    assert_eq!(c.objtype, ObjectType::OBJECT_AGGREGATE);
+    assert_eq!(c.comment, None);
+}
+
+#[test]
+fn alter_function_shapes() {
+    use types_nodes::parsenodes::ObjectType;
+    let list = parse("ALTER FUNCTION f(int) STRICT IMMUTABLE RESTRICT");
+    let a = only_stmt(&list).stmt.unwrap().as_alter_function_stmt().expect("AlterFunctionStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(a.actions.len(), 2);
+    assert_eq!(a.func.unwrap().objargs.len(), 1);
+
+    let list = parse("ALTER FUNCTION f(int) RENAME TO g");
+    let r = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::RenameStmt>()
+        .expect("RenameStmt");
+    assert_eq!(r.renameType, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(r.newname, Some("g"));
+    assert!(r.object.unwrap().as_object_with_args().is_some());
+
+    let list = parse("ALTER ROUTINE r(int) OWNER TO alice");
+    let o = only_stmt(&list).stmt.unwrap().as_alter_owner_stmt().expect("AlterOwnerStmt");
+    assert_eq!(o.objectType, ObjectType::OBJECT_ROUTINE);
+    assert_eq!(o.newowner.unwrap().rolename, Some("alice"));
+    assert!(o.object.unwrap().as_object_with_args().is_some());
+}
+
+#[test]
+fn grant_on_function_shapes() {
+    use types_nodes::parsenodes::{GrantTargetType, ObjectType};
+    let list = parse("GRANT EXECUTE ON FUNCTION f(int), s.g TO u");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_OBJECT);
+    assert_eq!(g.objects.len(), 2);
+    assert!(g.objects.nth(1).as_object_with_args().unwrap().args_unspecified);
+
+    let list = parse("REVOKE ALL ON ALL PROCEDURES IN SCHEMA s FROM u");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(!g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_PROCEDURE);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
+    assert_eq!(g.objects.nth(0).as_string().unwrap().sval, "s");
+}
+
+#[test]
+fn aggregate_output_args_rejected() {
+    let err = parse_err("DROP AGGREGATE a(OUT x int)");
+    assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
+}
