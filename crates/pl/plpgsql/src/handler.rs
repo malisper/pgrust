@@ -176,6 +176,7 @@ const PROARGMODE_OUT: i8 = b'o' as i8;
 const PROARGMODE_INOUT: i8 = b'b' as i8;
 const PROARGMODE_VARIADIC: i8 = b'v' as i8;
 const PROARGMODE_TABLE: i8 = b't' as i8;
+const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROKIND_PROCEDURE: i8 = b'p' as i8;
 
 fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
