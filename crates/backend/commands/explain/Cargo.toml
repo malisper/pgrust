@@ -34,6 +34,7 @@ typcache = { path = "../../utils/cache/typcache" }
 postgres = { path = "../../tcop/postgres" }
 prepare = { path = "../prepare" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 tcop_dest = { path = "../../tcop/dest" }
 tupdesc = { path = "../../access/common/tupdesc" }

@@ -31,3 +31,4 @@ varlena = { path = "../varlena" }
 wchar = { path = "../../../../common/wchar" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+adt_regproc = { path = "../regproc" }

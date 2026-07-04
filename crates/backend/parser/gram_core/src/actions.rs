@@ -1005,6 +1005,46 @@ impl<'mcx> Parser<'mcx> {
                 n.initdeferred = cas.initdeferred;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ConstraintElem: UNIQUE ExistingIndex ConstraintAttributeSpec
+            541 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_UNIQUE;
+                n.location = view.l(1);
+                n.keys = NodeList::nil();
+                n.including = NodeList::nil();
+                n.options = NodeList::nil();
+                n.indexname = Some(view.v(2).str_val());
+                n.indexspace = None;
+                let cas = self.process_cas_bits(
+                    view.v(3).ival(),
+                    view.l(3),
+                    "UNIQUE",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ConstraintElem: PRIMARY KEY ExistingIndex ConstraintAttributeSpec
+            543 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_PRIMARY;
+                n.location = view.l(1);
+                n.keys = NodeList::nil();
+                n.including = NodeList::nil();
+                n.options = NodeList::nil();
+                n.indexname = Some(view.v(3).str_val());
+                n.indexspace = None;
+                let cas = self.process_cas_bits(
+                    view.v(4).ival(),
+                    view.l(4),
+                    "PRIMARY KEY",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // ConstraintElem: PRIMARY KEY '(' columnList opt_without_overlaps
             // ')' opt_c_include opt_definition OptConsTableSpace
             // ConstraintAttributeSpec

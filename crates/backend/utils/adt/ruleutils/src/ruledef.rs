@@ -39,7 +39,7 @@ struct PgRewriteRow {
     ev_action: String,
 }
 
-fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> Datum {
+pub(crate) fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> Datum {
     let mut isnull = false;
     // SAFETY: pg_rewrite row read under its relation's descriptor; every
     // attno here is NOT NULL in pg_rewrite.
@@ -49,7 +49,7 @@ fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> Datum {
 }
 
 // ev_qual/ev_action are routinely pglz-compressed inline.
-fn text_attr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> PgResult<String> {
+pub(crate) fn text_attr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> PgResult<String> {
     let d = req(td, tup, attno);
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena attr datum addresses in-tuple bytes; length is

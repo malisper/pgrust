@@ -10,7 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_acl = { path = "../../adt/acl" }
+arrayfuncs = { path = "../../adt/arrayfuncs" }
 elog = { path = "../../error/elog" }
+funcapi = { path = "../../fmgr/funcapi" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
 format_type = { path = "../../adt/format_type" }
 guc = { path = "../guc" }
 guc_tables = { path = "../guc_tables" }
