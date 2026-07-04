@@ -55,6 +55,12 @@ impl<'a> VarlenaRef<'a> {
     pub fn varsize(self) -> usize {
         // SAFETY: from_ptr contract — header readable.
         let word = unsafe { self.ptr.as_ptr().cast::<u32>().read_unaligned() };
+        // 1B/1B_E headers misread as a u32 length; short-form datums (tuple,
+        // array-element, param sources) must go through a VARSIZE_ANY lane.
+        #[cfg(target_endian = "little")]
+        debug_assert!(word & 0x01 == 0, "VarlenaRef::varsize on a 1-byte-header varlena");
+        #[cfg(target_endian = "big")]
+        debug_assert!(word & 0x8000_0000 == 0, "VarlenaRef::varsize on a 1-byte-header varlena");
         #[cfg(target_endian = "big")]
         let len = word & VARLENA_SIZE_MASK;
         #[cfg(target_endian = "little")]
@@ -64,6 +70,12 @@ impl<'a> VarlenaRef<'a> {
 
     #[inline]
     pub fn data(self) -> &'a [u8] {
+        // SAFETY: from_ptr contract — header readable.
+        #[cfg(target_endian = "little")]
+        debug_assert!(
+            unsafe { *self.ptr.as_ptr() } & 0x03 == 0,
+            "VarlenaRef::data on a non-4B-U varlena"
+        );
         let len = self.varsize() - VARHDRSZ;
         // SAFETY: from_ptr contract — image readable for VARSIZE bytes.
         unsafe { core::slice::from_raw_parts(self.ptr.as_ptr().add(VARHDRSZ), len) }
@@ -153,6 +165,16 @@ mod tests {
         for len in [VARHDRSZ, 5, 100, 0x3FFF_FFFF] {
             assert_eq!(varsize_4b(set_varsize_4b(len)), len);
         }
+    }
+
+    #[test]
+    #[should_panic]
+    #[cfg(debug_assertions)]
+    fn varsize_on_short_header_panics() {
+        let short: [u8; 4] = [(4u8 << 1) | 0x01, b'a', b'b', b'c'];
+        // SAFETY: violates the 4B contract on purpose; the debug_assert fires
+        // before any out-of-image read.
+        let _ = unsafe { VarlenaRef::from_ptr(short.as_ptr()) }.varsize();
     }
 
     #[test]

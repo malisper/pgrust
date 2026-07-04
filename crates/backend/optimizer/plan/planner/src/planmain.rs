@@ -70,11 +70,9 @@ pub fn query_planner<'mcx>(
 
     let joinlist = crate::initsplan::deconstruct_jointree(run)?;
 
-    crate::initsplan::reconsider_outer_join_clauses(run)?;
+    crate::equivclass::reconsider_outer_join_clauses(run)?;
 
-    // No ECs exist (initsplan.rs documents the EC-const divergence).
-    debug_assert!(run.root.eq_classes.is_empty());
-    run.root.ec_merging_done = true;
+    crate::equivclass::generate_base_implied_equalities(run)?;
 
     qp_callback(run)?;
 

@@ -1,8 +1,15 @@
 // typecmds.c DefineDomain lane (CREATE DOMAIN with NOT NULL/CHECK/NULL
-// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner). ALTER
-// DOMAIN, COLLATE, DEFAULT expressions, and inherited base-type defaults are
-// loud.
-#![allow(non_snake_case)]
+// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner) + ALTER
+// DOMAIN/ALTER TYPE lane (alter.rs). COLLATE and inherited base-type
+// defaults are loud.
+#![allow(non_snake_case, non_upper_case_globals)]
+
+mod alter;
+pub use alter::{
+    checkDomainOwner, AlterDomain, AlterTypeNamespace, AlterTypeNamespace_oid,
+    AlterTypeNamespaceInternal, AlterTypeOwner, AlterTypeOwner_oid, AlterTypeOwnerInternal,
+    RenameDomainConstraint, RenameType,
+};
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
@@ -28,10 +35,10 @@ use pg_type::{
 
 const F_DOMAIN_IN: Oid = 2597;
 const F_DOMAIN_RECV: Oid = 2598;
-const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
+pub(crate) const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
 const TYPTYPE_ENUM: i8 = b'e' as i8;
-const TYPTYPE_RANGE: i8 = b'r' as i8;
-const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+pub(crate) const TYPTYPE_RANGE: i8 = b'r' as i8;
+pub(crate) const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 const TYPCATEGORY_ENUM: i8 = b'E' as i8;
 const TYPALIGN_INT: i8 = b'i' as i8;
@@ -44,7 +51,7 @@ const F_ENUM_SEND: Oid = 3533;
 
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
+pub(crate) fn unported(what: &str) -> ! {
     panic!("{what} unported — unit backend-commands-typecmds")
 }
 
@@ -127,7 +134,7 @@ fn base_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<BaseTypeRow> {
     Ok(row)
 }
 
-fn type_name_to_string<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<mcx::PgString<'mcx>> {
+pub(crate) fn type_name_to_string<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<mcx::PgString<'mcx>> {
     let mut s = mcx::PgString::new_in(mcx);
     for (i, n) in tn.names.iter().enumerate() {
         if i > 0 {
@@ -149,20 +156,8 @@ pub fn DefineDomain<'mcx>(
     for (i, n) in stmt.domainname.iter().enumerate() {
         names[i] = n.as_string().expect("domainname names").sval;
     }
-    let (schemaname, domain_name) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
-    let domain_namespace = match schemaname {
-        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
-        None => {
-            let path = catalog_namespace::fetch_search_path(mcx, false)?;
-            match path.first() {
-                Some(&ns) => ns,
-                None => return Err(no_creation_schema()),
-            }
-        }
-    };
-    if catalog_namespace::isAnyTempNamespace(domain_namespace)? {
-        unported("DefineDomain (typecmds.c): temp-namespace domain creation");
-    }
+    let (domain_namespace, domain_name) =
+        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &names[..nnames])?;
 
     let user_id = miscinit::GetUserId();
     if aclchk::object_aclcheck(
@@ -466,7 +461,7 @@ pub fn DefineDomain<'mcx>(
 fn creation_namespace<'mcx, 'a>(
     mcx: Mcx<'mcx>,
     qualified: &types_nodes::NodeList<'a>,
-    what: &str,
+    _what: &str,
 ) -> PgResult<(Oid, &'a str)> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = qualified.len();
@@ -474,24 +469,8 @@ fn creation_namespace<'mcx, 'a>(
     for (i, n) in qualified.iter().enumerate() {
         names[i] = n.as_string().expect("qualified name").sval;
     }
-    let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
-    let namespace = match schemaname {
-        // C resolves the alias via AccessTempTableNamespace (namespace.c:3498).
-        Some("pg_temp") => {
-            unported(&format!("{what} (typecmds.c): pg_temp-alias type creation"))
-        }
-        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
-        None => {
-            let path = catalog_namespace::fetch_search_path(mcx, false)?;
-            match path.first() {
-                Some(&ns) => ns,
-                None => return Err(no_creation_schema()),
-            }
-        }
-    };
-    if catalog_namespace::isAnyTempNamespace(namespace)? {
-        unported(&format!("{what} (typecmds.c): temp-namespace type creation"));
-    }
+    let (namespace, name) =
+        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &names[..nnames])?;
     if aclchk::object_aclcheck(
         NAMESPACE_RELATION_ID,
         namespace,
@@ -676,7 +655,7 @@ fn constraint_name<'mcx>(
     }
 }
 
-fn domainAddCheckConstraint<'mcx>(
+pub(crate) fn domainAddCheckConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     domain_oid: Oid,
     domain_namespace: Oid,
@@ -684,7 +663,7 @@ fn domainAddCheckConstraint<'mcx>(
     typ_mod: i32,
     constr: &Constraint<'mcx>,
     domain_name: &str,
-) -> PgResult<Oid> {
+) -> PgResult<(Oid, mcx::PgString<'mcx>)> {
     debug_assert!(constr.contype == ConstrType::CONSTR_CHECK);
     let conname =
         constraint_name(mcx, domain_oid, domain_namespace, domain_name, constr, "check")?;
@@ -730,10 +709,10 @@ fn domainAddCheckConstraint<'mcx>(
     entry.conbin = Some(ccbin.as_str());
     let ccoid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     parser_small1::free_parsestate(cpstate)?;
-    Ok(ccoid)
+    Ok((ccoid, ccbin))
 }
 
-fn domainAddNotNullConstraint<'mcx>(
+pub(crate) fn domainAddNotNullConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     domain_oid: Oid,
     domain_namespace: Oid,
@@ -764,15 +743,6 @@ fn domain_err(
 ) -> Box<PgError> {
     let pos = parser_small1::parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
     Box::new(PgError::new(ERROR, msg.to_string()).with_sqlstate(sqlstate).with_cursor_position(pos))
-}
-
-#[cold]
-#[inline(never)]
-fn no_creation_schema() -> Box<PgError> {
-    Box::new(
-        PgError::new(ERROR, "no schema has been selected to create in".to_string())
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
-    )
 }
 
 #[cold]

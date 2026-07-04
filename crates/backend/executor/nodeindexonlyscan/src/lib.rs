@@ -6,16 +6,14 @@ extern crate alloc;
 
 use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState, INDEX_VAR};
 use ::execscan::{ScanNode, ScanState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, ExecSlotId};
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
 use ::mcx::{Allocator, Mcx, PgBox, PgVec};
 use ::nbtree::itup::{index_getattr, ITup};
-use ::nodeindexscan::{
-    exec_index_build_scan_keys, exec_index_eval_runtime_keys, IndexRuntimeKeyInfo,
-};
+use ::nodeindexscan::{exec_index_build_scan_keys, exec_index_eval_runtime_keys, RuntimeKeysState};
 use ::tableam::table_slot_callbacks;
 use ::types_core::{AttrNumber, CSTRINGOID, NAMEOID};
 use ::types_error::{PgError, PgResult};
@@ -39,12 +37,10 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub ioss_RelationDesc: Option<Relation<'mcx>>,
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
-    pub ioss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
-    pub ioss_RuntimeKeysReady: bool,
-    pub ioss_RuntimeContext: Option<EcxtId>,
+    pub ioss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
-    pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
+    pub ioss_NameCStringAttNums: PgBox<'mcx, [AttrNumber]>,
     pub ioss_VMBuffer: VmBuffer,
     pub ioss_PlanNodeId: i32,
 }
@@ -102,9 +98,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             )? {
                 // InstrCountTuples2: EXPLAIN's Heap Fetches.
                 if estate.es_instrument != 0 {
-                    if let Some(i) =
-                        estate.es_instrumentation.get_mut(plan_node_id as usize)
-                    {
+                    if let Some(i) = estate.es_instrumentation.get_mut(plan_node_id as usize) {
                         i.ntuples2 += 1.0;
                     }
                 }
@@ -193,7 +187,7 @@ impl<'mcx> IndexOnlyScanState<'mcx> {
             0,
         )?;
         scandesc.xs_want_itup = true;
-        if self.ioss_RuntimeKeys.is_empty() || self.ioss_RuntimeKeysReady {
+        if self.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
             index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
         }
         // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
@@ -376,7 +370,7 @@ pub fn exec_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if !node.ioss_RuntimeKeys.is_empty() && !node.ioss_RuntimeKeysReady {
+    if node.ioss_Runtime.as_deref().is_some_and(|r| !r.ready) {
         exec_rescan_index_only_scan(node, estate)?;
     }
     execscan::exec_scan(node, estate)
@@ -446,14 +440,19 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         orderby_unported();
     }
 
-    let (ioss_ScanKeys, ioss_RuntimeKeys) =
+    let (ioss_ScanKeys, runtime_keys) =
         exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
-    // C keeps ps_ExprContext as the standard econtext and gives runtime keys
-    // their own, reset per rescan.
-    let ioss_RuntimeContext = if ioss_RuntimeKeys.is_empty() {
+    let ioss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
-        Some(estate.exec_assign_expr_context())
+        Some(::mcx::alloc_in(
+            mcx,
+            RuntimeKeysState {
+                keys: runtime_keys,
+                ready: false,
+                ecxt: estate.exec_assign_expr_context(),
+            },
+        )?)
     };
     let ioss_NameCStringAttNums = name_cstring_attnums(mcx, &index_rel)?;
 
@@ -463,9 +462,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_ScanDesc: None,
         ioss_RelationDesc: Some(index_rel),
         ioss_ScanKeys,
-        ioss_RuntimeKeys,
-        ioss_RuntimeKeysReady: false,
-        ioss_RuntimeContext,
+        ioss_Runtime,
         ioss_TableSlot,
         ioss_OrderDir: order_dir(node.indexorderdir),
         ioss_NameCStringAttNums,
@@ -479,7 +476,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
 fn name_cstring_attnums<'mcx>(
     mcx: Mcx<'mcx>,
     index_rel: &Relation<'mcx>,
-) -> PgResult<PgVec<'mcx, AttrNumber>> {
+) -> PgResult<PgBox<'mcx, [AttrNumber]>> {
     let mut attnums = PgVec::new_in(mcx);
     let indnkeyatts = index_rel.indnkeyatts();
     for attnum in 0..indnkeyatts as usize {
@@ -489,7 +486,7 @@ fn name_cstring_attnums<'mcx>(
             attnums.push(attnum as AttrNumber);
         }
     }
-    Ok(attnums)
+    Ok(attnums.into_boxed_slice())
 }
 
 fn order_dir(dir: i32) -> ScanDirection {
@@ -519,7 +516,7 @@ pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<(
     }
     node.recheckqual = None;
     node.ioss_ScanKeys.clear();
-    node.ioss_RuntimeKeys.clear();
+    node.ioss_Runtime = None;
     Ok(())
 }
 
@@ -528,18 +525,17 @@ pub fn exec_rescan_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    if !node.ioss_RuntimeKeys.is_empty() {
-        let ecxt = node.ioss_RuntimeContext.expect("runtime keys have their econtext");
-        estate.reset_expr_context(ecxt);
-        exec_index_eval_runtime_keys(
-            estate,
-            ecxt,
-            &mut node.ioss_RuntimeKeys,
-            &mut node.ioss_ScanKeys,
-        )?;
+    if let Some(rt) = node.ioss_Runtime.as_deref_mut() {
+        estate.reset_expr_context(rt.ecxt);
+        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.ioss_ScanKeys)?;
+        rt.ready = true;
     }
-    node.ioss_RuntimeKeysReady = true;
-    let IndexOnlyScanState { ioss_ScanDesc, ioss_ScanKeys, ss, .. } = node;
+    let IndexOnlyScanState {
+        ioss_ScanDesc,
+        ioss_ScanKeys,
+        ss,
+        ..
+    } = node;
     if let Some(scandesc) = ioss_ScanDesc.as_deref_mut() {
         index_rescan(scandesc, Some(ioss_ScanKeys), None)?;
     }
@@ -549,12 +545,20 @@ pub fn exec_rescan_index_only_scan<'mcx>(
 
 /// `ExecIndexOnlyMarkPos`; the EPQ arm lands with execMain's EPQState.
 pub fn exec_index_only_mark_pos(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
-    index_markpos(node.ioss_ScanDesc.as_deref_mut().expect("mark before first fetch"))
+    index_markpos(
+        node.ioss_ScanDesc
+            .as_deref_mut()
+            .expect("mark before first fetch"),
+    )
 }
 
 /// `ExecIndexOnlyRestrPos`; the EPQ arm lands with execMain's EPQState.
 pub fn exec_index_only_restr_pos(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
-    index_restrpos(node.ioss_ScanDesc.as_deref_mut().expect("restore before first fetch"))
+    index_restrpos(
+        node.ioss_ScanDesc
+            .as_deref_mut()
+            .expect("restore before first fetch"),
+    )
 }
 
 pub fn exec_index_only_scan_estimate(_node: &mut IndexOnlyScanState<'_>) -> ! {
@@ -574,15 +578,16 @@ pub fn exec_index_only_scan_initialize_worker(_node: &mut IndexOnlyScanState<'_>
 }
 
 pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!("nodeindexonlyscan: ExecIndexOnlyScanRetrieveInstrumentation pending parallel DSM/shm_toc")
+    panic!(
+        "nodeindexonlyscan: ExecIndexOnlyScanRetrieveInstrumentation pending parallel DSM/shm_toc"
+    )
 }
 
 // Exempt: droppy owners, all released in exec_end_index_only_scan;
 // ScanDirection is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_NameCStringAttNums,
-        ioss_PlanNodeId, ioss_RuntimeKeysReady, ioss_RuntimeContext;
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
-        ioss_RuntimeKeys, ioss_OrderDir, ioss_VMBuffer },
+        ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
 );

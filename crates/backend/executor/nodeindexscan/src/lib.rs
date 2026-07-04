@@ -40,15 +40,19 @@ pub struct IndexRuntimeKeyInfo<'mcx> {
     pub key_toastable: bool,
 }
 
+pub struct RuntimeKeysState<'mcx> {
+    pub keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    pub ready: bool,
+    pub ecxt: EcxtId,
+}
+
 pub struct IndexScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     pub indexqualorig: Option<PgBox<'mcx, ExprState<'mcx>>>,
     pub iss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub iss_RelationDesc: Option<Relation<'mcx>>,
     pub iss_ScanKeys: PgVec<'mcx, ScanKeyData>,
-    pub iss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
-    pub iss_RuntimeKeysReady: bool,
-    pub iss_RuntimeContext: Option<EcxtId>,
+    pub iss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub iss_OrderDir: ScanDirection,
     pub iss_PlanNodeId: i32,
 }
@@ -117,13 +121,16 @@ impl<'mcx> IndexScanState<'mcx> {
             .expect("index scan requires es_snapshot");
         let mut scandesc = index_beginscan(
             mcx,
-            self.ss.ss_currentRelation.as_ref().expect("indexscan has a relation"),
+            self.ss
+                .ss_currentRelation
+                .as_ref()
+                .expect("indexscan has a relation"),
             self.iss_RelationDesc.as_ref().expect("index relation open"),
             snapshot,
             self.iss_ScanKeys.len() as i32,
             0,
         )?;
-        if self.iss_RuntimeKeys.is_empty() || self.iss_RuntimeKeysReady {
+        if self.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
             index_rescan(&mut scandesc, Some(&self.iss_ScanKeys), None)?;
         }
         // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
@@ -188,7 +195,7 @@ pub fn exec_index_scan<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if !node.iss_RuntimeKeys.is_empty() && !node.iss_RuntimeKeysReady {
+    if node.iss_Runtime.as_deref().is_some_and(|r| !r.ready) {
         exec_rescan_index_scan(node, estate)?;
     }
     execscan::exec_scan(node, estate)
@@ -244,14 +251,21 @@ pub fn exec_init_index_scan_rel<'mcx>(
         orderby_unported();
     }
 
-    let (iss_ScanKeys, iss_RuntimeKeys) =
+    let (iss_ScanKeys, runtime_keys) =
         exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
     // C keeps ps_ExprContext as the standard econtext and gives runtime keys
     // their own, reset per rescan.
-    let iss_RuntimeContext = if iss_RuntimeKeys.is_empty() {
+    let iss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
-        Some(estate.exec_assign_expr_context())
+        Some(::mcx::alloc_in(
+            mcx,
+            RuntimeKeysState {
+                keys: runtime_keys,
+                ready: false,
+                ecxt: estate.exec_assign_expr_context(),
+            },
+        )?)
     };
 
     Ok(IndexScanState {
@@ -260,9 +274,7 @@ pub fn exec_init_index_scan_rel<'mcx>(
         iss_ScanDesc: None,
         iss_RelationDesc: Some(index_rel),
         iss_ScanKeys,
-        iss_RuntimeKeys,
-        iss_RuntimeKeysReady: false,
-        iss_RuntimeContext,
+        iss_Runtime,
         iss_OrderDir: order_dir(node.indexorderdir),
         iss_PlanNodeId: node.scan.plan.plan_node_id,
     })
@@ -297,7 +309,10 @@ pub fn exec_index_build_scan_keys<'mcx>(
     index: &Relation<'mcx>,
     quals: &NodeList<'mcx>,
     params: ParamBind<'mcx>,
-) -> PgResult<(PgVec<'mcx, ScanKeyData>, PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>)> {
+) -> PgResult<(
+    PgVec<'mcx, ScanKeyData>,
+    PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+)> {
     let indnkeyatts = index.indnkeyatts();
     let mut scan_keys: PgVec<'mcx, ScanKeyData> = PgVec::new_in(mcx);
     let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
@@ -439,7 +454,7 @@ pub fn exec_end_index_scan(node: &mut IndexScanState<'_>) -> PgResult<()> {
     }
     node.indexqualorig = None;
     node.iss_ScanKeys.clear();
-    node.iss_RuntimeKeys.clear();
+    node.iss_Runtime = None;
     Ok(())
 }
 
@@ -449,18 +464,17 @@ pub fn exec_rescan_index_scan<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    if !node.iss_RuntimeKeys.is_empty() {
-        let ecxt = node.iss_RuntimeContext.expect("runtime keys have their econtext");
-        estate.reset_expr_context(ecxt);
-        exec_index_eval_runtime_keys(
-            estate,
-            ecxt,
-            &mut node.iss_RuntimeKeys,
-            &mut node.iss_ScanKeys,
-        )?;
+    if let Some(rt) = node.iss_Runtime.as_deref_mut() {
+        estate.reset_expr_context(rt.ecxt);
+        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.iss_ScanKeys)?;
+        rt.ready = true;
     }
-    node.iss_RuntimeKeysReady = true;
-    let IndexScanState { iss_ScanDesc, iss_ScanKeys, ss, .. } = node;
+    let IndexScanState {
+        iss_ScanDesc,
+        iss_ScanKeys,
+        ss,
+        ..
+    } = node;
     if let Some(scandesc) = iss_ScanDesc.as_deref_mut() {
         index_rescan(scandesc, Some(iss_ScanKeys), None)?;
     }
@@ -470,12 +484,20 @@ pub fn exec_rescan_index_scan<'mcx>(
 
 /// `ExecIndexMarkPos`; the EPQ test-tuple arm lands with execMain's EPQState.
 pub fn exec_index_mark_pos(node: &mut IndexScanState<'_>) -> PgResult<()> {
-    index_markpos(node.iss_ScanDesc.as_deref_mut().expect("mark before first fetch"))
+    index_markpos(
+        node.iss_ScanDesc
+            .as_deref_mut()
+            .expect("mark before first fetch"),
+    )
 }
 
 /// `ExecIndexRestrPos`; the EPQ arm lands with execMain's EPQState.
 pub fn exec_index_restr_pos(node: &mut IndexScanState<'_>) -> PgResult<()> {
-    index_restrpos(node.iss_ScanDesc.as_deref_mut().expect("restore before first fetch"))
+    index_restrpos(
+        node.iss_ScanDesc
+            .as_deref_mut()
+            .expect("restore before first fetch"),
+    )
 }
 
 /// `ExecIndexEvalRuntimeKeys`; caller resets the runtime econtext first, so
@@ -493,8 +515,15 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
             ::executils::exec_eval_param_exec_params(estate, deps)?;
         }
         // SAFETY: the per-tuple context object outlives the plan (reset-only).
-        unsafe { rk.key_expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        unsafe {
+            rk.key_expr
+                .arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
+        };
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: None,
+            outer: None,
+        };
         let nd = exec_eval_expr(&mut rk.key_expr, &mut slots)?;
         let key = &mut scan_keys[rk.scan_key];
         if nd.isnull {
@@ -560,7 +589,7 @@ pub fn exec_index_scan_retrieve_instrumentation(_node: &mut IndexScanState<'_>) 
 // is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexScanState<'_> { ss, iss_PlanNodeId, iss_RuntimeKeysReady, iss_RuntimeContext;
-        indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_RuntimeKeys,
+    IndexScanState<'_> { ss, iss_PlanNodeId;
+        indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_Runtime,
         iss_OrderDir },
 );

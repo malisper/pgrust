@@ -64,6 +64,7 @@ fn setup() {
         predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
         predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
         predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+        snapmgr_seams::unregister_snapshot_no_owner::set(drop);
     });
 }
 

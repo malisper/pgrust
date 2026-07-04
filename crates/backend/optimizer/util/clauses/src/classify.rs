@@ -672,22 +672,34 @@ fn is_strict_saop(
     Ok(false)
 }
 
+// Header-relative dims read: works for 1B and 4B array images (bound-param
+// array consts can be short-form); external/compressed stays loud.
 fn saop_const_array_nitems(value: datum::Datum) -> i64 {
     let p = value.as_usize() as *const u8;
-    // SAFETY: non-null inline-header array const (planner-built).
-    let b0 = unsafe { *p };
-    assert!(b0 != 0x01 && b0 & 0x03 == 0, "is_strict_saop: toasted array const");
-    // SAFETY: 4-byte varlena header verified.
-    let img = unsafe {
-        core::slice::from_raw_parts(p, arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)))
+    // SAFETY: non-null inline varlena array const, readable per its header.
+    let body: &[u8] = unsafe {
+        let b0 = *p;
+        if b0 & 0x01 == 0x01 {
+            assert!(b0 != 0x01, "is_strict_saop: external toast array const");
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            core::slice::from_raw_parts(p.add(1), total - 1)
+        } else {
+            assert!(b0 & 0x03 == 0, "is_strict_saop: compressed array const");
+            let img = core::slice::from_raw_parts(
+                p,
+                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
+            );
+            &img[4..]
+        }
     };
-    let ndim = arrayfuncs::arr_ndim(img);
+    let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+    let ndim = rd(0);
     if ndim == 0 {
         return 0;
     }
     let mut n = 1i64;
     for i in 0..ndim as usize {
-        n *= arrayfuncs::arr_dim(img, i) as i64;
+        n *= rd(12 + 4 * i) as i64;
     }
     n
 }

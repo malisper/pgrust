@@ -100,6 +100,7 @@ pub fn plan_cluster_use_sort<'mcx>(
         mcx::PgVec::new_in(mcx),
         1, // ForwardScanDirection
         false,
+        &None,
         1.0,
     )?;
     let index_total = match run.root.path(index_path_id) {
