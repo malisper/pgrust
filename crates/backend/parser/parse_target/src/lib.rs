@@ -544,8 +544,9 @@ fn markTargetListOrigin<'mcx>(
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_TABLEFUNC
         | RTEKind::RTE_NAMEDTUPLESTORE
+        | RTEKind::RTE_JOIN
         | RTEKind::RTE_RESULT => {}
-        other @ (RTEKind::RTE_JOIN | RTEKind::RTE_GROUP) => panic!(
+        other @ RTEKind::RTE_GROUP => panic!(
             "markTargetListOrigin (parse_target.c): {other:?} recursion arm unported — \
              unit backend-parser-parse-target"
         ),
