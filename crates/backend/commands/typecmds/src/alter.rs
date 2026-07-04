@@ -106,7 +106,7 @@ fn name_key<'mcx>(
     let mut k = types_scan::scankey::ScanKeyData::empty();
     k.sk_attno = attno;
     k.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
-    k.sk_collation = 0;
+    k.sk_collation = types_core::C_COLLATION_OID;
     k.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_NAMEEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_NAMEEQ) failed: {e:?}"));
     k.sk_argument = Datum::from_usize(buf.as_ptr() as usize);
