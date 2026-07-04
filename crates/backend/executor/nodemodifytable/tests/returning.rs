@@ -247,7 +247,6 @@ fn install_xact_periphery_seams() {
     commit_ts_seams::extend_commit_ts::set(|_| Ok(()));
     syncrep_seams::sync_rep_wait_for_lsn::set(|_, _| Ok(()));
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
-    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
