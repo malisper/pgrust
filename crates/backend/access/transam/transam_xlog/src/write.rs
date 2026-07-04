@@ -101,7 +101,7 @@ pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> Pg
     Ok(())
 }
 
-fn InstallXLogFileSegment(
+pub(crate) fn InstallXLogFileSegment(
     segno: &mut XLogSegNo,
     tmppath: &str,
     find_free: bool,

@@ -436,3 +436,79 @@ fn checkpoint_without_sync_seams_is_loud() {
         "must fail loudly at the sync seam, got: {text}"
     );
 }
+
+#[test]
+fn xlog_filename_parse_roundtrip() {
+    let seg = 16 * 1024 * 1024;
+    with_seg(seg, || {
+        for segno in [1u64, 255, 256, 0xFF_FFFF, 0x1_0000_0000 / seg as u64, 12345678] {
+            let name = XLogFileName(3, segno, seg);
+            assert!(crate::removal::IsXLogFileName(&name), "{name}");
+            assert_eq!(crate::removal::XLogFromFileName(&name, seg), (3, segno));
+        }
+        assert!(!crate::removal::IsXLogFileName("00000001000000000000000g"));
+        assert!(!crate::removal::IsXLogFileName("000000010000000000000001.partial"));
+        assert!(crate::removal::IsPartialXLogFileName("000000010000000000000001.partial"));
+    });
+}
+
+#[test]
+fn keep_log_seg_matches_c() {
+    let seg = 16 * 1024 * 1024;
+    with_seg(seg, || {
+        guc_tables::init_seams();
+        let recptr = 100 * seg as u64 + 1234;
+
+        // No slots, no wal_keep_size: horizon untouched.
+        guc_tables::vars::wal_keep_size_mb.write(0);
+        guc_tables::vars::max_slot_wal_keep_size_mb.write(-1);
+        let mut segno = 90;
+        assert!(!crate::removal::keep_log_seg_with(recptr, &mut segno, InvalidXLogRecPtr));
+        assert_eq!(segno, 90);
+
+        // A slot restart_lsn pins its segment.
+        let mut segno = 90;
+        assert!(!crate::removal::keep_log_seg_with(recptr, &mut segno, 40 * seg as u64 + 7));
+        assert_eq!(segno, 40);
+
+        // max_slot_wal_keep_size caps the slot horizon and reports it.
+        guc_tables::vars::max_slot_wal_keep_size_mb.write(16 * 10);
+        let mut segno = 90;
+        assert!(crate::removal::keep_log_seg_with(recptr, &mut segno, 40 * seg as u64 + 7));
+        assert_eq!(segno, 100 - 10);
+
+        // wal_keep_size holds segments back without any slot.
+        guc_tables::vars::max_slot_wal_keep_size_mb.write(-1);
+        guc_tables::vars::wal_keep_size_mb.write(16 * 5);
+        let mut segno = 99;
+        assert!(!crate::removal::keep_log_seg_with(recptr, &mut segno, InvalidXLogRecPtr));
+        assert_eq!(segno, 95);
+
+        // wal_keep_size larger than history bottoms out at segment 1.
+        guc_tables::vars::wal_keep_size_mb.write(16 * 200);
+        let mut segno = 99;
+        assert!(!crate::removal::keep_log_seg_with(recptr, &mut segno, InvalidXLogRecPtr));
+        assert_eq!(segno, 1);
+        guc_tables::vars::wal_keep_size_mb.write(0);
+    });
+}
+
+#[test]
+fn xlog_fileslop_clamps_to_wal_size_bounds() {
+    let seg = 16 * 1024 * 1024;
+    with_seg(seg, || {
+        guc_tables::init_seams();
+        guc_tables::vars::min_wal_size_mb.write(5 * 16);
+        guc_tables::vars::max_wal_size_mb.write(64 * 16);
+        guc_tables::vars::CheckPointCompletionTarget.write(0.9);
+        let lastredo = 100 * seg as u64;
+
+        // Zero distance estimate: floor at min_wal_size worth of segments.
+        crate::removal::UpdateCheckPointDistanceEstimate(0);
+        assert_eq!(crate::removal::XLOGfileslop(lastredo), 100 + 5 - 1);
+
+        // Huge estimate: ceiling at max_wal_size worth of segments.
+        crate::removal::UpdateCheckPointDistanceEstimate(10_000 * seg as u64);
+        assert_eq!(crate::removal::XLOGfileslop(lastredo), 100 + 64 - 1);
+    });
+}

@@ -23,6 +23,8 @@ fn loc(func: &'static str) -> ErrorLocation {
 thread_local! {
     static LAST_FULL_PAGE_WRITES: Cell<bool> = const { Cell::new(false) };
     static CKPT_SEGS_ADDED: Cell<u64> = const { Cell::new(0) };
+    static CKPT_SEGS_REMOVED: Cell<u64> = const { Cell::new(0) };
+    static CKPT_SEGS_RECYCLED: Cell<u64> = const { Cell::new(0) };
     static CKPT_SLRU_WRITTEN: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -31,6 +33,12 @@ pub(crate) fn count_ckpt_slru_written() {
 }
 pub(crate) fn checkpoint_stats_bump_segs_added() {
     CKPT_SEGS_ADDED.set(CKPT_SEGS_ADDED.get() + 1);
+}
+pub(crate) fn checkpoint_stats_bump_segs_removed() {
+    CKPT_SEGS_REMOVED.set(CKPT_SEGS_REMOVED.get() + 1);
+}
+pub(crate) fn checkpoint_stats_bump_segs_recycled() {
+    CKPT_SEGS_RECYCLED.set(CKPT_SEGS_RECYCLED.get() + 1);
 }
 pub(crate) fn set_last_full_page_writes(v: bool) {
     LAST_FULL_PAGE_WRITES.set(v);
@@ -678,6 +686,8 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     }
 
     CKPT_SEGS_ADDED.set(0);
+    CKPT_SEGS_REMOVED.set(0);
+    CKPT_SEGS_RECYCLED.set(0);
     CKPT_SLRU_WRITTEN.set(0);
 
     sync_seams::sync_pre_checkpoint::call()?;
@@ -827,6 +837,10 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
             .map(|_| false);
     }
 
+    // PriorRedoPtr (xlog.c): the previous checkpoint's redo, read before this
+    // checkpoint overwrites checkPointCopy — feeds the recycling estimate.
+    let prior_redo_ptr = control_file().checkPointCopy.redo;
+
     LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
     let unlogged = ctl.unloggedLSN.load(SeqCst);
     control_file_update(|cf| {
@@ -848,8 +862,29 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 
     sync_seams::sync_post_checkpoint::call()?;
 
-    // RemoveOldXlogFiles / KeepLogSeg / slot invalidation: WAL retention is
-    // deferred (M1 clusters never fill a segment budget); segments accumulate.
+    if prior_redo_ptr != InvalidXLogRecPtr {
+        crate::removal::UpdateCheckPointDistanceEstimate(check_point.redo - prior_redo_ptr);
+    }
+
+    let mut log_seg_no = XLByteToSeg(check_point.redo, wal_segment_size());
+    // InvalidateObsoleteReplicationSlots is unported: it only matters when a
+    // slot's horizon is pushed forward by max_slot_wal_keep_size — removing
+    // that WAL without invalidating the slot breaks the slot contract, so
+    // that combination must be loud, never a silent removal.
+    if crate::removal::KeepLogSeg(recptr, &mut log_seg_no) {
+        panic!(
+            "max_slot_wal_keep_size would invalidate a replication slot: \
+             InvalidateObsoleteReplicationSlots not ported"
+        );
+    }
+    log_seg_no -= 1;
+    crate::removal::RemoveOldXlogFiles(
+        log_seg_no,
+        check_point.redo,
+        recptr,
+        check_point.ThisTimeLineID,
+    )?;
+
     if !shutdown {
         PreallocXlogFiles(recptr, check_point.ThisTimeLineID)?;
     }
@@ -867,9 +902,11 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         let _ = elog(
             LOG,
             format!(
-                "checkpoint complete: wrote {} SLRU buffers; {} WAL file(s) added",
+                "checkpoint complete: wrote {} SLRU buffers; {} WAL file(s) added, {} removed, {} recycled",
                 CKPT_SLRU_WRITTEN.get(),
-                CKPT_SEGS_ADDED.get()
+                CKPT_SEGS_ADDED.get(),
+                CKPT_SEGS_REMOVED.get(),
+                CKPT_SEGS_RECYCLED.get()
             ),
         );
     }

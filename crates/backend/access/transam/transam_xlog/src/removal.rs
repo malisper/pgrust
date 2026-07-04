@@ -1,0 +1,193 @@
+use std::cell::Cell;
+use std::sync::atomic::Ordering::Relaxed;
+
+use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
+use types_error::PgResult;
+
+use crate::ctl::XLogCtl;
+use crate::*;
+
+thread_local! {
+    static CHECK_POINT_DISTANCE_ESTIMATE: Cell<f64> = const { Cell::new(0.0) };
+    static PREV_CHECK_POINT_DISTANCE: Cell<f64> = const { Cell::new(0.0) };
+}
+
+pub(crate) fn UpdateCheckPointDistanceEstimate(nbytes: u64) {
+    let nbytes = nbytes as f64;
+    PREV_CHECK_POINT_DISTANCE.set(nbytes);
+    let est = CHECK_POINT_DISTANCE_ESTIMATE.get();
+    CHECK_POINT_DISTANCE_ESTIMATE.set(if est < nbytes { nbytes } else { 0.90 * est + 0.10 * nbytes });
+}
+
+fn ConvertToXSegs(mb: i32, wal_segsz: i32) -> u64 {
+    XLogMBVarToSegs(mb, wal_segsz) as u64
+}
+
+pub(crate) fn XLOGfileslop(lastredoptr: XLogRecPtr) -> XLogSegNo {
+    let wal_segsz = wal_segment_size();
+    let min_seg_no = lastredoptr / wal_segsz as u64
+        + ConvertToXSegs(guc_tables::vars::min_wal_size_mb.read(), wal_segsz)
+        - 1;
+    let max_seg_no = lastredoptr / wal_segsz as u64
+        + ConvertToXSegs(guc_tables::vars::max_wal_size_mb.read(), wal_segsz)
+        - 1;
+
+    let mut distance = (1.0 + guc_tables::vars::CheckPointCompletionTarget.read())
+        * CHECK_POINT_DISTANCE_ESTIMATE.get();
+    distance *= 1.10;
+
+    let recycle_seg_no = ((lastredoptr as f64 + distance) / wal_segsz as f64).ceil() as XLogSegNo;
+    recycle_seg_no.clamp(min_seg_no, max_seg_no)
+}
+
+// Returns true when the max_slot_wal_keep_size cap pushed the slot horizon
+// forward — C must then invalidate the affected slots.
+pub(crate) fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: &mut XLogSegNo) -> bool {
+    let ctl = XLogCtl();
+    let keep = ctl.info_lck.with(|| ctl.replicationSlotMinLSN.load(Relaxed));
+    keep_log_seg_with(recptr, log_seg_no, keep)
+}
+
+pub(crate) fn keep_log_seg_with(
+    recptr: XLogRecPtr,
+    log_seg_no: &mut XLogSegNo,
+    keep: XLogRecPtr,
+) -> bool {
+    let wal_segsz = wal_segment_size();
+    let curr_seg_no = XLByteToSeg(recptr, wal_segsz);
+    let mut segno = curr_seg_no;
+    let mut slot_horizon_capped = false;
+
+    if keep != InvalidXLogRecPtr && keep < recptr {
+        segno = XLByteToSeg(keep, wal_segsz);
+
+        let max_slot_keep_mb = guc_tables::vars::max_slot_wal_keep_size_mb.read();
+        if max_slot_keep_mb >= 0 && !init_small::globals::IsBinaryUpgrade() {
+            let slot_keep_segs = ConvertToXSegs(max_slot_keep_mb, wal_segsz);
+            if curr_seg_no - segno > slot_keep_segs {
+                segno = curr_seg_no - slot_keep_segs;
+                slot_horizon_capped = true;
+            }
+        }
+    }
+
+    let wal_keep_mb = guc_tables::vars::wal_keep_size_mb.read();
+    if wal_keep_mb > 0 {
+        let keep_segs = ConvertToXSegs(wal_keep_mb, wal_segsz);
+        if curr_seg_no - segno < keep_segs {
+            segno = if curr_seg_no <= keep_segs { 1 } else { curr_seg_no - keep_segs };
+        }
+    }
+
+    if segno < *log_seg_no {
+        *log_seg_no = segno;
+    }
+    slot_horizon_capped
+}
+
+pub(crate) fn IsXLogFileName(fname: &str) -> bool {
+    fname.len() == 24 && fname.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase())
+}
+
+pub(crate) fn IsPartialXLogFileName(fname: &str) -> bool {
+    fname.len() == 24 + ".partial".len()
+        && IsXLogFileName(&fname[..24])
+        && fname.ends_with(".partial")
+}
+
+pub(crate) fn XLogFromFileName(fname: &str, wal_segsz: i32) -> (TimeLineID, XLogSegNo) {
+    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap_or(0);
+    let log = u64::from_str_radix(&fname[8..16], 16).unwrap_or(0);
+    let seg = u64::from_str_radix(&fname[16..24], 16).unwrap_or(0);
+    (tli, log * XLogSegmentsPerXLogId(wal_segsz) + seg)
+}
+
+fn UpdateLastRemovedPtr(fname: &str) {
+    let (_, segno) = XLogFromFileName(fname, wal_segment_size());
+    let ctl = XLogCtl();
+    ctl.info_lck.with(|| {
+        if segno > ctl.lastRemovedSegNo.load(Relaxed) {
+            ctl.lastRemovedSegNo.store(segno, Relaxed);
+        }
+    });
+}
+
+// DEBT(wal-archive train): until xlogarchive's .ready/.done check is wired in,
+// archiving-active keeps the segment — never delete unarchived WAL.
+fn xlog_archive_check_done(_xlog: &str) -> bool {
+    !XLogArchivingActive()
+}
+
+fn xlog_archive_cleanup(xlog: &str) {
+    let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.done"));
+    let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.ready"));
+}
+
+// The keep test ignores names' TLI so a parent timeline's segments survive.
+pub(crate) fn RemoveOldXlogFiles(
+    segno: XLogSegNo,
+    lastredoptr: XLogRecPtr,
+    endptr: XLogRecPtr,
+    insert_tli: TimeLineID,
+) -> PgResult<()> {
+    let wal_segsz = wal_segment_size();
+    let mut endlog_seg_no = XLByteToSeg(endptr, wal_segsz);
+    let recycle_seg_no = XLOGfileslop(lastredoptr);
+
+    let lastoff = XLogFileName(0, segno, wal_segsz);
+
+    let Ok(dir) = std::fs::read_dir(XLOGDIR) else {
+        return Ok(());
+    };
+    for de in dir.flatten() {
+        let fname_os = de.file_name();
+        let Some(fname) = fname_os.to_str() else { continue };
+        if !IsXLogFileName(fname) && !IsPartialXLogFileName(fname) {
+            continue;
+        }
+        // Full-tail compare keeps an equal-segno ".partial" (C strcmp parity).
+        if fname[8..] <= lastoff[8..] && xlog_archive_check_done(fname) {
+            UpdateLastRemovedPtr(fname);
+            RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, insert_tli)?;
+        }
+    }
+    Ok(())
+}
+
+// Only regular files are recycled — symlinks into an archive directory must
+// not be renamed back into pg_wal.
+fn RemoveXlogFile(
+    de: &std::fs::DirEntry,
+    recycle_seg_no: XLogSegNo,
+    endlog_seg_no: &mut XLogSegNo,
+    insert_tli: TimeLineID,
+) -> PgResult<()> {
+    let fname_os = de.file_name();
+    let segname = fname_os.to_str().unwrap_or_default();
+    let path = format!("{XLOGDIR}/{segname}");
+
+    let is_reg = de.file_type().map(|t| t.is_file()).unwrap_or(false);
+    if guc_tables::vars::wal_recycle.read()
+        && *endlog_seg_no <= recycle_seg_no
+        && XLogCtl().InstallXLogFileSegmentActive.load(Relaxed)
+        && is_reg
+        && crate::write::InstallXLogFileSegment(
+            endlog_seg_no,
+            &path,
+            true,
+            recycle_seg_no,
+            insert_tli,
+        )?
+    {
+        crate::startup::checkpoint_stats_bump_segs_recycled();
+        *endlog_seg_no += 1;
+    } else {
+        if fd::durable_unlink(&path, types_error::LOG).map(|rc| rc != 0).unwrap_or(true) {
+            return Ok(());
+        }
+        crate::startup::checkpoint_stats_bump_segs_removed();
+    }
+
+    xlog_archive_cleanup(segname);
+    Ok(())
+}
