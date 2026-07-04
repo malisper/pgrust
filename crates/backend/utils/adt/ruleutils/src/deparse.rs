@@ -819,7 +819,7 @@ fn get_rule_expr_toplevel<'mcx>(
 ) -> PgResult<()> {
     if let Some(v) = node.as_var() {
         if v.varattno == types_core::InvalidAttrNumber {
-            return get_variable(v, 0, true, ctx).map(|_| ());
+            return get_variable(node, v, 0, true, ctx).map(|_| ());
         }
     }
     get_rule_expr(node, ctx, showimplicit)
