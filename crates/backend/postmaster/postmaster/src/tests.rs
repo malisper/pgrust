@@ -21,9 +21,13 @@ fn pmstate_order_is_load_bearing() {
     assert_eq!(pmstate_name(PMState::PM_WAIT_XLOG_SHUTDOWN), "PM_WAIT_XLOG_SHUTDOWN");
 }
 
+// Both shutdown tests drive the same PENDING_PM_* statics; serialize them.
+static SHUTDOWN_FLAGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn shutdown_signal_handlers_set_most_immediate() {
     use std::sync::atomic::Ordering;
+    let _g = SHUTDOWN_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     handle_pm_shutdown_request_signal(libc::SIGTERM);
     assert!(PENDING_PM_SHUTDOWN_REQUEST.load(Ordering::Acquire));
     assert!(!PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.load(Ordering::Acquire));
@@ -84,6 +88,7 @@ fn shutdown_request_reaches_named_pmchild_seam() {
     // Boot-readiness probe: a SIGTERM-shaped request must walk the C sequence
     // and stop at a NAMED uninstalled seam (pmchild count_children), not a
     // mystery. PM_RUN + conns_allowed=false drives the smart-shutdown arm.
+    let _g = SHUTDOWN_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let result = std::panic::catch_unwind(|| {
         with_pm(|pm| {
             pm.pm_state = PMState::PM_RUN;

@@ -7537,6 +7537,7 @@ dependencies = [
  "pg_enum",
  "pg_sema_seams",
  "pgstat",
+ "pmchild_seams",
  "pmsignal",
  "pmsignal_seams",
  "postgres_seams",

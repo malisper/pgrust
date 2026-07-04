@@ -13,6 +13,7 @@ fn guc_boot() {
         guc::init_seams();
         adt_bool::init_seams();
         adt_float::init_seams();
+        install_debug_parallel_query_accessor();
     });
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -22,6 +23,16 @@ fn guc_boot() {
             guc::store::initialize_guc_options().unwrap();
             armed.set(true);
         }
+    });
+}
+
+// The planner owns this accessor in production; tests install a stand-in.
+pub(crate) fn install_debug_parallel_query_accessor() {
+    use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+    static DPQ: AtomicI32 = AtomicI32::new(0);
+    guc_tables::vars::debug_parallel_query.install_if_absent(guc_tables::GucVarAccessors {
+        get: || DPQ.load(Relaxed),
+        set: |v| DPQ.store(v, Relaxed),
     });
 }
 

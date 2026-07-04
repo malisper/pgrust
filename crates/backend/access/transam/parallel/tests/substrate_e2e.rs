@@ -132,6 +132,20 @@ fn stub_seams() {
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
+    // Every launched worker thread is "postmaster child"-shaped here.
+    pmchild_seams::find_postmaster_child_by_pid::set(|pid| {
+        Some((pid, types_core::BackendType::Backend))
+    });
+
+    // The planner owns this accessor in production.
+    {
+        use std::sync::atomic::{AtomicI32, Ordering::Relaxed as R};
+        static DPQ: AtomicI32 = AtomicI32::new(0);
+        guc_tables::vars::debug_parallel_query.install_if_absent(guc_tables::GucVarAccessors {
+            get: || DPQ.load(R),
+            set: |v| DPQ.store(v, R),
+        });
+    }
 }
 
 fn setup() {

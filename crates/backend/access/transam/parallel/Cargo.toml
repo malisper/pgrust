@@ -66,6 +66,7 @@ waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
 pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+pmchild_seams = { path = "../../../postmaster/pmchild_seams" }
 syncrep_seams = { path = "../../../replication/syncrep_seams" }
 condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
 autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
