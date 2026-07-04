@@ -867,10 +867,25 @@ dependencies = [
  "bufmgr",
  "datum",
  "elog",
+ "init_small",
  "ipc_seams",
+ "latch",
  "libc",
+ "lmgr_proc",
+ "lwlock",
+ "pg_sema",
+ "postgres_seams",
+ "resowner",
+ "s_lock_seams",
+ "shmem_seams",
+ "smgr_seams",
  "types_core",
  "types_error",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
+ "xact_seams",
 ]
 
 [[package]]
@@ -1408,7 +1423,6 @@ name = "bufmgr"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
- "aio_uring",
  "bufmgr_seams",
  "catalog_storage_seams",
  "checkpointer_seams",
