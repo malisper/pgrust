@@ -299,7 +299,7 @@ fn parallel_vacuum_process_all_indexes(
     };
 
     nworkers -= 1;
-    nworkers = nworkers.min(parallel::context_nworkers(pvs.pcxt));
+    nworkers = nworkers.min(parallel::nworkers(pvs.pcxt));
 
     for (i, slot) in pvs.shared.indstats.iter().enumerate() {
         let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());

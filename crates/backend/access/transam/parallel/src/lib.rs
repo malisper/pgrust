@@ -335,10 +335,6 @@ pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
 }
 
-pub fn context_nworkers(id: ParallelContextId) -> i32 {
-    with_pcxt(id, |p| p.nworkers)
-}
-
 pub fn nworkers(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers)
 }
