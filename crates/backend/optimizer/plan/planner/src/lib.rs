@@ -34,6 +34,7 @@ pub mod prepunion;
 pub mod prepqual;
 pub mod predtest;
 pub mod prepjointree;
+mod pushdown;
 pub mod prepagg;
 pub mod relnode;
 pub mod run;
