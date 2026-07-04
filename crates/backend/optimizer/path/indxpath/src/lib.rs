@@ -1323,13 +1323,18 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
     // Attrs needed above the scan plus indrestrictinfo Vars (quals implied by
     // the index predicate need no recheck, hence not baserestrictinfo), each
     // checked against returnable index columns.
+    // C reads the reltarget, not attr_needed: attr_needed is never computed
+    // for inheritance child rels.
     let r = run.root.rel(rel);
     let mut needed: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(run.mcx);
-    for (i, an) in r.attr_needed.iter().enumerate() {
-        if !types_pathnodes::relids::relids_is_empty(an) {
-            needed.push(i as i16 + r.min_attr);
-        }
+    let target = r.pathtarget_id.expect("baserel has a reltarget");
+    let exprs =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(target).exprs);
+    let relid = r.relid as i32;
+    for &eid in exprs.iter() {
+        collect_varattnos(run, *run.root.expr_node(eid), relid, &mut needed);
     }
+    let r = run.root.rel(rel);
     for &rid in index.indrestrictinfo.borrow().iter() {
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         collect_varattnos(run, clause, r.relid as i32, &mut needed);
