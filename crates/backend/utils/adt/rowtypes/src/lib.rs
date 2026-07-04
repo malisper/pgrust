@@ -10,7 +10,7 @@ use ::mcx::{vec_from_elem_in, vec_with_capacity_in, PgVec};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    cstring_result, function_call1_coll, FmgrBuiltin, FmgrInfo,
+    cstring_result, function_call1_coll, function_call1_coll_in, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 use ::types_tuple::{
@@ -106,7 +106,7 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         }
         let proc =
             &mut flinfo.fn_extra_mut::<RecordIOData>().unwrap().columns[i].as_mut().unwrap().proc;
-        let d = function_call1_coll(proc, InvalidOid, values[i])?;
+        let d = function_call1_coll_in(proc, InvalidOid, mcx, values[i])?;
         let value = cstring_bytes(d);
         let nq = value.is_empty()
             || value.iter().any(|&ch| {
