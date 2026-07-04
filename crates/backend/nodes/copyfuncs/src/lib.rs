@@ -1,182 +1,36 @@
-//! copyfuncs.c copyObject for the utility statements standard_ProcessUtility
-//! must copy when readOnlyTree (plancache-held trees; utility.c:613). Direct
-//! arms cover the statements that flow through cached plans; embedded
-//! expression trees round-trip through outfuncs/readfuncs (C-equivalent,
-//! slower — this path is per-cached-utility-execution, never per-row). Every
-//! other statement tag is a loud panic naming the missing arm.
+//! copyfuncs.c copyObject. Arms for every node in C 18.3's copy switch whose
+//! struct exists in the types_nodes vocabulary live in `generated` (the Rust
+//! analog of the generated copyfuncs.funcs.c; see generate.py). Const and
+//! A_Const are hand-written here, as in C's copyfuncs.c. Tags with no
+//! vocabulary struct fall back to the outfuncs/readfuncs round trip, which is
+//! loud for anything unported.
 
 #![allow(non_snake_case)]
 
+mod generated;
+
+use datum::Datum;
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::parsenodes::{DefElem, ExecuteStmt, TransactionStmt, VariableSetStmt};
 use types_nodes::plannodes::PlannedStmt;
-use types_nodes::primnodes::FuncExpr;
-use types_nodes::rawnodes::{
-    A_Const, A_Expr, A_Star, ColumnRef, FuncCall, ParamRef, TypeCast, TypeName, ValUnion,
-};
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::primnodes::Const;
+use types_nodes::rawnodes::{A_Const, A_Star, ValUnion};
+use types_nodes::{Node, NodeTag};
+use types_tuple::varatt::varsize_any;
+
+pub fn copy_object<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
+    copy_node(mcx, node)
+}
 
 pub fn copy_utility_planned_stmt<'d>(
     mcx: Mcx<'d>,
     src: &PlannedStmt<'_>,
 ) -> PgResult<&'d PlannedStmt<'d>> {
-    debug_assert!(src.planTree.is_none());
-    let utility_stmt = src.utilityStmt.expect("utility PlannedStmt holds utilityStmt");
-    let copy = PlannedStmt {
-        commandType: src.commandType,
-        queryId: src.queryId,
-        planId: src.planId,
-        canSetTag: src.canSetTag,
-        utilityStmt: Some(copy_stmt(mcx, utility_stmt)?),
-        stmt_location: src.stmt_location,
-        stmt_len: src.stmt_len,
-        ..PlannedStmt::default()
-    };
+    let copy = generated::copy_PlannedStmt(mcx, src)?;
     Ok(Node::mk(mcx, copy)?.as_planned_stmt().expect("PlannedStmt"))
 }
 
-fn copy_stmt<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
-    match node.node_tag() {
-        NodeTag::T_TransactionStmt => {
-            let s = node.as_transaction_stmt().expect("TransactionStmt");
-            Node::mk(
-                mcx,
-                TransactionStmt {
-                    kind: s.kind,
-                    options: copy_raw_list(mcx, &s.options)?,
-                    savepoint_name: opt_str_in(mcx, s.savepoint_name)?,
-                    gid: opt_str_in(mcx, s.gid)?,
-                    chain: s.chain,
-                    location: s.location,
-                },
-            )
-        }
-        NodeTag::T_VariableSetStmt => {
-            let s = node.as_variable_set_stmt().expect("VariableSetStmt");
-            Node::mk(
-                mcx,
-                VariableSetStmt {
-                    kind: s.kind,
-                    name: opt_str_in(mcx, s.name)?,
-                    args: copy_raw_list(mcx, &s.args)?,
-                    jumble_args: s.jumble_args,
-                    is_local: s.is_local,
-                    location: s.location,
-                },
-            )
-        }
-        NodeTag::T_ExecuteStmt => {
-            let s = node.as_execute_stmt().expect("ExecuteStmt");
-            Node::mk(
-                mcx,
-                ExecuteStmt {
-                    name: opt_str_in(mcx, s.name)?,
-                    params: copy_raw_list(mcx, &s.params)?,
-                },
-            )
-        }
-        NodeTag::T_CallStmt => {
-            let s = node.as_call_stmt().expect("CallStmt");
-            let funccall = match s.funccall {
-                Some(fc) => Some(
-                    Node::mk(mcx, copy_func_call(mcx, fc)?)?
-                        .as_variant::<FuncCall>()
-                        .expect("FuncCall"),
-                ),
-                None => None,
-            };
-            let funcexpr = match s.funcexpr {
-                Some(fe) => Some(copy_func_expr(mcx, fe)?),
-                None => None,
-            };
-            Node::mk(
-                mcx,
-                types_nodes::rawnodes::CallStmt {
-                    funccall,
-                    funcexpr,
-                    outargs: copy_raw_list(mcx, &s.outargs)?,
-                },
-            )
-        }
-        NodeTag::T_ExplainStmt => {
-            let s = node.as_variant::<types_nodes::parsenodes::ExplainStmt>().expect("ExplainStmt");
-            Node::mk(
-                mcx,
-                types_nodes::parsenodes::ExplainStmt {
-                    query: copy_raw_opt(mcx, s.query)?,
-                    options: copy_raw_list(mcx, &s.options)?,
-                },
-            )
-        }
-        NodeTag::T_VacuumStmt => {
-            let s = node.as_vacuum_stmt().expect("VacuumStmt");
-            Node::mk(
-                mcx,
-                types_nodes::parsenodes::VacuumStmt {
-                    options: copy_raw_list(mcx, &s.options)?,
-                    rels: copy_raw_list(mcx, &s.rels)?,
-                    is_vacuumcmd: s.is_vacuumcmd,
-                },
-            )
-        }
-        other => panic!(
-            "copyObject (copyfuncs.c): utility statement {other:?} copy arm unported \
-             (standard_ProcessUtility readOnlyTree, cached-plan execution)"
-        ),
-    }
-}
-
-fn copy_func_call<'d>(mcx: Mcx<'d>, fc: &FuncCall<'_>) -> PgResult<FuncCall<'d>> {
-    Ok(FuncCall {
-        funcname: copy_raw_list(mcx, &fc.funcname)?,
-        args: copy_raw_list(mcx, &fc.args)?,
-        agg_order: copy_raw_list(mcx, &fc.agg_order)?,
-        agg_filter: copy_raw_opt(mcx, fc.agg_filter)?,
-        over: copy_raw_opt(mcx, fc.over)?,
-        agg_within_group: fc.agg_within_group,
-        agg_star: fc.agg_star,
-        agg_distinct: fc.agg_distinct,
-        func_variadic: fc.func_variadic,
-        funcformat: fc.funcformat,
-        location: fc.location,
-    })
-}
-
-fn copy_func_expr<'d>(mcx: Mcx<'d>, fe: &FuncExpr<'_>) -> PgResult<&'d FuncExpr<'d>> {
-    let copy = FuncExpr {
-        funcid: fe.funcid,
-        funcresulttype: fe.funcresulttype,
-        funcretset: fe.funcretset,
-        funcvariadic: fe.funcvariadic,
-        funcformat: fe.funcformat,
-        funccollid: fe.funccollid,
-        inputcollid: fe.inputcollid,
-        args: copy_raw_list(mcx, &fe.args)?,
-        location: fe.location,
-    };
-    Ok(Node::mk(mcx, copy)?.as_variant::<FuncExpr>().expect("FuncExpr"))
-}
-
-fn copy_raw_list<'d>(mcx: Mcx<'d>, list: &NodeList<'_>) -> PgResult<NodeList<'d>> {
-    let mut out = NodeList::nil();
-    for cell in list.iter() {
-        out.lappend(mcx, copy_raw(mcx, cell)?)?;
-    }
-    Ok(out)
-}
-
-fn copy_raw_opt<'d>(mcx: Mcx<'d>, node: Option<Node<'_>>) -> PgResult<Option<Node<'d>>> {
-    match node {
-        Some(n) => Ok(Some(copy_raw(mcx, n)?)),
-        None => Ok(None),
-    }
-}
-
-// Raw grammar nodes have no outfuncs arms, so the tags reachable from the
-// copied statements get direct arms; everything else (transformed expression
-// trees) falls through to the out/read round trip.
-fn copy_raw<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
+pub(crate) fn copy_node<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
     match node.node_tag() {
         NodeTag::T_String => {
             let s = node.as_string().expect("String");
@@ -195,8 +49,41 @@ fn copy_raw<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
             Node::mk(mcx, types_nodes::Boolean { boolval: b.boolval })
         }
         NodeTag::T_BitString => {
-            let b = node.as_variant::<types_nodes::BitString>().expect("BitString");
+            let b = node.as_bitstring().expect("BitString");
             Node::mk(mcx, types_nodes::BitString { bsval: str_in(mcx, b.bsval)? })
+        }
+        NodeTag::T_List => {
+            let l = node.as_list().expect("List");
+            let mut out = types_nodes::NodeList::nil();
+            for cell in l.iter() {
+                out.lappend(mcx, copy_node(mcx, cell)?)?;
+            }
+            Node::mk_list(mcx, out)
+        }
+        NodeTag::T_IntList => {
+            let l = node.as_int_list().expect("IntList");
+            Node::mk_int_list(mcx, types_nodes::list::IntList::from_slice(mcx, l.as_slice())?)
+        }
+        NodeTag::T_OidList => {
+            let l = node.as_oid_list().expect("OidList");
+            Node::mk_oid_list(mcx, types_nodes::list::OidList::from_slice(mcx, l.as_slice())?)
+        }
+        NodeTag::T_XidList => {
+            let l = node.as_xid_list().expect("XidList");
+            Node::mk_xid_list(mcx, types_nodes::list::XidList::from_slice(mcx, l.as_slice())?)
+        }
+        NodeTag::T_Bitmapset => {
+            let b = node.as_bitmapset().expect("Bitmapset");
+            Node::mk_bitmapset(mcx, generated::copy_bms(mcx, b)?)
+        }
+        NodeTag::T_A_Star => Node::mk(mcx, A_Star),
+        NodeTag::T_Const => {
+            let c = node.as_variant::<Const>().expect("Const");
+            let mut copy = *c;
+            if !c.constisnull && !c.constbyval {
+                copy.constvalue = datum_copy_in(mcx, c.constvalue, c.constlen)?;
+            }
+            Node::mk(mcx, copy)
         }
         NodeTag::T_A_Const => {
             let c = node.as_variant::<A_Const>().expect("A_Const");
@@ -206,125 +93,38 @@ fn copy_raw<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
             };
             Node::mk(mcx, A_Const { val, location: c.location })
         }
-        NodeTag::T_A_Star => Node::mk(mcx, A_Star),
-        NodeTag::T_ParamRef => {
-            let p = node.as_variant::<ParamRef>().expect("ParamRef");
-            Node::mk(mcx, ParamRef { number: p.number, location: p.location })
-        }
-        NodeTag::T_DefElem => {
-            let d = node.as_def_elem().expect("DefElem");
-            Node::mk(
-                mcx,
-                DefElem {
-                    defnamespace: opt_str_in(mcx, d.defnamespace)?,
-                    defname: opt_str_in(mcx, d.defname)?,
-                    arg: copy_raw_opt(mcx, d.arg)?,
-                    defaction: d.defaction,
-                    location: d.location,
-                },
-            )
-        }
-        NodeTag::T_TypeCast => {
-            let t = node.as_variant::<TypeCast>().expect("TypeCast");
-            Node::mk(
-                mcx,
-                TypeCast {
-                    arg: copy_raw_opt(mcx, t.arg)?,
-                    typeName: copy_raw_opt(mcx, t.typeName)?,
-                    location: t.location,
-                },
-            )
-        }
-        NodeTag::T_TypeName => {
-            let t = node.as_variant::<TypeName>().expect("TypeName");
-            Node::mk(
-                mcx,
-                TypeName {
-                    names: copy_raw_list(mcx, &t.names)?,
-                    typeOid: t.typeOid,
-                    setof: t.setof,
-                    pct_type: t.pct_type,
-                    typmods: copy_raw_list(mcx, &t.typmods)?,
-                    typemod: t.typemod,
-                    arrayBounds: copy_raw_list(mcx, &t.arrayBounds)?,
-                    location: t.location,
-                },
-            )
-        }
-        NodeTag::T_ColumnRef => {
-            let c = node.as_variant::<ColumnRef>().expect("ColumnRef");
-            Node::mk(
-                mcx,
-                ColumnRef { fields: copy_raw_list(mcx, &c.fields)?, location: c.location },
-            )
-        }
-        NodeTag::T_A_Expr => {
-            let a = node.as_variant::<A_Expr>().expect("A_Expr");
-            Node::mk(
-                mcx,
-                A_Expr {
-                    kind: a.kind,
-                    name: copy_raw_list(mcx, &a.name)?,
-                    lexpr: copy_raw_opt(mcx, a.lexpr)?,
-                    rexpr: copy_raw_opt(mcx, a.rexpr)?,
-                    rexpr_list_start: a.rexpr_list_start,
-                    rexpr_list_end: a.rexpr_list_end,
-                    location: a.location,
-                },
-            )
-        }
-        NodeTag::T_FuncCall => {
-            let fc = node.as_variant::<FuncCall>().expect("FuncCall");
-            Node::mk(mcx, copy_func_call(mcx, fc)?)
-        }
-        NodeTag::T_VacuumRelation => {
-            let v = node
-                .as_variant::<types_nodes::parsenodes::VacuumRelation>()
-                .expect("VacuumRelation");
-            Node::mk(
-                mcx,
-                types_nodes::parsenodes::VacuumRelation {
-                    relation: copy_raw_opt(mcx, v.relation)?,
-                    oid: v.oid,
-                    va_cols: copy_raw_list(mcx, &v.va_cols)?,
-                },
-            )
-        }
-        NodeTag::T_RangeVar => {
-            let r = node.as_range_var().expect("RangeVar");
-            let alias = match r.alias {
-                Some(a) => Some(
-                    Node::mk(
-                        mcx,
-                        types_nodes::primnodes::Alias {
-                            aliasname: opt_str_in(mcx, a.aliasname)?,
-                            colnames: copy_raw_list(mcx, &a.colnames)?,
-                        },
-                    )?
-                    .as_variant::<types_nodes::primnodes::Alias>()
-                    .expect("Alias"),
-                ),
-                None => None,
-            };
-            Node::mk(
-                mcx,
-                types_nodes::primnodes::RangeVar {
-                    catalogname: opt_str_in(mcx, r.catalogname)?,
-                    schemaname: opt_str_in(mcx, r.schemaname)?,
-                    relname: opt_str_in(mcx, r.relname)?,
-                    inh: r.inh,
-                    relpersistence: r.relpersistence,
-                    alias,
-                    location: r.location,
-                },
-            )
-        }
-        NodeTag::T_List => {
-            let l = node.as_list().expect("List");
-            Node::mk_list(mcx, copy_raw_list(mcx, l)?)
-        }
-        _ => copy_via_out_read(mcx, node),
+        _ => match generated::copy_generated(mcx, node)? {
+            Some(copy) => Ok(copy),
+            None => copy_via_out_read(mcx, node),
+        },
     }
+}
+
+// datumCopy (datum.c) for a by-ref Const value: constlen -1 varlena, -2
+// NUL-terminated cstring, else fixed length.
+fn datum_copy_in<'d>(mcx: Mcx<'d>, d: Datum, typlen: i32) -> PgResult<Datum> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: a by-ref non-null Const holds a live datum image of the layout
+    // constlen describes (makeConst invariant).
+    let size = unsafe {
+        match typlen {
+            -1 => varsize_any(p),
+            -2 => {
+                let mut n = 0usize;
+                while *p.add(n) != 0 {
+                    n += 1;
+                }
+                n + 1
+            }
+            l => {
+                debug_assert!(l > 0);
+                l as usize
+            }
+        }
+    };
+    // SAFETY: `size` readable bytes at `p` per the invariant above.
+    let src = unsafe { core::slice::from_raw_parts(p, size) };
+    Ok(Datum::from_usize(mcx::slice_in(mcx, src)?.leak().as_ptr() as usize))
 }
 
 fn copy_val<'d>(mcx: Mcx<'d>, v: &ValUnion<'_>) -> PgResult<ValUnion<'d>> {
@@ -339,6 +139,9 @@ fn copy_val<'d>(mcx: Mcx<'d>, v: &ValUnion<'_>) -> PgResult<ValUnion<'d>> {
     })
 }
 
+// Tags with no vocabulary struct (C copies 39 more node types than the
+// carried vocabulary holds). outfuncs/readfuncs is loud for anything neither
+// side supports, naming the node.
 fn copy_via_out_read<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
     // SAFETY: nodeToString only reads the tree; the unified handle does not
     // outlive the serialize call.
@@ -347,14 +150,17 @@ fn copy_via_out_read<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
     readfuncs::stringToNode(mcx, s.as_str())
 }
 
-fn str_in<'d>(mcx: Mcx<'d>, s: &str) -> PgResult<&'d str> {
+pub(crate) fn str_in<'d>(mcx: Mcx<'d>, s: &str) -> PgResult<&'d str> {
     let v = mcx::slice_in(mcx, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("copied str stays UTF-8"))
 }
 
-fn opt_str_in<'d>(mcx: Mcx<'d>, s: Option<&str>) -> PgResult<Option<&'d str>> {
+pub(crate) fn opt_str_in<'d>(mcx: Mcx<'d>, s: Option<&str>) -> PgResult<Option<&'d str>> {
     match s {
         Some(s) => Ok(Some(str_in(mcx, s)?)),
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests;

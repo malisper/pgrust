@@ -13,3 +13,5 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 outfuncs = { path = "../outfuncs" }
 readfuncs = { path = "../readfuncs" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
