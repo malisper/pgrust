@@ -34,10 +34,10 @@ SELECT j.id FROM ju_a LEFT JOIN ju_b USING (id) AS j WHERE j.id IS NOT NULL ORDE
 SELECT j.id, j.name FROM ju_a FULL JOIN ju_b USING (id, name) AS j ORDER BY 1, 2;
 -- USING alias only exposes the merged columns
 SELECT j.x FROM ju_a JOIN ju_b USING (id) AS j;
-SELECT j.name FROM ju_a JOIN ju_b USING (id) AS j;
+SELECT j.y FROM ju_a JOIN ju_b USING (id) AS j;
 -- whole-row of the USING alias is a RowExpr over the merged columns
-SELECT j FROM ju_a JOIN ju_b USING (id) AS j ORDER BY 1;
-SELECT j FROM ju_a LEFT JOIN ju_b USING (id, name) AS j ORDER BY 1;
+SELECT j FROM ju_a JOIN ju_b USING (id) AS j ORDER BY j.id;
+SELECT j FROM ju_a LEFT JOIN ju_b USING (id, name) AS j ORDER BY j.id, j.name;
 -- NATURAL joins
 SELECT * FROM ju_a NATURAL JOIN ju_b ORDER BY id;
 SELECT * FROM ju_a NATURAL LEFT JOIN ju_b ORDER BY id;
@@ -60,7 +60,9 @@ SELECT count(t) FROM (ju_a JOIN ju_b USING (id)) t;
 -- USING columns of different but coercible types
 CREATE TABLE ju_e (id bigint, w int);
 INSERT INTO ju_e VALUES (1, 11), (3, 33);
+SET enable_mergejoin = off;
 SELECT * FROM ju_a JOIN ju_e USING (id) ORDER BY id;
+RESET enable_mergejoin;
 SELECT pg_typeof(id) FROM ju_a JOIN ju_e USING (id) LIMIT 1;
 SELECT pg_typeof(id) FROM ju_a FULL JOIN ju_e USING (id) LIMIT 1;
 -- varchar/text typmod mix
@@ -83,7 +85,9 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ju_a JOIN ju_b USING (id);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM ju_a FULL JOIN ju_b USING (id);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT j.id FROM ju_a JOIN ju_b USING (id) AS j;
 -- view round-trips (pg_get_viewdef byte parity)
-CREATE VIEW ju_v1 AS SELECT * FROM ju_a JOIN ju_b USING (id);
+CREATE VIEW ju_v1 AS SELECT * FROM ju_a JOIN ju_b USING (id, name);
+-- duplicate output column names cannot be stored in a view
+CREATE VIEW ju_vdup AS SELECT * FROM ju_a JOIN ju_b USING (id);
 CREATE VIEW ju_v2 AS SELECT id, x, y FROM ju_a LEFT JOIN ju_b USING (id, name);
 CREATE VIEW ju_v3 AS SELECT j.id FROM ju_a FULL JOIN ju_b USING (id) AS j WHERE j.id > 0;
 CREATE VIEW ju_v4 AS SELECT * FROM ju_a NATURAL JOIN ju_b;
