@@ -720,7 +720,7 @@ pub fn be_tls_init(is_server_start: bool) -> PgResult<i32> {
             )
         };
         if rc == 1 {
-            store.set_flags(X509VerifyFlags::CRL_CHECK | X509VerifyFlags::CRL_CHECK_ALL);
+            let _ = store.set_flags(X509VerifyFlags::CRL_CHECK | X509VerifyFlags::CRL_CHECK_ALL);
         } else if ssl_crl_dir.is_empty() {
             ereport(cx.level())
                 .errcode(ERRCODE_CONFIG_FILE_ERROR)
@@ -1153,7 +1153,7 @@ pub fn be_tls_get_cipher_bits() -> i32 {
     CONN.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|conn| conn.stream.ssl().current_cipher().map(|ci| ci.bits() as i32))
+            .and_then(|conn| conn.stream.ssl().current_cipher().map(|ci| ci.bits().secret))
             .unwrap_or(0)
     })
 }

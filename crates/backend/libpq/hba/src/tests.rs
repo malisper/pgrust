@@ -275,14 +275,14 @@ fn parse_field_errors() {
 }
 
 #[test]
-fn parse_hostssl_cannot_match_but_loads() {
+fn parse_hostssl_warns_when_ssl_disabled_but_loads() {
     let mut toks = tokenize("hostssl all all 127.0.0.1/32 md5\n");
     let parsed = parse_hba_line(&mut toks[0], LOG).unwrap();
     let h = parsed.expect("line still loads");
     assert_eq!(h.conntype, ctHostSSL);
     assert_eq!(
         toks[0].err_msg.as_deref(),
-        Some("hostssl record cannot match because SSL is not supported by this build")
+        Some("hostssl record cannot match because SSL is disabled")
     );
 }
 
