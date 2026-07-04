@@ -173,6 +173,7 @@ fn create_toast_table<'mcx>(
             parent_index_relid: InvalidOid,
             parent_constraint_id: InvalidOid,
             reloptions: None,
+            old_number: types_core::InvalidRelFileNumber,
         },
     )?;
 

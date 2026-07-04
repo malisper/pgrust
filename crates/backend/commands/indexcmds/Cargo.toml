@@ -60,5 +60,9 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 clauses = { path = "../../optimizer/util/clauses" }
 vars = { path = "../../optimizer/util/vars" }
 nodes_core = { path = "../../nodes/nodes_core" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
+types_guc = { path = "../../../_support/types/types_guc" }
+array = { package = "types_array", path = "../../../_support/types/array" }
 
 [dev-dependencies]

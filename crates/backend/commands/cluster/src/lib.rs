@@ -51,6 +51,7 @@ fn unported(what: &str) -> ! {
 pub fn make_new_heap<'mcx>(
     mcx: Mcx<'mcx>,
     old_heap_oid: Oid,
+    new_tablespace: Oid,
     persistence: u8,
     lockmode: LOCKMODE,
 ) -> PgResult<Oid> {
@@ -70,7 +71,7 @@ pub fn make_new_heap<'mcx>(
         &catalog_heap::HeapCreateParams {
             relname: &new_heap_name,
             relnamespace: namespaceid,
-            reltablespace: old_heap.rd_rel.reltablespace,
+            reltablespace: new_tablespace,
             ownerid: old_heap.rd_rel.relowner,
             accessmtd: old_heap.rd_rel.relam,
             relkind: types_rel::RELKIND_RELATION,

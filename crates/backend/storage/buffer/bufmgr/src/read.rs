@@ -485,7 +485,7 @@ fn complete_read_sync(
 
 /// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
 /// ControlFile (tracked divergence: checksum-enabled clusters unverified).
-pub(crate) fn page_is_verified(page: *const u8) -> bool {
+pub fn page_is_verified(page: *const u8) -> bool {
     // SAFETY: caller owns a pinned BLCKSZ page image; u16 fields are 2-aligned
     // (page images are MAXALIGNed).
     unsafe {
@@ -509,7 +509,7 @@ pub(crate) fn page_is_verified(page: *const u8) -> bool {
     }
 }
 
-fn relpath_desc(locator: RelFileLocator, forknum: ForkNumber) -> String {
+pub fn relpath_desc(locator: RelFileLocator, forknum: ForkNumber) -> String {
     format!(
         "base/{}/{}{}",
         locator.dbOid,

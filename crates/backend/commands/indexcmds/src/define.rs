@@ -2,6 +2,7 @@
 // CheckPredicate + ChooseIndex*Name* + IndexSetParentIndex (indexcmds.c).
 // Loud: CONCURRENTLY, INCLUDE, named opclasses, WITH options, TABLESPACE,
 // exclusion/WITHOUT OVERLAPS, index detach.
+use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
     IndexCreateExtra, BTREE_AM_OID,
     INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
@@ -67,13 +68,174 @@ pub(crate) fn define_index_for_alter<'mcx>(
     mcx: Mcx<'mcx>,
     table_id: Oid,
     stmt_node: types_nodes::Node<'mcx>,
+    is_rebuild: bool,
     skip_build: bool,
 ) -> PgResult<Oid> {
     let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
-    DefineIndex(
-        mcx, table_id, stmt, InvalidOid, InvalidOid, InvalidOid, true, true, false, skip_build,
+    let skip_build = skip_build || stmt.oldNumber != types_core::InvalidRelFileNumber;
+    let index_oid = DefineIndex(
+        mcx,
+        table_id,
+        stmt,
+        InvalidOid,
+        InvalidOid,
+        InvalidOid,
+        true,
+        !is_rebuild,
         false,
-    )
+        skip_build,
+        is_rebuild,
+    )?;
+    // C ATExecAddIndex tail: a TryReuseIndex relfilenumber means the new
+    // index adopted the dropped edition's storage — cancel its pending unlink.
+    if stmt.oldNumber != types_core::InvalidRelFileNumber {
+        let irel = indexam::index_open(mcx, index_oid, types_rel::NoLock)?;
+        irel.rd_createSubid.set(stmt.oldCreateSubid);
+        irel.rd_firstRelfilelocatorSubid.set(stmt.oldFirstRelfilelocatorSubid);
+        catalog_storage::RelationPreserveStorage(irel.rd_locator.get(), true);
+        indexam::index_close(irel, types_rel::NoLock)?;
+    }
+    Ok(index_oid)
+}
+
+// SAFETY contract: d points at a detoasted, not-null oidvector.
+unsafe fn oidvector_values<'a>(d: Datum) -> &'a [Oid] {
+    let p = d.as_usize() as *const array::oidvector;
+    core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
+}
+
+const Anum_pg_index_indnkeyatts: i32 = 4;
+const Anum_pg_index_indisvalid: i32 = 11;
+const Anum_pg_index_indcollation: i32 = 17;
+const Anum_pg_index_indclass: i32 = 18;
+const Anum_pg_index_indexprs: i32 = 20;
+const Anum_pg_index_indpred: i32 = 21;
+
+// CheckIndexCompatible (indexcmds.c:180-354). Expressions, predicates and
+// invalid indexes are assumed incompatible, as in C.
+pub fn CheckIndexCompatible<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_id: Oid,
+    access_method_name: &str,
+    attribute_list: &types_nodes::NodeList<'mcx>,
+    exclusion_op_names: &types_nodes::NodeList<'mcx>,
+    is_without_overlaps: bool,
+) -> PgResult<bool> {
+    if !exclusion_op_names.is_nil() || is_without_overlaps {
+        unported("CheckIndexCompatible: exclusion / WITHOUT OVERLAPS constraints");
+    }
+    let relationId = catalog_index::IndexGetRelation(mcx, old_id, false)?;
+    let (accessMethodId, amname, amcanorder, _, _) = resolve_index_am(Some(access_method_name));
+
+    let numberOfAttributes = attribute_list.len();
+    debug_assert!(numberOfAttributes > 0 && numberOfAttributes <= INDEX_MAX_KEYS as usize);
+
+    let mut indexInfo = IndexInfo {
+        ii_NumIndexAttrs: numberOfAttributes as i32,
+        ii_AmCache: None,
+        ii_NumIndexKeyAttrs: numberOfAttributes as i32,
+        ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
+        ii_Expressions: types_nodes::NodeList::nil(),
+        ii_ExpressionsState: PgVec::new_in(mcx),
+        ii_Predicate: types_nodes::NodeList::nil(),
+        ii_PredicateState: None,
+        ii_Unique: false,
+        ii_NullsNotDistinct: false,
+        ii_ReadyForInserts: false,
+        ii_Summarizing: false,
+        ii_Concurrent: false,
+        ii_BrokenHotChain: false,
+        ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+    };
+    let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
+    let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
+    let mut opclassIds = [InvalidOid; INDEX_MAX_KEYS as usize];
+    let mut coloptions = [0i16; INDEX_MAX_KEYS as usize];
+    let rel = table::table_open(mcx, relationId, types_rel::AccessShareLock)?;
+    ComputeIndexAttrs(
+        mcx,
+        &rel,
+        &mut indexInfo,
+        &mut typeIds,
+        &mut collationIds,
+        &mut opclassIds,
+        &mut coloptions,
+        attribute_list,
+        false,
+        accessMethodId,
+        amname,
+        amcanorder,
+        None,
+    )?;
+    rel.close(types_rel::AccessShareLock)?;
+
+    let Some(tup) = SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(old_id)))?
+    else {
+        panic!("cache lookup failed for index {old_id}");
+    };
+    let notnull = |anum: i32| -> PgResult<Datum> {
+        let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, anum)?;
+        assert!(!isnull, "unexpected NULL pg_index column {anum}");
+        Ok(d)
+    };
+    let (_, pred_null) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?;
+    let (_, exprs_null) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+    let indisvalid = notnull(Anum_pg_index_indisvalid)?.as_bool();
+    if !(pred_null && exprs_null && indisvalid) {
+        ReleaseSysCache(tup);
+        return Ok(false);
+    }
+    let old_natts = notnull(Anum_pg_index_indnkeyatts)?.as_i16() as usize;
+    debug_assert_eq!(old_natts, numberOfAttributes);
+    // SAFETY (both): not-null oidvector columns of the held syscache tuple.
+    let same = unsafe { oidvector_values(notnull(Anum_pg_index_indclass)?) }[..old_natts]
+        == opclassIds[..old_natts]
+        && unsafe { oidvector_values(notnull(Anum_pg_index_indcollation)?) }[..old_natts]
+            == collationIds[..old_natts];
+    ReleaseSysCache(tup);
+    if !same {
+        return Ok(false);
+    }
+
+    let irel = indexam::index_open(mcx, old_id, types_rel::AccessShareLock)?;
+    let mut ret = true;
+    for i in 0..old_natts {
+        if coerce::IsPolymorphicType(lsyscache::get_opclass_input_type(opclassIds[i])?)
+            && irel.rd_att.attr(i).atttypid != typeIds[i]
+        {
+            ret = false;
+            break;
+        }
+    }
+    // New-side opclass options are impossible (ComputeIndexAttrs louds on
+    // opclassopts), so C's CompareOpclassOptions reduces to old-side nullness.
+    if ret {
+        for i in 0..old_natts {
+            if lsyscache::get_attoptions(mcx, old_id, (i + 1) as i16)? != Datum::null() {
+                ret = false;
+                break;
+            }
+        }
+    }
+    // ii_ExclusionOps comparison: exclusion indexes are loud upstream.
+    indexam::index_close(irel, types_rel::NoLock)?;
+    Ok(ret)
+}
+
+// Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine);
+// tuple is (oid, name, amcanorder, amcanunique, amcanmulticol).
+fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool) {
+    match name {
+        Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
+        Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
+        Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
+        Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
+        Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
+        Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
+        other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,7 +257,16 @@ pub fn DefineIndex<'mcx>(
         unported("DefineIndex: CONCURRENTLY");
     }
     if stmt.reset_default_tblspc {
-        unported("DefineIndex: reset_default_tblspc");
+        guc::set_config_option(
+            "default_tablespace",
+            Some(""),
+            types_guc::PGC_USERSET,
+            types_guc::PGC_S_SESSION,
+            guc::GUC_ACTION_SAVE,
+            true,
+            types_error::ErrorLevel(0),
+            false,
+        )?;
     }
     if stmt.iswithoutoverlaps {
         unported("DefineIndex: WITHOUT OVERLAPS constraints");
@@ -110,20 +281,8 @@ pub fn DefineIndex<'mcx>(
     if (stmt.deferrable || stmt.initdeferred) && !exclusion {
         unported("DefineIndex: DEFERRABLE unique/pk constraint indexes");
     }
-    if stmt.oldNumber != 0 || skip_build {
-        unported("DefineIndex: skip_build / oldNumber reuse");
-    }
-    // Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine).
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol) =
-        match stmt.accessMethod {
-            Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
-            Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
-            Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
-            Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
-            Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
-            Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
-            other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
-        };
+        resolve_index_am(stmt.accessMethod);
     if stmt.unique && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
@@ -254,6 +413,7 @@ pub fn DefineIndex<'mcx>(
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
     };
 
+    let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut opclassIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut coloptions = [0i16; INDEX_MAX_KEYS as usize];
@@ -261,6 +421,7 @@ pub fn DefineIndex<'mcx>(
         mcx,
         &rel,
         &mut indexInfo,
+        &mut typeIds,
         &mut collationIds,
         &mut opclassIds,
         &mut coloptions,
@@ -270,7 +431,7 @@ pub fn DefineIndex<'mcx>(
         accessMethodId,
         amname,
         amcanorder,
-        &mut root_save_nestlevel,
+        Some(&mut root_save_nestlevel),
     )?;
 
     if stmt.primary {
@@ -448,6 +609,9 @@ pub fn DefineIndex<'mcx>(
 
     let mut flags = (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
         | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 });
+    if skip_build {
+        flags |= catalog_index::INDEX_CREATE_SKIP_BUILD;
+    }
     if partitioned {
         flags |= catalog_index::INDEX_CREATE_SKIP_BUILD | catalog_index::INDEX_CREATE_PARTITIONED;
         // ONLY with existing partitions: catalog rows only, invalid until
@@ -490,6 +654,7 @@ pub fn DefineIndex<'mcx>(
             parent_index_relid: parentIndexId,
             parent_constraint_id: parentConstraintId,
             reloptions: reloptions.as_deref(),
+            old_number: stmt.oldNumber,
         },
     )?;
 
@@ -862,6 +1027,7 @@ fn ComputeIndexAttrs<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     indexInfo: &mut IndexInfo<'mcx>,
+    typeIds: &mut [Oid],
     collationIds: &mut [Oid],
     opclassIds: &mut [Oid],
     coloptions: &mut [i16],
@@ -871,7 +1037,7 @@ fn ComputeIndexAttrs<'mcx>(
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
-    ddl_save_nestlevel: &mut i32,
+    mut ddl_save_nestlevel: Option<&mut i32>,
 ) -> PgResult<()> {
     debug_assert!(exclusionOpNames.is_nil() || exclusionOpNames.len() == attList.len());
     let mut excl_iter = exclusionOpNames.iter();
@@ -926,14 +1092,19 @@ fn ComputeIndexAttrs<'mcx>(
             }
             (atttype, attcollation)
         };
+        typeIds[attn] = atttype;
         let mut attcollation = attcollation;
         // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
         // resolved before the collatable check).
         if !attribute.collation.is_nil() {
-            guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+            if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
+                guc::AtEOXact_GUC(false, *lvl);
+            }
             let resolved = catalog_namespace::get_collation_oid_list(&attribute.collation, false);
-            *ddl_save_nestlevel = guc::NewGUCNestLevel();
-            guc::RestrictSearchPath()?;
+            if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
+                *lvl = guc::NewGUCNestLevel();
+                guc::RestrictSearchPath()?;
+            }
             attcollation = resolved?;
         }
 
@@ -961,14 +1132,18 @@ fn ComputeIndexAttrs<'mcx>(
         // Opclass (and collation above) resolve under the DDL owner's original
         // search path: the RestrictSearchPath nest level pops around the
         // lookup (indexcmds.c ComputeIndexAttrs, ddl_save_nestlevel dance).
-        guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+        if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
+            guc::AtEOXact_GUC(false, *lvl);
+        }
         let resolved = if !attribute.opclass.is_nil() {
             ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
         } else {
             GetDefaultOpClass(atttype, accessMethodId)
         };
-        *ddl_save_nestlevel = guc::NewGUCNestLevel();
-        guc::RestrictSearchPath()?;
+        if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
+            *lvl = guc::NewGUCNestLevel();
+            guc::RestrictSearchPath()?;
+        }
         opclassIds[attn] = resolved?;
         if attribute.opclass.is_nil() {
             if opclassIds[attn] == InvalidOid {

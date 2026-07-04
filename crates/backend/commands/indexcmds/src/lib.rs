@@ -32,6 +32,7 @@ pub fn init_seams() {
     indexcmds_seams::define_index_for_alter::set(define::define_index_for_alter);
     indexcmds_seams::define_index::set(define::DefineIndex);
     indexcmds_seams::index_set_parent_index::set(define::IndexSetParentIndex);
+    indexcmds_seams::check_index_compatible::set(define::CheckIndexCompatible);
 }
 
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {

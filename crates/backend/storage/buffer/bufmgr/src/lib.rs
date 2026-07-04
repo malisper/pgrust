@@ -60,7 +60,7 @@ pub use localbuf::{
     AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
     DropRelationLocalBuffers,
 };
-pub use read::{ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};
+pub use read::{page_is_verified, relpath_desc, ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};
 pub use extend::{ExtendBufferedRelBy, ExtendBufferedRelTo, ExtendBufferedRelToSmgr};
 
 const DEFAULTTABLESPACE_OID: Oid = 1663;
@@ -210,13 +210,13 @@ macro_rules! unported {
     };
 }
 
-/// FlushRelationBuffers (bufmgr.c): local arm live; shared write-back arm
-/// stays loud with its C name.
+/// FlushRelationBuffers (bufmgr.c): the shared arm's per-buffer flush loop is
+/// FlushRelationsAllBuffers with one locator (same header-locked scan).
 pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {
     if rlocator.backend != INVALID_PROC_NUMBER {
         return localbuf::FlushRelationLocalBuffers(rlocator.locator);
     }
-    panic!("unported callee reached from bufmgr.c: FlushRelationBuffers shared arm (phase 2)");
+    write::FlushRelationsAllBuffers(&[rlocator])
 }
 
 pub use drop_buffers::DropDatabaseBuffers;

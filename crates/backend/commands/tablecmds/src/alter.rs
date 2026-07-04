@@ -24,6 +24,8 @@ const AT_PASS_DROP: usize = 0;
 const AT_PASS_ALTER_TYPE: usize = 1;
 const AT_PASS_ADD_COL: usize = 2;
 const AT_PASS_SET_EXPRESSION: usize = 3;
+const AT_PASS_OLD_INDEX: usize = 4;
+const AT_PASS_OLD_CONSTR: usize = 5;
 const AT_PASS_ADD_CONSTR: usize = 6;
 const AT_PASS_COL_ATTRS: usize = 7;
 const AT_PASS_ADD_INDEXCONSTR: usize = 8;
@@ -285,6 +287,9 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
     pub(crate) partition_constraint: Option<Node<'mcx>>,
     pub(crate) validate_default: bool,
+    changed_constraints: Vec<(Oid, String)>,
+    changed_indexes: Vec<(Oid, String)>,
+    replica_identity_index: Option<String>,
 }
 
 impl<'mcx> AlteredTableInfo<'mcx> {
@@ -307,6 +312,9 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             fk_checks: PgVec::new_in(mcx),
             partition_constraint: None,
             validate_default: false,
+            changed_constraints: Vec::new(),
+            changed_indexes: Vec::new(),
+            replica_identity_index: None,
         }
     }
 }
@@ -690,6 +698,7 @@ fn ATRewriteCatalogs<'mcx>(
                                 defnode,
                                 cmd.recurse,
                                 false,
+                                false,
                                 lockmode,
                                 query_string,
                             )?;
@@ -705,7 +714,31 @@ fn ATRewriteCatalogs<'mcx>(
                     ATExecValidateConstraint(mcx, &mut wqueue[tabidx], &rel, name, cmd.recurse)?;
                 }
                 AlterTableType::AT_AddIndex => {
-                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd)?;
+                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, false)?;
+                }
+                AlterTableType::AT_ReAddIndex => {
+                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, true)?;
+                }
+                AlterTableType::AT_ReAddConstraint => {
+                    let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
+                    let constr = defnode.as_variant::<Constraint>().expect("Constraint");
+                    match constr.contype {
+                        ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
+                            ATAddCheckNNConstraint(
+                                mcx,
+                                wqueue,
+                                tabidx,
+                                &rel,
+                                defnode,
+                                true,
+                                false,
+                                true,
+                                lockmode,
+                                query_string,
+                            )?;
+                        }
+                        _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
+                    }
                 }
                 AlterTableType::AT_AlterColumnType => {
                     ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
@@ -862,10 +895,11 @@ fn ATRewriteCatalogs<'mcx>(
             rel.close(NoLock)?;
             xact::CommandCounterIncrement()?;
         }
+        if pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION {
+            ATPostAlterTypeCleanup(mcx, &mut wqueue[tabidx])?;
+        }
         tabidx += 1;
         }
-        // ATPostAlterTypeCleanup: dependent constraints/indexes are loud in
-        // ATExecAlterColumnType, so the re-add queue is always empty.
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
     // or none is needed; opened with the statement lockmode (the AEL open in
@@ -912,18 +946,20 @@ fn ATRewriteTableOne<'mcx>(
         {
             unported("ATRewriteTable rewrite flags");
         }
-        if tab.new_tablespace != InvalidOid {
-            unported("ATRewriteTable rewrite combined with SET TABLESPACE");
-        }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
         let persistence = if tab.chg_persistence {
             tab.newrelpersistence
         } else {
             old_heap.rd_rel.relpersistence
         };
+        let new_tablespace = if tab.new_tablespace != InvalidOid {
+            tab.new_tablespace
+        } else {
+            old_heap.rd_rel.reltablespace
+        };
         old_heap.close(NoLock)?;
         let oid_new_heap =
-            commands_cluster::make_new_heap(mcx, tab.relid, persistence, lockmode)?;
+            commands_cluster::make_new_heap(mcx, tab.relid, new_tablespace, persistence, lockmode)?;
         ATRewriteTable(mcx, tab, oid_new_heap)?;
         commands_cluster::finish_heap_swap(
             mcx,
@@ -1334,7 +1370,17 @@ fn ATExecAddColumn<'mcx>(
             .expect("atthasdef column has a default");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         tab.has_newvals = true;
-        if !clauses::contain_volatile_functions(defval)? {
+        tab.newvals.push(NewColumnValue {
+            attnum: newattnum as AttrNumber,
+            expr: defval,
+            is_generated: col_def.generated != 0,
+        });
+        let has_domain_constraints =
+            typcache::domain::DomainHasConstraints(attribute.atttypid)?;
+        if col_def.generated == 0
+            && !has_domain_constraints
+            && !clauses::contain_volatile_functions(defval)?
+        {
             let mut state = execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
                 .expect("non-nil default expression");
             let mut slots =
@@ -1346,8 +1392,10 @@ fn ATExecAddColumn<'mcx>(
                 has_missing = true;
             }
         } else {
-            unported("ATExecAddColumn volatile default (phase-3 rewrite fill)");
+            tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
         }
+    } else if typcache::domain::DomainHasConstraints(attribute.atttypid)? {
+        unported("ATExecAddColumn domain-typed column without default (null-coercion fill)");
     }
     if !has_missing {
         tab.verify_new_notnull |= col_def.is_not_null;
@@ -1663,7 +1711,7 @@ fn ATExecSetExpression<'mcx>(
     if rewrite {
         catalog_heap::RelationClearMissing(mcx, rel.rd_id)?;
         xact::CommandCounterIncrement()?;
-        remember_dependents_or_loud(mcx, rel, attnum, col_name, false)?;
+        RememberAllDependentForRebuilding(mcx, tab, rel, attnum, col_name, false)?;
     }
 
     let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
@@ -2587,6 +2635,7 @@ fn ATAddCheckNNConstraint<'mcx>(
     defnode: Node<'mcx>,
     recurse: bool,
     recursing: bool,
+    is_readd: bool,
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
@@ -2601,7 +2650,7 @@ fn ATAddCheckNNConstraint<'mcx>(
         rel,
         &[],
         &NodeList::make1(mcx, defnode)?,
-        recursing, // allow_merge (is_readd rides the ALTER TYPE re-add lane)
+        recursing || is_readd,
         !recursing,
         query_string,
     )?;
@@ -2655,6 +2704,7 @@ fn ATAddCheckNNConstraint<'mcx>(
             defnode,
             recurse,
             true,
+            is_readd,
             lockmode,
             query_string,
         )?;
@@ -2797,10 +2847,15 @@ fn ATExecAddIndex<'mcx>(
     tab: &mut AlteredTableInfo<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    is_rebuild: bool,
 ) -> PgResult<()> {
     let stmt_node = cmd.def.expect("AT_AddIndex IndexStmt");
-    let skip_build = tab.rewrite > 0;
-    indexcmds_seams::define_index_for_alter::call(mcx, rel.rd_id, stmt_node, skip_build)?;
+    let old_number = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt")
+        .oldNumber;
+    let skip_build = tab.rewrite > 0 || old_number != 0;
+    indexcmds_seams::define_index_for_alter::call(mcx, rel.rd_id, stmt_node, is_rebuild, skip_build)?;
     Ok(())
 }
 
@@ -3139,9 +3194,6 @@ fn ATPrepAlterColumnType<'mcx>(
             .with_detail(format!("Column \"{col_name}\" is a generated column.")),
         ));
     }
-    if def.raw_default.is_some() || def.cooked_default.is_some() {
-        unported("ATPrepAlterColumnType USING transform");
-    }
     if attinhcount > 0 {
         return Err(Box::new(
             PgError::new(ERROR, format!("cannot alter inherited column \"{col_name}\""))
@@ -3149,10 +3201,6 @@ fn ATPrepAlterColumnType<'mcx>(
         ));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-    if def.collClause.is_some() {
-        unported("ATPrepAlterColumnType COLLATE clause (GetColumnDefCollation)");
-    }
-    // GetColumnDefCollation: no COLLATE clause -> type default.
 
     if att.attgenerated == b'v' as i8 {
         // C builds no transform for virtual generated columns: no newval,
@@ -3165,25 +3213,58 @@ fn ATPrepAlterColumnType<'mcx>(
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
-    let var = Node::mk(
-        mcx,
-        types_nodes::primnodes::Var {
-            varno: 1,
-            varattno: attnum,
-            vartype: att.atttypid,
-            vartypmod: att.atttypmod,
-            varcollid: att.attcollation,
-            varnosyn: 1,
-            varattnosyn: attnum,
-            location: -1,
-            ..Default::default()
-        },
-    )?;
+    let using = match (def.raw_default, def.cooked_default) {
+        (Some(raw), _) => {
+            if att.attidentity != 0 {
+                unported("ALTER COLUMN TYPE USING on an identity column");
+            }
+            let nsitem = parse_relation::addRangeTableEntryForRelation(
+                mcx,
+                &mut pstate,
+                rel,
+                types_rel::AccessShareLock,
+                None,
+                false,
+                true,
+            )?;
+            parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+            Some(parse_expr::transformExpr(
+                mcx,
+                &mut pstate,
+                raw,
+                parser_small1::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM,
+            )?)
+        }
+        (None, Some(cooked)) => Some(cooked),
+        (None, None) => None,
+    };
+    if att.attidentity != 0 {
+        // parse_utilcmd queues an ALTER SEQUENCE ... AS retype for identity
+        // columns; not carried yet.
+        unported("ALTER COLUMN TYPE on an identity column (sequence retype)");
+    }
+    let pre_transform = match using {
+        Some(t) => t,
+        None => Node::mk(
+            mcx,
+            types_nodes::primnodes::Var {
+                varno: 1,
+                varattno: attnum,
+                vartype: att.atttypid,
+                vartypmod: att.atttypmod,
+                varcollid: att.attcollation,
+                varnosyn: 1,
+                varattnosyn: attnum,
+                location: -1,
+                ..Default::default()
+            },
+        )?,
+    };
     let transform = match coerce::coerce_to_target_type(
         mcx,
         &mut pstate,
-        var,
-        att.atttypid,
+        pre_transform,
+        parse_expr::expr_type(pre_transform),
         targettype,
         targettypmod,
         coerce::CoercionContext::COERCION_ASSIGNMENT,
@@ -3193,20 +3274,32 @@ fn ATPrepAlterColumnType<'mcx>(
         Some(t) => t,
         None => {
             let want = format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
-            let e = PgError::new(
-                ERROR,
-                format!("column \"{col_name}\" cannot be cast automatically to type {want}"),
-            )
-            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
-            let e = if att.attgenerated == 0 {
-                let withmod = format_type::format_type_with_typemod(targettype, targettypmod)
-                    .unwrap_or_else(|_| "???".into());
-                let qcol = format_type::quote_identifier(col_name);
-                e.with_hint(format!(
-                    "You might need to specify \"USING {qcol}::{withmod}\"."
-                ))
+            let e = if using.is_some() {
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "result of USING clause for column \"{col_name}\" cannot be cast \
+                         automatically to type {want}"
+                    ),
+                )
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                .with_hint("You might need to add an explicit cast.".to_string())
             } else {
-                e
+                let e = PgError::new(
+                    ERROR,
+                    format!("column \"{col_name}\" cannot be cast automatically to type {want}"),
+                )
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+                if att.attgenerated == 0 {
+                    let withmod = format_type::format_type_with_typemod(targettype, targettypmod)
+                        .unwrap_or_else(|_| "???".into());
+                    let qcol = format_type::quote_identifier(col_name);
+                    e.with_hint(format!(
+                        "You might need to specify \"USING {qcol}::{withmod}\"."
+                    ))
+                } else {
+                    e
+                }
             };
             return Err(Box::new(e));
         }
@@ -3215,7 +3308,7 @@ fn ATPrepAlterColumnType<'mcx>(
     // expression_planner.
     let transform = clauses::eval_const_expressions(mcx, transform)?;
     tab.newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
-    if at_column_change_requires_rewrite(transform, attnum) {
+    if at_column_change_requires_rewrite(transform, attnum)? {
         tab.rewrite |= AT_REWRITE_COLUMN_REWRITE;
     }
     parser_small1::free_parsestate(pstate)?;
@@ -3226,18 +3319,26 @@ fn ATPrepAlterColumnType<'mcx>(
     Ok(())
 }
 
-// ATColumnChangeRequiresRewrite; domain/timestamp fastpath arms are loud.
-fn at_column_change_requires_rewrite(expr: Node<'_>, varattno: AttrNumber) -> bool {
+// ATColumnChangeRequiresRewrite; the timestamptz<->timestamp UTC fastpath is
+// not carried (FuncExpr always rewrites, a strict superset of C's rewrites).
+fn at_column_change_requires_rewrite(expr: Node<'_>, varattno: AttrNumber) -> PgResult<bool> {
     let mut e = expr;
     loop {
         if let Some(v) = e.as_var() {
-            return v.varattno != varattno;
+            return Ok(v.varattno != varattno);
         }
         if let Some(r) = e.as_variant::<types_nodes::primnodes::RelabelType>() {
             e = r.arg;
             continue;
         }
-        return true;
+        if let Some(d) = e.as_variant::<types_nodes::primnodes::CoerceToDomain>() {
+            if typcache::DomainHasConstraints(d.resulttype)? {
+                return Ok(true);
+            }
+            e = d.arg;
+            continue;
+        }
+        return Ok(true);
     }
 }
 
@@ -3276,7 +3377,7 @@ fn ATExecAlterColumnType<'mcx>(
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
     let shape = syscache_seams::lookup_pg_type_shape::call(targettype)?
         .expect("pg_type row vanished");
-    let targetcollid = shape.typcollation;
+    let targetcollid = crate::GetColumnDefCollation(def, targettype)?;
 
     // Re-coerce any stored default before the column type flips.
     let defaultexpr = if att.atthasdef {
@@ -3321,12 +3422,14 @@ fn ATExecAlterColumnType<'mcx>(
         None
     };
 
-    remember_dependents_or_loud(mcx, rel, attnum, col_name, true)?;
+    RememberAllDependentForRebuilding(mcx, tab, rel, attnum, col_name, true)?;
     delete_column_type_dependencies(mcx, rel.rd_id, attnum, &att)?;
 
-    if att.atthasmissing && tab.rewrite == 0 {
-        unported("ATExecAlterColumnType attmissingval repack (no-rewrite fast-default)");
-    }
+    let missing_elem = if att.atthasmissing && tab.rewrite == 0 {
+        fetch_missing_element(mcx, rel.rd_id, attnum, &att)?
+    } else {
+        None
+    };
 
     debug_assert!(tn.arrayBounds.is_nil());
     update_pg_attribute(
@@ -3345,6 +3448,14 @@ fn ATExecAlterColumnType<'mcx>(
             (Anum_pg_attribute_attcollation, Datum::from_oid(targetcollid)),
         ],
     )?;
+
+    // C repacks attmissingval in the same tuple write; two writes with a CCI
+    // between reach the identical row image (array metadata swaps to the new
+    // type, the element datum is untouched — no rewrite means binary reuse).
+    if let Some(elem) = missing_elem {
+        xact::CommandCounterIncrement()?;
+        catalog_heap::StoreAttrMissingVal(mcx, rel, attnum, elem)?;
+    }
 
     let myself = pg_depend::ObjectAddress::sub_set(RELATION_RELATION_ID, rel.rd_id, attnum as i32);
     let reftype = pg_depend::ObjectAddress::set(TYPE_RELATION_ID, targettype);
@@ -3383,10 +3494,35 @@ fn ATExecAlterColumnType<'mcx>(
     Ok(())
 }
 
-// RememberAllDependentForRebuilding: any dependent object beyond pg_attrdef
-// rows of this relation means an index/constraint rebuild lane — loud.
-fn remember_dependents_or_loud<'mcx>(
+const ConstraintRelationId: Oid = 2606;
+const ConstraintOidIndexId: Oid = 2667;
+const ProcedureRelationId: Oid = 1255;
+const RewriteRelationId: Oid = 2618;
+const TriggerRelationId: Oid = 2620;
+const PolicyRelationId: Oid = 3256;
+const StatisticExtRelationId: Oid = 3381;
+const PublicationRelRelationId: Oid = 6106;
+
+fn depends_on_column_err(
+    mcx: Mcx<'_>,
+    msg: &str,
+    obj: &pg_depend::ObjectAddress,
+    col_name: &str,
+) -> Box<PgError> {
+    let desc = catalog_dependency::getObjectDescription(mcx, obj)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "???".to_string());
+    Box::new(
+        PgError::new(ERROR, msg.to_string())
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(format!("{desc} depends on column \"{col_name}\"")),
+    )
+}
+
+fn RememberAllDependentForRebuilding<'mcx>(
     mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
     col_name: &str,
@@ -3407,6 +3543,7 @@ fn remember_dependents_or_loud<'mcx>(
         &keys,
     )?;
     let desc = dep_rel.descr();
+    let mut found: Vec<(Oid, Oid, i32)> = Vec::new();
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
@@ -3414,39 +3551,425 @@ fn remember_dependents_or_loud<'mcx>(
             unsafe { types_tuple::heap_getattr(tup, 1, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
         let objid = unsafe { types_tuple::heap_getattr(tup, 2, desc, &mut isnull) }.as_oid();
-        if classid == types_core::ATTR_DEFAULT_RELATION_ID {
-            let (adrelid, adnum) = pg_attrdef::GetAttrDefaultColumnAddress(mcx, objid)?;
-            if adrelid == rel.rd_id && adnum == attnum {
-                // The column's own default expression; the caller deals
-                // with it.
-                continue;
-            }
-            if !is_alter_type {
-                continue;
-            }
-            // Only a same-table generated column can reference this column.
-            assert!(adrelid == rel.rd_id, "attrdef dependency from another relation");
-            let gen_att = rel.rd_att.attr(adnum as usize - 1);
-            let genname =
-                core::str::from_utf8(gen_att.attname.name_str()).expect("attname UTF-8");
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    "cannot alter type of a column used by a generated column".to_string(),
-                )
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .with_detail(format!(
-                    "Column \"{col_name}\" is used by generated column \"{genname}\"."
-                )),
-            ));
-        }
-        unported(&format!(
-            "RememberAllDependentForRebuilding: dependent object (class {classid}, oid \
-             {objid}) — index/constraint rebuild lane"
-        ));
+        // SAFETY: as above.
+        let objsubid =
+            unsafe { types_tuple::heap_getattr(tup, 3, desc, &mut isnull) }.as_i32();
+        found.push((classid, objid, objsubid));
     }
     genam::systable_endscan(mcx, scan)?;
-    dep_rel.close(RowExclusiveLock)
+    dep_rel.close(RowExclusiveLock)?;
+
+    for (classid, objid, objsubid) in found {
+        let obj = pg_depend::ObjectAddress::sub_set(classid, objid, objsubid);
+        match classid {
+            RELATION_RELATION_ID => {
+                let relkind = lsyscache::get_rel_relkind(objid)? as u8;
+                if relkind == types_rel::RELKIND_INDEX
+                    || relkind == types_rel::RELKIND_PARTITIONED_INDEX
+                {
+                    RememberIndexForRebuilding(mcx, tab, objid)?;
+                } else if relkind == types_rel::RELKIND_SEQUENCE {
+                    // A SERIAL column's sequence; nothing to do.
+                } else {
+                    panic!("unexpected object depending on column: class {classid} oid {objid}");
+                }
+            }
+            ConstraintRelationId => RememberConstraintForRebuilding(mcx, tab, objid)?,
+            ProcedureRelationId => {
+                if is_alter_type {
+                    return Err(depends_on_column_err(
+                        mcx,
+                        "cannot alter type of a column used by a function or procedure",
+                        &obj,
+                        col_name,
+                    ));
+                }
+            }
+            RewriteRelationId => {
+                if is_alter_type {
+                    return Err(depends_on_column_err(
+                        mcx,
+                        "cannot alter type of a column used by a view or rule",
+                        &obj,
+                        col_name,
+                    ));
+                }
+            }
+            TriggerRelationId => {
+                if is_alter_type {
+                    return Err(depends_on_column_err(
+                        mcx,
+                        "cannot alter type of a column used in a trigger definition",
+                        &obj,
+                        col_name,
+                    ));
+                }
+            }
+            PolicyRelationId => {
+                if is_alter_type {
+                    return Err(depends_on_column_err(
+                        mcx,
+                        "cannot alter type of a column used in a policy definition",
+                        &obj,
+                        col_name,
+                    ));
+                }
+            }
+            types_core::ATTR_DEFAULT_RELATION_ID => {
+                let (adrelid, adnum) = pg_attrdef::GetAttrDefaultColumnAddress(mcx, objid)?;
+                if adrelid == rel.rd_id && adnum == attnum {
+                    // The column's own default expression; the caller deals
+                    // with it.
+                    continue;
+                }
+                if !is_alter_type {
+                    continue;
+                }
+                // Only a same-table generated column can reference this column.
+                assert!(adrelid == rel.rd_id, "attrdef dependency from another relation");
+                let gen_att = rel.rd_att.attr(adnum as usize - 1);
+                let genname =
+                    core::str::from_utf8(gen_att.attname.name_str()).expect("attname UTF-8");
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot alter type of a column used by a generated column".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail(format!(
+                        "Column \"{col_name}\" is used by generated column \"{genname}\"."
+                    )),
+                ));
+            }
+            StatisticExtRelationId => {
+                unported("RememberStatisticsForRebuilding (extended statistics)");
+            }
+            PublicationRelRelationId => {
+                if is_alter_type {
+                    return Err(depends_on_column_err(
+                        mcx,
+                        "cannot alter type of a column used by a publication WHERE clause",
+                        &obj,
+                        col_name,
+                    ));
+                }
+            }
+            _ => panic!("unexpected object depending on column: class {classid} oid {objid}"),
+        }
+    }
+    Ok(())
+}
+
+fn RememberConstraintForRebuilding<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    conoid: Oid,
+) -> PgResult<()> {
+    if tab.changed_constraints.iter().any(|(o, _)| *o == conoid) {
+        return Ok(());
+    }
+    let defstring = ruleutils::pg_get_constraintdef_command(mcx, conoid)?;
+    // Not-null constraints must be recreated ahead of primary key indexes,
+    // else the PK would create them under the wrong name.
+    if lsyscache::get_constraint_type(conoid)? as u8 == pg_constraint::CONSTRAINT_NOTNULL {
+        tab.changed_constraints.insert(0, (conoid, defstring));
+    } else {
+        tab.changed_constraints.push((conoid, defstring));
+    }
+    let indoid = lsyscache::get_constraint_index(conoid)?;
+    if indoid != InvalidOid {
+        RememberReplicaIdentityForRebuilding(mcx, tab, indoid)?;
+        RememberClusterOnForRebuilding(indoid)?;
+    }
+    Ok(())
+}
+
+fn RememberIndexForRebuilding<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    indoid: Oid,
+) -> PgResult<()> {
+    if tab.changed_indexes.iter().any(|(o, _)| *o == indoid) {
+        return Ok(());
+    }
+    let conoid = pg_depend::get_index_constraint(mcx, indoid)?;
+    if conoid != InvalidOid {
+        return RememberConstraintForRebuilding(mcx, tab, conoid);
+    }
+    let defstring = ruleutils::pg_get_indexdef_string(mcx, indoid)?;
+    tab.changed_indexes.push((indoid, defstring));
+    RememberReplicaIdentityForRebuilding(mcx, tab, indoid)?;
+    RememberClusterOnForRebuilding(indoid)
+}
+
+fn RememberReplicaIdentityForRebuilding<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    indoid: Oid,
+) -> PgResult<()> {
+    if !lsyscache::get_index_isreplident(indoid)? {
+        return Ok(());
+    }
+    if tab.replica_identity_index.is_some() {
+        panic!("relation {} has multiple indexes marked as replica identity", tab.relid);
+    }
+    let name = lsyscache::get_rel_name(mcx, indoid)?.expect("index has a name");
+    tab.replica_identity_index = Some(name.to_string());
+    Ok(())
+}
+
+fn RememberClusterOnForRebuilding(indoid: Oid) -> PgResult<()> {
+    if lsyscache::get_index_isclustered(indoid)? {
+        unported("AT_ClusterOn restore after ALTER TYPE (cluster-on lane)");
+    }
+    Ok(())
+}
+
+fn ATPostAlterTypeCleanup<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+) -> PgResult<()> {
+    if tab.changed_constraints.is_empty()
+        && tab.changed_indexes.is_empty()
+        && tab.replica_identity_index.is_none()
+    {
+        return Ok(());
+    }
+    let changed_constraints = std::mem::take(&mut tab.changed_constraints);
+    let changed_indexes = std::mem::take(&mut tab.changed_indexes);
+    let mut objects = catalog_dependency::ObjectAddresses::new();
+    for (conoid, def) in &changed_constraints {
+        let (conrelid, confrelid, conislocal) = constraint_rebuild_shape(mcx, *conoid)?;
+        objects
+            .add_exact_object_address(pg_depend::ObjectAddress::set(ConstraintRelationId, *conoid));
+        if !conislocal {
+            continue;
+        }
+        if conrelid == InvalidOid {
+            unported("ATPostAlterTypeCleanup domain constraint rebuild");
+        }
+        if conrelid != tab.relid {
+            unported("ATPostAlterTypeCleanup cross-table constraint rebuild");
+        }
+        ATPostAlterTypeParse(mcx, tab, *conoid, conrelid, confrelid, def)?;
+    }
+    for (indoid, def) in &changed_indexes {
+        let relid = catalog_index::IndexGetRelation(mcx, *indoid, false)?;
+        if relid != tab.relid {
+            unported("ATPostAlterTypeCleanup cross-table index rebuild");
+        }
+        ATPostAlterTypeParse(mcx, tab, *indoid, relid, InvalidOid, def)?;
+        objects
+            .add_exact_object_address(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, *indoid));
+    }
+    if let Some(idxname) = tab.replica_identity_index.take() {
+        let mut sub = Node::build::<types_nodes::parsenodes::ReplicaIdentityStmt>(mcx)?;
+        sub.identity_type = types_nodes::parsenodes::REPLICA_IDENTITY_INDEX;
+        sub.name = Some(str_arena(mcx, &idxname)?);
+        let subnode = sub.seal();
+        let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
+        cmd.subtype = AlterTableType::AT_ReplicaIdentity;
+        cmd.def = Some(subnode);
+        tab.subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, cmd.seal())?;
+    }
+    catalog_dependency::performMultipleDeletions(
+        mcx,
+        &objects,
+        catalog_dependency::DropBehavior::DROP_RESTRICT,
+        catalog_dependency::PERFORM_DELETION_INTERNAL,
+    )
+}
+
+fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, bool)> {
+    let con_rel = table::table_open(mcx, ConstraintRelationId, types_rel::AccessShareLock)?;
+    let keys = [oid_scankey(1, conoid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, ConstraintOidIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {conoid}"));
+    let desc = con_rel.descr();
+    let get = |anum: AttrNumber| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_constraint columns under its descriptor.
+        unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+    };
+    let conrelid = get(pg_constraint::Anum_pg_constraint_conrelid).as_oid();
+    let confrelid = get(pg_constraint::Anum_pg_constraint_confrelid).as_oid();
+    let conislocal = get(pg_constraint::Anum_pg_constraint_conislocal).as_bool();
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok((conrelid, confrelid, conislocal))
+}
+
+fn ATPostAlterTypeParse<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    old_id: Oid,
+    rel_id: Oid,
+    ref_rel_id: Oid,
+    def: &str,
+) -> PgResult<()> {
+    debug_assert!(rel_id == tab.relid);
+    let def = str_arena(mcx, def)?;
+    let raw_list = parser_seams::raw_parser::call(
+        mcx,
+        def,
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )?;
+    let rel = table::table_open(mcx, rel_id, NoLock)?;
+    for rs in raw_list.iter() {
+        let stmt = rs.stmt;
+        if let Some(_istmt) = stmt.as_variant::<types_nodes::rawnodes::IndexStmt>() {
+            parse_clause::transformIndexStmt(mcx, rel_id, stmt, def)?;
+            if tab.rewrite == 0 {
+                TryReuseIndex(mcx, old_id, stmt)?;
+            }
+            readd_index_fixups(mcx, old_id, stmt)?;
+            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+            newcmd.subtype = AlterTableType::AT_ReAddIndex;
+            newcmd.def = Some(stmt);
+            tab.subcmds[AT_PASS_OLD_INDEX].lappend(mcx, newcmd.seal())?;
+        } else if let Some(atstmt) = stmt.as_variant::<AlterTableStmt>() {
+            for cnode in atstmt.cmds.iter() {
+                let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                if cmd.subtype != AlterTableType::AT_AddConstraint {
+                    panic!("unexpected statement subtype: {:?}", cmd.subtype);
+                }
+                let connode = cmd.def.expect("AT_AddConstraint Constraint");
+                let con = connode.as_variant::<Constraint>().expect("Constraint");
+                match con.contype {
+                    ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
+                        let (istmt, nnconstraints) =
+                            parse_utilcmd::transformIndexConstraintForAlter(
+                                mcx, &rel, connode, def,
+                            )?;
+                        assert!(
+                            istmt
+                                .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                                .expect("IndexStmt")
+                                .indexOid
+                                == InvalidOid,
+                            "re-added constraint names an existing index"
+                        );
+                        parse_clause::transformIndexStmt(mcx, rel_id, istmt, def)?;
+                        let indoid = lsyscache::get_constraint_index(old_id)?;
+                        if tab.rewrite == 0 {
+                            TryReuseIndex(mcx, indoid, istmt)?;
+                        }
+                        readd_index_fixups(mcx, indoid, istmt)?;
+                        let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+                        newcmd.subtype = AlterTableType::AT_ReAddIndex;
+                        newcmd.def = Some(istmt);
+                        tab.subcmds[AT_PASS_OLD_INDEX].lappend(mcx, newcmd.seal())?;
+                        rebuild_constraint_comment(mcx, old_id)?;
+                        for nn in nnconstraints.iter() {
+                            let mut nncmd = Node::build::<AlterTableCmd>(mcx)?;
+                            nncmd.subtype = AlterTableType::AT_ReAddConstraint;
+                            nncmd.def = Some(nn);
+                            tab.subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, nncmd.seal())?;
+                        }
+                    }
+                    ConstrType::CONSTR_CHECK
+                    | ConstrType::CONSTR_NOTNULL
+                    | ConstrType::CONSTR_FOREIGN => {
+                        let contype = con.contype;
+                        let has_name = con.conname.is_some();
+                        if contype == ConstrType::CONSTR_FOREIGN {
+                            // SAFETY: parse tree is arena-owned; no derived
+                            // refs live.
+                            unsafe {
+                                connode
+                                    .with_mut::<Constraint, _>(|c| {
+                                        c.old_pktable_oid = ref_rel_id;
+                                    })
+                                    .expect("Constraint");
+                            }
+                            // TryReuseForeignKey is skipped: the re-added FK
+                            // revalidates instead of reusing conpfeqop —
+                            // catalog end-state identical to C.
+                        }
+                        // SAFETY: as above.
+                        unsafe {
+                            cnode
+                                .with_mut::<AlterTableCmd, _>(|c| {
+                                    c.subtype = AlterTableType::AT_ReAddConstraint;
+                                })
+                                .expect("AlterTableCmd");
+                        }
+                        tab.subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, cnode)?;
+                        if has_name {
+                            rebuild_constraint_comment(mcx, old_id)?;
+                        } else {
+                            debug_assert!(contype == ConstrType::CONSTR_NOTNULL);
+                        }
+                    }
+                    other => panic!("unexpected constraint type: {other:?}"),
+                }
+            }
+        } else {
+            panic!("unexpected statement type in ATPostAlterTypeParse");
+        }
+    }
+    rel.close(NoLock)
+}
+
+// RebuildConstraintComment: constraint comments are loud until CommentObject
+// grows an OBJECT_TABCONSTRAINT arm.
+fn rebuild_constraint_comment(mcx: Mcx<'_>, conoid: Oid) -> PgResult<()> {
+    if commands_comment::GetComment(mcx, conoid, ConstraintRelationId, 0)?.is_some() {
+        unported("RebuildConstraintComment (comment on a rebuilt constraint)");
+    }
+    Ok(())
+}
+
+// TryReuseIndex (tablecmds.c:15886).
+fn TryReuseIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_id: Oid,
+    stmt_node: Node<'mcx>,
+) -> PgResult<()> {
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt");
+    if !indexcmds_seams::check_index_compatible::call(
+        mcx,
+        old_id,
+        stmt.accessMethod.expect("transformed IndexStmt has an AM"),
+        &stmt.indexParams,
+        &stmt.excludeOpNames,
+        stmt.iswithoutoverlaps,
+    )? {
+        return Ok(());
+    }
+    let irel = indexam::index_open(mcx, old_id, NoLock)?;
+    if irel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_INDEX {
+        let old_number = irel.rd_rel.relfilenode;
+        // SAFETY: parse tree is arena-owned; no derived refs live.
+        unsafe {
+            stmt_node
+                .with_mut::<types_nodes::rawnodes::IndexStmt, _>(|s| {
+                    s.oldNumber = old_number;
+                    s.oldCreateSubid = 0;
+                })
+                .expect("IndexStmt");
+        }
+    }
+    irel.close(NoLock)
+}
+
+fn readd_index_fixups<'mcx>(mcx: Mcx<'mcx>, old_id: Oid, stmt_node: Node<'mcx>) -> PgResult<()> {
+    if commands_comment::GetComment(mcx, old_id, RELATION_RELATION_ID, 0)?.is_some() {
+        unported("ATPostAlterTypeParse idxcomment (comment on a rebuilt index)");
+    }
+    // SAFETY: parse tree is arena-owned; no derived refs live.
+    unsafe {
+        stmt_node
+            .with_mut::<types_nodes::rawnodes::IndexStmt, _>(|s| {
+                s.reset_default_tblspc = true;
+            })
+            .expect("IndexStmt");
+    }
+    Ok(())
 }
 
 // The depender-side scan in ATExecAlterColumnType: only the type (and
@@ -3490,6 +4013,78 @@ fn delete_column_type_dependencies<'mcx>(
         catalog_indexing::CatalogTupleDelete(&dep_rel, tid)?;
     }
     dep_rel.close(RowExclusiveLock)
+}
+
+const Anum_pg_attribute_attmissingval: usize = 25;
+
+// Unwraps the 1-element attmissingval array under the OLD column type's
+// metadata; the element is arena-copied (the scan tuple dies here).
+fn fetch_missing_element<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+    att: &types_tuple::FormData_pg_attribute,
+) -> PgResult<Option<Datum>> {
+    let attrrel =
+        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [oid_scankey(1, relid), int2_key(5, attnum)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &attrrel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {relid}"));
+    let desc = attrrel.descr();
+    let mut isnull = false;
+    // SAFETY: attmissingval under pg_attribute's descriptor.
+    let d = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_attribute_attmissingval as i32, desc, &mut isnull)
+    };
+    let result = if isnull {
+        None
+    } else {
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live anyarray varlena image through its extent.
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(mcx, image)?;
+        let body = payload.as_bytes();
+        let total = body.len() + 4;
+        let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+        mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+        mcx::vec_append_bytes(&mut full, body)?;
+        let elems = datum::array_build::deconstruct_array_image(
+            mcx,
+            &full,
+            att.attlen,
+            att.attbyval,
+            att.attalign as u8,
+        )?;
+        assert!(elems.len() == 1, "attmissingval with {} entries", elems.len());
+        let v = elems[0];
+        if att.attbyval {
+            Some(v)
+        } else {
+            let src = v.as_usize() as *const u8;
+            let len = if att.attlen > 0 {
+                att.attlen as usize
+            } else {
+                debug_assert!(att.attlen == -1);
+                // SAFETY: element datum points into `full`, a live varlena image.
+                unsafe { types_tuple::varatt::varsize_any(src) }
+            };
+            // SAFETY: `len` bytes readable at src per the array image layout.
+            let bytes = unsafe { core::slice::from_raw_parts(src, len) };
+            let copy = mcx::slice_borrow_in(mcx, bytes)?;
+            Some(Datum::from_usize(copy.as_ptr() as usize))
+        }
+    };
+    genam::systable_endscan(mcx, scan)?;
+    attrrel.close(types_rel::AccessShareLock)?;
+    Ok(result)
 }
 
 pub(crate) fn int4_key(attno: usize, v: i32) -> ScanKeyData {
@@ -4161,19 +4756,133 @@ fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace_id: Oid) -> Pg
     Ok(true)
 }
 
-// ATExecSetTableSpace (tablecmds.c:16853): validation surface; the physical
-// move (new relfilenumber + fork copy) rides the tablespace storage lane.
+// ATExecSetTableSpace (tablecmds.c:16853).
 fn ATExecSetTableSpace<'mcx>(
     mcx: Mcx<'mcx>,
     table_oid: Oid,
     new_tablespace: Oid,
-    _lockmode: LOCKMODE,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    let rel = table::table_open(mcx, table_oid, NoLock)?;
+    let is_index = lsyscache::get_rel_relkind(table_oid)? as u8 == types_rel::RELKIND_INDEX;
+    let rel = if is_index {
+        indexam::index_open(mcx, table_oid, lockmode)?
+    } else {
+        table::table_open(mcx, table_oid, lockmode)?
+    };
     if !CheckRelationTableSpaceMove(&rel, new_tablespace)? {
         return rel.close(NoLock);
     }
-    unported("ATExecSetTableSpace: physical relation move (tablespace storage lane)");
+    let reltoastrelid = rel.rd_rel.reltoastrelid;
+    let mut reltoastidxids: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    if reltoastrelid != InvalidOid {
+        let toast_rel = table::table_open(mcx, reltoastrelid, lockmode)?;
+        reltoastidxids = relcache::indexlist::RelationGetIndexList(mcx, reltoastrelid)?;
+        toast_rel.close(lockmode)?;
+    }
+    // Relfilenumbers are not unique across tablespaces within a database.
+    let newrelfilenumber = catalog::GetNewRelFileNumber(
+        mcx,
+        new_tablespace,
+        None,
+        rel.rd_rel.relpersistence,
+    )?;
+    let mut newrlocator = rel.rd_locator.get();
+    newrlocator.relNumber = newrelfilenumber;
+    newrlocator.spcOid = new_tablespace;
+
+    if is_index {
+        index_copy_data(&rel, newrlocator)?;
+    } else {
+        tableam::table_relation_copy_data(&rel, &newrlocator)?;
+    }
+
+    SetRelationTableSpace(mcx, &rel, new_tablespace, newrelfilenumber)?;
+    rel.rd_locator.set(newrlocator);
+    relcache::invalidate::RelationAssumeNewRelfilelocator(&rel);
+    rel.close(NoLock)?;
+    xact::CommandCounterIncrement()?;
+
+    if reltoastrelid != InvalidOid {
+        ATExecSetTableSpace(mcx, reltoastrelid, new_tablespace, lockmode)?;
+    }
+    for &idx in reltoastidxids.iter() {
+        ATExecSetTableSpace(mcx, idx, new_tablespace, lockmode)?;
+    }
+    Ok(())
+}
+
+// index_copy_data (tablecmds.c:17103).
+fn index_copy_data(
+    rel: &Relation<'_>,
+    newrlocator: types_storage::RelFileLocator,
+) -> PgResult<()> {
+    let src = types_storage::RelFileLocatorBackend {
+        locator: rel.rd_locator.get(),
+        backend: rel.rd_backend,
+    };
+    smgr::smgropen(src.locator, src.backend)?;
+    bufmgr_seams::flush_relations_all_buffers::call(&[src])?;
+    let persistence = rel.rd_rel.relpersistence;
+    let dstrel = catalog_storage::RelationCreateStorage(newrlocator, persistence, true)?;
+    use types_core::primitive::ForkNumber;
+    catalog_storage::RelationCopyStorage(src, dstrel, ForkNumber::MAIN_FORKNUM, persistence)?;
+    for fork_i in ForkNumber::MAIN_FORKNUM as i32 + 1..=types_core::MAX_FORKNUM as i32 {
+        let fork = ForkNumber::from_i32(fork_i).expect("valid fork number");
+        if smgr::smgrexists(src, fork)? {
+            smgr::smgrcreate(dstrel, fork, false)?;
+            if rel.is_permanent()
+                || (persistence == types_core::catalog::RELPERSISTENCE_UNLOGGED
+                    && fork == ForkNumber::INIT_FORKNUM)
+            {
+                catalog_storage::log_smgrcreate(&newrlocator, fork)?;
+            }
+            catalog_storage::RelationCopyStorage(src, dstrel, fork, persistence)?;
+        }
+    }
+    catalog_storage::RelationDropStorage(rel)?;
+    smgr::smgrclose(dstrel)
+}
+
+// SetRelationTableSpace (tablecmds.c:3750).
+fn SetRelationTableSpace<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    new_tablespace: Oid,
+    new_relfilenumber: Oid,
+) -> PgResult<()> {
+    const Anum_pg_class_relfilenode: usize = 8;
+    const Anum_pg_class_reltablespace: usize = 9;
+    let reloid = rel.rd_id;
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_scankey(1, reloid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {reloid}"));
+    let desc = pg_class.descr();
+    let natts = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+    let stored_spc = if new_tablespace == init_small::globals::MyDatabaseTableSpace() {
+        InvalidOid
+    } else {
+        new_tablespace
+    };
+    values[Anum_pg_class_reltablespace - 1] = Datum::from_oid(stored_spc);
+    replace[Anum_pg_class_reltablespace - 1] = true;
+    if new_relfilenumber != InvalidOid {
+        values[Anum_pg_class_relfilenode - 1] = Datum::from_oid(new_relfilenumber);
+        replace[Anum_pg_class_relfilenode - 1] = true;
+    }
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    pg_class.close(RowExclusiveLock)
 }
 
 // ATPrepSetAccessMethod (tablecmds.c:16491).
