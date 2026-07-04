@@ -229,3 +229,107 @@ fn nulltest_saop_write_and_round_trip() {
     assert!(sx.useOr);
     assert_eq!(sx.args.len(), 2);
 }
+
+#[test]
+fn copy_boundary_arms_round_trip() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let mut when_args = NodeList::nil();
+    let when = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseWhen {
+            expr: Some(Node::mk(mcx, int4_const(1)).unwrap()),
+            result: Some(Node::mk(mcx, int4_const(2)).unwrap()),
+            location: -1,
+        },
+    )
+    .unwrap();
+    when_args.lappend(mcx, when).unwrap();
+    let case = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseExpr {
+            casetype: 23,
+            casecollid: 0,
+            arg: None,
+            args: when_args,
+            defresult: Some(Node::mk(mcx, int4_const(0)).unwrap()),
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    let mut row_args = NodeList::nil();
+    row_args.lappend(mcx, case).unwrap();
+    let row = Node::mk(
+        mcx,
+        types_nodes::primnodes::RowExpr {
+            args: row_args,
+            row_typeid: 2249,
+            row_format: types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            colnames: NodeList::nil(),
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    let collate = Node::mk(
+        mcx,
+        types_nodes::primnodes::CollateExpr { arg: row, collOid: 100, location: -1 },
+    )
+    .unwrap();
+
+    let mut mm_args = NodeList::nil();
+    mm_args.lappend(mcx, collate).unwrap();
+    mm_args.lappend(mcx, Node::mk(mcx, int4_const(9)).unwrap()).unwrap();
+    let minmax = Node::mk(
+        mcx,
+        types_nodes::primnodes::MinMaxExpr {
+            minmaxtype: 23,
+            minmaxcollid: 0,
+            inputcollid: 0,
+            op: types_nodes::primnodes::MinMaxOp::IS_LEAST,
+            args: mm_args,
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    let sref = Node::mk(
+        mcx,
+        types_nodes::primnodes::SubscriptingRef {
+            refcontainertype: 1007,
+            refelemtype: 23,
+            refrestype: 23,
+            reftypmod: -1,
+            refcollid: 0,
+            refupperindexpr: {
+                let mut l = types_nodes::list::OptNodeList::nil();
+                l.lappend(mcx, Some(minmax)).unwrap();
+                l
+            },
+            reflowerindexpr: types_nodes::list::OptNodeList::nil(),
+            refexpr: Some(Node::mk(mcx, int4_const(5)).unwrap()),
+            refassgnexpr: None,
+        },
+    )
+    .unwrap();
+
+    let rmc = Node::mk(
+        mcx,
+        types_nodes::parsenodes::RowMarkClause {
+            rti: 1,
+            strength: types_nodes::nodes_enums::LockClauseStrength::LCS_FORUPDATE,
+            waitPolicy: types_nodes::nodes_enums::LockWaitPolicy::LockWaitSkip,
+            pushedDown: false,
+        },
+    )
+    .unwrap();
+
+    for n in [sref, rmc] {
+        let s1 = nodeToString(mcx, n).unwrap();
+        let back = readfuncs::stringToNode(mcx, s1.as_str()).unwrap();
+        let s2 = nodeToString(mcx, back).unwrap();
+        assert_eq!(s1.as_str(), s2.as_str());
+    }
+}
