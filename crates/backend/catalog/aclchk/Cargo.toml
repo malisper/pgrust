@@ -32,10 +32,17 @@ xact = { path = "../../access/transam/xact" }
 miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
 
 pg_largeobject = { path = "../pg_largeobject" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+genam = { path = "../../access/index/genam" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 
 [dev-dependencies]
 init_small = { path = "../../utils/init/init_small" }

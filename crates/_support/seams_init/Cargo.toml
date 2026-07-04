@@ -87,6 +87,8 @@ parse_collate = { path = "../../backend/parser/parse_collate" }
 parse_clause = { path = "../../backend/parser/parse_clause" }
 parse_expr = { path = "../../backend/parser/parse_expr" }
 parser_analyze = { path = "../../backend/parser/parser_analyze" }
+parse_func = { path = "../../backend/parser/parse_func" }
+parse_utilcmd = { path = "../../backend/parser/parse_utilcmd" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
 interrupt = { path = "../../backend/postmaster/interrupt" }
 launch_backend = { path = "../../backend/postmaster/launch_backend" }

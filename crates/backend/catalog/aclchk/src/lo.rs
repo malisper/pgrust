@@ -10,6 +10,36 @@ use crate::{ACLCHECK_NO_PRIV, ACLCHECK_OK};
 
 const VARHDRSZ: usize = 4;
 
+// pg_aclmask's OBJECT_LARGEOBJECT arm (aclchk.c): NULL snapshot.
+pub(crate) fn pg_largeobject_aclmask_snapshot_current(
+    lobj_oid: Oid,
+    roleid: Oid,
+    mask: u64,
+    how: AclMaskHow,
+) -> PgResult<u64> {
+    let scratch = mcx::MemoryContext::new("pg_largeobject_aclmask");
+    pg_largeobject_aclmask_snapshot(scratch.mcx(), lobj_oid, roleid, mask, how, None)
+}
+
+// has_lo_priv_byid (acl.c): (result, is_missing).
+pub(crate) fn has_lo_priv_byid(roleid: Oid, lobj_oid: Oid, priv_mode: u64) -> PgResult<(bool, bool)> {
+    let scratch = mcx::MemoryContext::new("has_lo_priv_byid");
+    let mcx = scratch.mcx();
+    let snapshot = if priv_mode & adt_acl::ACL_UPDATE != 0 {
+        None
+    } else {
+        Some(snapmgr::GetActiveSnapshot())
+    };
+    if !pg_largeobject::LargeObjectExistsWithSnapshot(mcx, lobj_oid, snapshot.clone())? {
+        return Ok((false, true));
+    }
+    if guc_tables::vars::lo_compat_privileges.read() {
+        return Ok((true, false));
+    }
+    let r = pg_largeobject_aclcheck_snapshot(mcx, lobj_oid, roleid, priv_mode, snapshot)?;
+    Ok((r == ACLCHECK_OK, false))
+}
+
 fn pg_largeobject_aclmask_snapshot<'mcx>(
     mcx: Mcx<'mcx>,
     lobj_oid: Oid,

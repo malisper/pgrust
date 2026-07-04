@@ -376,6 +376,7 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
 pub fn init_seams() {
     dbcommands_seams::get_database_name::set(get_database_name);
+    dbcommands_seams::get_database_oid::set(get_database_oid);
     dbcommands_seams::dbase_redo::set(dbase_redo);
 }
 
