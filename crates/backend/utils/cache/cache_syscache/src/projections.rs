@@ -57,6 +57,7 @@ const ANUM_PG_CONSTRAINT_CONNAMESPACE: i32 = 3;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
 const ANUM_PG_CONSTRAINT_CONTYPID: i32 = 10;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
+const ANUM_PG_CONSTRAINT_CONINDID: i32 = 11;
 const ANUM_PG_AUTHID_OID: i32 = 1;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
 const ANUM_PG_AUTHID_ROLSUPER: i32 = 3;
@@ -246,6 +247,24 @@ fn lookup_pg_index_ls_shape(
         indisreplident: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISREPLIDENT).as_bool(),
         indisvalid: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISVALID).as_bool(),
         indisclustered: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISCLUSTERED).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_constraint_shape(
+    conoid: Oid,
+) -> PgResult<Option<syscache_seams::PgConstraintShape>> {
+    let Some(tuple) = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(conoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgConstraintShape {
+        conname: getattr_name(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAME),
+        contype: getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPE).as_i8(),
+        conindid: getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONINDID).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -2229,6 +2248,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);
     syscache_seams::lookup_pg_attribute_shape::set(lookup_pg_attribute_shape);
+    syscache_seams::lookup_pg_constraint_shape::set(lookup_pg_constraint_shape);
     syscache_seams::lookup_pg_attribute_attnum_by_name::set(lookup_pg_attribute_attnum_by_name);
     syscache_seams::pg_type_isdefined::set(pg_type_isdefined);
     syscache_seams::pg_type_typtype::set(pg_type_typtype);
