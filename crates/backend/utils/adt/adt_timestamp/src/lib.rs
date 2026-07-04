@@ -1668,6 +1668,37 @@ pub fn init_seams() {
     timestamp_seams::get_current_timestamp::set(GetCurrentTimestamp);
     timestamp_seams::get_current_datetime::set(current_time_usec_snapshot);
     timestamp_seams::get_current_time_usec::set(current_time_usec_snapshot);
+    timestamp_seams::timestamptz_to_str::set(timestamptz_to_str);
+}
+
+// timestamp.c timestamptz_to_str (elog/debug support; NULL attimezone =
+// session timezone, like C).
+pub fn timestamptz_to_str(t: TimestampTz) -> String {
+    let mut buf = [0u8; adt_datetime::MAXDATELEN + 1];
+    let n = if TIMESTAMP_NOT_FINITE(t) {
+        EncodeSpecialTimestamp(t, &mut buf)
+    } else {
+        let mut tz: i32 = 0;
+        let mut tm = adt_datetime::consts::pg_tm::default();
+        let mut fsec: adt_datetime::consts::fsec_t = 0;
+        let mut tzn: Option<&'static str> = None;
+        if timestamp2tm(t, Some(&mut tz), &mut tm, &mut fsec, Some(&mut tzn), None).is_ok() {
+            adt_datetime::EncodeDateTime(
+                &mut tm,
+                fsec,
+                true,
+                tz,
+                tzn.map(str::as_bytes),
+                adt_datetime::USE_ISO_DATES,
+                &mut buf,
+            )
+        } else {
+            let msg = b"(timestamp out of range)";
+            buf[..msg.len()].copy_from_slice(msg);
+            msg.len()
+        }
+    };
+    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 pub fn timestamp_scale(timestamp: Timestamp, typmod: i32) -> PgResult<Timestamp> {
