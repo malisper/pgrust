@@ -329,7 +329,7 @@ fn set_relation_partition_info<'mcx>(
     rel: RelId,
     relation: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let partdesc = partdesc::RelationGetPartitionDesc(relation)?;
+    let partdesc = partdesc::RelationGetPartitionDesc(relation, true)?;
     let key = partcache::RelationGetPartitionKey(relation)?;
     let scheme = find_partition_scheme(run, &key)?;
     let bcopy = match partdesc.boundinfo.as_ref() {

@@ -321,7 +321,7 @@ impl<'mcx> AlteredTableInfo<'mcx> {
 
 type Wqueue<'mcx> = PgVec<'mcx, AlteredTableInfo<'mcx>>;
 
-fn ATGetQueueEntry<'mcx>(
+pub(crate) fn ATGetQueueEntry<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,
@@ -532,7 +532,10 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_MISC
         }
         AlterTableType::AT_DetachPartitionFinalize => {
-            unported("ATExecDetachPartitionFinalize (DETACH CONCURRENTLY lane)")
+            if !partitioned {
+                return Err(at_wrong_relkind("DETACH PARTITION ... FINALIZE", rel.name()));
+            }
+            AT_PASS_MISC
         }
         AlterTableType::AT_AddInherit => {
             ATPrepAddInherit(rel)?;
@@ -613,7 +616,7 @@ fn ATRewriteCatalogs<'mcx>(
             nodes.push(c);
         }
         for &cnode in nodes.iter() {
-            let rel = table::table_open(mcx, wqueue[tabidx].relid, NoLock)?;
+            let mut rel = table::table_open(mcx, wqueue[tabidx].relid, NoLock)?;
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
                 AlterTableType::AT_AddColumn => {
@@ -821,7 +824,23 @@ fn ATRewriteCatalogs<'mcx>(
                         .expect("AT_DetachPartition PartitionCmd")
                         .as_variant::<types_nodes::rawnodes::PartitionCmd>()
                         .expect("PartitionCmd");
-                    crate::attach::ATExecDetachPartition(mcx, &rel, pcmd)?;
+                    // Concurrent detach commits mid-command and reopens the
+                    // parent; the returned handle carries the reopened rel.
+                    rel = crate::attach::ATExecDetachPartition(
+                        mcx, wqueue, rel, pcmd, query_string,
+                    )?;
+                }
+                AlterTableType::AT_DetachPartitionFinalize => {
+                    let pcmd = cmd
+                        .def
+                        .expect("AT_DetachPartitionFinalize PartitionCmd")
+                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                        .expect("PartitionCmd");
+                    crate::attach::ATExecDetachPartitionFinalize(
+                        mcx,
+                        &rel,
+                        pcmd.name.expect("PartitionCmd.name"),
+                    )?;
                 }
                 AlterTableType::AT_AddInherit => {
                     ATExecAddInherit(mcx, &rel, cmd)?;
@@ -2631,7 +2650,7 @@ fn verify_notnull_pk_compatible(
 // ATAddCheckNNConstraint (tablecmds.c): CHECK and NOT NULL constraints with
 // exec-time recursion, one inheritance level at a time.
 #[allow(clippy::too_many_arguments)]
-fn ATAddCheckNNConstraint<'mcx>(
+pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     tabidx: usize,

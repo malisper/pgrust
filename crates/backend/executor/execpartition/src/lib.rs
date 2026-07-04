@@ -49,7 +49,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
 
     fn init_dispatch(&mut self, rel: Relation<'mcx>) -> PgResult<usize> {
         let key = partcache::RelationGetPartitionKey(&rel)?;
-        let partdesc = partdesc::RelationGetPartitionDesc(&rel)?;
+        let partdesc = partdesc::RelationGetPartitionDesc(&rel, false)?;
         let mut supfuncs = Vec::with_capacity(key.partnatts as usize);
         for f in key.partsupfunc.iter() {
             let fn_oid = f.borrow().fn_oid;

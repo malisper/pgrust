@@ -1,7 +1,7 @@
-// pg_inherits.c: StoreSingleInheritance + find_inheritance_children +
-// find_all_inheritors + has_superclass + DeleteInheritsTuple, plus
+// pg_inherits.c: StoreSingleInheritance + find_inheritance_children[_extended]
+// + find_all_inheritors + has_superclass + DeleteInheritsTuple, plus
 // get_partition_parent + get_partition_ancestors (C: catalog/partition.c;
-// hosted here for the pg_inherits scan machinery). DETACH CONCURRENTLY loud.
+// hosted here for the pg_inherits scan machinery).
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use datum::Datum;
@@ -60,6 +60,20 @@ pub fn find_inheritance_children<'mcx>(
     parent_rel_id: Oid,
     lockmode: LOCKMODE,
 ) -> PgResult<PgVec<'mcx, Oid>> {
+    find_inheritance_children_extended(mcx, parent_rel_id, true, lockmode, None, None)
+}
+
+// Detach-pending rows are omitted only when the pending flag's inserter is
+// visible-as-committed to the active snapshot (pg_inherits.c:82-186): RI
+// queries under RR/SERIALIZABLE snapshots must keep seeing the partition.
+pub fn find_inheritance_children_extended<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_rel_id: Oid,
+    omit_detached: bool,
+    lockmode: LOCKMODE,
+    mut detached_exist: Option<&mut bool>,
+    mut detached_xmin: Option<&mut types_core::TransactionId>,
+) -> PgResult<PgVec<'mcx, Oid>> {
     let mut result: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     if !has_subclass(parent_rel_id)? {
         return Ok(result);
@@ -82,7 +96,33 @@ pub fn find_inheritance_children<'mcx>(
         }
         .as_bool();
         if pending {
-            panic!("pg_inherits: DETACH CONCURRENTLY pending partitions unported");
+            if let Some(exist) = detached_exist.as_deref_mut() {
+                *exist = true;
+            }
+            if omit_detached && snapmgr::ActiveSnapshotSet() {
+                let xmin = tup.t_data().xmin();
+                let snap = snapmgr::GetActiveSnapshot();
+                if !snapmgr::XidInMVCCSnapshot(xmin, &snap)? {
+                    if let Some(out) = detached_xmin.as_deref_mut() {
+                        if *out != types_core::InvalidTransactionId {
+                            elog_seams::ereport_msg::call(
+                                types_error::WARNING,
+                                format!(
+                                    "more than one partition pending detach found for \
+                                     table with OID {parent_rel_id}"
+                                ),
+                                None,
+                            )?;
+                            if types_core::TransactionIdFollows(xmin, *out) {
+                                *out = xmin;
+                            }
+                        } else {
+                            *out = xmin;
+                        }
+                    }
+                    continue;
+                }
+            }
         }
         // SAFETY: as above.
         let inhrelid = unsafe {

@@ -26,6 +26,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 xact = { path = "../../access/transam/xact" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }

@@ -163,7 +163,7 @@ fn create_partition_prune_state<'mcx>(
             let (partdesc, partkey) = {
                 let partrel = estate.exec_get_range_table_relation(pinfo.rtindex, false)?;
                 (
-                    partdesc::RelationGetPartitionDesc(partrel)?,
+                    partdesc::RelationGetPartitionDesc(partrel, false)?,
                     partcache::RelationGetPartitionKey(partrel)?,
                 )
             };

@@ -449,7 +449,7 @@ pub fn DefineRelation<'mcx>(
         let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
         // Lock the default partition before validating: its constraint changes
         // with every sibling added (C DefineRelation tablecmds.c:1156).
-        let pdesc = partdesc::RelationGetPartitionDesc(&parent)?;
+        let pdesc = partdesc::RelationGetPartitionDesc(&parent, true)?;
         let default_part_oid = pdesc
             .boundinfo
             .as_ref()

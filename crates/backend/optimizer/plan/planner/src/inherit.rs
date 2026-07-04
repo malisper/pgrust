@@ -99,7 +99,7 @@ fn expand_partitioned_rtentry<'mcx>(
 ) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.rte(parent_rti).inh);
-    let pdesc = partdesc::RelationGetPartitionDesc(parentrel)?;
+    let pdesc = partdesc::RelationGetPartitionDesc(parentrel, true)?;
     let live_parts = crate::partprune::prune_append_rel_partitions(run, relinfo)?;
     let oids = {
         let mut v: PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, pdesc.oids.len())?;
