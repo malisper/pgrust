@@ -122,6 +122,7 @@ pub fn subquery_planner<'mcx>(
                         let f = f_node.as_range_tbl_function().expect("functions cell");
                         let funcexpr = preprocess_expression(
                             run,
+                            &parse.rtable,
                             f.funcexpr,
                             EXPRKIND_RTFUNC_LATERAL,
                             parse.hasSubLinks,
@@ -155,6 +156,7 @@ pub fn subquery_planner<'mcx>(
                     if rte.lateral { EXPRKIND_VALUES_LATERAL } else { EXPRKIND_VALUES };
                 let lists = preprocess_expression_list(
                     run,
+                    &parse.rtable,
                     rte.values_lists.clone_in(mcx)?,
                     kind,
                     parse.hasSubLinks,
@@ -207,7 +209,7 @@ pub fn subquery_planner<'mcx>(
             for sq in &rte.securityQuals {
                 // A constant-true element preprocesses to None; keep an empty
                 // sublist so per-element security levels stay aligned.
-                let one = match preprocess_expression(run, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
+                let one = match preprocess_expression(run, &parse.rtable, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
                     Some(n) => n,
                     None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
                 };
@@ -229,13 +231,13 @@ pub fn subquery_planner<'mcx>(
 
     let has_sublinks = parse.hasSubLinks;
     parse.targetList =
-        preprocess_expression_list(run, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
+        preprocess_expression_list(run, &parse.rtable, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
     if !parse.withCheckOptions.is_nil() {
         let mut new_wcos = NodeList::nil();
         for wco_node in &parse.withCheckOptions {
             let wco_qual =
                 wco_node.as_with_check_option().expect("withCheckOptions cell").qual;
-            let qual = preprocess_expression(run, wco_qual, EXPRKIND_QUAL, has_sublinks)?;
+            let qual = preprocess_expression(run, &parse.rtable, wco_qual, EXPRKIND_QUAL, has_sublinks)?;
             // SAFETY: parse tree is planner-owned; no derived refs live.
             unsafe {
                 wco_node.with_mut::<WithCheckOption, _>(|w| w.qual = qual)
@@ -248,14 +250,14 @@ pub fn subquery_planner<'mcx>(
         parse.withCheckOptions = new_wcos;
     }
     parse.returningList =
-        preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
+        preprocess_expression_list(run, &parse.rtable, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
     preprocess_qual_conditions(run, &mut parse, has_sublinks)?;
     parse.havingQual =
-        preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
+        preprocess_expression(run, &parse.rtable, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
     for wc_node in &parse.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
-        let start = preprocess_expression(run, wc.startOffset, EXPRKIND_LIMIT, has_sublinks)?;
-        let end = preprocess_expression(run, wc.endOffset, EXPRKIND_LIMIT, has_sublinks)?;
+        let start = preprocess_expression(run, &parse.rtable, wc.startOffset, EXPRKIND_LIMIT, has_sublinks)?;
+        let end = preprocess_expression(run, &parse.rtable, wc.endOffset, EXPRKIND_LIMIT, has_sublinks)?;
         // SAFETY: parse tree is planner-owned; no derived refs live.
         unsafe {
             wc_node
@@ -267,18 +269,19 @@ pub fn subquery_planner<'mcx>(
         }
     }
     parse.limitOffset =
-        preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
+        preprocess_expression(run, &parse.rtable, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
     parse.limitCount =
-        preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
+        preprocess_expression(run, &parse.rtable, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
     for action_node in &parse.mergeActionList {
         let action = action_node.as_merge_action().expect("mergeActionList cell");
         let new_tlist = preprocess_expression_list(
             run,
+            &parse.rtable,
             action.targetList.clone_in(mcx)?,
             EXPRKIND_TARGET,
             has_sublinks,
         )?;
-        let new_qual = preprocess_expression(run, action.qual, EXPRKIND_QUAL, has_sublinks)?;
+        let new_qual = preprocess_expression(run, &parse.rtable, action.qual, EXPRKIND_QUAL, has_sublinks)?;
         // SAFETY: parse tree is planner-owned; no derived refs live.
         unsafe {
             action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
@@ -289,13 +292,13 @@ pub fn subquery_planner<'mcx>(
         .expect("MergeAction");
     }
     parse.mergeJoinCondition =
-        preprocess_expression(run, parse.mergeJoinCondition, EXPRKIND_QUAL, has_sublinks)?;
+        preprocess_expression(run, &parse.rtable, parse.mergeJoinCondition, EXPRKIND_QUAL, has_sublinks)?;
     if let Some(oc_node) = parse.onConflict {
         let oc = oc_node.as_on_conflict_expr().expect("onConflict is OnConflictExpr");
         for elem_node in &oc.arbiterElems {
             let elem = elem_node.as_inference_elem().expect("arbiterElems cell");
             let new_expr =
-                preprocess_expression(run, elem.expr, EXPRKIND_ARBITER_ELEM, has_sublinks)?;
+                preprocess_expression(run, &parse.rtable, elem.expr, EXPRKIND_ARBITER_ELEM, has_sublinks)?;
             // SAFETY: parse tree is planner-owned; no derived refs live.
             unsafe {
                 elem_node
@@ -304,12 +307,12 @@ pub fn subquery_planner<'mcx>(
             .expect("InferenceElem");
         }
         let arbiter_where =
-            preprocess_expression(run, oc.arbiterWhere, EXPRKIND_QUAL, has_sublinks)?;
+            preprocess_expression(run, &parse.rtable, oc.arbiterWhere, EXPRKIND_QUAL, has_sublinks)?;
         let conflict_set = oc.onConflictSet.clone_in(run.mcx)?;
         let conflict_set =
-            preprocess_expression_list(run, conflict_set, EXPRKIND_TARGET, has_sublinks)?;
+            preprocess_expression_list(run, &parse.rtable, conflict_set, EXPRKIND_TARGET, has_sublinks)?;
         let conflict_where =
-            preprocess_expression(run, oc.onConflictWhere, EXPRKIND_QUAL, has_sublinks)?;
+            preprocess_expression(run, &parse.rtable, oc.onConflictWhere, EXPRKIND_QUAL, has_sublinks)?;
         // exclRelTlist contains only Vars, so no preprocessing needed.
         // SAFETY: same exclusive parse-tree ownership as above.
         unsafe {
@@ -421,6 +424,7 @@ pub fn subquery_planner<'mcx>(
 
 pub fn preprocess_expression<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    rtable: &NodeList<'mcx>,
     expr: Option<Node<'mcx>>,
     kind: i32,
     has_sublinks: bool,
@@ -430,7 +434,7 @@ pub fn preprocess_expression<'mcx>(
     // C skips flattening only for RTFUNC/VALUES/TABLESAMPLE/TABLEFUNC kinds
     // (the last two have no EXPRKIND here yet).
     if run.root.hasJoinRTEs && kind != EXPRKIND_RTFUNC && kind != EXPRKIND_VALUES {
-        expr = vars::flatten_join_alias_vars(run.mcx, run.root.parse, expr)?;
+        expr = vars::flatten_join_alias_vars(run.mcx, rtable, expr)?;
     }
     if kind != EXPRKIND_RTFUNC {
         expr = clauses::eval_const_expressions_with_params(
@@ -467,6 +471,7 @@ pub fn preprocess_expression<'mcx>(
 
 fn preprocess_expression_list<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    rtable: &NodeList<'mcx>,
     list: NodeList<'mcx>,
     kind: i32,
     has_sublinks: bool,
@@ -476,7 +481,7 @@ fn preprocess_expression_list<'mcx>(
     }
     let node = Node::mk_list(run.mcx, list)?;
     let folded =
-        preprocess_expression(run, Some(node), kind, has_sublinks)?.expect("list in, list out");
+        preprocess_expression(run, rtable, Some(node), kind, has_sublinks)?.expect("list in, list out");
     match folded.node_tag() {
         // clone_in copies the 8-byte cells, mirroring C's mutator list_copy.
         NodeTag::T_List => Ok(folded.as_list().unwrap().clone_in(run.mcx)?),
@@ -514,11 +519,12 @@ fn preprocess_qual_conditions<'mcx>(
     has_sublinks: bool,
 ) -> PgResult<()> {
     let f = parse.jointree.expect("jointree is a FromExpr");
+    let rtable = &parse.rtable;
     let mut fromlist = types_nodes::list::NodeList::nil();
     for child in &f.fromlist {
-        fromlist.lappend(run.mcx, preprocess_jointree_quals(run, child, has_sublinks)?)?;
+        fromlist.lappend(run.mcx, preprocess_jointree_quals(run, rtable, child, has_sublinks)?)?;
     }
-    let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL, has_sublinks)?;
+    let quals = preprocess_expression(run, rtable, f.quals, EXPRKIND_QUAL, has_sublinks)?;
     parse.jointree = Some(alloc_leak_in(
         run.mcx,
         types_nodes::primnodes::FromExpr { fromlist, quals },
@@ -528,6 +534,7 @@ fn preprocess_qual_conditions<'mcx>(
 
 fn preprocess_jointree_quals<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    rtable: &NodeList<'mcx>,
     node: Node<'mcx>,
     has_sublinks: bool,
 ) -> PgResult<Node<'mcx>> {
@@ -537,9 +544,9 @@ fn preprocess_jointree_quals<'mcx>(
             let f = node.as_from_expr().expect("FromExpr");
             let mut fromlist = types_nodes::list::NodeList::nil();
             for child in &f.fromlist {
-                fromlist.lappend(run.mcx, preprocess_jointree_quals(run, child, has_sublinks)?)?;
+                fromlist.lappend(run.mcx, preprocess_jointree_quals(run, rtable, child, has_sublinks)?)?;
             }
-            let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL, has_sublinks)?;
+            let quals = preprocess_expression(run, rtable, f.quals, EXPRKIND_QUAL, has_sublinks)?;
             Node::mk(
                 run.mcx,
                 types_nodes::primnodes::FromExpr { fromlist, quals },
@@ -547,9 +554,9 @@ fn preprocess_jointree_quals<'mcx>(
         }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().expect("JoinExpr");
-            let larg = preprocess_jointree_quals(run, j.larg, has_sublinks)?;
-            let rarg = preprocess_jointree_quals(run, j.rarg, has_sublinks)?;
-            let quals = preprocess_expression(run, j.quals, EXPRKIND_QUAL, has_sublinks)?;
+            let larg = preprocess_jointree_quals(run, rtable, j.larg, has_sublinks)?;
+            let rarg = preprocess_jointree_quals(run, rtable, j.rarg, has_sublinks)?;
+            let quals = preprocess_expression(run, rtable, j.quals, EXPRKIND_QUAL, has_sublinks)?;
             Node::mk(
                 run.mcx,
                 types_nodes::JoinExpr {

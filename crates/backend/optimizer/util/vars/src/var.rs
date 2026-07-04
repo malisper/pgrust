@@ -426,15 +426,15 @@ pub fn pull_var_clause<'mcx>(
 // aliases carried into subqueries stay loud.
 pub fn flatten_join_alias_vars<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
+    rtable: &NodeList<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    Ok(fjav_mutate(mcx, query, node)?.unwrap_or(node))
+    Ok(fjav_mutate(mcx, rtable, node)?.unwrap_or(node))
 }
 
 fn fjav_mutate<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
+    rtable: &NodeList<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
@@ -443,8 +443,7 @@ fn fjav_mutate<'mcx>(
             if v.varlevelsup != 0 {
                 return Ok(None);
             }
-            let rte = query
-                .rtable
+            let rte = rtable
                 .nth(v.varno as usize - 1)
                 .as_range_tbl_entry()
                 .expect("rtable cell");
@@ -466,7 +465,7 @@ fn fjav_mutate<'mcx>(
                                 .unwrap();
                         }
                     }
-                    let newvar = fjav_mutate(mcx, query, newvar)?.unwrap_or(newvar);
+                    let newvar = fjav_mutate(mcx, rtable, newvar)?.unwrap_or(newvar);
                     fields.lappend(mcx, newvar)?;
                     colnames.lappend(mcx, cn)?;
                 }
@@ -493,7 +492,7 @@ fn fjav_mutate<'mcx>(
                         .unwrap();
                 }
             }
-            let newvar = fjav_mutate(mcx, query, newvar)?.unwrap_or(newvar);
+            let newvar = fjav_mutate(mcx, rtable, newvar)?.unwrap_or(newvar);
             Ok(Some(add_nullingrels_if_needed(mcx, newvar, v)?))
         }
         t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
@@ -502,19 +501,19 @@ fn fjav_mutate<'mcx>(
             // upper level; the sublevels bookkeeping is unported, so scan and
             // stay loud only when the rewrite would change anything.
             let q = node.as_query().unwrap();
-            assert_subquery_free_of_upper_join_vars(query, q)?;
+            assert_subquery_free_of_upper_join_vars(rtable, q)?;
             Ok(None)
         }
-        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, query, n)),
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, rtable, n)),
     }
 }
 
 fn assert_subquery_free_of_upper_join_vars<'mcx>(
-    outer: &Query<'mcx>,
+    outer_rtable: &NodeList<'mcx>,
     q: &'mcx Query<'mcx>,
 ) -> PgResult<()> {
     struct W<'a, 'mcx> {
-        outer: &'a Query<'mcx>,
+        outer_rtable: &'a NodeList<'mcx>,
         levels: i64,
     }
     impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
@@ -524,8 +523,7 @@ fn assert_subquery_free_of_upper_join_vars<'mcx>(
                     let v = node.as_var().unwrap();
                     if v.varlevelsup as i64 == self.levels {
                         let rte = self
-                            .outer
-                            .rtable
+                            .outer_rtable
                             .nth(v.varno as usize - 1)
                             .as_range_tbl_entry()
                             .expect("rtable cell");
@@ -555,7 +553,7 @@ fn assert_subquery_free_of_upper_join_vars<'mcx>(
             r
         }
     }
-    let mut w = W { outer, levels: 1 };
+    let mut w = W { outer_rtable, levels: 1 };
     query_tree_walker(q, &mut w, nodes_core::QTW_IGNORE_JOINALIASES)?;
     Ok(())
 }
