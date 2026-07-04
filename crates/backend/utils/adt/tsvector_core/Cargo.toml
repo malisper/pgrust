@@ -18,3 +18,4 @@ varlena = { path = "../varlena" }
 funcapi = { path = "../../fmgr/funcapi" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 heaptuple = { path = "../../../access/common/heaptuple" }
+typcache_seams = { path = "../../cache/typcache_seams" }

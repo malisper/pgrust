@@ -376,6 +376,9 @@ fn unnest_collect(fcinfo: &mut Fcinfo) -> PgResult<Vec<Vec<u8>>> {
     ::tupdesc::TupleDescInitEntry(&mut desc, 3, Some("weights"), TEXTARRAYOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // BlessTupleDesc: register the anonymous record typmod so record_out can
+    // resolve tuples that escape into the targetlist.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let mut rows: Vec<Vec<u8>> = Vec::with_capacity(v.size());
     for i in 0..v.size() {
