@@ -1,12 +1,56 @@
 use super::*;
 use ::mcx::MemoryContext;
-use ::types_core::{FirstUnpinnedObjectId, INT2OID};
+use ::types_core::{FirstUnpinnedObjectId, InvalidOid as TypcacheInvalidOid, INT2OID};
 use ::types_tuple::{
     ATTNULLABLE_UNKNOWN, ATTNULLABLE_UNRESTRICTED, TYPALIGN_SHORT, TYPSTORAGE_MAIN,
 };
 use std::sync::Once;
 
 static SEAMS: Once = Once::new();
+
+// Dummy composite type oids used only so format_type_be() can name the
+// "returned"/"expected" rowtype in attmap error details.
+const OUT_ROWTYPE_OID: Oid = 20001;
+const IN_ROWTYPE_OID: Oid = 20002;
+
+fn typcache_shape(name: &str) -> syscache_seams::PgTypeTypcacheShape {
+    let mut typname = NameData::default();
+    typname.namestrcpy(name);
+    syscache_seams::PgTypeTypcacheShape {
+        typname,
+        typlen: -1,
+        typbyval: false,
+        typalign: TYPALIGN_INT,
+        typstorage: TYPSTORAGE_MAIN,
+        typtype: b'c' as i8,
+        typisdefined: true,
+        typrelid: TypcacheInvalidOid,
+        typsubscript: TypcacheInvalidOid,
+        typelem: TypcacheInvalidOid,
+        typarray: TypcacheInvalidOid,
+        typcollation: TypcacheInvalidOid,
+    }
+}
+
+fn scalar_typcache_shape(name: &str) -> syscache_seams::PgTypeTypcacheShape {
+    let mut s = typcache_shape(name);
+    s.typtype = b'b' as i8;
+    s.typstorage = if name == "text" { TYPSTORAGE_EXTENDED } else { TYPSTORAGE_MAIN };
+    s
+}
+
+fn install_format_type_seams() {
+    syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+        Ok(match typid {
+            OUT_ROWTYPE_OID => Some(typcache_shape("out_row")),
+            IN_ROWTYPE_OID => Some(typcache_shape("in_row")),
+            INT4OID => Some(scalar_typcache_shape("int4")),
+            TEXTOID => Some(scalar_typcache_shape("text")),
+            _ => None,
+        })
+    });
+    namespace_seams::type_is_visible::set(|_| Ok(true));
+}
 
 fn install_seams() {
     SEAMS.call_once(|| {
@@ -392,4 +436,235 @@ fn refcount_and_free() {
 
     let owned = two_col_desc(ctx.mcx());
     FreeTupleDesc(owned);
+}
+
+// ---- attmap.c / tupconvert.c residue -----------------------------------
+
+fn dropped_attr(attnum: i16, attlen: i16, align: i8) -> FormData_pg_attribute {
+    let mut a = FormData_pg_attribute::default();
+    a.attnum = attnum;
+    a.attisdropped = true;
+    a.attlen = attlen;
+    a.attalign = align;
+    a.atttypid = InvalidOid;
+    a.atttypmod = -1;
+    a
+}
+
+fn desc_from<'m>(mcx: Mcx<'m>, attrs: &[FormData_pg_attribute], tdtypeid: Oid) -> TupleDescData<'m> {
+    let mut desc = CreateTupleDesc(mcx, attrs).unwrap();
+    desc.tdtypeid = tdtypeid;
+    desc
+}
+
+#[test]
+fn build_attrmap_by_position_identity_returns_none() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = two_col_desc(ctx.mcx());
+    let outdesc = two_col_desc(ctx.mcx());
+    let map = build_attrmap_by_position(ctx.mcx(), &indesc, &outdesc, "test msg").unwrap();
+    assert!(map.is_none());
+}
+
+#[test]
+fn build_attrmap_by_position_handles_dropped_columns() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let in_attrs = [
+        attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+        attr("b", TEXTOID, 2, -1, false, TYPALIGN_INT),
+    ];
+    let indesc = CreateTupleDesc(ctx.mcx(), &in_attrs).unwrap();
+    let out_attrs = [
+        attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+        dropped_attr(2, 4, TYPALIGN_INT),
+        attr("b", TEXTOID, 3, -1, false, TYPALIGN_INT),
+    ];
+    let outdesc = CreateTupleDesc(ctx.mcx(), &out_attrs).unwrap();
+
+    let map = build_attrmap_by_position(ctx.mcx(), &indesc, &outdesc, "test msg")
+        .unwrap()
+        .expect("column-count differs, conversion required");
+    assert_eq!(&map[..], &[1, 0, 2]);
+}
+
+#[test]
+fn build_attrmap_by_position_mismatch_ereport_text() {
+    install_seams();
+    install_format_type_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = desc_from(
+        ctx.mcx(),
+        &[attr("b", INT4OID, 1, 4, true, TYPALIGN_INT)],
+        IN_ROWTYPE_OID,
+    );
+    let outdesc = desc_from(
+        ctx.mcx(),
+        &[attr("b", TEXTOID, 1, -1, false, TYPALIGN_INT)],
+        OUT_ROWTYPE_OID,
+    );
+
+    let err = build_attrmap_by_position(ctx.mcx(), &indesc, &outdesc, "test msg").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "test msg");
+    assert_eq!(
+        err.detail().unwrap(),
+        "Returned type integer does not match expected type text in column \"b\" (position 1)."
+    );
+}
+
+#[test]
+fn build_attrmap_by_position_column_count_ereport_text() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+            attr("b", INT4OID, 2, 4, true, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+    let outdesc = CreateTupleDesc(ctx.mcx(), &[attr("a", INT4OID, 1, 4, true, TYPALIGN_INT)]).unwrap();
+
+    let err = build_attrmap_by_position(ctx.mcx(), &indesc, &outdesc, "test msg").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(
+        err.detail().unwrap(),
+        "Number of returned columns (2) does not match expected column count (1)."
+    );
+}
+
+#[test]
+fn build_attrmap_by_name_handles_dropped_columns() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+            attr("b", TEXTOID, 2, -1, false, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+    let outdesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+            dropped_attr(2, 4, TYPALIGN_INT),
+            attr("b", TEXTOID, 3, -1, false, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+
+    let map = build_attrmap_by_name(ctx.mcx(), &indesc, &outdesc).unwrap();
+    assert_eq!(&map[..], &[1, 0, 2]);
+}
+
+#[test]
+fn build_attrmap_by_name_mismatch_ereport_text() {
+    install_seams();
+    install_format_type_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = desc_from(
+        ctx.mcx(),
+        &[attr("b", INT4OID, 1, 4, true, TYPALIGN_INT)],
+        IN_ROWTYPE_OID,
+    );
+    let outdesc = desc_from(
+        ctx.mcx(),
+        &[attr("b", TEXTOID, 1, -1, false, TYPALIGN_INT)],
+        OUT_ROWTYPE_OID,
+    );
+
+    let err = build_attrmap_by_name(ctx.mcx(), &indesc, &outdesc).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "could not convert row type");
+    assert_eq!(
+        err.detail().unwrap(),
+        "Attribute \"b\" of type text does not match corresponding attribute of type integer."
+    );
+}
+
+#[test]
+fn build_attrmap_by_name_missing_attribute_ereport_text() {
+    install_seams();
+    install_format_type_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = desc_from(
+        ctx.mcx(),
+        &[attr("a", INT4OID, 1, 4, true, TYPALIGN_INT)],
+        IN_ROWTYPE_OID,
+    );
+    let outdesc = desc_from(
+        ctx.mcx(),
+        &[attr("b", TEXTOID, 1, -1, false, TYPALIGN_INT)],
+        OUT_ROWTYPE_OID,
+    );
+
+    let err = build_attrmap_by_name(ctx.mcx(), &indesc, &outdesc).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "could not convert row type");
+    assert_eq!(
+        err.detail().unwrap(),
+        "Attribute \"b\" of type text does not exist in type integer."
+    );
+
+    // missing_ok=true: no error, mapped entry stays 0.
+    let map = build_attrmap_by_name_if_req(ctx.mcx(), &indesc, &outdesc, true)
+        .unwrap()
+        .expect("natts differ in general, but here 1==1 with a 0 entry: still Some");
+    assert_eq!(&map[..], &[0]);
+}
+
+#[test]
+fn build_attrmap_by_name_if_req_identity_returns_none() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = two_col_desc(ctx.mcx());
+    let outdesc = two_col_desc(ctx.mcx());
+    let map = build_attrmap_by_name_if_req(ctx.mcx(), &indesc, &outdesc, false).unwrap();
+    assert!(map.is_none());
+
+    let map = convert_tuples_by_name(ctx.mcx(), &indesc, &outdesc).unwrap();
+    assert!(map.is_none());
+}
+
+#[test]
+fn convert_tuples_by_position_matches_build_attrmap() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = two_col_desc(ctx.mcx());
+    let outdesc = two_col_desc(ctx.mcx());
+    assert!(convert_tuples_by_position(ctx.mcx(), &indesc, &outdesc, "test msg")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn convert_tuples_by_name_attrmap_is_identity() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+            attr("b", TEXTOID, 2, -1, false, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+    let outdesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[attr("b", TEXTOID, 1, -1, false, TYPALIGN_INT)],
+    )
+    .unwrap();
+    let attmap = build_attrmap_by_name(ctx.mcx(), &indesc, &outdesc).unwrap();
+    let expected: PgVec<'_, i16> = {
+        let mut v = vec_with_capacity_in(ctx.mcx(), attmap.len()).unwrap();
+        v.extend(attmap.iter().copied());
+        v
+    };
+    let wrapped = convert_tuples_by_name_attrmap(&indesc, &outdesc, attmap);
+    assert_eq!(&wrapped[..], &expected[..]);
 }
