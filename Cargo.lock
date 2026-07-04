@@ -3289,6 +3289,7 @@ dependencies = [
  "executils",
  "fd",
  "fmgr_core",
+ "funcapi",
  "guc_tables",
  "hashfn",
  "heapam_visibility_seams",
