@@ -396,6 +396,7 @@ members = [
     "crates/backend/catalog/pg_proc",
     "crates/backend/catalog/dependency_seams",
     "crates/backend/catalog/pg_enum",
+    "crates/backend/catalog/pg_range",
     "crates/backend/catalog/pg_type",
     "crates/backend/nodes/tidbitmap",
     "crates/backend/utils/mmgr/portalmem",

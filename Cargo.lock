@@ -39,7 +39,6 @@ dependencies = [
  "parse_utilcmd_seams",
  "pg_depend",
  "pg_largeobject",
- "pg_parameter_acl",
  "rel_vocab",
  "snapmgr",
  "superuser",
@@ -77,10 +76,8 @@ dependencies = [
  "datum",
  "dbcommands_seams",
  "elog",
- "foreigncmds_seams",
  "init_small",
  "inval",
- "lsyscache",
  "mbutils_seams",
  "mcx",
  "miscinit",
@@ -88,11 +85,9 @@ dependencies = [
  "rel_vocab",
  "superuser",
  "syscache_seams",
- "tablespace_seams",
  "types_core",
  "types_error",
  "types_fmgr",
- "types_rel",
  "types_tuple",
  "varlena",
  "wchar",
@@ -504,7 +499,6 @@ dependencies = [
  "adt_numeric",
  "arrayfuncs",
  "arrayutils",
- "catalog_namespace",
  "datum",
  "dbcommands",
  "detoast_seams",
@@ -778,7 +772,6 @@ name = "adt_timestamp"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
- "adt_float",
  "adt_numeric",
  "datum",
  "elog",
@@ -789,7 +782,6 @@ dependencies = [
  "libc",
  "localtime",
  "mcx",
- "nodes_core",
  "numutils",
  "pgtz",
  "pqformat",
@@ -1927,7 +1919,6 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
- "pg_rusage",
  "pgstat",
  "predicate_seams",
  "readfuncs",
@@ -2030,7 +2021,6 @@ dependencies = [
 name = "catalog_objectaddress"
 version = "0.0.0"
 dependencies = [
- "aclchk",
  "adt_acl",
  "adt_regproc",
  "cache_syscache",
@@ -2056,11 +2046,8 @@ dependencies = [
  "parse_utilcmd",
  "pg_attrdef",
  "pg_constraint",
- "pg_conversion",
  "pg_depend",
  "pg_largeobject",
- "pg_parameter_acl",
- "proclang",
  "rel_vocab",
  "relation",
  "rewrite_define_seams",
@@ -2697,7 +2684,6 @@ dependencies = [
  "cluster_seams",
  "commands_vacuum",
  "datum",
- "elog",
  "elog_seams",
  "exectuples",
  "explain",
@@ -2714,7 +2700,6 @@ dependencies = [
  "miscinit",
  "multixact",
  "pg_depend",
- "pg_rusage",
  "planner",
  "postgres_seams",
  "predicate_seams",
@@ -2805,7 +2790,6 @@ dependencies = [
  "parse_expr",
  "postgres",
  "prepare",
- "queryjumble",
  "rel_vocab",
  "rewrite_handler_seams",
  "snapmgr",
@@ -3078,7 +3062,6 @@ dependencies = [
  "cluster_seams",
  "combocid_seams",
  "commands_analyze_seams",
- "commands_define",
  "commit_ts_seams",
  "condition_variable_seams",
  "controldata_utils",
@@ -3214,7 +3197,6 @@ dependencies = [
  "parse_relation",
  "parser_analyze",
  "rewrite_define",
- "rewrite_handler",
  "tablecmds",
  "types_core",
  "types_error",
@@ -3305,28 +3287,6 @@ dependencies = [
  "types_fmgr",
  "wchar",
  "xact_seams",
-]
-
-[[package]]
-name = "conversioncmds"
-version = "0.0.0"
-dependencies = [
- "aclchk",
- "adt_acl",
- "catalog_namespace",
- "datum",
- "fmgr_seams",
- "lsyscache",
- "mbutils",
- "mcx",
- "miscinit",
- "parse_func",
- "pg_conversion",
- "pg_depend",
- "types_core",
- "types_error",
- "types_fmgr",
- "types_nodes",
 ]
 
 [[package]]
@@ -4205,7 +4165,6 @@ dependencies = [
  "execmain",
  "execmain_seams",
  "exectuples_output",
- "explain_dr",
  "fmgr_seams",
  "format_type",
  "guc_tables",
@@ -4233,7 +4192,6 @@ dependencies = [
  "prepare",
  "printtup",
  "procarray",
- "queryjumble",
  "relation_seams",
  "relcache_seams",
  "resowner_seams",
@@ -4268,26 +4226,6 @@ dependencies = [
  "waitevent_seams",
  "xact",
  "xact_seams",
-]
-
-[[package]]
-name = "explain_dr"
-version = "0.1.0"
-dependencies = [
- "datum",
- "exectuples",
- "fmgr_seams",
- "instrument",
- "lsyscache_seams",
- "mbutils_seams",
- "mcx",
- "pqformat",
- "stringinfo",
- "types_core",
- "types_error",
- "types_fmgr",
- "types_slot",
- "types_tuple",
 ]
 
 [[package]]
@@ -4779,54 +4717,6 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
-]
-
-[[package]]
-name = "generic_xlog"
-version = "0.1.0"
-dependencies = [
- "aio_seams",
- "autovacuum_seams",
- "bufmgr_seams",
- "condition_variable_seams",
- "controldata_utils",
- "deadlock_seams",
- "elog",
- "fd",
- "guc_tables",
- "init_small",
- "ipc_seams",
- "latch_seams",
- "lmgr_proc",
- "lock_seams",
- "lwlock",
- "mcx",
- "miscinit_seams",
- "origin_seams",
- "pg_sema_seams",
- "pmsignal_seams",
- "procarray",
- "s_lock_seams",
- "shmem",
- "smgr_seams",
- "syncrep_seams",
- "timeout_seams",
- "transam_xlog",
- "transam_xlog_seams",
- "types_core",
- "types_error",
- "types_rel",
- "types_storage",
- "types_tuple",
- "varsup",
- "waitevent_seams",
- "xact_seams",
- "xloginsert",
- "xloginsert_seams",
- "xlogreader",
- "xlogreader_seams",
- "xlogstats",
- "xlogutils",
 ]
 
 [[package]]
@@ -5596,9 +5486,6 @@ version = "0.1.0"
 [[package]]
 name = "ifaddr"
 version = "0.0.0"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "index_amvalidate"
@@ -5703,7 +5590,6 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
- "pg_rusage",
  "postgres_seams",
  "procarray",
  "rel_vocab",
@@ -6413,7 +6299,6 @@ dependencies = [
  "lmgr_proc",
  "mcx",
  "miscinit_seams",
- "parallel_seams",
  "pgstat_seams",
  "pqcomm_seams",
  "procarray_seams",
@@ -6581,7 +6466,6 @@ dependencies = [
  "origin_seams",
  "pg_sema_seams",
  "pmsignal_seams",
- "postgres_seams",
  "predicate_seams",
  "procarray",
  "procarray_seams",
@@ -7679,34 +7563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orderedsetaggs"
-version = "0.1.0"
-dependencies = [
- "adt_datetime",
- "adt_timestamp",
- "arrayfuncs",
- "datum",
- "detoast_seams",
- "execexpr",
- "exectuples",
- "fmgr_core",
- "funcapi",
- "init_small",
- "lsyscache",
- "mcx",
- "nodeagg",
- "nodes_core",
- "tupdesc",
- "tuplesort",
- "types_core",
- "types_error",
- "types_fmgr",
- "types_nodes",
- "types_slot",
- "types_tuple",
-]
-
-[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
@@ -7809,9 +7665,7 @@ dependencies = [
  "trigger_seams",
  "typcache_seams",
  "types_core",
- "types_dest",
  "types_error",
- "types_rel",
  "types_startup",
  "types_storage",
  "varsup",
@@ -7974,7 +7828,6 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit_seams",
- "nodes_core",
  "parse_agg",
  "parse_func_seams",
  "parse_relation",
@@ -8175,7 +8028,6 @@ dependencies = [
  "parser_small1",
  "pg_class_seams",
  "queryenvironment",
- "queryjumble",
  "rel_vocab",
  "relation_seams",
  "rewrite_manip",
@@ -8502,18 +8354,10 @@ name = "pg_conversion"
 version = "0.1.0"
 dependencies = [
  "cache_syscache",
- "catalog",
- "catalog_indexing",
  "catcache",
  "datum",
- "heaptuple",
- "mbutils",
- "mcx",
- "pg_depend",
- "table",
  "types_core",
  "types_error",
- "types_rel",
  "types_tuple",
 ]
 
@@ -8801,6 +8645,7 @@ dependencies = [
  "parse_oper",
  "pg_depend",
  "pg_shdepend",
+ "superuser",
  "syscache_seams",
  "table",
  "types_core",
@@ -8809,24 +8654,6 @@ dependencies = [
  "types_rel",
  "types_tuple",
  "xact",
-]
-
-[[package]]
-name = "pg_parameter_acl"
-version = "0.0.0"
-dependencies = [
- "cache_syscache",
- "catalog",
- "catalog_indexing",
- "datum",
- "guc",
- "heaptuple",
- "mcx",
- "table",
- "types_core",
- "types_error",
- "types_rel",
- "varlena",
 ]
 
 [[package]]
@@ -8856,7 +8683,6 @@ dependencies = [
 name = "pg_proc"
 version = "0.1.0"
 dependencies = [
- "aclchk",
  "aclchk_seams",
  "cache_syscache",
  "catalog",
@@ -8872,12 +8698,12 @@ dependencies = [
  "pg_depend",
  "pgstat",
  "pquery",
+ "superuser",
  "syscache_seams",
  "table",
  "types_core",
  "types_error",
  "types_fmgr",
- "types_nodes",
  "types_rel",
  "types_tuple",
  "varlena",
@@ -8923,10 +8749,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg_rusage"
+name = "pg_range"
 version = "0.0.0"
 dependencies = [
- "libc",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "pg_depend",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
 ]
 
 [[package]]
@@ -9032,6 +8869,7 @@ dependencies = [
  "miscinit_seams",
  "pg_depend",
  "pg_enum",
+ "pg_range",
  "pg_shdepend",
  "syscache_seams",
  "table",
@@ -9458,7 +9296,6 @@ dependencies = [
  "procarray",
  "procarray_seams",
  "pruneheap_seams",
- "queryjumble",
  "relation_seams",
  "resowner_portal_seams",
  "resowner_seams",
@@ -10200,29 +10037,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proclang"
-version = "0.0.0"
-dependencies = [
- "cache_syscache",
- "catalog",
- "catalog_indexing",
- "datum",
- "heaptuple",
- "lsyscache",
- "mcx",
- "miscinit",
- "parse_func",
- "pg_depend",
- "superuser",
- "table",
- "types_core",
- "types_error",
- "types_nodes",
- "types_rel",
- "types_tuple",
-]
-
-[[package]]
 name = "procsignal"
 version = "0.0.0"
 dependencies = [
@@ -10387,20 +10201,6 @@ dependencies = [
  "types_portal",
  "types_rel",
  "types_tuple",
-]
-
-[[package]]
-name = "queryjumble"
-version = "0.1.0"
-dependencies = [
- "datum",
- "guc_tables",
- "hashfn",
- "mcx",
- "stack_depth",
- "types_core",
- "types_error",
- "types_nodes",
 ]
 
 [[package]]
@@ -10867,7 +10667,6 @@ dependencies = [
  "origin_seams",
  "parallel_seams",
  "parse_expr",
- "parse_relation",
  "parser_analyze",
  "parser_driver",
  "parser_seams",
@@ -10883,7 +10682,6 @@ dependencies = [
  "pruneheap_seams",
  "readfuncs",
  "rel_vocab",
- "relation",
  "relation_seams",
  "relcache",
  "relcache_build_seams",
@@ -10922,7 +10720,6 @@ dependencies = [
  "types_core",
  "types_dest",
  "types_error",
- "types_fmgr",
  "types_nodes",
  "types_portal",
  "types_rel",
@@ -11049,8 +10846,6 @@ version = "0.0.0"
 dependencies = [
  "aclchk",
  "cache_syscache",
- "catalog_namespace",
- "catalog_objectaddress",
  "datum",
  "elog",
  "guc_tables",
@@ -11060,8 +10855,6 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
- "types_rel",
- "varlena",
 ]
 
 [[package]]
@@ -11081,7 +10874,6 @@ dependencies = [
  "clog",
  "dbcommands_seams",
  "elog",
- "generic_xlog",
  "gin_xlog",
  "gist_xlog",
  "hash_xlog",
@@ -11428,7 +11220,6 @@ dependencies = [
  "nodewindowagg",
  "opclasscmds",
  "operatorcmds",
- "orderedsetaggs",
  "parallel",
  "parse_clause",
  "parse_collate",
@@ -11524,7 +11315,6 @@ dependencies = [
  "user",
  "utility",
  "vacuumlazy",
- "vacuumparallel",
  "variable",
  "varlena",
  "vars",
@@ -11540,10 +11330,6 @@ dependencies = [
  "xlogutils",
  "xmlmap",
 ]
-
-[[package]]
-name = "seclabel"
-version = "0.0.0"
 
 [[package]]
 name = "sequence"
@@ -11771,13 +11557,11 @@ dependencies = [
  "elog",
  "fd",
  "guc_tables",
- "init_small",
  "inval",
  "libc",
  "mcx",
  "md",
  "pgstat_seams",
- "relmapper_seams",
  "relpath_seams",
  "smgr_seams",
  "sync_seams",
@@ -12252,7 +12036,6 @@ dependencies = [
 name = "statscmds"
 version = "0.0.0"
 dependencies = [
- "aclchk",
  "cache_syscache",
  "catalog",
  "catalog_heap",
@@ -12272,6 +12055,7 @@ dependencies = [
  "pg_depend",
  "rel_vocab",
  "relation_seams",
+ "superuser",
  "table",
  "typcache",
  "types_core",
@@ -12747,7 +12531,6 @@ version = "0.1.0"
 dependencies = [
  "cmdtag",
  "createas_seams",
- "explain_dr",
  "matview_seams",
  "mcx",
  "pqcomm_seams",
@@ -13476,20 +13259,25 @@ dependencies = [
  "format_type",
  "genam",
  "heaptuple",
+ "indexcmds_seams",
  "inval",
  "lsyscache",
  "mbutils",
  "mcx",
  "miscinit",
+ "opclasscmds",
  "outfuncs",
  "parse_collate",
  "parse_expr",
  "parse_func",
  "parse_utilcmd",
  "parser_small1",
+ "pg_cast",
  "pg_constraint",
  "pg_depend",
  "pg_enum",
+ "pg_proc",
+ "pg_range",
  "pg_shdepend",
  "pg_type",
  "readfuncs",
@@ -13818,7 +13606,6 @@ dependencies = [
 name = "user"
 version = "0.1.0"
 dependencies = [
- "aclchk",
  "adt_acl",
  "adt_bool",
  "adt_timestamp",
@@ -13828,7 +13615,6 @@ dependencies = [
  "catcache",
  "crypt",
  "datum",
- "dbcommands_seams",
  "elog",
  "fmgr_seams",
  "genam",
@@ -13881,7 +13667,6 @@ dependencies = [
  "commands_tablespace",
  "commands_vacuum",
  "commands_view",
- "conversioncmds",
  "copy_cmd",
  "copyfuncs",
  "dbcommands",
@@ -13913,7 +13698,6 @@ dependencies = [
  "portalcmds",
  "portalmem",
  "prepare",
- "proclang",
  "rel_vocab",
  "reloptions",
  "rewrite_define",
@@ -13921,6 +13705,7 @@ dependencies = [
  "sequence",
  "statscmds",
  "subscriptioncmds",
+ "superuser",
  "syscache_seams",
  "tablecmds",
  "tcop_dest",
@@ -13974,7 +13759,6 @@ dependencies = [
  "bufmgr_seams",
  "catalog_storage",
  "commands_vacuum",
- "elog",
  "freespace",
  "guc_tables",
  "heapam",
@@ -14003,36 +13787,9 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "vacuum_seams",
- "vacuumparallel",
  "visibilitymap",
- "xact",
  "xloginsert_seams",
  "xlogutils_seams",
-]
-
-[[package]]
-name = "vacuumparallel"
-version = "0.0.0"
-dependencies = [
- "amapi",
- "autovacuum_seams",
- "bufmgr_seams",
- "commands_vacuum",
- "elog",
- "guc_tables",
- "init_small",
- "mcx",
- "nbtree",
- "parallel",
- "table",
- "types_core",
- "types_error",
- "types_nbtree",
- "types_rel",
- "types_relscan",
- "types_storage",
- "types_tuple",
- "xact",
 ]
 
 [[package]]
@@ -14061,7 +13818,6 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit",
- "parallel_seams",
  "pg_string",
  "pgtz",
  "pqcomm_seams",
@@ -14639,14 +14395,6 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
-]
-
-[[package]]
-name = "xlogstats"
-version = "0.1.0"
-dependencies = [
- "types_core",
- "xlogreader_seams",
 ]
 
 [[package]]

@@ -5,6 +5,8 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
+mod range;
+pub use range::DefineRange;
 pub use alter::{
     checkDomainOwner, AlterDomain, AlterTypeNamespace, AlterTypeNamespace_oid,
     AlterTypeNamespaceInternal, AlterTypeOwner, AlterTypeOwner_oid, AlterTypeOwnerInternal,

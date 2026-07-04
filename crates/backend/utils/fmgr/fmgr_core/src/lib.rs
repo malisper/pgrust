@@ -392,6 +392,12 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
             let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                 .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
             match fmgr_lookup_by_name(&prosrc) {
+                // A user-created internal-language fn (new oid) must resolve
+                // through the canonical entry's oid; the stub's late lookup
+                // keys on flinfo.fn_oid, which is the new oid.
+                Some(fbp) if fbp.func as usize == builtin_not_ported as usize => {
+                    late_builtin(fbp.foid).map_or(fbp.func, |b| b.func)
+                }
                 Some(fbp) => fbp.func,
                 None => {
                     return Err(alloc::boxed::Box::new(

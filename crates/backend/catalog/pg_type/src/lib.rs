@@ -436,6 +436,28 @@ pub fn AssignTypeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     Ok(oid)
 }
 
+// AssignTypeMultirangeOid (typecmds.c); IsBinaryUpgrade arm loud below.
+pub fn AssignTypeMultirangeOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_type: binary-upgrade multirange-OID override (typecmds.c AssignTypeMultirangeOid) unported");
+    }
+    let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
+    let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
+    pg_type.close(AccessShareLock)?;
+    Ok(oid)
+}
+
+// AssignTypeMultirangeArrayOid (typecmds.c); IsBinaryUpgrade arm loud below.
+pub fn AssignTypeMultirangeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_type: binary-upgrade multirange-array-OID override (typecmds.c AssignTypeMultirangeArrayOid) unported");
+    }
+    let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
+    let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
+    pg_type.close(AccessShareLock)?;
+    Ok(oid)
+}
+
 // makeObjectName (indexcmds.c) specialized to name1 = "" (the only pg_type
 // caller shape): "_<name2 truncated>[_<label>]", NAMEDATALEN-bounded.
 fn make_array_object_name(typeName: &str, label: Option<&str>) -> NameData {
@@ -475,6 +497,56 @@ pub fn makeArrayTypeName(typeName: &str, typeNamespace: Oid) -> PgResult<NameDat
         let suffix = pass.to_string();
         arr_name = make_array_object_name(typeName, Some(&suffix));
     }
+}
+
+pub fn makeMultirangeTypeName(rangeTypeName: &str, typeNamespace: Oid) -> PgResult<NameData> {
+    // C: byte buffer, clipped below by pg_mbcliplen; NAMEDATALEN-12 leaves
+    // room for "_multirange".
+    let b = rangeTypeName.as_bytes();
+    let mut buf = [0u8; 2 * NAMEDATALEN as usize];
+    let len = match rangeTypeName.find("range") {
+        Some(i) => {
+            buf[..i].copy_from_slice(&b[..i]);
+            buf[i..i + 5].copy_from_slice(b"multi");
+            buf[i + 5..i + 5 + (b.len() - i)].copy_from_slice(&b[i..]);
+            b.len() + 5
+        }
+        None => {
+            let n = b.len().min(NAMEDATALEN as usize - 12);
+            buf[..n].copy_from_slice(&b[..n]);
+            buf[n..n + 11].copy_from_slice(b"_multirange");
+            n + 11
+        }
+    };
+    let clipped = mbutils_seams::pg_mbcliplen::call(
+        &buf[..len],
+        len as i32,
+        NAMEDATALEN as i32 - 1,
+    ) as usize;
+    let candidate =
+        core::str::from_utf8(&buf[..clipped]).expect("multirange type name UTF-8");
+    if syscache_seams::lookup_pg_type_oid_by_name::call(candidate, typeNamespace)? != InvalidOid {
+        return Err(multirange_name_taken(candidate, rangeTypeName));
+    }
+    let mut out = NameData::default();
+    out.data[..clipped].copy_from_slice(&buf[..clipped]);
+    Ok(out)
+}
+
+#[cold]
+#[inline(never)]
+fn multirange_name_taken(name: &str, range_type_name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("type \"{name}\" already exists"))
+            .with_sqlstate(ERRCODE_DUPLICATE_OBJECT)
+            .with_detail(format!(
+                "Failed while creating a multirange type for type \"{range_type_name}\"."
+            ))
+            .with_hint(
+                "You can manually specify a multirange type name using the \
+                 \"multirange_type_name\" attribute.",
+            ),
+    )
 }
 
 // RenameTypeInternal (pg_type.c): rename the type row, then chase the array
@@ -541,7 +613,7 @@ pub fn RenameTypeInternal<'mcx>(
     Ok(())
 }
 
-// RemoveTypeById (typecmds.c); enum/range cleanup arms are loud.
+// RemoveTypeById (typecmds.c).
 pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
     const Anum_pg_type_typtype: i32 = 7;
     let relation = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
@@ -569,7 +641,7 @@ pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
         pg_enum::EnumValuesDelete(mcx, typeOid)?;
     }
     if typtype == TYPTYPE_RANGE {
-        panic!("unported: RemoveTypeById RangeDelete (pg_range.c)");
+        pg_range::RangeDelete(mcx, typeOid)?;
     }
     genam::systable_endscan(mcx, scan)?;
     relation.close(RowExclusiveLock)

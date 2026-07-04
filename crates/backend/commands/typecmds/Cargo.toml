@@ -30,6 +30,11 @@ pg_type = { path = "../../catalog/pg_type" }
 commands_define = { path = "../commands_define" }
 parse_func = { path = "../../parser/parse_func" }
 pg_enum = { path = "../../catalog/pg_enum" }
+pg_range = { path = "../../catalog/pg_range" }
+pg_proc = { path = "../../catalog/pg_proc" }
+pg_cast = { path = "../../catalog/pg_cast" }
+opclasscmds = { path = "../opclasscmds" }
+indexcmds_seams = { path = "../indexcmds_seams" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 aclchk = { path = "../../catalog/aclchk" }
