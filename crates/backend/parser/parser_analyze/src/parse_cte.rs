@@ -7,8 +7,9 @@ use types_core::catalog::{DEFAULT_COLLATION_OID, TEXTOID, UNKNOWNOID};
 use types_core::{InvalidOid, Oid, ParseLoc};
 use types_error::{
     ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_ALIAS,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_RECURSION,
-    ErrorLocation, PgError, PgResult, ERROR,
+    ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
+    ERRCODE_INVALID_RECURSION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ErrorLocation,
+    PgError, PgResult, ERROR,
 };
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{CommonTableExpr, SetOperation, WithClause};
@@ -17,7 +18,7 @@ use types_nodes::rawnodes::SelectStmt;
 use types_nodes::{Bitmapset, JoinType, Node, NodeList, NodeTag};
 
 use nodes_core::NodeWalker;
-use parser_small1::{parser_errposition, ParseState};
+use parser_small1::{parser_errposition, ParseExprKind, ParseState};
 
 pub fn transformWithClause<'mcx>(
     mcx: Mcx<'mcx>,
@@ -96,19 +97,24 @@ fn analyzeCTE<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
     cte_node: Node<'mcx>,
 ) -> PgResult<()> {
-    let (ctequery, location, cterecursive, ctename) = {
+    let (ctequery, location, cterecursive, ctename, search_clause, cycle_clause) = {
         let cte = cte_node.as_common_table_expr().expect("WITH list cell");
-        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
-            panic!("analyzeCTE (parse_cte.c): SEARCH/CYCLE clause; recursive-cte lane");
-        }
         (
             cte.ctequery.expect("CTE has no query"),
             cte.location,
             cte.cterecursive,
             cte.ctename.unwrap_or(""),
+            cte.search_clause,
+            cte.cycle_clause,
         )
     };
     debug_assert!(ctequery.node_tag() != NodeTag::T_Query);
+
+    // The cycle mark type is resolved before analyzing the query, which can
+    // refer to the mark column.
+    if let Some(cc_node) = cycle_clause {
+        transformCycleMark(mcx, pstate, cc_node)?;
+    }
 
     let mut query = crate::parse_sub_analyze(mcx, ctequery, pstate, Some(cte_node), false, true)?;
 
@@ -143,7 +149,7 @@ fn analyzeCTE<'mcx>(
     debug_assert!(q.commandType == CmdType::CMD_SELECT);
 
     if !cterecursive {
-        analyzeCTETargetList(mcx, pstate, cte_node, &q.targetList)
+        analyzeCTETargetList(mcx, pstate, cte_node, &q.targetList)?;
     } else {
         // The output columns were set from the non-recursive term
         // (determineRecursiveColTypes); the whole query must agree.
@@ -190,8 +196,266 @@ fn analyzeCTE<'mcx>(
         if i != ncols {
             return Err(elog_error("wrong number of output columns in WITH"));
         }
-        Ok(())
     }
+
+    if search_clause.is_some() || cycle_clause.is_some() {
+        if !cterecursive {
+            return Err(syntax_err(pstate, "WITH query is not recursive".to_string(), location));
+        }
+        let sos = query_node
+            .as_query()
+            .expect("analyzed CTE query")
+            .setOperations
+            .expect("recursive CTE query has setOperations")
+            .as_set_operation_stmt()
+            .expect("recursive CTE top is a set operation");
+        if sos.larg.expect("setop larg").node_tag() != NodeTag::T_RangeTblRef {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(
+                        "with a SEARCH or CYCLE clause, the left side of the UNION must be a SELECT"
+                            .to_string(),
+                    )
+                    .into_error()
+                    .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            ));
+        }
+        if sos.rarg.expect("setop rarg").node_tag() != NodeTag::T_RangeTblRef {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg(
+                        "with a SEARCH or CYCLE clause, the right side of the UNION must be a SELECT"
+                            .to_string(),
+                    )
+                    .into_error()
+                    .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            ));
+        }
+    }
+
+    let ctecolnames = &cte_node.as_common_table_expr().expect("WITH list cell").ctecolnames;
+
+    if let Some(sc) = search_clause.map(|n| n.as_cte_search_clause().expect("search clause")) {
+        checkColumnList(
+            pstate,
+            ctecolnames,
+            &sc.search_col_list,
+            "search column \"{}\" not in WITH query column list",
+            "search column \"{}\" specified more than once",
+            sc.location,
+        )?;
+        let seq_col = sc.search_seq_column.expect("SEARCH SET column");
+        if colname_member(ctecolnames, seq_col) {
+            return Err(syntax_err(
+                pstate,
+                format!(
+                    "search sequence column name \"{seq_col}\" already used in \
+                     WITH query column list"
+                ),
+                sc.location,
+            ));
+        }
+    }
+
+    if let Some(cc) = cycle_clause.map(|n| n.as_cte_cycle_clause().expect("cycle clause")) {
+        checkColumnList(
+            pstate,
+            ctecolnames,
+            &cc.cycle_col_list,
+            "cycle column \"{}\" not in WITH query column list",
+            "cycle column \"{}\" specified more than once",
+            cc.location,
+        )?;
+        let mark_col = cc.cycle_mark_column.expect("CYCLE SET column");
+        let path_col = cc.cycle_path_column.expect("CYCLE USING column");
+        if colname_member(ctecolnames, mark_col) {
+            return Err(syntax_err(
+                pstate,
+                format!(
+                    "cycle mark column name \"{mark_col}\" already used in \
+                     WITH query column list"
+                ),
+                cc.location,
+            ));
+        }
+        if colname_member(ctecolnames, path_col) {
+            return Err(syntax_err(
+                pstate,
+                format!(
+                    "cycle path column name \"{path_col}\" already used in \
+                     WITH query column list"
+                ),
+                cc.location,
+            ));
+        }
+        if mark_col == path_col {
+            return Err(syntax_err(
+                pstate,
+                "cycle mark column name and cycle path column name are the same".to_string(),
+                cc.location,
+            ));
+        }
+    }
+
+    if let (Some(sc), Some(cc)) = (
+        search_clause.map(|n| n.as_cte_search_clause().expect("search clause")),
+        cycle_clause.map(|n| n.as_cte_cycle_clause().expect("cycle clause")),
+    ) {
+        let seq_col = sc.search_seq_column.expect("SEARCH SET column");
+        if seq_col == cc.cycle_mark_column.expect("CYCLE SET column") {
+            return Err(syntax_err(
+                pstate,
+                "search sequence column name and cycle mark column name are the same".to_string(),
+                sc.location,
+            ));
+        }
+        if seq_col == cc.cycle_path_column.expect("CYCLE USING column") {
+            return Err(syntax_err(
+                pstate,
+                "search sequence column name and cycle path column name are the same".to_string(),
+                sc.location,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn transformCycleMark<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    cc_node: Node<'mcx>,
+) -> PgResult<()> {
+    let (raw_value, raw_default) = {
+        let cc = cc_node.as_cte_cycle_clause().expect("cycle clause");
+        (
+            cc.cycle_mark_value.expect("cycle_mark_value"),
+            cc.cycle_mark_default.expect("cycle_mark_default"),
+        )
+    };
+    let value =
+        parse_expr::transformExpr(mcx, pstate, raw_value, ParseExprKind::EXPR_KIND_CYCLE_MARK)?;
+    let default =
+        parse_expr::transformExpr(mcx, pstate, raw_default, ParseExprKind::EXPR_KIND_CYCLE_MARK)?;
+
+    let (vt, vloc) = (parse_expr::expr_type(value), nodes_core::expr_location(value));
+    let (dt, dloc) = (parse_expr::expr_type(default), nodes_core::expr_location(default));
+    let mark_type =
+        coerce::select_common_type(pstate, &[(vt, vloc), (dt, dloc)], Some("CYCLE"))?;
+    let value =
+        coerce::coerce_to_common_type(mcx, pstate, value, vt, vloc, mark_type, "CYCLE/SET/TO")?;
+    let default = coerce::coerce_to_common_type(
+        mcx,
+        pstate,
+        default,
+        dt,
+        dloc,
+        mark_type,
+        "CYCLE/SET/DEFAULT",
+    )?;
+
+    let mark_typmod = coerce::select_common_typmod(
+        &[
+            (parse_expr::expr_type(value), parse_expr::expr_typmod(value)),
+            (parse_expr::expr_type(default), parse_expr::expr_typmod(default)),
+        ],
+        mark_type,
+    );
+    let both = NodeList::make2(mcx, value, default)?;
+    let mark_collation = parse_collate::select_common_collation(mcx, pstate, &both, true)?;
+
+    let typentry = typcache::lookup_type_cache(mark_type, typcache::TYPECACHE_EQ_OPR)?;
+    if !types_core::OidIsValid(typentry.eq_opr()) {
+        return Err(operator_lookup_err(mark_type, "equality")?);
+    }
+    let neop = lsyscache::get_negator(typentry.eq_opr())?;
+    if !types_core::OidIsValid(neop) {
+        return Err(operator_lookup_err(mark_type, "inequality")?);
+    }
+
+    // SAFETY: parser-owned tree under analysis; no live derived refs.
+    unsafe {
+        cc_node.with_mut::<types_nodes::parsenodes::CTECycleClause, _>(|c| {
+            c.cycle_mark_value = Some(value);
+            c.cycle_mark_default = Some(default);
+            c.cycle_mark_type = mark_type;
+            c.cycle_mark_typmod = mark_typmod;
+            c.cycle_mark_collation = mark_collation;
+            c.cycle_mark_neop = neop;
+        })
+    };
+    Ok(())
+}
+
+fn checkColumnList<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    ctecolnames: &NodeList<'mcx>,
+    col_list: &NodeList<'mcx>,
+    missing_fmt: &str,
+    dup_fmt: &str,
+    location: ParseLoc,
+) -> PgResult<()> {
+    for (i, col) in col_list.iter().enumerate() {
+        let colname = col.as_string().expect("column list cell").sval;
+        if !colname_member(ctecolnames, colname) {
+            return Err(syntax_err(
+                pstate,
+                missing_fmt.replacen("{}", colname, 1),
+                location,
+            ));
+        }
+        for earlier in col_list.iter().take(i) {
+            if earlier.as_string().expect("column list cell").sval == colname {
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(ERRCODE_DUPLICATE_COLUMN)
+                        .errmsg(dup_fmt.replacen("{}", colname, 1))
+                        .errposition(parser_errposition(
+                            pstate,
+                            location,
+                            mbutils::GetDatabaseEncoding(),
+                        ))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn colname_member(colnames: &NodeList<'_>, name: &str) -> bool {
+    colnames.iter().any(|n| n.as_string().is_some_and(|s| s.sval == name))
+}
+
+#[cold]
+#[inline(never)]
+fn syntax_err(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg)
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn operator_lookup_err(mark_type: Oid, which: &str) -> PgResult<Box<PgError>> {
+    Ok(Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "could not identify an {which} operator for type {}",
+                format_type::format_type_be(mark_type)?
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+    ))
 }
 
 pub(crate) fn analyzeCTETargetList<'mcx>(

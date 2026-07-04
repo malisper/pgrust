@@ -538,6 +538,16 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
     }
 }
 
+pub fn IncrementVarSublevelsUp_query<'mcx>(
+    q: &'mcx Query<'mcx>,
+    delta_sublevels_up: u32,
+    min_sublevels_up: u32,
+) -> PgResult<()> {
+    let mut w = IncrVarSublevels { delta: delta_sublevels_up, min_sublevels_up };
+    nodes_core::query_tree_walker(q, &mut w, nodes_core::QTW_EXAMINE_RTES_BEFORE)?;
+    Ok(())
+}
+
 pub fn IncrementVarSublevelsUp<'mcx>(
     node: Node<'mcx>,
     delta_sublevels_up: u32,

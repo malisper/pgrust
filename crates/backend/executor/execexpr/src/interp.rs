@@ -914,6 +914,14 @@ fn run_program<'mcx>(
                 let b = eval_row_null(frames, *rn, *frame, r, false)?;
                 write_out(*out, Datum::from_bool(b), false);
             }
+            Step::FieldSelect { fieldnum, resulttype, frame, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    let (value, isnull) =
+                        eval_field_select(frames, *fieldnum, *resulttype, *frame, r.value)?;
+                    write_out(*out, value, isnull);
+                }
+            }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(r.isnull), false);
@@ -1729,6 +1737,67 @@ fn eval_row_expr(
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok((d, false))
+}
+
+// ExecEvalFieldSelect (execExprInterp.c), heap-composite leg; the expanded-
+// record fastpath is unported loud. C memoizes the tupdesc in the step's
+// rowcache; a per-eval registry copy stands in (cold path, no invalidation).
+fn eval_field_select(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    fieldnum: i16,
+    resulttype: ::types_core::Oid,
+    frame: u32,
+    value: Datum,
+) -> PgResult<(Datum, bool)> {
+    use ::types_tuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null composite datum per the FieldSelect contract.
+    if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
+        panic!("ExecEvalFieldSelect (execExprInterp.c): expanded-record fastpath unported");
+    }
+    // SAFETY: a live varlena-headed composite image.
+    let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
+    // SAFETY: `total` readable bytes at p, per the datum contract.
+    let raw = unsafe { core::slice::from_raw_parts(p, total) };
+    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
+    let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, hdr.type_id(), hdr.typmod())?;
+    if fieldnum <= 0 || fieldnum as i32 > tupdesc.natts {
+        return Err(::types_error::PgError::error(format!(
+            "attribute number {fieldnum} exceeds number of columns {}",
+            tupdesc.natts
+        ))
+        .into());
+    }
+    let att = &tupdesc.attrs[(fieldnum - 1) as usize];
+    if att.attisdropped {
+        return Ok((Datum::null(), true));
+    }
+    if resulttype != att.atttypid {
+        return Err(::types_error::PgError::error(format!(
+            "attribute {fieldnum} has wrong type"
+        ))
+        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+        .into());
+    }
+    // SAFETY: MAXALIGN'd detoasted image of datum_length() bytes.
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    let mut isnull = false;
+    // SAFETY: fieldnum validated against the tuple's descriptor above.
+    let v = unsafe { ::types_tuple::heap_getattr(&tuple, fieldnum as i32, &tupdesc, &mut isnull) };
+    core::mem::forget(tuple);
+    Ok((v, isnull))
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in
