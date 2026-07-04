@@ -1289,9 +1289,51 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().expect("SubscriptingRef");
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                pn::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         other => panic!(
             "copyObject (pullup_replace_vars): {other:?} copy arm unported \
-             (simple-view expression set)"
+             (simple-view expression set; SubLink needs the rewriteManip \
+             sublevel-tracking lane)"
         ),
     }
 }
