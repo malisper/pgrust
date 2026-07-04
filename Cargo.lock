@@ -2550,6 +2550,7 @@ dependencies = [
  "detoast",
  "detoast_seams",
  "elog",
+ "execexpr",
  "execindexing",
  "exectuples",
  "fd",
@@ -12524,24 +12525,32 @@ dependencies = [
 name = "statistics"
 version = "0.0.0"
 dependencies = [
+ "arrayfuncs",
  "catalog_indexing",
+ "clauses_seams",
  "datum",
  "detoast",
  "elog",
+ "execexpr",
+ "exectuples",
  "fmgr_seams",
  "genam",
  "guc_tables",
  "heaptuple",
  "lsyscache",
  "mcx",
+ "nodes_core",
+ "readfuncs",
  "statscmds",
  "table",
  "typcache",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_scan",
+ "types_slot",
  "types_tuple",
 ]
 
@@ -12563,8 +12572,11 @@ dependencies = [
  "heaptuple",
  "init_small",
  "inval",
+ "lsyscache",
  "mcx",
  "miscinit_seams",
+ "nodes_core",
+ "outfuncs",
  "pg_class_seams",
  "pg_depend",
  "rel_vocab",
@@ -12577,6 +12589,7 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+ "vars",
 ]
 
 [[package]]
