@@ -955,6 +955,14 @@ impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
                         tcnt,
                         tcnt as f64,
                     )?,
+                    ComputeStats::Distinct => compute_distinct_stats(
+                        mcx,
+                        col_cx.mcx(),
+                        &mut stats,
+                        &src,
+                        tcnt,
+                        tcnt as f64,
+                    )?,
                     ComputeStats::Trivial => compute_trivial_stats(&mut stats, &src, tcnt)?,
                     ComputeStats::Range { is_multirange } => {
                         range_typanalyze::compute_range_stats(
@@ -966,12 +974,12 @@ impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
                             tcnt as f64,
                         )?
                     }
-                    ComputeStats::Array { std_scalar, elem_typeid } => {
+                    ComputeStats::Array { std, elem_typeid } => {
                         array_typanalyze::compute_array_stats(
                             mcx,
                             col_cx.mcx(),
                             &mut stats,
-                            std_scalar,
+                            std,
                             elem_typeid,
                             &src,
                             tcnt,
