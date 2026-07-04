@@ -49,7 +49,7 @@ impl DrTqueue {
                 .as_ref()
                 .expect("tqueueReceiveSlot: slot without descriptor");
             let natts = desc.natts as usize;
-            let tup = types_tuple::heap_form_minimal_tuple(
+            let tup = heaptuple::heap_form_minimal_tuple(
                 mcx,
                 desc,
                 &base.tts_values[..natts],

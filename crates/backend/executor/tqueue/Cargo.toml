@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../../../_support/mcx" }
+heaptuple = { path = "../../access/common/heaptuple" }
 exectuples = { path = "../exectuples" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
