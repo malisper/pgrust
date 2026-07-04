@@ -334,6 +334,7 @@ fn live_pg_differential() {
         builtin_locale: None,
         builtin_casemap_full: full,
         lt: libc_locale::LibcLocale::NONE,
+        icu: crate::icu::IcuLocale::NONE,
     };
 
     let run = |f: fn(Mcx<'_>, &mut [u8], &[u8], &PgLocale) -> PgResult<usize>,
