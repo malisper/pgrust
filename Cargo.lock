@@ -1689,6 +1689,7 @@ dependencies = [
  "sinval",
  "superuser",
  "syscache_seams",
+ "table",
  "trigger",
  "types_core",
  "types_error",

@@ -24,6 +24,7 @@ pg_largeobject = { path = "../pg_largeobject" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 relation = { path = "../../access/common/relation" }
+table = { path = "../../access/table/table" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 sinval = { path = "../../storage/ipc/sinval" }
 superuser = { path = "../../utils/misc/superuser" }
