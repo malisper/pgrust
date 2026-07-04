@@ -959,7 +959,8 @@ mod tests {
             get: || true,
             set: |_| {},
         });
-        RECENT_XID.set(300_000_000);
+        // Young cluster: age(relfrozenxid=700) < autovacuum_freeze_max_age.
+        RECENT_XID.set(100_000_000);
         RECENT_MULTI.set(1);
     }
 
@@ -989,10 +990,11 @@ mod tests {
         let frozen = row(1000.0, 10, 10);
         assert_eq!(decide(&frozen, Some(&entry(0, 1001, 0)), None), (true, false, false));
 
-        // vac_max_thresh cap (autovacuum_vacuum_max_threshold = 100000000).
+        // vac_max_thresh cap (autovacuum_vacuum_max_threshold = 100000000):
+        // uncapped vacthresh would be 2e8+50. Values f32-exact (C float4 math).
         let big = row(1e9, 1000, 0);
-        assert_eq!(decide(&big, Some(&entry(100_000_001, 0, 0)), None), (true, false, false));
-        assert_eq!(decide(&big, Some(&entry(100_000_000, 0, 0)), None), (false, false, false));
+        assert_eq!(decide(&big, Some(&entry(200_000_000, 0, 0)), None), (true, false, false));
+        assert_eq!(decide(&big, Some(&entry(50_000_000, 0, 0)), None), (false, false, false));
 
         // reltuples < 0 (never vacuumed) is treated as 0.
         let unk = row(-1.0, 10, 0);
@@ -1015,7 +1017,6 @@ mod tests {
         // Not at risk => reloption-disabled table is skipped entirely.
         RECENT_XID.set(300_000);
         assert_eq!(decide(&r, Some(&entry(9999, 0, 9999)), Some(&disabled)), (false, false, false));
-        RECENT_XID.set(300_000_000);
     }
 
     #[test]

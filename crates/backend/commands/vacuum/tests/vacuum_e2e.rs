@@ -271,7 +271,6 @@ fn install_proc_boot_seams() {
     pmsignal_seams::register_postmaster_child_active::set(|| {});
     syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
     condition_variable_seams::condition_variable_cancel_sleep::set(|| false);
-    autovacuum_seams::wake_autovacuum_launcher::set(|| {});
     lock_seams::abort_strong_lock_acquire::set(|| {});
     lock_seams::get_awaited_lock_hashcode::set(|| None);
     lock_seams::lock_release_all::set(|_, _| lock::VirtualXactLockTableCleanup());
