@@ -34,6 +34,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

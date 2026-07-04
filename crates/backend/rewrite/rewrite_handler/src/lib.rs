@@ -2875,3 +2875,56 @@ fn get_rte_attribute_is_dropped<'mcx>(
         )),
     }
 }
+
+fn fc_pg_relation_is_updatable(
+    _f: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    let reloid = fcinfo.arg_oid(0);
+    let include_triggers = fcinfo.arg_bool(1);
+    let mcx = fcinfo.result_mcx();
+    let mut outer_reloids = PgVec::new_in(mcx);
+    let events = relation_is_updatable(mcx, reloid, &mut outer_reloids, include_triggers, None)?;
+    Ok(datum::Datum::from_i32(events))
+}
+
+fn fc_pg_column_is_updatable(
+    _f: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    let reloid = fcinfo.arg_oid(0);
+    let attnum = fcinfo.arg_i16(1);
+    let include_triggers = fcinfo.arg_bool(2);
+    if attnum <= 0 {
+        return Ok(datum::Datum::from_bool(false));
+    }
+    let mcx = fcinfo.result_mcx();
+    let col = attnum as i32 - FirstLowInvalidHeapAttributeNumber;
+    let mut cols = Bitmapset::empty();
+    cols.add_member(mcx, col)?;
+    let mut outer_reloids = PgVec::new_in(mcx);
+    let events =
+        relation_is_updatable(mcx, reloid, &mut outer_reloids, include_triggers, Some(&cols))?;
+    const REQ_EVENTS: i32 =
+        (1 << CmdType::CMD_UPDATE as i32) | (1 << CmdType::CMD_DELETE as i32);
+    Ok(datum::Datum::from_bool(events & REQ_EVENTS == REQ_EVENTS))
+}
+
+pub const REWRITE_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
+    types_fmgr::FmgrBuiltin {
+        foid: 3842,
+        name: "pg_relation_is_updatable",
+        nargs: 2,
+        strict: true,
+        retset: false,
+        func: fc_pg_relation_is_updatable,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 3843,
+        name: "pg_column_is_updatable",
+        nargs: 3,
+        strict: true,
+        retset: false,
+        func: fc_pg_column_is_updatable,
+    },
+];

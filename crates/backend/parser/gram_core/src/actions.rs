@@ -5683,6 +5683,20 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_INDEX;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterTableStmt: ALTER VIEW [IF_P EXISTS] qualified_name alter_table_cmds
+            288 | 289 => {
+                let (rv, cmds) = if rule == 288 {
+                    (view.v(3), view.v(4))
+                } else {
+                    (view.v(5), view.v(6))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("qualified_name").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_VIEW;
+                n.missing_ok = rule == 289;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // partition_cmd: ATTACH PARTITION qualified_name PartitionBoundSpec
             //             | DETACH PARTITION qualified_name opt_concurrently
             //             | DETACH PARTITION qualified_name FINALIZE

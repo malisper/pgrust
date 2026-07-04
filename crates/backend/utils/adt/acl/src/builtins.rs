@@ -951,6 +951,78 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
+
+const ROLE_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "USAGE", value: crate::ACL_USAGE },
+    PrivMapEntry { name: "MEMBER", value: crate::ACL_CREATE },
+    PrivMapEntry { name: "SET", value: crate::ACL_SET },
+    PrivMapEntry { name: "USAGE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "USAGE WITH ADMIN OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "MEMBER WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "MEMBER WITH ADMIN OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "SET WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "SET WITH ADMIN OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+];
+
+fn pg_role_aclcheck(role_oid: Oid, roleid: Oid, mode: u64) -> PgResult<Datum> {
+    let mut ok = false;
+    if mode & acl_grant_option_for(crate::ACL_CREATE) != 0 {
+        ok = crate::is_admin_of_role(roleid, role_oid)?;
+    }
+    if !ok && mode & crate::ACL_CREATE != 0 {
+        ok = crate::is_member_of_role(roleid, role_oid)?;
+    }
+    if !ok && mode & crate::ACL_USAGE != 0 {
+        ok = crate::has_privs_of_role(roleid, role_oid)?;
+    }
+    if !ok && mode & crate::ACL_SET != 0 {
+        ok = crate::member_can_set_role(roleid, role_oid)?;
+    }
+    Ok(Datum::from_bool(ok))
+}
+
+fn fc_pg_has_role_name_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
+    let roleoid = crate::get_role_oid(arg_name_str(fcinfo, 1)?, false)?;
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
+fn fc_pg_has_role_name_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
+    let roleoid = fcinfo.arg_oid(1);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
+fn fc_pg_has_role_id_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let roleoid = crate::get_role_oid(arg_name_str(fcinfo, 1)?, false)?;
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
+fn fc_pg_has_role_id_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let roleoid = fcinfo.arg_oid(1);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
+fn fc_pg_has_role_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let roleoid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
+fn fc_pg_has_role_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let roleoid = fcinfo.arg_oid(0);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
+    pg_role_aclcheck(roleoid, roleid, mode)
+}
+
 pub const ACL_BUILTINS: &[FmgrBuiltin] = &[
     b(329, "hash_aclitem", 1, fc_hash_aclitem),
     b(777, "hash_aclitem_extended", 2, fc_hash_aclitem_extended),
@@ -967,6 +1039,12 @@ pub const ACL_BUILTINS: &[FmgrBuiltin] = &[
     b(1925, "has_table_privilege_id_id", 3, fc_has_table_privilege_id_id),
     b(1926, "has_table_privilege_name", 2, fc_has_table_privilege_name),
     b(1927, "has_table_privilege_id", 2, fc_has_table_privilege_id),
+    b(2705, "pg_has_role_name_name", 3, fc_pg_has_role_name_name),
+    b(2706, "pg_has_role_name_id", 3, fc_pg_has_role_name_id),
+    b(2707, "pg_has_role_id_name", 3, fc_pg_has_role_id_name),
+    b(2708, "pg_has_role_id_id", 3, fc_pg_has_role_id_id),
+    b(2709, "pg_has_role_name", 2, fc_pg_has_role_name),
+    b(2710, "pg_has_role_id", 2, fc_pg_has_role_id),
     b(2250, "has_database_privilege_name_name", 3, fc_has_database_privilege_name_name),
     b(2251, "has_database_privilege_name_id", 3, fc_has_database_privilege_name_id),
     b(2252, "has_database_privilege_id_name", 3, fc_has_database_privilege_id_name),
