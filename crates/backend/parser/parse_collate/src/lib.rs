@@ -632,6 +632,20 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_ArrayExpr => node
                         .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
                         .unwrap(),
+                    // exprSetCollation(XmlExpr) is assert-only: the text
+                    // result (IS_XMLSERIALIZE) carries DEFAULT_COLLATION_OID,
+                    // xml results none.
+                    NodeTag::T_XmlExpr => {
+                        debug_assert!(
+                            if node.as_xml_expr().unwrap().op
+                                == types_nodes::XmlExprOp::IS_XMLSERIALIZE
+                            {
+                                set_coll == types_core::catalog::DEFAULT_COLLATION_OID
+                            } else {
+                                !OidIsValid(set_coll)
+                            }
+                        );
+                    }
                     NodeTag::T_SQLValueFunction => {
                         debug_assert!(
                             if node.as_sql_value_function().unwrap().r#type
