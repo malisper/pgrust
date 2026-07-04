@@ -108,7 +108,7 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
         if relispartition {
             parent_oid = pg_inherits::get_partition_parent(mcx, relid, true)?;
             lmgr::LockRelationOid(parent_oid, AccessExclusiveLock)?;
-            default_part_oid = crate::partition::get_default_partition_oid(mcx, parent_oid)?;
+            default_part_oid = partcache::get_default_partition_oid(parent_oid)?;
             if default_part_oid != types_core::InvalidOid && relid != default_part_oid {
                 lmgr::LockRelationOid(default_part_oid, AccessExclusiveLock)?;
             }

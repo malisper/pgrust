@@ -302,6 +302,7 @@ members = [
     "crates/backend/utils/cache/typcache",
     "crates/backend/utils/cache/partcache",
     "crates/backend/partitioning/partbounds",
+    "crates/backend/partitioning/partprune",
     "crates/backend/partitioning/partdesc",
     "crates/backend/commands/indexcmds_seams",
     "crates/backend/commands/indexcmds",

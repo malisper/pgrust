@@ -71,6 +71,8 @@ pub enum PlanStateNode<'mcx> {
 pub struct AppendNode<'mcx> {
     pub state: ::nodeappend::AppendState<'mcx>,
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+    /// Original appendplans index per substate (initial pruning skips some).
+    pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
 }
 
 // nodeSubqueryscan.c lives here whole (crate cycle with the node-enum owner).
@@ -744,19 +746,48 @@ pub fn exec_init_node<'mcx>(
         NodeTag::T_Append => {
             let mcx = estate.es_query_cxt;
             let ap_plan = node.as_append().unwrap();
+            let n_total = ap_plan.appendplans.len();
+            let (prune_state, valid) = if ap_plan.part_prune_index >= 0 {
+                let (ps, valid) = ::execpartition::pruning::exec_init_partition_exec_pruning(
+                    estate,
+                    n_total as i32,
+                    ap_plan.part_prune_index,
+                    &ap_plan.apprelids,
+                )?;
+                (ps.map(Box::new), valid)
+            } else {
+                let mut all = ::types_nodes::bitmapset::Bitmapset::empty();
+                if n_total > 0 {
+                    ::partprune::bms_add_range(mcx, &mut all, 0, n_total as i32 - 1)?;
+                }
+                (None, all)
+            };
             let mut substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>> =
                 ::mcx::PgVec::new_in(mcx);
-            substates
-                .try_reserve_exact(ap_plan.appendplans.len())
-                .map_err(|_| mcx.oom(ap_plan.appendplans.len()))?;
-            for subplan in ap_plan.appendplans.iter() {
+            let mut subplan_origin: ::mcx::PgVec<'mcx, i32> = ::mcx::PgVec::new_in(mcx);
+            let nvalid = valid.num_members() as usize;
+            substates.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
+            subplan_origin.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
+            let mut i = valid.next_member(-1);
+            while i >= 0 {
+                let subplan = ap_plan.appendplans.nth(i as usize);
                 let state = exec_init_node(Some(subplan), estate, eflags)?
                     .expect("Append subplan list holds plan nodes");
                 substates.push(state);
+                subplan_origin.push(i);
+                i = valid.next_member(i);
             }
-            let state =
-                ::nodeappend::exec_init_append(ap_plan, estate, eflags, substates.len())?;
-            PlanStateNode::Append(::mcx::alloc_in(mcx, AppendNode { state, substates })?)
+            let state = ::nodeappend::exec_init_append(
+                ap_plan,
+                estate,
+                eflags,
+                substates.len(),
+                prune_state,
+            )?;
+            PlanStateNode::Append(::mcx::alloc_in(
+                mcx,
+                AppendNode { state, substates, subplan_origin },
+            )?)
         }
         NodeTag::T_SubqueryScan => {
             let mcx = estate.es_query_cxt;
@@ -1224,7 +1255,7 @@ fn append_arm<'mcx>(
     a: &mut PgBox<'mcx, AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let AppendNode { state, substates } = &mut **a;
+    let AppendNode { state, substates, subplan_origin: _ } = &mut **a;
     ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
 }
 
@@ -1944,7 +1975,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     MemoizeNode<'_> { state, outer },
     SortNode<'_> { state, outer; outer_desc },
     IncrementalSortNode<'_> { state, outer },
-    AppendNode<'_> { state, substates },
+    AppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
     LockRowsNode<'_> { state, outer, epq },

@@ -972,6 +972,16 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "value", d.value);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::PartitionCmd>() {
+        out.push_str("{PARTITIONCMD");
+        out.push_str(" :name ");
+        match c.name {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "bound", c.bound);
+        bool_field(out, "concurrent", c.concurrent);
+        out.push('}');
     } else if let Some(rf) = n.as_variant::<types_nodes::RangeFunction>() {
         out.push_str("{RANGEFUNCTION");
         bool_field(out, "lateral", rf.lateral);

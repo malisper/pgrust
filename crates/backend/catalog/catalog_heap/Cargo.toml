@@ -26,6 +26,7 @@ pg_type = { path = "../pg_type" }
 pg_depend = { path = "../pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+partcache = { path = "../../utils/cache/partcache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_inherits = { path = "../pg_inherits" }

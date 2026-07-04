@@ -105,6 +105,10 @@ pub struct PlannerRun<'mcx> {
     pub rowmarks: PgVec<'mcx, PlanRowMark>,
     /// C qp_extra.gset_data / grouping_planner's gset_data local.
     pub gset_data: Option<GroupingSetsData<'mcx>>,
+    /// C root->partPruneInfos, run-global (append-only across levels; the
+    /// Append's part_prune_index indexes here until setrefs registers the
+    /// entry into glob.part_prune_infos).
+    pub pending_part_prune_infos: NodeList<'mcx>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -119,7 +123,8 @@ mcx::forget_safe_struct!(
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
-        minmax_subroots, active_windows, qp_setop, rowmarks, gset_data },
+        minmax_subroots, active_windows, qp_setop, rowmarks, gset_data,
+        pending_part_prune_infos },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -139,6 +144,7 @@ impl<'mcx> PlannerRun<'mcx> {
             qp_setop: None,
             rowmarks: PgVec::new_in(mcx),
             gset_data: None,
+            pending_part_prune_infos: NodeList::nil(),
         }
     }
 

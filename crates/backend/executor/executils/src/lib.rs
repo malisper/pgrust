@@ -39,7 +39,6 @@ macro_rules! p3 {
 }
 // Unconstructible placeholders: provably None until the owning unit lands.
 p3!(
-    PartPruneP3,
     ModifyTableP3,
 );
 
@@ -370,7 +369,9 @@ pub struct EStateData<'mcx> {
     pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
     pub es_rteperminfos: Option<&'mcx NodeList<'mcx>>,
     pub es_plannedstmt: Option<&'mcx PlannedStmt<'mcx>>,
-    pub es_part_prune_infos: Option<PartPruneP3>,
+    /// Initial-pruning results, one entry per PlannedStmt.partPruneInfos
+    /// element (None = no initial pruning ran for that pruneinfo).
+    pub es_part_prune_results: PgVec<'mcx, Option<Bitmapset<'mcx>>>,
     pub es_unpruned_relids: Bitmapset<'mcx>,
     pub es_junkFilter: Option<JunkFilter<'mcx>>,
     pub es_output_cid: CommandId,
@@ -458,7 +459,7 @@ impl<'mcx> EStateData<'mcx> {
             es_rowmarks: PgVec::new_in(mcx),
             es_rteperminfos: None,
             es_plannedstmt: None,
-            es_part_prune_infos: None,
+            es_part_prune_results: PgVec::new_in(mcx),
             es_unpruned_relids: Bitmapset::empty(),
             es_junkFilter: None,
             es_output_cid: 0,
@@ -863,7 +864,6 @@ mcx::forget_safe_nodrop!(
 // UnregisterSnapshot in standard_executor_end; owners_released() asserts it);
 // [2] no-drop foreign types without ForgetSafe impls, const-proven here.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
-const _: () = assert!(!core::mem::needs_drop::<Option<PartPruneP3>>());
 const _: () = assert!(!core::mem::needs_drop::<Option<SubplanInitHook>>());
 const _: () = assert!(!core::mem::needs_drop::<Option<SubplanEvalHook>>());
 const _: () = assert!(!core::mem::needs_drop::<(core::ptr::NonNull<()>, unsafe fn(core::ptr::NonNull<()>))>());
@@ -892,7 +892,7 @@ mcx::forget_safe_struct!(
         es_rowmarks;
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_aux_contexts,
-        es_direction, es_part_prune_infos,
+        es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,

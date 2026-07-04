@@ -4,7 +4,7 @@
 // are loud.
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{AttrNumber, InvalidOid, Oid, BTREE_AM_OID, RELATION_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, BTREE_AM_OID, HASH_AM_OID, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERROR};
 use types_nodes::rawnodes::{PartitionElem, PartitionSpec, PartitionStrategy};
 use types_rel::{Relation, RowExclusiveLock};
@@ -27,9 +27,6 @@ pub(crate) fn compute_partition_key<'mcx>(
     partspec: &PartitionSpec<'mcx>,
 ) -> PgResult<PartKeyInfo<'mcx>> {
     let strategy = partspec.strategy;
-    if strategy == PartitionStrategy::Hash {
-        unported("HASH partitioned tables");
-    }
     if strategy == PartitionStrategy::List && partspec.partParams.len() != 1 {
         return Err(Box::new(
             PgError::new(
@@ -104,21 +101,26 @@ pub(crate) fn compute_partition_key<'mcx>(
         // path carries att's own collation; COLLATE overrides are loud above.
         info.partcollation.push(attcollation);
 
+        let (am_oid, am_name) = if strategy == PartitionStrategy::Hash {
+            (HASH_AM_OID, "hash")
+        } else {
+            (BTREE_AM_OID, "btree")
+        };
         let opclass = if pelem.opclass.is_nil() {
-            let oc = indexcmds_seams::get_default_opclass::call(atttype, BTREE_AM_OID)?;
+            let oc = indexcmds_seams::get_default_opclass::call(atttype, am_oid)?;
             if oc == InvalidOid {
                 return Err(Box::new(
                     PgError::new(
                         ERROR,
                         format!(
-                            "data type {} has no default operator class for access method \"btree\"",
+                            "data type {} has no default operator class for access method \"{am_name}\"",
                             format_type::format_type_be(atttype)?
                         ),
                     )
-                    .with_hint(
-                        "You must specify a btree operator class or define a default btree \
-                         operator class for the data type.",
-                    )
+                    .with_hint(format!(
+                        "You must specify a {am_name} operator class or define a default \
+                         {am_name} operator class for the data type."
+                    ))
                     .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
                 ));
             }
@@ -203,7 +205,7 @@ fn oid_scankey(attno: types_core::AttrNumber, oid: Oid) -> types_scan::scankey::
 
 // transformPartitionBound/transformPartitionBoundValue (C: parse_utilcmd.c),
 // hosted here because parse_expr -> parse_utilcmd would cycle (constraints.rs
-// precedent). DEFAULT/HASH bounds are loud.
+// precedent).
 pub(crate) fn transformPartitionBound<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut parser_small1::ParseState<'_, 'mcx>,
@@ -218,12 +220,16 @@ pub(crate) fn transformPartitionBound<'mcx>(
         .expect("transformPartitionBound on non-PartitionBoundSpec");
     let key = partcache::RelationGetPartitionKey(parent)?;
     let strategy = key.strategy as u8;
-    if spec.is_default {
-        unported("DEFAULT partitions");
-    }
     let mut result = Node::build::<PartitionBoundSpec>(mcx)?;
     result.strategy = strategy;
     result.location = spec.location;
+    if spec.is_default {
+        if strategy == b'h' {
+            return Err(hash_default_partition());
+        }
+        result.is_default = true;
+        return Ok(result.seal());
+    }
 
     let colinfo = |i: usize| -> PgResult<(String, Oid, i32, Oid)> {
         let attno = key.partattrs[i];
@@ -337,7 +343,24 @@ pub(crate) fn transformPartitionBound<'mcx>(
             result.lowerdatums = lower_out;
             result.upperdatums = upper_out;
         }
-        b'h' => unported("HASH partition bounds"),
+        b'h' => {
+            if spec.strategy != b'h' {
+                return Err(invalid_bound_spec("hash"));
+            }
+            if spec.modulus <= 0 {
+                return Err(hash_bound_error(
+                    "modulus for hash partition must be an integer value greater than zero",
+                ));
+            }
+            debug_assert!(spec.remainder >= 0);
+            if spec.remainder >= spec.modulus {
+                return Err(hash_bound_error(
+                    "remainder for hash partition must be less than modulus",
+                ));
+            }
+            result.modulus = spec.modulus;
+            result.remainder = spec.remainder;
+        }
         other => panic!("unexpected partition strategy: {}", other as char),
     }
     Ok(result.seal())
@@ -402,6 +425,27 @@ fn transformPartitionBoundValue<'mcx>(
 fn invalid_bound_spec(kind: &str) -> Box<PgError> {
     Box::new(
         PgError::new(ERROR, format!("invalid bound specification for a {kind} partition"))
+            .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn hash_default_partition() -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            "a hash-partitioned table may not have a default partition".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn hash_bound_error(msg: &'static str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, msg.to_string())
             .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
     )
 }

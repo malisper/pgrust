@@ -556,7 +556,7 @@ fn set_append_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> 
     add_paths_to_append_rel(run, rel, &live_childrels)
 }
 
-fn add_paths_to_append_rel(
+pub(crate) fn add_paths_to_append_rel(
     run: &mut PlannerRun<'_>,
     rel: RelId,
     live_childrels: &[RelId],

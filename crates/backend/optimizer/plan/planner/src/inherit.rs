@@ -88,10 +88,8 @@ fn expand_inherited_rtentry<'mcx>(
     oldrelation.close(types_rel::NoLock)
 }
 
-// expand_partitioned_rtentry (inherit.c); prune_append_rel_partitions is loud
-// whenever quals exist (C includes all partitions only when no pruning steps
-// can be generated — quals on the parent may prune, so the divergence stays
-// loud rather than silent).
+// expand_partitioned_rtentry (inherit.c): plan-time pruning picks the live
+// partitions; only those are locked and expanded.
 fn expand_partitioned_rtentry<'mcx>(
     run: &mut PlannerRun<'mcx>,
     relinfo: RelId,
@@ -101,20 +99,30 @@ fn expand_partitioned_rtentry<'mcx>(
 ) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.rte(parent_rti).inh);
-    assert!(
-        run.root.rel(relinfo).baserestrictinfo.is_empty(),
-        "prune_append_rel_partitions (partprune.c): partition pruning lane"
-    );
     let pdesc = partdesc::RelationGetPartitionDesc(parentrel)?;
-    if pdesc.oids.is_empty() {
-        return Ok(());
-    }
+    let live_parts = crate::partprune::prune_append_rel_partitions(run, relinfo)?;
     let oids = {
         let mut v: PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, pdesc.oids.len())?;
         v.extend(pdesc.oids.iter().copied());
         v
     };
-    for &child_oid in oids.iter() {
+    {
+        let r = run.root.rel_mut(relinfo);
+        r.part_rels = mcx::vec_from_elem_in(mcx, None, oids.len());
+        r.all_partrels = None;
+    }
+    {
+        let mut lp: types_pathnodes::Relids<'mcx> = None;
+        let mut m = live_parts.next_member(-1);
+        while m >= 0 {
+            lp = crate::relnode::relids_add_member(mcx, &lp, m as u32);
+            m = live_parts.next_member(m);
+        }
+        run.root.rel_mut(relinfo).live_parts = lp;
+    }
+    let mut i = live_parts.next_member(-1);
+    while i >= 0 {
+        let child_oid = oids[i as usize];
         let childrel = table::table_open(mcx, child_oid, lockmode)?;
         assert!(
             !(childrel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
@@ -123,10 +131,18 @@ fn expand_partitioned_rtentry<'mcx>(
         );
         let child_rti = expand_single_inheritance_child(run, parent_rti, parentrel, &childrel)?;
         let childrelinfo = crate::relnode::build_simple_rel_child(run, child_rti, relinfo)?;
+        run.root.rel_mut(relinfo).part_rels[i as usize] = Some(childrelinfo);
+        {
+            let child_relids = crate::relnode::relids_copy(mcx, &run.root.rel(childrelinfo).relids);
+            let cur = run.root.rel_mut(relinfo).all_partrels.take();
+            run.root.rel_mut(relinfo).all_partrels =
+                crate::relnode::relids_union(mcx, &cur, &child_relids);
+        }
         if childrel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
             expand_partitioned_rtentry(run, childrelinfo, child_rti as usize, &childrel, lockmode)?;
         }
         childrel.close(types_rel::NoLock)?;
+        i = live_parts.next_member(i);
     }
     Ok(())
 }

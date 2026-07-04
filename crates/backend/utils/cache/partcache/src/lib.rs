@@ -23,6 +23,7 @@ pub const PARTITION_MAX_KEYS: usize = 32;
 const PARTRELID: i32 = cache_syscache::cacheinfo::PARTRELID;
 const CLAOID: i32 = cache_syscache::cacheinfo::CLAOID;
 const BTORDER_PROC: i16 = 1;
+const HASHEXTENDED_PROC: i16 = 2;
 
 const Anum_pg_partitioned_table_partstrat: i32 = 2;
 const Anum_pg_partitioned_table_partnatts: i32 = 3;
@@ -212,12 +213,14 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     }
     cache_syscache::ReleaseSysCache(tuple);
 
-    if strategy != PARTITION_STRATEGY_LIST && strategy != PARTITION_STRATEGY_RANGE {
-        if strategy == PARTITION_STRATEGY_HASH {
-            panic!("partcache: HASH partition keys unported (relation {relid})");
-        }
+    if strategy != PARTITION_STRATEGY_LIST
+        && strategy != PARTITION_STRATEGY_RANGE
+        && strategy != PARTITION_STRATEGY_HASH
+    {
         panic!("invalid partition strategy \"{}\"", strategy as u8 as char);
     }
+    let procnum =
+        if strategy == PARTITION_STRATEGY_HASH { HASHEXTENDED_PROC } else { BTORDER_PROC };
 
     let n = partnatts as usize;
     let mut key = PartitionKeyData {
@@ -242,7 +245,14 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             cache_syscache::SysCacheKey::Value(Datum::from_oid(partclass[i])),
         )?
         .unwrap_or_else(|| panic!("cache lookup failed for opclass {}", partclass[i]));
-        // pg_opclass: opcfamily attnum 6, opcintype attnum 7.
+        // pg_opclass: opcname attnum 3, opcfamily attnum 6, opcintype attnum 7.
+        let opcname_d = cache_syscache::SysCacheGetAttrNotNull(CLAOID, &opclasstup, 3)?;
+        // SAFETY: NAME attribute datum points at a NUL-terminated NameData.
+        let opcname = unsafe {
+            core::ffi::CStr::from_ptr(opcname_d.as_usize() as *const core::ffi::c_char)
+        }
+        .to_string_lossy()
+        .into_owned();
         let opcfamily =
             cache_syscache::SysCacheGetAttrNotNull(CLAOID, &opclasstup, 6)?.as_oid();
         let opcintype =
@@ -251,9 +261,9 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         key.partopfamily.push(opcfamily);
         key.partopcintype.push(opcintype);
 
-        let funcid = lsyscache::get_opfamily_proc(opcfamily, opcintype, opcintype, BTORDER_PROC)?;
+        let funcid = lsyscache::get_opfamily_proc(opcfamily, opcintype, opcintype, procnum)?;
         if funcid == InvalidOid {
-            return Err(missing_support_function(partclass[i]));
+            return Err(missing_support_function(&opcname, strategy, procnum, opcintype));
         }
         key.partsupfunc.push(RefCell::new(
             fmgr_seams::fmgr_info::call(funcid)
@@ -279,12 +289,21 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
 
 #[cold]
 #[inline(never)]
-fn missing_support_function(opclass: Oid) -> Box<PgError> {
+fn missing_support_function(
+    opcname: &str,
+    strategy: i8,
+    procnum: i16,
+    opcintype: Oid,
+) -> Box<PgError> {
+    let am = if strategy == PARTITION_STRATEGY_HASH { "hash" } else { "btree" };
+    let tn = format_type::format_type_be(opcintype)
+        .unwrap_or_else(|_| format!("type {opcintype}"));
     Box::new(
         PgError::new(
             ERROR,
             format!(
-                "operator class {opclass} of access method btree is missing support function 1"
+                "operator class \"{opcname}\" of access method {am} is missing support \
+                 function {procnum} for type {tn}"
             ),
         )
         .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),

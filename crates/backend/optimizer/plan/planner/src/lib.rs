@@ -20,6 +20,7 @@ pub mod pathkeys;
 pub mod planagg;
 pub mod pathnode;
 pub mod plancat;
+pub mod partprune;
 pub mod like_support;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;

@@ -261,6 +261,29 @@ pub(crate) fn query_desc_instrument_seam(
     })
 }
 
+pub(crate) fn query_desc_prune_result_seam(
+    h: QueryDescHandle,
+    part_prune_index: i32,
+) -> Option<Vec<i32>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let entry = d
+                .estate
+                .es_part_prune_results
+                .get(usize::try_from(part_prune_index).ok()?)?
+                .as_ref()?;
+            let mut v = Vec::with_capacity(entry.num_members() as usize);
+            let mut i = entry.next_member(-1);
+            while i >= 0 {
+                v.push(i);
+                i = entry.next_member(i);
+            }
+            Some(v)
+        })
+    })
+}
+
 pub(crate) fn query_desc_agg_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

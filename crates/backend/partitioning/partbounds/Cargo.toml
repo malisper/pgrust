@@ -15,3 +15,14 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 partcache = { path = "../../utils/cache/partcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+readfuncs = { path = "../../nodes/readfuncs" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+execexpr = { path = "../../executor/execexpr" }
+table = { path = "../../access/table/table" }
+tableam = { path = "../../access/table/tableam" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+pg_inherits = { path = "../../catalog/pg_inherits" }

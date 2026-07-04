@@ -59,7 +59,7 @@ pub fn ExplainPrintPlan<'mcx>(
     es.rtable = Some(&pstmt.rtable);
     let root = pstmt.planTree.expect("ExplainPrintPlan: PlannedStmt without planTree");
     let mut rels_used = Bitmapset::empty();
-    ExplainPreScanNode(mcx, root, &pstmt.subplans, &mut rels_used)?;
+    ExplainPreScanNode(mcx, root, &pstmt.subplans, es.qd, &mut rels_used)?;
     es.rtable_names = select_rtable_names_for_explain(mcx, &pstmt.rtable, &rels_used)?;
     // deparse_context_for_plan_tree / printed_subplans: every consumer
     // (Var/subplan deparse) is loud below.
@@ -91,6 +91,7 @@ fn ExplainPreScanNode<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     subplans: &NodeList<'mcx>,
+    qd: types_portal::QueryDescHandle,
     rels_used: &mut Bitmapset<'mcx>,
 ) -> PgResult<()> {
     match node.node_tag() {
@@ -117,24 +118,46 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_SubqueryScan => {
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
-            ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, rels_used)?;
+            ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, qd, rels_used)?;
         }
         NodeTag::T_Append => {
+            // C walks the PLANSTATE tree: initially-pruned subplans have no
+            // state and never reach rels_used (their RTEs get no name).
             let a = node.as_append().unwrap();
             rels_used.add_members(mcx, &a.apprelids)?;
-            for child in &a.appendplans {
-                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+            let valid: Option<Vec<i32>> = if a.part_prune_index >= 0 && !qd.is_null() {
+                execmain_seams::query_desc_prune_result::call(qd, a.part_prune_index)
+            } else {
+                None
+            };
+            match valid {
+                Some(v) => {
+                    for &i in &v {
+                        ExplainPreScanNode(
+                            mcx,
+                            a.appendplans.nth(i as usize),
+                            subplans,
+                            qd,
+                            rels_used,
+                        )?;
+                    }
+                }
+                None => {
+                    for child in &a.appendplans {
+                        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+                    }
+                }
             }
         }
         // planstate_tree_walker's special-member leg for bitmap combiners.
         NodeTag::T_BitmapAnd => {
             for child in &node.as_bitmap_and().unwrap().bitmapplans {
-                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+                ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
             }
         }
         NodeTag::T_BitmapOr => {
             for child in &node.as_bitmap_or().unwrap().bitmapplans {
-                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+                ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
             }
         }
         _ => {}
@@ -147,17 +170,17 @@ fn ExplainPreScanNode<'mcx>(
     for sp_node in plan.initPlan.iter() {
         let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
         let child = subplans.nth(sp.plan_id as usize - 1);
-        ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
     }
     for sp in collect_node_subplans(mcx, node)?.iter() {
         let child = subplans.nth(sp.plan_id as usize - 1);
-        ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
     }
     if let Some(l) = plan.lefttree {
-        ExplainPreScanNode(mcx, l, subplans, rels_used)?;
+        ExplainPreScanNode(mcx, l, subplans, qd, rels_used)?;
     }
     if let Some(r) = plan.righttree {
-        ExplainPreScanNode(mcx, r, subplans, rels_used)?;
+        ExplainPreScanNode(mcx, r, subplans, qd, rels_used)?;
     }
     Ok(())
 }
@@ -722,6 +745,21 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
+    // ExplainMissingMembers: subplans removed by initial runtime pruning.
+    let append_valid: Option<Vec<i32>> = match node.as_append() {
+        Some(a) if a.part_prune_index >= 0 && !es.qd.is_null() => {
+            execmain_seams::query_desc_prune_result::call(es.qd, a.part_prune_index)
+        }
+        _ => None,
+    };
+    if let Some(a) = node.as_append() {
+        let nchildren = a.appendplans.len() as i64;
+        let nplans = append_valid.as_ref().map_or(nchildren, |v| v.len() as i64);
+        if nplans < nchildren || es.format != EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Subplans Removed", None, nchildren - nplans, es);
+        }
+    }
+
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
     // ExplainSubPlans over initPlan.
     for sp_node in plan.initPlan.iter() {
@@ -744,8 +782,17 @@ pub fn ExplainNode<'mcx>(
         ExplainNode(r, Some("Inner"), None, Some(&pushed), es)?;
     }
     if let Some(a) = node.as_append() {
-        for child in &a.appendplans {
-            ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+        match &append_valid {
+            Some(valid) => {
+                for &i in valid {
+                    ExplainNode(a.appendplans.nth(i as usize), Some("Member"), None, Some(&pushed), es)?;
+                }
+            }
+            None => {
+                for child in &a.appendplans {
+                    ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+                }
+            }
         }
     }
     // ExplainMemberNodes over the bitmap combiners' member lists.
