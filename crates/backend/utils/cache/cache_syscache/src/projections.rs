@@ -49,6 +49,7 @@ const ANUM_PG_SEQUENCE_SEQCYCLE: i32 = 8;
 const ANUM_PG_ATTRIBUTE_ATTRELID: i32 = 1;
 const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
 const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
+const ANUM_PG_INDEX_INDCLASS: i32 = 18;
 const ANUM_PG_INDEX_INDNATTS: i32 = 3;
 const ANUM_PG_INDEX_INDNKEYATTS: i32 = 4;
 const ANUM_PG_INDEX_INDISCLUSTERED: i32 = 10;
@@ -253,6 +254,28 @@ fn lookup_pg_index_ls_shape(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn pg_index_indclass_element(index_oid: Oid, index: i32) -> PgResult<Option<Oid>> {
+    let Some(tuple) =
+        SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(index_oid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let d = getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDCLASS);
+    // SAFETY: not-null plain-storage oidvector column of the held tuple
+    // (24-byte header, values in place); the seam's precondition bounds
+    // `index` under dim1.
+    let elem = unsafe {
+        let p = d.as_usize() as *const u8;
+        let dim1 = *(p.add(16) as *const i32);
+        debug_assert!(index >= 0 && index < dim1);
+        *(p.add(24) as *const Oid).add(index as usize)
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(elem))
 }
 
 fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid> {
@@ -2446,6 +2469,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);
     syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);
     syscache_seams::lookup_pg_index_ls_shape::set(lookup_pg_index_ls_shape);
+    syscache_seams::pg_index_indclass_element::set(pg_index_indclass_element);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
