@@ -1,16 +1,29 @@
-//! geo_ops.c, the box/point subset the gist box_ops/point_ops lanes need:
-//! point/box I/O, box comparison operators, point comparison operators,
-//! on_pb, point_dt/pg_hypot. Everything else in geo_ops.c stays unported.
+//! geo_ops.c: the 2-D geometric types (point/lseg/line/box/path/polygon/circle)
+//! and their operators. PATH and POLYGON are varlena; the fixed-size types are
+//! by-ref native struct images.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod boxes;
 pub mod builtins;
+pub mod circle;
+pub mod io;
+pub mod line;
+pub mod lseg;
+pub mod path;
+pub mod point;
+pub mod poly;
+pub mod proximity;
+#[cfg(test)]
+mod tests_full;
 
-use ::adt_float::{float8_mi, float8_min, float8_max};
-use ::types_core::geo::{Point, BOX};
+use ::adt_float::{float8_max, float8_mi, float8_min, float8_mul};
+use ::types_core::geo::{Point, BOX, PATH_HEADER_SIZE, POLYGON_HEADER_SIZE};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION};
 
 pub const EPSILON: f64 = 1.0E-06;
+
+pub(crate) const M_PI: f64 = core::f64::consts::PI;
 
 #[inline]
 pub fn FPzero(a: f64) -> bool {
@@ -100,139 +113,24 @@ pub fn point_dt(pt1: &Point, pt2: &Point) -> PgResult<f64> {
 }
 
 #[cold]
-fn invalid_input(type_name: &str, orig: &str) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!(
-            "invalid input syntax for type {type_name}: \"{orig}\""
-        ))
-        .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
-    )
+pub(crate) fn invalid_input(type_name: &str, orig: &str) -> PgError {
+    PgError::error(format!(
+        "invalid input syntax for type {type_name}: \"{orig}\""
+    ))
+    .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
 
-fn skip_space(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() && (s[i] as char).is_ascii_whitespace() {
-        i += 1;
-    }
-    i
-}
-
-// single_decode via float8in_internal; returns (value, next index).
-fn single_decode(s: &str, i: usize, type_name: &str, orig: &str) -> PgResult<(f64, usize)> {
-    let mut consumed = 0usize;
-    let v = ::adt_float::float8in_internal(&s[i..], Some(&mut consumed), type_name, orig, None)?;
-    Ok((v, i + consumed))
-}
-
-// pair_decode; returns (x, y, next index).
-fn pair_decode(
-    s: &str,
-    mut i: usize,
-    type_name: &str,
-    orig: &str,
-    stop_at: bool,
-) -> PgResult<(f64, f64, usize)> {
-    let b = s.as_bytes();
-    i = skip_space(b, i);
-    let has_delim = i < b.len() && b[i] == b'(';
-    if has_delim {
-        i += 1;
-    }
-    let (x, mut i) = single_decode(s, i, type_name, orig)?;
-    if i >= b.len() || b[i] != b',' {
-        return Err(invalid_input(type_name, orig));
-    }
-    i += 1;
-    let (y, mut i) = {
-        let (y, ni) = single_decode(s, i, type_name, orig)?;
-        (y, ni)
-    };
-    if has_delim {
-        if i >= b.len() || b[i] != b')' {
-            return Err(invalid_input(type_name, orig));
-        }
-        i += 1;
-        i = skip_space(b, i);
-    }
-    if !stop_at && i != b.len() {
-        return Err(invalid_input(type_name, orig));
-    }
-    Ok((x, y, i))
-}
-
-// path_decode for closed types (opentype=false), npts points.
-fn path_decode(
-    s: &str,
-    npts: usize,
-    type_name: &str,
-    orig: &str,
-) -> PgResult<Vec<Point>> {
-    let b = s.as_bytes();
-    let mut i = skip_space(b, 0);
-    let mut depth = 0usize;
-    if i < b.len() && b[i] == b'[' {
-        // no open delimiter allowed for box
-        return Err(invalid_input(type_name, orig));
-    }
-    if i < b.len() && b[i] == b'(' {
-        let cp = skip_space(b, i + 1);
-        if cp < b.len() && b[cp] == b'(' {
-            depth += 1;
-            i = cp;
-        } else if s.rfind('(') == Some(i) {
-            depth += 1;
-            i = cp;
-        }
-    }
-
-    let mut pts = Vec::with_capacity(npts);
-    for _ in 0..npts {
-        let (x, y, ni) = pair_decode(s, i, type_name, orig, true)?;
-        i = ni;
-        if i < b.len() && b[i] == b',' {
-            i += 1;
-        }
-        pts.push(Point { x, y });
-    }
-
-    while depth > 0 {
-        if i < b.len() && b[i] == b')' {
-            depth -= 1;
-            i += 1;
-            i = skip_space(b, i);
-        } else {
-            return Err(invalid_input(type_name, orig));
-        }
-    }
-
-    if i != b.len() {
-        return Err(invalid_input(type_name, orig));
-    }
-    Ok(pts)
-}
-
-/// box_in core: parse + reorder corners.
+/// box_in core.
 pub fn box_in(s: &str) -> PgResult<BOX> {
-    let pts = path_decode(s, 2, "box", s)?;
-    let mut bx = BOX {
-        high: pts[0],
-        low: pts[1],
-    };
-    if bx.high.x < bx.low.x {
-        core::mem::swap(&mut bx.high.x, &mut bx.low.x);
-    }
-    if bx.high.y < bx.low.y {
-        core::mem::swap(&mut bx.high.y, &mut bx.low.y);
-    }
-    Ok(bx)
+    io::box_in(s, None)
 }
 
 /// point_in core.
 pub fn point_in(s: &str) -> PgResult<Point> {
-    let (x, y, _) = pair_decode(s, 0, "point", s, false)?;
-    Ok(Point { x, y })
+    io::point_in(s, None)
 }
 
-fn pair_encode(x: f64, y: f64, out: &mut Vec<u8>) {
+pub(crate) fn pair_encode(x: f64, y: f64, out: &mut Vec<u8>) {
     let mut buf = [0u8; 64];
     let n = ::adt_float::float8out_internal(x, &mut buf);
     out.extend_from_slice(&buf[..n]);
@@ -283,6 +181,248 @@ pub fn rt_box_union(a: &BOX, b: &BOX) -> BOX {
     }
 }
 
+// Indexed point access shared by owned slices and varlena image views.
+pub trait Pts {
+    fn n(&self) -> usize;
+    fn pt(&self, i: usize) -> Point;
+}
+
+impl Pts for &[Point] {
+    #[inline]
+    fn n(&self) -> usize {
+        self.len()
+    }
+    #[inline]
+    fn pt(&self, i: usize) -> Point {
+        self[i]
+    }
+}
+
+pub const POINT_SIZE: usize = 16;
+
+/// Borrowed view over a PATH varlena payload (bytes after the 4-byte header).
+#[derive(Clone, Copy)]
+pub struct PathRef<'a> {
+    pub closed: bool,
+    npts: usize,
+    pts: &'a [u8],
+}
+
+impl<'a> PathRef<'a> {
+    pub fn from_payload(data: &'a [u8]) -> PathRef<'a> {
+        let npts = i32::from_ne_bytes(data[0..4].try_into().unwrap()) as usize;
+        let closed = i32::from_ne_bytes(data[4..8].try_into().unwrap()) != 0;
+        let base = PATH_HEADER_SIZE - 4;
+        PathRef {
+            closed,
+            npts,
+            pts: &data[base..base + npts * POINT_SIZE],
+        }
+    }
+}
+
+impl Pts for PathRef<'_> {
+    #[inline]
+    fn n(&self) -> usize {
+        self.npts
+    }
+    #[inline]
+    fn pt(&self, i: usize) -> Point {
+        Point::from_datum_bytes(&self.pts[i * POINT_SIZE..i * POINT_SIZE + POINT_SIZE])
+    }
+}
+
+/// Borrowed view over a POLYGON varlena payload (bytes after the 4-byte header).
+#[derive(Clone, Copy)]
+pub struct PolyRef<'a> {
+    pub boundbox: BOX,
+    npts: usize,
+    pts: &'a [u8],
+}
+
+impl<'a> PolyRef<'a> {
+    pub fn from_payload(data: &'a [u8]) -> PolyRef<'a> {
+        let npts = i32::from_ne_bytes(data[0..4].try_into().unwrap()) as usize;
+        let boundbox = BOX::from_datum_bytes(&data[4..36]);
+        let base = POLYGON_HEADER_SIZE - 4;
+        PolyRef {
+            boundbox,
+            npts,
+            pts: &data[base..base + npts * POINT_SIZE],
+        }
+    }
+}
+
+impl Pts for PolyRef<'_> {
+    #[inline]
+    fn n(&self) -> usize {
+        self.npts
+    }
+    #[inline]
+    fn pt(&self, i: usize) -> Point {
+        Point::from_datum_bytes(&self.pts[i * POINT_SIZE..i * POINT_SIZE + POINT_SIZE])
+    }
+}
+
+/// make_bound_box over any point sequence.
+pub fn bound_box(pts: &impl Pts) -> BOX {
+    debug_assert!(pts.n() != 0);
+    let p0 = pts.pt(0);
+    let (mut x1, mut x2, mut y1, mut y2) = (p0.x, p0.x, p0.y, p0.y);
+    for i in 1..pts.n() {
+        let p = pts.pt(i);
+        if ::adt_float::float8_lt(p.x, x1) {
+            x1 = p.x;
+        }
+        if ::adt_float::float8_gt(p.x, x2) {
+            x2 = p.x;
+        }
+        if ::adt_float::float8_lt(p.y, y1) {
+            y1 = p.y;
+        }
+        if ::adt_float::float8_gt(p.y, y2) {
+            y2 = p.y;
+        }
+    }
+    BOX {
+        high: Point { x: x2, y: y2 },
+        low: Point { x: x1, y: y1 },
+    }
+}
+
+const POINT_ON_POLYGON: i32 = i32::MAX;
+
+pub fn point_inside(p: &Point, plist: &impl Pts) -> PgResult<i32> {
+    debug_assert!(plist.n() != 0);
+
+    let p0 = plist.pt(0);
+    let x0 = float8_mi(p0.x, p.x)?;
+    let y0 = float8_mi(p0.y, p.y)?;
+
+    let mut prev_x = x0;
+    let mut prev_y = y0;
+    let mut total_cross = 0i32;
+
+    for i in 1..plist.n() {
+        let pt = plist.pt(i);
+        let x = float8_mi(pt.x, p.x)?;
+        let y = float8_mi(pt.y, p.y)?;
+
+        let cross = lseg_crossing(x, y, prev_x, prev_y)?;
+        if cross == POINT_ON_POLYGON {
+            return Ok(2);
+        }
+        total_cross += cross;
+
+        prev_x = x;
+        prev_y = y;
+    }
+
+    let cross = lseg_crossing(x0, y0, prev_x, prev_y)?;
+    if cross == POINT_ON_POLYGON {
+        return Ok(2);
+    }
+    total_cross += cross;
+
+    Ok(if total_cross != 0 { 1 } else { 0 })
+}
+
+fn lseg_crossing(x: f64, y: f64, prev_x: f64, prev_y: f64) -> PgResult<i32> {
+    if FPzero(y) {
+        if FPzero(x) {
+            Ok(POINT_ON_POLYGON)
+        } else if FPgt(x, 0.0) {
+            if FPzero(prev_y) {
+                return Ok(if FPgt(prev_x, 0.0) {
+                    0
+                } else {
+                    POINT_ON_POLYGON
+                });
+            }
+            Ok(if FPlt(prev_y, 0.0) { 1 } else { -1 })
+        } else {
+            if FPzero(prev_y) {
+                return Ok(if FPlt(prev_x, 0.0) {
+                    0
+                } else {
+                    POINT_ON_POLYGON
+                });
+            }
+            Ok(0)
+        }
+    } else {
+        let y_sign = if FPgt(y, 0.0) { 1 } else { -1 };
+
+        if FPzero(prev_y) {
+            Ok(if FPlt(prev_x, 0.0) { 0 } else { y_sign })
+        } else if (y_sign < 0 && FPlt(prev_y, 0.0)) || (y_sign > 0 && FPgt(prev_y, 0.0)) {
+            Ok(0)
+        } else {
+            if FPge(x, 0.0) && FPgt(prev_x, 0.0) {
+                return Ok(2 * y_sign);
+            }
+            if FPlt(x, 0.0) && FPle(prev_x, 0.0) {
+                return Ok(0);
+            }
+
+            let z = float8_mi(
+                float8_mul(float8_mi(x, prev_x)?, y)?,
+                float8_mul(float8_mi(y, prev_y)?, x)?,
+            )?;
+            if FPzero(z) {
+                return Ok(POINT_ON_POLYGON);
+            }
+            if (y_sign < 0 && FPlt(z, 0.0)) || (y_sign > 0 && FPgt(z, 0.0)) {
+                return Ok(0);
+            }
+            Ok(2 * y_sign)
+        }
+    }
+}
+
+pub fn plist_same(p1: &impl Pts, p2: &impl Pts) -> bool {
+    let npts = p1.n();
+    debug_assert_eq!(npts, p2.n());
+
+    for i in 0..npts {
+        if point_eq_point(&p2.pt(i), &p1.pt(0)) {
+            let mut ii = 1usize;
+            let mut j = i + 1;
+            while ii < npts {
+                if j >= npts {
+                    j = 0;
+                }
+                if !point_eq_point(&p2.pt(j), &p1.pt(ii)) {
+                    break;
+                }
+                ii += 1;
+                j += 1;
+            }
+            if ii == npts {
+                return true;
+            }
+
+            ii = 1;
+            let mut jb: isize = i as isize - 1;
+            while ii < npts {
+                if jb < 0 {
+                    jb = npts as isize - 1;
+                }
+                if !point_eq_point(&p2.pt(jb as usize), &p1.pt(ii)) {
+                    break;
+                }
+                ii += 1;
+                jb -= 1;
+            }
+            if ii == npts {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +469,18 @@ mod tests {
         assert_eq!(pg_hypot(3.0, 4.0).unwrap(), 5.0);
         assert_eq!(pg_hypot(0.0, 0.0).unwrap(), 0.0);
         assert!(pg_hypot(f64::INFINITY, f64::NAN).unwrap().is_infinite());
+    }
+
+    #[test]
+    fn point_inside_square() {
+        let square: &[Point] = &[
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 2.0, y: 0.0 },
+            Point { x: 2.0, y: 2.0 },
+            Point { x: 0.0, y: 2.0 },
+        ];
+        assert_eq!(point_inside(&Point { x: 1.0, y: 1.0 }, &square).unwrap(), 1);
+        assert_eq!(point_inside(&Point { x: 0.0, y: 1.0 }, &square).unwrap(), 2);
+        assert_eq!(point_inside(&Point { x: 5.0, y: 5.0 }, &square).unwrap(), 0);
     }
 }
