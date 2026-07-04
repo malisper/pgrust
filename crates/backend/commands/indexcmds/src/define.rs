@@ -597,18 +597,13 @@ fn ResolveOpClass(
     Ok(opClassId)
 }
 
-// IndexSetParentIndex (indexcmds.c), attach direction only (parentOid valid);
-// the detach arm rides the DETACH PARTITION lane.
-fn IndexSetParentIndex<'mcx>(
+// IndexSetParentIndex (indexcmds.c).
+pub fn IndexSetParentIndex<'mcx>(
     mcx: Mcx<'mcx>,
     partitionIdx: &types_rel::Relation<'mcx>,
     parentOid: Oid,
 ) -> PgResult<()> {
     let partRelid = partitionIdx.rd_id;
-    assert!(
-        parentOid != InvalidOid,
-        "unported: indexcmds IndexSetParentIndex detach direction"
-    );
 
     const InheritsRelationId: Oid = 2611;
     const InheritsRelidSeqnoIndexId: Oid = 2680;
@@ -627,7 +622,12 @@ fn IndexSetParentIndex<'mcx>(
         &keys,
     )?;
     let fix_dependencies = match genam::systable_getnext(mcx, &mut scan)? {
-        None => true,
+        None => parentOid != InvalidOid,
+        Some(tup) if parentOid == InvalidOid => {
+            let tid = tup.t_self;
+            catalog_indexing::CatalogTupleDelete(&pg_inherits_rel, &tid)?;
+            true
+        }
         Some(tup) => {
             let mut isnull = false;
             // SAFETY: inhparent (2) is a fixed NOT NULL pg_inherits column.
@@ -644,34 +644,53 @@ fn IndexSetParentIndex<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     pg_inherits_rel.close(types_rel::RowExclusiveLock)?;
 
-    if fix_dependencies {
+    if fix_dependencies && parentOid != InvalidOid {
         pg_inherits::StoreSingleInheritance(mcx, partRelid, parentOid, 1)?;
     }
 
-    lmgr::LockRelationOid(parentOid, types_rel::ShareUpdateExclusiveLock)?;
-    tablecmds::SetRelationHasSubclass(mcx, parentOid, true)?;
+    if parentOid != InvalidOid {
+        lmgr::LockRelationOid(parentOid, types_rel::ShareUpdateExclusiveLock)?;
+        tablecmds::SetRelationHasSubclass(mcx, parentOid, true)?;
+    }
 
-    update_relispartition(mcx, partRelid, true)?;
+    update_relispartition(mcx, partRelid, parentOid != InvalidOid)?;
 
     if fix_dependencies {
-        let partIdx = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, partRelid);
-        let parentIdx = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, parentOid);
-        let partitionTbl = pg_depend::ObjectAddress::set(
-            RELATION_RELATION_ID,
-            partitionIdx.rd_index.as_ref().expect("rd_index").indrelid,
-        );
-        pg_depend::recordDependencyOn(
-            mcx,
-            &partIdx,
-            &parentIdx,
-            pg_depend::DependencyType::PartitionPri,
-        )?;
-        pg_depend::recordDependencyOn(
-            mcx,
-            &partIdx,
-            &partitionTbl,
-            pg_depend::DependencyType::PartitionSec,
-        )?;
+        if parentOid != InvalidOid {
+            let partIdx = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, partRelid);
+            let parentIdx = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, parentOid);
+            let partitionTbl = pg_depend::ObjectAddress::set(
+                RELATION_RELATION_ID,
+                partitionIdx.rd_index.as_ref().expect("rd_index").indrelid,
+            );
+            pg_depend::recordDependencyOn(
+                mcx,
+                &partIdx,
+                &parentIdx,
+                pg_depend::DependencyType::PartitionPri,
+            )?;
+            pg_depend::recordDependencyOn(
+                mcx,
+                &partIdx,
+                &partitionTbl,
+                pg_depend::DependencyType::PartitionSec,
+            )?;
+        } else {
+            pg_depend::deleteDependencyRecordsForClass(
+                mcx,
+                RELATION_RELATION_ID,
+                partRelid,
+                RELATION_RELATION_ID,
+                pg_depend::DependencyType::PartitionPri,
+            )?;
+            pg_depend::deleteDependencyRecordsForClass(
+                mcx,
+                RELATION_RELATION_ID,
+                partRelid,
+                RELATION_RELATION_ID,
+                pg_depend::DependencyType::PartitionSec,
+            )?;
+        }
         xact::CommandCounterIncrement()?;
     }
     Ok(())

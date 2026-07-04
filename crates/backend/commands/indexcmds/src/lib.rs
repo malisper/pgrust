@@ -31,6 +31,7 @@ pub fn init_seams() {
     indexcmds_seams::get_default_opclass::set(GetDefaultOpClass);
     indexcmds_seams::define_index_for_alter::set(define::define_index_for_alter);
     indexcmds_seams::define_index::set(define::DefineIndex);
+    indexcmds_seams::index_set_parent_index::set(define::IndexSetParentIndex);
 }
 
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {
