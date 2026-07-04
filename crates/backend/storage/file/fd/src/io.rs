@@ -228,6 +228,24 @@ pub fn FilePrefetch(file: File, offset: i64, amount: i64, wait_event_info: u32) 
     }
 }
 
+pub fn FileStartBufferRead(file: File, offset: i64, buffer: i32) -> PgResult<bool> {
+    let file = file.0;
+    debug_assert!(with_fd(|fd| vfd::FileIsValid(fd, file)));
+    if !aio_seams::uring_buf_read::is_installed() {
+        return Ok(false);
+    }
+    let raw = with_fd(|fd| -> PgResult<RawFd> {
+        if vfd::FileAccess(fd, file)? < 0 {
+            return Ok(-1);
+        }
+        vfd::FileAccessDio(fd, file)
+    })?;
+    if raw < 0 {
+        return Ok(false);
+    }
+    Ok(aio_seams::uring_buf_read::call(raw, offset, buffer))
+}
+
 pub fn FileWriteback(file: File, offset: i64, nbytes: i64, wait_event_info: u32) -> PgResult<()> {
     let file = file.0;
     debug_assert!(with_fd(|fd| vfd::FileIsValid(fd, file)));

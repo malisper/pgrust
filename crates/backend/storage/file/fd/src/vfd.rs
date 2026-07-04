@@ -44,6 +44,11 @@ const _: () = assert!(
 pub(crate) struct Vfd {
     // `fd` -- None is VFD_CLOSED; the OwnedFd is the RAII close guard.
     pub fd: Option<OwnedFd>,
+    // Companion O_DIRECT descriptor, used ONLY by uring pool-read SQEs; every
+    // other path (sync reads, writes, WAL, recovery) stays on the buffered fd
+    // so kernel readahead/caching there is untouched.
+    pub fd_dio: Option<OwnedFd>,
+    pub dio_failed: bool,
     pub fdstate: u16,
     pub resowner: ResourceOwner,
     pub next_free: i32,
@@ -59,6 +64,8 @@ impl Vfd {
     pub(crate) const fn zeroed() -> Self {
         Vfd {
             fd: None,
+            fd_dio: None,
+            dio_failed: false,
             fdstate: 0,
             resowner: ResourceOwner::NULL,
             next_free: 0,
@@ -207,9 +214,17 @@ pub(crate) fn Delete(fd: &mut FdState, file: i32) {
     fd.vfd_cache[more as usize].lru_less_recently = less;
 }
 
+pub(crate) fn CloseDioFd(fd: &mut FdState, file: i32) {
+    if let Some(dio) = fd.vfd_cache[file as usize].fd_dio.take() {
+        crate::pgaio_closing_fd_if_engine_present(dio.as_raw());
+        set_num_external_fds(num_external_fds() - 1);
+    }
+}
+
 pub(crate) fn LruDelete(fd: &mut FdState, file: i32) -> PgResult<()> {
     debug_assert!(file != 0);
 
+    CloseDioFd(fd, file);
     let handle = fd.vfd_cache[file as usize].fd.take().expect("LruDelete on closed VFD");
     crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
@@ -310,8 +325,10 @@ pub(crate) fn AllocateVfd(fd: &mut FdState) -> i32 {
 }
 
 pub(crate) fn FreeVfd(fd: &mut FdState, file: i32) {
+    CloseDioFd(fd, file);
     let head = fd.vfd_cache[0].next_free;
     let vfd_p = &mut fd.vfd_cache[file as usize];
+    vfd_p.dio_failed = false;
     vfd_p.file_name = None;
     vfd_p.fdstate = 0x0;
     vfd_p.next_free = head;
@@ -329,6 +346,44 @@ pub(crate) fn FileAccess(fd: &mut FdState, file: i32) -> PgResult<i32> {
         Insert(fd, file);
     }
     Ok(0)
+}
+
+// Resolves the companion O_DIRECT descriptor for uring pool-read SQEs (opened
+// lazily, cached on the VFD, closed wherever the primary fd closes). -1 means
+// the filesystem/platform refused O_DIRECT -- caller falls back to advisory
+// prefetch, never to buffered uring (refuted, docs/optimizations/
+// uring-buffer-reads.md).
+pub(crate) fn FileAccessDio(fd: &mut FdState, file: i32) -> PgResult<i32> {
+    if let Some(d) = &fd.vfd_cache[file as usize].fd_dio {
+        return Ok(d.as_raw());
+    }
+    if fd.vfd_cache[file as usize].dio_failed || PG_O_DIRECT == 0 {
+        return Ok(-1);
+    }
+    ReleaseLruFiles(fd)?;
+    let name = fd.vfd_cache[file as usize].file_name.clone().unwrap_or_default();
+    let flags = (fd.vfd_cache[file as usize].file_flags | PG_O_DIRECT)
+        & !(libc::O_CREAT | libc::O_TRUNC | libc::O_EXCL);
+    let mode = fd.vfd_cache[file as usize].file_mode;
+    let raw = BasicOpenFilePermInternal(fd, &name, flags, mode)?;
+    if raw < 0 {
+        let en = get_errno();
+        fd.vfd_cache[file as usize].dio_failed = true;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            let _ = ereport(LOG)
+                .errmsg_internal(format!(
+                    "O_DIRECT unavailable for \"{name}\" (errno {en}); io_uring prefetch falls back to posix_fadvise"
+                ))
+                .finish(loc("FileAccessDio"));
+        }
+        return Ok(-1);
+    }
+    // SAFETY: freshly opened descriptor, owned by the VFD's companion slot.
+    fd.vfd_cache[file as usize].fd_dio = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+    set_num_external_fds(num_external_fds() + 1);
+    Ok(raw)
 }
 
 pub(crate) fn FileIsNotOpen(fd: &FdState, file: i32) -> bool {

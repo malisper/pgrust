@@ -106,6 +106,7 @@ pub fn init_all() {
     opclasscmds::init_seams();
     catalog_objectaddress::init_seams();
     aio_config::init_seams();
+    aio_uring::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
     dsm_core::init_seams();

@@ -62,6 +62,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrstartreadv (smgr.c aio read path) narrowed to one block landing in
+    // shared buffer `buffer`; false = ring unavailable/full/file gone --
+    // caller backs the IO out and falls back to advisory prefetch.
+    pub fn smgr_start_buffer_read(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        buffer: i32,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     // smgrreadv(smgropen(rlocator), forknum, blocknum, 1 iov) (smgr.c);
     // buffer is exactly BLCKSZ.
     pub fn smgr_read(
