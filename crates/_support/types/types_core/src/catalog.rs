@@ -116,6 +116,8 @@ pub const INDEX_AM_HANDLEROID: Oid = 325;
 
 pub const TABLE_AM_HANDLEROID: Oid = 269;
 
+pub const COLLATION_RELATION_ID: Oid = 3456;
+
 // `ScanKeyInit` always stamps this into `sk_collation`.
 pub const C_COLLATION_OID: Oid = 950;
 pub const POSIX_COLLATION_OID: Oid = 951;

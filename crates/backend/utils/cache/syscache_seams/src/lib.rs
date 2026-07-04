@@ -956,9 +956,11 @@ pub struct PgCollationLocaleRow<'mcx> {
     pub collnamespace: Oid,
     pub collprovider: u8,
     pub collisdeterministic: bool,
+    pub collencoding: i32,
     pub collcollate: Option<PgString<'mcx>>,
     pub collctype: Option<PgString<'mcx>>,
     pub colllocale: Option<PgString<'mcx>>,
+    pub collicurules: Option<PgString<'mcx>>,
     pub collversion: Option<PgString<'mcx>>,
 }
 

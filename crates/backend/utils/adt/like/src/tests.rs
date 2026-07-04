@@ -329,9 +329,11 @@ fn install_collation_stub() {
                 collnamespace: 11,
                 collprovider: provider,
                 collisdeterministic: true,
+                collencoding: -1,
                 collcollate: collate.map(s).transpose()?,
                 collctype: ctype.map(s).transpose()?,
                 colllocale: locale.map(s).transpose()?,
+                collicurules: None,
                 collversion: None,
             }))
         });

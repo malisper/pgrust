@@ -31,9 +31,28 @@ pub fn defGetString<'r, 'mcx: 'r, 'a: 'r>(
         NodeTag::T_Float => Ok(arg.as_float().unwrap().fval),
         NodeTag::T_Boolean => Ok(if arg.as_boolean().unwrap().boolval { "true" } else { "false" }),
         NodeTag::T_String => Ok(arg.as_string().unwrap().sval),
-        t @ (NodeTag::T_TypeName | NodeTag::T_List | NodeTag::T_A_Star) => panic!(
-            "defGetString (define.c): {t:?} arg needs TypeNameToString/NameListToString \
-             (define lane)"
+        NodeTag::T_TypeName => {
+            let tn = arg.as_type_name().expect("TypeName");
+            if tn.names.is_nil() {
+                panic!("defGetString (define.c): precooked TypeName needs format_type_be");
+            }
+            let mut s = PgString::new_in(mcx);
+            for (i, n) in tn.names.iter().enumerate() {
+                if i > 0 {
+                    s.try_push_str(".")?;
+                }
+                s.try_push_str(n.as_string().expect("TypeName names").sval)?;
+            }
+            if tn.pct_type {
+                s.try_push_str("%TYPE")?;
+            }
+            for _ in tn.arrayBounds.iter() {
+                s.try_push_str("[]")?;
+            }
+            Ok(str_in(mcx, s.as_str())?)
+        }
+        t @ (NodeTag::T_List | NodeTag::T_A_Star) => panic!(
+            "defGetString (define.c): {t:?} arg needs NameListToString (define lane)"
         ),
         t => panic!("unrecognized node type: {t:?}"),
     }
