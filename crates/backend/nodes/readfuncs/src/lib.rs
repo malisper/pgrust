@@ -233,24 +233,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
-    fn read_opt_node_list(&mut self, name: &str) -> PgResult<OptNodeList<'mcx>> {
-        self.label(name);
-        let t = self.token(name);
-        if t.is_empty() {
-            return Ok(OptNodeList::nil());
-        }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
-        let mut l = OptNodeList::nil();
-        loop {
-            let tok = self.token("list");
-            if tok == b")" {
-                return Ok(l);
-            }
-            let elem = self.node_read_token(tok)?;
-            l.lappend(self.mcx, elem)?;
-        }
-    }
-
     fn read_int_list(&mut self, name: &str) -> PgResult<IntList<'mcx>> {
         self.label(name);
         let t = self.token(name);
