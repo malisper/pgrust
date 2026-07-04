@@ -142,15 +142,20 @@ pub fn RelationGetDummyIndexExpressions<'mcx>(
     let list = node.as_list().expect("indexprs is a List");
     let mut out = NodeList::nil();
     for raw in list.iter() {
-        let mut c = ::types_nodes::Node::build::<::types_nodes::primnodes::Const>(mcx)?;
-        c.consttype = nodes_core::expr_type(raw);
-        c.consttypmod = nodes_core::expr_typmod(raw);
-        c.constcollid = nodes_core::expr_collation(raw);
-        c.constlen = 1;
-        c.constvalue = Datum::null();
-        c.constisnull = true;
-        c.constbyval = true;
-        out.lappend(mcx, c.seal())?;
+        let c = ::types_nodes::Node::mk(
+            mcx,
+            ::types_nodes::primnodes::Const {
+                consttype: nodes_core::expr_type(raw),
+                consttypmod: nodes_core::expr_typmod(raw),
+                constcollid: nodes_core::expr_collation(raw),
+                constlen: 1,
+                constvalue: Datum::null(),
+                constisnull: true,
+                constbyval: true,
+                location: -1,
+            },
+        )?;
+        out.lappend(mcx, c)?;
     }
     Ok(out)
 }
