@@ -316,6 +316,27 @@ fn get_agg_init_val(mcx: ::mcx::Mcx<'_>, text: &str, transtype: Oid) -> PgResult
     }
 }
 
+// resolve_aggregate_transtype (parse_agg.c): a polymorphic declared
+// transtype resolves against the call's actual input types.
+fn resolve_aggregate_transtype<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    aggfuncid: Oid,
+    aggtranstype: Oid,
+    args: &NodeList<'mcx>,
+) -> PgResult<Oid> {
+    if !coerce::IsPolymorphicType(aggtranstype) {
+        return Ok(aggtranstype);
+    }
+    let (_rettype, mut declared) = lsyscache::get_func_signature(mcx, aggfuncid)?;
+    debug_assert!(declared.len() <= args.len());
+    let mut actual: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, args.len())?;
+    for a in args.iter() {
+        actual.push(expr_type(a));
+    }
+    let n = declared.len();
+    coerce::enforce_generic_type_consistency(&actual[..n], &mut declared[..n], aggtranstype, false)
+}
+
 // C build_aggregate_transfn_expr/fmgr_info_set_expr: transfn arg types
 // [transtype, inputs...] ride fn_expr as the AggFnArgTypes carrier.
 fn erased_agg_argtypes<'mcx>(
@@ -888,7 +909,8 @@ fn initialize_peragg_default<'mcx>(
             wfunc.winfnoid
         );
     }
-    let transtype = shape.aggtranstype;
+    let transtype =
+        resolve_aggregate_transtype(mcx, wfunc.winfnoid, shape.aggtranstype, &wfunc.args)?;
     let (translen, byval) = lsyscache::get_typlenbyval(transtype)?;
     trans_typlen.push(translen);
     trans_byval.push(byval);
@@ -1025,6 +1047,8 @@ fn initialize_peragg_framed<'mcx>(
     }
     .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
 
+    let aggtranstype =
+        resolve_aggregate_transtype(mcx, wfunc.winfnoid, aggtranstype, &wfunc.args)?;
     let (trans_typlen, trans_byval) = lsyscache::get_typlenbyval(aggtranstype)?;
     let mut kernel;
     let fn_strict;

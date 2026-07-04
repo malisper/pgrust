@@ -16,6 +16,7 @@ adt_int8 = { path = "../../utils/adt/int8" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+coerce = { path = "../../parser/coerce" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
