@@ -1537,6 +1537,10 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             let r = node.as_relabel_type().unwrap();
             (r.resulttype, r.resulttypmod)
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            (f.resulttype, f.resulttypmod)
+        }
         NodeTag::T_CoerceToDomain => {
             let cd = node.as_coerce_to_domain().unwrap();
             (cd.resulttype, cd.resulttypmod)
