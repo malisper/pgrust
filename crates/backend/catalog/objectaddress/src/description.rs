@@ -1,7 +1,8 @@
 // getObjectDescription / getObjectIdentity arms for the live object classes;
 // all other classes are named panics.
 use crate::{
-    unported, AttrDefaultRelationId, ConstraintRelationId, ObjectAddress, PolicyRelationId,
+    unported, AttrDefaultRelationId, CastRelationId, ConstraintRelationId, ObjectAddress,
+    PolicyRelationId,
     ProcedureRelationId, PublicationNamespaceRelationId, PublicationRelRelationId,
     PublicationRelationId, RewriteRelationId, SubscriptionRelationId, TriggerRelationId,
 };
@@ -189,6 +190,22 @@ pub fn getObjectDescription(
             Ok(Some(format!(
                 "type {}",
                 format_type::format_type_be(object.objectId)?
+            )))
+        }
+        CastRelationId => {
+            let row = scan_one_row(mcx, CastRelationId, 2660, object.objectId, |tup, desc| {
+                (getattr(tup, 2, desc).as_oid(), getattr(tup, 3, desc).as_oid())
+            })?;
+            let Some((castsource, casttarget)) = row else {
+                if !missing_ok {
+                    panic!("could not find tuple for cast {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!(
+                "cast from {} to {}",
+                format_type::format_type_be(castsource)?,
+                format_type::format_type_be(casttarget)?
             )))
         }
         ConstraintRelationId => {

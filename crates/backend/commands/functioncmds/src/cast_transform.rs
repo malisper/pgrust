@@ -67,7 +67,7 @@ fn typename_oid<'a>(mcx: Mcx<'_>, node: Option<types_nodes::Node<'a>>) -> PgResu
         .expect("TypeName node")
         .as_variant::<TypeName>()
         .expect("TypeName node");
-    let (oid, _typmod) = parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, None, tn)?;
+    let oid = parse_utilcmd::typenameTypeId(mcx, None, tn)?;
     Ok((oid, tn))
 }
 

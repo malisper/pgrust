@@ -470,14 +470,22 @@ fn collect_aggrefs<'mcx>(
     }
 }
 
-// GetAggInitVal (nodeAgg.c): initval text through the transtype's typinput;
-// by-ref results land in the query context (C's CurrentMemoryContext there).
+// GetAggInitVal (nodeAgg.c): initval text through the transtype's typinput.
+// In-function by-ref results ride the resolved carrier's scratch (dead once
+// flinfo drops); C's palloc'd result is modeled by the datumCopy into mcx.
 fn get_agg_init_val(mcx: ::mcx::Mcx<'_>, text: &str, transtype: Oid) -> PgResult<Datum> {
     let (typinput, typioparam) = lsyscache::getTypeInputInfo(transtype)?;
     let mut flinfo = fmgr_core::fmgr_info(typinput)?;
     let cstr = std::ffi::CString::new(text)
         .expect("agginitval text contains an interior NUL");
-    ::types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)
+    let d = ::types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)?;
+    let (typlen, typbyval) = lsyscache::get_typlenbyval(transtype)?;
+    if typbyval {
+        Ok(d)
+    } else {
+        // SAFETY: non-null by-ref in-function result, live until flinfo drops.
+        unsafe { ::execexpr::agg_datum_copy(mcx, d, typlen) }
+    }
 }
 
 /// `ExecInitAgg` (nodeAgg.c). The caller (execProcnode's T_Agg arm) inits the
