@@ -29,6 +29,7 @@ pub struct PgStat_StatFuncEntry {
     pub self_time: PgStat_Counter,
 }
 
+#[derive(Debug)]
 pub struct PgStat_FunctionCallUsage {
     key: PgStat_HashKey,
     save_f_total_time: i64,
