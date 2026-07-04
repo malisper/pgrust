@@ -13005,6 +13005,7 @@ dependencies = [
  "lwlock",
  "multixact_seams",
  "origin_seams",
+ "pgstat",
  "pgstat_seams",
  "predicate_seams",
  "procarray",
