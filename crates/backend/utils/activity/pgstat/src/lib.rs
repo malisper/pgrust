@@ -1,9 +1,10 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
-// model, pgstat_report_stat batching, the relation/xact/database/slru/
-// checkpointer counting layers, and the shared store the flush paths apply
-// into plus its fetch/snapshot readers and variable-kind reset. Still
-// unported: fixed-kind reset, 2PC record registration, and connstat session
-// times (needs MyBackendType).
+// model, pgstat_report_stat batching, the relation/xact/database/function/
+// slru/checkpointer counting layers, the shared store the flush paths apply
+// into plus its fetch/snapshot readers and variable-kind reset, and the
+// statsfile persistence half (write on clean shutdown, restore/discard at
+// startup). Still unported: fixed-kind reset and connstat session times
+// (needs MyBackendType); io/wal/backend/replslot/subscription kinds.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -12,6 +13,8 @@ use core::cell::Cell;
 
 pub mod checkpointer;
 pub mod database;
+pub mod file;
+pub mod function;
 pub mod pending;
 pub mod relation;
 pub mod shmem;
@@ -19,6 +22,7 @@ pub mod slru;
 pub mod xact;
 
 pub use database::{pgstat_fetch_stat_dbentry, pgstat_report_autovac};
+pub use function::{find_funcstat_entry, pgstat_fetch_stat_funcentry};
 pub use pending::pgstat_clear_snapshot;
 pub use relation::{
     pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext, pgstat_report_analyze,
@@ -110,6 +114,9 @@ pub fn init_seams() {
     );
     pgstat_seams::pgstat_report_tempfile::set(database::pgstat_report_tempfile);
     pgstat_seams::pgstat_init_relation::set(relation::pgstat_init_relation);
+    pgstat_seams::pgstat_before_server_shutdown::set(file::pgstat_before_server_shutdown);
+    pgstat_seams::pgstat_restore_stats::set(file::pgstat_restore_stats);
+    pgstat_seams::pgstat_discard_stats::set(file::pgstat_discard_stats);
 
     pgstat_seams::pgstat_get_slru_index::set(slru::pgstat_get_slru_index);
     pgstat_seams::pgstat_count_slru_page_zeroed::set(slru::pgstat_count_slru_page_zeroed);
@@ -133,6 +140,11 @@ pub fn init_seams() {
     vars::pgstat_fetch_consistency.install(GucVarAccessors {
         get: pgstat_fetch_consistency,
         set: set_pgstat_fetch_consistency,
+    });
+    // pgstat_function.c:30 owns pgstat_track_functions.
+    vars::pgstat_track_functions.install(GucVarAccessors {
+        get: function::pgstat_track_functions,
+        set: function::set_pgstat_track_functions,
     });
 }
 

@@ -38,6 +38,7 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
 
 [features]
 bench-internals = []

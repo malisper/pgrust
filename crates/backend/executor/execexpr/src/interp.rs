@@ -671,6 +671,21 @@ fn run_program<'mcx>(
                     write_out(*out, value, isnull);
                 }
             }
+            Step::FuncExprFusage { call, out } => {
+                let (value, isnull) = invoke_fusage(call)?;
+                write_out(*out, value, isnull);
+            }
+            Step::FuncExprStrictFusage { call, out } => {
+                // SAFETY: reads nargs arg slots of the call's live image.
+                let anynull = (0..call.nargs as usize)
+                    .any(|i| unsafe { crate::steps::arg_slot_of(call.fcinfo, i).read().isnull });
+                if anynull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let (value, isnull) = invoke_fusage(call)?;
+                    write_out(*out, value, isnull);
+                }
+            }
             Step::XmlExprEval { state, out } => {
                 // SAFETY: compile-allocated state, live for the program.
                 let st = unsafe { state.as_ref() };
@@ -2234,6 +2249,18 @@ fn strict2_thin_eval(call: &crate::steps::CallThin) -> PgResult<NullableDatum> {
 }
 
 #[inline(always)]
+// ExecEvalFuncExprFusage: an erroring call unwinds past end_function_usage,
+// exactly as C's ereport does.
+#[cold]
+fn invoke_fusage(call: &FuncCall) -> PgResult<(Datum, bool)> {
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo.
+    let fn_oid = unsafe { call.flinfo.as_ref() }.fn_oid;
+    let fcu = ::pgstat::function::pgstat_init_function_usage(fn_oid)?;
+    let r = invoke(call)?;
+    ::pgstat::function::pgstat_end_function_usage(&fcu, true);
+    Ok(r)
+}
+
 fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
     // during the call.

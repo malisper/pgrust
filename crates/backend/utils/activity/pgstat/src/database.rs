@@ -12,7 +12,9 @@ use crate::pending::{self, PendingData, PgStatState, PgStat_HashKey, PGSTAT_KIND
 use crate::xact;
 use crate::PgStat_Counter;
 
+// repr(C), all-i64 fields: statsfile serialization copies these as bytes.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[repr(C)]
 pub struct PgStat_StatDBEntry {
     pub xact_commit: PgStat_Counter,
     pub xact_rollback: PgStat_Counter,

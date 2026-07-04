@@ -20,7 +20,9 @@ use crate::{
     PGSTAT_FETCH_CONSISTENCY_SNAPSHOT,
 };
 
+// repr(C), all-i64 fields: statsfile serialization copies these as bytes.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[repr(C)]
 pub struct PgStat_StatTabEntry {
     pub numscans: PgStat_Counter,
     pub lastscan: TimestampTz,
@@ -56,6 +58,7 @@ pub struct PgStat_StatTabEntry {
 pub enum SharedEntry {
     Relation(PgStat_StatTabEntry),
     Database(PgStat_StatDBEntry),
+    Function(crate::function::PgStat_StatFuncEntry),
 }
 
 type Store = HashMap<PgStat_HashKey, SharedEntry, FxBuildHasher>;
@@ -148,6 +151,19 @@ pub(crate) fn flush_database(key: PgStat_HashKey, pending: &PgStat_StatDBEntry) 
     shared.sessions_killed += pending.sessions_killed;
     shared.parallel_workers_to_launch += pending.parallel_workers_to_launch;
     shared.parallel_workers_launched += pending.parallel_workers_launched;
+}
+
+pub(crate) fn flush_function(key: PgStat_HashKey, pending: &crate::function::PgStat_FunctionCounts) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Function(shared) = store
+        .entry(key)
+        .or_insert(SharedEntry::Function(Default::default()))
+    else {
+        unreachable!("function key holds non-function shared entry")
+    };
+    shared.numcalls += pending.numcalls;
+    shared.total_time += pending.total_time / 1000;
+    shared.self_time += pending.self_time / 1000;
 }
 
 pub(crate) fn drop_entry(key: PgStat_HashKey) {
@@ -282,9 +298,25 @@ pub fn pgstat_have_entry(kind: u32, dboid: types_core::Oid, objid: u64) -> bool 
         || crate::pending::pgstat_have_pending(key)
 }
 
+pub(crate) fn export_entries(mut f: impl FnMut(PgStat_HashKey, SharedEntry)) {
+    let store = SHARED_STATS.lock().unwrap();
+    for (&key, &entry) in store.iter() {
+        f(key, entry);
+    }
+}
+
+pub(crate) fn import_entry(key: PgStat_HashKey, entry: SharedEntry) {
+    SHARED_STATS.lock().unwrap().insert(key, entry);
+}
+
+pub(crate) fn clear_all_entries() {
+    SHARED_STATS.lock().unwrap().clear();
+}
+
 fn reset_entry_contents(entry: &mut SharedEntry, ts: TimestampTz) {
     match entry {
         SharedEntry::Relation(t) => *t = PgStat_StatTabEntry::default(),
+        SharedEntry::Function(f) => *f = Default::default(),
         SharedEntry::Database(d) => {
             *d = PgStat_StatDBEntry::default();
             d.stat_reset_timestamp = ts;

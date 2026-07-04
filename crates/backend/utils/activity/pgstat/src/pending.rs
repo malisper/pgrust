@@ -42,6 +42,7 @@ pub struct PgStat_HashKey {
 pub enum PendingData {
     Relation(PgStat_TableStatus),
     Database(database::PgStat_StatDBEntry),
+    Function(crate::function::PgStat_FunctionCounts),
 }
 
 pub const PGSTAT_ENTRY_REF_HASH_SIZE: usize = 128;
@@ -83,6 +84,8 @@ fn new_pending_data(key: PgStat_HashKey, mcx: Mcx<'static>) -> PendingData {
         PendingData::Relation(PgStat_TableStatus::new(mcx))
     } else if key.kind == PGSTAT_KIND_DATABASE {
         PendingData::Database(database::PgStat_StatDBEntry::default())
+    } else if key.kind == PGSTAT_KIND_FUNCTION {
+        PendingData::Function(crate::function::PgStat_FunctionCounts::default())
     } else {
         panic!("pending entry for unported stats kind {:?}", key.kind)
     }
@@ -245,6 +248,11 @@ pub(crate) fn pgstat_flush_pending_entries(_nowait: bool) -> bool {
                 }
                 crate::shmem::flush_relation(key, &tab.counts);
                 flush_relation_into_db(st, key.dboid, &tab.counts);
+            } else if key.kind == PGSTAT_KIND_FUNCTION {
+                let Some(PendingData::Function(f)) = st.pending.remove(&key) else {
+                    continue;
+                };
+                crate::shmem::flush_function(key, &f);
             } else {
                 debug_assert_eq!(key.kind, PGSTAT_KIND_DATABASE);
                 let Some(PendingData::Database(db)) = st.pending.remove(&key) else {

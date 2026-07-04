@@ -1,7 +1,7 @@
 // pg_proc.c ProcedureCreate insert/replace slice. Loud: argument defaults,
 // transforms, proconfig, prosqlbody, RECORD-tupdesc replace compare,
 // replace of a function with proargmodes+proargnames set, non-superuser
-// owner check. pgstat_create_function is skipped (function stats unported).
+// owner check.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -666,7 +666,10 @@ pub fn ProcedureCreate<'mcx>(
         let mut flinfo = fmgr_core::fmgr_info(a.languageValidator)?;
         types_fmgr::function_call1_coll(&mut flinfo, InvalidOid, Datum::from_oid(retval))?;
     }
-    // pgstat_create_function: skipped (per-function stats unported).
+    // ensure that stats are dropped if transaction aborts
+    if !is_update {
+        pgstat::function::pgstat_create_function(retval);
+    }
 
     Ok(myself)
 }

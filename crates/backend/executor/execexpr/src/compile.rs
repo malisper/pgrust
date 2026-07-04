@@ -3164,15 +3164,15 @@ fn init_func<'mcx>(
     }
 
     // C: `pgstat_track_functions <= flinfo->fn_stats` picks the non-FUSAGE
-    // opcodes; builtins carry TRACK_FUNC_ALL (the enum maximum), so the GUC
-    // read is only reachable for the unported PL leg.
+    // opcodes; builtins carry TRACK_FUNC_ALL (the enum maximum, never
+    // trackable), so the GUC read is skipped on the builtin-dominated path.
     let track = if fn_stats >= TRACK_FUNC_ALL {
         TRACK_FUNC_OFF as i32
     } else {
         guc_tables::vars::pgstat_track_functions.read()
     };
-    if track <= fn_stats as i32 {
-        Ok(if fn_strict && nargs > 0 {
+    Ok(if track <= fn_stats as i32 {
+        if fn_strict && nargs > 0 {
             match nargs {
                 1 => Step::FuncExprStrict1 { call, out },
                 2 => Step::FuncExprStrict2 { call, out },
@@ -3180,10 +3180,12 @@ fn init_func<'mcx>(
             }
         } else {
             Step::FuncExpr { call, out }
-        })
+        }
+    } else if fn_strict && nargs > 0 {
+        Step::FuncExprStrictFusage { call, out }
     } else {
-        unported("EEOP_FUNCEXPR_FUSAGE/EEOP_FUNCEXPR_STRICT_FUSAGE (pgstat function usage)")
-    }
+        Step::FuncExprFusage { call, out }
+    })
 }
 
 // C ExecReadyExpr: kernel selection. The interpreter's unchecked cursor/frame
