@@ -163,13 +163,37 @@ pub fn range_types_do_not_match() -> Box<PgError> {
 
 /// range_deserialize (rangetypes.c). By-ref bound datums point into `range`;
 /// they are only valid while the image is.
+///
+/// The by-value tuple lowers to an sret block the caller reloads with 16B
+/// q-register loads spanning the callee's narrower stores — a measured
+/// store-to-load-forwarding failure (the two reload sites carried ~55% of
+/// rgist_penalty's cycles). The shim inlines, so the out-param core writes
+/// the caller's own slots and field reads match store widths (C's shape).
+#[inline]
 pub fn range_deserialize(elem: &ElemInfo, range: &[u8]) -> (RangeBound, RangeBound, bool) {
+    let mut lower =
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: true };
+    let mut upper =
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: false };
+    let empty = range_deserialize_into(elem, range, &mut lower, &mut upper);
+    (lower, upper, empty)
+}
+
+/// Out-param core of [`range_deserialize`]; returns `empty`. `lower.lower` /
+/// `upper.lower` keep the caller-initialized values (true/false as in C's
+/// stack-local convention).
+pub fn range_deserialize_into(
+    elem: &ElemInfo,
+    range: &[u8],
+    lower: &mut RangeBound,
+    upper: &mut RangeBound,
+) -> bool {
     let flags = range_get_flags(range);
     let typlen = elem.typlen as i32;
     let base = range.as_ptr();
     let mut off = RANGE_HDRSZ;
 
-    let lbound = if range_has_lbound(flags) {
+    lower.val = if range_has_lbound(flags) {
         // SAFETY: `off` stays within the serialized image range_serialize built.
         let d = fetch_att(unsafe { base.add(off) }, elem.typbyval, typlen);
         off = arrayfuncs::foundation::att_addlength_pointer(off, typlen, unsafe { base.add(off) });
@@ -177,30 +201,20 @@ pub fn range_deserialize(elem: &ElemInfo, range: &[u8]) -> (RangeBound, RangeBou
     } else {
         Datum::from_usize(0)
     };
+    lower.infinite = flags & RANGE_LB_INF != 0;
+    lower.inclusive = flags & RANGE_LB_INC != 0;
 
-    let ubound = if range_has_ubound(flags) {
+    upper.val = if range_has_ubound(flags) {
         off = att_align_ptr(base, off, elem.typalign, elem.typlen);
         // SAFETY: as above.
         fetch_att(unsafe { base.add(off) }, elem.typbyval, typlen)
     } else {
         Datum::from_usize(0)
     };
+    upper.infinite = flags & RANGE_UB_INF != 0;
+    upper.inclusive = flags & RANGE_UB_INC != 0;
 
-    (
-        RangeBound {
-            val: lbound,
-            infinite: flags & RANGE_LB_INF != 0,
-            inclusive: flags & RANGE_LB_INC != 0,
-            lower: true,
-        },
-        RangeBound {
-            val: ubound,
-            infinite: flags & RANGE_UB_INF != 0,
-            inclusive: flags & RANGE_UB_INC != 0,
-            lower: false,
-        },
-        flags & RANGE_EMPTY != 0,
-    )
+    flags & RANGE_EMPTY != 0
 }
 
 // att_align_pointer: no padding before an already-started short varlena.
