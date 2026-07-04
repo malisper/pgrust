@@ -1648,6 +1648,8 @@ fn expr_type(node: Node<'_>) -> u32 {
         }
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,

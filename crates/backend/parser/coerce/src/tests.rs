@@ -125,6 +125,7 @@ fn install_fixture() {
             }))
         });
         syscache_seams::pg_type_typrelid::set(|_| Ok(Some(InvalidOid)));
+        pg_inherits_seams::type_inherits_from::set(|_, _| Ok(false));
     });
 }
 

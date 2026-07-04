@@ -1480,6 +1480,14 @@ fn valid_json_behavior_default_expr(expr: Node<'_>) -> bool {
         NodeTag::T_CoerceViaIO => valid_json_behavior_default_expr(
             expr.as_coerce_via_io().unwrap().arg,
         ),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = expr.as_array_coerce_expr().unwrap();
+            valid_json_behavior_default_expr(a.arg)
+                || a.elemexpr.is_some_and(valid_json_behavior_default_expr)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            valid_json_behavior_default_expr(expr.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_CoerceToDomain => valid_json_behavior_default_expr(
             expr.as_coerce_to_domain().unwrap().arg,
         ),

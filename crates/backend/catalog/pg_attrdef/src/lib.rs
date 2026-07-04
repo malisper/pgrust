@@ -155,7 +155,8 @@ fn record_single_rel_expr_deps<'mcx>(
                     let o = node.as_op_expr().expect("OpExpr");
                     pinned(OPER_CLASS, o.opno) && pinned(TYPE_CLASS, o.opresulttype)
                 }
-                T_RelabelType | T_CoerceViaIO | T_BoolExpr | T_CaseExpr | T_CaseWhen
+                T_RelabelType | T_CoerceViaIO | T_ArrayCoerceExpr | T_ConvertRowtypeExpr
+                | T_BoolExpr | T_CaseExpr | T_CaseWhen
                 | T_NullTest | T_CoalesceExpr | T_MinMaxExpr | T_List => true,
                 other => panic!(
                     "unported: recordDependencyOnSingleRelExpr over {other:?} default expression"

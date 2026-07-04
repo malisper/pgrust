@@ -535,6 +535,17 @@ fn check_agg_arguments_walker<'mcx>(
         NodeTag::T_CoerceViaIO => {
             check_agg_arguments_walker(pstate, node.as_coerce_via_io().unwrap().arg, ctx)
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            check_agg_arguments_walker(pstate, a.arg, ctx)?;
+            match a.elemexpr {
+                Some(e) => check_agg_arguments_walker(pstate, e, ctx),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            check_agg_arguments_walker(pstate, node.as_convert_rowtype_expr().unwrap().arg, ctx)
+        }
         NodeTag::T_CoerceToDomain => {
             check_agg_arguments_walker(pstate, node.as_coerce_to_domain().unwrap().arg, ctx)
         }
@@ -1344,6 +1355,17 @@ fn finalize_grouping_exprs<'mcx>(
         NodeTag::T_CoerceViaIO => {
             finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, sublevels_up, node.as_coerce_via_io().unwrap().arg)
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, sublevels_up, a.arg)?;
+            match a.elemexpr {
+                Some(e) => finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, sublevels_up, e),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, sublevels_up, node.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_CoerceToDomain => {
             finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, sublevels_up, node.as_coerce_to_domain().unwrap().arg)
         }
@@ -1712,6 +1734,17 @@ fn check_ungrouped_columns<'mcx>(
         }
         NodeTag::T_CoerceViaIO => {
             check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args, a.arg)?;
+            match a.elemexpr {
+                Some(e) => check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args, e),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args, node.as_convert_rowtype_expr().unwrap().arg)
         }
         NodeTag::T_CoerceToDomain => {
             check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args, node.as_coerce_to_domain().unwrap().arg)

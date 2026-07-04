@@ -206,10 +206,8 @@ pub fn has_superclass(mcx: Mcx<'_>, relation_id: Oid) -> PgResult<bool> {
     Ok(found)
 }
 
-// typeInheritsFrom (pg_inherits.c): BFS up the inheritance graph from the
-// subclass relation; the subclass side may be a domain over a complex type,
-// the superclass side may not. Cold path (coercion fallback + DDL); scans run
-// in a local scratch context.
+// BFS up the inheritance graph; subclass side may be a domain over a complex
+// type, superclass may not. Cold path: scans run in a local scratch context.
 pub fn typeInheritsFrom(subclass_type_id: Oid, superclass_type_id: Oid) -> PgResult<bool> {
     let subclass_relid =
         lsyscache::get_typ_typrelid(lsyscache::getBaseType(subclass_type_id)?)?;

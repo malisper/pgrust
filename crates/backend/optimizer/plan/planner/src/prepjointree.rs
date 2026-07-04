@@ -1765,6 +1765,24 @@ pub(crate) fn copy_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().expect("ArrayCoerceExpr");
+            Node::mk(
+                mcx,
+                pn::ArrayCoerceExpr {
+                    arg: copy_expr(mcx, a.arg, levels_delta)?,
+                    elemexpr: copy_opt(mcx, a.elemexpr)?,
+                    ..*a
+                },
+            )
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().expect("ConvertRowtypeExpr");
+            Node::mk(
+                mcx,
+                pn::ConvertRowtypeExpr { arg: copy_expr(mcx, c.arg, levels_delta)?, ..*c },
+            )
+        }
         NodeTag::T_NullTest => {
             let nt = node.as_null_test().expect("NullTest");
             Node::mk(

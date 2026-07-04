@@ -610,6 +610,28 @@ fn fjav_copy<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
                 },
             )
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            // elemexpr is off the Var spine (the nullingrels adjustment never
+            // descends into it), so sharing it is safe.
+            Node::mk(
+                mcx,
+                types_nodes::ArrayCoerceExpr {
+                    arg: fjav_copy(mcx, a.arg)?,
+                    ..*a
+                },
+            )
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::ConvertRowtypeExpr {
+                    arg: fjav_copy(mcx, c.arg)?,
+                    ..*c
+                },
+            )
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             let mut args = NodeList::nil();
@@ -691,6 +713,10 @@ fn is_standard_join_alias_expression(newnode: Node<'_>, oldvar: &types_nodes::Va
         NodeTag::T_CoerceViaIO => {
             is_standard_join_alias_expression(newnode.as_coerce_via_io().unwrap().arg, oldvar)
         }
+        // C accepts ArrayCoerceExpr here but not ConvertRowtypeExpr.
+        NodeTag::T_ArrayCoerceExpr => {
+            is_standard_join_alias_expression(newnode.as_array_coerce_expr().unwrap().arg, oldvar)
+        }
         NodeTag::T_CoalesceExpr => {
             let c = newnode.as_coalesce_expr().unwrap();
             debug_assert!(!c.args.is_nil());
@@ -729,6 +755,11 @@ fn adjust_standard_join_alias_expression<'mcx>(
         NodeTag::T_CoerceViaIO => adjust_standard_join_alias_expression(
             mcx,
             newnode.as_coerce_via_io().unwrap().arg,
+            oldvar,
+        ),
+        NodeTag::T_ArrayCoerceExpr => adjust_standard_join_alias_expression(
+            mcx,
+            newnode.as_array_coerce_expr().unwrap().arg,
             oldvar,
         ),
         NodeTag::T_CoalesceExpr => {
@@ -1074,6 +1105,30 @@ fn fge_mutate<'mcx>(
                         location: c.location,
                     },
                 )?)),
+            }
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            let arg = fge_mutate(mcx, query, a.arg)?;
+            let elemexpr = fge_opt(mcx, query, a.elemexpr)?;
+            if arg.is_none() && elemexpr.is_none() {
+                Ok(None)
+            } else {
+                Ok(Some(Node::mk(
+                    mcx,
+                    pn::ArrayCoerceExpr {
+                        arg: arg.unwrap_or(a.arg),
+                        elemexpr: elemexpr.or(a.elemexpr),
+                        ..*a
+                    },
+                )?))
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            match fge_mutate(mcx, query, c.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(mcx, pn::ConvertRowtypeExpr { arg, ..*c })?)),
             }
         }
         NodeTag::T_SubLink | NodeTag::T_Query => {

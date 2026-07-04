@@ -1518,6 +1518,22 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            let arg = fix_upper_expr(run, a.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            let elemexpr = match a.elemexpr {
+                Some(e) => {
+                    Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?)
+                }
+                None => None,
+            };
+            Node::mk(mcx, types_nodes::primnodes::ArrayCoerceExpr { arg, elemexpr, ..*a })
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            let arg = fix_upper_expr(run, c.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(mcx, types_nodes::primnodes::ConvertRowtypeExpr { arg, ..*c })
+        }
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
             let mut upper = types_nodes::OptNodeList::nil();
@@ -2252,6 +2268,20 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            let arg = fix_scan_expr_mutator(run, a.arg, rtoffset, num_exec)?;
+            let elemexpr = match a.elemexpr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(mcx, types_nodes::primnodes::ArrayCoerceExpr { arg, elemexpr, ..*a })
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            let arg = fix_scan_expr_mutator(run, c.arg, rtoffset, num_exec)?;
+            Node::mk(mcx, types_nodes::primnodes::ConvertRowtypeExpr { arg, ..*c })
+        }
         NodeTag::T_List => {
             let mut out = NodeList::nil();
             for cell in node.as_list().unwrap() {
@@ -2546,6 +2576,17 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
         }
         NodeTag::T_CoerceViaIO => fix_scan_expr_walker(run, node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            fix_scan_expr_walker(run, a.arg)?;
+            match a.elemexpr {
+                Some(e) => fix_scan_expr_walker(run, e),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            fix_scan_expr_walker(run, node.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_ArrayExpr => {
             for e in &node.as_array_expr().unwrap().elements {
                 fix_scan_expr_walker(run, e)?;
@@ -3370,6 +3411,26 @@ fn fix_join_expr_mutator<'mcx>(
                     location: cv.location,
                 },
             )
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            let arg = fix_join_expr_mutator(
+                run, a.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+            )?;
+            let elemexpr = match a.elemexpr {
+                Some(e) => Some(fix_join_expr_mutator(
+                    run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            Node::mk(mcx, types_nodes::primnodes::ArrayCoerceExpr { arg, elemexpr, ..*a })
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            let arg = fix_join_expr_mutator(
+                run, c.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+            )?;
+            Node::mk(mcx, types_nodes::primnodes::ConvertRowtypeExpr { arg, ..*c })
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let sa = node.as_scalar_array_op_expr().unwrap();

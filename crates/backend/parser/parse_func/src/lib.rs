@@ -901,6 +901,8 @@ fn default_expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Const => node.as_const().unwrap().consttype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         tag => panic!("default_expr_type: node family {tag:?} not ported"),
     }
@@ -1417,6 +1419,14 @@ fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
+            leftmost(c.location, expr_location(c.arg))
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            leftmost(a.location, expr_location(a.arg))
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
             leftmost(c.location, expr_location(c.arg))
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,

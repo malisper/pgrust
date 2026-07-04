@@ -1923,6 +1923,20 @@ fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
             }
             node
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            if a.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(a.arg);
+            }
+            node
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            if c.convertformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
         _ => node,
     }
 }

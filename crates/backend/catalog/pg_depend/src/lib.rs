@@ -251,6 +251,17 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                     addrs.push(ObjectAddress::set(COLL_CLASS, c.resultcollid));
                 }
             }
+            T_ArrayCoerceExpr => {
+                let a = node.as_array_coerce_expr().expect("ArrayCoerceExpr");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, a.resulttype));
+                if a.resultcollid != 0 && a.resultcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, a.resultcollid));
+                }
+            }
+            T_ConvertRowtypeExpr => {
+                let c = node.as_convert_rowtype_expr().expect("ConvertRowtypeExpr");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, c.resulttype));
+            }
             T_BoolExpr | T_NullTest | T_BooleanTest | T_CaseExpr | T_CaseWhen
             | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List => {}
             other => panic!(

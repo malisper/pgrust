@@ -83,6 +83,16 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
         }
         NodeTag::T_RelabelType => pull_var_nodes(node.as_relabel_type().unwrap().arg, out),
         NodeTag::T_CoerceViaIO => pull_var_nodes(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            pull_var_nodes(a.arg, out);
+            if let Some(e) = a.elemexpr {
+                pull_var_nodes(e, out);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            pull_var_nodes(node.as_convert_rowtype_expr().unwrap().arg, out)
+        }
         NodeTag::T_NullTest => {
             if let Some(arg) = node.as_null_test().unwrap().arg {
                 pull_var_nodes(arg, out);
