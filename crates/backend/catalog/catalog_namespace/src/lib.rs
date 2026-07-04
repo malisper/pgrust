@@ -50,7 +50,6 @@ pub use path::{
 pub use visibility::{
     FunctionIsVisible, FunctionIsVisibleExt, OpclassIsVisible, OpclassIsVisibleExt,
     OperatorIsVisible, OperatorIsVisibleExt, OpfamilyIsVisible, OpfamilyIsVisibleExt,
-    StatisticsObjIsVisible, StatisticsObjIsVisibleExt,
     RelationIsVisible, RelationIsVisibleExt, TypeIsVisible, TypeIsVisibleExt,
 };
 

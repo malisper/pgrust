@@ -1,4 +1,4 @@
-use cache_syscache::cacheinfo::{CLAOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTNAMENSP, STATEXTOID, TYPEOID};
+use cache_syscache::cacheinfo::{CLAOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTOID, TYPEOID};
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey};
 use datum::Datum;
 use mcx::MemoryContext;
@@ -30,8 +30,6 @@ const ANUM_PG_OPCLASS_OPCNAMESPACE: i32 = 4;
 const ANUM_PG_STATISTIC_EXT_STXNAME: i32 = 3;
 const ANUM_PG_STATISTIC_EXT_STXNAMESPACE: i32 = 4;
 const ANUM_PG_OPFAMILY_OPFMETHOD: i32 = 2;
-const ANUM_PG_STATEXT_STXNAME: i32 = 3;
-const ANUM_PG_STATEXT_STXNAMESPACE: i32 = 4;
 const ANUM_PG_OPFAMILY_OPFNAME: i32 = 3;
 const ANUM_PG_OPFAMILY_OPFNAMESPACE: i32 = 4;
 
@@ -276,47 +274,4 @@ pub fn OpfamilyIsVisibleExt(opfid: Oid) -> PgResult<Option<bool>> {
         return Ok(Some(false));
     }
     Ok(Some(OpfamilynameGetOpfid(opfmethod, name_str(&opfname))? == opfid))
-}
-
-pub fn StatisticsObjIsVisible(stxid: Oid) -> PgResult<bool> {
-    StatisticsObjIsVisibleExt(stxid)?.ok_or_else(|| lookup_failed("statistics object", stxid))
-}
-
-/// C `StatisticsObjIsVisibleExt`; `None` mirrors `*is_missing = true`.
-pub fn StatisticsObjIsVisibleExt(stxid: Oid) -> PgResult<Option<bool>> {
-    use cache_syscache::SearchSysCache2;
-    let Some(tuple) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(stxid)))?
-    else {
-        return Ok(None);
-    };
-    let stxnamespace =
-        SysCacheGetAttrNotNull(STATEXTOID, &tuple, ANUM_PG_STATEXT_STXNAMESPACE)?.as_oid();
-    let stxname = name_of(SysCacheGetAttrNotNull(STATEXTOID, &tuple, ANUM_PG_STATEXT_STXNAME)?);
-    ReleaseSysCache(tuple);
-
-    recomputeNamespacePath()?;
-
-    if stxnamespace != PG_CATALOG_NAMESPACE && !path_contains(stxnamespace) {
-        return Ok(Some(false));
-    }
-    let mut visible = false;
-    for i in 0..base_path_len() {
-        let namespace_id = base_path_nth(i);
-        if namespace_id == crate::my_temp_namespace() {
-            continue;
-        }
-        if namespace_id == stxnamespace {
-            visible = true;
-            break;
-        }
-        if let Some(t) = SearchSysCache2(
-            STATEXTNAMENSP,
-            SysCacheKey::Str(name_str(&stxname)),
-            SysCacheKey::Value(Datum::from_oid(namespace_id)),
-        )? {
-            ReleaseSysCache(t);
-            break;
-        }
-    }
-    Ok(Some(visible))
 }
