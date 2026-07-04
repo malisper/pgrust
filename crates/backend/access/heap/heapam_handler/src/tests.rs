@@ -125,6 +125,22 @@ fn install_seams() {
             Ok(SURELY_DEAD.load(Ordering::Relaxed))
         });
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
+        // Committed-xmax tuples read as updated (lock path) and dead (dirty).
+        heapam_visibility_seams::heap_tuple_satisfies_update::set(|htup, _cid, _buf| {
+            let hdr = htup.t_data();
+            if hdr.xmin_raw() == INVISIBLE_XMIN {
+                Ok(::tableam_vocab::TM_Result::TM_Invisible)
+            } else if (hdr.t_infomask & HEAP_XMAX_INVALID) == 0 && hdr.xmax_raw() != 0 {
+                Ok(::tableam_vocab::TM_Result::TM_Updated)
+            } else {
+                Ok(::tableam_vocab::TM_Result::TM_Ok)
+            }
+        });
+        heapam_visibility_seams::heap_tuple_satisfies_dirty::set(|htup, _snap, _buf| {
+            let hdr = htup.t_data();
+            Ok((hdr.t_infomask & HEAP_XMAX_INVALID) != 0 || hdr.xmax_raw() == 0)
+        });
+        xact_seams::transaction_id_is_current_transaction_id::set(|_xid| false);
 
         predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
         predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
@@ -712,5 +728,52 @@ fn tableam_seqscan_composition() {
 
     ::tableam::table_endscan(scan).unwrap();
     exectuples::exec_clear_tuple(&mut slot, mcx);
+    quiesced();
+}
+
+#[test]
+fn tuple_lock_chase_dirty_fail_keeps_pin_and_reports_deleted() {
+    // keep_buf dirty-fail arm: xmin/t_ctid must be read through the
+    // still-held pin (C reads t_data before ReleaseBuffer) -> TM_Deleted.
+    use ::tableam_vocab::{
+        LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
+        TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+    };
+
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+
+    // lp1 updated by committed 200 -> lp2; lp2 deleted by committed 201
+    // with self-pointing ctid, so it fails the dirty snapshot.
+    let mut v2 = tuple_image(100, 200, 2);
+    set_infomask(&mut v2, 0, 0);
+    set_ctid(&mut v2, 0, 2);
+    let mut v3 = tuple_image(200, 201, 3);
+    set_infomask(&mut v3, 0, 0);
+    set_ctid(&mut v3, 0, 2);
+    register_table(oid, vec![build_page(&[Item::Tuple(v2), Item::Tuple(v3)])]);
+
+    let rel = test_relation(mcx, oid);
+    let snap = mvcc_snapshot(mcx);
+    let mut slot = buffer_slot(mcx, &rel);
+    let mut tmfd = TM_FailureData::default();
+    let r = heapam_tuple_lock(
+        mcx,
+        &rel,
+        &ItemPointerData::new(0, 1),
+        &snap,
+        &mut slot,
+        7,
+        LockTupleMode::LockTupleExclusive,
+        LockWaitPolicy::LockWaitBlock,
+        TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+        &mut tmfd,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Deleted);
+    assert!(tmfd.traversed);
     quiesced();
 }
