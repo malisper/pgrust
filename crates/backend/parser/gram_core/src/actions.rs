@@ -1179,7 +1179,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "EXCLUDE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
