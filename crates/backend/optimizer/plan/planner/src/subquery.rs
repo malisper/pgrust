@@ -24,6 +24,7 @@ pub const EXPRKIND_APPINFO: i32 = 7;
 pub const EXPRKIND_TABLEFUNC: i32 = 8;
 pub const EXPRKIND_TABLEFUNC_LATERAL: i32 = 9;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
+pub const EXPRKIND_PHV: i32 = 11;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
 // child root's query_level).
@@ -512,6 +513,23 @@ pub fn preprocess_expression<'mcx>(
         expr = Node::mk_list(run.mcx, list)?;
     }
     Ok(Some(expr))
+}
+
+// preprocess_phv_expression (planner.c).
+pub fn preprocess_phv_expression<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let parse = run.parse();
+    Ok(preprocess_expression(
+        run,
+        &parse.rtable,
+        parse.jointree,
+        Some(expr),
+        EXPRKIND_PHV,
+        parse.hasSubLinks,
+    )?
+    .expect("EXPRKIND_PHV never reduces to nothing"))
 }
 
 fn preprocess_expression_list<'mcx>(
