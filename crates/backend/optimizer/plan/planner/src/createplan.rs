@@ -1787,7 +1787,7 @@ fn create_group_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgRes
 
     // Group can project; grouping columns must be available (CP_LABEL_TLIST).
     let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     // extract_grouping_cols/ops/collations (tlist.c) against the subplan tlist.
     let num_cols = group_clause.len();
