@@ -67,7 +67,7 @@ fn cached_meta<'f>(
 }
 
 // Flatten an array-typed argument into an owned, MAXALIGN'd flat image.
-fn arg_array_bytes<'mcx>(
+pub(crate) fn arg_array_bytes<'mcx>(
     fcinfo: &Fcinfo,
     i: usize,
     mcx: ::mcx::Mcx<'mcx>,
@@ -336,13 +336,17 @@ pub fn fc_array_length(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(Datum::from_i32(dims[(reqdim - 1) as usize]))
 }
 
-// C array_to_text (varlena.c array_to_text_internal, null_string=NULL arm),
-// hosted with the array machinery it consumes.
-pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// C array_to_text_internal (varlena.c), hosted with the array machinery it
+// consumes; null_string=None skips null elements.
+fn array_to_text_common(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    null_string: Option<alloc::vec::Vec<u8>>,
+) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     let array = arg_array_bytes(fcinfo, 0, mcx)?;
     let sep: alloc::vec::Vec<u8> = {
-        // SAFETY: strict fn; arg 1 is a live text varlena.
+        // SAFETY: arg 1 is a live text varlena (callers checked for NULL).
         let v = unsafe { fcinfo.arg_varlena_packed(1) }?;
         v.data().to_vec()
     };
@@ -364,6 +368,13 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         let mut printed = false;
         for (i, &d) in elems.iter().enumerate() {
             if nulls[i] {
+                if let Some(ns) = &null_string {
+                    if printed {
+                        out.extend_from_slice(&sep);
+                    }
+                    out.extend_from_slice(ns);
+                    printed = true;
+                }
                 continue;
             }
             let v = crate::io::call1_armed(&mut ams.proc, mcx, d)?;
@@ -383,6 +394,26 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     ::mcx::vec_append_bytes(&mut img, &(((total as u32) << 2)).to_ne_bytes())?;
     ::mcx::vec_append_bytes(&mut img, &out)?;
     byref_result(mcx, &img)
+}
+
+pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    array_to_text_common(flinfo, fcinfo, None)
+}
+
+pub fn fc_array_to_text_null(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) || fcinfo.argisnull(1) {
+        return Ok(fcinfo.return_null());
+    }
+    let null_string = if !fcinfo.argisnull(2) {
+        // SAFETY: arg 2 checked non-null; a live text varlena.
+        Some(unsafe { fcinfo.arg_varlena_packed(2) }?.data().to_vec())
+    } else {
+        None
+    };
+    array_to_text_common(flinfo, fcinfo, null_string)
 }
 
 const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -551,41 +582,49 @@ struct ElemCmpState {
     typalign: u8,
 }
 
-fn cached_elem_cmp<'f>(
-    flinfo: &'f mut FmgrInfo,
+fn fresh_elem_cmp(element_type: Oid, eq: bool) -> PgResult<ElemCmpState> {
+    let flags = if eq {
+        ::typcache::TYPECACHE_EQ_OPR_FINFO
+    } else {
+        ::typcache::TYPECACHE_CMP_PROC_FINFO
+    };
+    let entry = ::typcache::lookup_type_cache(element_type, flags)?;
+    let finfo = if eq { entry.eq_opr_finfo().clone() } else { entry.cmp_proc_finfo().clone() };
+    if finfo.fn_oid == 0 {
+        let name = ::format_type::format_type_be(element_type)?;
+        let what = if eq { "an equality operator" } else { "a comparison function" };
+        return Err(Box::new(
+            PgError::error(alloc::format!("could not identify {what} for type {name}"))
+                .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
+        ));
+    }
+    Ok(ElemCmpState {
+        element_type,
+        finfo,
+        typlen: entry.typlen() as i32,
+        typbyval: entry.typbyval(),
+        typalign: entry.typalign() as u8,
+    })
+}
+
+// flinfo-less callers exist (tuplesort's comparison shim carries no FmgrInfo);
+// the per-call typcache probe replaces the fn_extra memo there.
+fn resolve_elem_cmp<'f>(
+    flinfo: Option<&'f mut FmgrInfo>,
+    scratch: &'f mut Option<ElemCmpState>,
     element_type: Oid,
     eq: bool,
 ) -> PgResult<&'f mut ElemCmpState> {
+    let Some(flinfo) = flinfo else {
+        return Ok(scratch.insert(fresh_elem_cmp(element_type, eq)?));
+    };
     let need = match flinfo.fn_extra_ref::<ElemCmpState>() {
         Some(s) => s.element_type != element_type,
         None => true,
     };
     if need {
-        let flags = if eq {
-            ::typcache::TYPECACHE_EQ_OPR_FINFO
-        } else {
-            ::typcache::TYPECACHE_CMP_PROC_FINFO
-        };
-        let entry = ::typcache::lookup_type_cache(element_type, flags)?;
-        let finfo =
-            if eq { entry.eq_opr_finfo().clone() } else { entry.cmp_proc_finfo().clone() };
-        if finfo.fn_oid == 0 {
-            let name = ::format_type::format_type_be(element_type)?;
-            let what = if eq { "an equality operator" } else { "a comparison function" };
-            return Err(Box::new(
-                PgError::error(alloc::format!(
-                    "could not identify {what} for type {name}"
-                ))
-                .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
-            ));
-        }
-        flinfo.set_fn_extra(ElemCmpState {
-            element_type,
-            finfo,
-            typlen: entry.typlen() as i32,
-            typbyval: entry.typbyval(),
-            typalign: entry.typalign() as u8,
-        });
+        let st = fresh_elem_cmp(element_type, eq)?;
+        flinfo.set_fn_extra(st);
     }
     Ok(flinfo.fn_extra_mut::<ElemCmpState>().unwrap())
 }
@@ -622,7 +661,8 @@ fn array_eq_internal(
     {
         return Ok(false);
     }
-    let st = cached_elem_cmp(flinfo.expect("array_eq: NULL flinfo"), element_type, true)?;
+    let mut shim_scratch = None;
+    let st = resolve_elem_cmp(flinfo, &mut shim_scratch, element_type, true)?;
     let (vals1, nulls1) = crate::construct::deconstruct_array(
         mcx, &a1, st.typlen, st.typbyval, st.typalign, true,
     )?;
@@ -668,7 +708,8 @@ fn array_cmp_internal(
     let (nd2, dims2, lbs2) = crate::foundation::read_dims_lbounds(&a2);
     let nitems1 = ::arrayutils::array_get_n_items(nd1, &dims1)? as usize;
     let nitems2 = ::arrayutils::array_get_n_items(nd2, &dims2)? as usize;
-    let st = cached_elem_cmp(flinfo.expect("array_cmp: NULL flinfo"), element_type, false)?;
+    let mut shim_scratch = None;
+    let st = resolve_elem_cmp(flinfo, &mut shim_scratch, element_type, false)?;
     let (vals1, nulls1) = crate::construct::deconstruct_array(
         mcx, &a1, st.typlen, st.typbyval, st.typalign, true,
     )?;
@@ -748,7 +789,11 @@ pub fn fc_array_ge(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_bool(array_cmp_internal(flinfo, fcinfo)? >= 0))
 }
 
-// pg_proc.dat rows for the generic array I/O functions.
+const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
+}
+
+// pg_proc.dat rows for the generic array functions.
 pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(382, "btarraycmp", 2, fc_btarraycmp),
     b(390, "array_ne", 2, fc_array_ne),
@@ -760,6 +805,7 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(750, "array_in", 3, fc_array_in),
     b(751, "array_out", 1, fc_array_out),
     b(395, "array_to_text", 2, fc_array_to_text),
+    nb(384, "array_to_text_null", 3, fc_array_to_text_null),
     b(2176, "array_length", 2, fc_array_length),
     b(383, "array_cat", 2, fc_array_cat),
     b(2400, "array_recv", 3, fc_array_recv),
@@ -768,4 +814,20 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     agg(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
     srf(2331, "array_unnest", 1, fc_array_unnest),
     b(3996, "array_unnest_support", 1, fc_array_unnest_support),
+    b(747, "array_dims", 1, crate::ops::fc_array_dims),
+    b(748, "array_ndims", 1, crate::ops::fc_array_ndims),
+    b(2091, "array_lower", 2, crate::ops::fc_array_lower),
+    b(2092, "array_upper", 2, crate::ops::fc_array_upper),
+    b(3179, "array_cardinality", 1, crate::ops::fc_array_cardinality),
+    b(626, "hash_array", 1, crate::ops::fc_hash_array),
+    b(782, "hash_array_extended", 2, crate::ops::fc_hash_array_extended),
+    b(2747, "arrayoverlap", 2, crate::ops::fc_arrayoverlap),
+    b(2748, "arraycontains", 2, crate::ops::fc_arraycontains),
+    b(2749, "arraycontained", 2, crate::ops::fc_arraycontained),
+    nb(3167, "array_remove", 2, crate::ops::fc_array_remove),
+    nb(3168, "array_replace", 3, crate::ops::fc_array_replace),
+    nb(1193, "array_fill", 2, crate::ops::fc_array_fill),
+    nb(1286, "array_fill_with_lower_bounds", 3, crate::ops::fc_array_fill_with_lower_bounds),
+    srf(1191, "generate_subscripts", 3, crate::ops::fc_generate_subscripts),
+    srf(1192, "generate_subscripts_nodir", 2, crate::ops::fc_generate_subscripts),
 ];

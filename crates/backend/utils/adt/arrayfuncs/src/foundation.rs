@@ -124,7 +124,15 @@ pub fn varsize_any(p: *const u8) -> usize {
     // SAFETY: p addresses a live varlena header.
     unsafe {
         let b0 = *p;
-        if b0 & 0x01 != 0 {
+        if b0 == 0x01 {
+            // 1B_E: 2-byte header + tag-determined body (C VARSIZE_EXTERNAL).
+            2 + match *p.add(1) {
+                1 => 8,          // VARTAG_INDIRECT
+                2 | 3 => 8,      // VARTAG_EXPANDED_RO/RW
+                18 => 16,        // VARTAG_ONDISK
+                other => panic!("unrecognized TOAST vartag {other}"),
+            }
+        } else if b0 & 0x01 != 0 {
             (b0 as usize >> 1) & 0x7F
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());

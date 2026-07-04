@@ -1253,6 +1253,7 @@ fn expr_type(node: Node<'_>) -> u32 {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_ScalarArrayOpExpr => 16,
         other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
     }
