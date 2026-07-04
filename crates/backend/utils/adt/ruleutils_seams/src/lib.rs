@@ -10,3 +10,13 @@ seam_core::seam!(
         relid: Oid,
     ) -> PgResult<String>
 );
+
+seam_core::seam!(
+    // pg_get_partkeydef_columns (ruleutils.c) for execPartition's routing
+    // failure detail; ruleutils sits above the executor, so this edge is a
+    // seam.
+    pub fn pg_get_partkeydef_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<String>>
+);

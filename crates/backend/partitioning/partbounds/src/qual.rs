@@ -110,7 +110,19 @@ fn get_partition_operator(
 
 fn make_key_var<'mcx>(mcx: Mcx<'mcx>, key: &PartitionKeyData, i: usize) -> PgResult<Node<'mcx>> {
     let attno = key.partattrs[i];
-    assert!(attno != 0, "expression partition keys unported");
+    if attno == 0 {
+        // C walks partexprs with a ListCell cursor; the i-th expression key is
+        // preceded by exprno zero entries in partattrs.
+        let exprno = key.partattrs[..i].iter().filter(|&&a| a == 0).count();
+        let expr = key
+            .partexprs
+            .iter()
+            .nth(exprno)
+            .unwrap_or_else(|| panic!("wrong number of partition key expressions"));
+        // copyObject: qual trees outlive this call and must not alias the
+        // cache's partexprs.
+        return copyfuncs::copy_object(mcx, expr);
+    }
     Node::mk(
         mcx,
         Var {

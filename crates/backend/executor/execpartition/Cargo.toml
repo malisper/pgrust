@@ -25,5 +25,6 @@ fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 types_nodes = { path = "../../../_support/types/nodes" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
 executils = { path = "../executils" }
 partprune = { path = "../../partitioning/partprune" }

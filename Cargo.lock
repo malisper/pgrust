@@ -4240,6 +4240,7 @@ dependencies = [
  "partcache",
  "partdesc",
  "partprune",
+ "ruleutils_seams",
  "table",
  "types_core",
  "types_error",
@@ -8540,6 +8541,7 @@ version = "0.1.0"
 dependencies = [
  "cache_syscache",
  "clauses_seams",
+ "copyfuncs",
  "datum",
  "execexpr",
  "lsyscache",

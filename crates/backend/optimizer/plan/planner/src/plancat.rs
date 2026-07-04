@@ -509,8 +509,7 @@ fn copy_boundinfo_for_planner<'mcx>(
     Ok(out)
 }
 
-// set_baserel_partition_key_exprs (plancat.c), column-key arm (expression
-// keys are loud at partcache build).
+// set_baserel_partition_key_exprs (plancat.c).
 fn set_baserel_partition_key_exprs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
@@ -520,19 +519,32 @@ fn set_baserel_partition_key_exprs<'mcx>(
     let varno = run.root.rel(rel).relid;
     let n = key.partnatts as usize;
     let mut ids: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut partexprs_item = key.partexprs.iter();
     for i in 0..n {
         let attno = key.partattrs[i];
-        assert!(attno > 0, "expression partition keys unported");
-        let mut v = types_nodes::Node::build::<types_nodes::primnodes::Var>(mcx)?;
-        v.varno = varno as i32;
-        v.varattno = attno;
-        v.vartype = key.parttypid[i];
-        v.vartypmod = key.parttypmod[i];
-        v.varcollid = key.parttypcoll[i];
-        v.varnosyn = varno;
-        v.varattnosyn = attno;
-        v.location = -1;
-        ids.push(run.intern_expr(v.seal()));
+        let partexpr = if attno != 0 {
+            assert!(attno > 0);
+            let mut v = types_nodes::Node::build::<types_nodes::primnodes::Var>(mcx)?;
+            v.varno = varno as i32;
+            v.varattno = attno;
+            v.vartype = key.parttypid[i];
+            v.vartypmod = key.parttypmod[i];
+            v.varcollid = key.parttypcoll[i];
+            v.varnosyn = varno;
+            v.varattnosyn = attno;
+            v.location = -1;
+            v.seal()
+        } else {
+            let expr = partexprs_item
+                .next()
+                .unwrap_or_else(|| panic!("wrong number of partition key expressions"));
+            // copyObject: the cache's tree is shared; ChangeVarNodes below
+            // scribbles varno in place on the copy.
+            let copied = rewrite_manip::copy_node(mcx, expr)?;
+            rewrite_manip::ChangeVarNodes(mcx, copied, 1, varno as i32, 0)?;
+            copied
+        };
+        ids.push(run.intern_expr(partexpr));
     }
     let mut partexprs: PgVec<'mcx, PgVec<'mcx, NodeId>> = PgVec::new_in(mcx);
     let mut nullable: PgVec<'mcx, PgVec<'mcx, NodeId>> = PgVec::new_in(mcx);
