@@ -7,7 +7,7 @@ pub mod foreign;
 pub mod options;
 
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use pg_depend::{DependencyType, ObjectAddress};
 use types_core::{
     InvalidOid, Oid, FOREIGN_DATA_WRAPPER_OID_INDEX_ID, FOREIGN_DATA_WRAPPER_RELATION_ID,
@@ -73,8 +73,12 @@ fn rolespec_oid(role: Option<&RoleSpec<'_>>, missing_ok: bool) -> PgResult<Oid> 
 }
 
 fn cstring_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {
-    let t = varlena::cstring_to_text(mcx, s.as_bytes())?;
-    Ok(Datum::from_usize(t.as_bytes().as_ptr() as usize))
+    let total = 4 + s.len();
+    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    mcx::vec_append_bytes(&mut buf, &datum::varlena::set_varsize_4b(total))?;
+    mcx::vec_append_bytes(&mut buf, s.as_bytes())?;
+    // Leaked: the datum must stay live through heap_form_tuple.
+    Ok(Datum::from_usize(buf.leak().as_ptr() as usize))
 }
 
 fn name_datum(name: &str, buf: &mut types_tuple::NameData) -> Datum {
