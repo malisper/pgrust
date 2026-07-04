@@ -813,3 +813,103 @@ fn scale_min_trim_int2() {
     assert_eq!(out(&numeric_round_common(n("nan").num(), 1).unwrap()), "NaN");
     assert_eq!(out(&numeric_trunc_common(n("-inf").num(), 1).unwrap()), "-Infinity");
 }
+
+#[test]
+fn hash_numeric_scale_invariance_and_specials() {
+    use crate::{hash_numeric, hash_numeric_extended};
+    assert_eq!(hash_numeric(n("nan").num()), 0);
+    assert_eq!(hash_numeric(n("inf").num()), 0);
+    assert_eq!(hash_numeric(n("0").num()), u32::MAX);
+    assert_eq!(hash_numeric(n("0.000").num()), u32::MAX);
+    assert_eq!(hash_numeric(n("1").num()), hash_numeric(n("1.000").num()));
+    assert_eq!(
+        hash_numeric(n("12345.678").num()),
+        hash_numeric(n("12345.67800000").num())
+    );
+    assert_ne!(hash_numeric(n("1").num()), hash_numeric(n("10").num()));
+    assert_eq!(hash_numeric_extended(n("nan").num(), 42), 42);
+    assert_eq!(hash_numeric_extended(n("0").num(), 42), 41);
+    assert_eq!(
+        hash_numeric_extended(n("7.5").num(), 11),
+        hash_numeric_extended(n("7.50000").num(), 11)
+    );
+}
+
+#[test]
+fn in_range_numeric_cases() {
+    use crate::in_range_numeric_numeric as ir;
+    let v = |s: &str| n(s);
+    assert!(ir(v("5").num(), v("10").num(), v("5").num(), true, true).unwrap());
+    assert!(!ir(v("4.9").num(), v("10").num(), v("5").num(), true, false).unwrap());
+    assert!(ir(v("15").num(), v("10").num(), v("5").num(), false, true).unwrap());
+    let e = ir(v("1").num(), v("1").num(), v("-1").num(), true, true).unwrap_err();
+    assert_eq!(e.message(), "invalid preceding or following size in window function");
+    let e = ir(v("1").num(), v("1").num(), v("nan").num(), true, true).unwrap_err();
+    assert_eq!(e.message(), "invalid preceding or following size in window function");
+    assert!(ir(v("nan").num(), v("nan").num(), v("1").num(), true, true).unwrap());
+    assert!(!ir(v("nan").num(), v("1").num(), v("1").num(), true, true).unwrap());
+    assert!(ir(v("1").num(), v("nan").num(), v("1").num(), true, true).unwrap());
+    assert!(ir(v("1").num(), v("1").num(), v("inf").num(), false, true).unwrap());
+    assert!(!ir(v("1").num(), v("1").num(), v("inf").num(), true, true).unwrap());
+    assert!(ir(v("-inf").num(), v("1").num(), v("inf").num(), true, true).unwrap());
+    assert!(ir(v("5").num(), v("inf").num(), v("inf").num(), true, true).unwrap());
+    assert!(ir(v("inf").num(), v("1").num(), v("2").num(), false, false).unwrap());
+    assert!(!ir(v("inf").num(), v("1").num(), v("2").num(), false, true).unwrap());
+    assert!(ir(v("-inf").num(), v("-inf").num(), v("0").num(), true, true).unwrap());
+    assert!(ir(v("1").num(), v("inf").num(), v("0").num(), true, true).unwrap());
+    assert!(ir(v("1").num(), v("-inf").num(), v("0").num(), true, false).unwrap());
+}
+
+#[test]
+fn generate_series_numeric_walk() {
+    use crate::series::GenerateSeriesNumeric;
+    let mut g =
+        GenerateSeriesNumeric::new(n("1").num(), n("2.2").num(), Some(n("0.4").num())).unwrap();
+    let mut got = Vec::new();
+    while let Some(img) = g.next().unwrap() {
+        got.push(out(&img));
+    }
+    assert_eq!(got, ["1", "1.4", "1.8", "2.2"]);
+    let mut g =
+        GenerateSeriesNumeric::new(n("3").num(), n("1").num(), Some(n("-1").num())).unwrap();
+    let mut got = Vec::new();
+    while let Some(img) = g.next().unwrap() {
+        got.push(out(&img));
+    }
+    assert_eq!(got, ["3", "2", "1"]);
+    let mut g = GenerateSeriesNumeric::new(n("5").num(), n("4").num(), None).unwrap();
+    assert!(g.next().unwrap().is_none());
+    let e = GenerateSeriesNumeric::new(n("nan").num(), n("1").num(), None).unwrap_err();
+    assert_eq!(e.message(), "start value cannot be NaN");
+    let e = GenerateSeriesNumeric::new(n("inf").num(), n("1").num(), None).unwrap_err();
+    assert_eq!(e.message(), "start value cannot be infinity");
+    let e = GenerateSeriesNumeric::new(n("1").num(), n("nan").num(), None).unwrap_err();
+    assert_eq!(e.message(), "stop value cannot be NaN");
+    let e =
+        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("0.0").num())).unwrap_err();
+    assert_eq!(e.message(), "step size cannot equal zero");
+    let e =
+        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("-inf").num())).unwrap_err();
+    assert_eq!(e.message(), "step size cannot be infinity");
+}
+
+#[test]
+fn generate_series_numeric_rows_estimate() {
+    use crate::series::generate_series_numeric_rows;
+    let r = generate_series_numeric_rows(n("1").num(), n("10").num(), None).unwrap().unwrap();
+    assert_eq!(r, 10.0);
+    let r = generate_series_numeric_rows(n("1").num(), n("10").num(), Some(n("3").num()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(r, 4.0);
+    let r = generate_series_numeric_rows(n("10").num(), n("1").num(), Some(n("3").num()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(r, 0.0);
+    assert!(generate_series_numeric_rows(n("nan").num(), n("1").num(), None).unwrap().is_none());
+    assert!(
+        generate_series_numeric_rows(n("1").num(), n("2").num(), Some(n("0").num()))
+            .unwrap()
+            .is_none()
+    );
+}

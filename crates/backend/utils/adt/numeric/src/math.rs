@@ -84,7 +84,7 @@ fn factorial_negative_error() -> PgError {
 
 // C's numericvar_to_double_no_overflow (strtod ignoring ERANGE; Rust parse
 // yields inf/0 at the same thresholds). Retained TLS text scratch (rule 7).
-fn var_to_f64(var: VarView<'_>) -> f64 {
+pub(crate) fn var_to_f64(var: VarView<'_>) -> f64 {
     std::thread_local! {
         static F64_TEXT: core::cell::RefCell<Vec<u8>> =
             const { core::cell::RefCell::new(Vec::new()) };

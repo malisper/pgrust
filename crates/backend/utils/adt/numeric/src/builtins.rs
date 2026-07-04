@@ -632,8 +632,155 @@ pub fn fc_numeric_trim_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     img_result(fcinfo, &img)
 }
 
+pub fn fc_hash_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_u32(crate::hash_numeric(num)))
+}
+
+pub fn fc_hash_numeric_extended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    let seed = fcinfo.arg_i64(1) as u64;
+    Ok(Datum::from_u64(crate::hash_numeric_extended(num, seed)))
+}
+
+pub fn fc_in_range_numeric_numeric(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0-2 are non-null numeric varlenas (strict fn).
+    let (val, base, offset) =
+        unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?, num_arg(fcinfo, 2)?) };
+    let sub = fcinfo.arg_bool(3);
+    let less = fcinfo.arg_bool(4);
+    Ok(Datum::from_bool(crate::in_range_numeric_numeric(
+        val, base, offset, sub, less,
+    )?))
+}
+
+// OIDs 3260 2-arg / 3259 3-arg share the C body (PG_NARGS demuxes) over the
+// funcapi ValuePerCall frame.
+pub fn fc_generate_series_numeric(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("generate_series_numeric: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        // SAFETY: catalog args are non-null numeric varlenas (strict fn).
+        let (start, stop) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
+        let step = if fcinfo.nargs() == 3 {
+            // SAFETY: as above.
+            Some(unsafe { num_arg(fcinfo, 2) }?)
+        } else {
+            None
+        };
+        let state = crate::series::GenerateSeriesNumeric::new(start, stop, step)?;
+        let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(std::boxed::Box::new(state));
+    }
+    let next = ::funcapi::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("generate_series_numeric: user_fctx set at first call")
+        .downcast_mut::<crate::series::GenerateSeriesNumeric>()
+        .expect("generate_series_numeric: user_fctx is GenerateSeriesNumeric")
+        .next()?;
+    match next {
+        Some(img) => {
+            let d = img_result(fcinfo, &img)?;
+            Ok(::funcapi::srf_return_next(flinfo, fcinfo, d))
+        }
+        None => Ok(::funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+// C's DatumGetNumeric for planner Consts: 1B-short images realign into the
+// frame's result mcx.
+unsafe fn num_from_const_datum<'a>(fcinfo: &'a Fcinfo, d: Datum) -> PgResult<Num<'a>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — a live in-line varlena const datum.
+    unsafe {
+        let b0 = *p;
+        if b0 & 0x01 == 0x01 {
+            assert!(b0 != 0x01, "numeric const: external toast datum");
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            let src = core::slice::from_raw_parts(p.add(1), total - 1);
+            let mcx = fcinfo.result_mcx();
+            let layout =
+                core::alloc::Layout::from_size_align(src.len(), 8).expect("numeric const layout");
+            let dst: core::ptr::NonNull<u8> =
+                mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len());
+            Ok(Num::from_payload(core::slice::from_raw_parts(dst.as_ptr(), src.len())))
+        } else {
+            assert!(b0 & 0x03 == 0, "numeric const: compressed datum");
+            Ok(Num::from_payload(::datum::VarlenaRef::from_ptr(p).data()))
+        }
+    }
+}
+
+// SupportRequestRows over all-Const args; anything else returns NULL so
+// callers fall back (C estimates planner-folded exprs — Param estimation
+// unported, same divergence as generate_series_int4_support).
+pub fn fc_generate_series_numeric_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *mut ();
+    // SAFETY: prosupport contract — the internal arg points at a live
+    // tag-first support-request node exclusively owned by this call.
+    let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let args = match req.node.and_then(|n| n.as_func_expr()) {
+        Some(fe) => &fe.args,
+        None => return Ok(Datum::from_usize(0)),
+    };
+    let mut vals = [Datum::null(); 3];
+    let nargs = args.len();
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_const() {
+            Some(c) if c.constisnull => {
+                req.rows = 0.0;
+                return Ok(Datum::from_usize(p as usize));
+            }
+            Some(c) => vals[i] = c.constvalue,
+            None => return Ok(Datum::from_usize(0)),
+        }
+    }
+    // SAFETY: non-null numeric Const datums per the constisnull check above.
+    let (start, stop) = unsafe {
+        (
+            num_from_const_datum(fcinfo, vals[0])?,
+            num_from_const_datum(fcinfo, vals[1])?,
+        )
+    };
+    let step = if nargs >= 3 {
+        // SAFETY: as above.
+        Some(unsafe { num_from_const_datum(fcinfo, vals[2]) }?)
+    } else {
+        None
+    };
+    match crate::series::generate_series_numeric_rows(start, stop, step)? {
+        Some(rows) => {
+            req.rows = rows;
+            Ok(Datum::from_usize(p as usize))
+        }
+        None => Ok(Datum::from_usize(0)),
+    }
+}
+
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict, retset: false, func }
+}
+
+const fn srf(foid: ::types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
 // pg_proc.dat rows, OID-ascending (1840/1841 proisstrict 'f', rest 't').
@@ -717,4 +864,10 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3393, "numeric_poly_stddev_samp", 1, false, fc_numeric_poly_stddev_samp),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
+    b(432, "hash_numeric", 1, true, fc_hash_numeric),
+    b(780, "hash_numeric_extended", 2, true, fc_hash_numeric_extended),
+    srf(3259, "generate_series", 3, fc_generate_series_numeric),
+    srf(3260, "generate_series", 2, fc_generate_series_numeric),
+    b(4141, "in_range_numeric_numeric", 5, true, fc_in_range_numeric_numeric),
+    b(6357, "generate_series_numeric_support", 1, true, fc_generate_series_numeric_support),
 ];
