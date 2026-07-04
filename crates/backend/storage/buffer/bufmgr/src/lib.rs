@@ -70,6 +70,7 @@ const GLOBALTABLESPACE_OID: Oid = 1664;
 /// rd_locator read; the compute arm backfills entries built outside relcache
 /// (tests, pre-InitPhysicalAddr builds) with RelationInitPhysicalAddr's
 /// steady-state rules — C's invariant is "valid before any smgr access".
+/// Twin of smgr::rel_file_locator (seam boundary keeps the crates apart).
 fn rel_locator_backend(rel: &RelationData<'_>) -> RelFileLocatorBackend {
     let mut locator = rel.rd_locator.get();
     if locator.relNumber == 0 {

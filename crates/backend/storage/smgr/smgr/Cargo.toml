@@ -21,6 +21,8 @@ inval = { path = "../../../utils/cache/inval" }
 xlogutils = { path = "../../../access/transam/xlogutils" }
 smgr_seams = { path = "../smgr_seams" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
+init_small = { path = "../../../utils/init/init_small" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
