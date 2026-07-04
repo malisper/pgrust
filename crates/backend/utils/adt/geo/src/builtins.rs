@@ -5,7 +5,7 @@ use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 use ::types_core::Oid;
 use ::types_error::{PgResult, SoftErrorContext};
 use ::types_fmgr::{
-    byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo,
 };
 
@@ -34,15 +34,12 @@ unsafe fn arg_circle(fcinfo: &Fcinfo, i: usize) -> CIRCLE {
     CIRCLE::from_datum_bytes(fcinfo.arg_fixed(i, 24))
 }
 
-// SAFETY: arg i is a non-null path/polygon varlena, live for the call; a
-// short-header image is expanded into the result mcx (C's PG_DETOAST_DATUM).
+// SAFETY: arg i is a non-null path/polygon varlena, live for the call. The
+// PathRef/PolyRef readers are unaligned-safe, so short-header payloads are
+// read in place (no C-style un-packing copy); external/compressed images
+// detoast inside arg_varlena_packed.
 unsafe fn varlena_payload<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
-    let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
-    if v.is_short() {
-        v.data_expanded(fcinfo.result_mcx())
-    } else {
-        Ok(v.data())
-    }
+    Ok(unsafe { fcinfo.arg_varlena_packed(i) }?.data())
 }
 
 unsafe fn arg_path<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<PathRef<'a>> {
@@ -65,12 +62,25 @@ fn escontext<'a>(fcinfo: &Fcinfo) -> Option<&'a mut SoftErrorContext> {
     unsafe { fcinfo.soft_error_context() }
 }
 
-fn out_cstring(fcinfo: &Fcinfo, bytes: &[u8]) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let mut v: ::mcx::PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, bytes.len() + 1)?;
-    v.extend_from_slice(bytes);
-    v.push(0);
-    Ok(cstring_result(v))
+// Out functions run under printtup with no armed result frame; the cstring
+// rides the resolved FmgrInfo's retained scratch (numeric_out precedent).
+struct OutBuf(Vec<u8>);
+
+fn out_cstring(
+    flinfo: Option<&mut FmgrInfo>,
+    fill: impl FnOnce(&mut Vec<u8>),
+) -> PgResult<Datum> {
+    let Some(flinfo) = flinfo else {
+        panic!("geo out: cstring result needs a resolved FmgrInfo's scratch")
+    };
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(OutBuf(Vec::new()));
+    }
+    let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
+    buf.clear();
+    fill(buf);
+    buf.push(0);
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
 
 fn ret_point(fcinfo: &Fcinfo, p: Point) -> PgResult<Datum> {
@@ -107,12 +117,10 @@ fn fc_point_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     ret_point(fcinfo, p)
 }
 
-fn fc_point_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_point_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_point(fcinfo, 0) };
-    let mut out = Vec::with_capacity(32);
-    io::point_out(&p, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::point_out(&p, buf))
 }
 
 fn fc_box_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -122,12 +130,10 @@ fn fc_box_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> 
     ret_box(fcinfo, b)
 }
 
-fn fc_box_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_box_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let b = unsafe { arg_box(fcinfo, 0) };
-    let mut out = Vec::with_capacity(64);
-    io::box_out(&b, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::box_out(&b, buf))
 }
 
 fn fc_lseg_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -137,12 +143,10 @@ fn fc_lseg_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
     ret_lseg(fcinfo, ls)
 }
 
-fn fc_lseg_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_lseg_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let ls = unsafe { arg_lseg(fcinfo, 0) };
-    let mut out = Vec::with_capacity(64);
-    io::lseg_out(&ls, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::lseg_out(&ls, buf))
 }
 
 fn fc_line_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -152,12 +156,10 @@ fn fc_line_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
     ret_line(fcinfo, l)
 }
 
-fn fc_line_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_line_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let l = unsafe { arg_line(fcinfo, 0) };
-    let mut out = Vec::with_capacity(64);
-    io::line_out(&l, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::line_out(&l, buf))
 }
 
 fn fc_circle_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -167,12 +169,10 @@ fn fc_circle_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
     ret_circle(fcinfo, c)
 }
 
-fn fc_circle_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_circle_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let c = unsafe { arg_circle(fcinfo, 0) };
-    let mut out = Vec::with_capacity(64);
-    io::circle_out(&c, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::circle_out(&c, buf))
 }
 
 fn fc_path_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -182,12 +182,10 @@ fn fc_path_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
     Ok(varlena_result(v))
 }
 
-fn fc_path_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_path_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
-    let mut out = Vec::with_capacity(64);
-    io::path_out(&p, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::path_out(&p, buf))
 }
 
 fn fc_poly_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -197,12 +195,10 @@ fn fc_poly_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
     Ok(varlena_result(v))
 }
 
-fn fc_poly_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_poly_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_poly(fcinfo, 0) }?;
-    let mut out = Vec::with_capacity(64);
-    io::poly_out(&p, &mut out);
-    out_cstring(fcinfo, &out)
+    out_cstring(f, |buf| io::poly_out(&p, buf))
 }
 
 macro_rules! fc_recv {
