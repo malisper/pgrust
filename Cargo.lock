@@ -3393,11 +3393,13 @@ dependencies = [
 name = "copyfuncs"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "mcx",
  "outfuncs",
  "readfuncs",
  "types_error",
  "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]
