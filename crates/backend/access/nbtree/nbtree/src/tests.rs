@@ -842,6 +842,7 @@ fn insert_into_empty_index_builds_root() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn sequential_inserts_split_and_stay_navigable() {
     install();
     build_empty_index(false);
@@ -903,6 +904,7 @@ fn sequential_inserts_split_and_stay_navigable() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn interleaved_inserts_split_interior_pages() {
     install();
     build_empty_index(false);
@@ -926,6 +928,7 @@ fn interleaved_inserts_split_interior_pages() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn rightmost_fastpath_arms_on_a_three_level_tree() {
     install();
     build_empty_index(false);
@@ -1036,6 +1039,7 @@ fn unique_check_partial_reports_conflict_and_inserts_anyway() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     install();
     build_empty_index(true);
@@ -1058,6 +1062,7 @@ fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn dedup_pass_merges_duplicates_onto_one_leaf() {
     install();
     build_empty_index(true);
@@ -1088,6 +1093,7 @@ fn dedup_pass_merges_duplicates_onto_one_leaf() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn single_value_strategy_splits_after_six_capped_postings() {
     install();
     build_empty_index(true);
@@ -1115,6 +1121,7 @@ fn single_value_strategy_splits_after_six_capped_postings() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn dedup_mixed_keys_only_merges_equal_runs() {
     install();
     build_empty_index(true);
@@ -1320,6 +1327,7 @@ fn mark_leaf_items_dead(blk: usize) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn lp_dead_page_fill_runs_simple_deletion_instead_of_split() {
     install();
     build_empty_index(false); // allequalimage=false: dedup can't mask deletion
