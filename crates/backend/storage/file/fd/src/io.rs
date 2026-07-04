@@ -234,11 +234,13 @@ pub fn FileStartBufferRead(file: File, offset: i64, buffer: i32) -> PgResult<boo
     if !aio_seams::uring_buf_read::is_installed() {
         return Ok(false);
     }
-    let (rc, raw) = with_fd(|fd| -> PgResult<(i32, RawFd)> {
-        let rc = vfd::FileAccess(fd, file)?;
-        Ok((rc, if rc < 0 { -1 } else { vfd_raw(fd, file) }))
+    let raw = with_fd(|fd| -> PgResult<RawFd> {
+        if vfd::FileAccess(fd, file)? < 0 {
+            return Ok(-1);
+        }
+        vfd::FileAccessDio(fd, file)
     })?;
-    if rc < 0 {
+    if raw < 0 {
         return Ok(false);
     }
     Ok(aio_seams::uring_buf_read::call(raw, offset, buffer))

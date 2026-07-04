@@ -373,6 +373,11 @@ mod imp {
         if st.free == 0 {
             return false;
         }
+        // O_DIRECT DMA contract: pool pages are PG_IO_ALIGN_SIZE-aligned and
+        // whole blocks are 4k multiples, so addr/off/len all satisfy DIO.
+        const _: () = assert!(types_core::BLCKSZ % 4096 == 0);
+        debug_assert!(offset % 4096 == 0);
+        debug_assert!(bufmgr::BufferGetBlockPtr(buffer) as usize % 4096 == 0);
         let slot = st.free.trailing_zeros();
         let gen = st.next_gen;
         st.next_gen += 1;
@@ -597,20 +602,29 @@ mod tests {
         buffer[24..28].copy_from_slice(&blkno.to_ne_bytes());
     }
 
+    static DIO_ENGAGED: AtomicBool = AtomicBool::new(false);
+
     fn uring_file_fd() -> i32 {
         use std::io::Write;
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
         URING_FILE
             .get_or_init(|| {
-                let dir =
-                    std::env::temp_dir().join(format!("aio-uring-pool-{}", std::process::id()));
+                // /work is the fleet NVMe (O_DIRECT-capable); temp_dir may be tmpfs.
+                let base = if std::path::Path::new("/work").is_dir() {
+                    std::path::PathBuf::from("/work")
+                } else {
+                    std::env::temp_dir()
+                };
+                let dir = base.join(format!("aio-uring-pool-{}", std::process::id()));
                 std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("rel.dat");
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(true)
                     .read(true)
                     .write(true)
-                    .open(dir.join("rel.dat"))
+                    .open(&path)
                     .unwrap();
                 let mut page = vec![0u8; BLCKSZ];
                 for blk in 0..FILE_PAGES {
@@ -619,7 +633,18 @@ mod tests {
                     f.write_all(&page).unwrap();
                 }
                 f.flush().unwrap();
-                f
+                f.sync_all().unwrap();
+                match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(&path)
+                {
+                    Ok(dio) => {
+                        DIO_ENGAGED.store(true, Ordering::Relaxed);
+                        dio
+                    }
+                    Err(e) => {
+                        eprintln!("O_DIRECT open failed ({e}); pool-read tests run buffered");
+                        f
+                    }
+                }
             })
             .as_raw_fd()
     }
@@ -761,6 +786,22 @@ mod tests {
         }
         eprintln!("io_uring unavailable here; skipping");
         false
+    }
+
+    // The O_DIRECT probe: on the fleet NVMe (/work) DIO MUST engage, so a
+    // buffered fallback there is a loud failure, not a silent skip.
+    #[test]
+    fn dio_engages_on_real_filesystem() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        uring_file_fd();
+        if std::path::Path::new("/work").is_dir() {
+            assert!(DIO_ENGAGED.load(Ordering::Relaxed), "O_DIRECT refused on /work NVMe");
+        } else if !DIO_ENGAGED.load(Ordering::Relaxed) {
+            eprintln!("O_DIRECT unavailable on this filesystem; suites ran buffered");
+        }
     }
 
     #[test]
