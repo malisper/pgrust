@@ -67,17 +67,19 @@ pub fn end(h: TuplestoreHandle) {
         return;
     }
     let (idx, generation) = decode(h);
-    let entry = ENTRIES.with(|e| {
+    // try_with: reachable from guard Drops inside TLS destructors at thread
+    // exit; a destroyed registry must leak, never abort the process.
+    let entry = ENTRIES.try_with(|e| {
         let mut e = e.borrow_mut();
         match e.get_mut(idx as usize) {
             Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
-                FREE.with(|f| f.borrow_mut().push(idx));
+                let _ = FREE.try_with(|f| f.borrow_mut().push(idx));
                 slot.take()
             }
             _ => None,
         }
     });
-    if let Some(e) = entry {
+    if let Ok(Some(e)) = entry {
         e.store.end();
     }
 }

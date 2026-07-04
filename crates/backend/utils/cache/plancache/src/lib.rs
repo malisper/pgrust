@@ -848,7 +848,7 @@ fn build_stmt_list(
                     ..PlannedStmt::default()
                 });
             } else {
-                let input = clone_query_in(mcx, q)?;
+                let input = copy_query_in(mcx, q)?;
                 stmts.push(planner_seams::planner::call(
                     mcx,
                     input,
@@ -867,6 +867,15 @@ fn build_stmt_list(
     }
 
     mcx::vec_borrow_in(mcx, result?)
+}
+
+// BuildCachedPlan's copyObject boundary: the planner writes plan-arena
+// pointers into its input tree; a subtree shared with the cached query_list
+// dangles once that plan's arena is reclaimed (out/read = only deep copy).
+fn copy_query_in(mcx: Mcx<'static>, q: &Query<'static>) -> PgResult<Query<'static>> {
+    let s = outfuncs::queryToString(mcx, q)?;
+    let node = readfuncs::stringToNode(mcx, s.as_str())?;
+    clone_query_in(mcx, node.as_query().expect("Query round trip"))
 }
 
 // The planner scribbles on TLE resnos and MergeAction fields — private copies.
