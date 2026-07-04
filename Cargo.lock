@@ -10940,7 +10940,6 @@ name = "rls"
 version = "0.0.0"
 dependencies = [
  "aclchk",
- "adt_acl",
  "cache_syscache",
  "catalog_namespace",
  "catalog_objectaddress",
