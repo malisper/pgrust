@@ -282,7 +282,15 @@ fn spi_ctx_err(
         e.internal_query = Some(query.to_string());
         return e;
     }
+    // The spi crate's _SPI_error_callback port may already have handled this
+    // query (transpose or context line); C runs the callback once per level.
+    if e.internal_query.as_deref() == Some(query) {
+        return e;
+    }
     let line = spi_context_line(query, mode);
+    if e.context.as_deref().is_some_and(|c| c.contains(line.as_str())) {
+        return e;
+    }
     match e.context.take() {
         Some(prev) => e.context = Some(format!("{prev}\n{line}")),
         None => e.context = Some(line),
