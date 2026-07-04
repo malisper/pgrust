@@ -13,9 +13,7 @@ use ::indexam::{
 };
 use ::mcx::{Allocator, Mcx, PgBox, PgVec};
 use ::nbtree::itup::{index_getattr, ITup};
-use ::nodeindexscan::{
-    exec_index_build_scan_keys, exec_index_eval_runtime_keys, IndexRuntimeKeyInfo,
-};
+use ::nodeindexscan::{exec_index_build_scan_keys, exec_index_eval_runtime_keys, RuntimeKeysState};
 use ::tableam::table_slot_callbacks;
 use ::types_core::{AttrNumber, CSTRINGOID, NAMEOID};
 use ::types_error::{PgError, PgResult};
