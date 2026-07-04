@@ -51,7 +51,8 @@ use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol};
 use types_nodes::rawnodes::{
     AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
     AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
-    CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem, IndexStmt,
+    CreateRangeStmt, CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem,
+    IndexStmt,
     IntoClause, OnCommitAction, TriggerTransition,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
@@ -8271,6 +8272,13 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<CreateEnumStmt>(mcx)?;
                 n.typeName = view.v(3).list();
                 n.vals = view.v(7).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // DefineStmt: CREATE TYPE_P any_name AS RANGE definition
+            855 => {
+                let mut n = Node::build::<CreateRangeStmt>(mcx)?;
+                n.typeName = view.v(3).list();
+                n.params = view.v(6).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // DefineStmt: CREATE COLLATION [IF NOT EXISTS] any_name definition

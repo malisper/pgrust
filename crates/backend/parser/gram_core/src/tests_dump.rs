@@ -993,6 +993,11 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "typeName", &c.typeName);
         list_field(out, "vals", &c.vals);
         out.push('}');
+    } else if let Some(c) = n.as_create_range_stmt() {
+        out.push_str("{CREATERANGESTMT");
+        list_field(out, "typeName", &c.typeName);
+        list_field(out, "params", &c.params);
+        out.push('}');
     } else if let Some(c) = n.as_alter_enum_stmt() {
         out.push_str("{ALTERENUMSTMT");
         list_field(out, "typeName", &c.typeName);

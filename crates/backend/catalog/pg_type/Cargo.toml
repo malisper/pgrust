@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 pg_enum = { path = "../pg_enum" }
+pg_range = { path = "../pg_range" }
 genam = { path = "../../access/index/genam" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_scan = { path = "../../../_support/types/types_scan" }
