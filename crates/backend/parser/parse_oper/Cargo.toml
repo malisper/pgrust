@@ -33,3 +33,4 @@ parse_utilcmd = { path = "../parse_utilcmd" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
