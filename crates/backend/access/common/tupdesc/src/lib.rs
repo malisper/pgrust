@@ -652,11 +652,12 @@ fn build_attrmap_by_name_impl<'mcx>(
             attmap.push(0);
             continue;
         }
-        let name = outatt.attname.name_str();
+        let name_bytes = outatt.attname.name_str();
+        let name = core::str::from_utf8(name_bytes).unwrap_or_else(|_| panic!("non-UTF-8 attname"));
         let mut mapped: i16 = 0;
         for j in 0..indesc.natts as usize {
             let inatt = indesc.attr(j);
-            if !inatt.attisdropped && inatt.attname.name_str() == name {
+            if !inatt.attisdropped && inatt.attname.name_str() == name_bytes {
                 if inatt.atttypid != outatt.atttypid || inatt.atttypmod != outatt.atttypmod {
                     return Err(could_not_convert_row_type(name, indesc, outdesc, true)?);
                 }
@@ -765,7 +766,8 @@ pub fn build_attrmap_by_position<'mcx>(
                             "Returned type {} does not match expected type {} in column \"{}\" (position {}).",
                             format_type::format_type_with_typemod(inatt.atttypid, inatt.atttypmod)?,
                             format_type::format_type_with_typemod(outatt.atttypid, outatt.atttypmod)?,
-                            outatt.attname.name_str(),
+                            core::str::from_utf8(outatt.attname.name_str())
+                                .unwrap_or_else(|_| panic!("non-UTF-8 attname")),
                             noutcols,
                         )),
                 ));

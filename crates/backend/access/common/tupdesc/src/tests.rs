@@ -7,6 +7,7 @@ use ::types_tuple::{
 use std::sync::Once;
 
 static SEAMS: Once = Once::new();
+static FORMAT_TYPE_SEAMS: Once = Once::new();
 
 // Dummy composite type oids used only so format_type_be() can name the
 // "returned"/"expected" rowtype in attmap error details.
@@ -40,16 +41,18 @@ fn scalar_typcache_shape(name: &str) -> syscache_seams::PgTypeTypcacheShape {
 }
 
 fn install_format_type_seams() {
-    syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
-        Ok(match typid {
-            OUT_ROWTYPE_OID => Some(typcache_shape("out_row")),
-            IN_ROWTYPE_OID => Some(typcache_shape("in_row")),
-            INT4OID => Some(scalar_typcache_shape("int4")),
-            TEXTOID => Some(scalar_typcache_shape("text")),
-            _ => None,
-        })
+    FORMAT_TYPE_SEAMS.call_once(|| {
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            Ok(match typid {
+                OUT_ROWTYPE_OID => Some(typcache_shape("out_row")),
+                IN_ROWTYPE_OID => Some(typcache_shape("in_row")),
+                INT4OID => Some(scalar_typcache_shape("int4")),
+                TEXTOID => Some(scalar_typcache_shape("text")),
+                _ => None,
+            })
+        });
+        namespace_seams::type_is_visible::set(|_| Ok(true));
     });
-    namespace_seams::type_is_visible::set(|_| Ok(true));
 }
 
 fn install_seams() {
@@ -583,7 +586,7 @@ fn build_attrmap_by_name_mismatch_ereport_text() {
     assert_eq!(err.message(), "could not convert row type");
     assert_eq!(
         err.detail().unwrap(),
-        "Attribute \"b\" of type text does not match corresponding attribute of type integer."
+        "Attribute \"b\" of type out_row does not match corresponding attribute of type in_row."
     );
 }
 
@@ -608,7 +611,7 @@ fn build_attrmap_by_name_missing_attribute_ereport_text() {
     assert_eq!(err.message(), "could not convert row type");
     assert_eq!(
         err.detail().unwrap(),
-        "Attribute \"b\" of type text does not exist in type integer."
+        "Attribute \"b\" of type out_row does not exist in type in_row."
     );
 
     // missing_ok=true: no error, mapped entry stays 0.
