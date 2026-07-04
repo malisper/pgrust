@@ -8,7 +8,8 @@ use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
     AccessPriv, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt, AlterRoleSetStmt, AlterRoleStmt,
     AlterTableCmd, AlterTableStmt, AlterTableType,
-    CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt,
+    CommentStmt, CommonTableExpr,
     CopyStmt, CreateFunctionStmt, CreatePolicyStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
     DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, DropBehavior,
     DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
@@ -1746,9 +1747,47 @@ impl<'mcx> Parser<'mcx> {
                     _ => CTEMaterialize::CTEMaterializeDefault,
                 };
                 n.ctequery = view.v(6).node();
-                // SEARCH/CYCLE productions are unported louds; only the
-                // NULL-yielding empty variants can reach here.
-                debug_assert!(view.v(8).node().is_none() && view.v(9).node().is_none());
+                n.search_clause = view.v(8).node();
+                n.cycle_clause = view.v(9).node();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_search_clause: SEARCH DEPTH|BREADTH FIRST_P BY columnList SET ColId
+            1735 | 1736 => {
+                let mut n = Node::build::<CTESearchClause>(mcx)?;
+                n.search_col_list = view.v(5).list();
+                n.search_breadth_first = rule == 1736;
+                n.search_seq_column = Some(view.v(7).str_val());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_cycle_clause: CYCLE columnList SET ColId [TO AexprConst
+            // DEFAULT AexprConst] USING ColId
+            1738 => {
+                let mut n = Node::build::<CTECycleClause>(mcx)?;
+                n.cycle_col_list = view.v(2).list();
+                n.cycle_mark_column = Some(view.v(4).str_val());
+                n.cycle_mark_value = view.v(6).node();
+                n.cycle_mark_default = view.v(8).node();
+                n.cycle_path_column = Some(view.v(10).str_val());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1739 => {
+                let mut n = Node::build::<CTECycleClause>(mcx)?;
+                n.cycle_col_list = view.v(2).list();
+                n.cycle_mark_column = Some(view.v(4).str_val());
+                n.cycle_mark_value = Some(Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Boolean(Boolean { boolval: true })),
+                    -1,
+                )?);
+                n.cycle_mark_default = Some(Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::Boolean(Boolean { boolval: false })),
+                    -1,
+                )?);
+                n.cycle_path_column = Some(view.v(6).str_val());
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }

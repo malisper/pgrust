@@ -767,6 +767,26 @@ fn node(out: &mut String, n: Node<'_>) {
         assert!(c.ctecoltypes.is_nil() && c.ctecoltypmods.is_nil() && c.ctecolcollations.is_nil());
         out.push_str(" :ctecoltypes <> :ctecoltypmods <> :ctecolcollations <>");
         out.push('}');
+    } else if let Some(s) = n.as_cte_search_clause() {
+        out.push_str("{CTESEARCHCLAUSE");
+        list_field(out, "search_col_list", &s.search_col_list);
+        bool_field(out, "search_breadth_first", s.search_breadth_first);
+        string_field(out, "search_seq_column", s.search_seq_column);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(c) = n.as_cte_cycle_clause() {
+        out.push_str("{CTECYCLECLAUSE");
+        list_field(out, "cycle_col_list", &c.cycle_col_list);
+        string_field(out, "cycle_mark_column", c.cycle_mark_column);
+        node_field(out, "cycle_mark_value", c.cycle_mark_value);
+        node_field(out, "cycle_mark_default", c.cycle_mark_default);
+        string_field(out, "cycle_path_column", c.cycle_path_column);
+        int_field(out, "location", c.location);
+        int_field(out, "cycle_mark_type", c.cycle_mark_type as i32);
+        int_field(out, "cycle_mark_typmod", c.cycle_mark_typmod);
+        int_field(out, "cycle_mark_collation", c.cycle_mark_collation as i32);
+        int_field(out, "cycle_mark_neop", c.cycle_mark_neop as i32);
+        out.push('}');
     } else if let Some(e) = n.as_variant::<types_nodes::rawnodes::IndexElem>() {
         out.push_str("{INDEXELEM");
         string_field(out, "name", e.name);
