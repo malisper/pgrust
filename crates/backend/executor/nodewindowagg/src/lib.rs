@@ -2738,8 +2738,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
     }
 
     // initialize_windowaggregate (framed lane): a private (moving-agg)
-    // aggcontext resets here; init values live in query memory, so no
-    // datumCopy (nothing frees them — C copies to survive its pfree).
+    // aggcontext resets here.
     fn initialize_windowaggregate(&mut self, aggno: usize) -> PgResult<()> {
         let pa = &mut self.peragg[aggno];
         if pa.private_ctx {
@@ -2748,7 +2747,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
         // C datumCopy's a by-ref initval into the aggcontext: the transfns
         // mutate the transvalue in place (float8_accum's agg leg).
-        pa.trans_value = if pa.trans_byval || pa.init_value.isnull {
+        // MovingIntSum keeps its state in int_sum; its init_value is a
+        // non-null-flagged sentinel with no datum behind it.
+        let sentinel = matches!(pa.kernel, AggKernel::MovingIntSum { .. });
+        pa.trans_value = if sentinel || pa.trans_byval || pa.init_value.isnull {
             pa.init_value
         } else {
             // SAFETY: shared read of the per-agg context handle.
