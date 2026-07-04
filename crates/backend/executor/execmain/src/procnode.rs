@@ -1555,7 +1555,69 @@ fn window_agg_arm<'mcx>(
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let SortNode { state, outer, outer_desc } = s;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    if !state.sort_done() {
+        if let PlanStateNode::SeqScan(ss) = &mut **outer {
+            if sort_seq_fusible(ss, estate)
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+            {
+                let src = SeqScanSortSource { ss };
+                return ::nodesort::exec_sort_batched(state, estate, outer_desc, src);
+            }
+        }
+    }
     ::nodesort::exec_sort(state, estate, outer_desc, |es| exec_proc_node(outer, es))
+}
+
+// Fused sort-over-seqscan page-batch feed: same tuples, same put order
+// (line-pointer emission), per-tuple node recursion elided. Instrumented
+// children never match the SeqScan arm, so EXPLAIN ANALYZE keeps the
+// per-tuple drive and its filter counters.
+fn sort_seq_fusible<'mcx>(
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    use ::execexpr::{Kernel, SlotSrc};
+    if estate.es_epq_active || ss.ss.instr_idx.is_some() {
+        return false;
+    }
+    match ss.variant() {
+        ::nodeseqscan::SeqScanVariant::Plain | ::nodeseqscan::SeqScanVariant::WithProject => {}
+        ::nodeseqscan::SeqScanVariant::WithQual
+        | ::nodeseqscan::SeqScanVariant::WithQualProject => {
+            // Only allocation-free kernel quals run under the fused drive.
+            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
+                Some(Kernel::QualScanVarCmpConst { .. }) => {}
+                Some(Kernel::QualVarCmpVar { a_src, b_src, .. })
+                    if a_src == SlotSrc::Scan && b_src == SlotSrc::Scan => {}
+                _ => return false,
+            }
+        }
+        ::nodeseqscan::SeqScanVariant::Epq => return false,
+    }
+    match ss.ss.ps_ProjInfo.as_ref() {
+        None => true,
+        Some(p) => !p.pi_state.has_subplan() && p.pi_state.param_exec_deps().is_empty(),
+    }
+}
+
+struct SeqScanSortSource<'a, 'mcx> {
+    ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+}
+
+impl<'mcx> ::nodesort::SortFeedSource<'mcx> for SeqScanSortSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
+    }
+
+    #[inline]
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        ::nodeseqscan::seq_scan_batch_emit(self.ss, estate, i)
+    }
 }
 
 #[inline(never)]

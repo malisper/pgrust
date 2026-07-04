@@ -311,6 +311,32 @@ pub fn seq_scan_batch_store<'mcx>(
     }
 }
 
+/// Fused-feed emit: reset the per-tuple context, fetch row `i`, apply the
+/// qual, project — `ExecScanExtended`'s body over a staged batch row. None =
+/// filtered; Some = the scan's output slot.
+#[inline(always)]
+pub fn seq_scan_batch_emit<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    i: u32,
+) -> PgResult<Option<ExecSlotId>> {
+    estate.ecxt_mut(node.ss.ps_ExprContext).reset();
+    if !seq_scan_batch_fetch(node, estate, i)? {
+        return Ok(None);
+    }
+    let scan_id = node.ss.ss_ScanTupleSlot;
+    estate.ecxt_mut(node.ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
+    let Some(proj) = node.ss.ps_ProjInfo.as_mut() else {
+        return Ok(Some(scan_id));
+    };
+    let mcx = estate.es_query_cxt;
+    let result_id = proj.pi_result_slot;
+    let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, result_id);
+    let mut slots = ::execexpr::EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
+    ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+    Ok(Some(result_id))
+}
+
 /// `ExecSeqScan` + its four specialized variants, dispatched on the enum
 /// selected at init instead of C's per-variant function pointers.
 pub fn exec_seq_scan<'mcx>(
