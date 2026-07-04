@@ -419,61 +419,328 @@ pub fn pull_var_clause<'mcx>(
     Ok(cx.varlist)
 }
 
-/// C mutator, detection form: join-alias Vars only arise from merged
-/// USING/NATURAL columns or join whole-row refs, both unported (loud in the
-/// parser), so C's rewrite is the identity on every tree that parses today.
+// flatten_join_alias_vars (var.c), root == NULL shape: join alias Vars are
+// replaced by copies of the joinaliasvars expression (whole-row by a RowExpr
+// over them); nullingrels transfer via the standard-expression adjustment.
+// The PlaceHolderVar fallback (root != NULL) and IncrementVarSublevelsUp for
+// aliases carried into subqueries stay loud.
 pub fn flatten_join_alias_vars<'mcx>(
+    mcx: Mcx<'mcx>,
     query: &Query<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    Ok(fjav_mutate(mcx, query, node)?.unwrap_or(node))
+}
+
+fn fjav_mutate<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().unwrap();
+            if v.varlevelsup != 0 {
+                return Ok(None);
+            }
+            let rte = query
+                .rtable
+                .nth(v.varno as usize - 1)
+                .as_range_tbl_entry()
+                .expect("rtable cell");
+            if rte.rtekind != types_nodes::parsenodes::RTEKind::RTE_JOIN {
+                return Ok(None);
+            }
+            if v.varattno == 0 {
+                let eref = rte.eref.expect("join RTE has eref");
+                assert_eq!(rte.joinaliasvars.len(), eref.colnames.len());
+                let mut fields = NodeList::nil();
+                let mut colnames = NodeList::nil();
+                for (av, cn) in rte.joinaliasvars.iter().zip(eref.colnames.iter()) {
+                    let newvar = fjav_copy(mcx, av)?;
+                    if newvar.as_var().is_some() {
+                        // SAFETY: fjav_copy returned a fresh node.
+                        unsafe {
+                            newvar
+                                .with_mut::<types_nodes::Var, _>(|x| x.location = v.location)
+                                .unwrap();
+                        }
+                    }
+                    let newvar = fjav_mutate(mcx, query, newvar)?.unwrap_or(newvar);
+                    fields.lappend(mcx, newvar)?;
+                    colnames.lappend(mcx, cn)?;
+                }
+                let rowexpr = Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args: fields,
+                        row_typeid: v.vartype,
+                        row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                        colnames,
+                        location: v.location,
+                    },
+                )?;
+                return Ok(Some(add_nullingrels_if_needed(mcx, rowexpr, v)?));
+            }
+            debug_assert!(v.varattno > 0);
+            let aliasvar = rte.joinaliasvars.nth(v.varattno as usize - 1);
+            let newvar = fjav_copy(mcx, aliasvar)?;
+            if newvar.as_var().is_some() {
+                // SAFETY: fjav_copy returned a fresh node.
+                unsafe {
+                    newvar
+                        .with_mut::<types_nodes::Var, _>(|x| x.location = v.location)
+                        .unwrap();
+                }
+            }
+            let newvar = fjav_mutate(mcx, query, newvar)?.unwrap_or(newvar);
+            Ok(Some(add_nullingrels_if_needed(mcx, newvar, v)?))
+        }
+        t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
+        NodeTag::T_Query => {
+            // A subquery matters here only if it references a join RTE of an
+            // upper level; the sublevels bookkeeping is unported, so scan and
+            // stay loud only when the rewrite would change anything.
+            let q = node.as_query().unwrap();
+            assert_subquery_free_of_upper_join_vars(query, q)?;
+            Ok(None)
+        }
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, query, n)),
+    }
+}
+
+fn assert_subquery_free_of_upper_join_vars<'mcx>(
+    outer: &Query<'mcx>,
+    q: &'mcx Query<'mcx>,
+) -> PgResult<()> {
     struct W<'a, 'mcx> {
-        query: &'a Query<'mcx>,
-        sublevels_up: i64,
+        outer: &'a Query<'mcx>,
+        levels: i64,
     }
     impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
             match node.node_tag() {
                 NodeTag::T_Var => {
                     let v = node.as_var().unwrap();
-                    if v.varlevelsup as i64 == self.sublevels_up {
+                    if v.varlevelsup as i64 == self.levels {
                         let rte = self
-                            .query
+                            .outer
                             .rtable
                             .nth(v.varno as usize - 1)
                             .as_range_tbl_entry()
                             .expect("rtable cell");
                         if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
                             panic!(
-                                "flatten_join_alias_vars (var.c): join alias Var \
-                                 (varno {}); join-using lane",
-                                v.varno
+                                "flatten_join_alias_vars (var.c): join alias Var under a \
+                                 subquery (IncrementVarSublevelsUp leg) — join-using residue"
                             );
                         }
                     }
                     Ok(false)
                 }
-                t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
                 NodeTag::T_Query => {
-                    let q = node.as_query().unwrap();
-                    self.sublevels_up += 1;
-                    let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
-                    self.sublevels_up -= 1;
+                    let sub = node.as_query().unwrap();
+                    self.levels += 1;
+                    let r = query_tree_walker(sub, self, nodes_core::QTW_IGNORE_JOINALIASES);
+                    self.levels -= 1;
                     r
                 }
                 _ => expression_tree_walker(node, self),
             }
         }
-
-        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
-            self.sublevels_up += 1;
-            let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
-            self.sublevels_up -= 1;
+        fn visit_query_ref(&mut self, sub: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.levels += 1;
+            let r = query_tree_walker(sub, self, nodes_core::QTW_IGNORE_JOINALIASES);
+            self.levels -= 1;
             r
         }
     }
-    let mut w = W { query, sublevels_up: 0 };
-    w.visit(node)?;
-    Ok(node)
+    let mut w = W { outer, levels: 1 };
+    query_tree_walker(q, &mut w, nodes_core::QTW_IGNORE_JOINALIASES)?;
+    Ok(())
+}
+
+// Deep copy of a joinaliasvars entry along its standard-expression spine
+// (parse_clause only builds Vars, implicit coercions, and COALESCE); the
+// nullingrels adjustment mutates the copy in place, so sharing is not safe.
+fn fjav_copy<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::Var {
+                    varno: v.varno,
+                    varattno: v.varattno,
+                    vartype: v.vartype,
+                    vartypmod: v.vartypmod,
+                    varcollid: v.varcollid,
+                    varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                    varlevelsup: v.varlevelsup,
+                    varreturningtype: v.varreturningtype,
+                    varnosyn: v.varnosyn,
+                    varattnosyn: v.varattnosyn,
+                    location: v.location,
+                },
+            )
+        }
+        NodeTag::T_Const => Ok(node),
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::RelabelType {
+                    arg: fjav_copy(mcx, r.arg)?,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::CoerceViaIO {
+                    arg: fjav_copy(mcx, c.arg)?,
+                    resulttype: c.resulttype,
+                    resultcollid: c.resultcollid,
+                    coerceformat: c.coerceformat,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &f.args {
+                args.lappend(mcx, fjav_copy(mcx, a)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::FuncExpr {
+                    funcid: f.funcid,
+                    funcresulttype: f.funcresulttype,
+                    funcretset: f.funcretset,
+                    funcvariadic: f.funcvariadic,
+                    funcformat: f.funcformat,
+                    funccollid: f.funccollid,
+                    inputcollid: f.inputcollid,
+                    args,
+                    location: f.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let c = node.as_coalesce_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &c.args {
+                args.lappend(mcx, fjav_copy(mcx, a)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::CoalesceExpr {
+                    coalescetype: c.coalescetype,
+                    coalescecollid: c.coalescecollid,
+                    args,
+                    location: c.location,
+                },
+            )
+        }
+        t => deferred("fjav_copy: joinaliasvars entry", t),
+    }
+}
+
+// add_nullingrels_if_needed (var.c); the make_placeholder_expr fallback for
+// non-standard expressions is unported and loud.
+fn add_nullingrels_if_needed<'mcx>(
+    mcx: Mcx<'mcx>,
+    newnode: Node<'mcx>,
+    oldvar: &types_nodes::Var<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if oldvar.varnullingrels.is_empty() {
+        return Ok(newnode);
+    }
+    if !is_standard_join_alias_expression(newnode, oldvar) {
+        panic!(
+            "add_nullingrels_if_needed (var.c): non-standard join alias expression \
+             (make_placeholder_expr leg) — join-using residue"
+        );
+    }
+    adjust_standard_join_alias_expression(mcx, newnode, oldvar)?;
+    Ok(newnode)
+}
+
+fn is_standard_join_alias_expression(newnode: Node<'_>, oldvar: &types_nodes::Var<'_>) -> bool {
+    match newnode.node_tag() {
+        NodeTag::T_Var => newnode.as_var().unwrap().varlevelsup == oldvar.varlevelsup,
+        NodeTag::T_FuncExpr => {
+            let f = newnode.as_func_expr().unwrap();
+            // Implicit coercions never make non-NULL from NULL; examine only
+            // the first argument (the rest are coercion constants).
+            if f.funcformat != types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+                || f.args.is_nil()
+            {
+                return false;
+            }
+            is_standard_join_alias_expression(f.args.nth(0), oldvar)
+        }
+        NodeTag::T_RelabelType => {
+            is_standard_join_alias_expression(newnode.as_relabel_type().unwrap().arg, oldvar)
+        }
+        NodeTag::T_CoerceViaIO => {
+            is_standard_join_alias_expression(newnode.as_coerce_via_io().unwrap().arg, oldvar)
+        }
+        NodeTag::T_CoalesceExpr => {
+            let c = newnode.as_coalesce_expr().unwrap();
+            debug_assert!(!c.args.is_nil());
+            c.args.iter().all(|a| is_standard_join_alias_expression(a, oldvar))
+        }
+        _ => false,
+    }
+}
+
+fn adjust_standard_join_alias_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    newnode: Node<'mcx>,
+    oldvar: &types_nodes::Var<'mcx>,
+) -> PgResult<()> {
+    match newnode.node_tag() {
+        NodeTag::T_Var if newnode.as_var().unwrap().varlevelsup == oldvar.varlevelsup => {
+            // SAFETY: fjav_copy made this node fresh; no live derived refs.
+            unsafe {
+                newnode
+                    .with_mut::<types_nodes::Var, _>(|v| {
+                        v.varnullingrels.add_members(mcx, &oldvar.varnullingrels)
+                    })
+                    .unwrap()
+            }
+        }
+        NodeTag::T_FuncExpr => adjust_standard_join_alias_expression(
+            mcx,
+            newnode.as_func_expr().unwrap().args.nth(0),
+            oldvar,
+        ),
+        NodeTag::T_RelabelType => adjust_standard_join_alias_expression(
+            mcx,
+            newnode.as_relabel_type().unwrap().arg,
+            oldvar,
+        ),
+        NodeTag::T_CoerceViaIO => adjust_standard_join_alias_expression(
+            mcx,
+            newnode.as_coerce_via_io().unwrap().arg,
+            oldvar,
+        ),
+        NodeTag::T_CoalesceExpr => {
+            for a in &newnode.as_coalesce_expr().unwrap().args {
+                adjust_standard_join_alias_expression(mcx, a, oldvar)?;
+            }
+            Ok(())
+        }
+        t => panic!("adjust_standard_join_alias_expression: unexpected {t:?}"),
+    }
 }
 
 // flatten_group_exprs (var.c), root == NULL arm: GROUP-RTE Vars replaced by
