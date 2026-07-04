@@ -2,9 +2,6 @@
 -- aliases (PG14+), NATURAL over mixed outer joins, whole-row refs of join
 -- RTEs, output-column visibility, ambiguity errors, view round-trips.
 \set VERBOSITY verbose
--- merge-join FULL executor + cross-type (int48) merge comparator lanes are
--- unported; hash/nestloop cover the same semantics on both binaries
-SET enable_mergejoin = off;
 CREATE TABLE ju_a (id int, name text, x int);
 CREATE TABLE ju_b (id int, name text, y int);
 CREATE TABLE ju_c (id int, z int);
@@ -69,9 +66,7 @@ SELECT pg_typeof(id) FROM ju_a FULL JOIN ju_e USING (id) LIMIT 1;
 -- varchar/text typmod mix
 CREATE TABLE ju_f (name varchar(10), v int);
 INSERT INTO ju_f VALUES ('one', 111), ('four', 444);
-SET enable_hashjoin = off;
 SELECT * FROM ju_a JOIN ju_f USING (name) ORDER BY name;
-RESET enable_hashjoin;
 SELECT pg_typeof(name) FROM ju_a JOIN ju_f USING (name) LIMIT 1;
 -- errors: USING duplicates / missing / ambiguous
 SELECT * FROM ju_a JOIN ju_b USING (id, id);
