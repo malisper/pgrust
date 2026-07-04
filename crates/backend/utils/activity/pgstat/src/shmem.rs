@@ -11,7 +11,8 @@ use types_core::{InvalidOid, TimestampTz};
 
 use crate::database::PgStat_StatDBEntry;
 use crate::pending::{
-    PgStat_HashKey, PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_DATABASE, PGSTAT_KIND_WAL,
+    PgStat_HashKey, PgStat_Kind, PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_DATABASE, PGSTAT_KIND_FUNCTION,
+    PGSTAT_KIND_RELATION, PGSTAT_KIND_WAL,
 };
 use crate::relation::PgStat_TableCounts;
 use crate::{
@@ -155,12 +156,14 @@ pub(crate) fn drop_entry(key: PgStat_HashKey) {
 
 struct SnapshotState {
     mode: i32,
+    snapshot_timestamp: TimestampTz,
     stats: HashMap<PgStat_HashKey, Option<SharedEntry>, FxBuildHasher>,
 }
 
 thread_local! {
     static SNAPSHOT: RefCell<SnapshotState> = RefCell::new(SnapshotState {
         mode: PGSTAT_FETCH_CONSISTENCY_NONE,
+        snapshot_timestamp: 0,
         stats: HashMap::with_hasher(FxBuildHasher),
     });
 }
@@ -184,8 +187,16 @@ fn build_snapshot() {
             }
             snap.stats.insert(key, Some(entry));
         }
+        snap.snapshot_timestamp = timestamp_seams::get_current_timestamp::call();
         snap.mode = PGSTAT_FETCH_CONSISTENCY_SNAPSHOT;
     });
+}
+
+pub fn pgstat_get_stat_snapshot_timestamp() -> Option<TimestampTz> {
+    SNAPSHOT.with(|s| {
+        let snap = s.borrow();
+        (snap.mode == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT).then_some(snap.snapshot_timestamp)
+    })
 }
 
 // Returns an owned copy; C hands back a pointer into snapshot memory. The
@@ -239,4 +250,65 @@ pub fn pgstat_have_entry(kind: u32, dboid: types_core::Oid, objid: u64) -> bool 
     // counts already answer true there; here shared entries appear at flush.
     SHARED_STATS.lock().unwrap().contains_key(&key)
         || crate::pending::pgstat_have_pending(key)
+}
+
+fn reset_entry_contents(entry: &mut SharedEntry, ts: TimestampTz) {
+    match entry {
+        SharedEntry::Relation(t) => *t = PgStat_StatTabEntry::default(),
+        SharedEntry::Database(d) => {
+            *d = PgStat_StatDBEntry::default();
+            d.stat_reset_timestamp = ts;
+        }
+    }
+}
+
+fn reset_database_timestamp(store: &mut Store, dboid: types_core::Oid, ts: TimestampTz) {
+    let key = PgStat_HashKey { kind: PGSTAT_KIND_DATABASE, dboid, objid: 0 };
+    let SharedEntry::Database(d) =
+        store.entry(key).or_insert(SharedEntry::Database(PgStat_StatDBEntry::default()))
+    else {
+        unreachable!("database key holds non-database shared entry")
+    };
+    d.stat_reset_timestamp = ts;
+}
+
+pub fn pgstat_reset_counters() {
+    let ts = timestamp_seams::get_current_timestamp::call();
+    let my_dboid = init_small::globals::MyDatabaseId();
+    let mut store = SHARED_STATS.lock().unwrap();
+    for (key, entry) in store.iter_mut() {
+        if key.dboid == my_dboid {
+            reset_entry_contents(entry, ts);
+        }
+    }
+}
+
+pub fn pgstat_reset(kind: PgStat_Kind, dboid: types_core::Oid, objid: u64) {
+    let ts = timestamp_seams::get_current_timestamp::call();
+    let mut store = SHARED_STATS.lock().unwrap();
+    if let Some(entry) = store.get_mut(&PgStat_HashKey { kind, dboid, objid }) {
+        reset_entry_contents(entry, ts);
+    }
+    // DATABASE is the only ported kind with accessed_across_databases.
+    if kind != PGSTAT_KIND_DATABASE {
+        reset_database_timestamp(&mut store, dboid, ts);
+    }
+}
+
+pub fn pgstat_reset_of_kind(kind: PgStat_Kind) {
+    match kind {
+        PGSTAT_KIND_DATABASE | PGSTAT_KIND_RELATION | PGSTAT_KIND_FUNCTION => {
+            let ts = timestamp_seams::get_current_timestamp::call();
+            let mut store = SHARED_STATS.lock().unwrap();
+            for (key, entry) in store.iter_mut() {
+                if key.kind == kind {
+                    reset_entry_contents(entry, ts);
+                }
+            }
+        }
+        _ => panic!(
+            "pgstat_reset_of_kind (pgstat.c:875): shared stats for kind {:?} unported",
+            kind
+        ),
+    }
 }
