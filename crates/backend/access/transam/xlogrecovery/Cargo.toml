@@ -9,6 +9,7 @@ name = "xlogrecovery"
 path = "src/lib.rs"
 
 [dependencies]
+pgstat = { path = "../../../utils/activity/pgstat" }
 timeline_seams = { path = "../timeline_seams" }
 mcx = { path = "../../../../_support/mcx" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
@@ -55,7 +56,6 @@ lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 shmem = { path = "../../../storage/ipc/shmem" }
 inval = { path = "../../../utils/cache/inval" }
-pgstat = { path = "../../../utils/activity/pgstat" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 guc = { path = "../../../utils/misc/guc" }
 adt_bool = { path = "../../../utils/adt/bool" }
