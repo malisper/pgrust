@@ -522,6 +522,165 @@ pub fn do_to_timestamp<'mcx>(
     Ok(true)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParsedDatetime {
+    Date(DateADT),
+    Time(::adt_date::TimeADT),
+    TimeTz(::adt_date::TimeTzADT),
+    Timestamp(Timestamp),
+    TimestampTz(Timestamp),
+}
+
+#[cold]
+fn out_of_range(what: &str) -> PgError {
+    PgError::error(format!("{what} out of range"))
+        .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE)
+}
+
+/// C: `parse_datetime` (formatting.c:4217) — datetime type inferred from the
+/// format's DCH_DATED/TIMED/ZONED fields. Ok(None) = soft error recorded.
+pub fn parse_datetime<'mcx>(
+    mcx: Mcx<'mcx>,
+    date_txt: &[u8],
+    fmt: &[u8],
+    collid: Oid,
+    strict: bool,
+    typmod: &mut i32,
+    tz_out: &mut i32,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<ParsedDatetime>> {
+    let mut tm = zero_tm();
+    let mut ftz = FmtTz::default();
+    let mut fsec: fsec_t = 0;
+    let mut fprec: i32 = 0;
+    let mut flags: u32 = 0;
+
+    if !do_to_timestamp(
+        mcx,
+        date_txt,
+        fmt,
+        collid,
+        strict,
+        &mut tm,
+        &mut fsec,
+        &mut ftz,
+        Some(&mut fprec),
+        Some(&mut flags),
+        escontext.as_deref_mut(),
+    )? {
+        return Ok(None);
+    }
+
+    *typmod = if fprec != 0 { fprec } else { -1 };
+
+    let flags = flags as i32;
+    if flags & DCH_DATED != 0 {
+        if flags & DCH_TIMED != 0 {
+            if flags & DCH_ZONED != 0 {
+                if ftz.has_tz {
+                    *tz_out = ftz.gmtoffset;
+                } else {
+                    debug_assert!(!strict);
+                    ::types_error::ereturn(
+                        escontext.as_deref_mut(),
+                        (),
+                        PgError::error(
+                            "missing time zone in input string for type timestamptz",
+                        )
+                        .with_sqlstate(::types_error::ERRCODE_INVALID_DATETIME_FORMAT),
+                    )?;
+                    return Ok(None);
+                }
+                let mut result: Timestamp = 0;
+                if tm2timestamp(&tm, fsec, Some(*tz_out), &mut result).is_err() {
+                    ::types_error::ereturn(
+                        escontext.as_deref_mut(),
+                        (),
+                        out_of_range("timestamptz"),
+                    )?;
+                    return Ok(None);
+                }
+                if !AdjustTimestampForTypmod(&mut result, *typmod, escontext.as_deref_mut())? {
+                    return Ok(None);
+                }
+                Ok(Some(ParsedDatetime::TimestampTz(result)))
+            } else {
+                let mut result: Timestamp = 0;
+                if tm2timestamp(&tm, fsec, None, &mut result).is_err() {
+                    ::types_error::ereturn(
+                        escontext.as_deref_mut(),
+                        (),
+                        out_of_range("timestamp"),
+                    )?;
+                    return Ok(None);
+                }
+                if !AdjustTimestampForTypmod(&mut result, *typmod, escontext.as_deref_mut())? {
+                    return Ok(None);
+                }
+                Ok(Some(ParsedDatetime::Timestamp(result)))
+            }
+        } else if flags & DCH_ZONED != 0 {
+            ::types_error::ereturn(
+                escontext.as_deref_mut(),
+                (),
+                PgError::error("datetime format is zoned but not timed")
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_DATETIME_FORMAT),
+            )?;
+            Ok(None)
+        } else {
+            if !IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday) {
+                ::types_error::ereturn(
+                    escontext.as_deref_mut(),
+                    (),
+                    *date_out_of_range(date_txt),
+                )?;
+                return Ok(None);
+            }
+            let result = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+            if !IS_VALID_DATE(result) {
+                ::types_error::ereturn(
+                    escontext.as_deref_mut(),
+                    (),
+                    *date_out_of_range(date_txt),
+                )?;
+                return Ok(None);
+            }
+            Ok(Some(ParsedDatetime::Date(result)))
+        }
+    } else if flags & DCH_TIMED != 0 {
+        if flags & DCH_ZONED != 0 {
+            if ftz.has_tz {
+                *tz_out = ftz.gmtoffset;
+            } else {
+                debug_assert!(!strict);
+                ::types_error::ereturn(
+                    escontext.as_deref_mut(),
+                    (),
+                    PgError::error("missing time zone in input string for type timetz")
+                        .with_sqlstate(::types_error::ERRCODE_INVALID_DATETIME_FORMAT),
+                )?;
+                return Ok(None);
+            }
+            let mut result = ::adt_date::TimeTzADT::default();
+            ::adt_date::tm2timetz(&tm, fsec, *tz_out, &mut result);
+            ::adt_date::AdjustTimeForTypmod(&mut result.time, *typmod);
+            Ok(Some(ParsedDatetime::TimeTz(result)))
+        } else {
+            let mut result = ::adt_date::tm2time(&tm, fsec);
+            ::adt_date::AdjustTimeForTypmod(&mut result, *typmod);
+            Ok(Some(ParsedDatetime::Time(result)))
+        }
+    } else {
+        ::types_error::ereturn(
+            escontext.as_deref_mut(),
+            (),
+            PgError::error("datetime format is not dated and not timed")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_DATETIME_FORMAT),
+        )?;
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

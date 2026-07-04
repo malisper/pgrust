@@ -34,6 +34,7 @@ adt_int8 = { path = "../../adt/int8" }
 adt_json = { path = "../../adt/json" }
 adt_jsonb = { path = "../../adt/jsonb" }
 adt_jsonpath = { path = "../../adt/jsonpath" }
+adt_jsonpath_exec = { path = "../../adt/jsonpath_exec" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
 adt_pg_lsn = { path = "../../adt/pg_lsn" }

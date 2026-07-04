@@ -386,6 +386,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_jsonpath_exec"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "adt_date",
+ "adt_datetime",
+ "adt_float",
+ "adt_formatting",
+ "adt_int",
+ "adt_int8",
+ "adt_json",
+ "adt_jsonb",
+ "adt_jsonpath",
+ "adt_numeric",
+ "adt_regexp",
+ "adt_timestamp",
+ "datum",
+ "elog",
+ "fd",
+ "format_type",
+ "funcapi",
+ "guc_tables",
+ "mbutils",
+ "mcx",
+ "pgtz",
+ "postgres_seams",
+ "stack_depth",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "wchar",
+ "xact_seams",
+]
+
+[[package]]
 name = "adt_like"
 version = "0.1.0"
 dependencies = [
@@ -3652,6 +3689,7 @@ dependencies = [
  "adt_json",
  "adt_jsonb",
  "adt_jsonpath",
+ "adt_jsonpath_exec",
  "adt_like",
  "adt_mac",
  "adt_mac8",
