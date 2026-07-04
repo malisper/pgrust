@@ -78,8 +78,7 @@ pub struct BTDedupState {
 
 impl BTDedupState {
     pub fn new(maxpostingsize: Size) -> BTDedupState {
-        // BLCKSZ = bottom-up deletion ("not really deduplicating"): TIDs are
-        // collected but finish_pending/form_posting are never reached.
+        // BLCKSZ = bottom-up deletion ("not really deduplicating"): form_posting unreached.
         debug_assert!(maxpostingsize <= BTMaxItemSize || maxpostingsize == BLCKSZ);
         // SAFETY: POD; one zeroed frame-local per pass (C pallocs state + htids).
         let mut state: BTDedupState = unsafe { core::mem::zeroed() };

@@ -83,8 +83,7 @@ fn bt_compare_array_skey(
     }
 }
 
-/// _bt_binsrch_array_skey: first array element >= tupdatum. `cur_elem_trig`
-/// enables the required-array lockstep optimization.
+/// _bt_binsrch_array_skey: first array element >= tupdatum; `cur_elem_trig` = required-array lockstep.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bt_binsrch_array_skey(
     frame: &mut OrderProcFrame,
@@ -261,8 +260,7 @@ fn bt_skiparray_set_isnull(skey: &mut ScanKeyData, array: &BTArrayKeyInfo<'_>) {
     skey.sk_flags |= SK_SEARCHNULL | SK_ISNULL;
 }
 
-/// _bt_skiparray_set_element: advance the skip array to tupdatum/tupnull, or
-/// to its low/high bound when set_elem_result says the tuple is out of range.
+/// _bt_skiparray_set_element: advance to tupdatum/tupnull, or to the bound set_elem_result picks.
 fn bt_skiparray_set_element<'mcx>(
     mcx: Mcx<'mcx>,
     skey: &mut ScanKeyData,
@@ -290,8 +288,7 @@ fn bt_skiparray_set_element<'mcx>(
     Ok(())
 }
 
-// _bt_array_decrement / _bt_array_increment; false = already at the first
-// (last) element for the direction.
+// _bt_array_decrement / _bt_array_increment; false = no prior (next) element for the direction.
 fn bt_array_step<'mcx>(
     mcx: Mcx<'mcx>,
     frame: &mut OrderProcFrame,
@@ -368,8 +365,7 @@ fn bt_array_step<'mcx>(
     Ok(true)
 }
 
-/// _bt_advance_array_keys_increment: false = arrays exhausted (restored to
-/// their final positions for the opposite direction, as C does).
+/// _bt_advance_array_keys_increment: false = exhausted (restored for the opposite direction, as C).
 fn bt_advance_array_keys_increment(
     so: &mut BTScanOpaqueData<'_>,
     dir: ScanDirection,
@@ -394,8 +390,7 @@ fn bt_advance_array_keys_increment(
     Ok(false)
 }
 
-/// _bt_binsrch_skiparray_skey: -1/0/1 = tupdatum below/within/above the skip
-/// array's range. `sk_flags` comes from the array's = scan key.
+/// _bt_binsrch_skiparray_skey: -1/0/1 = below/within/above; `sk_flags` from the array's = key.
 fn bt_binsrch_skiparray_skey(
     frame: &mut OrderProcFrame,
     cur_elem_trig: bool,
@@ -566,8 +561,7 @@ unsafe fn bt_tuple_before_array_skeys(
     Ok(false)
 }
 
-/// _bt_start_prim_scan: true when _bt_checkkeys scheduled another primitive
-/// index scan.
+/// _bt_start_prim_scan: true when another primitive index scan was scheduled.
 pub(crate) fn bt_start_prim_scan(so: &mut BTScanOpaqueData<'_>) -> bool {
     debug_assert!(so.numArrayKeys > 0);
     so.scanBehind = false;
@@ -603,8 +597,7 @@ unsafe fn bt_advance_array_keys(
     } else if sktrig < so.numberOfKeys - 1
         && so.keyData[so.numberOfKeys as usize - 1].sk_flags & SK_SEARCHARRAY == 0
     {
-        // Precheck the least significant key before the expensive binary
-        // searches (non-required trigger only).
+        // Precheck the least significant key first (non-required trigger only).
         let mut least_sign_ikey = so.numberOfKeys - 1;
         let mut continuescan = true;
         debug_assert!(so.keyData[sktrig as usize].sk_flags & SK_SEARCHARRAY != 0);
@@ -915,12 +908,9 @@ unsafe fn bt_advance_array_keys(
     Ok(false)
 }
 
-/// _bt_checkkeys. `tupnatts` is the tuple's own attribute count (may be less
-/// than the key count for a truncated high key).
-///
-/// ARRAY_KEYS is a const generic so the numArrayKeys==0 instantiation folds
-/// the array-advance tail dead and stays inlinable in the readpage loop —
-/// the runtime-bool form cost the plain range lane ~4% instr.
+/// _bt_checkkeys. `tupnatts` may be < key count (truncated high key). ARRAY_KEYS
+/// const-folds the array-advance tail dead in the numArrayKeys==0 instantiation,
+/// keeping it inlinable in the readpage loop (runtime bool cost the range lane ~4% instr).
 ///
 /// # Safety
 /// `tuple` points at a live index tuple on a page pinned+locked by caller.
@@ -1041,9 +1031,8 @@ unsafe fn bt_oppodir_checkkeys(
     Ok(true)
 }
 
-/// _bt_check_compare. ADVANCE_NONREQUIRED is const so the numArrayKeys==0
-/// instantiation folds the array-advance arm dead and inlines into
-/// bt_checkkeys::<false>'s readpage-loop copy (see bt_checkkeys).
+/// _bt_check_compare. const ADVANCE_NONREQUIRED folds the array-advance arm dead
+/// in the numArrayKeys==0 instantiation (inlines into bt_checkkeys::<false>).
 ///
 /// # Safety
 /// As [`bt_checkkeys`].
@@ -1115,8 +1104,7 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
             if required_same_dir {
                 *continuescan = false;
             } else if key.sk_flags & SK_BT_SKIP != 0 {
-                // Nonrequired non-range skip array with a NULL element is
-                // satisfied by every possible array key.
+                // A NULL element satisfies a nonrequired non-range skip array.
                 debug_assert!(forcenonrequired && *ikey > 0);
                 *ikey += 1;
                 continue;
@@ -1202,8 +1190,7 @@ unsafe fn advance_nonrequired_cold(
     bt_advance_array_keys(rel, so, None, tuple, tupnatts, ikey, false, frame)
 }
 
-// _bt_checkkeys_look_ahead: speculatively probe a later tuple on the page and
-// set pstate.skip when it's still before the current array keys.
+// _bt_checkkeys_look_ahead: probe a later tuple; set pstate.skip while still before the arrays.
 //
 // # Safety
 // As [`bt_checkkeys`]; pstate.page items live for the call.
@@ -1255,8 +1242,7 @@ unsafe fn bt_checkkeys_look_ahead(
     Ok(())
 }
 
-/// datum_image_eq (datum.c) trimmed to index-tuple callers: no external toast,
-/// no expanded datums on-page.
+/// datum_image_eq (datum.c) for index-tuple callers: no external toast, no expanded datums.
 ///
 /// # Safety
 /// By-ref datums point at live in-page values of the attribute's type shape.
@@ -1290,8 +1276,7 @@ unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> boo
     }
 }
 
-/// _bt_keep_natts_fast: first attribute (1-based) whose value differs between
-/// the two tuples, capped at keysz+1.
+/// _bt_keep_natts_fast: first differing attribute (1-based), capped at keysz+1.
 ///
 /// # Safety
 /// As [`bt_checkkeys`] for both tuples.

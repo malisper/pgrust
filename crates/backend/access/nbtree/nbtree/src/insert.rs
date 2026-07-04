@@ -1,9 +1,8 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
 //! _bt_check_unique (YES + PARTIAL arms, with the conflict-wait restart),
 //! _bt_findinsertloc, _bt_insertonpg incl. posting splits (_bt_binsrch_posting,
-//! _bt_swap_posting, the page-split coincidence), _bt_split + parent insertion
-//! + root split, dedup trigger (dedup.rs). Loud: deletion, deferred
-//! unique rechecks (UNIQUE_CHECK_EXISTING), !heapkeyspace.
+//! _bt_swap_posting, the page-split coincidence), _bt_split + parent insertion +
+//! root split, dedup trigger (dedup.rs). Loud: UNIQUE_CHECK_EXISTING, !heapkeyspace.
 
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
@@ -566,11 +565,9 @@ fn invalid_duplicate_tuple(
     )
 }
 
-/// _bt_check_unique, YES + PARTIAL arms: dirty-snapshot visibility recheck
-/// through the tableam. Returns (xwait, speculativeToken): a valid xwait means
-/// the caller must wait it out and restart the search; PARTIAL never waits —
-/// it reports the potential conflict via `is_unique` and lets the insert
-/// proceed.
+/// _bt_check_unique, YES + PARTIAL arms: dirty-snapshot recheck via the tableam.
+/// A valid returned xwait means wait it out + restart the search; PARTIAL never
+/// waits — it reports the potential conflict via `is_unique` and proceeds.
 ///
 /// # Safety
 /// `insertstate.buf` pinned + write-locked.
@@ -588,8 +585,7 @@ unsafe fn bt_check_unique<'mcx>(
 
     *is_unique = true;
 
-    // The dirty write-back (xmin/xmax/speculativeToken) comes back through
-    // the snapshot's dirty_* Cells (visibility read-marshal contract).
+    // Dirty write-back (xmin/xmax/speculativeToken) rides the snapshot's dirty_* Cells.
     let mut snapshot_dirty: ::tableam::Snapshot<'mcx> = Some(std::rc::Rc::new(
         SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_DIRTY),
     ));
@@ -653,9 +649,7 @@ unsafe fn bt_check_unique<'mcx>(
                     &mut snapshot_dirty,
                     Some(&mut all_dead),
                 )? {
-                    // Potential conflict is enough for PARTIAL: report it and
-                    // leave the conclusive check to the speculative recheck.
-                    // Don't invalidate binary search bounds.
+                    // PARTIAL: report the potential conflict; bounds stay valid.
                     if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_PARTIAL) {
                         if let Some(pin) = nbuf.take() {
                             bt_relbuf(rel, pin)?;

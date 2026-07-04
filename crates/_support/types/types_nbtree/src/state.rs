@@ -25,8 +25,7 @@ pub type BTStack<'mcx> = Option<&'mcx mut BTStackData<'mcx>>;
 
 const _: () = assert!(!core::mem::needs_drop::<BTStackData>());
 
-// C sizes scankeys[INDEX_MAX_KEYS] as a keysz-sized flexible array member;
-// keysz is scankeys.len().
+// C sizes scankeys[INDEX_MAX_KEYS] as a keysz-sized flexible array member; keysz = scankeys.len().
 pub struct BTScanInsertData<'mcx> {
     pub heapkeyspace: bool,
     pub allequalimage: bool,
@@ -149,9 +148,8 @@ pub struct SkipSupportData {
     pub increment: SkipSupportIncDec,
 }
 
-// C divergence: low_compare/high_compare are owned copies of the arrayKeyData
-// input keys rather than pointers into it (same mutability, same lifetime).
-// num_elems == -1 means skip array (elem_values stays empty).
+// C divergence: low_compare/high_compare are owned copies of the arrayKeyData keys, not
+// pointers into it (same mutability/lifetime). num_elems == -1 = skip array (elem_values empty).
 pub struct BTArrayKeyInfo<'mcx> {
     pub scan_key: i32,
     pub num_elems: i32,
@@ -166,8 +164,7 @@ pub struct BTArrayKeyInfo<'mcx> {
 }
 
 
-// C divergence: arrayContext is dropped — the PgVec allocations' 'mcx IS the
-// scan-lifespan context.
+// C divergence: arrayContext is dropped — the PgVec allocations' 'mcx IS the scan-lifespan context.
 pub struct BTScanOpaqueData<'mcx> {
     pub qual_ok: bool,
     pub numberOfKeys: i32,
@@ -195,8 +192,7 @@ pub struct BTScanOpaqueData<'mcx> {
 }
 
 impl<'mcx> BTScanOpaqueData<'mcx> {
-    // btbeginscan's palloc + header assignment, in place (a by-value Self would
-    // memcpy ~27KB through the stack).
+    // btbeginscan's palloc + header assignment, in place (by-value Self = ~27KB stack memcpy).
     pub fn alloc_in(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Self>> {
         let layout = core::alloc::Layout::new::<Self>();
         let ptr = Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
@@ -230,9 +226,8 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
 pub struct BTReadPageState<'p> {
     pub minoff: OffsetNumber,
     pub maxoff: OffsetNumber,
-    // High key (forward) / first non-pivot tuple (backward) bytes, borrowed
-    // from the pinned leaf page like C's IndexTuple pointer; None on the
-    // rightmost/leftmost page.
+    // High key (forward) / first non-pivot tuple (backward) bytes, borrowed from the
+    // pinned leaf page like C's IndexTuple pointer; None on the rightmost/leftmost page.
     pub finaltup: Option<&'p [u8]>,
     pub page: &'p [u8],
     pub firstpage: bool,
