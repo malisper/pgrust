@@ -113,6 +113,7 @@ pub fn RenameConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult
         stmt.relation.expect("RenameStmt.relation"),
         AccessExclusiveLock,
         stmt.missing_ok,
+        types_nodes::parsenodes::ObjectType::OBJECT_TABLE,
     )?;
     if relid == InvalidOid {
         elog_seams::ereport_msg::call(
