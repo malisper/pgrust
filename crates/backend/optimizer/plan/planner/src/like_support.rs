@@ -14,14 +14,7 @@ use crate::selfuncs::{
 };
 use types_pathnodes::NodeId;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PatternType {
-    Like,
-    LikeIc,
-    Regex,
-    RegexIc,
-    Prefix,
-}
+pub use planner_seams::PatternType;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PrefixStatus {

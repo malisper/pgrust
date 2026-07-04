@@ -25,6 +25,8 @@ types_portal = { path = "../../../../_support/types/portal" }
 planner_seams = { path = "../planner_seams" }
 costsize = { path = "../../path/costsize" }
 pathnode = { path = "../../util/pathnode" }
+equivclass = { path = "../../path/equivclass" }
+indxpath = { path = "../../path/indxpath" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 adt_int8 = { path = "../../../utils/adt/int8" }
 adt_multirangetypes = { path = "../../../utils/adt/multirangetypes" }

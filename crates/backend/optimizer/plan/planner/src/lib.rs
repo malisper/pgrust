@@ -151,6 +151,32 @@ pub fn init_seams() {
     planner_seams::generate_join_implied_equalities_for_ecs::set(
         crate::equivclass::generate_join_implied_equalities_for_ecs,
     );
+    planner_seams::distribute_restrictinfo_to_rels::set(
+        crate::initsplan::distribute_restrictinfo_to_rels,
+    );
+    planner_seams::build_implied_join_equality::set(crate::initsplan::build_implied_join_equality);
+    planner_seams::process_implied_equality::set(crate::initsplan::process_implied_equality);
+    planner_seams::pull_var_nodes::set(crate::initsplan::pull_var_nodes);
+    planner_seams::pull_varnos_relids::set(crate::initsplan::pull_varnos_relids);
+    planner_seams::add_vars_to_targetlist::set(crate::initsplan::add_vars_to_targetlist);
+    planner_seams::add_vars_to_attr_needed::set(crate::initsplan::add_vars_to_attr_needed);
+    planner_seams::commute_restrictinfo::set(crate::initsplan::commute_restrictinfo);
+    planner_seams::remove_rel_from_restrictinfo::set(
+        crate::analyzejoins::remove_rel_from_restrictinfo,
+    );
+    planner_seams::adjust_appendrel_attrs::set(crate::inherit::adjust_appendrel_attrs);
+    planner_seams::adjust_appendrel_attrs_multi::set(crate::inherit::adjust_appendrel_attrs_multi);
+    planner_seams::adjust_appendrel_attrs_multilevel::set(
+        crate::inherit::adjust_appendrel_attrs_multilevel,
+    );
+    planner_seams::expr_collation::set(crate::pathkeys::expr_collation);
+    planner_seams::is_dummy_rel::set(crate::joinrels::is_dummy_rel);
+    planner_seams::make_opclause::set(crate::like_support::make_opclause);
+    planner_seams::match_pattern_prefix::set(crate::like_support::match_pattern_prefix);
+    planner_seams::predicate_implied_by::set(crate::predtest::predicate_implied_by);
+    planner_seams::build_index_pathkeys::set(crate::pathkeys::build_index_pathkeys);
+    planner_seams::truncate_useless_pathkeys::set(crate::pathkeys::truncate_useless_pathkeys);
+    planner_seams::inet_ref::set(crate::network_selfuncs::inet_ref);
     use guc_tables::GucVarAccessors;
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
