@@ -107,7 +107,12 @@ pub fn exec_init_work_table_scan<'mcx>(
         ss_ScanTupleSlot,
         instr_idx: None,
     };
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
+    ss.qual = {
+        let pb = estate.param_bind();
+        ::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, pb, env)
+        })?
+    };
 
     Ok(WorkTableScanState { ss, plan: node, rustate_resolved: false })
 }

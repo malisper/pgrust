@@ -244,7 +244,9 @@ pub fn exec_init_index_scan_rel<'mcx>(
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
+    })?;
     let indexqualorig = exec_init_qual(mcx, &node.indexqualorig, params)?;
 
     if !node.indexorderby.is_nil() || !node.indexorderbyorig.is_nil() {

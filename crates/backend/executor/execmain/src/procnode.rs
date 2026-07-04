@@ -918,7 +918,12 @@ pub fn exec_init_node<'mcx>(
                 &sq_plan.scan.plan.targetlist,
             )?;
             ss.qual =
-                ::execexpr::exec_init_qual(mcx, &sq_plan.scan.plan.qual, estate.param_bind())?;
+                {
+                let pb = estate.param_bind();
+                ::executils::with_subplan_compile_env(estate, |env| {
+                    ::execexpr::exec_init_qual_subplans(mcx, &sq_plan.scan.plan.qual, pb, env)
+                })?
+            };
             PlanStateNode::SubqueryScan(::mcx::alloc_in(
                 mcx,
                 SubqueryScanNode { ss, subplan: ::mcx::alloc_in(mcx, subplan)? },
