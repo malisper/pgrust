@@ -4,7 +4,10 @@ use ::heapam::HeapTupleGetUpdateXid;
 use ::procarray::TransactionIdIsInProgress;
 use ::snapmgr::XidInMVCCSnapshot;
 use ::tableam::TM_Result::{self, *};
-use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid, TransactionIdPrecedes};
+use ::types_core::xact::{
+    InvalidCommandId, InvalidTransactionId, TransactionIdFollowsOrEquals, TransactionIdIsValid,
+    TransactionIdPrecedes,
+};
 use ::types_core::{Buffer, CommandId, GlobalVisStateHandle, InvalidOid, TransactionId};
 use ::types_error::PgResult;
 use ::types_snapshot::HTSV_Result::{self, *};
@@ -23,12 +26,6 @@ use ::xact::TransactionIdIsCurrentTransactionId;
 
 #[cfg(test)]
 mod tests;
-
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("backend-access-heap-heapam-visibility reached unported unit: {unit}")
-}
 
 // Seamed while transam.c is in flight; collapse to a direct dep when it lands.
 #[inline]
@@ -788,7 +785,7 @@ fn satisfies_mvcc_res<R: MvccXidResolve>(
             }
         } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
             if HeapTupleHeaderGetCmin(tuple) >= snapshot.curcid.get() {
-                return Ok(false); /* inserted after scan started */
+                return Ok(false);
             }
 
             if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
@@ -1165,6 +1162,132 @@ pub fn HeapTupleHeaderIsOnlyLocked(tuple: &HeapTupleHeaderData) -> PgResult<bool
     Ok(true)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_HISTORIC_RLOCATOR:
+        std::cell::Cell<Option<types_storage::RelFileLocator>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(not(test))]
+fn historic_buffer_rlocator(buffer: Buffer) -> types_storage::RelFileLocator {
+    let tag = bufmgr::BufferGetTag(buffer);
+    types_storage::RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber)
+}
+
+#[cfg(test)]
+fn historic_buffer_rlocator(_buffer: Buffer) -> types_storage::RelFileLocator {
+    TEST_HISTORIC_RLOCATOR
+        .with(|c| c.get())
+        .expect("historic visibility test without an installed rlocator")
+}
+
+fn TransactionIdInArray(xid: TransactionId, xip: &[TransactionId]) -> bool {
+    // xidComparator order (plain uint32).
+    xip.binary_search(&xid).is_ok()
+}
+
+pub fn HeapTupleSatisfiesHistoricMVCC(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+
+    let (xmin, raw_xmax, infomask, xmin_invalid, xmin_committed) = {
+        let tuple = htup.t_data();
+        (
+            tuple.xmin(),
+            tuple.xmax_raw(),
+            tuple.t_infomask,
+            tuple.xmin_invalid(),
+            tuple.xmin_committed(),
+        )
+    };
+    let mut xmax = raw_xmax;
+
+    let subxip = &snapshot.subxip[..snapshot.subxcnt.max(0) as usize];
+    let xip = &snapshot.xip[..snapshot.xcnt as usize];
+
+    if xmin_invalid {
+        return Ok(false);
+    } else if TransactionIdInArray(xmin, subxip) {
+        let rlocator = historic_buffer_rlocator(buffer);
+        let resolved = ::reorderbuffer::ResolveCminCmaxDuringDecoding(
+            ::snapmgr::HistoricSnapshotGetTupleCids().as_ref(),
+            snapshot,
+            htup,
+            rlocator,
+        )?;
+
+        let Some((cmin, _cmax)) = resolved else {
+            return Ok(false);
+        };
+
+        debug_assert!(cmin != InvalidCommandId);
+
+        if cmin >= snapshot.curcid.get() {
+            return Ok(false);
+        }
+    } else if TransactionIdPrecedes(xmin, snapshot.xmin) {
+        debug_assert!(!(xmin_committed && !TransactionIdDidCommit(xmin)?));
+
+        if !xmin_committed && !TransactionIdDidCommit(xmin)? {
+            return Ok(false);
+        }
+    } else if TransactionIdFollowsOrEquals(xmin, snapshot.xmax) {
+        return Ok(false);
+    } else if TransactionIdInArray(xmin, xip) {
+    } else {
+        return Ok(false);
+    }
+
+
+    if (infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(true);
+    } else if HEAP_XMAX_IS_LOCKED_ONLY(infomask) {
+        return Ok(true);
+    } else if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        xmax = HeapTupleGetUpdateXid(htup.t_data())?;
+    }
+
+    if TransactionIdInArray(xmax, subxip) {
+        let rlocator = historic_buffer_rlocator(buffer);
+        let resolved = ::reorderbuffer::ResolveCminCmaxDuringDecoding(
+            ::snapmgr::HistoricSnapshotGetTupleCids().as_ref(),
+            snapshot,
+            htup,
+            rlocator,
+        )?;
+
+        let Some((_cmin, cmax)) = resolved else {
+            return Ok(true);
+        };
+        if cmax == InvalidCommandId {
+            return Ok(true);
+        }
+
+        Ok(cmax >= snapshot.curcid.get())
+    } else if TransactionIdPrecedes(xmax, snapshot.xmin) {
+        debug_assert!(
+            !((infomask & HEAP_XMAX_COMMITTED) != 0 && !TransactionIdDidCommit(xmax)?)
+        );
+
+        if (infomask & HEAP_XMAX_COMMITTED) != 0 {
+            return Ok(false);
+        }
+
+        Ok(!TransactionIdDidCommit(xmax)?)
+    } else if TransactionIdFollowsOrEquals(xmax, snapshot.xmax) {
+        Ok(true)
+    } else if TransactionIdInArray(xmax, xip) {
+        Ok(false)
+    } else {
+        Ok(true)
+    }
+}
+
 pub fn HeapTupleSatisfiesVisibility(
     htup: &mut HeapTupleData<'_>,
     snapshot: &mut SnapshotData<'_>,
@@ -1176,9 +1299,7 @@ pub fn HeapTupleSatisfiesVisibility(
         SNAPSHOT_ANY => HeapTupleSatisfiesAny(htup, buffer),
         SNAPSHOT_TOAST => HeapTupleSatisfiesToast(htup, buffer),
         SNAPSHOT_DIRTY => HeapTupleSatisfiesDirty(htup, snapshot, buffer),
-        SNAPSHOT_HISTORIC_MVCC => {
-            unported("HeapTupleSatisfiesHistoricMVCC (reorderbuffer/logical decoding)")
-        }
+        SNAPSHOT_HISTORIC_MVCC => HeapTupleSatisfiesHistoricMVCC(htup, snapshot, buffer),
         SNAPSHOT_NON_VACUUMABLE => HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer),
     }
 }
@@ -1205,9 +1326,7 @@ fn heap_tuple_satisfies_visibility_read(
             snapshot.dirty_speculative_token.set(dirty.speculativeToken);
             Ok(r)
         }),
-        SNAPSHOT_HISTORIC_MVCC => {
-            unported("HeapTupleSatisfiesHistoricMVCC (reorderbuffer/logical decoding)")
-        }
+        SNAPSHOT_HISTORIC_MVCC => HeapTupleSatisfiesHistoricMVCC(htup, snapshot, buffer),
         SNAPSHOT_NON_VACUUMABLE => HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer),
     }
 }

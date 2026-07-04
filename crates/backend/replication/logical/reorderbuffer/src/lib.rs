@@ -760,6 +760,14 @@ impl ReorderBuffer {
         self.current_restart_decoding_lsn = ptr;
     }
 
+    pub fn current_restart_decoding_lsn(&self) -> XLogRecPtr {
+        self.current_restart_decoding_lsn
+    }
+
+    pub fn toplevel_txns(&self) -> impl Iterator<Item = TxnId> + '_ {
+        dl_iter(&self.txns, self.toplevel_by_lsn, |t| t.node)
+    }
+
     pub fn assign_child(&mut self, xid: TransactionId, subxid: TransactionId, lsn: XLogRecPtr) {
         let (txn, _new_top) = self.txn_by_xid(xid, true, lsn, true);
         let txn = txn.expect("created");

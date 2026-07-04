@@ -2,9 +2,11 @@ use crate::builtins::SLOTFUNCS_BUILTINS;
 
 #[test]
 fn builtin_table_shape() {
-    assert_eq!(SLOTFUNCS_BUILTINS.len(), 3);
+    assert_eq!(SLOTFUNCS_BUILTINS.len(), 4);
     let srf = SLOTFUNCS_BUILTINS.iter().find(|b| b.foid == 3781).unwrap();
     assert!(srf.retset && !srf.strict && srf.nargs == 0);
+    let create_logical = SLOTFUNCS_BUILTINS.iter().find(|b| b.foid == 3786).unwrap();
+    assert!(create_logical.strict && !create_logical.retset && create_logical.nargs == 5);
     let create = SLOTFUNCS_BUILTINS.iter().find(|b| b.foid == 3779).unwrap();
     assert!(create.strict && !create.retset && create.nargs == 3);
     let drop = SLOTFUNCS_BUILTINS.iter().find(|b| b.foid == 3780).unwrap();

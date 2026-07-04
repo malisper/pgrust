@@ -21,10 +21,6 @@ use crate::{
     RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED, RBTXN_SENT_PREPARE,
 };
 
-fn relid_by_relfilenumber(_spc_oid: Oid, _rel_number: Oid) -> Oid {
-    unported("RelidByRelfilenumber (utils/cache/relfilenumbermap.c)")
-}
-
 pub(crate) fn relation_is_logically_logged(relation: &RelationData<'static>) -> bool {
     transam_xlog_seams::xlog_logical_info_active::call()
         && relation.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
@@ -640,7 +636,10 @@ impl ReorderBuffer {
             _ => unreachable!("tuple change carries Tp data"),
         };
 
-        let reloid = relid_by_relfilenumber(rlocator.spcOid, rlocator.relNumber);
+        let reloid = relfilenumbermap_seams::relid_by_relfilenumber::call(
+            rlocator.spcOid,
+            rlocator.relNumber,
+        )?;
 
         // Mapped catalog tuple without data, emitted mid-rewrite: skippable.
         let relation = if reloid == InvalidOid && !has_new && !has_old {

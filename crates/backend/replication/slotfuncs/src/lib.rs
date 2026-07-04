@@ -48,6 +48,48 @@ pub(crate) fn create_physical_replication_slot(
     Ok(())
 }
 
+// create_logical_replication_slot (slotfuncs.c); doesn't release the slot.
+pub(crate) fn create_logical_replication_slot(
+    name: &str,
+    plugin: &str,
+    temporary: bool,
+    two_phase: bool,
+    failover: bool,
+    restart_lsn: XLogRecPtr,
+    find_startpoint: bool,
+) -> PgResult<()> {
+    assert!(slot::MyReplicationSlot().is_none());
+
+    if two_phase {
+        panic!("unported callee reached from slotfuncs.c: two_phase logical slot");
+    }
+
+    slot::ReplicationSlotCreate(
+        name,
+        true,
+        if temporary { RS_TEMPORARY } else { slot::RS_EPHEMERAL },
+        two_phase,
+        failover,
+        false,
+    )?;
+
+    let mut ctx = logical::CreateInitDecodingContext(
+        plugin,
+        Vec::new(),
+        false,
+        restart_lsn,
+        None,
+        None,
+        None,
+    )?;
+
+    if find_startpoint {
+        logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
+    }
+
+    ctx.free()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WALAvailability {
     InvalidLsn,

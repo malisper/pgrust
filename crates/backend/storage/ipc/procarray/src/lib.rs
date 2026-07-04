@@ -260,6 +260,47 @@ pub fn ProcArrayGetReplicationSlotXmin() -> PgResult<(TransactionId, Transaction
     Ok((xmin, catalog_xmin))
 }
 
+// Caller must hold ProcArrayLock (C asserts LWLockHeldByMe).
+pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> PgResult<TransactionId> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let tv = TransamVariables();
+    let recovery_in_progress = transam_xlog_seams::recovery_in_progress::call();
+
+    LWLockAcquire(XidGenLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    let mut oldest_safe_xid = FullTransactionId::from_u64(tv.nextXid.load(Relaxed)).xid();
+
+    let slot_xmin = arrayP.replication_slot_xmin.get();
+    if TransactionIdIsValid(slot_xmin) && TransactionIdPrecedes(slot_xmin, oldest_safe_xid) {
+        oldest_safe_xid = slot_xmin;
+    }
+
+    let slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    if catalog_only
+        && TransactionIdIsValid(slot_catalog_xmin)
+        && TransactionIdPrecedes(slot_catalog_xmin, oldest_safe_xid)
+    {
+        oldest_safe_xid = slot_catalog_xmin;
+    }
+
+    if !recovery_in_progress {
+        let num_procs = arrayP.numProcs.get() as usize;
+        for pgxactoff in 0..num_procs {
+            // Fetch xid just once - see GetNewTransactionId.
+            let xid = hdr.xids[pgxactoff].read();
+            if !TransactionIdIsNormal(xid) {
+                continue;
+            }
+            if TransactionIdPrecedes(xid, oldest_safe_xid) {
+                oldest_safe_xid = xid;
+            }
+        }
+    }
+
+    LWLockRelease(XidGenLock())?;
+    Ok(oldest_safe_xid)
+}
+
 pub fn GetMaxSnapshotXidCount() -> usize {
     procArray().maxProcs as usize
 }
