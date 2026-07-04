@@ -117,10 +117,10 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: tblspc_redo — land backend-commands-tablespace")]
+#[should_panic(expected = "rmgr callback not ported: gin_redo — land backend-access-gin-xlog")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
-    let _ = (GetRmgr(RM_TBLSPC_ID as u8).unwrap().rm_redo)(&mut record);
+    let _ = (GetRmgr(RM_GIN_ID as u8).unwrap().rm_redo)(&mut record);
 }
 
 #[test]
