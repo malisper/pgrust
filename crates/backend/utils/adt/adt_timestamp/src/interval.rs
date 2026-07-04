@@ -796,6 +796,77 @@ pub fn timestamp_mi_interval(timestamp: Timestamp, span: &Interval) -> PgResult<
     timestamp_pl_interval(timestamp, &tspan)
 }
 
+#[cold]
+#[inline(never)]
+fn invalid_in_range_offset() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid preceding or following size in window function")
+            .with_sqlstate(types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE),
+    )
+}
+
+pub fn in_range_timestamp_interval(
+    val: Timestamp,
+    base: Timestamp,
+    offset: &Interval,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
+    if interval_sign(offset) < 0 {
+        return Err(invalid_in_range_offset());
+    }
+    if offset.is_noend() && (if sub { TIMESTAMP_IS_NOEND(base) } else { TIMESTAMP_IS_NOBEGIN(base) })
+    {
+        return Ok(true);
+    }
+    let sum =
+        if sub { timestamp_mi_interval(base, offset)? } else { timestamp_pl_interval(base, offset)? };
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+pub fn in_range_timestamptz_interval(
+    val: TimestampTz,
+    base: TimestampTz,
+    offset: &Interval,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
+    if interval_sign(offset) < 0 {
+        return Err(invalid_in_range_offset());
+    }
+    if offset.is_noend() && (if sub { TIMESTAMP_IS_NOEND(base) } else { TIMESTAMP_IS_NOBEGIN(base) })
+    {
+        return Ok(true);
+    }
+    let sum = if sub {
+        timestamptz_mi_interval_internal(base, offset, None)?
+    } else {
+        timestamptz_pl_interval_internal(base, offset, None)?
+    };
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+pub fn in_range_interval_interval(
+    val: &Interval,
+    base: &Interval,
+    offset: &Interval,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
+    if interval_sign(offset) < 0 {
+        return Err(invalid_in_range_offset());
+    }
+    if offset.is_noend() && (if sub { base.is_noend() } else { base.is_nobegin() }) {
+        return Ok(true);
+    }
+    let sum = if sub { interval_mi(base, offset)? } else { interval_pl(base, offset)? };
+    Ok(if less {
+        interval_cmp_internal(val, &sum) <= 0
+    } else {
+        interval_cmp_internal(val, &sum) >= 0
+    })
+}
+
 pub fn timestamptz_pl_interval_internal(
     timestamp: TimestampTz,
     span: &Interval,

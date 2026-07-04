@@ -350,6 +350,12 @@ fn collect_window_funcs<'mcx>(
                 collect_window_funcs(a, out);
             }
         }
+        NodeTag::T_CoerceViaIO => {
+            collect_window_funcs(node.as_coerce_via_io().unwrap().arg, out)
+        }
+        NodeTag::T_RelabelType => {
+            collect_window_funcs(node.as_relabel_type().unwrap().arg, out)
+        }
         tag => panic!(
             "ExecInitWindowAgg (nodeWindowAgg.c): WindowAgg tlist node family {tag:?} \
              not ported"
@@ -388,6 +394,20 @@ fn contain_volatile_functions(node: Node<'_>) -> PgResult<bool> {
                 }
             }
             Ok(false)
+        }
+        NodeTag::T_CoerceViaIO => {
+            // check_functions_in_node (nodeFuncs.c): both the output and
+            // input IO functions decide volatility.
+            let c = node.as_coerce_via_io().unwrap();
+            let (outfn, _varlena) = lsyscache::getTypeOutputInfo(expr_type(c.arg))?;
+            if lsyscache::func_volatile(outfn)? == b'v' as i8 {
+                return Ok(true);
+            }
+            let (infn, _ioparam) = lsyscache::getTypeInputInfo(c.resulttype)?;
+            if lsyscache::func_volatile(infn)? == b'v' as i8 {
+                return Ok(true);
+            }
+            contain_volatile_functions(c.arg)
         }
         tag => panic!(
             "contain_volatile_functions (clauses.c): node family {tag:?} not ported \
