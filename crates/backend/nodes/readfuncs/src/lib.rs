@@ -513,6 +513,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         j.collation = self.read_u32("collation");
         j.location = self.read_location("location");
         Ok(j.seal())
+    }
+
     fn read_distinct_expr(&mut self) -> PgResult<Node<'mcx>> {
         let mcx = self.mcx;
         let mut d = Node::build::<types_nodes::primnodes::DistinctExpr>(mcx)?;
@@ -1313,7 +1315,6 @@ fn json_format_type(v: u32) -> types_nodes::primnodes::JsonFormatType {
         2 => JS_FORMAT_JSONB,
         _ => JS_FORMAT_DEFAULT,
     }
-}
 }
 
 fn json_encoding(v: u32) -> types_nodes::primnodes::JsonEncoding {
