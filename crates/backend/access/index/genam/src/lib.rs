@@ -633,7 +633,7 @@ fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn column_not_in_index() -> Box<PgError> {
-    Box::new(PgError::error("column is not in index"))
+    Box::new(PgError::error(format!("column is not in index\n{}", std::backtrace::Backtrace::force_capture())))
 }
 
 #[cold]
