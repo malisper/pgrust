@@ -8,6 +8,7 @@ use crate::{
 use datum::Datum;
 use format_type::quote_identifier;
 use mcx::Mcx;
+use types_core::primitive::OidIsValid;
 use types_core::{
     AttrNumber, InvalidOid, Oid, CONSTRAINT_OID_INDEX_ID, CONSTRAINT_RELATION_ID,
     NAMESPACE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
