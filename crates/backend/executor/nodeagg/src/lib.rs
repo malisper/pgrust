@@ -766,6 +766,27 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(a, out);
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                collect_base_var_cols(e, out);
+            }
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for a in c.args.iter() {
+                collect_base_var_cols(a, out);
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                collect_base_var_cols(e, out);
+            }
+        }
+        NodeTag::T_JsonIsPredicate => {
+            if let Some(e) = node.as_json_is_predicate().unwrap().expr {
+                collect_base_var_cols(e, out);
+            }
+        }
+        NodeTag::T_CaseTestExpr => {}
         tag => panic!("find_cols (nodeAgg.c): node family {tag:?} not ported"),
     }
 }
