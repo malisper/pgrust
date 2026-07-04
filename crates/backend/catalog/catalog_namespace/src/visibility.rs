@@ -1,4 +1,4 @@
-use cache_syscache::cacheinfo::{CLAOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, TYPEOID};
+use cache_syscache::cacheinfo::{CLAOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTOID, TYPEOID};
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey};
 use datum::Datum;
 use mcx::MemoryContext;
@@ -27,6 +27,8 @@ const ANUM_PG_OPERATOR_OPRRIGHT: i32 = 9;
 const ANUM_PG_OPCLASS_OPCMETHOD: i32 = 2;
 const ANUM_PG_OPCLASS_OPCNAME: i32 = 3;
 const ANUM_PG_OPCLASS_OPCNAMESPACE: i32 = 4;
+const ANUM_PG_STATISTIC_EXT_STXNAME: i32 = 3;
+const ANUM_PG_STATISTIC_EXT_STXNAMESPACE: i32 = 4;
 const ANUM_PG_OPFAMILY_OPFMETHOD: i32 = 2;
 const ANUM_PG_OPFAMILY_OPFNAME: i32 = 3;
 const ANUM_PG_OPFAMILY_OPFNAMESPACE: i32 = 4;
@@ -208,6 +210,45 @@ pub fn OpclassIsVisibleExt(opcid: Oid) -> PgResult<Option<bool>> {
         return Ok(Some(false));
     }
     Ok(Some(OpclassnameGetOpcid(opcmethod, name_str(&opcname))? == opcid))
+}
+
+
+pub fn StatisticsObjIsVisible(stxid: Oid) -> PgResult<bool> {
+    StatisticsObjIsVisibleExt(stxid)?.ok_or_else(|| lookup_failed("statistics object", stxid))
+}
+
+/// C `StatisticsObjIsVisibleExt`; `None` mirrors `*is_missing = true`.
+pub fn StatisticsObjIsVisibleExt(stxid: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(stxid)))?
+    else {
+        return Ok(None);
+    };
+    let stxnamespace =
+        SysCacheGetAttrNotNull(STATEXTOID, &tuple, ANUM_PG_STATISTIC_EXT_STXNAMESPACE)?.as_oid();
+    let stxname =
+        name_of(SysCacheGetAttrNotNull(STATEXTOID, &tuple, ANUM_PG_STATISTIC_EXT_STXNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if stxnamespace != PG_CATALOG_NAMESPACE && !path_contains(stxnamespace) {
+        return Ok(Some(false));
+    }
+    // In-path objects can still be shadowed by a same-name statistics object
+    // earlier in the path.
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == stxnamespace {
+            return Ok(Some(true));
+        }
+        if OidIsValid(syscache_seams::lookup_pg_statistic_ext_oid_by_name_nsp::call(
+            name_str(&stxname),
+            namespace_id,
+        )?) {
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(false))
 }
 
 pub fn OpfamilyIsVisible(opfid: Oid) -> PgResult<bool> {
