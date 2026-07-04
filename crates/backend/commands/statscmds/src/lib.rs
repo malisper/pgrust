@@ -712,6 +712,29 @@ fn find_data_tuple<'mcx>(
     Ok(found)
 }
 
+// StatisticsGetRelation (statscmds.c:937).
+pub fn StatisticsGetRelation(statId: Oid, missing_ok: bool) -> PgResult<Oid> {
+    use cache_syscache::{cacheinfo::STATEXTOID, ReleaseSysCache, SysCacheGetAttr, SysCacheKey};
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        STATEXTOID,
+        SysCacheKey::Value(Datum::from_oid(statId)),
+    )?
+    else {
+        if missing_ok {
+            return Ok(InvalidOid);
+        }
+        return Err(err(
+            types_error::ERRCODE_INTERNAL_ERROR,
+            format!("cache lookup failed for statistics object {statId}"),
+        ));
+    };
+    let (d, isnull) = SysCacheGetAttr(STATEXTOID, &tup, Anum_stxrelid as i32)?;
+    debug_assert!(!isnull);
+    let result = d.as_oid();
+    ReleaseSysCache(tup);
+    Ok(result)
+}
+
 pub fn RemoveStatisticsDataById(mcx: Mcx<'_>, statsOid: Oid, inh: bool) -> PgResult<()> {
     let relation = table::table_open(mcx, StatisticExtDataRelationId, RowExclusiveLock)?;
     if let Some(tid) = find_data_tuple(mcx, &relation, statsOid, inh)? {

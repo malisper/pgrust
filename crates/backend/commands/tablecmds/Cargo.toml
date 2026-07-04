@@ -108,3 +108,4 @@ commands_comment = { path = "../comment" }
 smgr = { path = "../../storage/smgr/smgr" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 types_storage = { path = "../../../_support/types/types_storage" }
+statscmds = { path = "../statscmds" }
