@@ -112,21 +112,25 @@ fn install() {
                     opcmethod: types_core::BTREE_AM_OID,
                     opcfamily: INT_BTREE_FAM,
                     opcintype: INT4OID,
+                    opckeytype: 0,
                 }),
                 INT4_HASH_OPCLASS => Some(s::PgOpclassShape {
                     opcmethod: lsyscache::HASH_AM_OID,
                     opcfamily: INT_HASH_FAM,
                     opcintype: INT4OID,
+                    opckeytype: 0,
                 }),
                 ARRAY_BTREE_OPCLASS => Some(s::PgOpclassShape {
                     opcmethod: types_core::BTREE_AM_OID,
                     opcfamily: ARRAY_BTREE_FAM,
                     opcintype: ANYARRAYOID,
+                    opckeytype: 0,
                 }),
                 ARRAY_HASH_OPCLASS => Some(s::PgOpclassShape {
                     opcmethod: lsyscache::HASH_AM_OID,
                     opcfamily: ARRAY_HASH_FAM,
                     opcintype: ANYARRAYOID,
+                    opckeytype: 0,
                 }),
                 _ => None,
             })

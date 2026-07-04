@@ -139,7 +139,7 @@ fn install() {
                 1979 => Some((HASH_AM_OID, 1977, INT4)),
                 _ => None,
             }
-            .map(|(m, f, i)| s::PgOpclassShape { opcmethod: m, opcfamily: f, opcintype: i }))
+            .map(|(m, f, i)| s::PgOpclassShape { opcmethod: m, opcfamily: f, opcintype: i, opckeytype: 0 }))
         });
         s::lookup_pg_amproc::set(|opfamily, lefttype, righttype, procnum| {
             Ok(match (opfamily, lefttype, righttype, procnum) {

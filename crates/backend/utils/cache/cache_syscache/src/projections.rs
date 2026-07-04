@@ -449,6 +449,7 @@ const ANUM_PG_OPCLASS_OID: i32 = 1;
 const ANUM_PG_OPCLASS_OPCMETHOD: i32 = 2;
 const ANUM_PG_OPCLASS_OPCFAMILY: i32 = 6;
 const ANUM_PG_OPCLASS_OPCINTYPE: i32 = 7;
+const ANUM_PG_OPCLASS_OPCKEYTYPE: i32 = 9;
 
 fn lookup_pg_opclass_shape(
     opclass: Oid,
@@ -461,6 +462,7 @@ fn lookup_pg_opclass_shape(
         opcmethod: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCMETHOD).as_oid(),
         opcfamily: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCFAMILY).as_oid(),
         opcintype: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCINTYPE).as_oid(),
+        opckeytype: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCKEYTYPE).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);

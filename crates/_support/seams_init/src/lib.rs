@@ -235,6 +235,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_tsginidx::builtins::TSGINIDX_BUILTINS);
     fmgr_core::register_late_builtins(adt_tsgistidx::TSGISTIDX_BUILTINS);
     fmgr_core::register_late_builtins(network_spgist::NETWORK_SPGIST_BUILTINS);
+    fmgr_core::register_late_builtins(spgist_quadtree::SPGIST_QUAD_BUILTINS);
+    fmgr_core::register_late_builtins(spgist_kdtree::SPGIST_KD_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(orderedsetaggs::ORDEREDSETAGGS_BUILTINS);
