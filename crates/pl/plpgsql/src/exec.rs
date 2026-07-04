@@ -3138,7 +3138,9 @@ impl<'a> Estate<'a> {
         }
         let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
 
+        let mut ctx_query = String::new();
         let rc = if let Some(query) = query {
+            ctx_query = query.query.clone();
             self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
             self.exec_run_select(query, 0)?
         } else {
@@ -3152,6 +3154,7 @@ impl<'a> Estate<'a> {
             }
             let querystr = self.convert_value_to_string(qv, restype)?;
             self.exec_eval_cleanup();
+            ctx_query = querystr.clone();
             let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
             let _frame =
                 FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
@@ -3191,13 +3194,18 @@ impl<'a> Estate<'a> {
                     nulls[f] = isnull;
                 }
             });
+            // C's mismatch fires inside the tuplestore DestReceiver, under
+            // the SPI statement context.
             let (v, nn) = convert_values_by_position(
                 &srcdesc,
                 &values,
                 &nulls,
                 &dst,
                 "structure of query does not match function result type",
-            )?;
+            )
+            .map_err(|e| {
+                spi_ctx_err(e, &ctx_query, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
+            })?;
             self.put_tuple_store_values(&v, &nn)?;
         }
         let _ = spi::SPI_freetuptable(tuptab);
