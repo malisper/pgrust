@@ -256,6 +256,7 @@ pub fn ObjectsInPublicationToOids<'mcx>(
     mcx: Mcx<'mcx>,
     pubobjspec_list: &NodeList<'mcx>,
 ) -> PgResult<(Vec<&'mcx PublicationTable<'mcx>>, Vec<Oid>)> {
+    eprintln!("PUBTRACE OIPTO enter");
     let mut rels: Vec<&'mcx PublicationTable<'mcx>> = Vec::new();
     let mut schemas: Vec<Oid> = Vec::new();
     for cell in pubobjspec_list.iter() {
@@ -328,6 +329,7 @@ fn OpenTableList<'mcx>(
     mcx: Mcx<'mcx>,
     tables: &[&'mcx PublicationTable<'mcx>],
 ) -> PgResult<Vec<PubRelOpen<'mcx>>> {
+    eprintln!("PUBTRACE OPENTL enter");
     let mut relids: Vec<Oid> = Vec::new();
     let mut rels: Vec<PubRelOpen<'mcx>> = Vec::new();
     let mut relids_with_rf: Vec<Oid> = Vec::new();
@@ -402,6 +404,7 @@ fn OpenTableList<'mcx>(
 }
 
 fn CloseTableList(rels: Vec<PubRelOpen<'_>>) -> PgResult<()> {
+    eprintln!("PUBTRACE CLOSETL enter");
     for r in rels {
         r.relation.close(NoLock)?;
     }
@@ -614,6 +617,7 @@ fn CheckPubRelationColumnList(
     publish_schema: bool,
     pubviaroot: bool,
 ) -> PgResult<()> {
+    eprintln!("PUBTRACE CHKCOL enter");
     for pri in rels {
         if pri.columns.is_nil() {
             continue;
@@ -670,6 +674,7 @@ fn PublicationAddTables<'mcx>(
     rels: &[PubRelOpen<'mcx>],
     if_not_exists: bool,
 ) -> PgResult<()> {
+    eprintln!("PUBTRACE PUBADDT enter");
     for pub_rel in rels {
         let rel = &pub_rel.relation;
         if !aclchk::object_ownercheck(RELATION_RELATION_ID, rel.rd_id, miscinit::GetUserId())? {
