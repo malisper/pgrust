@@ -15,7 +15,7 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{
     CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SetOperationStmt,
-    SortGroupClause,
+    SortGroupClause, TableSampleClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
@@ -363,6 +363,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
+        }
+        NodeTag::T_TableSampleClause => {
+            let t = node.as_variant::<TableSampleClause>().expect("TableSampleClause");
+            w!(out, "{{TABLESAMPLECLAUSE :tsmhandler {} :args ", t.tsmhandler);
+            out_list(out, &t.args)?;
+            w!(out, " :repeatable ");
+            out_opt_node(out, t.repeatable)?;
+            w!(out, "}}");
         }
         NodeTag::T_RTEPermissionInfo => out_rte_permission_info(
             out,

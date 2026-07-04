@@ -149,6 +149,13 @@ pub struct SeqScan<'mcx> {
     pub scan: Scan<'mcx>,
 }
 
+#[derive(Default)]
+#[repr(C)]
+pub struct SampleScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tablesample: Option<Node<'mcx>>,
+}
+
 /// tidquals has implicit OR semantics.
 #[derive(Default)]
 #[repr(C)]
@@ -906,6 +913,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ProjectSet<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SeqScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SampleScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SampleScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for TidScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_TidScan;
 }
@@ -1042,6 +1052,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for ProjectSet<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for SeqScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for SampleScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for IndexScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for IndexOnlyScan<'mcx> {}
@@ -1118,6 +1130,10 @@ const _: () = {
     assert!(offset_of!(SeqScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<SeqScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(SampleScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<SampleScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
     assert!(offset_of!(TidScan, scan) == 0);
     assert!(
@@ -1230,6 +1246,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
         NodeTag::T_Result
             | NodeTag::T_ProjectSet
             | NodeTag::T_SeqScan
+            | NodeTag::T_SampleScan
             | NodeTag::T_TidScan
             | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
@@ -1287,6 +1304,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_seq_scan(self) -> Option<&'mcx SeqScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sample_scan(self) -> Option<&'mcx SampleScan<'mcx>> {
         self.as_variant()
     }
 

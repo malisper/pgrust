@@ -394,6 +394,15 @@ pub struct RangeSubselect<'mcx> {
 }
 
 #[derive(Default)]
+pub struct RangeTableSample<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub method: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub repeatable: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct RangeFunction<'mcx> {
     pub lateral: bool,
     pub ordinality: bool,
@@ -932,6 +941,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeSubselect<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeFunction<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeFunction;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeTableSample<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeTableSample;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeTableFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeTableFunc;
 }
@@ -1260,6 +1272,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_function(self) -> Option<&'mcx RangeFunction<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_table_sample(self) -> Option<&'mcx RangeTableSample<'mcx>> {
         self.as_variant()
     }
 

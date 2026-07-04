@@ -3831,6 +3831,7 @@ dependencies = [
  "nodes_core",
  "planner_seams",
  "table",
+ "tablesample",
  "tidbitmap",
  "types_core",
  "types_error",
@@ -4508,6 +4509,7 @@ dependencies = [
  "nodenamedtuplestorescan",
  "nodenestloop",
  "noderecursiveunion",
+ "nodesamplescan",
  "nodeseqscan",
  "nodesetop",
  "nodesort",
@@ -8159,6 +8161,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodesamplescan"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "datum",
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "pg_prng",
+ "tableam",
+ "tablesample",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_slot",
+]
+
+[[package]]
 name = "nodeseqscan"
 version = "0.1.0"
 dependencies = [
@@ -8728,6 +8751,7 @@ dependencies = [
  "parse_clause_seams",
  "parse_collate",
  "parse_expr",
+ "parse_func_seams",
  "parse_oper",
  "parse_relation",
  "parse_target",
@@ -8737,6 +8761,7 @@ dependencies = [
  "stack_depth",
  "syscache_seams",
  "table",
+ "tablesample",
  "types_core",
  "types_error",
  "types_nodes",
@@ -10274,6 +10299,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tablesample",
  "tidbitmap",
  "typcache",
  "types_core",
@@ -12573,6 +12599,7 @@ dependencies = [
  "nodememoize",
  "nodemergejoin",
  "nodenestloop",
+ "nodesamplescan",
  "nodeseqscan",
  "nodesort",
  "nodetidrangescan",
@@ -12676,6 +12703,7 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds",
+ "tablesample",
  "tcop_dest",
  "test_decoding",
  "timeline",
@@ -14212,6 +14240,21 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "tablesample"
+version = "0.1.0"
+dependencies = [
+ "clauses",
+ "datum",
+ "hashfn",
+ "mcx",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]

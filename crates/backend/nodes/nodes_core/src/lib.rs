@@ -313,6 +313,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_RangeTblFunction => {
             walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
         }
+        NodeTag::T_TableSampleClause => {
+            let tsc = node.as_table_sample_clause().unwrap();
+            Ok(walk_list(&tsc.args, w)? || walk_opt(tsc.repeatable, w)?)
+        }
         // C: arg_names and ns_names deemed uninteresting.
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
@@ -1137,6 +1141,29 @@ where
                     types_nodes::primnodes::FieldSelect { arg, ..*f },
                 )?)),
             }
+        }
+        NodeTag::T_TableSampleClause => {
+            let tsc = node.as_table_sample_clause().unwrap();
+            let args = mutate_list(mcx, &tsc.args, m)?;
+            let repeatable = match tsc.repeatable {
+                Some(r) => m(r)?.map(Some),
+                None => None,
+            };
+            if args.is_none() && repeatable.is_none() {
+                return Ok(None);
+            }
+            let args = match args {
+                Some(l) => l,
+                None => tsc.args.clone_in(mcx)?,
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::TableSampleClause {
+                    tsmhandler: tsc.tsmhandler,
+                    args,
+                    repeatable: repeatable.unwrap_or(tsc.repeatable),
+                },
+            )?))
         }
         NodeTag::T_RangeTblFunction => {
             let rtf = node.as_range_tbl_function().unwrap();

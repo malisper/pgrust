@@ -535,6 +535,8 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_JsonArrayAgg => {
             node.as_json_array_agg().unwrap().constructor.map_or(-1, expr_location)
         }
+        NodeTag::T_RangeVar => node.as_range_var().unwrap().location,
+        NodeTag::T_RangeTableSample => node.as_range_table_sample().unwrap().location,
         other => deferred("exprLocation", other),
     }
 }

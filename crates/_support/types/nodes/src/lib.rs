@@ -31,7 +31,7 @@ pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVaria
 pub use nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 pub use parsenodes::{
     AclMode, DefineStmt, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
-    RangeTblFunction, RowMarkClause, SetOperation,
+    RangeTblFunction, RowMarkClause, SetOperation, TableSampleClause,
 };
 pub use plannodes::{AppendRelInfo, Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
@@ -57,7 +57,7 @@ pub use rawnodes::{
     JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
     JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonQuotes, JsonScalarExpr,
     JsonSerializeExpr, LockingClause, MergeStmt, MergeWhenClause, OnConflictClause, PLAssignStmt, ParamRef, RangeFunction, RangeTableFunc,
-    RangeTableFuncCol, RawStmt,
+    RangeTableFuncCol, RangeTableSample, RawStmt,
     ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
     UpdateStmt, ValUnion, XmlSerialize,
 };

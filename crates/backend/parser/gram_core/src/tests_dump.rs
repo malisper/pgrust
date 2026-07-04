@@ -1153,6 +1153,14 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "bound", c.bound);
         bool_field(out, "concurrent", c.concurrent);
         out.push('}');
+    } else if let Some(rts) = n.as_variant::<types_nodes::RangeTableSample>() {
+        out.push_str("{RANGETABLESAMPLE");
+        node_field(out, "relation", rts.relation);
+        list_field(out, "method", &rts.method);
+        list_field(out, "args", &rts.args);
+        node_field(out, "repeatable", rts.repeatable);
+        int_field(out, "location", rts.location);
+        out.push('}');
     } else if let Some(rf) = n.as_variant::<types_nodes::RangeFunction>() {
         out.push_str("{RANGEFUNCTION");
         bool_field(out, "lateral", rf.lateral);

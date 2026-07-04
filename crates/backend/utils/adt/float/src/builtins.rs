@@ -317,11 +317,15 @@ pub fn fc_hashfloat4extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
 
 pub fn fc_hashfloat8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    let key = a.value.as_f64();
+    Ok(Datum::from_u32(hashfloat8(a.value.as_f64())))
+}
+
+/// Direct-call leg of hashfloat8 (nodeSamplescan's REPEATABLE seed).
+pub fn hashfloat8(key: f64) -> u32 {
     if key == 0.0 {
-        return Ok(Datum::from_u32(0));
+        return 0;
     }
-    Ok(Datum::from_u32(::hashfn::hash_bytes(&float8_hash_image(key))))
+    ::hashfn::hash_bytes(&float8_hash_image(key))
 }
 
 pub fn fc_hashfloat8extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

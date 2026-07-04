@@ -45,6 +45,7 @@ nodenamedtuplestorescan = { path = "../nodenamedtuplestorescan" }
 noderecursiveunion = { path = "../noderecursiveunion" }
 nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
+nodesamplescan = { path = "../nodesamplescan" }
 nodeindexscan = { path = "../nodeindexscan" }
 nodetidscan = { path = "../nodetidscan" }
 nodetidrangescan = { path = "../nodetidrangescan" }

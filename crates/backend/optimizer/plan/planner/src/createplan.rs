@@ -1,8 +1,8 @@
 use types_error::PgResult;
 use types_nodes::list::{NodeList, OidList};
 use types_nodes::plannodes::{
-    Agg, Append, Group, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, SetOp,
-    SubqueryScan, WindowAgg,
+    Agg, Append, Group, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SampleScan,
+    SeqScan, SetOp, SubqueryScan, WindowAgg,
 };
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
@@ -377,6 +377,9 @@ fn create_scan_plan<'mcx>(
         t if t == crate::pathnode::tag16(NodeTag::T_SeqScan) => {
             create_seqscan_plan(run, best_path, tlist, scan_clauses)?
         }
+        t if t == crate::pathnode::tag16(NodeTag::T_SampleScan) => {
+            create_samplescan_plan(run, best_path, tlist, scan_clauses)?
+        }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexScan) => {
             create_indexscan_plan(run, best_path, tlist, scan_clauses, false)?
         }
@@ -588,6 +591,38 @@ fn create_seqscan_plan<'mcx>(
     plan.scan.plan.targetlist = tlist;
     plan.scan.plan.qual = qpqual;
     plan.scan.scanrelid = scan_relid;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_samplescan_plan (createplan.c). C runs replace_nestloop_params over
+// the quals and the tablesample clause for parameterized paths; those are
+// loud upstream (cost_samplescan asserts no param_info).
+fn create_samplescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let scan_relid = run.root.rel(run.root.path(best_path).base().parent).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::RTEKind::RTE_RELATION);
+    let tsc = rte.tablesample.expect("sampled rel has a tablesample clause");
+    assert!(
+        run.root.path(best_path).base().param_info.is_none(),
+        "create_samplescan_plan (createplan.c): nestloop params; M2 lateral lane"
+    );
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<SampleScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.tablesample = Some(tsc);
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }

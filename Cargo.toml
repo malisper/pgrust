@@ -262,6 +262,8 @@ members = [
     "crates/backend/access/transam/xlogutils",
     "crates/backend/access/table/tableam_vocab",
     "crates/backend/access/table/tableam",
+    "crates/backend/access/tablesample/tablesample",
+    "crates/backend/executor/nodesamplescan",
     "crates/backend/storage/lmgr/predicate",
     "crates/backend/storage/lmgr/predicate_seams",
     "crates/backend/access/common/syncscan",
