@@ -117,10 +117,15 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_FUNCTION => {
                 // preprocess_function_rtes: inline_set_returning_function is a
                 // no-op for non-SQL-language functions and non-builtins cannot
-                // resolve on this lane. Non-lateral EXPRKIND_RTFUNC
-                // preprocess_expression skipped (grammar-Const args); lateral
-                // args carry Vars (possibly uplevel) and must be processed.
-                if rte.lateral {
+                // resolve on this lane. C preprocesses non-lateral functions
+                // too — uplevel correlation Vars appear without LATERAL and
+                // must become Params here.
+                {
+                    let kind = if rte.lateral {
+                        EXPRKIND_RTFUNC_LATERAL
+                    } else {
+                        EXPRKIND_RTFUNC
+                    };
                     let mut new_functions = NodeList::nil();
                     for f_node in &rte.functions {
                         let f = f_node.as_range_tbl_function().expect("functions cell");
@@ -128,7 +133,7 @@ pub fn subquery_planner<'mcx>(
                             run,
                             &parse.rtable,
                             f.funcexpr,
-                            EXPRKIND_RTFUNC_LATERAL,
+                            kind,
                             parse.hasSubLinks,
                         )?;
                         new_functions.lappend(
