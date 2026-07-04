@@ -1038,6 +1038,96 @@ pub fn fc_float8_timestamptz(
     Ok(Datum::from_i64(crate::float8_timestamptz(fcinfo.arg_f64(0))?))
 }
 
+#[cold]
+fn agg_non_aggregate_context() -> Box<::types_error::PgError> {
+    Box::new(::types_error::PgError::error(
+        "aggregate function called in non-aggregate context",
+    ))
+}
+
+// interval_avg_accum/interval_avg_accum_inv (timestamp.c): INTERNAL
+// IntervalAggState allocated in the aggcontext on first call.
+fn interval_agg_accum_common(fcinfo: &mut Fcinfo, inverse: bool) -> PgResult<Datum> {
+    use crate::interval::IntervalAggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    let stp: *mut IntervalAggState = if a.isnull {
+        if inverse {
+            panic!("interval_avg_accum_inv called with NULL state");
+        }
+        // SAFETY: fcinfo.context is the executor's live AggStateNode.
+        let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+            return Err(agg_non_aggregate_context());
+        };
+        let layout = core::alloc::Layout::new::<IntervalAggState>();
+        let raw = ::mcx::Allocator::allocate(&agg_mcx, layout)
+            .map_err(|_| agg_mcx.oom(layout.size()))?;
+        let p: *mut IntervalAggState = raw.cast().as_ptr();
+        // SAFETY: fresh aggcontext allocation of the exact layout.
+        unsafe { p.write(IntervalAggState::default()) };
+        p
+    } else {
+        a.value.as_usize() as *mut IntervalAggState
+    };
+    if !b.isnull {
+        let iv = arg_interval(fcinfo, 1);
+        // SAFETY: a non-null arg0 is the aggcontext-lived state this transfn
+        // chain returned; no other reference is live during the call.
+        unsafe {
+            if inverse {
+                crate::interval::do_interval_discard(&mut *stp, &iv)?;
+            } else {
+                crate::interval::do_interval_accum(&mut *stp, &iv)?;
+            }
+        }
+    }
+    Ok(Datum::from_usize(stp as usize))
+}
+
+pub fn fc_interval_avg_accum(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    interval_agg_accum_common(fcinfo, false)
+}
+
+pub fn fc_interval_avg_accum_inv(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    interval_agg_accum_common(fcinfo, true)
+}
+
+fn interval_agg_final(fcinfo: &mut Fcinfo, avg: bool) -> PgResult<Datum> {
+    use crate::interval::IntervalAggState;
+    let [a] = *fcinfo.args_n::<1>();
+    let r = if a.isnull {
+        None
+    } else {
+        // SAFETY: a non-null arg0 is the aggcontext-lived state; read-only.
+        let state = unsafe { &*(a.value.as_usize() as *const IntervalAggState) };
+        if avg {
+            crate::interval::interval_avg_final(state)?
+        } else {
+            crate::interval::interval_sum_final(state)?
+        }
+    };
+    match r {
+        Some(iv) => interval_result(fcinfo, iv),
+        None => {
+            fcinfo.isnull = true;
+            Ok(Datum::null())
+        }
+    }
+}
+
+pub fn fc_interval_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    interval_agg_final(fcinfo, true)
+}
+
+pub fn fc_interval_sum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    interval_agg_final(fcinfo, false)
+}
+
 pub fn fc_in_range_timestamp_interval(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -1104,6 +1194,10 @@ pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     srf(6274, "generate_series_timestamptz_at_zone", 4, fc_generate_series_timestamptz),
     b(6354, "generate_series_timestamp_support", 1, fc_generate_series_timestamp_support),
     b(1158, "float8_timestamptz", 1, fc_float8_timestamptz),
+    bn(1843, "interval_avg_accum", 2, fc_interval_avg_accum),
+    bn(3549, "interval_avg_accum_inv", 2, fc_interval_avg_accum_inv),
+    bn(1844, "interval_avg", 1, fc_interval_avg),
+    bn(6326, "interval_sum", 1, fc_interval_sum),
     b(4134, "in_range_timestamp_interval", 5, fc_in_range_timestamp_interval),
     b(4135, "in_range_timestamptz_interval", 5, fc_in_range_timestamptz_interval),
     b(4136, "in_range_interval_interval", 5, fc_in_range_interval_interval),
