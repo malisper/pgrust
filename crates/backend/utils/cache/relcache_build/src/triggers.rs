@@ -216,12 +216,13 @@ pub(crate) fn build_trigger_desc(
 
 fn varlena_bytes<'a>(d: datum::Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
-    // SAFETY: inline catalog varlena (pg_trigger rows are never toasted here);
-    // 4-byte or 1-byte header per varatt rules.
+    // SAFETY: inline catalog varlena, 4-byte or 1-byte header per varatt
+    // rules; pg_trigger has a toast table, so external stays loud.
     unsafe {
         let b0 = *p;
         if b0 & 0x01 != 0 {
-            let len = (b0 >> 1) as usize;
+            assert!(b0 != 0x01, "pg_trigger varlena is external toast — detoast lane");
+            let len = ((b0 >> 1) & 0x7F) as usize;
             core::slice::from_raw_parts(p.add(1), len - 1)
         } else {
             let vl = core::ptr::read_unaligned(p as *const u32);
@@ -238,4 +239,26 @@ fn corrupt(relid: Oid, field: &str) -> Box<PgError> {
         PgError::error(format!("{field} is null in trigger for relation {relid}"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
+}
+
+#[cfg(test)]
+mod varlena_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn reads_short_and_4b_headers() {
+        let short: [u8; 4] = [(4u8 << 1) | 0x01, b'a', b'b', b'c'];
+        assert_eq!(varlena_bytes(datum::Datum::from_usize(short.as_ptr() as usize)), b"abc");
+        let mut long = ((4u32 + 3) << 2).to_ne_bytes().to_vec();
+        long.extend_from_slice(b"abc");
+        assert_eq!(varlena_bytes(datum::Datum::from_usize(long.as_ptr() as usize)), b"abc");
+    }
+
+    #[test]
+    #[should_panic(expected = "external toast")]
+    fn external_pointer_is_loud() {
+        let mut ext = vec![0x01u8, 18];
+        ext.extend_from_slice(&[0u8; 16]);
+        let _ = varlena_bytes(datum::Datum::from_usize(ext.as_ptr() as usize));
+    }
 }

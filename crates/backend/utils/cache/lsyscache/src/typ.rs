@@ -118,22 +118,19 @@ pub fn get_typstorage(typid: Oid) -> PgResult<i8> {
     })
 }
 
-// C returns a Node* expression tree; no value is constructible until
-// stringToNode (readfuncs.c) and OidInputFunctionCall/makeConst land.
-pub enum TypeDefaultExpr {}
-
-pub fn get_typdefault(typid: Oid) -> PgResult<Option<TypeDefaultExpr>> {
-    crate::scratch::with_scratch(|scratch| {
-        let defaults = syscache_seams::pg_type_default_strings::call(scratch, typid)?
-            .ok_or_else(|| type_lookup_failed(typid))?;
-        if defaults.typdefaultbin.is_some() {
-            panic!("get_typdefault({typid}): stringToNode unported (readfuncs.c)");
-        }
-        if defaults.typdefault.is_some() {
-            panic!("get_typdefault({typid}): OidInputFunctionCall/makeConst unported");
-        }
-        Ok(None)
-    })
+pub fn get_typdefault<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    typid: Oid,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    let defaults = syscache_seams::pg_type_default_strings::call(mcx, typid)?
+        .ok_or_else(|| type_lookup_failed(typid))?;
+    if let Some(bin) = defaults.typdefaultbin {
+        return Ok(Some(readfuncs::stringToNode(mcx, bin.as_str())?));
+    }
+    if defaults.typdefault.is_some() {
+        panic!("get_typdefault({typid}): literal typdefault without typdefaultbin (OidInputFunctionCall arm)");
+    }
+    Ok(None)
 }
 
 pub fn getBaseType(typid: Oid) -> PgResult<Oid> {

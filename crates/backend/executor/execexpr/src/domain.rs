@@ -68,6 +68,37 @@ fn compile_check(
     Ok(CompiledCheck { name, slot, state })
 }
 
+// ALTER DOMAIN validation programs (typecmds.c validateDomainCheckConstraint's
+// ExecPrepareExpr): same wiring as compile_check, caller-lifetime.
+pub struct DomainCheckExpr<'mcx> {
+    slot: NonNull<NullableDatum>,
+    state: PgBox<'mcx, ExprState<'mcx>>,
+}
+
+impl<'mcx> DomainCheckExpr<'mcx> {
+    pub fn eval(&mut self, value: Datum, isnull: bool) -> PgResult<NullableDatum> {
+        // SAFETY: slot lives in the program's mcx alongside the state.
+        unsafe { self.slot.as_ptr().write(NullableDatum { value, isnull }) };
+        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        exec_eval_expr(&mut self.state, &mut slots)
+    }
+}
+
+pub fn prepare_domain_check_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<DomainCheckExpr<'mcx>> {
+    let slot = crate::compile::alloc_nullable_datum(mcx)?;
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    crate::compile::create_expr_setup_steps(&mut state, mcx, &[expr])?;
+    state.innermost_domain = Some(OutRef(slot));
+    let rout = state.result_out();
+    crate::compile::init_expr_rec(expr, &mut state, mcx, rout, None, ParamBind::NONE, None)?;
+    crate::compile::push_step(&mut state, mcx, Step::DoneReturn)?;
+    crate::compile::ready_expr(&mut state);
+    Ok(DomainCheckExpr { slot, state })
+}
+
 fn rebuild_memo(memo: &mut DomainMemo, mcx: Mcx<'static>) -> PgResult<()> {
     // Old programs leak into the engine mcx (constraint changes are DDL-rare;
     // typcache's dcc takes the same stance).
