@@ -593,9 +593,6 @@ fn step_footprint_and_program_shapes() {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
             .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
-        // Kernelized at ready (steps stay raw); forcing the program kernel
-        // fuses: [Fetch, Var, FuncStrict2, Qual, Done] ->
-        // [Fetch, ScanVarFuncStrict2, Qual(remapped), Done].
         assert_eq!(state.steps().len(), 5);
         assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
         state.force_program_kernel();
@@ -1454,7 +1451,6 @@ fn fused_func_chain_evaluates_like_unfused() {
             expr = mk_opexpr(mcx, 177, INT4OID, args);
         }
         let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
-        // [Fetch, Var, F1..F8, Done] -> [Fetch, VarF1, FF23, FF45, FF67, F8, Done]
         assert_eq!(state.steps().len(), 7);
         assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }));
         assert!(matches!(state.steps()[2], Step::FuncFuncStrict2 { argno: 0, .. }));
@@ -1512,8 +1508,7 @@ fn fused_two_clause_qual_matches() {
 #[test]
 fn fusion_skips_jump_targets() {
     with_mcx(|mcx| {
-        // CASE WHEN var < 0 THEN (var + 1) + 2 ELSE 7 END: the THEN arm's
-        // chain head is a jump target; results stay correct across arms.
+        // CASE arm heads are jump targets; results stay correct across arms.
         let cond = {
             let args =
                 NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
