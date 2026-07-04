@@ -32,7 +32,7 @@ const RELKIND_FOREIGN_TABLE: u8 = b'f';
 pub type check_object_relabel_type =
     fn(object: &ObjectAddress, seclabel: Option<&str>) -> PgResult<()>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct LabelProvider {
     name: &'static str,
     hook: check_object_relabel_type,
