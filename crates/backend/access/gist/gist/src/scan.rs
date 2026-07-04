@@ -112,7 +112,7 @@ pub fn gistrescan(
             so.qual_ok = true;
 
             // C preserves sk_func.fn_extra across rescans (consistentFn memos).
-            let mut fn_extras: Vec<Option<Box<dyn core::any::Any>>> = scan
+            let mut fn_extras: Vec<Option<::types_fmgr::FnExtra>> = scan
                 .keyData
                 .iter_mut()
                 .map(|k| k.sk_func.fn_extra.take())
