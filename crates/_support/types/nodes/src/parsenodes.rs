@@ -370,6 +370,34 @@ pub struct FunctionParameter<'mcx> {
     pub location: ParseLoc,
 }
 
+// C: objargs is the extracted input-argtype TypeName list (entries may be
+// NULL for operator NONE sides); objfuncargs keeps the full FunctionParameter
+// list; both NIL when args_unspecified.
+#[derive(Default)]
+pub struct ObjectWithArgs<'mcx> {
+    pub objname: NodeList<'mcx>,
+    pub objargs: NodeList<'mcx>,
+    pub objfuncargs: NodeList<'mcx>,
+    pub args_unspecified: bool,
+}
+
+// C: actions is a List of DefElem.
+#[derive(Default)]
+pub struct AlterFunctionStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub func: Option<&'mcx ObjectWithArgs<'mcx>>,
+    pub actions: NodeList<'mcx>,
+}
+
+// C: relation is used by the table-like forms, object by everything else.
+#[derive(Default)]
+pub struct AlterOwnerStmt<'mcx> {
+    pub objectType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub newowner: Option<&'mcx RoleSpec<'mcx>>,
+}
+
 // C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
 #[derive(Default)]
 pub struct CreateFunctionStmt<'mcx> {
@@ -776,14 +804,6 @@ pub struct CommentStmt<'mcx> {
 }
 
 #[derive(Default)]
-pub struct ObjectWithArgs<'mcx> {
-    pub objname: NodeList<'mcx>,
-    pub objargs: NodeList<'mcx>,
-    pub objfuncargs: NodeList<'mcx>,
-    pub args_unspecified: bool,
-}
-
-#[derive(Default)]
 pub struct DefineStmt<'mcx> {
     pub kind: ObjectType,
     pub oldstyle: bool,
@@ -1167,6 +1187,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateFunctionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateFunctionStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ObjectWithArgs<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ObjectWithArgs;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterFunctionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterFunctionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterOwnerStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterOwnerStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1256,9 +1285,6 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
-}
-unsafe impl<'mcx> NodeVariant<'mcx> for ObjectWithArgs<'mcx> {
-    const TAG: NodeTag = NodeTag::T_ObjectWithArgs;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DefineStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DefineStmt;
@@ -1423,6 +1449,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_create_function_stmt(self) -> Option<&'mcx CreateFunctionStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_object_with_args(self) -> Option<&'mcx ObjectWithArgs<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_function_stmt(self) -> Option<&'mcx AlterFunctionStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_owner_stmt(self) -> Option<&'mcx AlterOwnerStmt<'mcx>> {
         self.as_variant()
     }
 

@@ -51,6 +51,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrprefetch(smgropen(rlocator), forknum, blocknum, nblocks) (smgr.c);
+    // false = relation file gone (recovery) — advisory only.
+    pub fn smgr_prefetch(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        nblocks: i32,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     // smgrreadv(smgropen(rlocator), forknum, blocknum, 1 iov) (smgr.c);
     // buffer is exactly BLCKSZ.
     pub fn smgr_read(
