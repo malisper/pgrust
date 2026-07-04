@@ -698,7 +698,7 @@ pub fn build_column_default<'mcx>(
 ) -> PgResult<types_nodes::Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
     if att.attidentity != 0 {
-        let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32)?;
+        let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32, false)?;
         return types_nodes::Node::mk(
             mcx,
             types_nodes::primnodes::NextValueExpr { seqid, typeId: att.atttypid },

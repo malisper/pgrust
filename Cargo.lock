@@ -10115,10 +10115,12 @@ name = "sequence_seams"
 version = "0.0.0"
 dependencies = [
  "datum",
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -11091,6 +11093,7 @@ dependencies = [
  "rewrite_handler",
  "rewrite_manip",
  "ri_triggers_seams",
+ "sequence_seams",
  "snapmgr",
  "superuser",
  "syscache_seams",
