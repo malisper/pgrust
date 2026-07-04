@@ -17,6 +17,9 @@ tablecmds = { path = "../../commands/tablecmds" }
 trigger = { path = "../../commands/trigger" }
 typecmds = { path = "../../commands/typecmds" }
 commands_policy = { path = "../../commands/policy" }
+commands_publicationcmds = { path = "../../commands/publicationcmds" }
+subscriptioncmds = { path = "../../commands/subscriptioncmds" }
+commands_alter = { path = "../../commands/alter" }
 commands_dropcmds = { path = "../../commands/dropcmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }

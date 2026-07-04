@@ -110,7 +110,7 @@ pub struct Publication<'mcx> {
 pub struct PublicationRelInfo<'a, 'mcx> {
     pub relation: &'a Relation<'mcx>,
     pub whereClause: Option<Node<'mcx>>,
-    pub columns: NodeList<'mcx>,
+    pub columns: &'a NodeList<'mcx>,
 }
 
 fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
@@ -246,14 +246,9 @@ pub fn is_schema_publication<'mcx>(mcx: Mcx<'mcx>, pubid: Oid) -> PgResult<bool>
         F_OIDEQ,
         Datum::from_oid(pubid),
     )];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &pubschsrel,
-        PublicationNamespacePnnspidPnpubidIndexId,
-        true,
-        None,
-        &keys,
-    )?;
+    // C divergence: C scans the (pnnspid, pnpubid) index keyed on the second
+    // column only (nbtree skip scan); ours is unported, so heap scan.
+    let mut scan = genam::systable_beginscan(mcx, &pubschsrel, InvalidOid, false, None, &keys)?;
     let result = genam::systable_getnext(mcx, &mut scan)?.is_some();
     genam::systable_endscan(mcx, scan)?;
     pubschsrel.close(AccessShareLock)?;
@@ -410,7 +405,7 @@ pub fn publication_add_relation<'mcx>(
 
     check_publication_add_relation(targetrel)?;
 
-    let attnums = pub_collist_validate(mcx, targetrel, &pri.columns)?;
+    let attnums = pub_collist_validate(mcx, targetrel, pri.columns)?;
 
     let mut values = [Datum::null(); Natts_pg_publication_rel];
     let mut nulls = [false; Natts_pg_publication_rel];
@@ -759,14 +754,8 @@ pub fn GetPublicationSchemas<'mcx>(mcx: Mcx<'mcx>, pubid: Oid) -> PgResult<PgVec
         F_OIDEQ,
         Datum::from_oid(pubid),
     )];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &pubschsrel,
-        PublicationNamespacePnnspidPnpubidIndexId,
-        true,
-        None,
-        &keys,
-    )?;
+    // C divergence: see is_schema_publication (skip scan unported).
+    let mut scan = genam::systable_beginscan(mcx, &pubschsrel, InvalidOid, false, None, &keys)?;
     let td = pubschsrel.descr();
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let (d, _) = getattr(td, tup, Anum_pg_publication_namespace_pnnspid);

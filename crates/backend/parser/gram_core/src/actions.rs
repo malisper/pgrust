@@ -6024,7 +6024,8 @@ impl<'mcx> Parser<'mcx> {
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
             969 => *yyval = YYSTYPE::Boolean(true),
-            // CommentStmt TABLE/COLUMN arms (object forms 973-988 stay louds).
+            // CommentStmt TABLE/COLUMN/object_type_name arms (object forms
+            // 974-988 stay louds).
             971 | 972 => {
                 let mut n = Node::build::<CommentStmt>(mcx)?;
                 n.objtype = if rule == 972 {
@@ -6033,6 +6034,14 @@ impl<'mcx> Parser<'mcx> {
                     object_type(view.v(3).ival())
                 };
                 n.object = Some(Node::mk_list(mcx, view.v(4).list())?);
+                let c = view.v(6);
+                n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            973 => {
+                let mut n = Node::build::<CommentStmt>(mcx)?;
+                n.objtype = object_type(view.v(3).ival());
+                n.object = Some(Node::mk_string(mcx, view.v(4).str_val())?);
                 let c = view.v(6);
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));

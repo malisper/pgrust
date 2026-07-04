@@ -32,6 +32,7 @@ pub fn init_all() {
     aclchk::init_seams();
     rls::init_seams();
     commands_policy::init_seams();
+    commands_publicationcmds::init_seams();
     be_fsstubs::init_seams();
     large_object::init_seams();
     catalog_namespace::init_seams();

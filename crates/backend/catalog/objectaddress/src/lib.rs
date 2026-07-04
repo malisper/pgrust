@@ -52,6 +52,10 @@ pub const AttrDefaultRelationId: Oid = 2604;
 pub const RewriteRelationId: Oid = 2618;
 pub const TriggerRelationId: Oid = 2620;
 pub const PolicyRelationId: Oid = 3256;
+pub const PublicationRelationId: Oid = 6104;
+pub const PublicationRelRelationId: Oid = 6106;
+pub const PublicationNamespaceRelationId: Oid = 6237;
+pub const SubscriptionRelationId: Oid = 6100;
 
 #[cold]
 #[inline(never)]
@@ -301,8 +305,112 @@ fn get_object_address_unqualified(
             EXTENSION_RELATION_ID,
             extension::get_extension_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_PUBLICATION => Ok(ObjectAddress::set(
+            PublicationRelationId,
+            lsyscache::get_publication_oid(name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_SUBSCRIPTION => Ok(ObjectAddress::set(
+            SubscriptionRelationId,
+            lsyscache::get_subscription_oid(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
+}
+
+fn get_object_address_publication_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &NodeList<'mcx>,
+    missing_ok: bool,
+) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
+    let mut address = ObjectAddress::set(PublicationRelRelationId, InvalidOid);
+    let relname = object
+        .nth(0)
+        .as_list()
+        .expect("publication relation object leads with a name list");
+    let rv = makeRangeVarFromNameList(&relname);
+    let Some(relation) =
+        relation::relation_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?
+    else {
+        return Ok((address, None));
+    };
+
+    let pubname = object
+        .nth(1)
+        .as_string()
+        .expect("publication relation object carries the publication name")
+        .sval;
+    let puboid = lsyscache::get_publication_oid(pubname, missing_ok)?;
+    if !OidIsValid(puboid) {
+        relation.close(types_rel::AccessShareLock)?;
+        return Ok((address, None));
+    }
+
+    address.objectId = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::PUBLICATIONRELMAP,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(relation.rd_id)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(puboid)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(address.objectId) {
+        if !missing_ok {
+            return Err(err(
+                ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "publication relation \"{}\" in publication \"{pubname}\" does not exist",
+                    relation.name()
+                ),
+            ));
+        }
+        relation.close(types_rel::AccessShareLock)?;
+        return Ok((address, None));
+    }
+    Ok((address, Some(relation)))
+}
+
+fn get_object_address_publication_schema(
+    object: &NodeList<'_>,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let mut address = ObjectAddress::set(PublicationNamespaceRelationId, InvalidOid);
+    let schemaname = object
+        .nth(0)
+        .as_string()
+        .expect("publication schema object leads with the schema name")
+        .sval;
+    let pubname = object
+        .nth(1)
+        .as_string()
+        .expect("publication schema object carries the publication name")
+        .sval;
+
+    let schemaid = catalog_namespace::get_namespace_oid(schemaname, missing_ok)?;
+    if !OidIsValid(schemaid) {
+        return Ok(address);
+    }
+    let puboid = lsyscache::get_publication_oid(pubname, missing_ok)?;
+    if !OidIsValid(puboid) {
+        return Ok(address);
+    }
+
+    address.objectId = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::PUBLICATIONNAMESPACEMAP,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(schemaid)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(puboid)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(address.objectId) && !missing_ok {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!(
+                "publication schema \"{schemaname}\" in publication \"{pubname}\" does not exist"
+            ),
+        ));
+    }
+    Ok(address)
 }
 
 // get_object_address_relobject (objectaddress.c), OBJECT_RULE arm; the
@@ -426,9 +534,21 @@ pub fn get_object_address<'mcx>(
                 let tn = object.as_type_name().expect("type object is a TypeName");
                 (get_object_address_type(objtype, tn, missing_ok)?, None)
             }
-            OBJECT_SCHEMA | OBJECT_EXTENSION => {
+            OBJECT_SCHEMA | OBJECT_EXTENSION | OBJECT_PUBLICATION | OBJECT_SUBSCRIPTION => {
                 (get_object_address_unqualified(objtype, object, missing_ok)?, None)
             }
+            OBJECT_PUBLICATION_NAMESPACE => (
+                get_object_address_publication_schema(
+                    &object.as_list().expect("publication schema object is a list"),
+                    missing_ok,
+                )?,
+                None,
+            ),
+            OBJECT_PUBLICATION_REL => get_object_address_publication_rel(
+                mcx,
+                &object.as_list().expect("publication relation object is a list"),
+                missing_ok,
+            )?,
             OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE => {
                 let owa = object
                     .as_variant::<ObjectWithArgs>()
@@ -523,7 +643,10 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
             .map(|(_, nsp)| nsp)
             .unwrap_or(InvalidOid)),
         NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
-        | RewriteRelationId | TriggerRelationId => Ok(InvalidOid),
+        | RewriteRelationId | TriggerRelationId | PublicationRelationId
+        | PublicationRelRelationId | PublicationNamespaceRelationId | SubscriptionRelationId => {
+            Ok(InvalidOid)
+        }
         ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
             .map(|s| s.pronamespace)
             .unwrap_or(InvalidOid)),
