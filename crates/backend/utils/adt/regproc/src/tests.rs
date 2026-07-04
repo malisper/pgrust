@@ -138,6 +138,28 @@ fn install_fakes() {
                 })
             }))
         });
+        syscache_seams::lookup_pg_proc_signature::set(|mcx, funcid| {
+            Ok(PROCS.with(|p| {
+                p.borrow().iter().find(|(_, oid, _, _)| *oid == funcid).map(|(_, _, _, args)| {
+                    let mut av = mcx::PgVec::new_in(mcx);
+                    for &a in args {
+                        av.push(a);
+                    }
+                    (25, av)
+                })
+            }))
+        });
+        regproc_seams::parse_type_string::set(|_mcx, typename| {
+            match typename.to_ascii_lowercase().as_str() {
+                "text" => Ok((25, -1)),
+                "integer" | "int4" => Ok((23, -1)),
+                "anyarray" => Ok((2277, -1)),
+                _ => Err(Box::new(
+                    PgError::error(format!("type \"{typename}\" does not exist"))
+                        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+                )),
+            }
+        });
         syscache_seams::lookup_authid_by_rolname::set(|rolname| {
             Ok((rolname == "malisper").then_some((ROLE_M, true)))
         });
@@ -378,6 +400,54 @@ fn regprocout_qualification() {
 }
 
 #[test]
+fn regprocedurein_lookup() {
+    with_mcx(|mcx| {
+        assert_eq!(regprocedurein(mcx, "-", None).unwrap(), Some(0));
+        assert_eq!(regprocedurein(mcx, "1299", None).unwrap(), Some(1299));
+        assert_eq!(regprocedurein(mcx, "now()", None).unwrap(), Some(PROC_NOW));
+        assert_eq!(regprocedurein(mcx, "now(  )", None).unwrap(), Some(PROC_NOW));
+        assert_eq!(regprocedurein(mcx, "lower(text)", None).unwrap(), Some(PROC_LOWER_TEXT));
+        assert_eq!(regprocedurein(mcx, "lower(anyarray)", None).unwrap(), Some(PROC_LOWER_ANY));
+        assert_eq!(
+            regprocedurein(mcx, "pg_catalog.lower( text )", None).unwrap(),
+            Some(PROC_LOWER_TEXT)
+        );
+        // Same-signature shadowing: pg_catalog precedes public in the path.
+        assert_eq!(regprocedurein(mcx, "sfunc(integer)", None).unwrap(), Some(PROC_SF_CAT));
+        assert_eq!(regprocedurein(mcx, "public.sfunc(integer)", None).unwrap(), Some(PROC_SF_PUB));
+
+        let err = regprocedurein(mcx, "lower", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(err.message(), "expected a left parenthesis");
+        let err = regprocedurein(mcx, "lower(text", None).unwrap_err();
+        assert_eq!(err.message(), "expected a right parenthesis");
+        let err = regprocedurein(mcx, "lower(text,)", None).unwrap_err();
+        assert_eq!(err.message(), "expected a type name");
+        let err = regprocedurein(mcx, "lower(\"text)", None).unwrap_err();
+        assert_eq!(err.message(), "improper type name");
+        let err = regprocedurein(mcx, "lower(integer)", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        assert_eq!(err.message(), "function \"lower(integer)\" does not exist");
+
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regprocedurein(mcx, "no_such(text)", Some(&mut soft)).unwrap(), Some(0));
+        assert!(soft.error_occurred());
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regprocedurein(mcx, "lower", Some(&mut soft)).unwrap(), None);
+        assert!(soft.error_occurred());
+    });
+}
+
+#[test]
+fn regprocedureout_formats() {
+    with_mcx(|mcx| {
+        assert_eq!(out_str(&regprocedureout(mcx, InvalidOid).unwrap()), "-");
+        assert_eq!(out_str(&regprocedureout(mcx, PROC_NOW).unwrap()), "now()");
+        assert_eq!(out_str(&regprocedureout(mcx, 99999999).unwrap()), "99999999");
+    });
+}
+
+#[test]
 #[should_panic(expected = "parseTypeString")]
 fn regtypein_name_arm_is_loud() {
     with_mcx(|mcx| {
@@ -448,16 +518,21 @@ fn builtins_table_matches_pg_proc() {
         (44, "regprocin", 1),
         (45, "regprocout", 1),
         (1079, "text_regclass", 1),
+        (2212, "regprocedurein", 1),
+        (2213, "regprocedureout", 1),
         (2218, "regclassin", 1),
         (2219, "regclassout", 1),
         (2220, "regtypein", 1),
         (2221, "regtypeout", 1),
         (2444, "regprocrecv", 1),
         (2445, "regprocsend", 1),
+        (2446, "regprocedurerecv", 1),
+        (2447, "regproceduresend", 1),
         (2452, "regclassrecv", 1),
         (2453, "regclasssend", 1),
         (2454, "regtyperecv", 1),
         (2455, "regtypesend", 1),
+        (3479, "to_regprocedure", 1),
         (3493, "to_regtype", 1),
         (3494, "to_regproc", 1),
         (3495, "to_regclass", 1),

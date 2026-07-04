@@ -1,15 +1,16 @@
-//! view.c CREATE VIEW lane. CREATE OR REPLACE, WITH CHECK OPTION, reloptions,
-//! and temp views are loud panics.
+//! view.c CREATE VIEW lane. CREATE OR REPLACE, WITH CHECK OPTION, and
+//! reloptions are loud panics.
 
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
-use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_UNLOGGED};
+use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{Query, RTEKind};
+use types_nodes::parsenodes::Query;
+use types_nodes::primnodes::RangeVar;
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName, ViewCheckOption, ViewStmt};
 use types_nodes::{Node, RawStmt};
 use types_portal::QueryEnvHandle;
@@ -76,27 +77,44 @@ pub fn DefineView<'mcx>(
         }
     }
 
-    let view = stmt.view.expect("ViewStmt.view");
+    let mut view = stmt.view.expect("ViewStmt.view");
     if view.relpersistence == RELPERSISTENCE_UNLOGGED {
         return Err(Box::new(
             PgError::error("views cannot be unlogged because they do not have storage")
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR),
         ));
     }
-    if view.relpersistence != RELPERSISTENCE_PERMANENT {
-        panic!("DefineView (view.c): temp view lane unported");
-    }
-    if isQueryUsingTempRelation(&viewParse)? {
-        panic!("DefineView (view.c): implicit temp view promotion unported");
+    if view.relpersistence == RELPERSISTENCE_PERMANENT
+        && parse_relation::isQueryUsingTempRelation(mcx, &viewParse)?
+    {
+        view = mcx::alloc_leak_in(
+            mcx,
+            RangeVar {
+                catalogname: view.catalogname,
+                schemaname: view.schemaname,
+                relname: view.relname,
+                inh: view.inh,
+                relpersistence: RELPERSISTENCE_TEMP,
+                alias: view.alias,
+                location: view.location,
+            },
+        )?;
+        elog::ereport(types_error::NOTICE)
+            .errmsg(format!(
+                "view \"{}\" will be a temporary view",
+                view.relname.unwrap_or("")
+            ))
+            .finish(types_error::ErrorLocation::new("view.c", 0, "DefineView"))?;
     }
 
-    DefineVirtualRelation(mcx, stmt, &mut viewParse, query_string)
+    DefineVirtualRelation(mcx, stmt, view, &mut viewParse, query_string)
 }
 
 // DefineVirtualRelation (view.c), create lane; OR REPLACE is loud.
 fn DefineVirtualRelation<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ViewStmt<'mcx>,
+    view: &'mcx RangeVar<'mcx>,
     viewParse: &mut Query<'mcx>,
     query_string: &str,
 ) -> PgResult<Oid> {
@@ -141,7 +159,7 @@ fn DefineVirtualRelation<'mcx>(
     }
 
     let mut createStmt = Node::build::<CreateStmt>(mcx)?;
-    createStmt.relation = stmt.view;
+    createStmt.relation = Some(view);
     createStmt.tableElts = attrList;
     createStmt.inhRelations = NodeList::nil();
     createStmt.constraints = NodeList::nil();
@@ -176,32 +194,6 @@ pub fn StoreViewQuery<'mcx>(
         action,
     )?;
     Ok(())
-}
-
-// isQueryUsingTempRelation (rewriteManip.c), view-creation slice: plain
-// relation and subquery RTEs; anything else in the tree that could hide a
-// temp relation is unreachable here (CTEs/sublinks hit outfuncs' loud arms
-// before this matters).
-fn isQueryUsingTempRelation(query: &Query<'_>) -> PgResult<bool> {
-    for item in query.rtable.iter() {
-        let rte = item.as_range_tbl_entry().expect("rtable entry");
-        match rte.rtekind {
-            RTEKind::RTE_RELATION => {
-                if lsyscache::get_rel_persistence(rte.relid)? as u8
-                    != RELPERSISTENCE_PERMANENT
-                {
-                    return Ok(true);
-                }
-            }
-            RTEKind::RTE_SUBQUERY => {
-                if isQueryUsingTempRelation(rte.subquery.expect("subquery"))? {
-                    return Ok(true);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(false)
 }
 
 #[cold]

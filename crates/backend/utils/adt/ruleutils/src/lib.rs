@@ -7,25 +7,33 @@
 pub mod builtins;
 mod deparse;
 mod functiondef;
+mod plan;
 mod query;
 mod ruledef;
+mod triggerdef;
 mod viewdef;
 #[cfg(test)]
 mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
 pub use deparse::deparse_expression_pretty;
+pub use plan::{
+    deparse_context_for_plan_tree, deparse_expression, select_rtable_names_for_explain,
+    set_deparse_context_plan, AncestorEntry, PlanDeparse,
+};
 pub use functiondef::{
-    pg_get_function_arguments_worker, pg_get_function_identity_arguments_worker,
-    pg_get_function_result_worker, pg_get_functiondef_worker,
+    pg_get_function_arg_default_worker, pg_get_function_arguments_worker,
+    pg_get_function_identity_arguments_worker, pg_get_function_result_worker,
+    pg_get_functiondef_worker,
 };
 pub use ruledef::pg_get_ruledef_worker;
+pub use triggerdef::pg_get_triggerdef_worker;
 pub use viewdef::pg_get_viewdef_worker;
 pub use format_type::quote_identifier;
 
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SysCacheKey, AMOID, AUTHOID, CONSTROID, INDEXRELID, OPEROID,
-    PROCOID, RELOID,
+    PARTRELID, PROCOID, RELOID, STATEXTOID,
 };
 use datum::Datum;
 use mcx::Mcx;
@@ -101,7 +109,7 @@ pub(crate) fn text_at(d: Datum) -> String {
 }
 
 // One-dimensional no-null int16 array body (int2vector or int2[]).
-fn i16_array_at(d: Datum) -> Vec<i16> {
+pub(crate) fn i16_array_at(d: Datum) -> Vec<i16> {
     array_body(d, 2).chunks_exact(2).map(|c| i16::from_ne_bytes([c[0], c[1]])).collect()
 }
 
@@ -294,29 +302,34 @@ pub(crate) fn generate_function_name(
     mcx: Mcx<'_>,
     funcid: Oid,
     argtypes: &[Oid],
+    argnames: &[&str],
     has_variadic: bool,
 ) -> PgResult<String> {
     let proname = lsyscache::get_func_name(mcx, funcid)?
         .ok_or_else(|| cache_lookup_failed("function", funcid))?;
     let proname = proname.as_str().to_owned();
-    if has_variadic {
-        gap("generate_function_name", "VARIADIC call deparse");
-    }
+    // C threads use_variadic into func_get_detail: expand_variadic is off
+    // when the call prints with the VARIADIC keyword.
     let cands = catalog_namespace::FuncnameGetCandidates(
         mcx,
         &[&proname],
         argtypes.len() as i16,
-        true,
+        !has_variadic,
         true,
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
-    if best.is_none() && !cands.is_empty() {
+    if best.is_none() && !cands.is_empty() && argnames.is_empty() {
         let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
         best = match matched.len() {
             0 => None,
             1 => Some(matched[0].oid),
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
+    }
+    if best.is_none() && !argnames.is_empty() {
+        // C's MatchNamedCall leg is unported; in-order named args resolve on
+        // the exact-argtypes match above.
+        gap("generate_function_name", "out-of-order named-argument resolution");
     }
     if best.is_none() && argtypes.len() == 1 {
         // func_get_detail falls back to the FuncNameAsType coercion arm only
@@ -433,7 +446,7 @@ fn get_opclass_name(
         return Err(cache_lookup_failed("opclass", opclass));
     };
     if actual_datatype == InvalidOid
-        || indexcmds::GetDefaultOpClass(actual_datatype, opcmethod)? != opclass
+        || indexcmds_seams::get_default_opclass::call(actual_datatype, opcmethod)? != opclass
     {
         buf.push(' ');
         if !opclass_is_visible(opclass, &opcname, opcmethod)? {
@@ -608,6 +621,10 @@ const FKCONSTR_ACTION_SETNULL: i8 = b'n' as i8;
 const FKCONSTR_ACTION_SETDEFAULT: i8 = b'd' as i8;
 
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
+const ANUM_PG_CONSTRAINT_CONDEFERRABLE: i32 = 5;
+const ANUM_PG_CONSTRAINT_CONDEFERRED: i32 = 6;
+const ANUM_PG_CONSTRAINT_CONENFORCED: i32 = 7;
+const ANUM_PG_CONSTRAINT_CONVALIDATED: i32 = 8;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_CONSTRAINT_CONTYPID: i32 = 10;
 const ANUM_PG_CONSTRAINT_CONINDID: i32 = 11;
@@ -670,6 +687,10 @@ pub fn pg_get_constraintdef_worker(
     let confupdtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFUPDTYPE).as_i8();
     let confdeltype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELTYPE).as_i8();
     let confmatchtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFMATCHTYPE).as_i8();
+    let condeferrable = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool();
+    let condeferred = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool();
+    let conenforced = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool();
+    let convalidated = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool();
     let connoinherit = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNOINHERIT).as_bool();
     let conperiod = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONPERIOD).as_bool();
     let conkey = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONKEY).map(i16_array_at);
@@ -772,6 +793,18 @@ pub fn pg_get_constraintdef_worker(
             &format!("constraint type '{}'", (other as u8) as char),
         ),
     }
+
+    if condeferrable {
+        buf.push_str(" DEFERRABLE");
+    }
+    if condeferred {
+        buf.push_str(" INITIALLY DEFERRED");
+    }
+    if !conenforced {
+        buf.push_str(" NOT ENFORCED");
+    } else if !convalidated {
+        buf.push_str(" NOT VALID");
+    }
     Ok(Some(buf))
 }
 
@@ -826,4 +859,207 @@ pub fn pg_get_expr_worker(
         }
     }
     Ok(Some(deparse_expression_pretty(mcx, node, relid, false, pretty_flags)?))
+}
+
+const PARTITION_STRATEGY_HASH: i8 = b'h' as i8;
+const PARTITION_STRATEGY_LIST: i8 = b'l' as i8;
+const PARTITION_STRATEGY_RANGE: i8 = b'r' as i8;
+
+const ANUM_PG_PARTITIONED_TABLE_PARTSTRAT: i32 = 2;
+const ANUM_PG_PARTITIONED_TABLE_PARTNATTS: i32 = 3;
+const ANUM_PG_PARTITIONED_TABLE_PARTATTRS: i32 = 5;
+const ANUM_PG_PARTITIONED_TABLE_PARTCLASS: i32 = 6;
+const ANUM_PG_PARTITIONED_TABLE_PARTCOLLATION: i32 = 7;
+const ANUM_PG_PARTITIONED_TABLE_PARTEXPRS: i32 = 8;
+
+pub fn pg_get_partkeydef_worker(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    pretty_flags: i32,
+    attrs_only: bool,
+    missing_ok: bool,
+) -> PgResult<Option<String>> {
+    let Some(ht) = SearchSysCache1(PARTRELID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        if missing_ok {
+            return Ok(None);
+        }
+        return Err(PgError::error(format!(
+            "cache lookup failed for partition key of {relid}"
+        ))
+        .into());
+    };
+    let t = ht.tuple();
+    let notnull =
+        |anum: i32| getattr_null(&t, PARTRELID, anum).expect("NOT NULL pg_partitioned_table column");
+    let partstrat = getattr(&t, PARTRELID, ANUM_PG_PARTITIONED_TABLE_PARTSTRAT).as_i8();
+    let partnatts = getattr(&t, PARTRELID, ANUM_PG_PARTITIONED_TABLE_PARTNATTS).as_i16();
+    let partattrs = i16_array_at(notnull(ANUM_PG_PARTITIONED_TABLE_PARTATTRS));
+    let partclass = oid_array_at(notnull(ANUM_PG_PARTITIONED_TABLE_PARTCLASS));
+    let partcollation = oid_array_at(notnull(ANUM_PG_PARTITIONED_TABLE_PARTCOLLATION));
+    let partexprs_text =
+        getattr_null(&t, PARTRELID, ANUM_PG_PARTITIONED_TABLE_PARTEXPRS).map(text_at);
+    drop(t);
+    ReleaseSysCache(ht);
+
+    let mut partexprs: Vec<Node<'_>> = Vec::new();
+    if let Some(s) = &partexprs_text {
+        let node = readfuncs::stringToNode(mcx, s)?;
+        let list = node.as_list().expect("unexpected node type found in partexprs");
+        partexprs = list.iter().collect();
+    }
+    let mut partexpr_item = 0usize;
+
+    let strategy = match partstrat {
+        PARTITION_STRATEGY_HASH => "HASH",
+        PARTITION_STRATEGY_LIST => "LIST",
+        PARTITION_STRATEGY_RANGE => "RANGE",
+        other => panic!("unexpected partition strategy: {other}"),
+    };
+    let mut buf = String::new();
+    if !attrs_only {
+        buf.push_str(strategy);
+        buf.push_str(" (");
+    }
+    let mut sep = "";
+    for keyno in 0..partnatts as usize {
+        let attnum = partattrs[keyno];
+        buf.push_str(sep);
+        sep = ", ";
+        let (keycoltype, keycolcollation);
+        if attnum != 0 {
+            let attname = lsyscache::get_attname(mcx, relid, attnum, false)?
+                .expect("get_attname missing_ok=false");
+            buf.push_str(&quote_identifier(attname.as_str()));
+            let (ty, _, coll) = lsyscache::get_atttypetypmodcoll(relid, attnum)?;
+            keycoltype = ty;
+            keycolcollation = coll;
+        } else {
+            assert!(partexpr_item < partexprs.len(), "too few entries in partexprs list");
+            let partkey = partexprs[partexpr_item];
+            partexpr_item += 1;
+            let s = deparse_expression_pretty(mcx, partkey, relid, false, pretty_flags)?;
+            if query::looks_like_function(partkey) {
+                buf.push_str(&s);
+            } else {
+                buf.push_str(&format!("({s})"));
+            }
+            keycoltype = parse_expr::expr_type(partkey);
+            keycolcollation = parse_expr::expr_collation(partkey);
+        }
+        let partcoll = partcollation[keyno];
+        if !attrs_only && partcoll != InvalidOid && partcoll != keycolcollation {
+            buf.push_str(&format!(" COLLATE {}", generate_collation_name(mcx, partcoll)?));
+        }
+        if !attrs_only {
+            get_opclass_name(mcx, partclass[keyno], keycoltype, &mut buf)?;
+        }
+    }
+    if !attrs_only {
+        buf.push(')');
+    }
+    Ok(Some(buf))
+}
+
+const STATS_EXT_NDISTINCT: u8 = b'd';
+const STATS_EXT_DEPENDENCIES: u8 = b'f';
+const STATS_EXT_MCV: u8 = b'm';
+
+const ANUM_PG_STATISTIC_EXT_STXRELID: i32 = 2;
+const ANUM_PG_STATISTIC_EXT_STXNAME: i32 = 3;
+const ANUM_PG_STATISTIC_EXT_STXNAMESPACE: i32 = 4;
+const ANUM_PG_STATISTIC_EXT_STXKEYS: i32 = 6;
+const ANUM_PG_STATISTIC_EXT_STXKIND: i32 = 8;
+const ANUM_PG_STATISTIC_EXT_STXEXPRS: i32 = 9;
+
+pub fn pg_get_statisticsobj_worker(
+    mcx: Mcx<'_>,
+    statextid: Oid,
+    columns_only: bool,
+    missing_ok: bool,
+) -> PgResult<Option<String>> {
+    let Some(ht) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(statextid)))?
+    else {
+        if missing_ok {
+            return Ok(None);
+        }
+        return Err(PgError::error(format!(
+            "cache lookup failed for statistics object {statextid}"
+        ))
+        .into());
+    };
+    let t = ht.tuple();
+    let notnull =
+        |anum: i32| getattr_null(&t, STATEXTOID, anum).expect("NOT NULL pg_statistic_ext column");
+    let stxrelid = getattr(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXRELID).as_oid();
+    let stxname = name_at(getattr(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXNAME));
+    let stxnamespace = getattr(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXNAMESPACE).as_oid();
+    let stxkeys = i16_array_at(notnull(ANUM_PG_STATISTIC_EXT_STXKEYS));
+    let stxkind = array_body(notnull(ANUM_PG_STATISTIC_EXT_STXKIND), 1);
+    let exprs_text = getattr_null(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXEXPRS).map(text_at);
+    drop(t);
+    ReleaseSysCache(ht);
+
+    let mut exprs: Vec<Node<'_>> = Vec::new();
+    if let Some(s) = &exprs_text {
+        let node = readfuncs::stringToNode(mcx, s)?;
+        exprs = node.as_list().expect("stxexprs is a List").iter().collect();
+    }
+    let ncolumns = stxkeys.len() + exprs.len();
+
+    let mut buf = String::new();
+    if !columns_only {
+        let nsp = namespace_name_or_temp(mcx, stxnamespace)?;
+        buf.push_str(&format!(
+            "CREATE STATISTICS {}",
+            quote_qualified_identifier(nsp.as_deref(), &stxname)
+        ));
+        let ndistinct_enabled = stxkind.contains(&STATS_EXT_NDISTINCT);
+        let dependencies_enabled = stxkind.contains(&STATS_EXT_DEPENDENCIES);
+        let mcv_enabled = stxkind.contains(&STATS_EXT_MCV);
+        if (!ndistinct_enabled || !dependencies_enabled || !mcv_enabled) && ncolumns > 1 {
+            let mut gotone = false;
+            buf.push_str(" (");
+            if ndistinct_enabled {
+                buf.push_str("ndistinct");
+                gotone = true;
+            }
+            if dependencies_enabled {
+                buf.push_str(if gotone { ", dependencies" } else { "dependencies" });
+                gotone = true;
+            }
+            if mcv_enabled {
+                buf.push_str(if gotone { ", mcv" } else { "mcv" });
+            }
+            buf.push(')');
+        }
+        buf.push_str(" ON ");
+    }
+
+    let mut colno = 0usize;
+    for &attnum in &stxkeys {
+        if colno > 0 {
+            buf.push_str(", ");
+        }
+        let attname = lsyscache::get_attname(mcx, stxrelid, attnum, false)?
+            .expect("get_attname missing_ok=false");
+        buf.push_str(&quote_identifier(attname.as_str()));
+        colno += 1;
+    }
+    for &expr in &exprs {
+        let s = deparse_expression_pretty(mcx, expr, stxrelid, false, PRETTYFLAG_PAREN)?;
+        if colno > 0 {
+            buf.push_str(", ");
+        }
+        if query::looks_like_function(expr) {
+            buf.push_str(&s);
+        } else {
+            buf.push_str(&format!("({s})"));
+        }
+        colno += 1;
+    }
+
+    if !columns_only {
+        buf.push_str(&format!(" FROM {}", generate_relation_name(mcx, stxrelid)?));
+    }
+    Ok(Some(buf))
 }

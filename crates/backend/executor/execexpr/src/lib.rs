@@ -36,7 +36,10 @@ pub use interp::{
     agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_outcome,
     exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome, Resume, Suspension,
 };
-pub use steps::{AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef, SlotSrc, Step};
+pub use steps::{
+    qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef,
+    SlotSrc, Step,
+};
 pub use types_portal::params::ParamBind;
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.

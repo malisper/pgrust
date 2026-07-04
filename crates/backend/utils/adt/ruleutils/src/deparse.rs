@@ -15,7 +15,7 @@ use types_nodes::primnodes::{
     FuncExpr, MinMaxExpr, MinMaxOp, NullTest, NullTestType, OpExpr, Param, ParamKind,
     ScalarArrayOpExpr, SubLink, SubLinkType, Var, VarReturningType,
 };
-use types_nodes::{Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
+use types_nodes::{BoolTestType, Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
 
 use crate::query::{self, DeparseNamespace};
 use crate::{gap, generate_function_name, generate_operator_name, quote_identifier};
@@ -208,7 +208,7 @@ pub(crate) fn get_rule_expr<'mcx>(
     showimplicit: bool,
 ) -> PgResult<()> {
     match node.node_tag() {
-        NodeTag::T_Var => get_variable(node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
+        NodeTag::T_Var => get_variable(node, node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
         NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),
         NodeTag::T_Param => get_parameter(node.as_param().unwrap(), ctx),
         NodeTag::T_Aggref => get_agg_expr(node.as_aggref().unwrap(), ctx),
@@ -228,6 +228,14 @@ pub(crate) fn get_rule_expr<'mcx>(
         }
         NodeTag::T_OpExpr => get_oper_expr(node, node.as_op_expr().unwrap(), ctx),
         NodeTag::T_FuncExpr => get_func_expr(node, node.as_func_expr().unwrap(), ctx, showimplicit),
+        NodeTag::T_NamedArgExpr => {
+            let na = node.as_named_arg_expr().unwrap();
+            ctx.buf.push_str(&format!(
+                "{} => ",
+                quote_identifier(na.name.expect("NamedArgExpr has a name"))
+            ));
+            get_rule_expr(na.arg.expect("NamedArgExpr has an arg"), ctx, showimplicit)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             get_saop_expr(node, node.as_scalar_array_op_expr().unwrap(), ctx)
         }
@@ -258,6 +266,148 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_CoalesceExpr => get_coalesce_expr(node.as_coalesce_expr().unwrap(), ctx),
         NodeTag::T_MinMaxExpr => get_minmax_expr(node.as_min_max_expr().unwrap(), ctx),
         NodeTag::T_NullTest => get_null_test(node, node.as_null_test().unwrap(), ctx),
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            ctx.buf.push_str("GROUPING(");
+            let mut first = true;
+            for arg in g.args.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(arg, ctx, true)?;
+            }
+            ctx.buf.push(')');
+            Ok(())
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(d.args.nth(0), ctx, true, Some(node))?;
+            ctx.buf.push_str(" IS DISTINCT FROM ");
+            get_rule_expr_paren(d.args.nth(1), ctx, true, Some(node))?;
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_BooleanTest => {
+            let btest = node.as_boolean_test().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(btest.arg.expect("BooleanTest.arg"), ctx, false, Some(node))?;
+            ctx.buf.push_str(match btest.booltesttype {
+                BoolTestType::IS_TRUE => " IS TRUE",
+                BoolTestType::IS_NOT_TRUE => " IS NOT TRUE",
+                BoolTestType::IS_FALSE => " IS FALSE",
+                BoolTestType::IS_NOT_FALSE => " IS NOT FALSE",
+                BoolTestType::IS_UNKNOWN => " IS UNKNOWN",
+                BoolTestType::IS_NOT_UNKNOWN => " IS NOT UNKNOWN",
+            });
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::primnodes::SQLValueFunctionOp as Op;
+            let svf = node.as_sql_value_function().unwrap();
+            match svf.op {
+                Op::SVFOP_CURRENT_DATE => ctx.buf.push_str("CURRENT_DATE"),
+                Op::SVFOP_CURRENT_TIME => ctx.buf.push_str("CURRENT_TIME"),
+                Op::SVFOP_CURRENT_TIME_N => {
+                    ctx.buf.push_str(&format!("CURRENT_TIME({})", svf.typmod));
+                }
+                Op::SVFOP_CURRENT_TIMESTAMP => ctx.buf.push_str("CURRENT_TIMESTAMP"),
+                Op::SVFOP_CURRENT_TIMESTAMP_N => {
+                    ctx.buf.push_str(&format!("CURRENT_TIMESTAMP({})", svf.typmod));
+                }
+                Op::SVFOP_LOCALTIME => ctx.buf.push_str("LOCALTIME"),
+                Op::SVFOP_LOCALTIME_N => ctx.buf.push_str(&format!("LOCALTIME({})", svf.typmod)),
+                Op::SVFOP_LOCALTIMESTAMP => ctx.buf.push_str("LOCALTIMESTAMP"),
+                Op::SVFOP_LOCALTIMESTAMP_N => {
+                    ctx.buf.push_str(&format!("LOCALTIMESTAMP({})", svf.typmod));
+                }
+                Op::SVFOP_CURRENT_ROLE => ctx.buf.push_str("CURRENT_ROLE"),
+                Op::SVFOP_CURRENT_USER => ctx.buf.push_str("CURRENT_USER"),
+                Op::SVFOP_USER => ctx.buf.push_str("USER"),
+                Op::SVFOP_SESSION_USER => ctx.buf.push_str("SESSION_USER"),
+                Op::SVFOP_CURRENT_CATALOG => ctx.buf.push_str("CURRENT_CATALOG"),
+                Op::SVFOP_CURRENT_SCHEMA => ctx.buf.push_str("CURRENT_SCHEMA"),
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sbsref = node.as_subscripting_ref().unwrap();
+            let refexpr = sbsref.refexpr.expect("SubscriptingRef.refexpr");
+            if refexpr.node_tag() == NodeTag::T_CaseTestExpr {
+                gap("get_rule_expr", "SubscriptingRef inside FieldStore");
+            }
+            let need_parens = !matches!(refexpr.node_tag(), NodeTag::T_Var | NodeTag::T_FieldSelect);
+            if need_parens {
+                ctx.buf.push('(');
+            }
+            get_rule_expr(refexpr, ctx, showimplicit)?;
+            if need_parens {
+                ctx.buf.push(')');
+            }
+            if sbsref.refassgnexpr.is_some() {
+                gap("get_rule_expr", "SubscriptingRef store (processIndirection)");
+            }
+            print_subscripts(sbsref, ctx)?;
+            Ok(())
+        }
+        NodeTag::T_SubPlan => {
+            let subplan = node.as_sub_plan().unwrap();
+            ctx.buf.push_str(match subplan.subLinkType {
+                SubLinkType::EXISTS_SUBLINK => "EXISTS(",
+                SubLinkType::ALL_SUBLINK => "(ALL ",
+                SubLinkType::ANY_SUBLINK => "(ANY ",
+                SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::EXPR_SUBLINK => "(",
+                SubLinkType::MULTIEXPR_SUBLINK => "(rescan ",
+                SubLinkType::ARRAY_SUBLINK => "ARRAY(",
+                SubLinkType::CTE_SUBLINK => "CTE(",
+            });
+            if let Some(testexpr) = subplan.testexpr {
+                let dpns = Rc::clone(&ctx.namespaces[0]);
+                dpns.plan
+                    .borrow_mut()
+                    .ancestors
+                    .insert(0, crate::plan::AncestorEntry::Sub(subplan));
+                let r = get_rule_expr(testexpr, ctx, showimplicit);
+                dpns.plan.borrow_mut().ancestors.remove(0);
+                r?;
+                ctx.buf.push(')');
+            } else {
+                if subplan.useHashTable {
+                    ctx.buf.push_str("hashed ");
+                }
+                ctx.buf.push_str(subplan.plan_name.expect("planned SubPlan has a name"));
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let asplan = node.as_alternative_sub_plan().unwrap();
+            ctx.buf.push_str("(alternatives: ");
+            let mut first = true;
+            for sp_node in asplan.subplans.iter() {
+                let splan = sp_node.as_sub_plan().expect("AlternativeSubPlan cell");
+                if !first {
+                    ctx.buf.push_str(" or ");
+                }
+                first = false;
+                if splan.useHashTable {
+                    ctx.buf.push_str("hashed ");
+                }
+                ctx.buf.push_str(splan.plan_name.expect("planned SubPlan has a name"));
+            }
+            ctx.buf.push(')');
+            Ok(())
+        }
         NodeTag::T_List => {
             let mut first = true;
             for item in node.as_list().unwrap().iter() {
@@ -458,6 +608,7 @@ fn simple_under_parent(parent: Node<'_>) -> bool {
 // get_variable (ruleutils.c): returns the attname, or None for a whole-row
 // Var (used by get_target_list for the implicit AS label).
 pub(crate) fn get_variable<'mcx>(
+    node: Node<'mcx>,
     var: &Var<'mcx>,
     levelsup: u32,
     istoplevel: bool,
@@ -468,24 +619,35 @@ pub(crate) fn get_variable<'mcx>(
         panic!("bogus varlevelsup: {} offset {levelsup}", var.varlevelsup);
     }
     let dpns = Rc::clone(&ctx.namespaces[netlevelsup]);
+    let plan_active = dpns.plan.borrow().plan.is_some();
 
-    if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
-        gap("get_variable", "OLD/NEW RETURNING variable");
-    }
-
-    let (varno, varattno) = if var.varnosyn > 0 {
+    let (varno, varattno) = if var.varnosyn > 0 && !plan_active {
         (var.varnosyn as usize, var.varattnosyn)
     } else {
         (var.varno as usize, var.varattno)
     };
 
     if varno < 1 || varno > dpns.rtable.len() {
-        gap("get_variable", "special varno (plan-tree deparse)");
+        crate::plan::get_variable_special(node, ctx)?;
+        return Ok(None);
     }
     let rte: &RangeTblEntry<'_> = dpns.rtable[varno - 1];
-    let mut refname = dpns.rtable_names[varno - 1].clone();
+    let mut refname = match var.varreturningtype {
+        VarReturningType::VAR_RETURNING_OLD => {
+            dpns.plan.borrow().ret_old_alias.map(str::to_owned)
+        }
+        VarReturningType::VAR_RETURNING_NEW => {
+            dpns.plan.borrow().ret_new_alias.map(str::to_owned)
+        }
+        VarReturningType::VAR_RETURNING_DEFAULT => dpns.rtable_names[varno - 1].clone(),
+    };
     let colinfo = &dpns.rtable_columns[varno - 1];
     let attnum = varattno;
+
+    if crate::plan::inner_plan_drilldown(var, rte, &dpns, ctx)? {
+        debug_assert!(netlevelsup == 0);
+        return Ok(None);
+    }
 
     if rte.rtekind == RTEKind::RTE_JOIN && rte.alias.is_none() {
         if rte.joinaliasvars.is_nil() {
@@ -494,7 +656,7 @@ pub(crate) fn get_variable<'mcx>(
         if attnum > 0 {
             let aliasvar = rte.joinaliasvars.nth(attnum as usize - 1);
             if let Some(av) = aliasvar.as_var() {
-                return get_variable(av, var.varlevelsup + levelsup, istoplevel, ctx);
+                return get_variable(aliasvar, av, var.varlevelsup + levelsup, istoplevel, ctx);
             }
         }
         refname = None;
@@ -515,7 +677,9 @@ pub(crate) fn get_variable<'mcx>(
         gap("get_variable", "system column deparse");
     };
 
-    let mut need_prefix = ctx.varprefix || attname.is_none();
+    let mut need_prefix = ctx.varprefix
+        || attname.is_none()
+        || var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT;
 
     if ctx.var_in_order_by && !ctx.in_group_by && !need_prefix {
         if let (Some(tlist), Some(att)) = (ctx.target_list, attname.as_deref()) {
@@ -570,14 +734,66 @@ fn same_var(expr: Node<'_>, var: &Var<'_>) -> bool {
     }
 }
 
-fn get_parameter(param: &Param, ctx: &mut DeparseContext<'_>) -> PgResult<()> {
+fn get_parameter<'mcx>(param: &Param, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if let Some((expr, dpns, ancestor_idx)) = crate::plan::find_param_referent(param, ctx) {
+        let save = crate::plan::push_ancestor_plan(&dpns, ancestor_idx);
+        let save_varprefix = ctx.varprefix;
+        ctx.varprefix = true;
+        let need_paren = !matches!(
+            expr.node_tag(),
+            NodeTag::T_Var | NodeTag::T_Aggref | NodeTag::T_GroupingFunc | NodeTag::T_Param
+        );
+        if need_paren {
+            ctx.buf.push('(');
+        }
+        let r = get_rule_expr(expr, ctx, false);
+        if need_paren {
+            ctx.buf.push(')');
+        }
+        ctx.varprefix = save_varprefix;
+        crate::plan::pop_ancestor_plan(&dpns, save);
+        return r;
+    }
+    if let Some((subplan, column)) = crate::plan::find_param_generator(param, ctx) {
+        ctx.buf.push_str(&format!(
+            "({}{}).col{}",
+            if subplan.useHashTable { "hashed " } else { "" },
+            subplan.plan_name.expect("planned SubPlan has a name"),
+            column + 1
+        ));
+        return Ok(());
+    }
     match param.paramkind {
-        ParamKind::PARAM_EXTERN => {
+        ParamKind::PARAM_EXTERN | ParamKind::PARAM_EXEC => {
+            // The C argnames leg (function-body deparse) is unported; plain $n
+            // matches every context this engine reaches.
             ctx.buf.push_str(&format!("${}", param.paramid));
             Ok(())
         }
         other => gap("get_parameter", &format!("{other:?} deparse")),
     }
+}
+
+fn print_subscripts<'mcx>(
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let mut low = sbsref.reflowerindexpr.iter();
+    let has_lower = !sbsref.reflowerindexpr.is_nil();
+    for up in sbsref.refupperindexpr.iter() {
+        ctx.buf.push('[');
+        if has_lower {
+            if let Some(Some(l)) = low.next() {
+                get_rule_expr(l, ctx, false)?;
+            }
+            ctx.buf.push(':');
+        }
+        if let Some(u) = up {
+            get_rule_expr(u, ctx, false)?;
+        }
+        ctx.buf.push(']');
+    }
+    Ok(())
 }
 
 fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, value: Datum) -> PgResult<String> {
@@ -725,28 +941,209 @@ fn get_func_expr<'mcx>(
         let coerced_typmod = func_expr_length_coercion_typmod(expr);
         return get_coercion_expr(arg, ctx, expr.funcresulttype, coerced_typmod, node);
     }
-    if expr.funcformat == CoercionForm::COERCE_SQL_SYNTAX {
-        gap("get_func_expr", "COERCE_SQL_SYNTAX (get_func_sql_syntax)");
+    if expr.funcformat == CoercionForm::COERCE_SQL_SYNTAX && get_func_sql_syntax(node, expr, ctx)? {
+        return Ok(());
     }
 
     let mut argtypes = Vec::with_capacity(expr.args.len());
+    let mut argnames = Vec::new();
     for arg in expr.args.iter() {
-        if arg.node_tag() == NodeTag::T_NamedArgExpr {
-            gap("get_func_expr", "NamedArgExpr arguments");
+        if let Some(na) = arg.as_named_arg_expr() {
+            argnames.push(na.name.expect("NamedArgExpr has a name"));
         }
         argtypes.push(parse_expr::expr_type(arg));
     }
-    let funcname = generate_function_name(ctx.mcx, expr.funcid, &argtypes, expr.funcvariadic)?;
+    let funcname =
+        generate_function_name(ctx.mcx, expr.funcid, &argtypes, &argnames, expr.funcvariadic)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
+    let nargs = expr.args.len();
     for (i, arg) in expr.args.iter().enumerate() {
         if i > 0 {
             ctx.buf.push_str(", ");
+        }
+        if expr.funcvariadic && i == nargs - 1 {
+            ctx.buf.push_str("VARIADIC ");
         }
         get_rule_expr(arg, ctx, true)?;
     }
     ctx.buf.push(')');
     Ok(())
+}
+
+const F_TIMEZONE_INTERVAL_TIMESTAMP: Oid = 2070;
+const F_TIMEZONE_INTERVAL_TIMESTAMPTZ: Oid = 1026;
+const F_TIMEZONE_INTERVAL_TIMETZ: Oid = 2038;
+const F_TIMEZONE_TEXT_TIMESTAMP: Oid = 2069;
+const F_TIMEZONE_TEXT_TIMESTAMPTZ: Oid = 1159;
+const F_TIMEZONE_TEXT_TIMETZ: Oid = 2037;
+const F_TIMEZONE_TIMESTAMP: Oid = 6335;
+const F_TIMEZONE_TIMESTAMPTZ: Oid = 6334;
+const F_TIMEZONE_TIMETZ: Oid = 6336;
+const F_OVERLAPS_OIDS: [Oid; 13] =
+    [1271, 1304, 1305, 1306, 1307, 1308, 1309, 1310, 1311, 2041, 2042, 2043, 2044];
+const F_EXTRACT_OIDS: [Oid; 6] = [6199, 6200, 6201, 6202, 6203, 6204];
+const F_IS_NORMALIZED: Oid = 4351;
+const F_PG_COLLATION_FOR: Oid = 3162;
+const F_NORMALIZE: Oid = 4350;
+const F_OVERLAY_OIDS: [Oid; 6] = [749, 752, 1404, 1405, 3030, 3031];
+const F_POSITION_OIDS: [Oid; 3] = [849, 1698, 2014];
+const F_SUBSTRING_FROM_OIDS: [Oid; 6] = [936, 937, 1680, 1699, 2012, 2013];
+const F_SUBSTRING_TEXT_TEXT_TEXT: Oid = 2074;
+const F_BTRIM_OIDS: [Oid; 3] = [884, 885, 2015];
+const F_LTRIM_OIDS: [Oid; 3] = [875, 881, 6195];
+const F_RTRIM_OIDS: [Oid; 3] = [876, 882, 6196];
+const F_SYSTEM_USER: Oid = 6311;
+
+fn text_const_str(arg: Node<'_>) -> String {
+    let c = arg.as_const().expect("SQL-syntax option arg is a Const");
+    debug_assert!(c.consttype == types_core::TEXTOID && !c.constisnull);
+    crate::text_at(c.constvalue)
+}
+
+fn get_func_sql_syntax<'mcx>(
+    node: Node<'mcx>,
+    expr: &FuncExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<bool> {
+    let funcoid = expr.funcid;
+    match funcoid {
+        F_TIMEZONE_INTERVAL_TIMESTAMP
+        | F_TIMEZONE_INTERVAL_TIMESTAMPTZ
+        | F_TIMEZONE_INTERVAL_TIMETZ
+        | F_TIMEZONE_TEXT_TIMESTAMP
+        | F_TIMEZONE_TEXT_TIMESTAMPTZ
+        | F_TIMEZONE_TEXT_TIMETZ => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(1), ctx, false, Some(node))?;
+            ctx.buf.push_str(" AT TIME ZONE ");
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_TIMEZONE_TIMESTAMP | F_TIMEZONE_TIMESTAMPTZ | F_TIMEZONE_TIMETZ => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push_str(" AT LOCAL)");
+            Ok(true)
+        }
+        _ if F_OVERLAPS_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("((");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(", ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(") OVERLAPS (");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            ctx.buf.push_str(", ");
+            get_rule_expr(expr.args.nth(3), ctx, false)?;
+            ctx.buf.push_str("))");
+            Ok(true)
+        }
+        _ if F_EXTRACT_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("EXTRACT(");
+            ctx.buf.push_str(&text_const_str(expr.args.nth(0)));
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_IS_NORMALIZED => {
+            ctx.buf.push('(');
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            ctx.buf.push_str(" IS");
+            if expr.args.len() == 2 {
+                ctx.buf.push(' ');
+                ctx.buf.push_str(&text_const_str(expr.args.nth(1)));
+            }
+            ctx.buf.push_str(" NORMALIZED)");
+            Ok(true)
+        }
+        F_PG_COLLATION_FOR => {
+            ctx.buf.push_str("COLLATION FOR (");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_NORMALIZE => {
+            ctx.buf.push_str("NORMALIZE(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            if expr.args.len() == 2 {
+                ctx.buf.push_str(", ");
+                ctx.buf.push_str(&text_const_str(expr.args.nth(1)));
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_OVERLAY_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("OVERLAY(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" PLACING ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            if expr.args.len() == 4 {
+                ctx.buf.push_str(" FOR ");
+                get_rule_expr(expr.args.nth(3), ctx, false)?;
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_POSITION_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("POSITION((");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(") IN (");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str("))");
+            Ok(true)
+        }
+        _ if F_SUBSTRING_FROM_OIDS.contains(&funcoid) => {
+            ctx.buf.push_str("SUBSTRING(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            if expr.args.len() == 3 {
+                ctx.buf.push_str(" FOR ");
+                get_rule_expr(expr.args.nth(2), ctx, false)?;
+            }
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_SUBSTRING_TEXT_TEXT_TEXT => {
+            ctx.buf.push_str("SUBSTRING(");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(" SIMILAR ");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str(" ESCAPE ");
+            get_rule_expr(expr.args.nth(2), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        _ if F_BTRIM_OIDS.contains(&funcoid)
+            || F_LTRIM_OIDS.contains(&funcoid)
+            || F_RTRIM_OIDS.contains(&funcoid) =>
+        {
+            ctx.buf.push_str(if F_BTRIM_OIDS.contains(&funcoid) {
+                "TRIM(BOTH"
+            } else if F_LTRIM_OIDS.contains(&funcoid) {
+                "TRIM(LEADING"
+            } else {
+                "TRIM(TRAILING"
+            });
+            if expr.args.len() == 2 {
+                ctx.buf.push(' ');
+                get_rule_expr(expr.args.nth(1), ctx, false)?;
+            }
+            ctx.buf.push_str(" FROM ");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push(')');
+            Ok(true)
+        }
+        F_SYSTEM_USER => {
+            ctx.buf.push_str("SYSTEM_USER");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
@@ -758,7 +1155,8 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
         gap("get_agg_expr", "unrecognized aggkind");
     }
     let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
-    let funcname = generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, aggref.aggvariadic)?;
+    let funcname =
+        generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, &[], aggref.aggvariadic)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if !aggref.aggdistinct.is_nil() {
@@ -780,6 +1178,11 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
     } else if aggref.aggstar {
         ctx.buf.push('*');
     } else {
+        let nargs = aggref
+            .args
+            .iter()
+            .filter(|n| !n.as_target_entry().expect("Aggref args are TargetEntries").resjunk)
+            .count();
         let mut i = 0;
         for tle_node in aggref.args.iter() {
             let tle = tle_node.as_target_entry().expect("Aggref args are TargetEntries");
@@ -790,6 +1193,9 @@ fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>
                 ctx.buf.push_str(", ");
             }
             i += 1;
+            if aggref.aggvariadic && i == nargs {
+                ctx.buf.push_str("VARIADIC ");
+            }
             get_rule_expr(tle.expr, ctx, true)?;
         }
     }
@@ -813,13 +1219,14 @@ fn get_windowfunc_expr<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     let mut argtypes = Vec::with_capacity(wfunc.args.len());
+    let mut argnames = Vec::new();
     for arg in wfunc.args.iter() {
-        if arg.node_tag() == NodeTag::T_NamedArgExpr {
-            gap("get_windowfunc_expr", "NamedArgExpr arguments");
+        if let Some(na) = arg.as_named_arg_expr() {
+            argnames.push(na.name.expect("NamedArgExpr has a name"));
         }
         argtypes.push(parse_expr::expr_type(arg));
     }
-    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, false)?;
+    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, &argnames, false)?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if wfunc.winstar {
@@ -841,7 +1248,17 @@ fn get_windowfunc_expr<'mcx>(
     ctx.buf.push_str(") OVER ");
 
     let Some(wclauses) = ctx.window_clause else {
-        gap("get_windowfunc_expr", "plan-tree OVER (WindowAgg namespace search)");
+        for dpns in &ctx.namespaces {
+            let ps = dpns.plan.borrow();
+            if let Some(wagg) = ps.plan.and_then(Node::as_window_agg) {
+                if wagg.winref == wfunc.winref {
+                    let name = wagg.winname.expect("planned WindowAgg has a winname");
+                    ctx.buf.push_str(&quote_identifier(name));
+                    return Ok(());
+                }
+            }
+        }
+        panic!("could not find window clause for winref {}", wfunc.winref);
     };
     let wc = wclauses
         .iter()

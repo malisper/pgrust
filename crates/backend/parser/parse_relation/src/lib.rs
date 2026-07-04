@@ -2197,3 +2197,44 @@ fn perminfo_relid_mismatch(rte: &RangeTblEntry<'_>, perminfo_relid: Oid) -> Box<
         .with_error_location(loc("getRTEPermissionInfo")),
     )
 }
+
+struct UsesTempRelation<'mcx> {
+    mcx: Mcx<'mcx>,
+}
+
+impl<'mcx> UsesTempRelation<'mcx> {
+    fn query(&mut self, q: &types_nodes::parsenodes::Query<'mcx>) -> PgResult<bool> {
+        for item in q.rtable.iter() {
+            let rte = item.as_range_tbl_entry().expect("rtable entry");
+            if rte.rtekind == RTEKind::RTE_RELATION {
+                let rel = relation_seams::relation_open::call(self.mcx, rte.relid, AccessShareLock)?;
+                let relpersistence = rel.rd_rel.relpersistence;
+                rel.close(AccessShareLock)?;
+                if relpersistence == types_core::catalog::RELPERSISTENCE_TEMP {
+                    return Ok(true);
+                }
+            }
+        }
+        nodes_core::query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES)
+    }
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for UsesTempRelation<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(q) = node.as_query() {
+            return self.query(q);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx types_nodes::parsenodes::Query<'mcx>) -> PgResult<bool> {
+        self.query(q)
+    }
+}
+
+pub fn isQueryUsingTempRelation<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &types_nodes::parsenodes::Query<'mcx>,
+) -> PgResult<bool> {
+    UsesTempRelation { mcx }.query(query)
+}

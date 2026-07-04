@@ -23,3 +23,7 @@ SELECT p.proname, pg_get_functiondef(p.oid)
 SELECT p.proname, pg_get_function_arguments(p.oid),
        pg_get_function_identity_arguments(p.oid), pg_get_function_result(p.oid)
   FROM pg_proc p WHERE p.pronamespace = 2200 ORDER BY p.proname;
+SELECT t.tgname, pg_get_triggerdef(t.oid)
+  FROM pg_trigger t WHERE NOT t.tgisinternal ORDER BY t.tgname;
+SELECT t.tgname, pg_get_triggerdef(t.oid, true)
+  FROM pg_trigger t WHERE NOT t.tgisinternal ORDER BY t.tgname;

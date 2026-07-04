@@ -672,6 +672,14 @@ pub struct FuncExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct NamedArgExpr<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+    pub argnumber: i32,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors primnodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Alias<'mcx> {
     const TAG: NodeTag = NodeTag::T_Alias;
@@ -729,6 +737,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ArrayExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NamedArgExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NamedArgExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubscriptingRef<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubscriptingRef;
@@ -1020,6 +1031,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_func_expr(self) -> Option<&'mcx FuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_named_arg_expr(self) -> Option<&'mcx NamedArgExpr<'mcx>> {
         self.as_variant()
     }
 

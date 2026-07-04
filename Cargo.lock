@@ -58,6 +58,7 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "adt_regproc",
  "cache_syscache",
  "catalog_namespace",
  "catcache",
@@ -686,6 +687,7 @@ dependencies = [
  "miscinit_seams",
  "namespace_seams",
  "pqformat",
+ "regproc_seams",
  "rel_vocab",
  "syscache_seams",
  "types_core",
@@ -2097,6 +2099,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_amcmds"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "commands_analyze"
 version = "0.0.0"
 dependencies = [
@@ -2519,11 +2531,18 @@ dependencies = [
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "fmgr_seams",
+ "genam",
  "mcx",
  "relpath",
+ "table",
  "tablespace_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2669,9 +2688,11 @@ name = "commands_view"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "elog",
  "lsyscache",
  "mcx",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "rewrite_define",
  "tablecmds",
@@ -3247,6 +3268,7 @@ dependencies = [
  "syscache_seams",
  "tableam",
  "tableam_vocab",
+ "test_boot",
  "transam_xlog_seams",
  "types_brin",
  "types_core",
@@ -3437,6 +3459,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_slot",
+ "types_storage",
  "types_tuple",
 ]
 
@@ -3533,6 +3556,7 @@ dependencies = [
  "resowner_seams",
  "rewrite_handler",
  "rewrite_handler_seams",
+ "ruleutils",
  "s_lock_seams",
  "shmem_seams",
  "snapmgr",
@@ -3812,6 +3836,7 @@ dependencies = [
  "miscinit_seams",
  "predicate_seams",
  "smgr_seams",
+ "test_boot",
  "types_core",
  "types_error",
  "types_rel",
@@ -3955,18 +3980,16 @@ name = "genfile"
 version = "0.1.0"
 dependencies = [
  "acl_seams",
+ "adt_datetime",
  "datum",
  "elog",
- "fd",
  "funcapi",
  "guc_tables",
  "heaptuple",
  "init_small",
- "libc",
- "mcx",
+ "mbutils",
  "miscinit",
  "pg_path",
- "tupdesc",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -4196,10 +4219,12 @@ dependencies = [
  "adt_acl",
  "adt_datetime",
  "adt_timestamp",
+ "arrayfuncs",
  "datum",
  "elog",
  "exectuples_output",
  "format_type",
+ "funcapi",
  "guc",
  "guc_tables",
  "mbutils",
@@ -4219,6 +4244,7 @@ dependencies = [
  "types_core",
  "types_dest",
  "types_error",
+ "types_fmgr",
  "types_guc",
  "types_nodes",
  "types_tuple",
@@ -4649,6 +4675,7 @@ dependencies = [
  "snapmgr",
  "table",
  "tableam_vocab",
+ "test_boot",
  "toast_internals_seams",
  "toastdesc",
  "transam_xlog_seams",
@@ -6331,6 +6358,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_rel",
+ "types_scan",
  "types_slot",
  "types_snapshot",
  "types_storage",
@@ -6779,6 +6807,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nodes_core",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
@@ -6844,6 +6873,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "readfuncs",
+ "regproc_seams",
  "rel_vocab",
  "relation",
  "relcache",
@@ -7766,6 +7796,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "arrayfuncs",
  "cache_syscache",
  "catalog_namespace",
  "coerce",
@@ -7776,6 +7807,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "guc_tables",
+ "heaptuple",
  "lsyscache",
  "mcx",
  "nodes_core",
@@ -7785,6 +7817,7 @@ dependencies = [
  "pg_proc",
  "plancache",
  "rel_vocab",
+ "resowner",
  "rustc-hash",
  "scan_fgram",
  "snapmgr",
@@ -7797,7 +7830,10 @@ dependencies = [
  "types_nodes",
  "types_portal",
  "types_rel",
+ "types_trigger",
+ "types_trigger_call",
  "types_tuple",
+ "varlena",
  "wchar",
  "xact",
 ]
@@ -8860,6 +8896,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "regproc_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "regress_lib"
 version = "0.1.0"
 dependencies = [
@@ -9092,6 +9138,7 @@ dependencies = [
  "predicate_seams",
  "resowner_portal_seams",
  "resowner_seams",
+ "snapmgr_seams",
  "types_error",
  "types_resowner",
  "types_snapshot",
@@ -9501,7 +9548,7 @@ dependencies = [
  "format_type",
  "genam",
  "guc",
- "indexcmds",
+ "indexcmds_seams",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -9525,6 +9572,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_trigger",
  "types_tuple",
  "varlena",
  "vars",
@@ -9741,6 +9789,7 @@ dependencies = [
  "parse_clause",
  "parse_collate",
  "parse_expr",
+ "parse_utilcmd",
  "parser_analyze",
  "parser_driver",
  "partitionfuncs",
@@ -10809,10 +10858,13 @@ dependencies = [
  "catalog_toasting",
  "clauses",
  "coerce",
+ "commands_amcmds",
  "commands_cluster",
+ "commands_tablespace",
  "datum",
  "elog_seams",
  "execexpr",
+ "execindexing",
  "exectuples",
  "fmgr_seams",
  "format_type",
@@ -10866,6 +10918,7 @@ dependencies = [
  "tablecmds_seams",
  "trigger",
  "tupdesc",
+ "typcache",
  "types_array",
  "types_core",
  "types_error",
@@ -10919,6 +10972,45 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "xact_seams",
+]
+
+[[package]]
+name = "test_boot"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "adt_float",
+ "aio_seams",
+ "autovacuum_seams",
+ "condition_variable_seams",
+ "controldata_utils",
+ "deadlock_seams",
+ "fd",
+ "guc",
+ "guc_tables",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lock_seams",
+ "lwlock",
+ "miscinit_seams",
+ "pg_sema_seams",
+ "pmsignal_seams",
+ "postgres_seams",
+ "s_lock_seams",
+ "shmem",
+ "sinval_seams",
+ "sync_seams",
+ "syncrep_seams",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
+ "xlogutils",
 ]
 
 [[package]]

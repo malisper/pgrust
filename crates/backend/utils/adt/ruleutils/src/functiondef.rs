@@ -373,7 +373,7 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
         buf.push_str(&format!(" ROWS {}", fmt_g(proc.prorows)));
     }
     if proc.prosupport != InvalidOid {
-        let name = generate_function_name(mcx, proc.prosupport, &[INTERNALOID], false)?;
+        let name = generate_function_name(mcx, proc.prosupport, &[INTERNALOID], &[], false)?;
         buf.push_str(&format!(" SUPPORT {name}"));
     }
     if oldlen != buf.len() {
@@ -443,6 +443,61 @@ pub fn pg_get_function_identity_arguments_worker(
     let mut buf = String::new();
     print_function_arguments(mcx, &mut buf, &proc, false, false)?;
     Ok(Some(buf))
+}
+
+// is_input_argument (ruleutils.c).
+fn is_input_argument(nth: usize, argmodes: Option<&Vec<u8>>) -> bool {
+    match argmodes {
+        None => true,
+        Some(m) => {
+            matches!(m[nth], PROARGMODE_IN | PROARGMODE_INOUT | PROARGMODE_VARIADIC)
+        }
+    }
+}
+
+pub fn pg_get_function_arg_default_worker(
+    mcx: Mcx<'_>,
+    funcid: Oid,
+    nth_arg: i32,
+) -> PgResult<Option<String>> {
+    let Some(proc) = pg_proc_row(funcid)? else {
+        return Ok(None);
+    };
+    let info = func_arg_info(&proc);
+    let numargs = info.argtypes.len() as i32;
+    if nth_arg < 1
+        || nth_arg > numargs
+        || !is_input_argument((nth_arg - 1) as usize, info.argmodes.as_ref())
+    {
+        return Ok(None);
+    }
+
+    let mut nth_inputarg = 0i32;
+    for i in 0..nth_arg {
+        if is_input_argument(i as usize, info.argmodes.as_ref()) {
+            nth_inputarg += 1;
+        }
+    }
+
+    let Some(defs) = &proc.proargdefaults else {
+        return Ok(None);
+    };
+    let node = readfuncs::stringToNode(mcx, defs)?;
+    let argdefaults: Vec<types_nodes::Node<'_>> =
+        node.as_list().expect("proargdefaults is a List").iter().collect();
+
+    let nth_default = nth_inputarg - 1 - (proc.pronargs - proc.pronargdefaults) as i32;
+    if nth_default < 0 || nth_default >= argdefaults.len() as i32 {
+        return Ok(None);
+    }
+    let s = crate::deparse_expression_pretty(
+        mcx,
+        argdefaults[nth_default as usize],
+        InvalidOid,
+        false,
+        0,
+    )?;
+    Ok(Some(s))
 }
 
 pub fn pg_get_function_result_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<String>> {

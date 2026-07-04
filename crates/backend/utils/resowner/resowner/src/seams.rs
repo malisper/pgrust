@@ -26,9 +26,12 @@ static SNAPSHOT_REF_DESC: ResourceOwnerDesc = ResourceOwnerDesc {
 };
 
 fn release_snapshot_ref(res: Datum) {
+    // ResOwnerReleaseSnapshot (snapmgr.c): the still-registered snapshot must
+    // leave snapmgr's registry too, not just drop its owner reference.
     // SAFETY: pairs the Rc::into_raw in resource_owner_remember_snapshot;
-    // the entry's removal from the owner is the only path that drops it.
-    unsafe { Rc::decrement_strong_count(res.as_usize() as *const SnapshotData<'static>) };
+    // the entry's removal from the owner is the only path that reclaims it.
+    let snap = unsafe { Rc::from_raw(res.as_usize() as *const SnapshotData<'static>) };
+    snapmgr_seams::unregister_snapshot_no_owner::call(snap);
 }
 
 fn print_snapshot_ref<'a>(mcx: Mcx<'a>, res: Datum) -> PgResult<PgString<'a>> {
