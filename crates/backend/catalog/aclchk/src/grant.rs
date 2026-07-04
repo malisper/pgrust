@@ -625,7 +625,7 @@ fn expand_col_privileges(
     this_privileges: u64,
     col_privileges: &mut [u64],
 ) -> PgResult<()> {
-    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 6;
+    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
     for cell in colnames.iter() {
         let colname = cell.as_string().expect("column name").sval;
         // get_attnum (lsyscache.c): SearchSysCacheAttName misses dropped rows.
