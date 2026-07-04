@@ -461,6 +461,8 @@ members = [
     "crates/backend/utils/adt/genfile",
     "crates/backend/utils/adt/uuid",
     "crates/backend/utils/adt/network",
+    "crates/backend/utils/adt/network_gist",
+    "crates/backend/utils/adt/network_spgist",
     "crates/backend/utils/adt/tsvector_core",
     "crates/backend/utils/adt/tsquery_core",
     "crates/backend/utils/adt/tsrank",

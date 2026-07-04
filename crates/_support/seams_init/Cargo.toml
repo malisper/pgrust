@@ -166,6 +166,8 @@ spgist_text = { path = "../../backend/access/spgist/spgist_text" }
 gistproc = { path = "../../backend/access/gist/gistproc" }
 rangetypes_gist = { path = "../../backend/utils/adt/rangetypes_gist" }
 rangetypes_spgist = { path = "../../backend/utils/adt/rangetypes_spgist" }
+network_gist = { path = "../../backend/utils/adt/network_gist" }
+network_spgist = { path = "../../backend/utils/adt/network_spgist" }
 commands_constraint = { path = "../../backend/commands/constraint_cmd" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
