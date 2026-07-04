@@ -229,20 +229,24 @@ impl<T> PoolMutex<T> {
         }
     }
 
+    // Single CAS attempt, no spin: a contended pool is bypassed (caller falls
+    // through to Global/mimalloc). Spinning here collapsed the multi-backend
+    // write gate at clients > vCPU (75% of cycles in __aarch64_cas1_acq;
+    // m4mc-gate job pgrust-m4mc-gate-1783126728-37375).
     #[inline]
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+    pub(crate) fn try_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         use core::sync::atomic::Ordering;
-        while self
+        if self
             .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            return None;
         }
         // SAFETY: the flag serializes access; released below.
         let r = f(unsafe { &mut *self.val.get() });
         self.locked.store(false, Ordering::Release);
-        r
+        Some(r)
     }
 }
 
@@ -257,7 +261,7 @@ const CHILD_VEC_POOL_MAX: usize = 64;
 
 #[inline]
 fn child_vec_take() -> alloc::vec::Vec<AcctWeak> {
-    CHILD_VEC_POOL.with(|s| s.pop()).unwrap_or_default()
+    CHILD_VEC_POOL.try_with(|s| s.pop()).flatten().unwrap_or_default()
 }
 
 #[inline]
@@ -266,7 +270,7 @@ fn child_vec_give(v: alloc::vec::Vec<AcctWeak>) {
     if v.capacity() == 0 {
         return;
     }
-    CHILD_VEC_POOL.with(|s| {
+    let _ = CHILD_VEC_POOL.try_with(move |s| {
         if s.len() < CHILD_VEC_POOL_MAX {
             s.push(v);
         }
@@ -306,7 +310,7 @@ fn acct_alloc_global() -> NonNull<AcctInner> {
 
 #[inline]
 fn acct_take_from(pool: &AcctPool) -> NonNull<AcctInner> {
-    if let Some(p) = pool.with(|s| s.pop()) {
+    if let Some(Some(p)) = pool.try_with(|s| s.pop()) {
         return p;
     }
     acct_alloc_global()
@@ -314,15 +318,15 @@ fn acct_take_from(pool: &AcctPool) -> NonNull<AcctInner> {
 
 #[inline]
 fn acct_give_to(pool: &AcctPool, p: NonNull<AcctInner>) {
-    let full = pool.with(|s| {
+    let pooled = pool.try_with(|s| {
         if s.len() >= ACCT_POOL_MAX {
-            true
+            false
         } else {
             s.push(p);
-            false
+            true
         }
     });
-    if full {
+    if pooled != Some(true) {
         // SAFETY: from acct_alloc_global; `val` already dropped, nothing else owns it.
         unsafe { Global.deallocate(p.cast(), Layout::new::<AcctInner>()) };
     }
