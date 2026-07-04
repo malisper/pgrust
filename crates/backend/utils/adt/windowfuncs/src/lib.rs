@@ -2,16 +2,20 @@ use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
-use types_nodes::primnodes::SupportRequestOptimizeWindowClause;
+use types_nodes::primnodes::{
+    SupportRequestOptimizeWindowClause, SupportRequestWFuncMonotonic, MONOTONICFUNC_BOTH,
+    MONOTONICFUNC_DECREASING, MONOTONICFUNC_INCREASING, MONOTONICFUNC_NONE,
+};
 use types_nodes::rawnodes::{
-    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_NONDEFAULT, FRAMEOPTION_ROWS,
-    FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_NONDEFAULT,
+    FRAMEOPTION_ROWS, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
 use types_nodes::NodeTag;
 
-// C acts on WFuncMonotonic (runCondition lane, unported: loud) and
-// OptimizeWindowClause requests; NULL for everything else. All six window
-// prosupports rewrite to ROWS UNBOUNDED PRECEDING..CURRENT ROW.
+// C acts on WFuncMonotonic and OptimizeWindowClause requests; NULL for
+// everything else. All six window prosupports are monotonically increasing
+// and rewrite the frame to ROWS UNBOUNDED PRECEDING..CURRENT ROW; int8inc's
+// monotonicity depends on the window clause (count(*) over frame bounds).
 fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let p = a.value.as_usize() as *const NodeTag;
@@ -23,6 +27,29 @@ fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> 
         | NodeTag::T_SupportRequestRows
         | NodeTag::T_SupportRequestSelectivity
         | NodeTag::T_SupportRequestIndexCondition => Ok(Datum::from_usize(0)),
+        NodeTag::T_SupportRequestWFuncMonotonic => {
+            let req = a.value.as_usize() as *mut SupportRequestWFuncMonotonic;
+            // SAFETY: tag checked; caller owns the request node.
+            unsafe {
+                if optimize_frame {
+                    (*req).monotonic = MONOTONICFUNC_INCREASING;
+                } else {
+                    let mut monotonic = MONOTONICFUNC_NONE;
+                    if (*req).order_clause_empty {
+                        monotonic = MONOTONICFUNC_BOTH;
+                    } else {
+                        if (*req).frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+                            monotonic |= MONOTONICFUNC_INCREASING;
+                        }
+                        if (*req).frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+                            monotonic |= MONOTONICFUNC_DECREASING;
+                        }
+                    }
+                    (*req).monotonic = monotonic;
+                }
+            }
+            Ok(a.value)
+        }
         NodeTag::T_SupportRequestOptimizeWindowClause => {
             if !optimize_frame {
                 return Ok(Datum::from_usize(0));
@@ -37,9 +64,7 @@ fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> 
             }
             Ok(a.value)
         }
-        other => panic!(
-            "window prosupport: request {other:?} unported (runCondition lane)"
-        ),
+        other => panic!("window prosupport: request {other:?} unported"),
     }
 }
 

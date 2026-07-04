@@ -1802,8 +1802,7 @@ pub fn adjust_limit_rows_costs(
     }
 }
 
-// create_windowagg_path (pathnode.c); runCondition/qual legs dead
-// (WindowFuncRunCondition loud upstream, topqual only feeds runconditions).
+// create_windowagg_path (pathnode.c).
 pub fn create_windowagg_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -1811,9 +1810,11 @@ pub fn create_windowagg_path<'mcx>(
     target_id: PtId,
     window_funcs: &[types_nodes::Node<'mcx>],
     winclause_node: types_nodes::Node<'mcx>,
+    run_condition: &[types_nodes::Node<'mcx>],
+    qual: &[types_nodes::Node<'mcx>],
     topwindow: bool,
 ) -> PgResult<PathId> {
-    let _ = topwindow;
+    debug_assert!(qual.is_empty() || topwindow);
     let sub = run.root.path(subpath_id).base();
     let rel = run.root.rel(rel_id);
     // WindowAgg preserves the input sort order.
@@ -1836,12 +1837,20 @@ pub fn create_windowagg_path<'mcx>(
     let (sub_disabled, sub_startup, sub_total, sub_rows) =
         (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
     let winclause = run.intern_expr(winclause_node);
+    let mut qual_ids = PgVec::new_in(run.mcx);
+    for &n in qual {
+        qual_ids.push(run.intern_expr(n));
+    }
+    let mut run_condition_ids = PgVec::new_in(run.mcx);
+    for &n in run_condition {
+        run_condition_ids.push(run.intern_expr(n));
+    }
     let id = run.root.alloc_path(PathNode::WindowAggPath(types_pathnodes::WindowAggPath {
         path,
         subpath: Some(subpath_id),
         winclause,
-        qual: PgVec::new_in(run.mcx),
-        runCondition: PgVec::new_in(run.mcx),
+        qual: qual_ids,
+        runCondition: run_condition_ids,
         topwindow,
     }));
     costsize::cost_windowagg(

@@ -20,7 +20,7 @@ use crate::primnodes::{
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
-    XmlExpr,
+    WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
@@ -57,6 +57,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Aggref => cmp!(as_aggref),
         NodeTag::T_GroupingFunc => cmp!(as_grouping_func),
         NodeTag::T_WindowFunc => cmp!(as_window_func),
+        NodeTag::T_WindowFuncRunCondition => cmp!(as_window_func_run_condition),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_FieldSelect => cmp!(as_field_select),
@@ -407,6 +408,15 @@ impl NodeEqual for WindowFunc<'_> {
             && self.winref == b.winref
             && self.winstar == b.winstar
             && self.winagg == b.winagg
+    }
+}
+
+impl NodeEqual for WindowFuncRunCondition<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.opno == b.opno
+            && self.inputcollid == b.inputcollid
+            && self.wfunc_left == b.wfunc_left
+            && equal(self.arg, b.arg)
     }
 }
 

@@ -1,7 +1,6 @@
 //! grouping_planner's window lane: optimize_window_clauses /
 //! select_active_windows / make_window_input_target / create_window_paths
-//! (planner.c). The runCondition half of C's monotonic-function machinery
-//! stays unported (WFuncMonotonic requests are loud in the prosupports).
+//! (planner.c), including the WindowFuncRunCondition -> OpExpr conversion.
 
 use clauses::classify::WindowFuncLists;
 use mcx::{Mcx, PgVec};
@@ -586,6 +585,7 @@ fn create_one_window_path<'mcx>(
     let mut window_target = input_target;
     let active = crate::relnode::pgvec_clone_shallow(mcx, &run.active_windows);
     let nactive = active.len();
+    let mut topqual: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for (i, &wc_node) in active.iter().enumerate() {
         let tlist = run.processed_tlist();
         let window_pathkeys = make_pathkeys_for_window(run, wc_node, tlist)?;
@@ -606,14 +606,6 @@ fn create_one_window_path<'mcx>(
 
         let winref = wc_node.as_window_clause().expect("WindowClause").winref;
         let wfuncs = &wflists.window_funcs[winref as usize];
-        for wf_node in wfuncs.iter() {
-            let wf = wf_node.as_window_func().expect("WindowFunc");
-            assert!(
-                wf.runCondition.is_nil(),
-                "create_one_window_path (planner.c): WindowFuncRunCondition unported"
-            );
-        }
-
         let topwindow = i == nactive - 1;
         if !topwindow {
             // copy_pathtarget + add_column_to_pathtarget(wfunc, 0) per C; a
@@ -652,6 +644,32 @@ fn create_one_window_path<'mcx>(
             window_target = output_target;
         }
 
+        // WindowFuncRunConditions become OpExprs; non-top conditions also
+        // feed the top window's qual. C copyObject's both operands; the
+        // shared subtrees are read-only from here.
+        let mut runcondition: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        for wf_node in wfuncs.iter() {
+            let wf = wf_node.as_window_func().expect("WindowFunc");
+            for rc_node in &wf.runCondition {
+                let rc = rc_node
+                    .as_window_func_run_condition()
+                    .expect("runCondition cell is a WindowFuncRunCondition");
+                let (leftop, rightop) =
+                    if rc.wfunc_left { (*wf_node, rc.arg) } else { (rc.arg, *wf_node) };
+                let opexpr = crate::like_support::make_opclause(
+                    mcx,
+                    rc.opno,
+                    leftop,
+                    rightop,
+                    rc.inputcollid,
+                )?;
+                runcondition.push(opexpr);
+                if !topwindow {
+                    topqual.push(opexpr);
+                }
+            }
+        }
+
         path_id = crate::pathnode::create_windowagg_path(
             run,
             window_rel,
@@ -659,6 +677,8 @@ fn create_one_window_path<'mcx>(
             window_target,
             wfuncs,
             wc_node,
+            &runcondition,
+            if topwindow { &topqual } else { &[] },
             topwindow,
         )?;
     }

@@ -525,7 +525,25 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         }
         NodeTag::T_WindowAgg => {
             let w = plan.as_window_agg().unwrap();
-            debug_assert!(w.runCondition.is_nil() && w.runConditionOrig.is_nil());
+            // WindowFunc refs in the runcondition swap to Vars reading the
+            // WindowAgg's own output slot (matched against the tlist before
+            // set_upper_references rewrites it).
+            if !w.runCondition.is_nil() {
+                let mut out = NodeList::nil();
+                for rc in &w.runCondition {
+                    out.lappend(
+                        run.mcx,
+                        fix_windowagg_condition_expr(run.mcx, rc, &w.plan.targetlist)?,
+                    )?;
+                }
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::WindowAgg, _>(|p| {
+                        p.runCondition = out;
+                    })
+                }
+                .expect("WindowAgg node");
+            }
             if let Some(off) = w.startOffset {
                 fix_frame_offset(run, off, rtoffset)?;
             }
@@ -533,6 +551,24 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 fix_frame_offset(run, off, rtoffset)?;
             }
             set_upper_references(run, plan, rtoffset)?;
+            let w = plan.as_window_agg().unwrap();
+            let nexec = w.plan.plan_rows;
+            let fixed_rc = fix_scan_list(run, &w.runCondition, rtoffset, nexec)?;
+            let fixed_orig = fix_scan_list(run, &w.runConditionOrig, rtoffset, nexec)?;
+            if fixed_rc.is_some() || fixed_orig.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::WindowAgg, _>(|p| {
+                        if let Some(l) = fixed_rc {
+                            p.runCondition = l;
+                        }
+                        if let Some(l) = fixed_orig {
+                            p.runConditionOrig = l;
+                        }
+                    })
+                }
+                .expect("WindowAgg node");
+            }
         }
         NodeTag::T_Memoize => {
             // The tlist is the child's (never evaluated); only the cache-key
@@ -1190,7 +1226,6 @@ fn fix_upper_expr<'mcx>(
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().expect("WindowFunc");
             record_plan_function_dependency(run, wf.winfnoid)?;
-            debug_assert!(wf.runCondition.is_nil());
             let mut args = NodeList::nil();
             for arg in &wf.args {
                 args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
@@ -1201,6 +1236,13 @@ fn fix_upper_expr<'mcx>(
                     Some(fix_upper_expr(run, f, subplan_tlist, rtoffset, newvarno, num_exec)?)
                 }
             };
+            let mut run_condition = NodeList::nil();
+            for rc in &wf.runCondition {
+                run_condition.lappend(
+                    mcx,
+                    fix_upper_expr(run, rc, subplan_tlist, rtoffset, newvarno, num_exec)?,
+                )?;
+            }
             Node::mk(
                 mcx,
                 types_nodes::primnodes::WindowFunc {
@@ -1210,7 +1252,7 @@ fn fix_upper_expr<'mcx>(
                     inputcollid: wf.inputcollid,
                     args,
                     aggfilter,
-                    runCondition: NodeList::nil(),
+                    runCondition: run_condition,
                     winref: wf.winref,
                     winstar: wf.winstar,
                     winagg: wf.winagg,
@@ -1507,6 +1549,19 @@ fn fix_upper_expr<'mcx>(
                     op: mm.op,
                     args,
                     location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_WindowFuncRunCondition => {
+            let rc = node.as_window_func_run_condition().expect("WindowFuncRunCondition");
+            let arg = fix_upper_expr(run, rc.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::WindowFuncRunCondition {
+                    opno: rc.opno,
+                    inputcollid: rc.inputcollid,
+                    wfunc_left: rc.wfunc_left,
+                    arg,
                 },
             )
         }
@@ -1825,6 +1880,47 @@ fn fix_frame_offset<'mcx>(
 // fix_scan_expr (setrefs.c): rtoffset==0 walks in place (fix_expr_common
 // only, returns None); rtoffset>0 is the subplan pass and takes C's mutator
 // leg, rebuilding the expressions with renumbered varnos.
+// fix_windowagg_condition_expr / set_windowagg_runcondition_references
+// (setrefs.c): a WindowFunc in the runcondition becomes a Var (varno 0)
+// reading the value from the slot the projection just stored it into.
+fn fix_windowagg_condition_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    tlist: &NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if node.node_tag() == NodeTag::T_WindowFunc {
+        for tle_node in tlist {
+            let tle = tle_node.as_target_entry().expect("TargetEntry");
+            if types_nodes::equal(tle.expr, node) {
+                let (vartype, vartypmod) = crate::costsize::expr_type_typmod(node);
+                return Node::mk(
+                    mcx,
+                    types_nodes::primnodes::Var {
+                        varno: 0,
+                        varattno: tle.resno,
+                        vartype,
+                        vartypmod,
+                        varcollid: exprs_collation(node),
+                        varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                        varlevelsup: 0,
+                        varreturningtype:
+                            types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                        varnosyn: 0,
+                        varattnosyn: 0,
+                        location: expr_location(node),
+                    },
+                );
+            }
+        }
+        panic!("WindowFunc not found in subplan target lists");
+    }
+    let mut m =
+        |n: Node<'mcx>| -> PgResult<Option<Node<'mcx>>> {
+            fix_windowagg_condition_expr(mcx, n, tlist).map(Some)
+        };
+    Ok(nodes_core::expression_tree_mutator(mcx, node, &mut m)?.unwrap_or(node))
+}
+
 fn fix_scan_list<'mcx>(
     run: &mut PlannerRun<'mcx>,
     list: &NodeList<'mcx>,
@@ -2234,7 +2330,6 @@ fn fix_scan_expr_mutator<'mcx>(
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().expect("WindowFunc");
             record_plan_function_dependency(run, wf.winfnoid)?;
-            debug_assert!(wf.runCondition.is_nil());
             let mut args = NodeList::nil();
             for arg in &wf.args {
                 args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
@@ -2243,6 +2338,10 @@ fn fix_scan_expr_mutator<'mcx>(
                 None => None,
                 Some(f) => Some(fix_scan_expr_mutator(run, f, rtoffset, num_exec)?),
             };
+            let mut run_condition = NodeList::nil();
+            for rc in &wf.runCondition {
+                run_condition.lappend(mcx, fix_scan_expr_mutator(run, rc, rtoffset, num_exec)?)?;
+            }
             Node::mk(
                 mcx,
                 types_nodes::primnodes::WindowFunc {
@@ -2252,11 +2351,24 @@ fn fix_scan_expr_mutator<'mcx>(
                     inputcollid: wf.inputcollid,
                     args,
                     aggfilter,
-                    runCondition: NodeList::nil(),
+                    runCondition: run_condition,
                     winref: wf.winref,
                     winstar: wf.winstar,
                     winagg: wf.winagg,
                     location: wf.location,
+                },
+            )
+        }
+        NodeTag::T_WindowFuncRunCondition => {
+            let rc = node.as_window_func_run_condition().expect("WindowFuncRunCondition");
+            let arg = fix_scan_expr_mutator(run, rc.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::WindowFuncRunCondition {
+                    opno: rc.opno,
+                    inputcollid: rc.inputcollid,
+                    wfunc_left: rc.wfunc_left,
+                    arg,
                 },
             )
         }
@@ -2686,14 +2798,19 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
             record_plan_function_dependency(run, wf.winfnoid)?;
-            debug_assert!(wf.runCondition.is_nil());
             for arg in &wf.args {
                 fix_scan_expr_walker(run, arg)?;
+            }
+            for rc in &wf.runCondition {
+                fix_scan_expr_walker(run, rc)?;
             }
             match wf.aggfilter {
                 Some(f) => fix_scan_expr_walker(run, f),
                 None => Ok(()),
             }
+        }
+        NodeTag::T_WindowFuncRunCondition => {
+            fix_scan_expr_walker(run, node.as_window_func_run_condition().unwrap().arg)
         }
 
         NodeTag::T_JsonValueExpr => {

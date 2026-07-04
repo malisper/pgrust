@@ -826,7 +826,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_WindowAgg => {
             show_window_def(node, ancestors, es)?;
             let w = node.as_window_agg().unwrap();
-            debug_assert!(w.runCondition.is_nil());
+            show_upper_qual(&w.runConditionOrig, "Run Condition", node, ancestors, es)?;
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
             show_windowagg_info(node, es);
