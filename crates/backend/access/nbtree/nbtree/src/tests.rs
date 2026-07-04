@@ -1040,6 +1040,90 @@ fn unique_check_partial_reports_conflict_and_inserts_anyway() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
+fn unique_check_walks_posting_list_tids() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel_opts(cx.mcx(), true);
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    HEAP_PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.push(leak_page(build_dead_heap_page(220)));
+        pages.push(leak_page(build_dead_heap_page(220)));
+        pages.push(leak_page(build_heap_page(&[20, 20])));
+    });
+
+    // 440 dead-TID duplicates: page-full dedup folds them into posting lists.
+    for k in 1..=440u32 {
+        let (blk, pos) = ((k - 1) / 220, ((k - 1) % 220 + 1) as u16);
+        insert_key(&rel, &heap, 20, tid(blk, pos));
+    }
+    assert!(
+        wal_infos().contains(&::types_nbtree::XLOG_BTREE_DEDUP),
+        "posting lists formed"
+    );
+
+    let unique_insert = |k: i32, htid: ItemPointerData| {
+        let icx = MemoryContext::new("ins");
+        crate::btinsert(
+            icx.mcx(),
+            &rel,
+            &[Datum::from_i32(k)],
+            &[false],
+            &htid,
+            &heap,
+            ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_YES,
+            false,
+        )
+    };
+
+    // every posting TID is dead: the walk crosses them without a conflict.
+    assert!(unique_insert(20, tid(2, 1)).unwrap());
+    // a live duplicate sitting past the dead posting lists: 23505.
+    let err = unique_insert(20, tid(2, 2)).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
+
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
+fn posting_split_page_split_coincidence_keeps_every_tid() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // Even posids dedup into capped posting lists; the odd pass then lands
+    // every insert inside an existing posting list until the page can no
+    // longer dedup and _bt_split runs with postingoff != 0.
+    for i in 1..=800u16 {
+        insert_key(&rel, &rel, 7, tid(1, i * 2));
+    }
+    for i in 1..=799u16 {
+        insert_key(&rel, &rel, 7, tid(1, i * 2 + 1));
+    }
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), 1599);
+    for (i, t) in seen.iter().enumerate() {
+        assert_eq!(ItemPointerGetBlockNumber(t), 1);
+        assert_eq!(t.ip_posid, i as u16 + 2);
+    }
+    let infos = wal_infos();
+    assert!(
+        infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_L)
+            || infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R),
+        "churn must split: {infos:?}"
+    );
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     install();
     build_empty_index(true);

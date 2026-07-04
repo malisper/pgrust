@@ -1,8 +1,8 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
 //! _bt_check_unique (YES + PARTIAL arms, with the conflict-wait restart),
 //! _bt_findinsertloc, _bt_insertonpg incl. posting splits (_bt_binsrch_posting,
-//! _bt_swap_posting), _bt_split + parent insertion + root split, dedup trigger
-//! (dedup.rs). Loud: posting split during a page split, deletion, deferred
+//! _bt_swap_posting, the page-split coincidence), _bt_split + parent insertion
+//! + root split, dedup trigger (dedup.rs). Loud: deletion, deferred
 //! unique rechecks (UNIQUE_CHECK_EXISTING), !heapkeyspace.
 
 
@@ -605,6 +605,14 @@ unsafe fn bt_check_unique<'mcx>(
     debug_assert!(!insertstate.itup_key.anynullkeys);
     debug_assert!(insertstate.itup_key.scantid.is_none());
 
+    // Each iteration processes one heap TID, not one index tuple: posting
+    // list TIDs advance curposti, everything else advances the page offset.
+    let mut curitup: ITup = core::ptr::null();
+    let mut curitemid_dead = false;
+    let mut inposting = false;
+    let mut prevalldead = true;
+    let mut curposti: usize = 0;
+
     loop {
         if offset <= maxoff {
             if nbuf.is_none() && offset == insertstate.stricthigh {
@@ -614,17 +622,29 @@ unsafe fn bt_check_unique<'mcx>(
                 break;
             }
 
-            let curitemid = page.item_id(offset);
-            if !curitemid.is_dead() {
-                if bt_compare(rel, insertstate.itup_key, &page, offset, frame)? != 0 {
-                    break;
+            if !inposting {
+                curitemid_dead = page.item_id(offset).is_dead();
+            }
+            if inposting || !curitemid_dead {
+                if !inposting {
+                    if bt_compare(rel, insertstate.itup_key, &page, offset, frame)? != 0 {
+                        break;
+                    }
+                    curitup = page_item(&page, page.item_id(offset));
+                    debug_assert!(!bt_tuple_is_pivot(curitup));
                 }
-                let curitup = page_item(&page, curitemid);
-                debug_assert!(!bt_tuple_is_pivot(curitup));
-                if bt_tuple_is_posting(curitup) {
-                    unported_phase2("_bt_check_unique posting-list TIDs (nbtdedup lane)");
-                }
-                let mut htid = t_tid(curitup);
+                let mut htid = if !bt_tuple_is_posting(curitup) {
+                    debug_assert!(!inposting);
+                    t_tid(curitup)
+                } else if !inposting {
+                    inposting = true;
+                    prevalldead = true;
+                    curposti = 0;
+                    bt_tuple_get_posting_n(curitup, 0)
+                } else {
+                    debug_assert!(curposti > 0);
+                    bt_tuple_get_posting_n(curitup, curposti)
+                };
 
                 let mut all_dead = false;
                 if ::tableam::table_index_fetch_tuple_check(
@@ -698,7 +718,10 @@ unsafe fn bt_check_unique<'mcx>(
                     insertstate.bounds_valid = false;
 
                     return Err(unique_violation(mcx, rel, heap_rel, itup));
-                } else if all_dead {
+                } else if all_dead
+                    && (!inposting
+                        || (prevalldead && curposti == bt_tuple_get_nposting(curitup) - 1))
+                {
                     mark_item_dead(&page, offset);
                     set_page_has_garbage(&page);
                     let dirty_buf = match nbuf.as_ref() {
@@ -707,10 +730,20 @@ unsafe fn bt_check_unique<'mcx>(
                     };
                     bufmgr::mark_buffer_dirty_hint::call(dirty_buf, true)?;
                 }
+
+                if !all_dead && inposting {
+                    prevalldead = false;
+                }
             }
         }
 
+        if inposting && curposti < bt_tuple_get_nposting(curitup) - 1 {
+            curposti += 1;
+            continue;
+        }
         if offset < maxoff {
+            curposti = 0;
+            inposting = false;
             offset += 1;
         } else {
             if P_RIGHTMOST(&opaque) {
@@ -736,6 +769,8 @@ unsafe fn bt_check_unique<'mcx>(
                 }
             }
             let _ = buf;
+            curposti = 0;
+            inposting = false;
             maxoff = page.max_offset_number();
             offset = P_FIRSTDATAKEY(&opaque);
         }
@@ -1103,10 +1138,14 @@ unsafe fn bt_insertonpg<'mcx>(
 
     if buf.page().free_space() < itemsz {
         debug_assert!(!split_only_page);
-        if postingoff != 0 {
-            unported_phase2("_bt_split posting-split coincidence (nbtdedup lane)");
-        }
-        let rbuf = bt_split(mcx, rel, heaprel, itup_key, frame, &buf, cbuf, newitemoff, itemsz, itup)?;
+        let (orignewitem, npostingp) = match swapped.as_ref() {
+            Some((_, nposting, origitup)) => (*origitup, nposting.as_ptr() as ITup),
+            None => (core::ptr::null(), core::ptr::null()),
+        };
+        let rbuf = bt_split(
+            mcx, rel, heaprel, itup_key, frame, &buf, cbuf, newitemoff, itemsz, itup,
+            orignewitem, npostingp, postingoff as u16,
+        )?;
         predicate_seams::predicate_lock_page_split::call(
             rel,
             buf.block_number(),
@@ -1274,7 +1313,8 @@ unsafe fn bt_insertonpg<'mcx>(
 }
 
 /// _bt_split. Returns the new right sibling, pinned + write-locked; the pin
-/// and lock on `buf` are kept.
+/// and lock on `buf` are kept. `orignewitem`/`nposting` are non-null iff
+/// `postingoff != 0` (posting-list split coinciding with the page split).
 ///
 /// # Safety
 /// As [`bt_insertonpg`].
@@ -1289,6 +1329,9 @@ unsafe fn bt_split<'mcx>(
     newitemoff: OffsetNumber,
     newitemsz: usize,
     newitem: ITup,
+    orignewitem: ITup,
+    nposting: ITup,
+    postingoff: u16,
 ) -> PgResult<BufferPin> {
     let origpagenumber = buf.block_number();
     let (isleaf, isrightmost, maxoff, orig_flags, orig_prev, orig_next, orig_level, orig_lsn) = {
@@ -1328,15 +1371,27 @@ unsafe fn bt_split<'mcx>(
     write_opaque(&mut leftpage, &lopaque);
     leftpage.set_lsn(orig_lsn);
 
-    // posting-split coincidence arms panic in bt_binsrch_insert; newitem is
-    // always the caller's tuple here.
+    // lastleft/firstright come from an imaginary origpage that already holds
+    // nposting in place of the split posting tuple (C: origpagepostingoff).
+    let origpagepostingoff: OffsetNumber = if postingoff != 0 {
+        debug_assert!(isleaf);
+        debug_assert!(ItemPointerCompare(&t_tid(orignewitem), &t_tid(newitem)) < 0);
+        debug_assert!(bt_tuple_is_posting(nposting));
+        newitemoff - 1
+    } else {
+        InvalidOffsetNumber
+    };
 
     let (firstright, firstright_sz): (ITup, usize) =
         if !newitemonleft && newitemoff == firstrightoff {
             (newitem, newitemsz)
         } else {
             let itemid = origpage.item_id(firstrightoff);
-            (page_item(&origpage, itemid), itemid.lp_len() as usize)
+            let mut fr = page_item(&origpage, itemid);
+            if firstrightoff == origpagepostingoff {
+                fr = nposting;
+            }
+            (fr, itemid.lp_len() as usize)
         };
 
     let lefthighkey_owned: ItupBuf<'mcx>;
@@ -1346,7 +1401,11 @@ unsafe fn bt_split<'mcx>(
         } else {
             let lastleftoff = firstrightoff - 1;
             debug_assert!(lastleftoff >= P_FIRSTDATAKEY(&page_opaque(&origpage)));
-            page_item(&origpage, origpage.item_id(lastleftoff))
+            if lastleftoff == origpagepostingoff {
+                nposting
+            } else {
+                page_item(&origpage, origpage.item_id(lastleftoff))
+            }
         };
 
         let itup_key = itup_key.expect("leaf split has an insertion key");
@@ -1419,9 +1478,13 @@ unsafe fn bt_split<'mcx>(
     while i <= maxoff {
         let itemid = origpage.item_id(i);
         let dataitemsz = itemid.lp_len() as usize;
-        let dataitem = page_item(&origpage, itemid);
+        let mut dataitem = page_item(&origpage, itemid);
 
-        if i == newitemoff {
+        if i == origpagepostingoff {
+            debug_assert!(bt_tuple_is_posting(dataitem));
+            debug_assert!(dataitemsz == maxalign(index_tuple_size(nposting)));
+            dataitem = nposting;
+        } else if i == newitemoff {
             if newitemonleft {
                 debug_assert!(newitemoff <= firstrightoff);
                 if !bt_pgaddtup(&mut leftpage, newitemsz, newitem, afterleftoff, false) {
@@ -1535,7 +1598,17 @@ unsafe fn bt_split<'mcx>(
     }
 
     if relation_needs_wal(rel) {
-        let xlrec = crate::wal::xl_btree_split(ropaque.btpo_level, firstrightoff, newitemoff, 0);
+        // postingoff stays zero when both the replacement posting list and
+        // newitem land on the right page: recovery then needs no posting
+        // split at all. Otherwise orignewitem is logged instead of newitem
+        // and redo re-runs _bt_swap_posting.
+        let xl_postingoff: u16 = if postingoff != 0 && origpagepostingoff < firstrightoff {
+            postingoff
+        } else {
+            0
+        };
+        let xlrec =
+            crate::wal::xl_btree_split(ropaque.btpo_level, firstrightoff, newitemoff, xl_postingoff);
 
         let newitem_bytes = core::slice::from_raw_parts(newitem, newitemsz);
         // the left high key is re-read from the restored origpage (C reads it
@@ -1547,8 +1620,14 @@ unsafe fn bt_split<'mcx>(
 
         let mut leftfrags: [&[u8]; 2] = [&[], &[]];
         let mut nleft = 0;
-        if newitemonleft {
+        if newitemonleft && xl_postingoff == 0 {
             leftfrags[nleft] = newitem_bytes;
+            nleft += 1;
+        } else if xl_postingoff != 0 {
+            debug_assert!(isleaf);
+            debug_assert!(newitemonleft || firstrightoff == newitemoff);
+            debug_assert!(newitemsz == maxalign(index_tuple_size(orignewitem)));
+            leftfrags[nleft] = core::slice::from_raw_parts(orignewitem, newitemsz);
             nleft += 1;
         }
         leftfrags[nleft] = hk_bytes;

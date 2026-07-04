@@ -310,10 +310,6 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
     let postingoff = u16::from_ne_bytes(xlrec[8..10].try_into().unwrap());
     let isleaf = level == 0;
 
-    if postingoff != 0 {
-        panic!("btree_xlog_split arm not ported: posting-list split (_bt_swap_posting) — land backend-access-nbt-dedup");
-    }
-
     let (_, _, origpagenumber, _) =
         record.block_tag_extended(0).expect("btree_xlog_split: no block 0");
     let (_, _, rightpagenumber, _) =
@@ -349,23 +345,55 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
     if action == BLK_NEEDS_REDO {
         let mut datapos = block_data(record, 0);
 
+        let raw = bufmgr_seams::buffer_get_page::call(buf);
+        // SAFETY: pinned + exclusively locked; reads only until the restore
+        // memcpy below ends this borrow.
+        let origpage = unsafe { PageRef::from_raw(raw) };
+        let oopaque = page_opaque(&origpage);
+
+        // posting-split coincidence: reconstruct newitem + nposting by
+        // re-running the primary's _bt_swap_posting against oposting at
+        // newitemoff - 1 (as btree_xlog_split does).
+        #[repr(C, align(8))]
+        struct ItupImage([u8; BLCKSZ]);
+        let mut newitem_img = ItupImage([0u8; BLCKSZ]);
+        let mut nposting_img = ItupImage([0u8; BLCKSZ]);
+        let mut nposting_sz = 0usize;
+        let replacepostingoff: u16 = if postingoff != 0 { newitemoff - 1 } else { 0 };
+
         let mut newitem: &[u8] = &[];
-        if newitemonleft {
+        if newitemonleft || postingoff != 0 {
             let newitemsz = maxalign(itup_size_at(datapos, 0));
             newitem = &datapos[..newitemsz];
             datapos = &datapos[newitemsz..];
+
+            if postingoff != 0 {
+                let itemid = origpage.item_id(replacepostingoff);
+                let opos_off = itemid.lp_off() as usize;
+                nposting_sz =
+                    (u16_le_native(origpage, opos_off + 6) & INDEX_SIZE_MASK) as usize;
+                newitem_img.0[..newitemsz].copy_from_slice(newitem);
+                // SAFETY: in-bounds page item read under the redo lock.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        origpage.as_ptr().add(opos_off),
+                        nposting_img.0.as_mut_ptr(),
+                        nposting_sz,
+                    );
+                }
+                bt_swap_posting(
+                    &mut newitem_img.0[..newitemsz],
+                    &mut nposting_img.0[..nposting_sz],
+                    postingoff as usize,
+                )?;
+                newitem = &newitem_img.0[..newitemsz];
+            }
         }
 
         let left_hikeysz = maxalign(itup_size_at(datapos, 0));
         let left_hikey = &datapos[..left_hikeysz];
         datapos = &datapos[left_hikeysz..];
         debug_assert!(datapos.is_empty());
-
-        let raw = bufmgr_seams::buffer_get_page::call(buf);
-        // SAFETY: pinned + exclusively locked; reads only until the restore
-        // memcpy below ends this borrow.
-        let origpage = unsafe { PageRef::from_raw(raw) };
-        let oopaque = page_opaque(&origpage);
 
         // PageGetTempPageCopySpecial + item-order rebuild, as _bt_split does.
         #[repr(align(8))]
@@ -386,6 +414,20 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
 
         let mut off = P_FIRSTDATAKEY(&oopaque);
         while off < firstrightoff {
+            if postingoff != 0 && off == replacepostingoff {
+                debug_assert!(newitemonleft || firstrightoff == newitemoff);
+                let np_sz = maxalign(itup_size_at(&nposting_img.0, 0));
+                debug_assert!(np_sz == maxalign(nposting_sz));
+                if leftpage.add_item(&nposting_img.0[..np_sz], leftoff, 0).is_none() {
+                    return Err(error_err(
+                        "failed to add new posting list item to left page after split".into(),
+                    ));
+                }
+                leftoff += 1;
+                off += 1;
+                continue; // don't insert oposting
+            }
+
             if newitemonleft && off == newitemoff {
                 if leftpage.add_item(newitem, leftoff, 0).is_none() {
                     return Err(error_err(
