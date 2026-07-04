@@ -3650,9 +3650,17 @@ fn generic_restriction_selectivity<'mcx>(
         // with a bump scratch (C leaks into the planner context).
         let scratch = ::mcx::MemoryContext::new_bump("generic_restriction_selectivity");
         let smcx = scratch.mcx();
+        // C evaluates via raw fcinfo: a NULL result counts as no-match
+        // (jsonb @@ can return NULL), never an error.
         let armed_test = |opproc: &mut FmgrInfo, v: Datum| -> PgResult<bool> {
             let (a0, a1) = if varonleft { (v, constval) } else { (constval, v) };
-            Ok(types_fmgr::function_call2_coll_in(opproc, collation, smcx, a0, a1)?.as_bool())
+            let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(collation);
+            // SAFETY: smcx outlives this single call.
+            unsafe { fcinfo.set_result_mcx(smcx) };
+            fcinfo.set_arg(0, a0);
+            fcinfo.set_arg(1, a1);
+            let result = opproc.invoke(&mut fcinfo)?;
+            Ok(!fcinfo.isnull && result.as_bool())
         };
 
         let stats_usable =
