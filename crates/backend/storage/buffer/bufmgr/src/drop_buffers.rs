@@ -16,8 +16,7 @@ use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 
 pub(crate) const RELS_BSEARCH_THRESHOLD: usize = 20;
 
-/// DropRelationBuffers (bufmgr.c): local arm live; the shared arm serves
-/// smgrtruncate, whose callers are unported — loud until that lane lands.
+/// DropRelationBuffers (bufmgr.c).
 pub fn DropRelationBuffers(
     rlocator: RelFileLocatorBackend,
     forknum: &[ForkNumber],
@@ -31,7 +30,56 @@ pub fn DropRelationBuffers(
         }
         return Ok(());
     }
-    panic!("unported callee reached from bufmgr.c: DropRelationBuffers shared arm (smgrtruncate lane)");
+
+    // Cached-size optimization: probe only the doomed block range when every
+    // fork size is cached and the range is small (recovery guarantees the
+    // cache; elsewhere a stale cache just forfeits the fast path).
+    let mut n_fork_block = [InvalidBlockNumber; MAX_FORKNUM as usize + 1];
+    let mut n_blocks_to_invalidate: u64 = 0;
+    let mut cached = true;
+    for (i, fork) in forknum.iter().enumerate() {
+        let nblocks = smgr_seams::smgr_nblocks_cached::call(rlocator, *fork);
+        if nblocks == InvalidBlockNumber {
+            cached = false;
+            break;
+        }
+        n_fork_block[i] = nblocks;
+        n_blocks_to_invalidate += (nblocks - first_del_block[i]) as u64;
+    }
+
+    if cached && n_blocks_to_invalidate < buf_drop_full_scan_threshold() {
+        for (i, fork) in forknum.iter().enumerate() {
+            FindAndDropRelationBuffers(
+                rlocator.locator,
+                *fork,
+                n_fork_block[i],
+                first_del_block[i],
+            )?;
+        }
+        return Ok(());
+    }
+
+    for i in 0..NBuffersInited() {
+        let desc = GetBufferDescriptor(i);
+        // Unlocked precheck, safe as in C (both tag halves change under the
+        // mapping lock; a false miss here was concurrently invalidated).
+        if !tag_matches(&desc.tag(), &rlocator.locator) {
+            continue;
+        }
+        let buf_state = LockBufHdr(desc);
+        let tag = desc.tag();
+        let doomed = tag_matches(&tag, &rlocator.locator)
+            && forknum
+                .iter()
+                .zip(first_del_block)
+                .any(|(fork, first)| tag.forkNum == *fork && tag.blockNum >= *first);
+        if doomed {
+            InvalidateBuffer(desc, buf_state)?;
+        } else {
+            UnlockBufHdr(desc, buf_state);
+        }
+    }
+    Ok(())
 }
 
 fn buf_drop_full_scan_threshold() -> u64 {
