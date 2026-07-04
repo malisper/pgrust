@@ -2574,7 +2574,8 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
     let sub_parallel_safe = sub.parallel_safe;
     let sub_parallel_workers = sub.parallel_workers;
-    debug_assert!(sub.param_info.is_none());
+    // C: Material inherits the subpath's parameterization.
+    let sub_param_info = sub.param_info.clone();
     let sub_pathkeys = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys);
     let width = run.root.path_pathtarget(subpath).width;
 
@@ -2587,7 +2588,7 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         pathtype: tag16(NodeTag::T_Material),
         parent: rel,
         pathtarget_id: run.root.rel(rel).pathtarget_id,
-        param_info: None,
+        param_info: sub_param_info,
         parallel_aware: false,
         parallel_safe: run.root.rel(rel).consider_parallel && sub_parallel_safe,
         parallel_workers: sub_parallel_workers,
