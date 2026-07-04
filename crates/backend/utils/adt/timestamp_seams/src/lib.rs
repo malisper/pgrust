@@ -30,3 +30,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn get_current_time_usec() -> PgResult<CurrentTimeUsec>
 );
+
+// timestamp.c timestamptz_to_str: elog/debug formatting of a TimestampTz.
+seam_core::seam!(
+    pub fn timestamptz_to_str(t: TimestampTz) -> String
+);
