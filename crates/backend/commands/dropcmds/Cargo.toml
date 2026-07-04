@@ -25,3 +25,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 xact = { path = "../../access/transam/xact" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 types_scan = { path = "../../../_support/types/types_scan" }
+relcache = { path = "../../utils/cache/relcache" }
+foreigncmds = { path = "../foreigncmds" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }

@@ -36,6 +36,12 @@ pub fn get_relation_info<'mcx>(
 
     let relation = table::table_open(mcx, relation_object_id, NoLock)?;
     let relkind = relation.rd_rel.relkind;
+    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        // C: GetFdwRoutineForRelation. The seam errors for a handler-less
+        // FDW and is loud past that (no FDW implementations exist).
+        foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relation_object_id)?;
+        unreachable!("get_fdw_routine_by_rel_id returned");
+    }
     if !(relkind_has_table_am(relkind)
         || relkind == RELKIND_SEQUENCE
         || relkind == types_rel::RELKIND_PARTITIONED_TABLE)

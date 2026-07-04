@@ -420,6 +420,7 @@ fn transformColumnDefinition<'mcx>(
     nnconstraints: &mut NodeList<'mcx>,
     ixconstraints: &mut NodeList<'mcx>,
     fkconstraints: &mut NodeList<'mcx>,
+    is_foreign: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
     if column.raw_default.is_some() || column.cooked_default.is_some() {
@@ -644,6 +645,20 @@ fn transformColumnDefinition<'mcx>(
                         ));
                     }
                     need_notnull = true;
+                    if is_foreign {
+                        return Err(not_supported_on_foreign_tables(
+                            "primary key",
+                            src,
+                            constraint.location,
+                        ));
+                    }
+                }
+                if constraint.contype == ConstrType::CONSTR_UNIQUE && is_foreign {
+                    return Err(not_supported_on_foreign_tables(
+                        "unique",
+                        src,
+                        constraint.location,
+                    ));
                 }
                 if constraint.keys.is_nil() {
                     let colname = column.colname.expect("ColumnDef.colname");
@@ -656,6 +671,13 @@ fn transformColumnDefinition<'mcx>(
                 ixconstraints.lappend(mcx, cnode)?;
             }
             ConstrType::CONSTR_FOREIGN => {
+                if is_foreign {
+                    return Err(not_supported_on_foreign_tables(
+                        "foreign key",
+                        src,
+                        constraint.location,
+                    ));
+                }
                 let colname = column.colname.expect("ColumnDef.colname");
                 let fk_attrs = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
                 // SAFETY: parse tree is analyze-owned; no derived refs.
@@ -770,9 +792,15 @@ pub fn transformCreateStmt<'mcx>(
     stmt_node: Node<'mcx>,
     query_string: &str,
 ) -> PgResult<NodeList<'mcx>> {
-    let stmt = stmt_node
-        .as_variant::<CreateStmt>()
-        .expect("transformCreateStmt on non-CreateStmt");
+    let is_foreign = stmt_node.node_tag() == NodeTag::T_CreateForeignTableStmt;
+    let stmt: &CreateStmt<'mcx> = if is_foreign {
+        &stmt_node
+            .as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>()
+            .expect("transformCreateStmt on non-CreateStmt")
+            .base
+    } else {
+        stmt_node.as_variant::<CreateStmt>().expect("transformCreateStmt on non-CreateStmt")
+    };
 
     if stmt.if_not_exists {
         unported("IF NOT EXISTS");
@@ -811,6 +839,7 @@ pub fn transformCreateStmt<'mcx>(
                     &mut nnconstraints,
                     &mut ixconstraints,
                     &mut fkconstraints,
+                    is_foreign,
                 )?;
                 columns.lappend(mcx, elt)?;
             }
@@ -829,10 +858,33 @@ pub fn transformCreateStmt<'mcx>(
                 match c.contype {
                     ConstrType::CONSTR_PRIMARY
                     | ConstrType::CONSTR_UNIQUE
-                    | ConstrType::CONSTR_EXCLUSION => ixconstraints.lappend(mcx, elt)?,
+                    | ConstrType::CONSTR_EXCLUSION => {
+                        if is_foreign {
+                            let what = match c.contype {
+                                ConstrType::CONSTR_PRIMARY => "primary key",
+                                ConstrType::CONSTR_UNIQUE => "unique",
+                                _ => "exclusion",
+                            };
+                            return Err(not_supported_on_foreign_tables(
+                                what,
+                                Some(query_string),
+                                c.location,
+                            ));
+                        }
+                        ixconstraints.lappend(mcx, elt)?
+                    }
                     ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, elt)?,
                     ConstrType::CONSTR_NOTNULL => nnconstraints.lappend(mcx, elt)?,
-                    ConstrType::CONSTR_FOREIGN => fkconstraints.lappend(mcx, elt)?,
+                    ConstrType::CONSTR_FOREIGN => {
+                        if is_foreign {
+                            return Err(not_supported_on_foreign_tables(
+                                "foreign key",
+                                Some(query_string),
+                                c.location,
+                            ));
+                        }
+                        fkconstraints.lappend(mcx, elt)?
+                    }
                     other => unported(&format!("transformTableConstraint {other:?} arm")),
                 }
             }
@@ -898,27 +950,42 @@ pub fn transformCreateStmt<'mcx>(
         alist.lappend(mcx, alterstmt.seal())?;
     }
 
-    // transformCheckConstraints(skipValidation=true): new plain table.
-    for cnode in ckconstraints.iter() {
-        // SAFETY: parse tree is analyze-owned; no derived refs live.
-        unsafe {
-            cnode
-                .with_mut::<Constraint, _>(|c| {
-                    c.skip_validation = true;
-                    c.initially_valid = c.is_enforced;
-                })
-                .expect("Constraint");
+    // transformCheckConstraints(!isforeign): a new plain table is empty, so
+    // its CHECKs are immediately valid; not so for foreign tables.
+    if !is_foreign {
+        for cnode in ckconstraints.iter() {
+            // SAFETY: parse tree is analyze-owned; no derived refs live.
+            unsafe {
+                cnode
+                    .with_mut::<Constraint, _>(|c| {
+                        c.skip_validation = true;
+                        c.initially_valid = c.is_enforced;
+                    })
+                    .expect("Constraint");
+            }
         }
     }
-    // SAFETY: parse tree is analyze-owned; no derived refs live.
-    unsafe {
-        stmt_node
-            .with_mut::<CreateStmt, _>(|s| {
-                s.tableElts = columns;
-                s.constraints = ckconstraints;
-                s.nnconstraints = nnconstraints;
-            })
-            .expect("CreateStmt");
+    // SAFETY (both arms): parse tree is analyze-owned; no derived refs live.
+    if is_foreign {
+        unsafe {
+            stmt_node
+                .with_mut::<types_nodes::rawnodes::CreateForeignTableStmt, _>(|s| {
+                    s.base.tableElts = columns;
+                    s.base.constraints = ckconstraints;
+                    s.base.nnconstraints = nnconstraints;
+                })
+                .expect("CreateForeignTableStmt");
+        }
+    } else {
+        unsafe {
+            stmt_node
+                .with_mut::<CreateStmt, _>(|s| {
+                    s.tableElts = columns;
+                    s.constraints = ckconstraints;
+                    s.nnconstraints = nnconstraints;
+                })
+                .expect("CreateStmt");
+        }
     }
 
     // C: result = blist ++ [stmt] ++ likeclauses ++ alist ++ save_alist
@@ -2016,6 +2083,20 @@ fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgE
             format!("column \"{colname}\" appears twice in {what} constraint"),
         )
         .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn not_supported_on_foreign_tables(what: &str, src: Option<&str>, location: i32) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("{what} constraints are not supported on foreign tables"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_cursor_position(parser_small1::parser_errposition_source(
+                src.map(str::as_bytes),
+                location,
+                mbutils::GetDatabaseEncoding(),
+            )),
     )
 }
 

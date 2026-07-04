@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
 execmain = { path = "../../../executor/execmain" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 parse_agg = { path = "../../../parser/parse_agg" }
