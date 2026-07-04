@@ -2059,6 +2059,10 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
         };
         Ok(())
     }
+
+    fn dense_armed(&mut self) {
+        self.cur.hashes = None;
+    }
 }
 
 #[inline(never)]
