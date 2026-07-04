@@ -223,7 +223,7 @@ fn GenerateTypeDependencies<'mcx>(
         n += 1;
     }
     if !isDependentType {
-        pg_depend::recordDependencyOnOwner(TYPE_RELATION_ID, typeObjectId, p.ownerId);
+        pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, typeObjectId, p.ownerId)?;
     }
     // C: makeExtensionDep is true on every TypeCreate path (dependent types
     // get explicit membership too); rebuild is false for fresh rows.

@@ -1376,10 +1376,12 @@ fn transformSQLValueFunction<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResult
         Op::SVFOP_LOCALTIMESTAMP_N => {
             (TIMESTAMPOID, anytimestamp_typmod_check(false, svf.typmod)?)
         }
-        other => panic!(
-            "transformSQLValueFunction (parse_expr.c): name-returning op {other:?} unported \
-             (grammar arms 2149-2155 are louds) — unit backend-parser-expr"
-        ),
+        Op::SVFOP_CURRENT_ROLE
+        | Op::SVFOP_CURRENT_USER
+        | Op::SVFOP_USER
+        | Op::SVFOP_SESSION_USER
+        | Op::SVFOP_CURRENT_CATALOG
+        | Op::SVFOP_CURRENT_SCHEMA => (types_core::catalog::NAMEOID, -1),
     };
     Node::mk(
         mcx,

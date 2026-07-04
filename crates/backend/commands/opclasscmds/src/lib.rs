@@ -234,7 +234,7 @@ fn CreateOpFamily(
         DependencyType::Normal,
     )?;
     // dependency on owner
-    recordDependencyOnOwner(OPERATOR_FAMILY_RELATION_ID, opfamilyoid, miscinit::GetUserId());
+    recordDependencyOnOwner(mcx, OPERATOR_FAMILY_RELATION_ID, opfamilyoid, miscinit::GetUserId())?;
     // dependency on extension: no-op (CREATE EXTENSION unported)
 
     rel.close(RowExclusiveLock)?;
@@ -545,7 +545,7 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
             DependencyType::Normal,
         )?;
     }
-    recordDependencyOnOwner(OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId());
+    recordDependencyOnOwner(mcx, OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId())?;
 
     rel.close(RowExclusiveLock)?;
     Ok(myself)

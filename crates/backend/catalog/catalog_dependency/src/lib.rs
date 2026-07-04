@@ -56,7 +56,6 @@ const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
-const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
 const TriggerRelationId: Oid = 2620;
 
@@ -177,7 +176,7 @@ pub fn AcquireDeletionLock(object: &ObjectAddress, flags: i32) -> PgResult<()> {
         }
         lmgr::LockRelationOid(object.objectId, AccessExclusiveLock)
     } else if object.classId == AuthMemRelationId {
-        unported("AcquireDeletionLock: LockSharedObject (pg_auth_members)");
+        lmgr::LockSharedObject(object.classId, object.objectId, 0, AccessExclusiveLock)
     } else {
         lmgr::LockDatabaseObject(object.classId, object.objectId, 0, AccessExclusiveLock)
     }
@@ -725,7 +724,12 @@ fn deleteOneObject<'mcx>(
     }
     genam::systable_endscan(mcx, scan)?;
 
-    deleteSharedDependencyRecordsFor(mcx, object.classId, object.objectId, object.objectSubId)?;
+    pg_shdepend::deleteSharedDependencyRecordsFor(
+        mcx,
+        object.classId,
+        object.objectId,
+        object.objectSubId,
+    )?;
 
     DeleteComments(mcx, object.objectId, object.classId, object.objectSubId)?;
     DeleteSecurityLabel(mcx, object)?;
@@ -848,44 +852,6 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     depRel.close(RowExclusiveLock)?;
     Ok(count)
-}
-
-// deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
-// dependent-object scan.
-pub fn deleteSharedDependencyRecordsFor<'mcx>(
-    mcx: Mcx<'mcx>,
-    classId: Oid,
-    objectId: Oid,
-    objectSubId: i32,
-) -> PgResult<()> {
-    let sdepRel = table::table_open(mcx, catalog::SharedDependRelationId, RowExclusiveLock)?;
-    let dbid = if catalog::IsSharedRelation(classId) {
-        InvalidOid
-    } else {
-        init_small::globals::MyDatabaseId()
-    };
-    let mut keys: Vec<ScanKeyData> = vec![
-        oid_key(1, dbid),
-        oid_key(2, classId),
-        oid_key(3, objectId),
-    ];
-    if objectSubId != 0 {
-        keys.push(int4_key(4, objectSubId));
-    }
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &sdepRel,
-        catalog::SharedDependDependerIndexId,
-        true,
-        None,
-        &keys,
-    )?;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let tid = tup.t_self;
-        catalog_indexing::CatalogTupleDelete(&sdepRel, &tid)?;
-    }
-    genam::systable_endscan(mcx, scan)?;
-    sdepRel.close(RowExclusiveLock)
 }
 
 // DeleteComments (comment.c).

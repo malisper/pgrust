@@ -1,5 +1,6 @@
 // pg_depend.c recording slice; the deletion half rides in catalog_dependency
-// (deleteOneObject's scans); pg_shdepend writes unported.
+// (deleteOneObject's scans); the pg_shdepend.c wrappers delegate to the
+// pg_shdepend crate.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -440,44 +441,27 @@ pub fn recordDependencyOnCurrentExtension<'mcx>(
     recordDependencyOn(mcx, object, &extension, DependencyType::Extension)
 }
 
-// A pinned owner records nothing; pg_shdepend writes unported → loud.
-pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
-    if !catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, owner) {
-        panic!(
-            "recordDependencyOnOwner (pg_shdepend.c): pg_shdepend recording unported \
-             (class {classId} object {objectId} owner {owner})"
-        );
-    }
+pub fn recordDependencyOnOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    owner: Oid,
+) -> PgResult<()> {
+    pg_shdepend::recordDependencyOnOwner(mcx, classId, objectId, owner)
 }
 
-// SHARED_DEPENDENCY_ACL rows never cover PUBLIC, the owner, or pinned roles,
-// so those grants need no pg_shdepend writes; any other role is loud.
-pub fn updateAclDependencies(
+pub fn updateAclDependencies<'mcx>(
+    mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
     objsubId: i32,
     ownerId: Oid,
     oldmembers: &[Oid],
     newmembers: &[Oid],
-) {
-    let check = |roleid: Oid, other: &[Oid]| {
-        if other.contains(&roleid)
-            || roleid == ownerId
-            || catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, roleid)
-        {
-            return;
-        }
-        panic!(
-            "updateAclDependencies (pg_shdepend.c): pg_shdepend recording unported \
-             (class {classId} object {objectId} subid {objsubId} role {roleid})"
-        );
-    };
-    for &r in newmembers {
-        check(r, oldmembers);
-    }
-    for &r in oldmembers {
-        check(r, newmembers);
-    }
+) -> PgResult<()> {
+    pg_shdepend::updateAclDependencies(
+        mcx, classId, objectId, objsubId, ownerId, oldmembers, newmembers,
+    )
 }
 
 const Anum_pg_depend_classid: usize = 1;

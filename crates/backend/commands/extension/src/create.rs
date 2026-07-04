@@ -409,7 +409,7 @@ pub fn InsertExtensionTuple(
     catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut tup)?;
     rel.close(RowExclusiveLock)?;
 
-    pg_depend::recordDependencyOnOwner(EXTENSION_RELATION_ID, extension_oid, ext_owner);
+    pg_depend::recordDependencyOnOwner(mcx, EXTENSION_RELATION_ID, extension_oid, ext_owner)?;
 
     let myself = ObjectAddress::set(EXTENSION_RELATION_ID, extension_oid);
     let mut refobjs: Vec<ObjectAddress> = Vec::with_capacity(1 + required_extensions.len());

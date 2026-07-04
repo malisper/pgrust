@@ -314,7 +314,10 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree.as_grant_stmt().unwrap();
             aclchk::ExecuteGrantStmt(mcx, stmt)?;
         }
-        T_GrantRoleStmt => handler_gap("GrantRole (user lane)"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree.as_grant_role_stmt().unwrap();
+            user::GrantRole(mcx, stmt)?;
+        }
 
         T_CreatedbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE DATABASE")?;
@@ -436,11 +439,30 @@ fn dispatch_switch<'mcx>(
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
         T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
-        T_CreateRoleStmt => handler_gap("CreateRole (user lane)"),
-        T_AlterRoleStmt => handler_gap("AlterRole (user lane)"),
-        T_AlterRoleSetStmt => handler_gap("AlterRoleSet (user lane)"),
-        T_DropRoleStmt => handler_gap("DropRole (user lane)"),
-        T_ReassignOwnedStmt => handler_gap("ReassignOwnedObjects (user lane)"),
+        T_CreateRoleStmt => {
+            let stmt = parsetree.as_create_role_stmt().unwrap();
+            user::CreateRole(mcx, stmt)?;
+        }
+        T_AlterRoleStmt => {
+            let stmt = parsetree.as_alter_role_stmt().unwrap();
+            user::AlterRole(mcx, stmt)?;
+        }
+        T_AlterRoleSetStmt => {
+            let stmt = parsetree.as_alter_role_set_stmt().unwrap();
+            user::AlterRoleSet(stmt)
+        }
+        T_DropRoleStmt => {
+            let stmt = parsetree.as_drop_role_stmt().unwrap();
+            user::DropRole(mcx, stmt)?;
+        }
+        T_DropOwnedStmt => {
+            let stmt = parsetree.as_drop_owned_stmt().unwrap();
+            user::DropOwnedObjects(mcx, stmt)?;
+        }
+        T_ReassignOwnedStmt => {
+            let stmt = parsetree.as_reassign_owned_stmt().unwrap();
+            user::ReassignOwnedObjects(mcx, stmt)?;
+        }
 
         T_LockStmt => {
             xact::RequireTransactionBlock(is_top_level, "LOCK TABLE")?;

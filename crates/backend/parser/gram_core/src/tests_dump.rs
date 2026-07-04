@@ -360,6 +360,57 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(r) = n.as_role_spec() {
         role_spec(out, r);
+    } else if let Some(g) = n.as_grant_role_stmt() {
+        out.push_str("{GRANTROLESTMT");
+        list_field(out, "granted_roles", &g.granted_roles);
+        list_field(out, "grantee_roles", &g.grantee_roles);
+        bool_field(out, "is_grant", g.is_grant);
+        list_field(out, "opt", &g.opt);
+        out.push_str(" :grantor ");
+        match g.grantor {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        int_field(out, "behavior", g.behavior as i32);
+        out.push('}');
+    } else if let Some(c) = n.as_create_role_stmt() {
+        out.push_str("{CREATEROLESTMT");
+        int_field(out, "stmt_type", c.stmt_type as i32);
+        string_field(out, "role", c.role);
+        list_field(out, "options", &c.options);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_role_stmt() {
+        out.push_str("{ALTERROLESTMT :role ");
+        role_spec(out, a.role);
+        list_field(out, "options", &a.options);
+        int_field(out, "action", a.action);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_role_set_stmt() {
+        out.push_str("{ALTERROLESETSTMT :role ");
+        match a.role {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "database", a.database);
+        out.push_str(" :setstmt ");
+        variable_set_stmt(out, a.setstmt);
+        out.push('}');
+    } else if let Some(d) = n.as_drop_role_stmt() {
+        out.push_str("{DROPROLESTMT");
+        list_field(out, "roles", &d.roles);
+        bool_field(out, "missing_ok", d.missing_ok);
+        out.push('}');
+    } else if let Some(d) = n.as_drop_owned_stmt() {
+        out.push_str("{DROPOWNEDSTMT");
+        list_field(out, "roles", &d.roles);
+        int_field(out, "behavior", d.behavior as i32);
+        out.push('}');
+    } else if let Some(r) = n.as_reassign_owned_stmt() {
+        out.push_str("{REASSIGNOWNEDSTMT");
+        list_field(out, "roles", &r.roles);
+        out.push_str(" :newrole ");
+        role_spec(out, r.newrole);
+        out.push('}');
     } else if let Some(p) = n.as_prepare_stmt() {
         out.push_str("{PREPARESTMT");
         string_field(out, "name", p.name);
@@ -515,14 +566,7 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "missing_ok", r.missing_ok);
         out.push('}');
     } else if let Some(v) = n.as_variable_set_stmt() {
-        out.push_str("{VARIABLESETSTMT");
-        int_field(out, "kind", v.kind as i32);
-        string_field(out, "name", v.name);
-        list_field(out, "args", &v.args);
-        bool_field(out, "jumble_args", v.jumble_args);
-        bool_field(out, "is_local", v.is_local);
-        int_field(out, "location", v.location);
-        out.push('}');
+        variable_set_stmt(out, v);
     } else if let Some(v) = n.as_variable_show_stmt() {
         out.push_str("{VARIABLESHOWSTMT");
         string_field(out, "name", v.name);
@@ -977,6 +1021,17 @@ fn node(out: &mut String, n: Node<'_>) {
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
+}
+
+fn variable_set_stmt(out: &mut String, v: &types_nodes::parsenodes::VariableSetStmt<'_>) {
+    out.push_str("{VARIABLESETSTMT");
+    int_field(out, "kind", v.kind as i32);
+    string_field(out, "name", v.name);
+    list_field(out, "args", &v.args);
+    bool_field(out, "jumble_args", v.jumble_args);
+    bool_field(out, "is_local", v.is_local);
+    int_field(out, "location", v.location);
+    out.push('}');
 }
 
 fn role_spec(out: &mut String, r: &types_nodes::parsenodes::RoleSpec<'_>) {

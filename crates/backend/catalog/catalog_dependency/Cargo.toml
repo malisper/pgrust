@@ -29,6 +29,7 @@ trigger = { path = "../../commands/trigger" }
 pg_constraint = { path = "../pg_constraint" }
 rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
 pg_largeobject = { path = "../pg_largeobject" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }

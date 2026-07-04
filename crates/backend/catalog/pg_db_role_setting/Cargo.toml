@@ -20,4 +20,6 @@ types_rel = { path = "../../../_support/types/rel" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 genam = { path = "../../access/index/genam" }
+table = { path = "../../access/table/table" }
+catalog_indexing = { path = "../catalog_indexing" }
 pg_db_role_setting_seams = { path = "../pg_db_role_setting_seams" }

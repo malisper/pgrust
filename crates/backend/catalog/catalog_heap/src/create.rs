@@ -465,7 +465,7 @@ pub fn heap_create_with_catalog<'mcx>(
         && !miscinit_seams::is_bootstrap_processing_mode::call()
     {
         let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
-        pg_depend::recordDependencyOnOwner(RELATION_RELATION_ID, relid, p.ownerid);
+        pg_depend::recordDependencyOnOwner(mcx, RELATION_RELATION_ID, relid, p.ownerid)?;
         // recordDependencyOnNewAcl: relacl is always NULL here (divergence
         // above) and the owner needs no entry, so C records nothing.
         pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
