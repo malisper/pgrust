@@ -32,7 +32,7 @@ pub use plan::{
 pub use functiondef::{
     pg_get_function_arg_default_worker, pg_get_function_arguments_worker,
     pg_get_function_identity_arguments_worker, pg_get_function_result_worker,
-    pg_get_functiondef_worker,
+    pg_get_function_sqlbody_worker, pg_get_functiondef_worker,
 };
 pub use ruledef::pg_get_ruledef_worker;
 pub use triggerdef::pg_get_triggerdef_worker;
@@ -125,6 +125,39 @@ pub(crate) fn oid_array_at(d: Datum) -> Vec<Oid> {
     array_body(d, 4).chunks_exact(4).map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
+// One-dimensional no-null text array (TYPALIGN_INT elements).
+pub(crate) fn text_array_at(d: Datum) -> Vec<String> {
+    // SAFETY: catalog text[] datum; header fields read bytewise.
+    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
+    let b = v.data();
+    let ndim = i32::from_ne_bytes(b[0..4].try_into().unwrap());
+    if ndim == 0 {
+        return Vec::new();
+    }
+    let dataoffset = i32::from_ne_bytes(b[4..8].try_into().unwrap());
+    assert!(ndim == 1 && dataoffset == 0, "ruleutils: unexpected catalog text[] shape");
+    let dim1 = i32::from_ne_bytes(b[12..16].try_into().unwrap()) as usize;
+    let mut out = Vec::with_capacity(dim1);
+    let mut off = 20usize;
+    for _ in 0..dim1 {
+        // att_align_pointer: a zero pad byte means the element was aligned.
+        if b[off] == 0 {
+            off = (off + 3) & !3;
+        }
+        let b0 = b[off];
+        let (hdr, len) = if b0 & 0x01 != 0 {
+            (1usize, (((b0 >> 1) & 0x7F) as usize).saturating_sub(1))
+        } else {
+            let raw = u32::from_ne_bytes(b[off..off + 4].try_into().unwrap());
+            (4usize, (raw >> 2) as usize - 4)
+        };
+        out.push(String::from_utf8(b[off + hdr..off + hdr + len].to_vec())
+            .expect("non-UTF-8 text[] element"));
+        off += hdr + len;
+    }
+    out
+}
+
 pub(crate) fn array_body(d: Datum, elem_width: usize) -> Vec<u8> {
     // SAFETY: as text_at; header fields read bytewise (short varlena headers
     // leave the body unaligned).
@@ -208,7 +241,6 @@ struct PgClassRow {
     relnamespace: Oid,
     relam: Oid,
     relkind: i8,
-    has_reloptions: bool,
 }
 
 const ANUM_PG_CLASS_RELNAME: i32 = 2;
@@ -227,7 +259,6 @@ fn pg_class_row(relid: Oid) -> PgResult<Option<PgClassRow>> {
         relnamespace: getattr(&t, RELOID, ANUM_PG_CLASS_RELNAMESPACE).as_oid(),
         relam: getattr(&t, RELOID, ANUM_PG_CLASS_RELAM).as_oid(),
         relkind: getattr(&t, RELOID, ANUM_PG_CLASS_RELKIND).as_i8(),
-        has_reloptions: getattr_null(&t, RELOID, ANUM_PG_CLASS_RELOPTIONS).is_some(),
     };
     drop(t);
     ReleaseSysCache(ht);
@@ -302,7 +333,12 @@ pub(crate) fn generate_operator_name(
             opname.lappend(mcx, Node::mk_string(mcx, str_in(mcx, &oprname)?)?)?;
             parse_oper::oper(&pstate, &opname, arg1, arg2, true, -1)?.map(|op| op.oid)
         }
-        b'l' => gap("generate_operator_name", "prefix (left) operator resolution"),
+        b'l' => {
+            let pstate = parser_small1::make_parsestate(mcx, None);
+            let mut opname: NodeList<'_> = NodeList::nil();
+            opname.lappend(mcx, Node::mk_string(mcx, str_in(mcx, &oprname)?)?)?;
+            parse_oper::left_oper(&pstate, &opname, arg2, true, -1)?.map(|op| op.oid)
+        }
         other => panic!("unrecognized oprkind: {other}"),
     };
     if resolved == Some(operid) {
@@ -397,11 +433,9 @@ pub(crate) fn generate_function_name(
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
     }
-    if best.is_none() && argtypes.len() == 1 {
-        // func_get_detail falls back to the FuncNameAsType coercion arm only
-        // after normal resolution fails.
-        gap("generate_function_name", "single-arg coercion-arm resolution (FuncNameAsType)");
-    }
+    // C's FuncNameAsType coercion arm returns FUNCDETAIL_COERCION with
+    // funcid = InvalidOid; like NOTFOUND it lands in the qualify branch, so
+    // resolution failure falls through unconditionally.
     if best == Some(funcid) {
         return Ok(quote_identifier(&proname).into_owned());
     }
@@ -432,7 +466,6 @@ pub fn pg_get_userbyid_core(roleid: Oid) -> PgResult<NameData> {
     Ok(result)
 }
 
-const BTREE_AM_OID: Oid = 403;
 const RELKIND_PARTITIONED_INDEX: i8 = b'I' as i8;
 const INDOPTION_DESC: i16 = 0x0001;
 const INDOPTION_NULLS_FIRST: i16 = 0x0002;
@@ -489,6 +522,42 @@ fn pg_index_row(indexrelid: Oid) -> PgResult<Option<PgIndexRow>> {
     drop(t);
     ReleaseSysCache(ht);
     Ok(Some(row))
+}
+
+// get_reloptions (ruleutils.c): name=value pairs; value kept bare only when
+// it is an identifier that needs no quoting (C tests quote_identifier ptr
+// identity), else single-quoted.
+fn get_reloptions(buf: &mut String, options: &[String]) {
+    for (i, option) in options.iter().enumerate() {
+        let (name, value) = match option.find('=') {
+            Some(p) => (&option[..p], &option[p + 1..]),
+            None => (option.as_str(), ""),
+        };
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(&quote_identifier(name));
+        buf.push('=');
+        match quote_identifier(value) {
+            std::borrow::Cow::Borrowed(v) => buf.push_str(v),
+            std::borrow::Cow::Owned(_) => deparse::simple_quote_literal(buf, value),
+        }
+    }
+}
+
+fn flatten_reloptions(relid: Oid) -> PgResult<Option<String>> {
+    let Some(ht) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        return Err(cache_lookup_failed("relation", relid));
+    };
+    let t = ht.tuple();
+    let opts = getattr_null(&t, RELOID, ANUM_PG_CLASS_RELOPTIONS).map(text_array_at);
+    drop(t);
+    ReleaseSysCache(ht);
+    Ok(opts.map(|o| {
+        let mut buf = String::new();
+        get_reloptions(&mut buf, &o);
+        buf
+    }))
 }
 
 const ANUM_PG_AM_AMNAME: i32 = 2;
@@ -640,9 +709,9 @@ fn pg_get_indexdef_worker_extended(
     let idxrel =
         pg_class_row(indexrelid)?.ok_or_else(|| cache_lookup_failed("relation", indexrelid))?;
     let amname = pg_am_name(idxrel.relam)?;
-    if idxrel.relam != BTREE_AM_OID && !attrs_only {
-        gap("pg_get_indexdef", &format!("non-btree index (am \"{amname}\")"));
-    }
+    let amcanorder = amapi::GetIndexAmRoutineByAmId(idxrel.relam, false)?
+        .expect("noerror=false returned Some")
+        .amcanorder();
     let mut indexpr_items: std::vec::Vec<types_nodes::Node<'_>> = std::vec::Vec::new();
     if let Some(src) = idx.indexprs_src.as_deref() {
         let node = readfuncs::stringToNode(mcx, src)?;
@@ -726,20 +795,32 @@ fn pg_get_indexdef_worker_extended(
         {
             let opt = idx.indoption[keyno];
             let indcoll = idx.indcollation[keyno];
-            if lsyscache::get_attoptions(mcx, indexrelid, keyno as i16 + 1)? != Datum::null() {
-                gap("pg_get_indexdef", "per-column attoptions");
-            }
+            let attoptions = lsyscache::get_attoptions(mcx, indexrelid, keyno as i16 + 1)?;
+            let has_options = attoptions != Datum::null();
             if indcoll != InvalidOid && indcoll != keycolcollation {
-                gap("pg_get_indexdef", "non-default column collation");
+                buf.push_str(" COLLATE ");
+                buf.push_str(&generate_collation_name(mcx, indcoll)?);
             }
-            get_opclass_name(mcx, idx.indclass[keyno], keycoltype, &mut buf)?;
-            if opt & INDOPTION_DESC != 0 {
-                buf.push_str(" DESC");
-                if opt & INDOPTION_NULLS_FIRST == 0 {
-                    buf.push_str(" NULLS LAST");
+            get_opclass_name(
+                mcx,
+                idx.indclass[keyno],
+                if has_options { InvalidOid } else { keycoltype },
+                &mut buf,
+            )?;
+            if has_options {
+                buf.push_str(" (");
+                get_reloptions(&mut buf, &text_array_at(attoptions));
+                buf.push(')');
+            }
+            if amcanorder {
+                if opt & INDOPTION_DESC != 0 {
+                    buf.push_str(" DESC");
+                    if opt & INDOPTION_NULLS_FIRST == 0 {
+                        buf.push_str(" NULLS LAST");
+                    }
+                } else if opt & INDOPTION_NULLS_FIRST != 0 {
+                    buf.push_str(" NULLS FIRST");
                 }
-            } else if opt & INDOPTION_NULLS_FIRST != 0 {
-                buf.push_str(" NULLS FIRST");
             }
             if let Some(ops) = exclude_ops {
                 let opname = generate_operator_name(mcx, ops[keyno], keycoltype, keycoltype)?;
@@ -753,12 +834,15 @@ fn pg_get_indexdef_worker_extended(
         if idx.indnullsnotdistinct {
             buf.push_str(" NULLS NOT DISTINCT");
         }
-        if idxrel.has_reloptions {
-            gap("pg_get_indexdef", "index reloptions (WITH ...)");
+        if let Some(options) = flatten_reloptions(indexrelid)? {
+            buf.push_str(&format!(" WITH ({options})"));
         }
         if show_tbl_spc {
             let tblspc = lsyscache::get_rel_tablespace(indexrelid)?;
             if tblspc != InvalidOid {
+                if is_constraint {
+                    buf.push_str(" USING INDEX");
+                }
                 let spcname = get_tablespace_name(tblspc)?
                     .unwrap_or_else(|| panic!("cache lookup failed for tablespace {tblspc}"));
                 buf.push_str(&format!(" TABLESPACE {}", quote_identifier(&spcname)));
@@ -1337,4 +1421,95 @@ pub fn pg_get_statisticsobj_worker(
         buf.push_str(&format!(" FROM {}", generate_relation_name(mcx, stxrelid)?));
     }
     Ok(Some(buf))
+}
+
+// pg_get_statisticsobjdef_expressions (ruleutils.c:1838); the fc wrapper
+// builds the text[] result.
+pub fn pg_get_statisticsobjdef_expressions_worker(
+    mcx: Mcx<'_>,
+    statextid: Oid,
+) -> PgResult<Option<Vec<String>>> {
+    let Some(ht) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(statextid)))?
+    else {
+        return Ok(None);
+    };
+    let t = ht.tuple();
+    let stxrelid = getattr(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXRELID).as_oid();
+    let exprs_text = getattr_null(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXEXPRS).map(text_at);
+    drop(t);
+    ReleaseSysCache(ht);
+    let Some(src) = exprs_text else {
+        return Ok(None);
+    };
+    let node = readfuncs::stringToNode(mcx, &src)?;
+    let mut out = Vec::new();
+    for expr in node.as_list().expect("stxexprs is a List").iter() {
+        out.push(deparse_expression_pretty(mcx, expr, stxrelid, false, PRETTYFLAG_INDENT)?);
+    }
+    Ok(Some(out))
+}
+
+const RELKIND_SEQUENCE: i8 = b'S' as i8;
+
+// pg_get_serial_sequence (ruleutils.c:2833).
+pub fn pg_get_serial_sequence_worker(
+    mcx: Mcx<'_>,
+    tablename: &str,
+    columnname: &str,
+) -> PgResult<Option<String>> {
+    let table_oid = viewdef::qualified_name_to_relid(mcx, tablename)?;
+    let attnum = lsyscache::get_attnum(table_oid, columnname)?;
+    if attnum == 0 {
+        return Err(PgError::error(format!(
+            "column \"{columnname}\" of relation \"{tablename}\" does not exist"
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN)
+        .into());
+    }
+    for cand in pg_depend::get_serial_sequence_candidates(mcx, table_oid, attnum as i32)?.iter() {
+        if lsyscache::get_rel_relkind(*cand)? == RELKIND_SEQUENCE {
+            return Ok(Some(generate_qualified_relation_name(mcx, *cand)?));
+        }
+    }
+    Ok(None)
+}
+
+// pg_get_partition_constraintdef (ruleutils.c:2096) over
+// get_partition_qual_relid (partcache.c:299).
+pub fn pg_get_partition_constraintdef_worker(
+    mcx: Mcx<'_>,
+    relation_id: Oid,
+) -> PgResult<Option<String>> {
+    if !lsyscache::get_rel_relispartition(relation_id)? {
+        return Ok(None);
+    }
+    // C holds AccessShareLock through the deparse; lock machinery is another
+    // lane (matches the pg_get_expr divergence above).
+    let rel = table::table_open(mcx, relation_id, types_rel::AccessShareLock)?;
+    let and_args = partdesc::RelationGetPartitionQual(mcx, &rel)?;
+    rel.close(types_rel::AccessShareLock)?;
+    let expr = match and_args.len() {
+        0 => return Ok(None),
+        1 => and_args.nth(0),
+        _ => Node::mk(
+            mcx,
+            types_nodes::primnodes::BoolExpr {
+                boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                args: and_args,
+                location: -1,
+            },
+        )?,
+    };
+    Ok(Some(deparse_expression_pretty(mcx, expr, relation_id, false, PRETTYFLAG_INDENT)?))
+}
+
+// pg_get_querydef (ruleutils.c:1588) — extension-facing entry point.
+pub fn pg_get_querydef<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &'mcx types_nodes::Query<'mcx>,
+    pretty: bool,
+) -> PgResult<String> {
+    let mut ctx = deparse::DeparseContext::new(mcx, get_pretty_flags(pretty));
+    query::get_query_def(query, &mut ctx, None, true)?;
+    Ok(ctx.buf)
 }

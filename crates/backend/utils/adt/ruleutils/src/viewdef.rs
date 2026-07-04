@@ -9,7 +9,7 @@ use types_nodes::nodes_enums::CmdType;
 use types_rel::NoLock;
 
 use crate::deparse::DeparseContext;
-use crate::{gap, query};
+use crate::query;
 
 pub(crate) const WRAP_COLUMN_DEFAULT: i32 = 0;
 
@@ -67,16 +67,21 @@ pub(crate) fn view_attnames(relid: Oid) -> PgResult<Vec<String>> {
 }
 
 // textToQualifiedNameList + makeRangeVarFromNameList + RangeVarGetRelid
-// (NoLock, hard error) — the by-name pg_get_viewdef forms.
-pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &str) -> PgResult<Oid> {
+// (NoLock, hard error) — the by-name pg_get_viewdef and
+// pg_get_serial_sequence forms.
+pub(crate) fn qualified_name_to_relid(mcx: Mcx<'_>, rawname: &str) -> PgResult<Oid> {
     let names = match varlena::split_identifier_string(
         mcx,
-        viewname,
+        rawname,
         b'.',
         mbutils::GetDatabaseEncoding(),
     )? {
         Some(names) if !names.is_empty() => names,
-        _ => gap("pg_get_viewdef_name", "invalid name syntax ereport"),
+        _ => {
+            return Err(types_error::PgError::error("invalid name syntax")
+                .with_sqlstate(types_error::ERRCODE_INVALID_NAME)
+                .into())
+        }
     };
     let mut rv = rel_vocab::RangeVar {
         catalogname: None,
@@ -97,7 +102,17 @@ pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &str) -> PgResult<Oid> {
             rv.schemaname = Some(s);
             rv.relname = r;
         }
-        _ => gap("pg_get_viewdef_name", "improper qualified name ereport"),
+        _ => {
+            return Err(types_error::PgError::error(format!(
+                "improper qualified name (too many dotted names): {rawname}"
+            ))
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+            .into())
+        }
     }
     catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)
+}
+
+pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &str) -> PgResult<Oid> {
+    qualified_name_to_relid(mcx, viewname)
 }

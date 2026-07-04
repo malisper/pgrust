@@ -349,6 +349,76 @@ pub fn fc_pg_get_function_result(
     })
 }
 
+fn text_arg(fcinfo: &mut Fcinfo, argno: usize, what: &str) -> PgResult<String> {
+    // SAFETY: strict builtin, text argument.
+    let raw = unsafe { fcinfo.arg_varlena_packed(argno) }?;
+    Ok(core::str::from_utf8(raw.data())
+        .unwrap_or_else(|_| panic!("non-UTF-8 {what}"))
+        .to_owned())
+}
+
+pub fn fc_pg_get_serial_sequence(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let tablename = text_arg(fcinfo, 0, "table name")?;
+    let columnname = text_arg(fcinfo, 1, "column name")?;
+    let ctx = MemoryContext::new("pg_get_serial_sequence");
+    let res = crate::pg_get_serial_sequence_worker(ctx.mcx(), &tablename, &columnname)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_serial_sequence", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_partition_constraintdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_partition_constraintdef");
+    let res = crate::pg_get_partition_constraintdef_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_partition_constraintdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_function_sqlbody(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_function_sqlbody");
+    let res = crate::pg_get_function_sqlbody_worker(ctx.mcx(), fcinfo.arg_oid(0))?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_function_sqlbody", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_statisticsobjdef_expressions(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    const TEXTOID: Oid = 25;
+    let ctx = MemoryContext::new("pg_get_statisticsobjdef_expressions");
+    let mcx = ctx.mcx();
+    let Some(exprs) = crate::pg_get_statisticsobjdef_expressions_worker(mcx, fcinfo.arg_oid(0))?
+    else {
+        return Ok(fcinfo.return_null());
+    };
+    let mut texts = Vec::with_capacity(exprs.len());
+    for e in &exprs {
+        texts.push(varlena::cstring_to_text(mcx, e.as_bytes())?);
+    }
+    let elems: Vec<Datum> =
+        texts.iter().map(|t| Datum::from_usize(t.as_bytes().as_ptr() as usize)).collect();
+    let img = arrayfuncs::construct_array(mcx, &elems, TEXTOID, -1, false, b'i')?;
+    let buf = out_scratch(flinfo, "pg_get_statisticsobjdef_expressions");
+    buf.clear();
+    buf.extend_from_slice(&img);
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -362,6 +432,7 @@ pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
     b(1642, "pg_get_userbyid", 1, fc_pg_get_userbyid),
     b(1643, "pg_get_indexdef", 1, fc_pg_get_indexdef),
     b(1662, "pg_get_triggerdef", 1, fc_pg_get_triggerdef),
+    b(1665, "pg_get_serial_sequence", 2, fc_pg_get_serial_sequence),
     b(1716, "pg_get_expr", 2, fc_pg_get_expr),
     b(2098, "pg_get_functiondef", 1, fc_pg_get_functiondef),
     b(2162, "pg_get_function_arguments", 1, fc_pg_get_function_arguments),
@@ -376,7 +447,10 @@ pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
     b(2730, "pg_get_triggerdef_ext", 2, fc_pg_get_triggerdef_ext),
     b(3159, "pg_get_viewdef_wrap", 2, fc_pg_get_viewdef_wrap),
     b(3352, "pg_get_partkeydef", 1, fc_pg_get_partkeydef),
+    b(3408, "pg_get_partition_constraintdef", 1, fc_pg_get_partition_constraintdef),
     b(3415, "pg_get_statisticsobjdef", 1, fc_pg_get_statisticsobjdef),
     b(3808, "pg_get_function_arg_default", 2, fc_pg_get_function_arg_default),
+    b(6173, "pg_get_statisticsobjdef_expressions", 1, fc_pg_get_statisticsobjdef_expressions),
     b(6174, "pg_get_statisticsobjdef_columns", 1, fc_pg_get_statisticsobjdef_columns),
+    b(6197, "pg_get_function_sqlbody", 1, fc_pg_get_function_sqlbody),
 ];
