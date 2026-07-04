@@ -1,6 +1,6 @@
-// functioncmds.c CREATE FUNCTION lane. Loud: procedures, inline SQL bodies
-// (BEGIN ATOMIC / RETURN), parameter defaults, OUT/INOUT/VARIADIC/TABLE
-// modes, WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal,
+// functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
+// (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
+// WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal,
 // shell types, %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION,
 // CREATE CAST/TRANSFORM, DO, CALL.
 #![allow(non_snake_case)]
@@ -8,11 +8,14 @@
 
 use mcx::Mcx;
 use pg_proc::{
-    ClanguageId, ProcedureCreateArgs, INTERNALlanguageId, PROKIND_FUNCTION,
+    ClanguageId, ProcedureCreateArgs, INTERNALlanguageId, PROKIND_FUNCTION, PROKIND_PROCEDURE,
     PROPARALLEL_RESTRICTED, PROPARALLEL_SAFE, PROPARALLEL_UNSAFE, PROVOLATILE_IMMUTABLE,
     PROVOLATILE_STABLE, PROVOLATILE_VOLATILE, SQLlanguageId,
 };
-use types_core::{InvalidOid, Oid, OidIsValid, LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, TYPE_RELATION_ID};
+use types_core::{
+    InvalidOid, Oid, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, LANGUAGE_RELATION_ID,
+    NAMESPACE_RELATION_ID, RECORDOID, TYPE_RELATION_ID, VOIDOID,
+};
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -46,6 +49,15 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
 #[inline(never)]
 fn conflicting_options() -> Box<PgError> {
     err("conflicting or redundant options".to_string(), ERRCODE_SYNTAX_ERROR)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_procedure_attribute() -> Box<PgError> {
+    err(
+        "invalid attribute in procedure definition".to_string(),
+        ERRCODE_INVALID_FUNCTION_DEFINITION,
+    )
 }
 
 struct FunctionAttrs<'mcx> {
@@ -131,9 +143,21 @@ fn compute_function_attributes<'mcx>(
     let mut rows_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut parallel_item: Option<&'mcx DefElem<'mcx>> = None;
 
+    let is_procedure = stmt.is_procedure;
     for option in stmt.options.iter() {
         let defel = option.as_def_elem().expect("createfunc_opt_list holds DefElems");
-        let slot: &mut Option<&'mcx DefElem<'mcx>> = match defel.defname.unwrap_or("") {
+        let name = defel.defname.unwrap_or("");
+        // compute_common_attribute rejects these before the conflict check.
+        if is_procedure
+            && matches!(
+                name,
+                "window" | "volatility" | "strict" | "leakproof" | "cost" | "rows" | "support"
+                    | "parallel"
+            )
+        {
+            return Err(invalid_procedure_attribute());
+        }
+        let slot: &mut Option<&'mcx DefElem<'mcx>> = match name {
             "as" => &mut as_item,
             "language" => &mut language_item,
             "transform" => unported("TRANSFORM option"),
@@ -298,48 +322,42 @@ fn compute_return_type<'mcx>(
     Ok((rettype, returnType.setof))
 }
 
-// interpret_function_parameter_list (functioncmds.c); VARIADIC stays loud.
-struct ParamListInfoOut<'mcx> {
+struct ParameterList<'mcx> {
     in_types: mcx::PgVec<'mcx, Oid>,
-    all_types: Option<mcx::PgVec<'mcx, Oid>>,
-    modes: Option<mcx::PgVec<'mcx, i8>>,
+    all_types: mcx::PgVec<'mcx, Oid>,
+    param_modes: mcx::PgVec<'mcx, i8>,
     names: mcx::PgVec<'mcx, &'mcx str>,
     have_names: bool,
-    /// RECORDOID / single-OUT type when RETURNS is omitted; InvalidOid if no OUTs.
+    have_out_or_variadic: bool,
     required_result_type: Oid,
 }
 
+// interpret_function_parameter_list (functioncmds.c); DEFAULT expressions
+// are loud.
 fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
-) -> PgResult<ParamListInfoOut<'mcx>> {
-    const RECORDOID: Oid = 2249;
+) -> PgResult<ParameterList<'mcx>> {
+    use FunctionParameterMode::*;
+    let is_procedure = stmt.is_procedure;
     let n = stmt.parameters.len();
     let mut in_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut all_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
-    let mut modes: mcx::PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut param_modes: mcx::PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut names: mcx::PgVec<'mcx, &'mcx str> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut have_names = false;
-    let mut have_modes = false;
     let mut out_count = 0usize;
+    let mut var_count = 0usize;
     let mut required_result_type = InvalidOid;
 
     for p in stmt.parameters.iter() {
         let fp: &FunctionParameter<'mcx> = p
             .as_function_parameter()
             .expect("func_args_with_defaults holds FunctionParameters");
-        let mode = match fp.mode {
-            FunctionParameterMode::FUNC_PARAM_IN | FunctionParameterMode::FUNC_PARAM_DEFAULT => {
-                b'i' as i8
-            }
-            FunctionParameterMode::FUNC_PARAM_OUT => b'o' as i8,
-            FunctionParameterMode::FUNC_PARAM_INOUT => b'b' as i8,
-            FunctionParameterMode::FUNC_PARAM_TABLE => b't' as i8,
-            _ => unported("VARIADIC parameter mode"),
+        let fpmode = match fp.mode {
+            FUNC_PARAM_DEFAULT => FUNC_PARAM_IN,
+            m => m,
         };
-        if mode != b'i' as i8 {
-            have_modes = true;
-        }
         if fp.defexpr.is_some() {
             unported("parameter DEFAULT expressions");
         }
@@ -347,45 +365,95 @@ fn interpret_function_parameter_list<'mcx>(
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
         let toid = resolve_type_name(mcx, tn)?;
         if tn.setof {
-            return Err(err(
-                "functions cannot accept set arguments".to_string(),
-                ERRCODE_INVALID_FUNCTION_DEFINITION,
-            ));
+            let msg = if is_procedure {
+                "procedures cannot accept set arguments"
+            } else {
+                "functions cannot accept set arguments"
+            };
+            return Err(err(msg.to_string(), ERRCODE_INVALID_FUNCTION_DEFINITION));
         }
-        if matches!(mode as u8, b'i' | b'b') {
+
+        if matches!(fpmode, FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC) {
+            if var_count > 0 {
+                return Err(err(
+                    "VARIADIC parameter must be the last input parameter".to_string(),
+                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                ));
+            }
             in_types.push(toid);
         }
-        if matches!(mode as u8, b'o' | b'b' | b't') {
+
+        if fpmode != FUNC_PARAM_IN && fpmode != FUNC_PARAM_VARIADIC {
+            if is_procedure {
+                // OUT-after-VARIADIC is disallowed only for procedures: it
+                // would cause confusion in a CALL statement.
+                if var_count > 0 {
+                    return Err(err(
+                        "VARIADIC parameter must be the last parameter".to_string(),
+                        ERRCODE_INVALID_FUNCTION_DEFINITION,
+                    ));
+                }
+                required_result_type = RECORDOID;
+            } else if out_count == 0 {
+                required_result_type = toid;
+            }
             out_count += 1;
-            required_result_type =
-                if out_count > 1 { RECORDOID } else { toid };
         }
+
+        if fpmode == FUNC_PARAM_VARIADIC {
+            var_count += 1;
+            match toid {
+                ANYARRAYOID | ANYCOMPATIBLEARRAYOID | ANYOID => {}
+                _ => {
+                    if lsyscache::get_element_type(toid)? == InvalidOid {
+                        return Err(err(
+                            "VARIADIC parameter must be an array".to_string(),
+                            ERRCODE_INVALID_FUNCTION_DEFINITION,
+                        ));
+                    }
+                }
+            }
+        }
+
         all_types.push(toid);
-        modes.push(mode);
+        param_modes.push(fpmode as i8);
 
         let name = fp.name.unwrap_or("");
         if !name.is_empty() {
-            if names.iter().any(|&pn| pn == name) {
-                return Err(err(
-                    format!("parameter name \"{name}\" used more than once"),
-                    ERRCODE_INVALID_FUNCTION_DEFINITION,
-                ));
+            let is_in = |m: i8| m == FUNC_PARAM_IN as i8 || m == FUNC_PARAM_VARIADIC as i8;
+            let is_out = |m: i8| m == FUNC_PARAM_OUT as i8 || m == FUNC_PARAM_TABLE as i8;
+            for (j, &pn) in names.iter().enumerate() {
+                let prevmode = param_modes[j];
+                // Pure in doesn't conflict with pure out.
+                if is_in(fpmode as i8) && is_out(prevmode) {
+                    continue;
+                }
+                if is_in(prevmode) && is_out(fpmode as i8) {
+                    continue;
+                }
+                if !pn.is_empty() && pn == name {
+                    return Err(err(
+                        format!("parameter name \"{name}\" used more than once"),
+                        ERRCODE_INVALID_FUNCTION_DEFINITION,
+                    ));
+                }
             }
             have_names = true;
         }
         names.push(name);
     }
-    let (all_types, modes) = if have_modes {
-        (Some(all_types), Some(modes))
-    } else {
-        (None, None)
-    };
-    Ok(ParamListInfoOut {
+
+    let have_out_or_variadic = out_count > 0 || var_count > 0;
+    if have_out_or_variadic && out_count > 1 {
+        required_result_type = RECORDOID;
+    }
+    Ok(ParameterList {
         in_types,
         all_types,
-        modes,
+        param_modes,
         names,
         have_names,
+        have_out_or_variadic,
         required_result_type,
     })
 }
@@ -484,10 +552,6 @@ pub fn CreateFunction<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    if stmt.is_procedure {
-        unported("CREATE PROCEDURE");
-    }
-
     let (namespaceId, funcname) = qualified_name_get_creation_namespace(mcx, &stmt.funcname)?;
 
     let aclresult = aclchk::object_aclcheck(
@@ -585,23 +649,35 @@ pub fn CreateFunction<'mcx>(
     }
 
     let params = interpret_function_parameter_list(mcx, stmt)?;
-    let (in_types, param_names, have_names) =
-        (params.in_types, params.names, params.have_names);
 
-    let (prorettype, returnsSet) = match stmt.returnType {
-        Some(rt) => {
-            let tn = rt.as_variant::<TypeName>().expect("returnType is a TypeName");
-            compute_return_type(mcx, tn, languageOid)?
-        }
-        None if OidIsValid(params.required_result_type) => {
-            (params.required_result_type, false)
-        }
-        None => {
+    let (prorettype, returnsSet) = if stmt.is_procedure {
+        debug_assert!(stmt.returnType.is_none());
+        let rt = if params.required_result_type != InvalidOid {
+            params.required_result_type
+        } else {
+            VOIDOID
+        };
+        (rt, false)
+    } else if let Some(rt) = stmt.returnType {
+        let tn = rt.as_variant::<TypeName>().expect("returnType is a TypeName");
+        let (prorettype, returnsSet) = compute_return_type(mcx, tn, languageOid)?;
+        if params.required_result_type != InvalidOid && prorettype != params.required_result_type {
             return Err(err(
-                "function result type must be specified".to_string(),
+                format!(
+                    "function result type must be {} because of OUT parameters",
+                    format_type::format_type_be(params.required_result_type)?
+                ),
                 ERRCODE_INVALID_FUNCTION_DEFINITION,
             ));
         }
+        (prorettype, returnsSet)
+    } else if params.required_result_type != InvalidOid {
+        (params.required_result_type, false)
+    } else {
+        return Err(err(
+            "function result type must be specified".to_string(),
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+        ));
     };
 
     let as_parsed =
@@ -644,16 +720,24 @@ pub fn CreateFunction<'mcx>(
             languageValidator,
             prosrc: as_parsed.prosrc,
             probin: as_parsed.probin,
-            prokind: PROKIND_FUNCTION,
+            prokind: if stmt.is_procedure { PROKIND_PROCEDURE } else { PROKIND_FUNCTION },
             security_definer: attrs.security,
             isLeakProof: attrs.leakproof,
             isStrict: attrs.strict,
             volatility: attrs.volatility,
             parallel: attrs.parallel,
-            parameterTypes: &in_types,
-            allParameterTypes: params.all_types.as_deref(),
-            parameterModes: params.modes.as_deref(),
-            parameterNames: if have_names { Some(&param_names) } else { None },
+            parameterTypes: &params.in_types,
+            allParameterTypes: if params.have_out_or_variadic {
+                Some(&params.all_types)
+            } else {
+                None
+            },
+            parameterModes: if params.have_out_or_variadic {
+                Some(&params.param_modes)
+            } else {
+                None
+            },
+            parameterNames: if params.have_names { Some(&params.names) } else { None },
             procost,
             prorows,
         },

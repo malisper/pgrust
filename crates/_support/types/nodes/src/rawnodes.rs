@@ -806,7 +806,18 @@ pub struct PLAssignStmt<'mcx> {
     pub location: ParseLoc,
 }
 
+/// `funcexpr`/`outargs` are filled by transform (parse_analyze), not the grammar.
+#[derive(Default)]
+pub struct CallStmt<'mcx> {
+    pub funccall: Option<&'mcx FuncCall<'mcx>>,
+    pub funcexpr: Option<&'mcx crate::primnodes::FuncExpr<'mcx>>,
+    pub outargs: NodeList<'mcx>,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
+unsafe impl<'mcx> NodeVariant<'mcx> for CallStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CallStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
 }
@@ -1129,6 +1140,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_pl_assign_stmt(self) -> Option<&'mcx PLAssignStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_call_stmt(self) -> Option<&'mcx CallStmt<'mcx>> {
         self.as_variant()
     }
 

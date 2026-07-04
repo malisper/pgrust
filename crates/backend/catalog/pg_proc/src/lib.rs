@@ -1,8 +1,7 @@
-// pg_proc.c ProcedureCreate insert/replace slice. Loud: OUT/variadic
-// parameter arrays, argument defaults, transforms, proconfig, prosqlbody,
-// RECORD-tupdesc replace compare, named-argument replace compare,
-// non-superuser owner check. pgstat_create_function is skipped (function
-// stats unported).
+// pg_proc.c ProcedureCreate insert/replace slice. Loud: argument defaults,
+// transforms, proconfig, prosqlbody, RECORD-tupdesc replace compare,
+// replace of a function with proargmodes+proargnames set, non-superuser
+// owner check. pgstat_create_function is skipped (function stats unported).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -11,8 +10,9 @@ use mcx::Mcx;
 use types_core::{
     AttrNumber, InvalidOid, Oid, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
     ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID,
-    ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID, INTERNALOID, LANGUAGE_RELATION_ID,
-    NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, RECORDOID, TYPE_RELATION_ID,
+    ANYMULTIRANGEOID, ANYNONARRAYOID, ANYOID, ANYRANGEOID, CHAROID, INTERNALOID,
+    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, OIDOID, PROCEDURE_RELATION_ID, RECORDOID,
+    TYPE_RELATION_ID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
@@ -71,6 +71,12 @@ pub const PROPARALLEL_SAFE: i8 = b's' as i8;
 pub const PROPARALLEL_RESTRICTED: i8 = b'r' as i8;
 pub const PROPARALLEL_UNSAFE: i8 = b'u' as i8;
 
+pub const PROARGMODE_IN: i8 = b'i' as i8;
+pub const PROARGMODE_OUT: i8 = b'o' as i8;
+pub const PROARGMODE_INOUT: i8 = b'b' as i8;
+pub const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+pub const PROARGMODE_TABLE: i8 = b't' as i8;
+
 pub const FUNC_MAX_ARGS: usize = 100;
 
 pub const INTERNALlanguageId: Oid = 12;
@@ -107,9 +113,9 @@ pub struct ProcedureCreateArgs<'a> {
     pub volatility: i8,
     pub parallel: i8,
     pub parameterTypes: &'a [Oid],
-    /// All parameters (IN and OUT) when any non-IN mode exists.
+    // All parameters (including OUT) when any non-IN mode is present.
     pub allParameterTypes: Option<&'a [Oid]>,
-    /// One mode char per allParameterTypes entry.
+    // PROARGMODE_* chars, parallel to allParameterTypes.
     pub parameterModes: Option<&'a [i8]>,
     // One entry per parameter, "" for unnamed; None when no parameter is named.
     pub parameterNames: Option<&'a [&'a str]>,
@@ -250,6 +256,69 @@ pub fn ProcedureCreate<'mcx>(
         ));
     }
 
+    if let Some(allParams) = a.allParameterTypes {
+        debug_assert!(allParams.len() >= parameterCount);
+        for (i, &t) in allParams.iter().enumerate() {
+            match a.parameterModes.map(|ms| ms[i]) {
+                None | Some(PROARGMODE_IN) | Some(PROARGMODE_VARIADIC) => continue,
+                _ => {}
+            }
+            if let Some(detail) = check_valid_polymorphic_signature(t, a.parameterTypes)? {
+                return Err(Box::new(
+                    PgError::new(ERROR, "cannot determine result data type".to_string())
+                        .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                        .with_detail(detail),
+                ));
+            }
+            if let Some(detail) = check_valid_internal_signature(t, a.parameterTypes) {
+                return Err(Box::new(
+                    PgError::new(ERROR, "unsafe use of pseudo-type \"internal\"".to_string())
+                        .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                        .with_detail(detail),
+                ));
+            }
+        }
+    }
+
+    let mut variadicType = InvalidOid;
+    if let Some(modes) = a.parameterModes {
+        let allParams = a.allParameterTypes.unwrap_or(a.parameterTypes);
+        debug_assert!(modes.len() == allParams.len());
+        for (i, &m) in modes.iter().enumerate() {
+            match m {
+                PROARGMODE_IN | PROARGMODE_INOUT => {
+                    if variadicType != InvalidOid {
+                        panic!("variadic parameter must be last");
+                    }
+                }
+                PROARGMODE_OUT => {
+                    if variadicType != InvalidOid && a.prokind == PROKIND_PROCEDURE {
+                        panic!("variadic parameter must be last");
+                    }
+                }
+                PROARGMODE_TABLE => {}
+                PROARGMODE_VARIADIC => {
+                    if variadicType != InvalidOid {
+                        panic!("variadic parameter must be last");
+                    }
+                    variadicType = match allParams[i] {
+                        ANYOID => ANYOID,
+                        ANYARRAYOID => ANYELEMENTOID,
+                        ANYCOMPATIBLEARRAYOID => ANYCOMPATIBLEOID,
+                        t => {
+                            let elem = lsyscache::get_element_type(t)?;
+                            if elem == InvalidOid {
+                                panic!("variadic parameter is not an array");
+                            }
+                            elem
+                        }
+                    };
+                }
+                _ => panic!("invalid parameter mode '{}'", m as u8 as char),
+            }
+        }
+    }
+
     let mut procname = NameData::default();
     procname.namestrcpy(a.procedureName);
     let prosrc_text = varlena::cstring_to_text(mcx, a.prosrc.as_bytes())?;
@@ -268,7 +337,7 @@ pub fn ProcedureCreate<'mcx>(
     set(&mut values, Anum_pg_proc_prolang, Datum::from_oid(a.languageObjectId));
     set(&mut values, Anum_pg_proc_procost, Datum::from_f32(a.procost));
     set(&mut values, Anum_pg_proc_prorows, Datum::from_f32(a.prorows));
-    set(&mut values, Anum_pg_proc_provariadic, Datum::from_oid(InvalidOid));
+    set(&mut values, Anum_pg_proc_provariadic, Datum::from_oid(variadicType));
     set(&mut values, Anum_pg_proc_prosupport, Datum::from_oid(InvalidOid));
     set(&mut values, Anum_pg_proc_prokind, Datum::from_char(a.prokind));
     set(&mut values, Anum_pg_proc_prosecdef, Datum::from_bool(a.security_definer));
@@ -286,12 +355,11 @@ pub fn ProcedureCreate<'mcx>(
         Datum::from_usize(argtypes_image.as_ptr() as usize),
     );
     let allargtypes_image = match a.allParameterTypes {
-        Some(all) => {
-            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, all.len())?;
-            for &t in all {
-                elems.push(Datum::from_oid(t));
+        Some(oids) => {
+            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, oids.len())?;
+            for &o in oids {
+                elems.push(Datum::from_oid(o));
             }
-            const OIDOID: Oid = 26;
             Some(datum::array_build::construct_array_image(mcx, &elems, OIDOID, 4, true, b'i')?)
         }
         None => None,
@@ -308,9 +376,8 @@ pub fn ProcedureCreate<'mcx>(
         Some(modes) => {
             let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, modes.len())?;
             for &m in modes {
-                elems.push(Datum::from_i8(m));
+                elems.push(Datum::from_char(m));
             }
-            const CHAROID: Oid = 18;
             Some(datum::array_build::construct_array_image(mcx, &elems, CHAROID, 1, true, b'c')?)
         }
         None => None,
@@ -559,13 +626,14 @@ pub fn ProcedureCreate<'mcx>(
         pg_depend::deleteDependencyRecordsFor(mcx, PROCEDURE_RELATION_ID, retval, true)?;
     }
 
+    let dep_param_types = a.allParameterTypes.unwrap_or(a.parameterTypes);
     let myself = ObjectAddress::set(PROCEDURE_RELATION_ID, retval);
     let mut referenced: mcx::PgVec<'mcx, ObjectAddress> =
-        mcx::vec_with_capacity_in(mcx, 3 + parameterCount)?;
+        mcx::vec_with_capacity_in(mcx, 3 + dep_param_types.len())?;
     referenced.push(ObjectAddress::set(NAMESPACE_RELATION_ID, a.procNamespace));
     referenced.push(ObjectAddress::set(LANGUAGE_RELATION_ID, a.languageObjectId));
     referenced.push(ObjectAddress::set(TYPE_RELATION_ID, a.returnType));
-    for &argtype in a.parameterTypes {
+    for &argtype in dep_param_types {
         referenced.push(ObjectAddress::set(TYPE_RELATION_ID, argtype));
     }
     pg_depend::record_object_address_dependencies(
