@@ -895,8 +895,7 @@ impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
         stattarget: i32,
         rows: &[HeapTupleData<'_>],
     ) -> PgResult<PgVec<'mcx, Option<statistics::ExprStatsRow<'mcx>>>> {
-        let mut out: PgVec<'mcx, Option<statistics::ExprStatsRow<'mcx>>> =
-            mcx::vec_with_capacity_in(mcx, exprs.len())?;
+        let mut out: PgVec<'mcx, Option<statistics::ExprStatsRow<'mcx>>> = PgVec::new_in(mcx);
         let col_scratch = MemoryContext::new("Analyze Expression");
         let mut col_cx = col_scratch.new_child_bump("Analyze Expression scratch");
         let mut per_tuple = col_scratch.new_child_bump("Analyze Expression per-tuple");
