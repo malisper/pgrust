@@ -5603,6 +5603,31 @@ impl<'mcx> Parser<'mcx> {
                 n.newname = Some(view.v(6).str_val());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER PUBLICATION/SUBSCRIPTION name RENAME TO name
+            1289 | 1293 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = if rule == 1289 {
+                    ObjectType::OBJECT_PUBLICATION
+                } else {
+                    ObjectType::OBJECT_SUBSCRIPTION
+                };
+                n.object = Some(Node::mk_string(mcx, view.v(3).str_val())?);
+                n.newname = Some(view.v(6).str_val());
+                n.missing_ok = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER PUBLICATION/SUBSCRIPTION name OWNER TO RoleSpec
+            1402 | 1403 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = if rule == 1402 {
+                    ObjectType::OBJECT_PUBLICATION
+                } else {
+                    ObjectType::OBJECT_SUBSCRIPTION
+                };
+                n.object = Some(Node::mk_string(mcx, view.v(3).str_val())?);
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // AlterOwnerStmt objwithargs forms (OPERATOR 1388 stays loud).
             1380 | 1385 | 1391 | 1392 => {
                 let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
