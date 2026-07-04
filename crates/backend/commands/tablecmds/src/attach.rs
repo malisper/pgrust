@@ -15,9 +15,10 @@ use types_nodes::list::NodeList;
 use types_nodes::primnodes::{NullTest, NullTestType, Var};
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionCmd};
 use types_nodes::Node;
+use types_core::catalog::RELPERSISTENCE_TEMP;
 use types_rel::{
     AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclusiveLock,
-    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELPERSISTENCE_TEMP,
+    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
 use crate::alter::{attname_lookup, oid_scankey, AlteredTableInfo};
@@ -1389,7 +1390,7 @@ fn DetachPartitionFinalize<'mcx>(
 
     if default_part_oid != InvalidOid {
         if part_rel.rd_id == default_part_oid {
-            catalog_heap::update_default_partition_oid(mcx, rel.rd_id, InvalidOid)?;
+            catalog_heap::partition::update_default_partition_oid(mcx, rel.rd_id, InvalidOid)?;
         } else {
             inval::invalidate::CacheInvalidateRelcacheByRelid(default_part_oid)?;
         }
