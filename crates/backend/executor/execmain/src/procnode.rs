@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use ::execexpr::{EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Plan;
@@ -205,7 +205,7 @@ pub struct HashJoinNode<'mcx> {
     pub state: ::nodehashjoin::HashJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
-    pub probe_batch: ProbeBatch,
+    pub probe_batch: ProbeBatch<'mcx>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -217,21 +217,34 @@ enum ProbeBatchMode {
 
 // Probe-side fused-drive cursor: exec_hash_join returns per joined row, so
 // the staged-page position must outlive each hash_join_arm call.
-pub struct ProbeBatch {
+pub struct ProbeBatch<'mcx> {
     mode: ProbeBatchMode,
     n: u32,
     i: u32,
+    // Columnar probe hashes for the staged page (hash32var_low32 cover);
+    // hash_col == u16::MAX = disarmed. last_hash None = per-row eval.
+    hash_col: u16,
+    hashes: Option<PgVec<'mcx, u32>>,
+    last_hash: Option<u32>,
 }
 
-impl ProbeBatch {
+impl<'mcx> ProbeBatch<'mcx> {
     pub const fn new() -> Self {
-        ProbeBatch { mode: ProbeBatchMode::Unknown, n: 0, i: 0 }
+        ProbeBatch {
+            mode: ProbeBatchMode::Unknown,
+            n: 0,
+            i: 0,
+            hash_col: u16::MAX,
+            hashes: None,
+            last_hash: None,
+        }
     }
 
     // Rescan invalidates the staged page; the fusibility verdict survives.
     pub fn reset_staged(&mut self) {
         self.n = 0;
         self.i = 0;
+        self.last_hash = None;
     }
 }
 
@@ -1240,6 +1253,7 @@ fn agg_arm<'mcx>(
                     estate,
                     fused_soa_prefix(agg, ss).unwrap_or(0),
                     false,
+                    false,
                 );
                 let outer_slot = ss.ss.ss_ScanTupleSlot;
                 let src = SeqScanBatchSource { ss, outer_slot };
@@ -1830,7 +1844,8 @@ fn hash_join_arm<'mcx>(
     let HashJoinNode { state, outer, hash, probe_batch } = hj;
     let HashSubNode { state: hstate, child } = &mut **hash;
     if probe_batch.mode == ProbeBatchMode::Unknown {
-        probe_batch.mode = probe_batch_probe(state, &mut **outer, estate)?;
+        let m = probe_batch_probe(state, &mut **outer, estate, probe_batch)?;
+        probe_batch.mode = m;
     }
     if probe_batch.mode == ProbeBatchMode::On {
         let PlanStateNode::SeqScan(ss) = &mut **outer else {
@@ -1851,6 +1866,7 @@ fn probe_batch_probe<'mcx>(
     hjs: &::nodehashjoin::HashJoinState<'mcx>,
     outer: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
+    pb: &mut ProbeBatch<'mcx>,
 ) -> PgResult<ProbeBatchMode> {
     use ::execexpr::{Kernel, SlotSrc};
     let PlanStateNode::SeqScan(ss) = outer else { return Ok(ProbeBatchMode::Off) };
@@ -1882,13 +1898,26 @@ fn probe_batch_probe<'mcx>(
             None => 0,
         };
     }
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false);
+    let hash_col = hjs.probe_hash_col();
+    let force = hash_col.is_some_and(|c| (c as i32) < prefix);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, force);
+    if let Some(c) = hash_col {
+        if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| (c as i32) < soa.ncols() as i32)
+        {
+            pb.hash_col = c;
+            let mcx = estate.es_query_cxt;
+            let mut v: PgVec<'mcx, u32> = PgVec::new_in(mcx);
+            v.try_reserve_exact(::exectuples::SOA_MAX_ROWS)
+                .map_err(|_| mcx.oom(::exectuples::SOA_MAX_ROWS * 4))?;
+            pb.hashes = Some(v);
+        }
+    }
     Ok(ProbeBatchMode::On)
 }
 
 struct SeqScanProbeSource<'a, 'mcx> {
     ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
-    cur: &'a mut ProbeBatch,
+    cur: &'a mut ProbeBatch<'mcx>,
 }
 
 impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> {
@@ -1899,6 +1928,10 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
                 let i = self.cur.i;
                 self.cur.i += 1;
                 if ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)? {
+                    self.cur.last_hash = match self.cur.hashes.as_deref() {
+                        Some(h) if (i as usize) < h.len() => Some(h[i as usize]),
+                        _ => None,
+                    };
                     return Ok(Some(self.ss.ss.ss_ScanTupleSlot));
                 }
             }
@@ -1908,12 +1941,38 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
             }
             self.cur.n = n;
             self.cur.i = 0;
+            if let Some(h) = self.cur.hashes.as_mut() {
+                h.clear();
+                if let Some(soa) = ::nodeseqscan::seq_scan_batch_soa(self.ss) {
+                    let col = self.cur.hash_col as usize;
+                    let vals = &soa.col_values(col)[..n as usize];
+                    let nulls = &soa.col_isnull(col)[..n as usize];
+                    for r in 0..n as usize {
+                        // NULL hashes to 0 and fallback rows re-eval per row
+                        // — both the Hash32Var kernel's exact behavior.
+                        if soa.is_fallback(r as u32) {
+                            break;
+                        }
+                        let hv = if nulls[r] {
+                            0
+                        } else {
+                            ::hashfn::hash_bytes_uint32(vals[r].as_u32())
+                        };
+                        h.push(hv);
+                    }
+                }
+            }
         }
     }
 
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         self.cur.reset_staged();
         ::nodeseqscan::exec_rescan_seq_scan(self.ss, estate)
+    }
+
+    #[inline(always)]
+    fn staged_hash(&self) -> Option<u32> {
+        self.cur.last_hash
     }
 }
 
@@ -2589,6 +2648,7 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     estate,
                     hash_build_soa_prefix(hs, ss).unwrap_or(0),
                     false,
+                    false,
                 );
                 match ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot) {
                     Some(result_slot) => {
@@ -2671,7 +2731,8 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 
 // Exempt fields: released by release_owned/the per-node end fns before
 // standard_executor_end forgets the bundle (Drop stays the abort path).
-::mcx::forget_safe_nodrop!(ProbeBatch);
+::mcx::forget_safe_nodrop!(ProbeBatchMode);
+::mcx::forget_safe_struct!(ProbeBatch<'_> { mode, n, i, hash_col, hashes, last_hash });
 ::mcx::forget_safe_struct!(
     PlanStateBase<'_> { plan, ps_ExprContext, ps_ResultTupleSlot;
         ps_ResultTupleDesc, ps_ProjInfo, qual },

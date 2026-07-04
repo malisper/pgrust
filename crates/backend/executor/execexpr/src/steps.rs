@@ -795,6 +795,21 @@ impl<'mcx> ExprState<'mcx> {
         self.kernel
     }
 
+    /// Hash32Var over `src` whose resolved fn is a total low-32 hash
+    /// (hashint4/hashoid: hash_bytes_uint32 of the datum's low 32 bits,
+    /// never errors) — the columnar precompute cover; 0-based key attnum.
+    pub fn hash32var_low32(&self, src: SlotSrc) -> Option<u16> {
+        let Kernel::Hash32Var { src: s, attnum, frame } = self.kernel else {
+            return None;
+        };
+        if s != src {
+            return None;
+        }
+        // SAFETY: mcx-boxed FmgrInfo owned by this state; read-only field.
+        let oid = unsafe { (*self.frames[frame as usize].flinfo.as_ptr()).fn_oid };
+        matches!(oid, 450 | 453).then_some(attnum)
+    }
+
     /// Max attnum this expression demands of `src`'s slot (its FETCHSOME
     /// bound; 0 = none); None = shape unknown to the batch-deform planner.
     pub fn max_fetch(&self, src: SlotSrc) -> Option<i32> {

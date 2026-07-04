@@ -179,6 +179,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     estate: &mut EStateData<'mcx>,
     prefix: i32,
     qual_only: bool,
+    force: bool,
 ) {
     if prefix <= 0 {
         node.batch_soa = None;
@@ -203,7 +204,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     // Break-even: at <=2 fixed columns the deform+gather double-copy loses to
     // the per-row walk (distinct +2.3% instr) unless a bitmap qual skips the
     // gather for non-survivors; group_agg's 3-column prefix wins -4.9%.
-    if qual.is_none() && prefix < 3 {
+    if qual.is_none() && prefix < 3 && !force {
         node.batch_soa = None;
         return;
     }
@@ -298,6 +299,15 @@ pub fn seq_scan_batch_key<'mcx>(
         return None;
     }
     Some((b.soa.col_values(c)[i as usize], b.soa.col_isnull(c)[i as usize]))
+}
+
+/// Staged SoA batch when the full-prefix deform is armed (columnar readers).
+#[inline]
+pub fn seq_scan_batch_soa<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+) -> Option<&'a ::exectuples::SoaBatch<'mcx>> {
+    let b = node.batch_soa.as_deref()?;
+    (!b.qual_only).then_some(&b.soa)
 }
 
 pub fn seq_scan_next_pagebatch<'mcx>(
@@ -478,7 +488,7 @@ fn scan_batch_probe<'mcx>(
     if !::tableam::table_scan_supports_pagebatch(node.ss.ss_currentScanDesc.as_ref().unwrap()) {
         return Ok(false);
     }
-    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1, true);
+    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1, true, false);
     if node.batch_soa.as_deref().is_some_and(|b| b.qual_armed) {
         node.scan_batch = ScanBatchMode::On;
         return Ok(true);

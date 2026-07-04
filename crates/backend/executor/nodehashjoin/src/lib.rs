@@ -37,6 +37,12 @@ fn cfi() -> PgResult<()> {
 pub trait HashJoinOuter<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
+    /// Precomputed hash of the tuple exec_proc just returned; must be
+    /// byte-equal to the outer hash expr (hash32var_low32 cover).
+    #[inline(always)]
+    fn staged_hash(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub struct HashJoinState<'mcx> {
@@ -87,6 +93,11 @@ impl<'mcx> HashJoinState<'mcx> {
         }
         p = p.max(self.proj.max_fetch(SlotSrc::Outer)?);
         Some(p)
+    }
+
+    /// 0-based outer key column when the probe hash is columnar-precomputable.
+    pub fn probe_hash_col(&self) -> Option<u16> {
+        self.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner)
     }
 }
 
@@ -599,11 +610,16 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
             e.reset();
             e.ecxt_outertuple = Some(slot_id);
         }
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-        let r = exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?;
+        let h = match outer.staged_hash() {
+            Some(h) => h,
+            None => {
+                let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+                let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
+                exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?.value.as_u32()
+            }
+        };
         node.hj_OuterNotEmpty = true;
-        Ok(Some(r.value.as_u32()))
+        Ok(Some(h))
     } else {
         let table = hash_state.table.as_mut().expect("hash table built");
         // In outer-join cases the batch file can be empty.
