@@ -4,10 +4,12 @@
 mod tests;
 
 use mcx::Mcx;
+use nodes_core::node_funcs::{expr_collation, expr_typmod};
 use parse_expr::{expr_location, expr_type, transformExpr};
 use parser_small1::{ParseExprKind, ParseNamespaceItem, ParseState};
-use types_core::catalog::{TEXTOID, UNKNOWNOID};
+use types_core::catalog::{RECORDOID, TEXTOID, UNKNOWNOID};
 use types_core::AttrNumber;
+use types_tuple::tupdesc::TupleDescData;
 use types_error::PgResult;
 use types_nodes::rawnodes::{A_Expr_Kind, ColumnRef};
 use types_nodes::{CoercionForm, Node, NodeList, NodeTag, RTEKind, TargetEntry};
@@ -31,7 +33,7 @@ pub fn transformTargetList<'mcx>(
         if expand_star {
             if let Some(cref) = val.as_column_ref() {
                 if cref.fields.last().is_some_and(|f| f.node_tag() == NodeTag::T_A_Star) {
-                    p_target.concat(mcx, &ExpandColumnRefStar(mcx, pstate, cref)?)?;
+                    p_target.concat(mcx, &ExpandColumnRefStar(mcx, pstate, cref, true)?)?;
                     continue;
                 }
             } else if let Some(ind) = val.as_a_indirection() {
@@ -51,10 +53,9 @@ pub fn transformTargetList<'mcx>(
     }
 
     if !pstate.p_multiassign_exprs.is_nil() {
-        panic!(
-            "transformTargetList (parse_target.c): multiassign resjunk attach \
-             (UPDATE tlist) unported — unit backend-parser-parse-target"
-        );
+        debug_assert!(exprKind == ParseExprKind::EXPR_KIND_UPDATE_SOURCE);
+        p_target.concat(mcx, &pstate.p_multiassign_exprs)?;
+        pstate.p_multiassign_exprs = NodeList::nil();
     }
 
     Ok(p_target)
@@ -110,18 +111,13 @@ pub fn transformExpressionList<'mcx>(
     for e in exprlist {
         if let Some(cref) = e.as_column_ref() {
             if cref.fields.last().is_some_and(|f| f.node_tag() == NodeTag::T_A_Star) {
-                panic!(
-                    "transformExpressionList (parse_target.c): foo.* expansion \
-                     (ExpandColumnRefStar make_target_entry=false) unported — \
-                     unit backend-parser-parse-target"
-                );
+                result.concat(mcx, &ExpandColumnRefStar(mcx, pstate, cref, false)?)?;
+                continue;
             }
         } else if let Some(ind) = e.as_a_indirection() {
             if ind.indirection.last().is_some_and(|n| n.node_tag() == NodeTag::T_A_Star) {
-                panic!(
-                    "transformExpressionList (parse_target.c): ExpandIndirectionStar \
-                     unported — unit backend-parser-parse-target"
-                );
+                result.concat(mcx, &ExpandIndirectionStar(mcx, pstate, ind, false, exprKind)?)?;
+                continue;
             }
         }
         let e = if allowDefault && e.node_tag() == NodeTag::T_SetToDefault {
@@ -550,16 +546,15 @@ fn markTargetListOrigin<'mcx>(
                 }
             }
         }
+        // C: RTE_GROUP is unreachable here (the group RTE is not yet added
+        // when targetlist origins are marked); same no-op arm.
         RTEKind::RTE_FUNCTION
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_TABLEFUNC
         | RTEKind::RTE_NAMEDTUPLESTORE
         | RTEKind::RTE_JOIN
-        | RTEKind::RTE_RESULT => {}
-        other @ RTEKind::RTE_GROUP => panic!(
-            "markTargetListOrigin (parse_target.c): {other:?} recursion arm unported — \
-             unit backend-parser-parse-target"
-        ),
+        | RTEKind::RTE_RESULT
+        | RTEKind::RTE_GROUP => {}
     }
     Ok(())
 }
@@ -646,8 +641,11 @@ fn ExpandRowReference<'mcx>(
         }
     }
 
-    let tupdesc = funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
-        .expect("no_error=false returns a descriptor");
+    let tupdesc = match expr.as_var() {
+        Some(var) if var.vartype == RECORDOID => expandRecordVariable(mcx, pstate, expr, 0)?,
+        _ => funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
+            .expect("no_error=false returns a descriptor"),
+    };
     let mut result = NodeList::nil();
     for i in 0..tupdesc.natts as usize {
         let att = tupdesc.attr(i);
@@ -678,13 +676,155 @@ fn ExpandRowReference<'mcx>(
     Ok(result)
 }
 
+// expandRecordVariable (parse_target.c): tuple descriptor for a Var of type
+// RECORD, drilling through subquery/join/CTE RTEs to the defining expression.
+pub fn expandRecordVariable<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    var_node: Node<'mcx>,
+    levelsup: i32,
+) -> PgResult<TupleDescData<'mcx>> {
+    let var = var_node.as_var().expect("expandRecordVariable takes a Var");
+    debug_assert_eq!(var.vartype, RECORDOID);
+    let netlevelsup = var.varlevelsup as i32 + levelsup;
+    let rte = parse_relation::GetRTEByRangeTablePosn(pstate, var.varno, netlevelsup);
+    let attnum = var.varattno;
+
+    if attnum == 0 {
+        // Whole-row reference to an RTE: expand the known fields.
+        let (names, vars) = parse_relation::expandRTE(
+            mcx,
+            rte,
+            var.varno,
+            0,
+            var.varreturningtype,
+            var.location,
+            false,
+        )?;
+        let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, vars.len() as i32)?;
+        for (i, (name, v)) in names.iter().zip(vars.iter()).enumerate() {
+            let label = name.as_string().expect("colnames are String nodes").sval;
+            let attno = (i + 1) as AttrNumber;
+            tupdesc::TupleDescInitEntry(
+                &mut desc,
+                attno,
+                Some(label),
+                expr_type(v),
+                expr_typmod(v),
+                0,
+            )?;
+            tupdesc::TupleDescInitEntryCollation(&mut desc, attno, expr_collation(v));
+        }
+        return Ok(desc);
+    }
+
+    // Default if we can't drill down: inspect the Var itself at the bottom.
+    let mut expr = var_node;
+    match rte.rtekind {
+        // These RTE kinds cannot yield a RECORD-typed column; fall through
+        // and (most likely) fail at the bottom (C same).
+        RTEKind::RTE_RELATION
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_NAMEDTUPLESTORE
+        | RTEKind::RTE_RESULT
+        | RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_GROUP => {}
+        RTEKind::RTE_SUBQUERY => {
+            let subquery = rte.subquery.expect("RTE_SUBQUERY has subquery");
+            let ste = get_tle_by_resno(&subquery.targetList, attnum);
+            let ste = match ste {
+                Some(t) if !t.resjunk => t,
+                _ => return Err(no_such_attribute("subquery", rte, attnum)),
+            };
+            expr = ste.expr;
+            if expr.node_tag() == NodeTag::T_Var {
+                // Recurse with a fake ParseState one level down; the subquery
+                // RTE might be from an outer level, so the fake state's parent
+                // is the pstate that owns the RTE (C same).
+                let mut p = pstate;
+                for _ in 0..netlevelsup {
+                    p = p.parentParseState.expect("GetRTEByRangeTablePosn validated depth");
+                }
+                let mut mypstate = parser_small1::make_parsestate(mcx, Some(p));
+                // C aliases the subquery's rtable pointer; the 16-byte list
+                // carrier is re-materialized (cells copied, nodes shared).
+                mypstate.p_rtable = subquery.rtable.clone_in(mcx)?;
+                return expandRecordVariable(mcx, &mypstate, expr, 0);
+            }
+        }
+        RTEKind::RTE_JOIN => {
+            debug_assert!(attnum > 0 && attnum as usize <= rte.joinaliasvars.len());
+            // C intentionally doesn't strip implicit coercions here.
+            expr = rte.joinaliasvars.nth(attnum as usize - 1);
+            if expr.node_tag() == NodeTag::T_Var {
+                return expandRecordVariable(mcx, pstate, expr, netlevelsup);
+            }
+        }
+        RTEKind::RTE_CTE => {
+            if !rte.self_reference {
+                let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
+                let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
+                let ctequery = cte
+                    .ctequery
+                    .expect("analyzed CTE")
+                    .as_query()
+                    .expect("analyzed CTE is a Query");
+                let ste = get_tle_by_resno(&ctequery.targetList, attnum);
+                let ste = match ste {
+                    Some(t) if !t.resjunk => t,
+                    _ => return Err(no_such_attribute("CTE", rte, attnum)),
+                };
+                expr = ste.expr;
+                if expr.node_tag() == NodeTag::T_Var {
+                    let mut p = pstate;
+                    for _ in 0..(rte.ctelevelsup as i32 + netlevelsup) {
+                        p = p.parentParseState.expect("GetCTEForRTE validated depth");
+                    }
+                    let mut mypstate = parser_small1::make_parsestate(mcx, Some(p));
+                    mypstate.p_rtable = ctequery.rtable.clone_in(mcx)?;
+                    return expandRecordVariable(mcx, &mypstate, expr, 0);
+                }
+            }
+        }
+    }
+
+    Ok(funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
+        .expect("no_error=false returns a descriptor"))
+}
+
+fn get_tle_by_resno<'mcx>(
+    tlist: &NodeList<'mcx>,
+    resno: AttrNumber,
+) -> Option<&'mcx TargetEntry<'mcx>> {
+    tlist
+        .iter()
+        .map(|n| n.as_target_entry().expect("tlist cell"))
+        .find(|t| t.resno == resno)
+}
+
+#[cold]
+fn no_such_attribute(
+    what: &str,
+    rte: &types_nodes::RangeTblEntry<'_>,
+    attnum: AttrNumber,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "{what} {} does not have attribute {attnum}",
+        rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+    )))
+}
+
 fn ExpandColumnRefStar<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     cref: &ColumnRef<'mcx>,
+    make_target_entry: bool,
 ) -> PgResult<NodeList<'mcx>> {
     let fields = cref.fields.as_slice();
     if fields.len() == 1 {
+        // Grammar accepts bare '*' only at SELECT top level (C same assert).
+        debug_assert!(make_target_entry);
         return ExpandAllTables(mcx, pstate, cref.location);
     }
 
@@ -694,14 +834,17 @@ fn ExpandColumnRefStar<'mcx>(
     let (nspname, relname) = match fields.len() {
         2 => (None, field_str(fields[0])),
         3 => (Some(field_str(fields[0])), field_str(fields[1])),
-        4 => panic!(
-            "ExpandColumnRefStar (parse_target.c): catalog-qualified star needs \
-             get_database_name — unit backend-parser-parse-target"
-        ),
-        _ => panic!(
-            "ExpandColumnRefStar (parse_target.c): >4 dotted names — C raises 42601; \
-             arm unported with the catalog-qualified lane"
-        ),
+        4 => {
+            let catname = field_str(fields[0]);
+            let dbname = dbcommands_seams::get_database_name::call(
+                init_small::globals::MyDatabaseId(),
+            )?;
+            if dbname.as_deref() != Some(catname) {
+                return Err(cross_database_reference(pstate, &cref.fields, cref.location));
+            }
+            (Some(field_str(fields[1])), field_str(fields[2]))
+        }
+        _ => return Err(too_many_dotted_names(pstate, &cref.fields, cref.location)),
     };
 
     let mut levels_up = 0;
@@ -726,7 +869,70 @@ fn ExpandColumnRefStar<'mcx>(
         return Err(parse_relation::errorMissingRTE(mcx, pstate, rv));
     };
 
-    ExpandSingleTable(mcx, pstate, nsitem, levels_up, cref.location, true)
+    ExpandSingleTable(mcx, pstate, nsitem, levels_up, cref.location, make_target_entry)
+}
+
+// C NameListToString (namespace.c): dotted join, A_Star renders as "*".
+fn name_list_to_string(fields: &NodeList<'_>) -> String {
+    let mut out = String::new();
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        match f.as_string() {
+            Some(s) => out.push_str(s.sval),
+            None => out.push('*'),
+        }
+    }
+    out
+}
+
+#[cold]
+fn cross_database_reference(
+    pstate: &ParseState<'_, '_>,
+    fields: &NodeList<'_>,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cross-database references are not implemented: {}",
+                name_list_to_string(fields)
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "ExpandColumnRefStar")),
+    )
+}
+
+#[cold]
+fn too_many_dotted_names(
+    pstate: &ParseState<'_, '_>,
+    fields: &NodeList<'_>,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!(
+                "improper qualified name (too many dotted names): {}",
+                name_list_to_string(fields)
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "ExpandColumnRefStar")),
+    )
 }
 
 fn ExpandAllTables<'mcx>(
