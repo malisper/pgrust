@@ -430,6 +430,9 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
 }
 
 fn begin_parallel_ready_xact() {
+    // start_xact_command's job (postgres.c); the worker-side xact assert
+    // requires a real xact_start_timestamp.
+    xact::SetCurrentStatementStartTimestamp();
     xact::StartTransactionCommand().unwrap();
     let snap = snapmgr::GetTransactionSnapshot().unwrap();
     snapmgr::PushActiveSnapshot(&snap).unwrap();
