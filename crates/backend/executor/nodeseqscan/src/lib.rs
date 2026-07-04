@@ -154,12 +154,12 @@ impl<'mcx> SeqScanState<'mcx> {
 }
 
 /// Fused page-batch drive support (upstream batch scan, CF 6176). The caller
-/// owns qual evaluation and must have verified `seq_scan_batch_supported`.
+/// owns qual/projection evaluation and gates its own variant set.
 pub fn seq_scan_batch_supported<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    if !matches!(node.variant, SeqScanVariant::Plain | SeqScanVariant::WithQual) {
+    if matches!(node.variant, SeqScanVariant::Epq) {
         return Ok(false);
     }
     node.ensure_scandesc(estate)?;
