@@ -1344,7 +1344,7 @@ fn reorder_function_arguments<'mcx>(
             Some(na) => {
                 debug_assert!(na.argnumber >= 0 && (na.argnumber as usize) < pronargs);
                 debug_assert!(argarray[na.argnumber as usize].is_none());
-                argarray[na.argnumber as usize] = Some(na.arg);
+                argarray[na.argnumber as usize] = na.arg;
             }
         }
     }
