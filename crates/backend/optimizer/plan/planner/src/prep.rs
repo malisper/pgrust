@@ -48,6 +48,26 @@ pub fn remove_useless_result_rtes<'mcx>(
 ) -> PgResult<()> {
     let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
+    // All-RangeTblRef fast path (SELECT 1 and every no-join query pays this
+    // pass): the recursion is a per-child no-op, so drop RESULT siblings
+    // directly and rebuild only when something dropped.
+    if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
+        let total = f.fromlist.len();
+        let mut dropped = 0usize;
+        let mut fromlist = NodeList::nil();
+        for n in &f.fromlist {
+            if total - dropped > 1 && get_result_relid(parse, n) != 0 {
+                dropped += 1;
+                continue;
+            }
+            fromlist.lappend(mcx, n)?;
+        }
+        if dropped > 0 {
+            parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
+            check_rowmarks_on_result(run, parse);
+        }
+        return Ok(());
+    }
     let mut dropped_outer_joins = types_nodes::bitmapset::Bitmapset::empty();
     let mut slot = QualSlot { node: f.quals, changed: false };
     let mut children: mcx::PgVec<'mcx, Option<Node<'mcx>>> = mcx::PgVec::new_in(mcx);
@@ -87,9 +107,14 @@ pub fn remove_useless_result_rtes<'mcx>(
     if !dropped_outer_joins.is_empty() {
         crate::prepjointree::remove_nulling_relids(parse, &dropped_outer_joins, None)?;
     }
-    // C drops any PlanRowMark on a RESULT RTE (removed or surviving); the
-    // rowmark store is id-indexed here, so removal would dangle ids — loud
-    // until a lane needs it.
+    check_rowmarks_on_result(run, parse);
+    Ok(())
+}
+
+// C drops any PlanRowMark on a RESULT RTE (removed or surviving); the rowmark
+// store is id-indexed here, so removal would dangle ids — loud until a lane
+// needs it.
+fn check_rowmarks_on_result<'mcx>(run: &PlannerRun<'mcx>, parse: &Query<'mcx>) {
     for &id in run.root.rowMarks.iter() {
         let rc = run.rowmark(id);
         let rte = parse
@@ -103,7 +128,6 @@ pub fn remove_useless_result_rtes<'mcx>(
              M2 rowmark lane"
         );
     }
-    Ok(())
 }
 
 struct QualSlot<'mcx> {
