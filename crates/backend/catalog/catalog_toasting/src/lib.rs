@@ -1,5 +1,4 @@
-// toasting.c; bootstrap/binary-upgrade arms and ALTER TABLE's lock cross-check
-// lane (check=true) are unreached here.
+// toasting.c; bootstrap/binary-upgrade arms are unreached here.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -36,16 +35,27 @@ pub fn NewRelationCreateToastTable<'mcx>(
     relOid: Oid,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
-    CheckAndCreateToastTable(mcx, relOid, reloptions)
+    CheckAndCreateToastTable(mcx, relOid, reloptions, AccessExclusiveLock, false)
+}
+
+pub fn AlterTableCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    relOid: Oid,
+    reloptions: Option<&[u8]>,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
+    CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, true)
 }
 
 fn CheckAndCreateToastTable<'mcx>(
     mcx: Mcx<'mcx>,
     relOid: Oid,
     reloptions: Option<&[u8]>,
+    lockmode: types_rel::LOCKMODE,
+    check: bool,
 ) -> PgResult<()> {
-    let rel = table::table_open(mcx, relOid, AccessExclusiveLock)?;
-    create_toast_table(mcx, &rel, reloptions)?;
+    let rel = table::table_open(mcx, relOid, lockmode)?;
+    create_toast_table(mcx, &rel, reloptions, lockmode, check)?;
     rel.close(NoLock)
 }
 
@@ -53,6 +63,8 @@ fn create_toast_table<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     reloptions: Option<&[u8]>,
+    lockmode: types_rel::LOCKMODE,
+    check: bool,
 ) -> PgResult<bool> {
     let relOid = rel.rd_id;
 
@@ -61,6 +73,9 @@ fn create_toast_table<'mcx>(
     }
     if !needs_toast_table(rel) {
         return Ok(false);
+    }
+    if check && lockmode != AccessExclusiveLock {
+        panic!("AccessExclusiveLock required to add toast table.");
     }
 
     let toast_relname = format!("pg_toast_{relOid}");

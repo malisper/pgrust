@@ -242,7 +242,7 @@ fn create_ctas_internal<'mcx>(
     xact::CommandCounterIncrement()?;
     // toast reloptions: WITH (...) is loud in DefineRelation, so the list is
     // nil here and transformRelOptions would yield (Datum) 0.
-    catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
+    catalog_toasting::NewRelationCreateToastTable(mcx, relid, None)?;
     if let Some(query) = view_query.take() {
         commands_view::StoreViewQuery(mcx, relid, query, false)?;
         xact::CommandCounterIncrement()?;

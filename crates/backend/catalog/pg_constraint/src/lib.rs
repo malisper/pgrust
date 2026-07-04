@@ -465,6 +465,7 @@ pub struct ConShape {
     pub coninhcount: i16,
     pub connoinherit: bool,
     pub conislocal: bool,
+    pub conenforced: bool,
     pub convalidated: bool,
     pub conindid: Oid,
     pub confrelid: Oid,
@@ -531,6 +532,7 @@ pub fn findConstraintByName<'mcx>(
                 coninhcount: get(Anum_pg_constraint_coninhcount).as_i16(),
                 connoinherit: get(Anum_pg_constraint_connoinherit).as_bool(),
                 conislocal: get(Anum_pg_constraint_conislocal).as_bool(),
+                conenforced: get(Anum_pg_constraint_conenforced).as_bool(),
                 convalidated: get(Anum_pg_constraint_convalidated).as_bool(),
                 conindid: get(Anum_pg_constraint_conindid).as_oid(),
                 confrelid: get(Anum_pg_constraint_confrelid).as_oid(),
@@ -541,6 +543,59 @@ pub fn findConstraintByName<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     con_rel.close(RowExclusiveLock)?;
     Ok(found)
+}
+
+// The convalidated=true flip shared by the Queue*ConstraintValidation arms
+// (tablecmds.c); DIVERGENCE: C updates the tuple found by the caller's name
+// scan, this re-finds the row by oid (catalog-only, same row).
+pub fn SetConstraintValidated<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let desc = con_rel.descr();
+    let natts = desc.natts as usize;
+    let mut repl_values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
+    let repl_isnull: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+    let mut repl: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+    repl_values[(Anum_pg_constraint_convalidated - 1) as usize] = Datum::from_bool(true);
+    repl[(Anum_pg_constraint_convalidated - 1) as usize] = true;
+    let mut newtup =
+        heaptuple::heap_modify_tuple(mcx, tup, desc, &repl_values, &repl_isnull, &repl)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+    con_rel.close(RowExclusiveLock)
+}
+
+// The QueueCheckConstraintValidation conbin fetch (tablecmds.c).
+pub fn constraint_conbin<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<mcx::PgString<'mcx>> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let mut isnull = false;
+    // SAFETY: varlena column under pg_constraint's descriptor; image live
+    // through the open scan.
+    let d = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_conbin as i32, con_rel.descr(), &mut isnull)
+    };
+    assert!(!isnull, "null conbin for constraint {con_id}");
+    let p = d.as_usize() as *const u8;
+    // SAFETY: live varlena image through its extent.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    let s = mcx::PgString::from_str_in(
+        core::str::from_utf8(payload.as_bytes()).expect("conbin UTF-8"),
+        mcx,
+    )?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(s)
 }
 
 // RenameConstraintById (pg_constraint.c) minus the object-access hook.

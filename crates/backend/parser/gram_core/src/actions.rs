@@ -7548,9 +7548,6 @@ impl<'mcx> Parser<'mcx> {
         {
             panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
         }
-        if out.not_valid {
-            panic!("gram_core: NOT VALID {constr_type} constraints unported");
-        }
         if !out.is_enforced {
             panic!("gram_core: NOT ENFORCED {constr_type} constraints unported");
         }
