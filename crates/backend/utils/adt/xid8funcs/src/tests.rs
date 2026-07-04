@@ -2,7 +2,7 @@ use mcx::MemoryContext;
 
 use crate::*;
 
-fn view(v: &::datum::Varlena<'_>) -> SnapView<'_> {
+fn view<'a>(v: &'a ::datum::Varlena<'_>) -> SnapView<'a> {
     SnapView::new(v.data())
 }
 
