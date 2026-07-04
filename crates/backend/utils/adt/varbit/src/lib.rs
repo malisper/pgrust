@@ -319,6 +319,101 @@ pub fn fc_bitfromint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_usize(img.leak().as_ptr() as usize))
 }
 
+
+// varbit.c bitfromint8: same fill as bitfromint4 with a 64-bit source.
+pub fn bitfromint8_core<'mcx>(mcx: Mcx<'mcx>, a: i64, typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
+    let typmod = if typmod <= 0 || typmod as i64 > VARBITMAXLEN { 1 } else { typmod };
+    let nbits = typmod as usize;
+    let len = varbit_total_len(nbits);
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, len)?;
+    out.extend_from_slice(&::datum::varlena::set_varsize_4b(len));
+    out.extend_from_slice(&typmod.to_ne_bytes());
+    for _ in (VARHDRSZ + VARBITHDRSZ)..len {
+        out.push(0);
+    }
+    let r = &mut out[VARHDRSZ + VARBITHDRSZ..];
+    let mut ri = 0usize;
+    let mut destbitsleft = typmod;
+    let srcbitsleft = 64i32.min(destbitsleft);
+    while destbitsleft >= srcbitsleft + 8 {
+        r[ri] = if a < 0 { 0xff } else { 0 };
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    if destbitsleft > srcbitsleft {
+        let mut val = (a >> (destbitsleft - 8)) as u64;
+        if a < 0 {
+            val |= (!0u64) << (srcbitsleft + 8 - destbitsleft);
+        }
+        r[ri] = (val & 0xff) as u8;
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    while destbitsleft >= 8 {
+        r[ri] = ((a >> (destbitsleft - 8)) & 0xff) as u8;
+        ri += 1;
+        destbitsleft -= 8;
+    }
+    if destbitsleft > 0 {
+        r[ri] = ((a << (8 - destbitsleft)) & 0xff) as u8;
+    }
+    Ok(out)
+}
+
+pub fn fc_bitfromint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = fcinfo.arg(0).as_i64();
+    let typmod = fcinfo.arg(1).as_i32();
+    let mcx = fcinfo.result_mcx();
+    let img = bitfromint8_core(mcx, a, typmod)?;
+    Ok(Datum::from_usize(img.leak().as_ptr() as usize))
+}
+
+// varbit.c bit_cmp: byte memcmp then length.
+fn bit_cmp_payload(a: &[u8], b: &[u8]) -> i32 {
+    let (abits, abytes) = (i32::from_ne_bytes(a[..4].try_into().unwrap()), &a[4..]);
+    let (bbits, bbytes) = (i32::from_ne_bytes(b[..4].try_into().unwrap()), &b[4..]);
+    let n = abytes.len().min(bbytes.len());
+    match abytes[..n].cmp(&bbytes[..n]) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Greater => 1,
+        core::cmp::Ordering::Equal => {
+            if abits != bbits {
+                if abits < bbits { -1 } else { 1 }
+            } else {
+                0
+            }
+        }
+    }
+}
+
+fn fc_bit_cmp_body(fcinfo: &mut Fcinfo, test: fn(i32) -> Datum) -> PgResult<Datum> {
+    // SAFETY: strict fn; args 0/1 are non-null varbit varlenas.
+    let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let b = unsafe { fcinfo.arg_varlena_packed(1)? };
+    Ok(test(bit_cmp_payload(a.data(), b.data())))
+}
+
+macro_rules! bit_cmp_fns {
+    ($($fc:ident $op:tt;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            fc_bit_cmp_body(fcinfo, |c| Datum::from_bool(c $op 0))
+        }
+    )*};
+}
+
+bit_cmp_fns! {
+    fc_biteq ==;
+    fc_bitne !=;
+    fc_bitlt <;
+    fc_bitle <=;
+    fc_bitgt >;
+    fc_bitge >=;
+}
+
+pub fn fc_bitcmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_cmp_body(fcinfo, Datum::from_i32)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -328,7 +423,15 @@ pub const VARBIT_BUILTINS: &[FmgrBuiltin] = &[
     b(1565, "bit_out", 1, fc_bit_out),
     b(1579, "varbit_in", 3, fc_varbit_in),
     b(1580, "varbit_out", 1, fc_varbit_out),
+    b(1581, "biteq", 2, fc_biteq),
+    b(1582, "bitne", 2, fc_bitne),
+    b(1592, "bitge", 2, fc_bitge),
+    b(1593, "bitgt", 2, fc_bitgt),
+    b(1594, "bitle", 2, fc_bitle),
+    b(1595, "bitlt", 2, fc_bitlt),
+    b(1596, "bitcmp", 2, fc_bitcmp),
     b(1683, "bitfromint4", 2, fc_bitfromint4),
+    b(2075, "bitfromint8", 2, fc_bitfromint8),
     b(2902, "varbittypmodin", 1, fc_varbittypmodin),
     b(2919, "bittypmodin", 1, fc_bittypmodin),
     b(2920, "bittypmodout", 1, fc_bittypmodout),
