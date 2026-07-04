@@ -503,11 +503,18 @@ fn canonicalize<'m>(
                 lfc.context = n.fm_node_ptr();
             }
             lfc.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
-            // Entry-owned finfo (C's rng_canonical_finfo); RANGE_INFO is
-            // already loaded, so the callee cannot re-borrow this cell.
-            let mut finfo = pin.rng_canonical_finfo();
-            let r = finfo.invoke(&mut lfc)?;
-            drop(finfo);
+            // Entry-owned finfo (C's rng_canonical_finfo) taken out for the
+            // call: the callee's flinfo_ri re-reads this cell (from_entry),
+            // so holding the RefMut across invoke double-borrows. The
+            // placeholder's InvalidOid fn_oid only reaches the callee's
+            // fn_extra memo, whose canonical fc consumers never read it.
+            let mut finfo = core::mem::replace(
+                &mut *pin.rng_canonical_finfo(),
+                FmgrInfo::unresolved(),
+            );
+            let r = finfo.invoke(&mut lfc);
+            *pin.rng_canonical_finfo() = finfo;
+            let r = r?;
             if let Some(mut n) = node {
                 if n.ctx.error_occurred() {
                     if let Some(e) = esc {
