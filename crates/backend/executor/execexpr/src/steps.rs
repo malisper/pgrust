@@ -267,6 +267,8 @@ pub struct JsonConstructorState {
     pub types: NonNull<Oid>,
     pub scalar_json: Option<NonNull<::adt_json::tojson::TypeCat>>,
     pub scalar_jsonb: Option<NonNull<::adt_jsonb::tojsonb::ValCategory>>,
+}
+
 // C ExprEvalStep d.nulltest_row.rowcache: last-seen rowtype's tupdesc,
 // refreshed from typcache when the header's (type, typmod) changes. `mcx` is
 // the compile mcx restamped 'static; it outlives every eval of this step.

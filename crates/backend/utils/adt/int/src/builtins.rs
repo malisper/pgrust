@@ -184,6 +184,9 @@ pub fn fc_hashint2extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     Ok(Datum::from_u64(::hashfn::hash_bytes_uint32_extended(
         a.value.as_i16() as i32 as u32,
         seed.value.as_u64(),
+    )))
+}
+
 pub fn fc_hashchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_char() as i32 as u32)))
