@@ -23,6 +23,8 @@ static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
+        miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok((typid == INT4OID).then_some(PgTypeShape {
                 typlen: 4,

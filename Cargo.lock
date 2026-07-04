@@ -6948,6 +6948,7 @@ dependencies = [
 name = "nodegroup"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "datum",
  "execexpr",
  "exectuples",
@@ -6955,6 +6956,7 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "postgres_seams",
  "syscache_seams",
  "types_core",
