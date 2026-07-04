@@ -466,7 +466,10 @@ fn array_eq_internal(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<bool> {
-    let mcx = fcinfo.result_mcx();
+    // By-val result; detoast/deconstruct scratch dies with the call (C's
+    // AARR_FREE_IF_COPY), so no armed result frame is required.
+    let scratch = ::mcx::MemoryContext::new_bump("array_eq scratch");
+    let mcx = scratch.mcx();
     let a1 = arg_array_bytes(fcinfo, 0, mcx)?;
     let a2 = arg_array_bytes(fcinfo, 1, mcx)?;
     let collation = fcinfo.fncollation;
@@ -515,7 +518,8 @@ fn array_cmp_internal(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<i32> {
-    let mcx = fcinfo.result_mcx();
+    let scratch = ::mcx::MemoryContext::new_bump("array_cmp scratch");
+    let mcx = scratch.mcx();
     let a1 = arg_array_bytes(fcinfo, 0, mcx)?;
     let a2 = arg_array_bytes(fcinfo, 1, mcx)?;
     let collation = fcinfo.fncollation;
