@@ -1088,13 +1088,10 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
         if key.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR) != 0 {
             debug_assert!(key.sk_flags & SK_SEARCHARRAY != 0 && key.sk_flags & SK_BT_SKIP != 0);
             debug_assert!(required_same_dir || forcenonrequired);
-
-            if forcenonrequired {
-                let trig = *ikey;
-                return bt_advance_array_keys(rel, so, None, tuple, tupnatts, trig, false, frame);
-            }
-            *continuescan = false;
-            return Ok(false);
+            let trig = *ikey;
+            return check_compare_sentinel(
+                rel, so, tuple, tupnatts, trig, forcenonrequired, continuescan, frame,
+            );
         }
 
         if key.sk_flags & SK_ROW_HEADER != 0 {
@@ -1130,7 +1127,7 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
         if is_null {
             if forcenonrequired && key.sk_flags & SK_BT_SKIP != 0 {
                 let trig = *ikey;
-                return bt_advance_array_keys(rel, so, None, tuple, tupnatts, trig, false, frame);
+                return advance_nonrequired_cold(rel, so, tuple, tupnatts, trig, frame);
             }
             if key.sk_flags & SK_BT_NULLS_FIRST != 0 {
                 if (required_same_dir || required_opposite_dir_only)
@@ -1168,6 +1165,41 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
     }
 
     Ok(true)
+}
+
+// Cold-outlined skip-array sentinel arm of _bt_check_compare: keeps the hot
+// per-tuple loop the same test+jump shape as before skip scan landed.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn check_compare_sentinel(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    tuple: ITup,
+    tupnatts: i32,
+    ikey: i32,
+    forcenonrequired: bool,
+    continuescan: &mut bool,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    if forcenonrequired {
+        return bt_advance_array_keys(rel, so, None, tuple, tupnatts, ikey, false, frame);
+    }
+    *continuescan = false;
+    Ok(false)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn advance_nonrequired_cold(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    tuple: ITup,
+    tupnatts: i32,
+    ikey: i32,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    bt_advance_array_keys(rel, so, None, tuple, tupnatts, ikey, false, frame)
 }
 
 // _bt_checkkeys_look_ahead: speculatively probe a later tuple on the page and
