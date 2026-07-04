@@ -1867,6 +1867,34 @@ fn grant_on_function_shapes() {
 }
 
 #[test]
+fn grant_on_parameter_shapes() {
+    use types_nodes::parsenodes::{GrantTargetType, ObjectType};
+    let list = parse("GRANT SET ON PARAMETER work_mem, plperl.on_init TO pg_monitor");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_PARAMETER_ACL);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_OBJECT);
+    assert_eq!(g.objects.len(), 2);
+    assert_eq!(g.objects.nth(0).as_string().unwrap().sval, "work_mem");
+    assert_eq!(g.objects.nth(1).as_string().unwrap().sval, "plperl.on_init");
+    assert_eq!(g.privileges.nth(0).as_access_priv().unwrap().priv_name, Some("set"));
+
+    let list = parse("REVOKE ALL ON PARAMETER work_mem FROM pg_monitor");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(!g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_PARAMETER_ACL);
+    assert!(g.privileges.is_nil());
+}
+
+#[test]
 fn aggregate_output_args_rejected() {
     let err = parse_err("DROP AGGREGATE a(OUT x int)");
     assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
