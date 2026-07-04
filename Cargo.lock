@@ -9504,6 +9504,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "objectaddress_seams",
+ "policy_seams",
  "seam_core",
  "syscache_seams",
  "table",

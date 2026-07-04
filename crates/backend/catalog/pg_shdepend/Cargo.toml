@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 objectaddress_seams = { path = "../objectaddress_seams" }
+seam_core = { path = "../../../_support/seam_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -28,3 +30,4 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+policy_seams = { path = "../../commands/policy_seams" }

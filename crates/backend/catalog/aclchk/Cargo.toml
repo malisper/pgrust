@@ -28,7 +28,10 @@ table = { path = "../../access/table/table" }
 heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
 catalog = { path = "../catalog" }
+types_scan = { path = "../../../_support/types/types_scan" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 dependency_seams = { path = "../dependency_seams" }
 xact = { path = "../../access/transam/xact" }
 miscinit = { path = "../../utils/init/miscinit" }
