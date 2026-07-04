@@ -1303,6 +1303,7 @@ pub fn get_object_address<'mcx>(
                 )?,
                 None,
             ),
+            #[allow(unreachable_patterns)]
             other => unported(&format!("get_object_address {other:?}")),
         };
 
