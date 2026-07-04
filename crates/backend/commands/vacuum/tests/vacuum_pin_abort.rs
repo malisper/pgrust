@@ -639,6 +639,7 @@ fn vacuum_error_mid_scan_abort_releases_all_pins() {
     shmem::init_seams();
     fd::init_seams();
     guc_tables::init_seams();
+    init_small::init_seams();
     guc::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();

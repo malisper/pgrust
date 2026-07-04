@@ -822,6 +822,7 @@ fn vacuum_reclaims_dead_rows_e2e() {
     shmem::init_seams();
     fd::init_seams();
     guc_tables::init_seams();
+    init_small::init_seams();
     guc::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
