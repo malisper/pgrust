@@ -516,6 +516,46 @@ pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
     Ok(dictoid)
 }
 
+pub fn get_conversion_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, conversion_name) = DeconstructQualifiedName(names)?;
+    let mut conoid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            conoid = syscache_seams::lookup_pg_conversion_oid_by_name_nsp::call(
+                conversion_name,
+                namespace_id,
+            )?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            conoid = syscache_seams::lookup_pg_conversion_oid_by_name_nsp::call(
+                conversion_name,
+                namespace_id,
+            )?;
+            if OidIsValid(conoid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(conoid) && !missing_ok {
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "conversion \"{}\" does not exist",
+                names.join(".")
+            ))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    Ok(conoid)
+}
+
 // TypenameGetTypidExtended (namespace.c).
 pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
     recomputeNamespacePath()?;

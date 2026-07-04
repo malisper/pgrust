@@ -25,6 +25,8 @@ subscriptioncmds = { path = "../../commands/subscriptioncmds" }
 commands_alter = { path = "../../commands/alter" }
 commands_dropcmds = { path = "../../commands/dropcmds" }
 collationcmds = { path = "../../commands/collationcmds" }
+conversioncmds = { path = "../../commands/conversioncmds" }
+proclang = { path = "../../commands/proclang" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 commands_tablespace = { path = "../../commands/tablespace" }

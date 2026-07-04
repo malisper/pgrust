@@ -321,6 +321,50 @@ pub fn getObjectDescription(
                 adt_regproc::format_operator(mcx, object.objectId)?
             )))
         }
+        pg_conversion::ConversionRelationId => {
+            let row = scan_one_row(
+                mcx,
+                pg_conversion::ConversionRelationId,
+                pg_conversion::ConversionOidIndexId,
+                object.objectId,
+                |tup, desc| {
+                    (name_from_datum(getattr(tup, 2, desc)), getattr(tup, 3, desc).as_oid())
+                },
+            )?;
+            let Some((conname, connamespace)) = row else {
+                if !missing_ok {
+                    panic!("cache lookup failed for conversion {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let nspname = if catalog_namespace::get_conversion_oid(&[&conname], true)?
+                == object.objectId
+            {
+                None
+            } else {
+                get_namespace_name(connamespace)?
+            };
+            Ok(Some(format!(
+                "conversion {}",
+                quote_qualified(nspname.as_deref(), &conname)
+            )))
+        }
+        proclang::LanguageRelationId => {
+            let row = scan_one_row(
+                mcx,
+                proclang::LanguageRelationId,
+                proclang::LanguageOidIndexId,
+                object.objectId,
+                |tup, desc| name_from_datum(getattr(tup, 2, desc)),
+            )?;
+            let Some(lanname) = row else {
+                if !missing_ok {
+                    panic!("cache lookup failed for language {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!("language {}", quote_qualified(None, &lanname))))
+        }
         OPERATOR_CLASS_RELATION_ID => {
             let Some((opcmethod, opcname, opcnamespace)) = opclass_or_opfamily_row(
                 cache_syscache::cacheinfo::CLAOID,

@@ -1,0 +1,8 @@
+[package]
+name = "pg_rusage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"

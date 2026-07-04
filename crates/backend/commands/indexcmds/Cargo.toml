@@ -77,4 +77,6 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 inval = { path = "../../utils/cache/inval" }
 
+pg_rusage = { path = "../../utils/misc/pg_rusage" }
+
 [dev-dependencies]

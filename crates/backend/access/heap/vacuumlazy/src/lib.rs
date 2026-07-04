@@ -88,6 +88,7 @@ pub struct LVRelState<'a, 'mcx> {
 
     dead_items: PgVec<'mcx, ItemPointerData>,
     dead_items_max_bytes: usize,
+    pvs: Option<vacuumparallel::ParallelVacuumState>,
 
     num_index_scans: i64,
     tuples_deleted: i64,
@@ -191,6 +192,7 @@ pub fn heap_vacuum_rel<'mcx>(
         nonempty_pages: 0,
         dead_items: PgVec::new_in(mcx),
         dead_items_max_bytes: init_small::globals::maintenance_work_mem() as usize * 1024,
+        pvs: None,
         num_index_scans: 0,
         tuples_deleted: 0,
         tuples_frozen: 0,
@@ -212,11 +214,15 @@ pub fn heap_vacuum_rel<'mcx>(
     };
 
     lazy_check_wraparound_failsafe(&mut vacrel)?;
-    if params.nworkers > 0 {
-        unported("dead_items_alloc: parallel vacuum (vacuumparallel.c)");
-    }
+    dead_items_alloc(&mut vacrel, params.nworkers)?;
 
     lazy_scan_heap(&mut vacrel, mcx)?;
+
+    // dead_items_cleanup: ends parallel mode, copying worker stats out first.
+    if let Some(pvs) = vacrel.pvs.take() {
+        vacuumparallel::parallel_vacuum_end(pvs, &mut vacrel.indstats)?;
+    }
+    debug_assert!(!xact::IsInParallelMode());
 
     if vacrel.do_index_cleanup {
         update_relstats_all_indexes(&mut vacrel)?;
@@ -892,24 +898,41 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    for idx in 0..vacrel.nindexes {
-        let istat = vacrel.indstats[idx].take();
-        let new_istat = {
-            let ivinfo = IndexVacuumInfo {
-                index: &vacrel.indrels[idx],
-                heaprel: vacrel.rel,
-                analyze_only: false,
-                estimated_count: true,
-                num_heap_tuples: old_live_tuples,
-                strategy: vacrel.bstrategy.clone(),
+    if vacrel.pvs.is_none() {
+        for idx in 0..vacrel.nindexes {
+            let istat = vacrel.indstats[idx].take();
+            let new_istat = {
+                let ivinfo = IndexVacuumInfo {
+                    index: &vacrel.indrels[idx],
+                    heaprel: vacrel.rel,
+                    analyze_only: false,
+                    estimated_count: true,
+                    num_heap_tuples: old_live_tuples,
+                    strategy: vacrel.bstrategy.clone(),
+                };
+                vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &vacrel.dead_items)?
             };
-            vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &vacrel.dead_items)?
-        };
-        vacrel.indstats[idx] = Some(new_istat);
+            vacrel.indstats[idx] = Some(new_istat);
 
+            if lazy_check_wraparound_failsafe(vacrel)? {
+                allindexes = false;
+                break;
+            }
+        }
+    } else {
+        vacuumparallel::parallel_vacuum_bulkdel_all_indexes(
+            vacrel.pvs.as_mut().expect("checked is_some"),
+            vacrel.mcx,
+            vacrel.rel,
+            &vacrel.indrels,
+            &vacrel.bstrategy,
+            &vacrel.dead_items,
+            old_live_tuples,
+            vacrel.num_index_scans as i32,
+        )?;
+        // Parallel VACUUM gets only the precheck and this postcheck.
         if lazy_check_wraparound_failsafe(vacrel)? {
             allindexes = false;
-            break;
         }
     }
 
@@ -930,20 +953,66 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let reltuples = vacrel.new_rel_tuples;
     let estimated_count = vacrel.scanned_pages < vacrel.rel_pages;
 
-    for idx in 0..vacrel.nindexes {
-        let istat = vacrel.indstats[idx].take();
-        let new_istat = {
-            let ivinfo = IndexVacuumInfo {
-                index: &vacrel.indrels[idx],
-                heaprel: vacrel.rel,
-                analyze_only: false,
-                estimated_count,
-                num_heap_tuples: reltuples,
-                strategy: vacrel.bstrategy.clone(),
+    if vacrel.pvs.is_none() {
+        for idx in 0..vacrel.nindexes {
+            let istat = vacrel.indstats[idx].take();
+            let new_istat = {
+                let ivinfo = IndexVacuumInfo {
+                    index: &vacrel.indrels[idx],
+                    heaprel: vacrel.rel,
+                    analyze_only: false,
+                    estimated_count,
+                    num_heap_tuples: reltuples,
+                    strategy: vacrel.bstrategy.clone(),
+                };
+                vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat)?
             };
-            vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat)?
-        };
-        vacrel.indstats[idx] = new_istat;
+            vacrel.indstats[idx] = new_istat;
+        }
+    } else {
+        vacuumparallel::parallel_vacuum_cleanup_all_indexes(
+            vacrel.pvs.as_mut().expect("checked is_some"),
+            vacrel.mcx,
+            vacrel.rel,
+            &vacrel.indrels,
+            &vacrel.bstrategy,
+            reltuples,
+            vacrel.num_index_scans as i32,
+            estimated_count,
+        )?;
+    }
+    Ok(())
+}
+
+// dead_items_alloc: start parallel vacuum when requested and profitable. The
+// serial dead-items vec is already allocated in LVRelState (flat-vec
+// divergence); under parallel it stays the accumulation buffer and a snapshot
+// crosses to workers per pass.
+fn dead_items_alloc(vacrel: &mut LVRelState<'_, '_>, nworkers: i32) -> PgResult<()> {
+    if nworkers >= 0 && vacrel.nindexes > 1 && vacrel.do_index_vacuuming {
+        if vacrel.rel.uses_local_buffers() {
+            if nworkers > 0 {
+                elog::ereport(::types_error::WARNING)
+                    .errmsg(format!(
+                        "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
+                        vacrel.rel.name()
+                    ))
+                    .finish(::types_error::ErrorLocation::new(
+                        "vacuumlazy.c",
+                        3499,
+                        "dead_items_alloc",
+                    ))?;
+            }
+        } else {
+            let vac_work_mem = init_small::globals::maintenance_work_mem();
+            vacrel.pvs = vacuumparallel::parallel_vacuum_init(
+                &vacrel.indrels,
+                nworkers,
+                vac_work_mem,
+                &vacrel.bstrategy,
+                vacrel.rel.rd_id,
+            )?;
+        }
     }
     Ok(())
 }

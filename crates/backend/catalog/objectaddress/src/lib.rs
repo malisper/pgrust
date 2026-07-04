@@ -390,6 +390,10 @@ fn get_object_address_unqualified<'mcx>(
             catalog::ParameterAclRelationId,
             pg_parameter_acl::ParameterAclLookup(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_LANGUAGE => Ok(ObjectAddress::set(
+            proclang::LanguageRelationId,
+            proclang::get_language_oid(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
 }
@@ -727,6 +731,17 @@ pub fn get_object_address<'mcx>(
                 let oid = catalog_namespace::get_collation_oid_list(names, missing_ok)?;
                 (ObjectAddress::set(CollationRelationId, oid), None)
             }
+            OBJECT_CONVERSION => {
+                let names = object.as_list().expect("conversion object is a name list");
+                let parts: Vec<&str> = names
+                    .iter()
+                    .map(|n| {
+                        n.as_string().expect("qualified name component is a String node").sval
+                    })
+                    .collect();
+                let oid = catalog_namespace::get_conversion_oid(&parts, missing_ok)?;
+                (ObjectAddress::set(pg_conversion::ConversionRelationId, oid), None)
+            }
             OBJECT_OPCLASS | OBJECT_OPFAMILY => {
                 let names = object.as_list().expect("opclass object is a name list");
                 (get_object_address_opcf(mcx, objtype, names, missing_ok)?, None)
@@ -837,11 +852,19 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
             address.objectId,
             Anum_pg_opfamily_opfnamespace,
         ),
+        pg_conversion::ConversionRelationId => syscache_oid_field(
+            cache_syscache::cacheinfo::CONVOID,
+            address.objectId,
+            Anum_pg_conversion_connamespace,
+        ),
+        // pg_language rows carry no namespace.
+        proclang::LanguageRelationId => Ok(InvalidOid),
         other => unported(&format!("get_object_namespace class {other}")),
     }
 }
 
 const Anum_pg_operator_oprnamespace: i32 = 3;
+const Anum_pg_conversion_connamespace: i32 = 3;
 const Anum_pg_opclass_opcnamespace: i32 = 4;
 const Anum_pg_opfamily_opfnamespace: i32 = 4;
 
@@ -900,6 +923,12 @@ pub fn check_object_ownership<'mcx>(
                     objtype,
                     &NameListToString(&owa.objname),
                 )?;
+            }
+        }
+        ObjectType::OBJECT_CONVERSION => {
+            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
+                let names = object.as_list().expect("conversion object is a name list");
+                aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, &NameListToString(names))?;
             }
         }
         ObjectType::OBJECT_DATABASE

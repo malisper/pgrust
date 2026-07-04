@@ -1,0 +1,28 @@
+[package]
+name = "proclang"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "proclang"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+heaptuple = { path = "../../access/common/heaptuple" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+miscinit = { path = "../../utils/init/miscinit" }
+parse_func = { path = "../../parser/parse_func" }
+pg_depend = { path = "../../catalog/pg_depend" }
+superuser = { path = "../../utils/misc/superuser" }
+table = { path = "../../access/table/table" }

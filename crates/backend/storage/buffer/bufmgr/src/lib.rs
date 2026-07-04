@@ -391,6 +391,8 @@ pub fn init_seams() {
     bufmgr_seams::incr_buffer_ref_count::set(pin::IncrBufferRefCount);
     bufmgr_seams::get_access_strategy::set(freelist::GetAccessStrategy);
     bufmgr_seams::free_access_strategy::set(freelist::FreeAccessStrategy);
+    bufmgr_seams::get_access_strategy_with_size::set(freelist::GetAccessStrategyWithSize);
+    bufmgr_seams::get_access_strategy_buffer_count::set(freelist::GetAccessStrategyBufferCount);
     bufmgr_seams::relation_get_number_of_blocks_in_fork::set(RelationGetNumberOfBlocksInFork);
     bufmgr_seams::drop_relation_buffers::set(drop_buffers::DropRelationBuffers);
     bufmgr_seams::drop_relations_all_buffers::set(drop_buffers::DropRelationsAllBuffers);

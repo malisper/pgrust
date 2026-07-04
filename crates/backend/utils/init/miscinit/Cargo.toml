@@ -23,6 +23,7 @@ guc_tables = { path = "../../misc/guc_tables" }
 guc_seams = { path = "../../misc/guc_seams" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 inval_seams = { path = "../../cache/inval_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }

@@ -51,6 +51,7 @@ planner = { path = "../../optimizer/plan/planner" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }
+elog = { path = "../../utils/error/elog" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 exectuples = { path = "../../executor/exectuples" }
@@ -60,3 +61,4 @@ init_small = { path = "../../utils/init/init_small" }
 guc = { path = "../../utils/misc/guc" }
 inval = { path = "../../utils/cache/inval" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pg_rusage = { path = "../../utils/misc/pg_rusage" }

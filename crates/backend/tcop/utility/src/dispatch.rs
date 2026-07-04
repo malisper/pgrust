@@ -1318,6 +1318,22 @@ fn slow_switch<'mcx>(
             }
             Ok(None)
         }
+        T_CreateConversionStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateConversionStmt>()
+                .expect("CreateConversionStmt");
+            let address = conversioncmds::CreateConversionCommand(mcx, stmt)?;
+            Ok(Some(address))
+        }
+        T_CreatePLangStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreatePLangStmt>()
+                .expect("CreatePLangStmt");
+            let address = proclang::CreateProceduralLanguage(mcx, stmt)?;
+            Ok(Some(address))
+        }
         T_AlterTSDictionaryStmt => {
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node

@@ -22,11 +22,13 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_dest = { path = "../../../_support/types/types_dest" }
 elog = { path = "../../utils/error/elog" }
 execmain_seams = { path = "../../executor/execmain_seams" }
+explain_dr = { path = "../explain_dr" }
 instrument = { path = "../../executor/instrument" }
 exectuples_output = { path = "../../executor/exectuples_output" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+queryjumble = { path = "../../nodes/queryjumble" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 keywords = { path = "../../../common/keywords" }
 nodes_core = { path = "../../nodes/nodes_core" }

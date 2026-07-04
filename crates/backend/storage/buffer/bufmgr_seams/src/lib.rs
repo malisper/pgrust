@@ -155,6 +155,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_access_strategy_with_size(
+        btype: types_storage::buf::BufferAccessStrategyType,
+        ring_size_kb: i32,
+    ) -> BufferAccessStrategy
+);
+
+seam_core::seam!(
+    pub fn get_access_strategy_buffer_count(strategy: &BufferAccessStrategy) -> i32
+);
+
+seam_core::seam!(
     pub fn relation_get_number_of_blocks_in_fork<'a, 'mcx>(
         rel: &'a types_rel::RelationData<'mcx>,
         fork_num: ForkNumber,

@@ -891,6 +891,25 @@ pub struct CommentStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CreateConversionStmt<'mcx> {
+    pub conversion_name: NodeList<'mcx>,
+    pub for_encoding_name: Option<&'mcx str>,
+    pub to_encoding_name: Option<&'mcx str>,
+    pub func_name: NodeList<'mcx>,
+    pub def: bool,
+}
+
+#[derive(Default)]
+pub struct CreatePLangStmt<'mcx> {
+    pub replace: bool,
+    pub plname: Option<&'mcx str>,
+    pub plhandler: NodeList<'mcx>,
+    pub plinline: NodeList<'mcx>,
+    pub plvalidator: NodeList<'mcx>,
+    pub pltrusted: bool,
+}
+
+#[derive(Default)]
 pub struct DefineStmt<'mcx> {
     pub kind: ObjectType,
     pub oldstyle: bool,
@@ -1604,6 +1623,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CTECycleClause<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateConversionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateConversionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatePLangStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatePLangStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ClusterStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ClusterStmt;

@@ -916,6 +916,44 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        ConversionRelationId_own => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::CONVOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for conversion {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::CONVOID,
+                &tuple,
+                ANUM_PG_CONVERSION_CONOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        LanguageRelationId_own => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::LANGOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for language {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::LANGOID,
+                &tuple,
+                ANUM_PG_LANGUAGE_LANOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
         NAMESPACE_RELATION_ID => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::NAMESPACEOID,
@@ -973,6 +1011,9 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
 }
 
 
+const ConversionRelationId_own: Oid = 2607;
+const LanguageRelationId_own: Oid = 2612;
+const ANUM_PG_CONVERSION_CONOWNER: i32 = 4;
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
 const OperatorRelationId: Oid = 2617;

@@ -36,7 +36,7 @@ pub use temp::{
 
 pub use lookup::{
     get_collation_oid, get_collation_oid_list, get_namespace_oid, get_ts_config_oid,
-    get_ts_dict_oid, is_encoding_supported_by_icu, CheckSetNamespace, DeconstructQualifiedName,
+    get_conversion_oid, get_ts_dict_oid, is_encoding_supported_by_icu, CheckSetNamespace, DeconstructQualifiedName,
     FuncCandidate, FuncnameGetCandidates, FuncnameGetCandidatesExtended, LookupCreationNamespace,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
     OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,

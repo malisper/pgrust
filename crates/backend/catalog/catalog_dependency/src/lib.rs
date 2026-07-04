@@ -883,6 +883,12 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             drop_row_by_oid(mcx, AccessMethodRelationId, AmOidIndexId, object.objectId)?
         }
         CastRelationId => drop_row_by_oid(mcx, CastRelationId, CastOidIndexId, object.objectId)?,
+        ConversionRelationId => {
+            drop_row_by_oid(mcx, ConversionRelationId, ConversionOidIndexId, object.objectId)?
+        }
+        LanguageRelationId => {
+            drop_row_by_oid(mcx, LanguageRelationId, LanguageOidIndexId, object.objectId)?
+        }
         TransformRelationId => {
             drop_row_by_oid(mcx, TransformRelationId, TransformOidIndexId, object.objectId)?
         }
@@ -934,6 +940,10 @@ const AccessMethodRelationId: Oid = 2601;
 const AmOidIndexId: Oid = 2652;
 const CastRelationId: Oid = 2605;
 const CastOidIndexId: Oid = 2660;
+const ConversionRelationId: Oid = 2607;
+const ConversionOidIndexId: Oid = 2670;
+const LanguageRelationId: Oid = 2612;
+const LanguageOidIndexId: Oid = 2682;
 const TransformRelationId: Oid = 3576;
 const TransformOidIndexId: Oid = 3574;
 const TSDictionaryRelationId: Oid = 3600;

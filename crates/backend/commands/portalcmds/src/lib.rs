@@ -52,9 +52,6 @@ pub fn PerformCursorOpen(
             .into());
     }
 
-    // C: JumbleQuery + post_parse_analyze_hook — compute_query_id is off at
-    // boot and no hook surface exists.
-
     // C copies the finished plan into portalContext (portalcmds.c:109); node
     // deep-copy is unported, so the plan is DERIVED inside a portal-owned
     // arena instead: re-parse this DECLARE's own statement text and run
@@ -97,8 +94,15 @@ pub fn PerformCursorOpen(
     .flatten()
     .ok_or_else(non_select_in_declare)?;
     // SAFETY: as above; no derived refs are live.
-    let query = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+    let mut query = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .ok_or_else(non_select_in_declare)?;
+
+    // C jumbles the DECLARE's contained query at entry; the re-parsed tree is
+    // identical, so the queryId matches. post_parse_analyze_hook: no plugin
+    // surface exists.
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(pmcx, &mut query)?;
+    }
 
     let rewritten = rewrite_handler_seams::query_rewrite::call(pmcx, query)?;
     if rewritten.len() != 1 {

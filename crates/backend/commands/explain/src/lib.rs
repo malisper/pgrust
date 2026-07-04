@@ -58,16 +58,6 @@ pub fn init_seams() {
     });
 }
 
-// C IsQueryIdEnabled (queryjumble.h): the AUTO arm reads query_id_enabled,
-// which only unported jumble consumers ever set.
-fn is_query_id_enabled() -> bool {
-    use guc_tables::consts::{COMPUTE_QUERY_ID_ON, COMPUTE_QUERY_ID_REGRESS};
-    matches!(
-        guc_tables::backing::compute_query_id(),
-        COMPUTE_QUERY_ID_ON | COMPUTE_QUERY_ID_REGRESS
-    )
-}
-
 // C signature takes a ParseState; its uses arrive as query_string and
 // query_env (error cursor positions are omitted repo-wide).
 pub fn ExplainQuery<'mcx>(
@@ -82,17 +72,17 @@ pub fn ExplainQuery<'mcx>(
     ParseExplainOptionList(&mut es, mcx, &stmt.options)?;
 
     let query_node = stmt.query.expect("ExplainQuery: stmt->query is NULL");
-    if is_query_id_enabled() {
-        panic!("ExplainQuery (explain.c): JumbleQuery unported — compute_query_id is on");
-    }
-    // post_parse_analyze_hook: no plugin surface exists.
 
     // C rewrites stmt->query through the shared pointer and never reads it
     // again outside the plancache-held EXPLAIN EXECUTE path (loud upstream):
     // move the Query out of the node.
     // SAFETY: this call holds the only live access to the ExplainStmt tree.
-    let query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+    let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("ExplainQuery: statement is not an analyzed Query");
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
+    }
+    // post_parse_analyze_hook: no plugin surface exists.
     let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
 
     ExplainBeginOutput(&mut es);
@@ -352,7 +342,6 @@ fn ExplainOnePlanRef<'mcx>(
     bufusage: Option<&BufferUsage>,
 ) -> PgResult<()> {
     debug_assert!(pstmt.commandType != CmdType::CMD_UTILITY);
-    debug_assert_eq!(es.serialize, EXPLAIN_SERIALIZE_NONE);
 
     let mut instrument_option = 0;
     if es.analyze && es.timing {
@@ -378,13 +367,18 @@ fn ExplainOnePlanRef<'mcx>(
     snapmgr::PushCopiedSnapshot(&snapmgr::GetActiveSnapshot())?;
     snapmgr::UpdateActiveSnapshotCommandId()?;
 
-    // C: dest = None_Receiver (no CTAS/SERIALIZE receivers in this lane).
+    // C: into's CreateIntoRelDestReceiver arm is loud upstream (no CTAS lane).
+    let cmd_dest = if es.serialize != EXPLAIN_SERIALIZE_NONE {
+        types_dest::CommandDest::ExplainSerialize
+    } else {
+        types_dest::CommandDest::None
+    };
     let qd = execmain_seams::create_query_desc::call(
         pstmt,
         query_string,
         Some(snapmgr::GetActiveSnapshot()),
         None,
-        types_dest::CommandDest::None,
+        cmd_dest,
         params,
         query_env,
         instrument_option,
@@ -396,9 +390,19 @@ fn ExplainOnePlanRef<'mcx>(
     }
     execmain_seams::executor_start::call(qd, eflags)?;
 
+    let mut serializeMetrics = explain_dr::SerializeMetrics::default();
     if es.analyze {
         // CTAS WITH NO DATA's NoMovement arm is loud upstream (no CTAS lane).
-        let mut dest = tcop_dest::NONE_RECEIVER;
+        let mut dest = if es.serialize != EXPLAIN_SERIALIZE_NONE {
+            DestReceiver::ExplainSerialize(explain_dr::CreateExplainSerializeDestReceiver(
+                mcx,
+                es.serialize == EXPLAIN_SERIALIZE_BINARY,
+                es.timing,
+                es.buffers,
+            ))
+        } else {
+            DestReceiver::DoNothing
+        };
         execmain_seams::executor_run::call(
             qd,
             types_scan::sdir::ScanDirection::ForwardScanDirection,
@@ -406,6 +410,11 @@ fn ExplainOnePlanRef<'mcx>(
             &mut dest,
         )?;
         execmain_seams::executor_finish::call(qd)?;
+        // C: GetSerializationMetrics(dest) before dest->rDestroy(dest); the
+        // IntoRel else-arm (all-zero metrics) is the initializer above.
+        if let DestReceiver::ExplainSerialize(dr) = &dest {
+            serializeMetrics = dr.metrics;
+        }
         totaltime += elapsed_time(&starttime);
     }
 
@@ -438,6 +447,10 @@ fn ExplainOnePlanRef<'mcx>(
         panic!("ExplainPrintJITSummary (explain.c): JIT display unported (jit lane)");
     }
 
+    if es.serialize != EXPLAIN_SERIALIZE_NONE {
+        ExplainPrintSerialize(es, &serializeMetrics);
+    }
+
     starttime = instrument::instr_time_current();
     execmain_seams::executor_end::call(qd)?;
     qd_owner.disarm();
@@ -460,6 +473,59 @@ fn elapsed_time(starttime: &types_core::instrument::instr_time) -> f64 {
     let mut endtime = instrument::instr_time_current();
     endtime.subtract(*starttime);
     endtime.get_double()
+}
+
+// explain.c BYTES_TO_KILOBYTES.
+fn bytes_to_kilobytes(b: u64) -> u64 {
+    (b + 1023) / 1024
+}
+
+// explain.c ExplainPrintSerialize.
+fn ExplainPrintSerialize(es: &mut ExplainState<'_>, metrics: &explain_dr::SerializeMetrics) {
+    let format = if es.serialize == EXPLAIN_SERIALIZE_TEXT {
+        "text"
+    } else {
+        debug_assert_eq!(es.serialize, EXPLAIN_SERIALIZE_BINARY);
+        "binary"
+    };
+
+    ExplainOpenGroup("Serialization", Some("Serialization"), true, es);
+
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        ExplainIndentText(es);
+        if es.timing {
+            append!(
+                es,
+                "Serialization: time={:.3} ms  output={}kB  format={}\n",
+                1000.0 * metrics.timeSpent.get_double(),
+                bytes_to_kilobytes(metrics.bytesSent),
+                format
+            );
+        } else {
+            append!(
+                es,
+                "Serialization: output={}kB  format={}\n",
+                bytes_to_kilobytes(metrics.bytesSent),
+                format
+            );
+        }
+        if es.buffers && peek_buffer_usage(es, &metrics.bufferUsage) {
+            es.indent += 1;
+            show_buffer_usage(es, &metrics.bufferUsage);
+            es.indent -= 1;
+        }
+    } else {
+        if es.timing {
+            ExplainPropertyFloat("Time", Some("ms"), 1000.0 * metrics.timeSpent.get_double(), 3, es);
+        }
+        ExplainPropertyUInteger("Output Volume", Some("kB"), bytes_to_kilobytes(metrics.bytesSent), es);
+        ExplainPropertyText("Format", format, es);
+        if es.buffers {
+            show_buffer_usage(es, &metrics.bufferUsage);
+        }
+    }
+
+    ExplainCloseGroup("Serialization", Some("Serialization"), true, es);
 }
 
 pub(crate) fn peek_buffer_usage(es: &ExplainState<'_>, usage: &BufferUsage) -> bool {

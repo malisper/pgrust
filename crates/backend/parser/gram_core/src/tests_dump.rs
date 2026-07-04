@@ -505,6 +505,23 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "portalname", f.portalname);
         bool_field(out, "ismove", f.ismove);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateConversionStmt>() {
+        out.push_str("{CREATECONVERSIONSTMT");
+        list_field(out, "conversion_name", &c.conversion_name);
+        string_field(out, "for_encoding_name", c.for_encoding_name);
+        string_field(out, "to_encoding_name", c.to_encoding_name);
+        list_field(out, "func_name", &c.func_name);
+        bool_field(out, "def", c.def);
+        out.push('}');
+    } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::CreatePLangStmt>() {
+        out.push_str("{CREATEPLANGSTMT");
+        bool_field(out, "replace", p.replace);
+        string_field(out, "plname", p.plname);
+        list_field(out, "plhandler", &p.plhandler);
+        list_field(out, "plinline", &p.plinline);
+        list_field(out, "plvalidator", &p.plvalidator);
+        bool_field(out, "pltrusted", p.pltrusted);
+        out.push('}');
     } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DefineStmt>() {
         out.push_str("{DEFINESTMT");
         int_field(out, "kind", d.kind as i32);
@@ -1500,6 +1517,18 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "typeMod", st.typeMod);
         int_field(out, "collation", st.collation as i32);
         int_field(out, "location", st.location);
+        out.push('}');
+    } else if let Some(v) = n.as_vacuum_stmt() {
+        out.push_str("{VACUUMSTMT");
+        list_field(out, "options", &v.options);
+        list_field(out, "rels", &v.rels);
+        bool_field(out, "is_vacuumcmd", v.is_vacuumcmd);
+        out.push('}');
+    } else if let Some(v) = n.as_vacuum_relation() {
+        out.push_str("{VACUUMRELATION");
+        node_field(out, "relation", v.relation);
+        int_field(out, "oid", v.oid as i32);
+        list_field(out, "va_cols", &v.va_cols);
         out.push('}');
     } else if let Some(c) = n.as_current_of_expr() {
         out.push_str("{CURRENTOFEXPR");

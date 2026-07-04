@@ -19,6 +19,9 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 tableam_vocab = { path = "../../table/tableam_vocab" }
 tableam_seams = { path = "../../table/tableam_seams" }
 commands_vacuum = { path = "../../../commands/vacuum" }
+vacuumparallel = { path = "../../../commands/vacuumparallel" }
+xact = { path = "../../transam/xact" }
+elog = { path = "../../../utils/error/elog" }
 nbtree = { path = "../../nbtree/nbtree" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 vacuum_seams = { path = "../../../commands/vacuum_seams" }

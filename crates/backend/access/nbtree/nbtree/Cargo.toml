@@ -35,6 +35,7 @@ transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 xact = { path = "../../transam/xact" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 heaptuple = { path = "../../common/heaptuple" }
 tableam = { path = "../../table/tableam" }
 freespace = { path = "../../../storage/freespace/freespace" }

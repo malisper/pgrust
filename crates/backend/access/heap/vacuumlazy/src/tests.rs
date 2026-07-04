@@ -286,6 +286,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         lpdead_item_pages: 1,
         nonempty_pages: 0,
         dead_items: PgVec::new_in(mcx),
+        pvs: None,
         dead_items_max_bytes: 64 * 1024 * 1024,
         num_index_scans: 1,
         tuples_deleted: 0,

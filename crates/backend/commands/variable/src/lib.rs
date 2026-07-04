@@ -15,7 +15,8 @@ use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
 use types_core::{BackendType, InvalidOid, Oid, XACT_SERIALIZABLE};
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, LOG, NOTICE,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE,
+    ERRCODE_UNDEFINED_OBJECT, LOG, NOTICE,
 };
 use types_guc::{GucSource, PGC_S_DEFAULT, PGC_S_INTERACTIVE, PGC_S_TEST};
 
@@ -34,9 +35,15 @@ fn unported(what: &str) -> ! {
     panic!("commands/variable.c hook arm not ported: {what}");
 }
 
-// parallel.c is unported; no parallel worker can exist in this backend yet.
-const INITIALIZING_PARALLEL_WORKER: bool = false;
-const IS_PARALLEL_WORKER: bool = false;
+fn initializing_parallel_worker() -> bool {
+    parallel_seams::initializing_parallel_worker::is_installed()
+        && parallel_seams::initializing_parallel_worker::call()
+}
+
+fn is_parallel_worker() -> bool {
+    parallel_seams::is_parallel_worker::is_installed()
+        && parallel_seams::is_parallel_worker::call()
+}
 
 fn parse_datestyle(
     value: &str,
@@ -333,7 +340,7 @@ pub fn check_transaction_read_only(
     if !*newval
         && xact::XactReadOnly()
         && xact::IsTransactionState()
-        && !INITIALIZING_PARALLEL_WORKER
+        && !initializing_parallel_worker()
     {
         if xact::IsSubTransaction() {
             GUC_check_errcode(ERRCODE_ACTIVE_SQL_TRANSACTION);
@@ -364,7 +371,7 @@ pub fn check_transaction_isolation(
     let new_level = *newval;
     if new_level != xact::XactIsoLevel()
         && xact::IsTransactionState()
-        && !INITIALIZING_PARALLEL_WORKER
+        && !initializing_parallel_worker()
     {
         if snapmgr::FirstSnapshotSet() {
             GUC_check_errcode(ERRCODE_ACTIVE_SQL_TRANSACTION);
@@ -393,7 +400,7 @@ pub fn check_transaction_deferrable(
     _extra: &mut Option<GucHookExtra>,
     _source: GucSource,
 ) -> PgResult<bool> {
-    if INITIALIZING_PARALLEL_WORKER {
+    if initializing_parallel_worker() {
         return Ok(true);
     }
     if xact::IsSubTransaction() {
@@ -446,7 +453,15 @@ pub fn check_client_encoding(
     }
     let canonical_name = mbutils::pg_encoding_to_char(encoding);
 
-    if !IS_PARALLEL_WORKER && mbutils::PrepareClientEncoding(encoding)? < 0 {
+    // Workers send data to the leader in the database encoding; accept the
+    // leader's setting during startup, reject any later change.
+    if is_parallel_worker() && !initializing_parallel_worker() {
+        GUC_check_errcode(ERRCODE_INVALID_TRANSACTION_STATE);
+        GUC_check_errdetail("Cannot change \"client_encoding\" during a parallel operation.");
+        return Ok(false);
+    }
+
+    if !is_parallel_worker() && mbutils::PrepareClientEncoding(encoding)? < 0 {
         if xact::IsTransactionState() {
             GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
             GUC_check_errdetail(format!(
@@ -472,7 +487,7 @@ pub fn assign_client_encoding(_newval: Option<&str>, extra: Option<&GucHookExtra
     let &encoding = extra
         .and_then(|e| e.downcast_ref::<i32>())
         .expect("assign_client_encoding extra");
-    if IS_PARALLEL_WORKER {
+    if is_parallel_worker() {
         return;
     }
     match mbutils::SetClientEncoding(encoding) {
@@ -497,6 +512,16 @@ pub fn check_session_authorization(
     let Some(value) = newval.clone() else {
         return Ok(true);
     };
+
+    if initializing_parallel_worker() {
+        // Copy the leader's state even if it no longer matches the catalogs;
+        // ParallelWorkerMain already installed the right OID + superuser bit.
+        *extra = Some(Box::new(RoleAuthExtra {
+            roleid: miscinit::GetSessionUserId(),
+            is_superuser: miscinit::GetSessionUserIsSuperuser(),
+        }));
+        return Ok(true);
+    }
 
     if !xact::IsTransactionState() {
         return Ok(false);
@@ -557,6 +582,10 @@ pub fn check_role(
     if value == "none" {
         roleid = InvalidOid;
         is_superuser = false;
+    } else if initializing_parallel_worker() {
+        // Copy the leader's state even if it no longer matches the catalogs.
+        roleid = miscinit::GetCurrentRoleId();
+        is_superuser = guc_tables::vars::current_role_is_superuser.read();
     } else {
         if !xact::IsTransactionState() {
             return Ok(false);
