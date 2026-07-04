@@ -594,6 +594,18 @@ impl NodeEqual for DistinctExpr<'_> {
     }
 }
 
+impl NodeEqual for crate::primnodes::NullIfExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.opno == b.opno
+            && (self.opfuncid == b.opfuncid || self.opfuncid == 0 || b.opfuncid == 0)
+            && self.opresulttype == b.opresulttype
+            && self.opretset == b.opretset
+            && self.opcollid == b.opcollid
+            && self.inputcollid == b.inputcollid
+            && self.args.node_equal(&b.args)
+    }
+}
+
 impl NodeEqual for CollateClause<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         equal_opt(self.arg, b.arg) && self.collname.node_equal(&b.collname)
