@@ -6965,6 +6965,7 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]

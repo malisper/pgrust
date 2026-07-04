@@ -146,7 +146,7 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_XmlExpr => transformXmlExpr(mcx, pstate, expr),
         NodeTag::T_XmlSerialize => transformXmlSerialize(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
-        NodeTag::T_CurrentOfExpr => transformCurrentOfExpr(pstate, expr),
+        NodeTag::T_CurrentOfExpr => transformCurrentOfExpr(mcx, pstate, expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
         NodeTag::T_SetToDefault => Err(default_not_allowed(
             pstate,
@@ -160,21 +160,50 @@ pub fn transformExprRecurse<'mcx>(
     }
 }
 
-// transformCurrentOfExpr (parse_expr.c). C's REFCURSOR-param columnref-hook
-// substitution is structurally absent: PreColumnRefHook is a closed set with
-// no Param-returning member (plpgsql lane), so cursor_name always stays.
+// transformCurrentOfExpr (parse_expr.c).
 fn transformCurrentOfExpr<'mcx>(
+    mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     expr: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    const REFCURSOROID: types_core::Oid = 1790;
     let rtindex = pstate
         .p_target_nsitem
         .expect("CURRENT OF only at top level of UPDATE/DELETE")
         .p_rtindex;
+    let cursor_name = expr.as_current_of_expr().expect("T_CurrentOfExpr node").cursor_name;
+    let mut cursor_param = 0;
+    if let Some(name) = cursor_name {
+        if let Some(st) = pstate.p_ref_hook_state.as_plpgsql_params().copied() {
+            if let Some(node) = parser_small1::plpgsql_resolve_column_ref(
+                mcx,
+                pstate,
+                &st,
+                &[name],
+                -1,
+                false,
+                mbutils::GetDatabaseEncoding(),
+            )? {
+                if let Some(p) = node.as_param() {
+                    if p.paramkind == types_nodes::ParamKind::PARAM_EXTERN
+                        && p.paramtype == REFCURSOROID
+                    {
+                        cursor_param = p.paramid;
+                    }
+                }
+            }
+        }
+    }
     // SAFETY: freshly built raw-parse node; single mutator, tag matches.
     unsafe {
-        expr.with_mut::<types_nodes::CurrentOfExpr, _>(|c| c.cvarno = rtindex as types_core::Index)
-            .expect("T_CurrentOfExpr node");
+        expr.with_mut::<types_nodes::CurrentOfExpr, _>(|c| {
+            c.cvarno = rtindex as types_core::Index;
+            if cursor_param != 0 {
+                c.cursor_name = None;
+                c.cursor_param = cursor_param;
+            }
+        })
+        .expect("T_CurrentOfExpr node");
     }
     Ok(expr)
 }
