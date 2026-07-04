@@ -215,8 +215,20 @@ pub struct TuplesortData<'m> {
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
 
-/// The C `Tuplesortstate *`; Drop is `tuplesort_end`.
+/// The C `Tuplesortstate *`; Drop is `tuplesort_end`. The Drop impl is the
+/// fd guard: a spilled sort owns open temp-file VFDs that must close before
+/// the query's resowner cross-check (C closes in tuplesort_end).
 pub struct Tuplesort(McxOwned<TuplesortTy>);
+
+impl Drop for Tuplesort {
+    fn drop(&mut self) {
+        self.0.with_mut(|st| {
+            if let Some(ts) = st.tapes.take() {
+                let _ = ts.tapeset.close();
+            }
+        })
+    }
+}
 
 struct CmpCtx<'a> {
     mcx: ::mcx::Mcx<'a>,
@@ -1427,15 +1439,7 @@ impl Tuplesort {
         })
     }
 
-    pub fn end(mut self) {
-        self.0.with_mut(|st| {
-            if let Some(ts) = st.tapes.take() {
-                ts.tapeset
-                    .close()
-                    .expect("tuplesort_end: closing tape temp files failed");
-            }
-        })
-    }
+    pub fn end(self) {}
 }
 
 /// Register-resident put cursor over the TSS_INITIAL window [len, watermark).
