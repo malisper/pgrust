@@ -557,6 +557,33 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "opername", a.opername);
         list_field(out, "options", &a.options);
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::CreateAmStmt>() {
+        out.push_str("{CREATEAMSTMT");
+        string_field(out, "amname", a.amname);
+        list_field(out, "handler_name", &a.handler_name);
+        out.push_str(" :amtype ");
+        if a.amtype == 0 {
+            out.push_str("<>");
+        } else {
+            out.push(a.amtype as char);
+        }
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateCastStmt>() {
+        out.push_str("{CREATECASTSTMT");
+        node_field(out, "sourcetype", c.sourcetype);
+        node_field(out, "targettype", c.targettype);
+        node_field(out, "func", c.func);
+        int_field(out, "context", c.context as i32);
+        bool_field(out, "inout", c.inout);
+        out.push('}');
+    } else if let Some(t) = n.as_variant::<types_nodes::parsenodes::CreateTransformStmt>() {
+        out.push_str("{CREATETRANSFORMSTMT");
+        bool_field(out, "replace", t.replace);
+        node_field(out, "type_name", t.type_name);
+        string_field(out, "lang", t.lang);
+        node_field(out, "fromsql", t.fromsql);
+        node_field(out, "tosql", t.tosql);
+        out.push('}');
     } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::FunctionParameter>() {
         out.push_str("{FUNCTIONPARAMETER");
         string_field(out, "name", p.name);

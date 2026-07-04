@@ -541,6 +541,10 @@ fn enum_values_match_c_headers() {
     check_enum!(prim_h, "CoercionForm", CoercionForm, [
         COERCE_EXPLICIT_CALL, COERCE_EXPLICIT_CAST, COERCE_IMPLICIT_CAST, COERCE_SQL_SYNTAX,
     ]);
+    use crate::primnodes::CoercionContext;
+    check_enum!(prim_h, "CoercionContext", CoercionContext, [
+        COERCION_IMPLICIT, COERCION_ASSIGNMENT, COERCION_PLPGSQL, COERCION_EXPLICIT,
+    ]);
     check_enum!(prim_h, "ParamKind", ParamKind, [
         PARAM_EXTERN, PARAM_EXEC, PARAM_SUBLINK, PARAM_MULTIEXPR,
     ]);
@@ -1679,4 +1683,28 @@ fn tsearch_lane_stmt_field_order_matches_c() {
         crate::rawnodes::A_ArrayExpr::default();
 
     assert_eq!(crate::rawnodes::AlterTSConfigType::ALTER_TSCONFIG_DROP_MAPPING as u32, 4);
+}
+
+#[test]
+fn definestmt_tail_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    assert_eq!(c_struct_fields(parse_h, "CreateAmStmt"), ["amname", "handler_name", "amtype"]);
+    let crate::parsenodes::CreateAmStmt { amname: _, handler_name: _, amtype: _ } =
+        crate::parsenodes::CreateAmStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "CreateCastStmt"),
+        ["sourcetype", "targettype", "func", "context", "inout"]
+    );
+    let crate::parsenodes::CreateCastStmt {
+        sourcetype: _, targettype: _, func: _, context: _, inout: _,
+    } = crate::parsenodes::CreateCastStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "CreateTransformStmt"),
+        ["replace", "type_name", "lang", "fromsql", "tosql"]
+    );
+    let crate::parsenodes::CreateTransformStmt {
+        replace: _, type_name: _, lang: _, fromsql: _, tosql: _,
+    } = crate::parsenodes::CreateTransformStmt::default();
 }

@@ -9,7 +9,7 @@ use crate::jointype::JoinType;
 use crate::list::{IntList, NodeList, OidList};
 use crate::node_tree::{Node, NodeVariant};
 use crate::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
-use crate::primnodes::{Alias, FromExpr, OverridingKind};
+use crate::primnodes::{Alias, CoercionContext, FromExpr, OverridingKind};
 use crate::tags::NodeTag;
 
 pub type AclMode = u64;
@@ -947,6 +947,36 @@ pub struct AlterOperatorStmt<'mcx> {
     pub options: NodeList<'mcx>,
 }
 
+pub const AMTYPE_INDEX: u8 = b'i';
+pub const AMTYPE_TABLE: u8 = b't';
+
+#[derive(Default)]
+pub struct CreateAmStmt<'mcx> {
+    pub amname: Option<&'mcx str>,
+    pub handler_name: NodeList<'mcx>,
+    pub amtype: u8,
+}
+
+// C: sourcetype/targettype are TypeName*, func an ObjectWithArgs*.
+#[derive(Default)]
+pub struct CreateCastStmt<'mcx> {
+    pub sourcetype: Option<Node<'mcx>>,
+    pub targettype: Option<Node<'mcx>>,
+    pub func: Option<Node<'mcx>>,
+    pub context: CoercionContext,
+    pub inout: bool,
+}
+
+// C: type_name is a TypeName*, fromsql/tosql ObjectWithArgs*.
+#[derive(Default)]
+pub struct CreateTransformStmt<'mcx> {
+    pub replace: bool,
+    pub type_name: Option<Node<'mcx>>,
+    pub lang: Option<&'mcx str>,
+    pub fromsql: Option<Node<'mcx>>,
+    pub tosql: Option<Node<'mcx>>,
+}
+
 // C AlterTableType (parsenodes.h); discriminants are outfuncs-visible.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -1508,6 +1538,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterOpFamilyStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOperatorStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOperatorStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateAmStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateAmStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateCastStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateCastStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTransformStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTransformStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateEventTrigStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateEventTrigStmt;

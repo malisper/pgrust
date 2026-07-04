@@ -46,7 +46,7 @@ use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
-use types_nodes::primnodes::{XmlExpr, XmlExprOp, XmlOptionType};
+use types_nodes::primnodes::{CoercionContext, XmlExpr, XmlExprOp, XmlOptionType};
 use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol};
 use types_nodes::rawnodes::{
     AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
@@ -86,7 +86,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{FuncAliasCols, JoinQualUsing, JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{FuncAliasCols, JoinQualUsing, JsonBehaviors, KeyAction, KeyActions, SelectLimit, TransformElements, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -6882,8 +6882,7 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(param));
             }
-            // aggr_arg / aggr_args (ordered-set form 1168 stays loud:
-            // makeOrderedSetArgs unported). aggr_args' C shape is
+            // aggr_arg / aggr_args; aggr_args' C shape is
             // (arglist, Integer numdirect); NIL rides as an empty List node.
             1164 => {
                 let param = view.v(1).node().expect("func_arg");
@@ -6924,6 +6923,40 @@ impl<'mcx> Parser<'mcx> {
                 };
                 let mut pair = NodeList::make1(mcx, Node::mk_list(mcx, args)?)?;
                 pair.lappend(mcx, Node::mk_integer(mcx, numdirect)?)?;
+                *yyval = YYSTYPE::List(pair);
+            }
+            // makeOrderedSetArgs: a trailing VARIADIC direct arg needs a lone
+            // matching VARIADIC aggregated arg, dropped from the internal form.
+            1168 => {
+                let mut direct = view.v(2).list();
+                let mut ordered = view.v(5).list();
+                let lastd = direct
+                    .last()
+                    .and_then(|n| n.as_function_parameter())
+                    .expect("FunctionParameter");
+                if lastd.mode == FunctionParameterMode::FUNC_PARAM_VARIADIC {
+                    let firsto = ordered
+                        .first()
+                        .and_then(|n| n.as_function_parameter())
+                        .expect("FunctionParameter");
+                    if ordered.len() != 1
+                        || firsto.mode != FunctionParameterMode::FUNC_PARAM_VARIADIC
+                        || !types_nodes::equal_opt(lastd.argType, firsto.argType)
+                    {
+                        return Err(self.errposition_error_code(
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            "an ordered-set aggregate with a VARIADIC direct argument \
+                             must have one VARIADIC aggregated argument of the same data type"
+                                .into(),
+                            firsto.location,
+                        ));
+                    }
+                    ordered = NodeList::nil();
+                }
+                let ndirect = direct.len() as i32;
+                direct.concat(mcx, &ordered)?;
+                let mut pair = NodeList::make1(mcx, Node::mk_list(mcx, direct)?)?;
+                pair.lappend(mcx, Node::mk_integer(mcx, ndirect)?)?;
                 *yyval = YYSTYPE::List(pair);
             }
             // aggregate_with_argtypes: func_name aggr_args
@@ -7063,8 +7096,7 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(p));
             }
-            // aggr_args carrier: [args sublist, numdirectargs Integer];
-            // ordered-set form 1168 stays loud (makeOrderedSetArgs).
+            // aggr_args carrier: [args sublist, numdirectargs Integer].
             1165..=1167 => {
                 let sub = match rule {
                     1165 => NodeList::nil(),
@@ -7842,6 +7874,40 @@ impl<'mcx> Parser<'mcx> {
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            670 => {
+                let s = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
+            }
+            671 => {
+                let mut list = view.v(2).list();
+                list.lcons(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // CreateAmStmt; am_type rides as Ival(AMTYPE_*).
+            781 => {
+                let mut n = Node::build::<parsenodes::CreateAmStmt>(mcx)?;
+                n.amname = Some(view.v(4).str_val());
+                n.handler_name = view.v(8).list();
+                n.amtype = view.v(6).ival() as u8;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            782 => *yyval = YYSTYPE::Ival(parsenodes::AMTYPE_INDEX as i32),
+            783 => *yyval = YYSTYPE::Ival(parsenodes::AMTYPE_TABLE as i32),
+            // DefineStmt AGGREGATE: 849 is the old (pre-8.2) syntax.
+            848 | 849 => {
+                let mut n = Node::build::<parsenodes::DefineStmt>(mcx)?;
+                n.kind = ObjectType::OBJECT_AGGREGATE;
+                n.oldstyle = rule == 849;
+                n.replace = view.v(2).boolean();
+                n.defnames = view.v(4).list();
+                if rule == 848 {
+                    n.args = view.v(5).list();
+                    n.definition = view.v(6).list();
+                } else {
+                    n.definition = view.v(5).list();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // DefineStmt: CREATE OPERATOR any_operator definition
             850 => {
                 let mut n = Node::build::<parsenodes::DefineStmt>(mcx)?;
@@ -7850,16 +7916,18 @@ impl<'mcx> Parser<'mcx> {
                 n.definition = view.v(4).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            865 => {
+            865 | 876 => {
                 let el = view.v(1).node().expect("def_elem");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
             }
-            866 => {
+            866 | 877 => {
                 let mut list = view.v(1).list();
                 list.lappend(mcx, view.v(3).node().expect("def_elem"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            867 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            867 | 878 => {
+                *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?;
+            }
             868 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
             // def_arg / operator_def_arg: func_type | reserved_keyword |
             // qual_all_Op | NumericOnly | Sconst | NONE (872/873 = the
@@ -7997,6 +8065,49 @@ impl<'mcx> Parser<'mcx> {
                             "Use NONE to denote the missing argument of a unary operator.",
                         ),
                 ));
+            }
+            // CreateCastStmt: 1248 WITH FUNCTION, 1249 WITHOUT, 1250 INOUT.
+            1248..=1250 => {
+                let mut n = Node::build::<parsenodes::CreateCastStmt>(mcx)?;
+                n.sourcetype = view.v(4).node();
+                n.targettype = view.v(6).node();
+                if rule == 1248 {
+                    n.func = view.v(10).node();
+                }
+                let ctx = view.v(if rule == 1248 { 11 } else { 10 }).ival();
+                n.context = match ctx {
+                    0 => CoercionContext::COERCION_IMPLICIT,
+                    1 => CoercionContext::COERCION_ASSIGNMENT,
+                    _ => CoercionContext::COERCION_EXPLICIT,
+                };
+                n.inout = rule == 1250;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1251 => *yyval = YYSTYPE::Ival(CoercionContext::COERCION_IMPLICIT as i32),
+            1252 => *yyval = YYSTYPE::Ival(CoercionContext::COERCION_ASSIGNMENT as i32),
+            1253 => *yyval = YYSTYPE::Ival(CoercionContext::COERCION_EXPLICIT as i32),
+            // CreateTransformStmt + transform_element_list arms.
+            1257 => {
+                let mut n = Node::build::<parsenodes::CreateTransformStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                n.type_name = view.v(5).node();
+                n.lang = Some(view.v(7).str_val());
+                let elems = view.v(9).transform_elements();
+                n.fromsql = elems.fromsql;
+                n.tosql = elems.tosql;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1258..=1261 => {
+                let (fromsql, tosql) = match rule {
+                    1258 => (view.v(5).node(), view.v(11).node()),
+                    1259 => (view.v(11).node(), view.v(5).node()),
+                    1260 => (view.v(5).node(), None),
+                    _ => (None, view.v(5).node()),
+                };
+                *yyval = YYSTYPE::TransformElementsV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    TransformElements { fromsql, tosql },
+                )?));
             }
             1235 => {
                 let l = view.v(2).node().expect("Typename");

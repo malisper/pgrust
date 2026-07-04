@@ -165,7 +165,8 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
     let kind = GetIndexAmRoutineByAmId(shape.opcmethod, false)?.expect("noerror=false");
     match kind {
         IndexAmKind::Btree => nbt_validate::btvalidate(opclassoid),
-        other => panic!("unported: amvalidate for index AM {other:?} (hashvalidate lane)"),
+        IndexAmKind::Hash => hash_validate::hashvalidate(opclassoid),
+        other => panic!("unported: amvalidate for index AM {other:?} (gist/gin/spgist validate lanes)"),
     }
 }
 

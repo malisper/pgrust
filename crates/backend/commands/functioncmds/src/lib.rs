@@ -1,10 +1,12 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
 // WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal+C+plpgsql,
-// %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION,
-// CREATE CAST/TRANSFORM, DO.
+// %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+mod cast_transform;
+pub use cast_transform::{get_transform_oid, CreateCast, CreateTransform};
 
 use mcx::Mcx;
 use pg_proc::{
@@ -45,7 +47,7 @@ fn unported(what: &str) -> ! {
 
 #[cold]
 #[inline(never)]
-fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
+pub(crate) fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
@@ -414,27 +416,29 @@ fn compute_return_type<'mcx>(
     Ok((rettype, returnType.setof))
 }
 
-struct ParameterList<'mcx> {
-    in_types: mcx::PgVec<'mcx, Oid>,
-    all_types: mcx::PgVec<'mcx, Oid>,
-    param_modes: mcx::PgVec<'mcx, i8>,
-    names: mcx::PgVec<'mcx, &'mcx str>,
-    have_names: bool,
-    have_out_or_variadic: bool,
-    required_result_type: Oid,
+pub struct ParameterList<'mcx> {
+    pub in_types: mcx::PgVec<'mcx, Oid>,
+    pub all_types: mcx::PgVec<'mcx, Oid>,
+    pub param_modes: mcx::PgVec<'mcx, i8>,
+    pub names: mcx::PgVec<'mcx, &'mcx str>,
+    pub have_names: bool,
+    pub have_out_or_variadic: bool,
+    pub variadic_arg_type: Oid,
+    pub required_result_type: Oid,
 }
 
-// interpret_function_parameter_list (functioncmds.c); DEFAULT expressions
-// are loud.
-fn interpret_function_parameter_list<'mcx>(
+// interpret_function_parameter_list (functioncmds.c); shared with
+// aggregatecmds exactly as in C. DEFAULT expressions are loud.
+pub fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &parser_small1::ParseState<'_, 'mcx>,
-    stmt: &CreateFunctionStmt<'mcx>,
+    parameters: &types_nodes::NodeList<'mcx>,
     languageOid: Oid,
+    objtype: ObjectType,
 ) -> PgResult<ParameterList<'mcx>> {
     use FunctionParameterMode::*;
-    let is_procedure = stmt.is_procedure;
-    let n = stmt.parameters.len();
+    let is_procedure = objtype == ObjectType::OBJECT_PROCEDURE;
+    let n = parameters.len();
     let mut in_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut all_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut param_modes: mcx::PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, n)?;
@@ -442,9 +446,10 @@ fn interpret_function_parameter_list<'mcx>(
     let mut have_names = false;
     let mut out_count = 0usize;
     let mut var_count = 0usize;
+    let mut variadic_arg_type = InvalidOid;
     let mut required_result_type = InvalidOid;
 
-    for p in stmt.parameters.iter() {
+    for p in parameters.iter() {
         let fp: &FunctionParameter<'mcx> = p
             .as_function_parameter()
             .expect("func_args_with_defaults holds FunctionParameters");
@@ -456,10 +461,10 @@ fn interpret_function_parameter_list<'mcx>(
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
         let toid = resolve_type_name(mcx, pstate, tn, languageOid)?;
         if tn.setof {
-            let msg = if is_procedure {
-                "procedures cannot accept set arguments"
-            } else {
-                "functions cannot accept set arguments"
+            let msg = match objtype {
+                ObjectType::OBJECT_AGGREGATE => "aggregates cannot accept set arguments",
+                ObjectType::OBJECT_PROCEDURE => "procedures cannot accept set arguments",
+                _ => "functions cannot accept set arguments",
             };
             return Err(err(msg.to_string(), ERRCODE_INVALID_FUNCTION_DEFINITION));
         }
@@ -492,6 +497,7 @@ fn interpret_function_parameter_list<'mcx>(
         }
 
         if fpmode == FUNC_PARAM_VARIADIC {
+            variadic_arg_type = toid;
             var_count += 1;
             match toid {
                 ANYARRAYOID | ANYCOMPATIBLEARRAYOID | ANYOID => {}
@@ -549,6 +555,7 @@ fn interpret_function_parameter_list<'mcx>(
         names,
         have_names,
         have_out_or_variadic,
+        variadic_arg_type,
         required_result_type,
     })
 }
@@ -745,7 +752,13 @@ pub fn CreateFunction<'mcx>(
         ));
     }
 
-    let params = interpret_function_parameter_list(mcx, pstate, stmt, languageOid)?;
+    let objtype = if stmt.is_procedure {
+        ObjectType::OBJECT_PROCEDURE
+    } else {
+        ObjectType::OBJECT_FUNCTION
+    };
+    let params =
+        interpret_function_parameter_list(mcx, pstate, &stmt.parameters, languageOid, objtype)?;
 
     let (prorettype, returnsSet) = if stmt.is_procedure {
         debug_assert!(stmt.returnType.is_none());

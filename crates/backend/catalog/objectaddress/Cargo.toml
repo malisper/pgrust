@@ -19,6 +19,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_nodes = { path = "../../../_support/types/nodes" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 catalog = { path = "../catalog" }
+commands_amcmds = { path = "../../commands/amcmds" }
 catalog_namespace = { path = "../catalog_namespace" }
 pg_depend = { path = "../pg_depend" }
 pg_attrdef = { path = "../pg_attrdef" }

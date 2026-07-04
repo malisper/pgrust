@@ -978,46 +978,56 @@ fn type_category(typid: Oid) -> PgResult<i8> {
 }
 
 pub fn IsBinaryCoercible(srctype: Oid, targettype: Oid) -> PgResult<bool> {
+    Ok(IsBinaryCoercibleWithCast(srctype, targettype)?.0)
+}
+
+// The oid is the pg_cast row when one decided the answer; InvalidOid for the
+// hard-wired rules and for failure.
+pub fn IsBinaryCoercibleWithCast(srctype: Oid, targettype: Oid) -> PgResult<(bool, Oid)> {
     if srctype == targettype {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if matches!(targettype, ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID) {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     let srctype = if OidIsValid(srctype) { lsyscache::getBaseType(srctype)? } else { srctype };
     if srctype == targettype {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     let type_is_array = |t: Oid| -> PgResult<bool> { Ok(OidIsValid(lsyscache::get_element_type(t)?)) };
     if matches!(targettype, ANYARRAYOID | ANYCOMPATIBLEARRAYOID) && type_is_array(srctype)? {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if matches!(targettype, ANYNONARRAYOID | ANYCOMPATIBLENONARRAYOID) && !type_is_array(srctype)? {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if targettype == ANYENUMOID && lsyscache::type_is_enum(srctype)? {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if matches!(targettype, ANYRANGEOID | ANYCOMPATIBLERANGEOID)
         && lsyscache::type_is_range(srctype)?
     {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if matches!(targettype, ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID)
         && lsyscache::type_is_multirange(srctype)?
     {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if targettype == RECORDOID && is_complex(srctype)? {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     if targettype == RECORDARRAYOID && is_complex_array(srctype)? {
-        return Ok(true);
+        return Ok((true, InvalidOid));
     }
     match syscache_seams::lookup_pg_cast_shape::call(srctype, targettype)? {
-        Some(cast) => Ok(cast.castmethod == COERCION_METHOD_BINARY
-            && cast.castcontext == COERCION_CODE_IMPLICIT),
-        None => Ok(false),
+        Some(cast)
+            if cast.castmethod == COERCION_METHOD_BINARY
+                && cast.castcontext == COERCION_CODE_IMPLICIT =>
+        {
+            Ok((true, cast.oid))
+        }
+        _ => Ok((false, InvalidOid)),
     }
 }
 

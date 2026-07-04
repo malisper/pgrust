@@ -879,6 +879,13 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         DefaultAclRelationId => {
             drop_row_by_oid(mcx, DefaultAclRelationId, DefaultAclOidIndexId, object.objectId)?
         }
+        AccessMethodRelationId => {
+            drop_row_by_oid(mcx, AccessMethodRelationId, AmOidIndexId, object.objectId)?
+        }
+        CastRelationId => drop_row_by_oid(mcx, CastRelationId, CastOidIndexId, object.objectId)?,
+        TransformRelationId => {
+            drop_row_by_oid(mcx, TransformRelationId, TransformOidIndexId, object.objectId)?
+        }
         // DropObjectById (objectaddress.c) takes the EVENTTRIGGEROID catcache
         // branch; the unique-index scan reaches the same tuple.
         EventTriggerRelationId => {
@@ -923,6 +930,12 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
     Ok(())
 }
 
+const AccessMethodRelationId: Oid = 2601;
+const AmOidIndexId: Oid = 2652;
+const CastRelationId: Oid = 2605;
+const CastOidIndexId: Oid = 2660;
+const TransformRelationId: Oid = 3576;
+const TransformOidIndexId: Oid = 3574;
 const TSDictionaryRelationId: Oid = 3600;
 const TSDictionaryOidIndexId: Oid = 3605;
 const TSConfigRelationId: Oid = 3602;
