@@ -2976,6 +2976,7 @@ fn transformFuncCall<'mcx>(
         fc,
         agg_filter,
         last_srf,
+        false,
         fc.location,
     )
 }
