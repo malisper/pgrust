@@ -946,6 +946,16 @@ where
                 )?)),
             }
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            match m(f.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::FieldSelect { arg, ..*f },
+                )?)),
+            }
+        }
         NodeTag::T_RangeTblFunction => {
             let rtf = node.as_range_tbl_function().unwrap();
             let funcexpr = match rtf.funcexpr {
