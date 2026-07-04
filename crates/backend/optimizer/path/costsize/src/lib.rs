@@ -3044,6 +3044,7 @@ pub fn final_cost_hashjoin(
         hashjointuples = if path.jpath.jointype == JOIN_INNER
             && !inner_is_unique_path
             && !outer_is_unique_path
+            && path.jpath.path.parallel_workers == 0
         {
             path.jpath.path.rows
         } else {
