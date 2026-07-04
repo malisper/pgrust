@@ -1,5 +1,5 @@
 // pl_handler.c + pl_comp.c's plpgsql_compile / do_compile + pl_exec.c's
-// plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks, procedures,
+// plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks,
 // event triggers and polymorphic signatures are named louds. GUC-backed compile options
 // (plpgsql.variable_conflict, ...) read their C-source defaults; SET on the
 // unregistered custom GUCs is loud at the GUC layer.
@@ -41,7 +41,6 @@ const RECORDOID: Oid = 2249;
 const TRIGGEROID: Oid = 2279;
 const EVENT_TRIGGEROID: Oid = 3838;
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
-const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
 
 fn is_polymorphic(t: Oid) -> bool {
@@ -165,11 +164,19 @@ struct ProcInfo {
     /// One mode per argtypes entry; empty when proargmodes is null (all IN).
     argmodes: Vec<i8>,
     argnames: Vec<String>,
+    argmodes: Option<Vec<i8>>,
     rettype: Oid,
     retset: bool,
     prokind: i8,
     readonly: bool,
 }
+
+const PROARGMODE_IN: i8 = b'i' as i8;
+const PROARGMODE_OUT: i8 = b'o' as i8;
+const PROARGMODE_INOUT: i8 = b'b' as i8;
+const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+const PROARGMODE_TABLE: i8 = b't' as i8;
+const PROKIND_PROCEDURE: i8 = b'p' as i8;
 
 fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
     let cx = mcx::MemoryContext::new("plpgsql compile proc row");
@@ -326,9 +333,6 @@ fn do_compile(
         attach_compile_context(e, &proc.proname, 1, for_validator, &proc.prosrc)
     };
 
-    if proc.prokind != PROKIND_FUNCTION {
-        panic!("plpgsql_compile: procedures (CALL) unported (function {fn_oid})");
-    }
     if !is_dml_trigger && proc.rettype == TRIGGEROID {
         return Err(hdr_ctx(crate::exec::exec_err(
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -623,6 +627,33 @@ fn attach_compile_context(
     e
 }
 
+// add_dummy_return (pl_comp.c): let control fall off the end when the
+// function has OUT params, returns VOID, or returns a set.
+fn add_dummy_return(comp: &mut CompState, action: &mut PlBlock) {
+    if action.exceptions.is_some() || action.label.is_some() {
+        let inner = std::mem::replace(
+            action,
+            PlBlock {
+                lineno: 0,
+                label: None,
+                body: Vec::new(),
+                initvarnos: Vec::new(),
+                exceptions: None,
+            },
+        );
+        comp.nstatements += 1;
+        action.body.push(PlStmt::Block(inner));
+    }
+    if !matches!(action.body.last(), Some(PlStmt::Return { .. })) {
+        comp.nstatements += 1;
+        action.body.push(PlStmt::Return {
+            lineno: 0,
+            expr: None,
+            retvarno: comp.out_param_varno,
+        });
+    }
+}
+
 // add_parameter_name (pl_comp.c).
 fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()> {
     if comp.ns_lookup(comp.ns_top, true, name, None, None).is_some() {
@@ -674,7 +705,10 @@ fn plpgsql_call_handler(
             None
         };
 
-    let nonatomic = false; // procedures/DO are unported; function calls are atomic
+    // SAFETY: fcinfo.context, when set, is ExecuteCallStmt's live CallContext
+    // armed for this call, with no `&mut` formed during it.
+    let nonatomic = ctx_tag == Some(types_fmgr::T_CALL_CONTEXT)
+        && unsafe { fcinfo.call_context() }.is_some_and(|cc| !cc.atomic);
 
     let rc = spi::SPI_connect_ext(if nonatomic { spi::SPI_OPT_NONATOMIC } else { 0 })?;
     assert_eq!(rc, spi::SPI_OK_CONNECT, "SPI_connect failed");
@@ -701,7 +735,7 @@ fn plpgsql_call_handler(
                 })
             }
             (FnTrigger::NotTrigger, None, None) => {
-                plpgsql_exec_function(&entry.func, flinfo.as_deref(), fcinfo, true)
+                plpgsql_exec_function(&entry.func, flinfo.as_deref(), fcinfo, !nonatomic)
             }
             _ => panic!(
                 "plpgsql_call_handler: call context does not match the compiled \

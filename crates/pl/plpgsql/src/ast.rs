@@ -264,6 +264,11 @@ pub enum PlStmt {
         lineno: i32,
         expr: PlExpr,
     },
+    Call {
+        lineno: i32,
+        expr: PlExpr,
+        is_call: bool,
+    },
     GetDiag {
         lineno: i32,
         is_stacked: bool,
@@ -391,6 +396,7 @@ pub fn stmt_lineno(s: &PlStmt) -> i32 {
         | PlStmt::Assert { lineno, .. }
         | PlStmt::ExecSql { lineno, .. }
         | PlStmt::Perform { lineno, .. }
+        | PlStmt::Call { lineno, .. }
         | PlStmt::GetDiag { lineno, .. }
         | PlStmt::Case { lineno, .. }
         | PlStmt::ForEachA { lineno, .. }
@@ -424,6 +430,8 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
         PlStmt::Assert { .. } => "ASSERT",
         PlStmt::ExecSql { .. } => "SQL statement",
         PlStmt::Perform { .. } => "PERFORM",
+        PlStmt::Call { is_call: true, .. } => "CALL",
+        PlStmt::Call { is_call: false, .. } => "DO",
         PlStmt::GetDiag { is_stacked: false, .. } => "GET DIAGNOSTICS",
         PlStmt::GetDiag { is_stacked: true, .. } => "GET STACKED DIAGNOSTICS",
         PlStmt::DynExecute { .. } => "EXECUTE",

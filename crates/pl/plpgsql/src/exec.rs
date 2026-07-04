@@ -137,6 +137,9 @@ std::thread_local! {
     // compiled function (free_function_plans).
     static EXPR_PLANS: core::cell::RefCell<FxHashMap<u32, PlanEntry>> =
         core::cell::RefCell::new(FxHashMap::default());
+    // expr_id -> CALL OUT-arg row varnos (C stmt->target, cached in fn_cxt).
+    static CALL_TARGETS: core::cell::RefCell<FxHashMap<u32, Vec<Dno>>> =
+        core::cell::RefCell::new(FxHashMap::default());
 }
 
 pub fn free_function_plans(expr_ids: &[u32]) {
@@ -146,6 +149,12 @@ pub fn free_function_plans(expr_ids: &[u32]) {
             if let Some(e) = t.remove(id) {
                 spi::SPI_freeplan(e.plan);
             }
+        }
+    });
+    CALL_TARGETS.with(|t| {
+        let mut t = t.borrow_mut();
+        for id in expr_ids {
+            t.remove(id);
         }
     });
 }
@@ -1321,6 +1330,7 @@ impl<'a> Estate<'a> {
                 self.exec_eval_cleanup();
                 Ok(RC_OK)
             }
+            PlStmt::Call { expr, is_call, .. } => self.exec_stmt_call(expr, *is_call),
             PlStmt::DynExecute { query, into, strict, target, params, .. } => {
                 self.exec_stmt_dynexecute(query, *into, *strict, *target, params)
             }
@@ -2201,26 +2211,7 @@ impl<'a> Estate<'a> {
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
-                let (desc, _src) = self.rec_desc_of(tuptab)?;
-                let natts = desc.types.len();
-                let mut anum = 0usize;
-                for dno in varnos {
-                    while anum < natts && desc.dropped[anum] {
-                        anum += 1;
-                    }
-                    let (v, isnull, vt, vm) = if anum < natts {
-                        let (v, isnull) = spi::tuptable_with(tuptab, |t| {
-                            spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (anum + 1) as i32)
-                        });
-                        let r = (v, isnull, desc.types[anum], desc.typmods[anum]);
-                        anum += 1;
-                        r
-                    } else {
-                        (Datum::null(), true, UNKNOWNOID, -1)
-                    };
-                    self.exec_assign_value(dno, v, isnull, vt, vm)?;
-                }
-                Ok(())
+                self.move_row_into_varnos(&varnos, tuptab, i)
             }
             _ => panic!("plpgsql exec_move_row: bad target datum {var}"),
         }
@@ -2808,6 +2799,217 @@ impl<'a> Estate<'a> {
         }
 
         Ok(RC_OK)
+    }
+
+    // exec_stmt_call (pl_exec.c:2196); DO shares the statement shape but is a
+    // named loud at the grammar. procedure_resowner is not carried: it only
+    // matters when the callee ends the transaction, and intra-procedure
+    // COMMIT/ROLLBACK is loud.
+    fn exec_stmt_call(&mut self, expr: &PlExpr, is_call: bool) -> PgResult<i32> {
+        self.ensure_plan(expr, 0)?;
+        let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
+            let t = t.borrow();
+            let e = t.get(&expr.expr_id).expect("plan ensured");
+            (e.plan, e.paramnos.clone(), e.argtypes.clone())
+        });
+        // C Assert(!expr->expr_simple_expr): a CALL/DO is never simple.
+        debug_assert!(!matches!(self.simple_cache.get(&expr.expr_id), Some(Some(_))));
+
+        let target = if is_call {
+            Some(self.make_callstmt_target(expr, plan)?)
+        } else {
+            None
+        };
+
+        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let before_lxid = current_lxid();
+        let rc = spi::SPI_execute_plan_extended(
+            plan,
+            &values,
+            &nulls,
+            self.readonly_func,
+            true,
+            0,
+        )
+        .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        if rc < 0 {
+            panic!(
+                "SPI_execute_plan_extended failed executing query \"{}\": rc {rc}",
+                expr.query
+            );
+        }
+        let after_lxid = current_lxid();
+        if before_lxid != after_lxid {
+            panic!(
+                "exec_stmt_call (pl_exec.c): transaction ended during CALL — \
+                 simple-expression rebuild (plpgsql_create_econtext) unported — \
+                 unit backend-pl-plpgsql-exec"
+            );
+        }
+
+        let n = spi::SPI_processed();
+        let tuptab = spi::SPI_tuptable();
+        if n == 1 {
+            let t = tuptab.expect("SPI_processed row without tuptable");
+            let Some(target) = &target else {
+                let _ = spi::SPI_freetuptable(t);
+                return Err(exec_err(
+                    types_error::ERRCODE_INTERNAL_ERROR,
+                    "DO statement returned a row".to_string(),
+                ));
+            };
+            let target = target.clone();
+            self.move_row_into_varnos(&target, t, 0)?;
+        } else if n > 1 {
+            if let Some(t) = tuptab {
+                let _ = spi::SPI_freetuptable(t);
+            }
+            return Err(exec_err(
+                types_error::ERRCODE_INTERNAL_ERROR,
+                "procedure call returned more than one row".to_string(),
+            ));
+        }
+
+        self.exec_eval_cleanup();
+        if let Some(t) = tuptab {
+            let _ = spi::SPI_freetuptable(t);
+        }
+        Ok(RC_OK)
+    }
+
+    // make_callstmt_target (pl_exec.c:2288): OUT-arg Params -> row varnos,
+    // cached per expr like C's stmt->target (function lifetime).
+    fn make_callstmt_target(
+        &mut self,
+        expr: &PlExpr,
+        plan: SpiPlanPtr,
+    ) -> PgResult<Vec<Dno>> {
+        if let Some(v) = CALL_TARGETS.with(|t| t.borrow().get(&expr.expr_id).cloned()) {
+            return Ok(v);
+        }
+        const PROARGMODE_INOUT: i8 = b'b' as i8;
+        const PROARGMODE_OUT: i8 = b'o' as i8;
+
+        let not_call_stmt = || {
+            exec_err(
+                types_error::ERRCODE_INTERNAL_ERROR,
+                "query for CALL statement is not a CallStmt".to_string(),
+            )
+        };
+        let Some((psrc, _)) = spi::SPI_plan_single_source(plan) else {
+            return Err(not_call_stmt());
+        };
+        let cplan = plancache::GetCachedPlan(
+            psrc,
+            types_portal::ParamListHandle::NULL,
+            None,
+            types_portal::QueryEnvHandle::NULL,
+        )?;
+        let built = (|| -> PgResult<Vec<Dno>> {
+            let stmts = plancache::CachedPlanStmtList(cplan);
+            if stmts.len() != 1 {
+                return Err(not_call_stmt());
+            }
+            let Some(stmt) = stmts[0].utilityStmt.and_then(|u| u.as_call_stmt()) else {
+                return Err(not_call_stmt());
+            };
+            let funcexpr = stmt.funcexpr.expect("analyzed CallStmt has funcexpr");
+            let arrays = syscache_seams::pg_proc_result_arrays::call(
+                self.eval_ctx.mcx(),
+                funcexpr.funcid,
+            )?
+            .unwrap_or_else(|| {
+                panic!("cache lookup failed for function {}", funcexpr.funcid)
+            });
+
+            let mut varnos: Vec<Dno> = Vec::new();
+            if let Some(argmodes) = &arrays.proargmodes {
+                for (i, &mode) in argmodes.iter().enumerate() {
+                    if mode != PROARGMODE_INOUT && mode != PROARGMODE_OUT {
+                        continue;
+                    }
+                    let param = (varnos.len() < stmt.outargs.len())
+                        .then(|| stmt.outargs.nth(varnos.len()))
+                        .and_then(|n| n.as_variant::<types_nodes::primnodes::Param>());
+                    let Some(param) = param else {
+                        let msg = match arrays
+                            .proargnames
+                            .as_ref()
+                            .and_then(|names| names.get(i))
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            Some(name) => format!(
+                                "procedure parameter \"{name}\" is an output parameter but corresponding argument is not writable"
+                            ),
+                            None => format!(
+                                "procedure parameter {} is an output parameter but corresponding argument is not writable",
+                                i + 1
+                            ),
+                        };
+                        return Err(exec_err(types_error::ERRCODE_SYNTAX_ERROR, msg));
+                    };
+                    // paramid is dno + 1 (make_datum_param).
+                    let dno = param.paramid - 1;
+                    self.exec_check_assignable(dno)?;
+                    varnos.push(dno);
+                }
+            }
+            debug_assert_eq!(varnos.len(), stmt.outargs.len());
+            Ok(varnos)
+        })();
+        plancache::ReleaseCachedPlan(cplan);
+        let varnos = built?;
+        CALL_TARGETS.with(|t| {
+            t.borrow_mut().insert(expr.expr_id, varnos.clone());
+        });
+        Ok(varnos)
+    }
+
+    // exec_check_assignable (pl_exec.c).
+    fn exec_check_assignable(&self, dno: Dno) -> PgResult<()> {
+        match &self.func.datums[dno as usize] {
+            PlDatum::Var(v) => {
+                if v.isconst {
+                    return Err(exec_err(
+                        types_error::ERRCODE_ERROR_IN_ASSIGNMENT,
+                        format!("variable \"{}\" is declared CONSTANT", v.refname),
+                    ));
+                }
+                Ok(())
+            }
+            PlDatum::Rec(_) | PlDatum::Row(_) => Ok(()),
+            PlDatum::RecField(f) => self.exec_check_assignable(f.recparentno),
+        }
+    }
+
+    // exec_move_row scalar-list arm, over an explicit varno list.
+    fn move_row_into_varnos(
+        &mut self,
+        varnos: &[Dno],
+        tuptab: TuptabHandle,
+        i: usize,
+    ) -> PgResult<()> {
+        let (desc, _src) = self.rec_desc_of(tuptab)?;
+        let natts = desc.types.len();
+        let mut anum = 0usize;
+        for &dno in varnos {
+            while anum < natts && desc.dropped[anum] {
+                anum += 1;
+            }
+            let (v, isnull, vt, vm) = if anum < natts {
+                let (v, isnull) = spi::tuptable_with(tuptab, |t| {
+                    spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (anum + 1) as i32)
+                });
+                let r = (v, isnull, desc.types[anum], desc.typmods[anum]);
+                anum += 1;
+                r
+            } else {
+                (Datum::null(), true, UNKNOWNOID, -1)
+            };
+            self.exec_assign_value(dno, v, isnull, vt, vm)?;
+        }
+        Ok(())
     }
 
     // exec_eval_using_params: unknown-typed params become text; by-ref
@@ -3647,6 +3849,15 @@ fn recognize_err_condition(condname: &str) -> PgResult<SqlState> {
         types_error::ERRCODE_UNDEFINED_OBJECT,
         format!("unrecognized exception condition \"{condname}\""),
     ))
+}
+
+// MyProc->vxid.lxid (exec_stmt_call's before/after transaction check).
+fn current_lxid() -> u32 {
+    let procno = lmgr_proc::MyProc().expect("MyProc is not set");
+    lmgr_proc::GetPGProcByNumber(procno)
+        .vxid
+        .lxid
+        .load(core::sync::atomic::Ordering::Relaxed)
 }
 
 fn unpack_sql_state(code: SqlState) -> String {
