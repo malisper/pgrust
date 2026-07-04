@@ -936,8 +936,11 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         }
         if let Some(var) = ordvar {
             const INT8_LESS_OPERATOR: u32 = 412;
-            pathkeys =
-                crate::pathkeys::build_expression_pathkey(run, var, INT8_LESS_OPERATOR, false)?;
+            let fn_relids =
+                types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(rel).relids);
+            pathkeys = crate::pathkeys::build_expression_pathkey(
+                run, var, INT8_LESS_OPERATOR, &fn_relids, false,
+            )?;
         }
     }
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);

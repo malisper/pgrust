@@ -537,6 +537,7 @@ pub fn get_eclass_for_sort_expr<'mcx>(
     opcintype: u32,
     collation: u32,
     sortref: u32,
+    rel: &Relids<'mcx>,
     create_it: bool,
 ) -> PgResult<Option<EcId>> {
     let mcx = run.mcx;
@@ -577,6 +578,23 @@ pub fn get_eclass_for_sort_expr<'mcx>(
                 && types_nodes::equal(*run.root.expr_node(run.root.em(em_id).em_expr), expr)
             {
                 return Ok(Some(id));
+            }
+        }
+        // Child members match only when their em_relids equal the request.
+        for r in relids_members(rel) {
+            let Some(list) = run.root.ec(id).ec_childmembers.get(r as usize) else { continue };
+            let n = list.len();
+            for m in 0..n {
+                let em_id = run.root.ec(id).ec_childmembers[r as usize][m];
+                let em_type = run.root.em(em_id).em_datatype;
+                if !relids_equal(&run.root.em(em_id).em_relids, rel) {
+                    continue;
+                }
+                if opcintype == em_type
+                    && types_nodes::equal(*run.root.expr_node(run.root.em(em_id).em_expr), expr)
+                {
+                    return Ok(Some(id));
+                }
             }
         }
     }

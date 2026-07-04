@@ -209,6 +209,7 @@ pub fn build_expression_pathkey<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
     opno: u32,
+    rel: &types_pathnodes::Relids<'mcx>,
     create_it: bool,
 ) -> PgResult<PgVec<'mcx, PathKey>> {
     let (opfamily, opcintype, cmptype) = lsyscache::amop::get_ordering_op_properties(opno)?
@@ -221,8 +222,9 @@ pub fn build_expression_pathkey<'mcx>(
         opcintype,
         collation,
         cmptype == COMPARE_GT,
-        false,
+        cmptype == COMPARE_GT,
         0,
+        rel,
         create_it,
     )?;
     let mut pathkeys = PgVec::new_in(run.mcx);
@@ -252,6 +254,7 @@ fn make_pathkey_from_sortop<'mcx>(
         reverse_sort,
         nulls_first,
         sortref,
+        &None,
         true,
     )?
     .expect("create_it pathkey"))
@@ -267,6 +270,7 @@ fn make_pathkey_from_sortinfo<'mcx>(
     reverse_sort: bool,
     nulls_first: bool,
     sortref: u32,
+    rel: &types_pathnodes::Relids<'mcx>,
     create_it: bool,
 ) -> PgResult<Option<PathKey>> {
     let cmptype = if reverse_sort { COMPARE_GT } else { COMPARE_LT };
@@ -289,6 +293,7 @@ fn make_pathkey_from_sortinfo<'mcx>(
         opcintype,
         collation,
         sortref,
+        rel,
         create_it,
     )?
     else {
@@ -325,6 +330,10 @@ pub fn build_index_pathkeys<'mcx>(
         } else {
             (index.reverse_sort[i], index.nulls_first[i])
         };
+        let index_relids = types_pathnodes::relids::relids_copy(
+            run.mcx,
+            &run.root.rel(index.rel.expect("index has a rel")).relids,
+        );
         let cpathkey = make_pathkey_from_sortinfo(
             run,
             indexkey,
@@ -334,6 +343,7 @@ pub fn build_index_pathkeys<'mcx>(
             reverse_sort,
             nulls_first,
             0,
+            &index_relids,
             false,
         )?;
         match cpathkey {
@@ -379,8 +389,11 @@ pub fn build_partition_pathkeys<'mcx>(
                 scheme.partcollation[i],
             )
         };
+        let part_relids =
+            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(partrel).relids);
         let cpathkey = make_pathkey_from_sortinfo(
-            run, key_col, opfamily, opcintype, collation, backward, backward, 0, false,
+            run, key_col, opfamily, opcintype, collation, backward, backward, 0, &part_relids,
+            false,
         )?;
         match cpathkey {
             Some(pk) => {
@@ -491,6 +504,7 @@ pub fn initialize_mergeclause_eclasses(
         lefttype,
         o.inputcollid,
         0,
+        &None,
         true,
     )?;
     let right_ec = crate::equivclass::get_eclass_for_sort_expr(
@@ -500,6 +514,7 @@ pub fn initialize_mergeclause_eclasses(
         righttype,
         o.inputcollid,
         0,
+        &None,
         true,
     )?;
     let r = run.root.rinfo_mut(rinfo);
