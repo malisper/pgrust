@@ -20,6 +20,7 @@ pub(crate) fn install_fixtures() {
     ONCE.call_once(|| {
         crate::init_seams();
         miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::pg_class_aclmask::set(|_, _, mask, _| Ok(mask));
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {

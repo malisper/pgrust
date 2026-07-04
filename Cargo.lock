@@ -7664,6 +7664,7 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "aclchk",
+ "aclchk_seams",
  "adt_acl",
  "adt_int8",
  "adt_multirangetypes",
