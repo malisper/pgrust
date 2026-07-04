@@ -8,7 +8,9 @@ use types_core::{InvalidSubTransactionId, Oid, RECORDOID};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, WARNING};
 use types_rel::{FormData_pg_class, FormData_pg_index, RelationData, RELKIND_INDEX};
 use types_rel::{
-    AutoVacOpts, RdOptions, StdRdOptions, ViewOptions,
+    AutoVacOpts, BTOptions, BrinOptions, GinOptions, GistOptions, HashOptions, RdOptions,
+    SpGistOptions, StdRdOptions, ViewOptions, GIST_OPTION_BUFFERING_AUTO,
+    GIST_OPTION_BUFFERING_OFF, GIST_OPTION_BUFFERING_ON,
     STDRD_OPTION_VACUUM_INDEX_CLEANUP_AUTO, STDRD_OPTION_VACUUM_INDEX_CLEANUP_OFF,
     STDRD_OPTION_VACUUM_INDEX_CLEANUP_ON, VIEW_OPTION_CHECK_OPTION_CASCADED,
     VIEW_OPTION_CHECK_OPTION_LOCAL, VIEW_OPTION_CHECK_OPTION_NOT_SET,
@@ -443,6 +445,35 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_bool(buf, v.security_invoker);
             put_i32(buf, v.check_option as i32);
         }
+        Some(RdOptions::BTree(o)) => {
+            put_u8(buf, 3);
+            put_i32(buf, o.fillfactor);
+            put_f64(buf, o.vacuum_cleanup_index_scale_factor);
+            put_bool(buf, o.deduplicate_items);
+        }
+        Some(RdOptions::Hash(o)) => {
+            put_u8(buf, 4);
+            put_i32(buf, o.fillfactor);
+        }
+        Some(RdOptions::Gin(o)) => {
+            put_u8(buf, 5);
+            put_bool(buf, o.use_fast_update);
+            put_i32(buf, o.pending_list_cleanup_size);
+        }
+        Some(RdOptions::Gist(o)) => {
+            put_u8(buf, 6);
+            put_i32(buf, o.fillfactor);
+            put_i32(buf, o.buffering_mode as i32);
+        }
+        Some(RdOptions::SpGist(o)) => {
+            put_u8(buf, 7);
+            put_i32(buf, o.fillfactor);
+        }
+        Some(RdOptions::Brin(o)) => {
+            put_u8(buf, 8);
+            put_i32(buf, o.pages_per_range);
+            put_bool(buf, o.autosummarize);
+        }
     }
 }
 
@@ -492,6 +523,30 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
                 2 => VIEW_OPTION_CHECK_OPTION_CASCADED,
                 _ => return None,
             },
+        }))),
+        3 => Some(Some(RdOptions::BTree(BTOptions {
+            fillfactor: rd.i32()?,
+            vacuum_cleanup_index_scale_factor: rd.f64()?,
+            deduplicate_items: rd.boolean()?,
+        }))),
+        4 => Some(Some(RdOptions::Hash(HashOptions { fillfactor: rd.i32()? }))),
+        5 => Some(Some(RdOptions::Gin(GinOptions {
+            use_fast_update: rd.boolean()?,
+            pending_list_cleanup_size: rd.i32()?,
+        }))),
+        6 => Some(Some(RdOptions::Gist(GistOptions {
+            fillfactor: rd.i32()?,
+            buffering_mode: match rd.i32()? {
+                0 => GIST_OPTION_BUFFERING_AUTO,
+                1 => GIST_OPTION_BUFFERING_ON,
+                2 => GIST_OPTION_BUFFERING_OFF,
+                _ => return None,
+            },
+        }))),
+        7 => Some(Some(RdOptions::SpGist(SpGistOptions { fillfactor: rd.i32()? }))),
+        8 => Some(Some(RdOptions::Brin(BrinOptions {
+            pages_per_range: rd.i32()?,
+            autosummarize: rd.boolean()?,
         }))),
         _ => None,
     }
