@@ -1271,20 +1271,21 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let lineno = self.lineno(lloc);
         let t = self.yylex()?;
         let t_expr = if t.0 == K_WHEN {
-            self.push_back(&t)?;
             None
         } else {
             self.push_back(&t)?;
-            Some(self.read_sql_expression(K_WHEN, "WHEN")?)
+            let e = self.read_sql_expression(K_WHEN, "WHEN")?;
+            Some(e)
         };
 
         let mut whens: Vec<(PlExpr, Vec<PlStmt>)> = Vec::new();
         loop {
-            self.expect(K_WHEN, "syntax error")?;
             let expr = self.read_sql_expression(K_THEN, "THEN")?;
             let stmts = self.parse_proc_sect(&[K_WHEN, K_ELSE, K_END])?;
             whens.push((expr, stmts));
-            if self.peek()? != K_WHEN {
+            let nt = self.yylex()?;
+            if nt.0 != K_WHEN {
+                self.push_back(&nt)?;
                 break;
             }
         }
