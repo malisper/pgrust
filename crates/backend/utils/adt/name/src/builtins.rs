@@ -1,12 +1,13 @@
 //! fmgr wrappers (`fc_*`) + `NAME_BUILTINS` for fmgr-core. Still value-core-only:
-//! namerecv/namesend (wire frame) and nameconcatoid.
+//! nameconcatoid.
 
 use datum::Datum;
 use types_core::catalog::NAMEOID;
 use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::{
-    byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 use types_tuple::NameData;
 
@@ -170,6 +171,20 @@ pub fn fc_hashnameextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(a.name_str(), seed)))
 }
 
+pub fn fc_namerecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    let nd = crate::namerecv(mcx, buf)?;
+    byref_result(mcx, &nd.data)
+}
+
+pub fn fc_namesend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let s = arg_name(fcinfo, 0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::namesend(mcx, &s)?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -213,4 +228,6 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(746, "session_user", 0, fc_session_user),
     b(1402, "current_schema", 0, fc_current_schema),
     b(1403, "current_schemas", 1, fc_current_schemas),
+    b(2422, "namerecv", 1, fc_namerecv),
+    b(2423, "namesend", 1, fc_namesend),
 ];
