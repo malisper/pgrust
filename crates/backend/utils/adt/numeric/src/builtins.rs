@@ -6,6 +6,7 @@
 //! ops.rs); sortsupport lives in sortsupport.rs.
 
 use ::datum::Datum;
+use ::mcx::Allocator;
 use ::types_error::PgResult;
 use ::types_fmgr::{
     byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
