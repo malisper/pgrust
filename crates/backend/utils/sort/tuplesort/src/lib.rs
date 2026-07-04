@@ -506,6 +506,18 @@ macro_rules! dispatch_cmp {
                     };
                     $body
                 }
+                SortComparator::Float32 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.$meth(SortComparator::Float32, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Float64 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.$meth(SortComparator::Float64, a, b)
+                    };
+                    $body
+                }
                 SortComparator::TextC => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
                         __c.$meth(SortComparator::TextC, a, b)
