@@ -53,6 +53,7 @@ fn indexdef(
         ctx.mcx(),
         fcinfo.arg_oid(0),
         colno,
+        None,
         colno != 0,
         pretty_flags,
         true,

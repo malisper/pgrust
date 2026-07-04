@@ -96,3 +96,26 @@ CREATE TRIGGER trg_instead INSTEAD OF INSERT ON v_simple FOR EACH ROW EXECUTE FU
 CREATE TRIGGER trg_trunc AFTER TRUNCATE ON t2 FOR EACH STATEMENT EXECUTE FUNCTION f_trig();
 CREATE TRIGGER trg_when BEFORE UPDATE ON t1 FOR EACH ROW WHEN (old.b IS DISTINCT FROM new.b OR new.c = 'x') EXECUTE FUNCTION f_trig();
 CREATE CONSTRAINT TRIGGER trg_constr AFTER INSERT ON t2 FROM t1 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION f_trig();
+
+CREATE TABLE conf_t (a int4 PRIMARY KEY, b int4, c text, CONSTRAINT conf_t_b_uq UNIQUE (b));
+CREATE UNIQUE INDEX conf_t_c_pat_uidx ON conf_t (c text_pattern_ops);
+CREATE UNIQUE INDEX conf_t_partial_uidx ON conf_t (c) WHERE b > 0 AND c <> 'nope';
+CREATE RULE r_conf_nothing AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'x') ON CONFLICT DO NOTHING;
+CREATE RULE r_conf_arbiter AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'x') ON CONFLICT (a) DO NOTHING;
+CREATE RULE r_conf_upd AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'y') ON CONFLICT (a) DO UPDATE SET b = excluded.b + 1, c = conf_t.c || 'z' WHERE conf_t.b < 10;
+CREATE RULE r_conf_constr AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'w') ON CONFLICT ON CONSTRAINT conf_t_b_uq DO UPDATE SET c = 'dup';
+CREATE RULE r_conf_opclass AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'p') ON CONFLICT (c text_pattern_ops) DO NOTHING;
+CREATE RULE r_conf_where AS ON INSERT TO t2 DO ALSO INSERT INTO conf_t VALUES (new.a, new.f, 'q') ON CONFLICT (c) WHERE b > 0 AND c <> 'nope' DO NOTHING;
+
+CREATE TABLE excl_t (x int4, y int4, CONSTRAINT excl_xy EXCLUDE USING btree (x WITH =, y WITH =) DEFERRABLE INITIALLY DEFERRED);
+
+CREATE VIEW v_nullif AS SELECT NULLIF(a, b) AS n, NULLIF(c, 'x') AS nc FROM t1;
+CREATE VIEW v_multidim AS SELECT ARRAY[ARRAY[a, b], ARRAY[b, a]] AS m, (ARRAY[[1, 2], [3, 4]])[2][1] AS el FROM t1;
+CREATE VIEW v_syscols AS SELECT t1.ctid, t1.xmin, t1.xmax, t1.tableoid FROM t1;
+CREATE VIEW v_named_ooo AS SELECT f_named(b => 'q', a => 2) AS x, f_named(2, b => 'r') AS y, f_named(a => 3) AS z;
+
+CREATE TABLE arr_t (id int4, xs int4[], m int4[][]);
+CREATE RULE r_arr_upd AS ON UPDATE TO t1 DO ALSO UPDATE arr_t SET xs[1] = new.b, m[1][2] = old.a WHERE arr_t.id = old.a;
+CREATE RULE r_arr_slice AS ON UPDATE TO t1 DO ALSO UPDATE arr_t SET xs[1:2] = ARRAY[old.a, new.b] WHERE arr_t.id = old.a;
+CREATE RULE r_multiassign AS ON UPDATE TO t2 DO ALSO UPDATE t1 SET (b, e) = (SELECT new.f, old.a::int8) WHERE t1.a = old.a;
+CREATE RULE r_multi_sub AS ON UPDATE TO t2 DO ALSO UPDATE arr_t SET (xs[1], id) = (SELECT new.f, old.a) WHERE arr_t.id = old.a;

@@ -34,6 +34,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_BooleanTest
         | NodeTag::T_CurrentOfExpr => types_core::catalog::BOOLOID,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
+        NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
@@ -168,6 +169,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
+        | NodeTag::T_NullIfExpr
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_XmlExpr
         | NodeTag::T_RowExpr => -1,
@@ -260,6 +262,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
+        NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
@@ -437,6 +440,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let d = node.as_distinct_expr().unwrap();
             leftmost_loc(d.location, expr_location_list(&d.args))
         }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            leftmost_loc(d.location, expr_location_list(&d.args))
+        }
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
         // C: consider both function name and leftmost arg.
         NodeTag::T_XmlExpr => {
@@ -571,6 +578,7 @@ pub fn expr_input_collation(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().inputcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().inputcollid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().inputcollid,
+        NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().inputcollid,
         NodeTag::T_ScalarArrayOpExpr => node.as_scalar_array_op_expr().unwrap().inputcollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().inputcollid,
         _ => types_core::InvalidOid,

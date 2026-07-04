@@ -692,9 +692,81 @@ pub struct FuncCandidate<'mcx> {
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
-// FuncnameGetCandidates (namespace.c), positional notation only (argnames and
-// include_out_arguments have no in-tree callers; both stay on the loud path in
-// parse_func). An oid of InvalidOid marks C's ambiguous-set placeholder.
+// MatchNamedCall (namespace.c), include_out_arguments always false. Returns
+// the call-position -> proargtypes-position map, or None on no match.
+fn match_named_call<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    cand: &syscache_seams::PgProcCandidate<'mcx>,
+    nargs: i16,
+    argnames: &[&str],
+) -> PgResult<Option<mcx::PgVec<'mcx, i32>>> {
+    const FUNC_PARAM_IN: i8 = b'i' as i8;
+    const FUNC_PARAM_INOUT: i8 = b'b' as i8;
+    const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
+    let pronargs = cand.pronargs as usize;
+    let numposargs = nargs as usize - argnames.len();
+    assert!(nargs as usize <= pronargs);
+
+    let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)? else {
+        return Ok(None);
+    };
+    let Some(p_argnames) = arrays.proargnames else {
+        return Ok(None);
+    };
+    let p_argmodes = arrays.proargmodes;
+    let pronallargs = p_argnames.len();
+
+    let mut argnumbers: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, pronargs)?;
+    let mut arggiven = [false; types_core::FUNC_MAX_ARGS];
+    for ap in 0..numposargs {
+        argnumbers.push(ap as i32);
+        arggiven[ap] = true;
+    }
+    for argname in argnames {
+        let mut pp = 0usize;
+        let mut found = false;
+        for i in 0..pronallargs {
+            if let Some(modes) = &p_argmodes {
+                if !matches!(modes[i], FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC) {
+                    continue;
+                }
+            }
+            if p_argnames[i].as_str() == *argname {
+                if arggiven[pp] {
+                    return Ok(None);
+                }
+                arggiven[pp] = true;
+                argnumbers.push(pp as i32);
+                found = true;
+                break;
+            }
+            pp += 1;
+        }
+        if !found {
+            return Ok(None);
+        }
+    }
+    if (nargs as usize) < pronargs {
+        let first_arg_with_default = pronargs - cand.pronargdefaults as usize;
+        for (pp, given) in arggiven.iter().enumerate().take(pronargs).skip(numposargs) {
+            if *given {
+                continue;
+            }
+            if pp < first_arg_with_default {
+                return Ok(None);
+            }
+            argnumbers.push(pp as i32);
+        }
+    }
+    assert_eq!(argnumbers.len(), pronargs);
+    Ok(Some(argnumbers))
+}
+
+// FuncnameGetCandidates (namespace.c); include_out_arguments has no in-tree
+// caller and stays on the loud path in parse_func. An oid of InvalidOid marks
+// C's ambiguous-set placeholder. Divergence: C's argnumbers array is applied
+// to candidate args here but not returned (parse_func's named-call transform
+// is unported).
 pub fn FuncnameGetCandidates<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     names: &[&str],
@@ -702,13 +774,14 @@ pub fn FuncnameGetCandidates<'mcx>(
     expand_variadic: bool,
     expand_defaults: bool,
 ) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
-    FuncnameGetCandidatesExtended(mcx, names, nargs, expand_variadic, expand_defaults, false)
+    FuncnameGetCandidatesExtended(mcx, names, nargs, &[], expand_variadic, expand_defaults, false)
 }
 
 pub fn FuncnameGetCandidatesExtended<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     names: &[&str],
     nargs: i16,
+    argnames: &[&str],
     expand_variadic: bool,
     expand_defaults: bool,
     missing_ok: bool,
@@ -758,32 +831,66 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             }
         }
 
-        // C considers variadic expansion only when pronargs <= nargs; an
-        // undersupplied variadic candidate falls through to the arg-count
-        // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
-        let (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
-            (OidIsValid(cand.provariadic), cand.provariadic)
-        } else {
-            (false, InvalidOid)
-        };
-        any_special |= variadic;
-
-        let use_defaults = pronargs > nargs && expand_defaults && {
-            if nargs + cand.pronargdefaults < pronargs {
+        let mut argnumbers: Option<mcx::PgVec<'mcx, i32>> = None;
+        let (variadic, va_elem_type, use_defaults);
+        if !argnames.is_empty() {
+            // Named or mixed notation matches a variadic function only with
+            // expand_variadic off (C: no way to name the expanded params).
+            if OidIsValid(cand.provariadic) && expand_variadic {
                 continue;
             }
+            variadic = false;
+            va_elem_type = InvalidOid;
+            assert!(nargs >= 0);
+            use_defaults = pronargs > nargs && expand_defaults && {
+                if nargs + cand.pronargdefaults < pronargs {
+                    continue;
+                }
+                true
+            };
+            if pronargs != nargs && !use_defaults {
+                continue;
+            }
+            match match_named_call(mcx, &cand, nargs, argnames)? {
+                None => continue,
+                some => argnumbers = some,
+            }
             any_special = true;
-            true
-        };
+        } else {
+            // C considers variadic expansion only when pronargs <= nargs; an
+            // undersupplied variadic candidate falls through to the arg-count
+            // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
+            (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
+                (OidIsValid(cand.provariadic), cand.provariadic)
+            } else {
+                (false, InvalidOid)
+            };
+            any_special |= variadic;
 
-        if nargs >= 0 && pronargs != nargs && !variadic && !use_defaults {
-            continue;
+            use_defaults = pronargs > nargs && expand_defaults && {
+                if nargs + cand.pronargdefaults < pronargs {
+                    continue;
+                }
+                any_special = true;
+                true
+            };
+
+            if nargs >= 0 && pronargs != nargs && !variadic && !use_defaults {
+                continue;
+            }
         }
 
         let effective_nargs = pronargs.max(nargs);
         let mut args = mcx::vec_with_capacity_in(mcx, effective_nargs as usize)?;
-        for &a in cand.proargtypes.iter() {
-            args.push(a);
+        if let Some(argnumbers) = &argnumbers {
+            // Re-order the argument types into the call's logical order.
+            for &j in argnumbers.iter() {
+                args.push(cand.proargtypes[j as usize]);
+            }
+        } else {
+            for &a in cand.proargtypes.iter() {
+                args.push(a);
+            }
         }
         let nvargs = if variadic {
             // C: expand the variadic slot into N copies of the element type.
