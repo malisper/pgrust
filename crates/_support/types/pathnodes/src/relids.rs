@@ -2,20 +2,23 @@ use mcx::{box_new_in, vec_from_elem_in, Mcx, PgVec};
 use crate::{Bitmapset, PathTarget, PlannerInfo, PtId, RelId, RelOptInfo, Relids, UpperRelationKind, RELOPT_UPPER_REL};
 
 pub fn relids_singleton<'mcx>(mcx: Mcx<'mcx>, x: u32) -> Relids<'mcx> {
+    if x < 64 {
+        return Some(box_new_in(mcx, Bitmapset::Small(1u64 << x)));
+    }
     let mut words = vec_from_elem_in(mcx, 0u64, (x as usize / 64) + 1);
     words[x as usize / 64] |= 1u64 << (x % 64);
-    Some(box_new_in(mcx, Bitmapset { words }))
+    Some(box_new_in(mcx, Bitmapset::Big(words)))
 }
 
 pub fn relids_overlap(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     let (Some(a), Some(b)) = (a, b) else { return false };
-    a.words.iter().zip(b.words.iter()).any(|(x, y)| x & y != 0)
+    a.word_slice().iter().zip(b.word_slice().iter()).any(|(x, y)| x & y != 0)
 }
 
 pub fn relids_equal(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => a.words.as_slice() == b.words.as_slice(),
+        (Some(a), Some(b)) => a.word_slice() == b.word_slice(),
         _ => false,
     }
 }
@@ -23,7 +26,7 @@ pub fn relids_equal(a: &Relids<'_>, b: &Relids<'_>) -> bool {
 pub fn relids_is_empty(a: &Relids<'_>) -> bool {
     match a {
         None => true,
-        Some(b) => b.words.iter().all(|w| *w == 0),
+        Some(b) => b.word_slice().iter().all(|w| *w == 0),
     }
 }
 
@@ -34,7 +37,7 @@ pub fn relids_is_member(x: i32, a: &Relids<'_>) -> bool {
     match a {
         None => false,
         Some(b) => b
-            .words
+            .word_slice()
             .get(x as usize / 64)
             .is_some_and(|w| w & (1u64 << (x % 64)) != 0),
     }
@@ -43,18 +46,18 @@ pub fn relids_is_member(x: i32, a: &Relids<'_>) -> bool {
 pub fn relids_num_members(a: &Relids<'_>) -> i32 {
     match a {
         None => 0,
-        Some(b) => b.words.iter().map(|w| w.count_ones() as i32).sum(),
+        Some(b) => b.word_slice().iter().map(|w| w.count_ones() as i32).sum(),
     }
 }
 
 pub fn relids_is_subset(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     let (Some(a), b) = (a, b) else { return true };
-    for (i, w) in a.words.iter().enumerate() {
+    let bw = b.as_ref().map_or(&[] as &[u64], |b| b.word_slice());
+    for (i, w) in a.word_slice().iter().enumerate() {
         if *w == 0 {
             continue;
         }
-        let bw = b.as_ref().and_then(|b| b.words.get(i)).copied().unwrap_or(0);
-        if w & !bw != 0 {
+        if w & !bw.get(i).copied().unwrap_or(0) != 0 {
             return false;
         }
     }
@@ -64,7 +67,7 @@ pub fn relids_is_subset(a: &Relids<'_>, b: &Relids<'_>) -> bool {
 pub fn relids_singleton_member(a: &Relids<'_>) -> Option<i32> {
     let mut found: Option<i32> = None;
     if let Some(b) = a {
-        for (i, w) in b.words.iter().enumerate() {
+        for (i, w) in b.word_slice().iter().enumerate() {
             let mut w = *w;
             while w != 0 {
                 if found.is_some() {
@@ -79,32 +82,44 @@ pub fn relids_singleton_member(a: &Relids<'_>) -> Option<i32> {
 }
 
 pub fn relids_union<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
-    let n = a.as_ref().map_or(0, |x| x.words.len()).max(b.as_ref().map_or(0, |x| x.words.len()));
+    let aw = a.as_ref().map_or(&[] as &[u64], |x| x.word_slice());
+    let bw = b.as_ref().map_or(&[] as &[u64], |x| x.word_slice());
+    let n = aw.len().max(bw.len());
     if n == 0 {
         return None;
     }
+    if n == 1 {
+        let w = aw.first().copied().unwrap_or(0) | bw.first().copied().unwrap_or(0);
+        return Some(box_new_in(mcx, Bitmapset::Small(w)));
+    }
     let mut words = vec_from_elem_in(mcx, 0u64, n);
     for (i, w) in words.iter_mut().enumerate() {
-        *w = a.as_ref().and_then(|x| x.words.get(i)).copied().unwrap_or(0)
-            | b.as_ref().and_then(|x| x.words.get(i)).copied().unwrap_or(0);
+        *w = aw.get(i).copied().unwrap_or(0) | bw.get(i).copied().unwrap_or(0);
     }
-    Some(box_new_in(mcx, Bitmapset { words }))
+    Some(box_new_in(mcx, Bitmapset::Big(words)))
 }
 
 pub fn relids_intersect<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
     let (Some(x), Some(y)) = (a, b) else { return None };
-    let n = x.words.len().min(y.words.len());
+    let (xw, yw) = (x.word_slice(), y.word_slice());
+    let n = xw.len().min(yw.len());
     if n == 0 {
         return None;
     }
+    if n == 1 {
+        return Some(box_new_in(mcx, Bitmapset::Small(xw[0] & yw[0])));
+    }
     let mut words = vec_from_elem_in(mcx, 0u64, n);
     for (i, w) in words.iter_mut().enumerate() {
-        *w = x.words[i] & y.words[i];
+        *w = xw[i] & yw[i];
     }
-    Some(box_new_in(mcx, Bitmapset { words }))
+    Some(box_new_in(mcx, Bitmapset::Big(words)))
 }
 
 pub fn relids_add_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: u32) -> Relids<'mcx> {
+    if a.is_none() {
+        return relids_singleton(mcx, x);
+    }
     relids_union(mcx, a, &relids_singleton(mcx, x))
 }
 
@@ -112,8 +127,8 @@ pub fn relids_add_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: u32) -> Reli
 pub fn relids_add_member_mut<'mcx>(mcx: Mcx<'mcx>, a: &mut Relids<'mcx>, x: u32) {
     let wordnum = x as usize / 64;
     match a {
-        Some(b) if b.words.len() > wordnum => {
-            b.words[wordnum] |= 1u64 << (x % 64);
+        Some(b) if b.word_slice().len() > wordnum => {
+            b.word_slice_mut()[wordnum] |= 1u64 << (x % 64);
         }
         _ => *a = relids_union(mcx, a, &relids_singleton(mcx, x)),
     }
@@ -123,7 +138,7 @@ pub fn relids_del_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: i32) -> Reli
     let mut out = relids_copy(mcx, a);
     if x >= 0 {
         if let Some(b) = out.as_mut() {
-            if let Some(w) = b.words.get_mut(x as usize / 64) {
+            if let Some(w) = b.word_slice_mut().get_mut(x as usize / 64) {
                 *w &= !(1u64 << (x % 64));
             }
         }
@@ -133,16 +148,22 @@ pub fn relids_del_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: i32) -> Reli
 
 pub fn relids_difference<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
     let Some(x) = a else { return None };
-    let mut words = vec_from_elem_in(mcx, 0u64, x.words.len());
-    for (i, w) in words.iter_mut().enumerate() {
-        *w = x.words[i] & !b.as_ref().and_then(|y| y.words.get(i)).copied().unwrap_or(0);
+    let xw = x.word_slice();
+    let bw = b.as_ref().map_or(&[] as &[u64], |y| y.word_slice());
+    if xw.len() == 1 {
+        let w = xw[0] & !bw.first().copied().unwrap_or(0);
+        return Some(box_new_in(mcx, Bitmapset::Small(w)));
     }
-    Some(box_new_in(mcx, Bitmapset { words }))
+    let mut words = vec_from_elem_in(mcx, 0u64, xw.len());
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = xw[i] & !bw.get(i).copied().unwrap_or(0);
+    }
+    Some(box_new_in(mcx, Bitmapset::Big(words)))
 }
 
 pub fn relids_members<'a>(a: &'a Relids<'_>) -> impl Iterator<Item = i32> + 'a {
     a.iter()
-        .flat_map(|b| b.words.iter().enumerate())
+        .flat_map(|b| b.word_slice().iter().enumerate())
         .flat_map(|(i, w)| {
             let mut w = *w;
             core::iter::from_fn(move || {
@@ -154,6 +175,18 @@ pub fn relids_members<'a>(a: &'a Relids<'_>) -> impl Iterator<Item = i32> + 'a {
                 Some((i * 64) as i32 + bit as i32)
             })
         })
+}
+
+pub fn relids_copy<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>) -> Relids<'mcx> {
+    a.as_ref().map(|b| match &**b {
+        Bitmapset::Small(w) => box_new_in(mcx, Bitmapset::Small(*w)),
+        Bitmapset::Big(v) => {
+            let mut words = PgVec::new_in(mcx);
+            words.reserve(v.len());
+            words.extend(v.iter().copied());
+            box_new_in(mcx, Bitmapset::Big(words))
+        }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,14 +205,6 @@ pub fn relids_subset_compare(a: &Relids<'_>, b: &Relids<'_>) -> SubsetCmp {
         (false, true) => SubsetCmp::Subset2,
         (false, false) => SubsetCmp::Different,
     }
-}
-
-pub fn relids_copy<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>) -> Relids<'mcx> {
-    a.as_ref().map(|b| {
-        let mut words = PgVec::new_in(mcx);
-        words.extend(b.words.iter().copied());
-        box_new_in(mcx, Bitmapset { words })
-    })
 }
 
 // find_base_rel (relnode.c).
