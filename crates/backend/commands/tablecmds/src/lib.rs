@@ -418,7 +418,7 @@ pub fn DefineRelation<'mcx>(
             .as_variant::<types_nodes::rawnodes::PartitionSpec>()
             .expect("PartitionSpec");
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
-        let info = partition::compute_partition_key(mcx, &rel, spec)?;
+        let info = partition::compute_partition_key(mcx, &rel, spec, query_string)?;
         catalog_heap::StorePartitionKey(
             mcx,
             &rel,
