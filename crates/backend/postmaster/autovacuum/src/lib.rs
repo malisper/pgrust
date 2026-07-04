@@ -1,5 +1,6 @@
-//! autovacuum.c: GUC homes, autovac_init, AutoVacuumingActive, and the
-//! launcher main (launcher.rs); AutoVacWorkerMain stays unported.
+//! autovacuum.c: GUC homes, AutoVacuumingActive, the launcher (launcher.rs),
+//! the worker + do_autovacuum (worker.rs), cost balancing (cost.rs), and the
+//! thread-native AutoVacuumShmem (shmem.rs).
 
 #![allow(non_snake_case)]
 
@@ -8,8 +9,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use guc_tables::{vars, GucVarAccessors};
 use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
 
+mod cost;
 mod launcher;
-pub use launcher::AutoVacLauncherMain;
+mod shmem;
+mod worker;
+pub use cost::{AutoVacuumUpdateCostLimit, VacuumUpdateCosts};
+pub use launcher::{AutoVacLauncherMain, AutoVacWorkerFailed};
+pub use worker::{do_autovacuum, AutoVacWorkerMain, AutoVacuumRequestWork};
 
 const AUTOVACUUM_C: &str = "src/backend/postmaster/autovacuum.c";
 
@@ -125,4 +131,17 @@ pub fn init_seams() {
     });
     autovacuum_seams::autovac_init::set(autovac_init);
     autovacuum_seams::autovacuuming_active::set(AutoVacuumingActive);
+    autovacuum_seams::vacuum_update_costs::set(cost::VacuumUpdateCosts);
+    autovacuum_seams::auto_vacuum_update_cost_limit::set(cost::AutoVacuumUpdateCostLimit);
+    autovacuum_seams::wake_autovacuum_launcher::set(wake_autovacuum_launcher);
+    autovacuum_seams::autovac_worker_failed::set(launcher::AutoVacWorkerFailed);
+}
+
+// ProcKill's kill(AutovacuumLauncherPid, SIGUSR2): only autovac workers carry
+// a nonzero saved launcher pid (set by FreeWorkerInfo).
+fn wake_autovacuum_launcher() {
+    let pid = shmem::AUTOVACUUM_LAUNCHER_PID.get();
+    if pid != 0 {
+        let _ = procsignal::SendThreadSignal(pid, libc::SIGUSR2);
+    }
 }

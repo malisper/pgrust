@@ -65,6 +65,18 @@ pub fn GetPGProcByNumber(procno: ProcNumber) -> &'static PGPROC {
     &ProcGlobal().allProcs[procno as usize]
 }
 
+pub fn ProcNumberGetProc(proc_number: ProcNumber) -> Option<&'static PGPROC> {
+    let hdr = ProcGlobal();
+    if proc_number < 0 || proc_number as usize >= hdr.allProcs.len() {
+        return None;
+    }
+    let proc = &hdr.allProcs[proc_number as usize];
+    if proc.pid.load(Relaxed) == 0 {
+        return None;
+    }
+    Some(proc)
+}
+
 fn spin_acquire(lock: &Spinlock) {
     if lock.tas() != 0 {
         let mut delay =

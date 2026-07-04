@@ -649,6 +649,7 @@ pub fn init_seams() {
     async_seams::at_subabort_notify::set(AtSubAbort_Notify);
     async_seams::at_prepare_notify::set(AtPrepare_Notify);
     async_seams::handle_notify_interrupt::set(HandleNotifyInterrupt);
+    async_seams::async_notify_freeze_xids::set(AsyncNotifyFreezeXids);
 
     fn check_hook(
         newval: &mut i32,

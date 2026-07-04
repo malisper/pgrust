@@ -47,6 +47,16 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+miscinit = { path = "../../utils/init/miscinit" }
+interrupt = { path = "../../postmaster/interrupt" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+clog = { path = "../../access/transam/clog" }
+async_seams = { path = "../async_seams" }
+pg_database = { path = "../../catalog/pg_database" }
+types_guc = { path = "../../../_support/types/types_guc" }
 
 [dev-dependencies]
 indexcmds_seams = { path = "../indexcmds_seams" }

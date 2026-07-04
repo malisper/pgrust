@@ -273,6 +273,8 @@ fn do_analyze_rel<'mcx>(
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
+    let starttime = timestamp_seams::get_current_timestamp::call();
+
     // Partitioned: hasindex only (nothing to open); inh recursion: leave the
     // parent's indexes alone entirely (C).
     let is_partitioned = onerel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
@@ -500,7 +502,31 @@ fn do_analyze_rel<'mcx>(
         )?;
     }
 
-    // pgstat_report_analyze: cumulative-stats lane (autovacuum feeds off it).
+    // C reports !inh counts here; partitioned-with-inh zeros; plain
+    // inheritance parents report nothing.
+    if !inh {
+        pgstat::pgstat_report_analyze(
+            onerel.rd_id,
+            onerel.rd_rel.relisshared,
+            onerel.rd_rel.relkind,
+            onerel.pgstat_enabled.get(),
+            totalrows as i64,
+            totaldeadrows as i64,
+            va_cols.is_nil(),
+            starttime,
+        );
+    } else if is_partitioned {
+        pgstat::pgstat_report_analyze(
+            onerel.rd_id,
+            onerel.rd_rel.relisshared,
+            onerel.rd_rel.relkind,
+            onerel.pgstat_enabled.get(),
+            0,
+            0,
+            va_cols.is_nil(),
+            starttime,
+        );
+    }
 
     if params.options & VACOPT_VACUUM == 0 {
         for ind in irel.iter() {

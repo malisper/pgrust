@@ -125,6 +125,8 @@ pub fn heap_vacuum_rel<'mcx>(
     debug_assert!(params.index_cleanup != VacOptValue::Unspecified);
     debug_assert!(!matches!(params.truncate, VacOptValue::Unspecified | VacOptValue::Auto));
 
+    let starttime = timestamp_seams::get_current_timestamp::call();
+
     let indrels = vac_open_indexes(mcx, rel, RowExclusiveLock)?;
     let nindexes = indrels.len();
     let mut indstats = ::mcx::PgVec::with_capacity_in(nindexes, mcx);
@@ -256,7 +258,6 @@ pub fn heap_vacuum_rel<'mcx>(
         new_rel_allfrozen = new_rel_allvisible;
     }
     let _ = orig_rel_pages;
-    // C divergence (recorded): pgstat_report_vacuum skipped (cumulative-stats lane).
     vacuum_seams::vac_update_relstats::call(
         rel,
         new_rel_pages,
@@ -268,6 +269,14 @@ pub fn heap_vacuum_rel<'mcx>(
         vacrel.NewRelminMxid,
         false,
     )?;
+
+    pgstat::pgstat_report_vacuum(
+        rel.rd_id,
+        rel.rd_rel.relisshared,
+        vacrel.new_live_tuples.max(0.0) as i64,
+        vacrel.recently_dead_tuples + vacrel.missed_dead_tuples,
+        starttime,
+    );
     Ok(())
 }
 

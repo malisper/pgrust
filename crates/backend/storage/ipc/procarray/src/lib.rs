@@ -1136,6 +1136,11 @@ fn GlobalVisHorizonKindForRel(rel: &types_rel::RelationData<'_>) -> GlobalVisHor
     }
 }
 
+// C's rel == NULL arm (GlobalVisHorizonKindForRel(NULL) == VISHORIZON_SHARED).
+pub fn GetOldestNonRemovableTransactionIdShared() -> PgResult<TransactionId> {
+    Ok(ComputeXidHorizons()?.shared_oldest_nonremovable)
+}
+
 pub fn GetOldestNonRemovableTransactionId(
     rel: &types_rel::RelationData<'_>,
 ) -> PgResult<TransactionId> {

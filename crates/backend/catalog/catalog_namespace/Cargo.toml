@@ -28,6 +28,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
 inval_seams = { path = "../../utils/cache/inval_seams" }
 lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 sinval = { path = "../../storage/ipc/sinval" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 init_small = { path = "../../utils/init/init_small" }

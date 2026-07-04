@@ -36,6 +36,8 @@ init_small = { path = "../../../utils/init/init_small" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 
 [dev-dependencies]
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }

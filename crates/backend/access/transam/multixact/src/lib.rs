@@ -18,7 +18,7 @@ use slru::{
     SlruDeleteSegment, SlruPagePrecedesUnitTests, SlruPath, SlruSyncFileTag,
     SLRU_PAGES_PER_SEGMENT,
 };
-use types_core::xact::MultiXactIdPrecedes;
+use types_core::xact::{MultiXactIdPrecedes, MultiXactIdPrecedesOrEquals};
 use types_core::{
     MultiXactId, MultiXactOffset, Oid, Size, TransactionId, TransactionIdIsValid,
     TransactionIdPrecedes, BLCKSZ,
@@ -1864,9 +1864,17 @@ fn PerformOffsetsTruncation(
 }
 
 pub fn TruncateMultiXact(
-    _new_oldest_multi: MultiXactId,
+    new_oldest_multi: MultiXactId,
     _new_oldest_multi_db: Oid,
 ) -> PgResult<()> {
+    // C-exact early exit: nothing to truncate away unless the horizon moved
+    // forward past the current oldest (datminmxid never advances until the
+    // freeze lane lands, so this is the live arm).
+    let oldest_multi = MultiXactState().oldestMultiXactId.load(Relaxed);
+    debug_assert!(MultiXactIdIsValid(oldest_multi));
+    if MultiXactIdPrecedesOrEquals(new_oldest_multi, oldest_multi) {
+        return Ok(());
+    }
     panic!(
         "unported caller path reached: TruncateMultiXact (multixact.c) — vacuum lane \
          (vac_truncate_clog); needs delay-chkpt seam + WAL truncate record"

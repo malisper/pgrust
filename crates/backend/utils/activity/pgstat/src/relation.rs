@@ -336,6 +336,103 @@ pub fn pgstat_copy_relation_stats(
     );
 }
 
+fn timestamp_difference_milliseconds(
+    start: types_core::TimestampTz,
+    stop: types_core::TimestampTz,
+) -> PgStat_Counter {
+    if start >= stop {
+        0
+    } else {
+        (stop - start + 999) / 1000
+    }
+}
+
+fn am_autovacuum_worker() -> bool {
+    miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+}
+
+pub fn pgstat_report_vacuum(
+    tableoid: Oid,
+    shared: bool,
+    livetuples: PgStat_Counter,
+    deadtuples: PgStat_Counter,
+    starttime: types_core::TimestampTz,
+) {
+    if !crate::pgstat_track_counts() {
+        return;
+    }
+    let ts = timestamp_seams::get_current_timestamp::call();
+    let elapsedtime = timestamp_difference_milliseconds(starttime, ts);
+    crate::shmem::update_relation_entry(relation_key(tableoid, shared), |tabentry| {
+        tabentry.live_tuples = livetuples;
+        tabentry.dead_tuples = deadtuples;
+        tabentry.ins_since_vacuum = 0;
+        if am_autovacuum_worker() {
+            tabentry.last_autovacuum_time = ts;
+            tabentry.autovacuum_count += 1;
+            tabentry.total_autovacuum_time += elapsedtime;
+        } else {
+            tabentry.last_vacuum_time = ts;
+            tabentry.vacuum_count += 1;
+            tabentry.total_vacuum_time += elapsedtime;
+        }
+    });
+    // C flushes IO stats here (pgstat_flush_io/pgstat_flush_backend): IO-stats lane.
+}
+
+pub fn pgstat_report_analyze(
+    relid: Oid,
+    relisshared: bool,
+    relkind: u8,
+    pgstat_enabled: bool,
+    mut livetuples: PgStat_Counter,
+    mut deadtuples: PgStat_Counter,
+    resetcounter: bool,
+    starttime: types_core::TimestampTz,
+) {
+    if !crate::pgstat_track_counts() {
+        return;
+    }
+
+    // Subtract this transaction's own not-yet-flushed counts, else they'd be
+    // double-counted at commit (C walks rel->pgstat_info->trans->upper).
+    if pgstat_enabled && relkind != RELKIND_PARTITIONED_TABLE {
+        let key = relation_key(relid, relisshared);
+        pending::with_state(|st| {
+            if !st.have_pending(key) {
+                return;
+            }
+            let t = table_mut(st, key);
+            for trans in &t.trans {
+                livetuples -= trans.tuples_inserted - trans.tuples_deleted;
+                deadtuples -= trans.tuples_updated + trans.tuples_deleted;
+            }
+            deadtuples -= t.counts.delta_dead_tuples;
+        });
+        livetuples = livetuples.max(0);
+        deadtuples = deadtuples.max(0);
+    }
+
+    let ts = timestamp_seams::get_current_timestamp::call();
+    let elapsedtime = timestamp_difference_milliseconds(starttime, ts);
+    crate::shmem::update_relation_entry(relation_key(relid, relisshared), |tabentry| {
+        tabentry.live_tuples = livetuples;
+        tabentry.dead_tuples = deadtuples;
+        if resetcounter {
+            tabentry.mod_since_analyze = 0;
+        }
+        if am_autovacuum_worker() {
+            tabentry.last_autoanalyze_time = ts;
+            tabentry.autoanalyze_count += 1;
+            tabentry.total_autoanalyze_time += elapsedtime;
+        } else {
+            tabentry.last_analyze_time = ts;
+            tabentry.analyze_count += 1;
+            tabentry.total_analyze_time += elapsedtime;
+        }
+    });
+}
+
 pub fn pgstat_fetch_stat_tabentry(relid: Oid) -> Option<crate::shmem::PgStat_StatTabEntry> {
     pgstat_fetch_stat_tabentry_ext(catalog_seams::is_shared_relation::call(relid), relid)
 }

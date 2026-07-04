@@ -57,7 +57,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "autovacuum worker",
-        main_fn: Main::Unported("AutoVacWorkerMain (backend-postmaster-autovacuum)"),
+        main_fn: Main::Ported(autovacuum::AutoVacWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind {

@@ -1,7 +1,6 @@
-// namespace.c temp-namespace creation half. C divergences: MyProc->
-// tempNamespaceId is not mirrored (its only reader, autovacuum's
-// isTempNamespaceInUse, is unported); RecoveryInProgress/IsParallelWorker
-// guards are compile-time absent (no hot standby, no parallel workers).
+// namespace.c temp-namespace creation half. C divergences:
+// RecoveryInProgress/IsParallelWorker guards are compile-time absent (no hot
+// standby, no parallel workers).
 use std::cell::Cell;
 
 use mcx::{Mcx, MemoryContext};
@@ -89,6 +88,7 @@ fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
 
     MY_TEMP_NAMESPACE.with(|c| c.set(namespace_id));
     MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(toastspace_id));
+    crate::advertise_temp_namespace(namespace_id);
 
     debug_assert_eq!(MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get), InvalidSubTransactionId);
     MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(xact::GetCurrentSubTransactionId()));
