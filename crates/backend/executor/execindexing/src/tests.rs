@@ -134,12 +134,6 @@ fn reset_fixture() {
 fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        guc_tables::vars::XLOGbuffers
-            .install(guc_tables::GucVarAccessors { get: || 64, set: |_| {} });
-        transam_xlog::XLOGShmemInit();
-        transam_xlog::ctl::XLogCtl()
-            .SharedRecoveryState
-            .store(transam_xlog::RECOVERY_STATE_DONE, std::sync::atomic::Ordering::Relaxed);
         genam_seams::build_index_value_description::set(|_, _, _| Ok(None));
         syscache_seams::pg_namespace_nspname::set(|_| Ok(None));
         bufmgr_seams::read_buffer::set(|rel, block| {
@@ -215,7 +209,6 @@ fn install() {
         smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
 
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
-        transam_xlog_seams::xlog_logical_info_active::set(|| false);
         xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, _main, _bufs| {
             with_fake(|f| {
                 f.wal.push((rmid, info));

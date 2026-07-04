@@ -187,6 +187,10 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
+    if !guc_tables::vars::cpu_operator_cost.installed() {
+        guc_tables::vars::cpu_operator_cost
+            .install(guc_tables::GucVarAccessors { get: || 0.0025, set: |_| {} });
+    }
     backend_status_seams::pgstat_report_activity::set(|_, _| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));

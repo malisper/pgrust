@@ -34,8 +34,6 @@ catalog_seams = { path = "../../../catalog/catalog_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
 
 [dev-dependencies]
-transam_xlog = { path = "../../transam/transam_xlog" }
-guc_tables = { path = "../../../utils/misc/guc_tables" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
