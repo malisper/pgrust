@@ -1194,22 +1194,26 @@ impl<'a> Estate<'a> {
             }
         };
 
-        match body_result {
-            Ok(rc) => {
-                self.err_text = Some("during statement block exit");
-                // The return value must survive subxact exit (C datumTransfer
-                // out of the subxact eval_econtext).
-                if rc == RC_RETURN && !self.retisnull && self.ret_rec.is_none()
-                    && OidIsValid(self.rettype)
-                {
-                    let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(self.rettype)?;
-                    self.retval = self.copy_to_datum_ctx(self.retval, false, typlen, typbyval)?;
-                }
-                xact::ReleaseCurrentSubTransaction()?;
-                resowner::SetCurrentResourceOwner(save_owner);
-                self.err_text = None;
-                Ok(rc)
+        // C's PG_TRY extends over the return-value transfer and the subxact
+        // release; errors there reach the same handlers.
+        let attempt = body_result.and_then(|rc| {
+            self.err_text = Some("during statement block exit");
+            // The return value must survive subxact exit (C datumTransfer
+            // out of the subxact eval_econtext).
+            if rc == RC_RETURN && !self.retisnull && self.ret_rec.is_none()
+                && OidIsValid(self.rettype)
+            {
+                let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(self.rettype)?;
+                self.retval = self.copy_to_datum_ctx(self.retval, false, typlen, typbyval)?;
             }
+            xact::ReleaseCurrentSubTransaction()?;
+            resowner::SetCurrentResourceOwner(save_owner);
+            self.err_text = None;
+            Ok(rc)
+        });
+
+        match attempt {
+            Ok(rc) => Ok(rc),
             Err(e) => {
                 // Only ERROR is catchable; FATAL/PANIC never longjmp in C
                 // (the backend exits) — release the subxact and propagate.
