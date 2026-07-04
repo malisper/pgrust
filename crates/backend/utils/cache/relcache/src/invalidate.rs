@@ -328,6 +328,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
 // pg_class, pg_class_oid_index, other nailed, rest — catalogs must be current
 // before they reload the rest. Phase lists are transient per call, as in C.
 pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
+    eprintln!("PUBTRACE RCI enter debug_discard={debug_discard}");
     relmapper_seams::relation_map_invalidate_all::call()?;
     with_state(|st| {
         st.rules_cache.clear();
