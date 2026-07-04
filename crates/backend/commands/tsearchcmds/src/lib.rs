@@ -672,7 +672,7 @@ struct TokenType<'a> {
 // getTokenTypes (tsearchcmds.c). DIVERGENCE: C resolves the parser through
 // lookup_ts_parser_cache; this cold DDL path reads pg_ts_parser directly.
 // Contract with wparser_def: prslextype returns a pointer Datum to a
-// lexid==0-terminated ts_locale LexDescr array (C shape).
+// caller-owned Vec<LexDescr>.
 fn getTokenTypes<'mcx>(
     mcx: Mcx<'mcx>,
     prsId: Oid,
@@ -697,25 +697,21 @@ fn getTokenTypes<'mcx>(
     }
     let mut flinfo = fmgr_seams::fmgr_info::call(lextype)?;
     let list = types_fmgr::function_call1_coll(&mut flinfo, InvalidOid, Datum::from_i64(0))?;
-    let base = list.as_usize() as *const ts_locale::LexDescr;
+    // wparser_def contract: pointer Datum to a caller-owned Vec<LexDescr>.
+    // SAFETY: produced by fc_prsd_lextype's Box::into_raw immediately above.
+    let descrs: Box<Vec<ts_locale::LexDescr>> =
+        unsafe { Box::from_raw(list.as_usize() as *mut Vec<ts_locale::LexDescr>) };
 
     'names: for tn in tokennames.iter() {
         let val = tn.as_string().expect("tokentype list holds Strings").sval;
         if result.iter().any(|t| t.name == val) {
             continue;
         }
-        let mut j = 0usize;
-        loop {
-            // SAFETY: contract above — array terminated by lexid == 0.
-            let entry = unsafe { &*base.add(j) };
-            if entry.lexid == 0 {
-                break;
-            }
-            if entry.alias == val {
+        for entry in descrs.iter() {
+            if entry.lexid != 0 && entry.alias == val {
                 result.push(TokenType { num: entry.lexid, name: val });
                 continue 'names;
             }
-            j += 1;
         }
         return Err(Box::new(
             PgError::error(format!("token type \"{val}\" does not exist"))
