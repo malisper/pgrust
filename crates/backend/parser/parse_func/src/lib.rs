@@ -1365,10 +1365,18 @@ fn lookup_func_name_internal(
     parts: &[&str],
     nargs: i16,
     argtypes: &[Oid],
+    missing_ok: bool,
 ) -> PgResult<Result<Oid, bool>> {
     // Err(true) = ambiguous, Err(false) = no such function.
     let scratch = mcx::MemoryContext::new("LookupFuncNameInternal");
-    let clist = FuncnameGetCandidates(scratch.mcx(), parts, nargs, false, false)?;
+    let clist = catalog_namespace::FuncnameGetCandidatesExtended(
+        scratch.mcx(),
+        parts,
+        nargs,
+        false,
+        false,
+        missing_ok,
+    )?;
     let mut result = InvalidOid;
     for cand in clist.iter() {
         if nargs > 0 && cand.args.as_slice()[..nargs as usize] != argtypes[..nargs as usize] {
@@ -1429,7 +1437,7 @@ pub fn LookupFuncName(
 ) -> PgResult<Oid> {
     let mut buf = [""; 4];
     let parts = name_parts(funcname, &mut buf);
-    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes)? {
+    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, missing_ok)? {
         Ok(oid) => Ok(oid),
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {
@@ -1483,7 +1491,7 @@ pub fn LookupFuncWithArgs(
     // "object is of wrong type" beats "object doesn't exist".
     let lookup_objtype =
         if args_unspecified { objtype } else { ObjectType::OBJECT_ROUTINE };
-    match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids)? {
+    match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, missing_ok)? {
         Ok(oid) => {
             let prokind = lsyscache::get_func_prokind(oid)?;
             match objtype {
