@@ -83,6 +83,9 @@ impl HbaLine {
 
 pub const TIMESTAMP_MINUS_INFINITY: TimestampTz = i64::MIN;
 
+// scram-common.h SCRAM_MAX_KEY_LEN (= SHA-256 digest length).
+pub const SCRAM_MAX_KEY_LEN: usize = 32;
+
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CacState {
@@ -171,6 +174,10 @@ pub struct Port {
     pub peer_cn: Option<String>,
     pub peer_dn: Option<String>,
     pub peer_cert_valid: bool,
+    // SCRAM_MAX_KEY_LEN keys, saved for SCRAM pass-through (postgres_fdw).
+    pub scram_client_key: [u8; SCRAM_MAX_KEY_LEN],
+    pub scram_server_key: [u8; SCRAM_MAX_KEY_LEN],
+    pub has_scram_keys: bool,
     // C: `const HbaLine *hba` borrows the parsed_hba_lines list entry; an
     // owned clone of the matched line here (once per connection, cold).
     pub hba: Option<HbaLine>,
@@ -208,6 +215,9 @@ impl Port {
             peer_cn: None,
             peer_dn: None,
             peer_cert_valid: false,
+            scram_client_key: [0; SCRAM_MAX_KEY_LEN],
+            scram_server_key: [0; SCRAM_MAX_KEY_LEN],
+            has_scram_keys: false,
             hba: None,
             remote_hostname_resolv: 0,
             remote_hostname_errcode: 0,

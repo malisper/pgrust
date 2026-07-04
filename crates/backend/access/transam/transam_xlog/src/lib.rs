@@ -25,7 +25,8 @@ mod tests;
 
 pub use control_file::{
     CheckPoint, ControlFileData, DataChecksumsEnabled, GetDefaultCharSignedness,
-    GetMockAuthenticationNonce, GetSystemIdentifier, LocalProcessControlFile, ReadControlFile,
+    control_file_mark_read_for_tests, GetMockAuthenticationNonce, GetSystemIdentifier,
+    LocalProcessControlFile, ReadControlFile,
     UpdateControlFile,
 };
 pub use ctl::{XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};

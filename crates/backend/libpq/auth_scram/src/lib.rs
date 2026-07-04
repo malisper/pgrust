@@ -1,6 +1,12 @@
-//! auth-scram.c secret half: parse/build/verify + mock salt. The SASL wire
-//! exchange (scram_init/scram_exchange/messages) is unported; auth.c panics
-//! loudly on the scram-sha-256 arm.
+//! auth-scram.c: secret parse/build/verify, mock salt, and the SASL
+//! SCRAM-SHA-256 mechanism (exchange.rs).
+
+mod exchange;
+pub use exchange::ScramMech;
+#[cfg(test)]
+pub(crate) use exchange::{
+    test_build_server_final_message, test_scram_init, test_verify_client_proof, ScramState,
+};
 
 use mcx::{Mcx, PgString};
 use pg_b64::{pg_b64_dec_len, pg_b64_decode, pg_b64_enc_len, pg_b64_encode};
@@ -13,7 +19,7 @@ use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR, LOG};
 
 use std::cell::Cell;
 
-fn loc(funcname: &'static str) -> ErrorLocation {
+pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("auth-scram.c", 0, funcname)
 }
 
@@ -244,7 +250,7 @@ fn strtol_base10_full(s: &[u8]) -> Option<i32> {
     Some(val as i32)
 }
 
-fn b64dec(src: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn b64dec(src: &[u8]) -> Option<Vec<u8>> {
     let cap = pg_b64_dec_len(src.len() as i32);
     let mut dst = vec![0u8; cap as usize];
     let n = pg_b64_decode(src, src.len() as i32, &mut dst, cap);

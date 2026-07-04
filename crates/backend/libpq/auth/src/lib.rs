@@ -1,9 +1,9 @@
 //! auth.c: ClientAuthentication and the per-method handlers. Live end-to-end:
-//! the trust arm, the reject / implicit-reject arms (SQLSTATE 28000 exact),
-//! sendAuthRequest / recv_password_packet, set_authn_id, auth_failed. Loud:
-//! the password-family arms (pending backend-libpq-crypt + auth-scram), peer /
-//! ident / radius / oauth. gss / sspi / pam / bsd / ldap / cert never reach
-//! dispatch — hba rejects those methods in this build.
+//! trust, reject / implicit-reject (SQLSTATE 28000 exact), and the password
+//! family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
+//! CheckSASLAuth. Loud: peer / ident / radius / oauth. gss / sspi / pam /
+//! bsd / ldap / cert never reach dispatch — hba rejects those methods in
+//! this build.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -35,9 +35,7 @@ pub const AUTH_REQ_PASSWORD: AuthRequest = 3;
 pub const AUTH_REQ_MD5: AuthRequest = 5;
 pub const AUTH_REQ_GSS: AuthRequest = 7;
 pub const AUTH_REQ_SSPI: AuthRequest = 9;
-pub const AUTH_REQ_SASL: AuthRequest = 10;
-pub const AUTH_REQ_SASL_CONT: AuthRequest = 11;
-pub const AUTH_REQ_SASL_FIN: AuthRequest = 12;
+pub use auth_sasl::{AUTH_REQ_SASL, AUTH_REQ_SASL_CONT, AUTH_REQ_SASL_FIN};
 
 pub const PqMsg_AuthenticationRequest: u8 = b'R';
 pub const PqMsg_PasswordMessage: u8 = b'p';
@@ -177,7 +175,7 @@ pub fn set_authn_id(port: &Port, id: &str) -> PgResult<()> {
 }
 
 pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
-    let logdetail: Option<String> = None;
+    let mut logdetail: Option<String> = None;
 
     hba::hba_getauthmethod(port)?;
 
@@ -210,13 +208,8 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
         m if m == uaImplicitReject => return reject_arm(port, false),
         m if m == uaPeer => deferred_arm("peer", "auth_peer (getpeereid + check_usermap)"),
         m if m == uaIdent => deferred_arm("ident", "ident_inet"),
-        m if m == uaMD5 || m == uaSCRAM => deferred_arm(
-            if m == uaMD5 { "md5" } else { "scram-sha-256" },
-            "CheckPWChallengeAuth (backend-libpq-crypt + backend-libpq-auth-scram)",
-        ),
-        m if m == uaPassword => {
-            deferred_arm("password", "CheckPasswordAuth (backend-libpq-crypt)")
-        }
+        m if m == uaMD5 || m == uaSCRAM => CheckPWChallengeAuth(port, &mut logdetail)?,
+        m if m == uaPassword => CheckPasswordAuth(port, &mut logdetail)?,
         m if m == uaRADIUS => deferred_arm("radius", "CheckRADIUSAuth"),
         m if m == uaOAuth => deferred_arm("oauth", "CheckSASLAuth(oauth)"),
         m if m == uaCert || m == uaTrust => STATUS_OK,
@@ -403,6 +396,98 @@ pub fn recv_password_packet(_port: &Port) -> PgResult<Option<String>> {
     elog(DEBUG5, "received password packet")?;
 
     Ok(Some(String::from_utf8_lossy(&data[..strlen]).into_owned()))
+}
+
+fn CheckPasswordAuth(port: &mut Port, logdetail: &mut Option<String>) -> PgResult<i32> {
+    sendAuthRequest(port, AUTH_REQ_PASSWORD, &[])?;
+
+    let Some(passwd) = recv_password_packet(port)? else {
+        return Ok(STATUS_EOF); // client wouldn't send password
+    };
+
+    let user_name = port.user_name.clone().unwrap_or_default();
+    let result = match crypt::get_role_password(&user_name, logdetail)? {
+        Some(shadow_pass) => {
+            let scratch = MemoryContext::new("CheckPasswordAuth");
+            crypt::plain_crypt_verify(scratch.mcx(), &user_name, &shadow_pass, &passwd, logdetail)?
+        }
+        None => STATUS_ERROR,
+    };
+
+    if result == STATUS_OK {
+        set_authn_id(port, &user_name)?;
+    }
+    Ok(result)
+}
+
+fn CheckPWChallengeAuth(port: &mut Port, logdetail: &mut Option<String>) -> PgResult<i32> {
+    let auth_method = port_auth_method(port);
+    debug_assert!(auth_method == uaSCRAM || auth_method == uaMD5);
+
+    let user_name = port.user_name.clone().unwrap_or_default();
+    let shadow_pass = crypt::get_role_password(&user_name, logdetail)?;
+
+    // No password (or no such user, or expired): still go through the
+    // motions with a doomed exchange, choosing md5 vs scram by
+    // password_encryption so the mock "blends in".
+    let pwtype = match &shadow_pass {
+        None => crypt::PasswordType::from_guc(guc_tables::vars::Password_encryption.read()),
+        Some(sp) => crypt::get_password_type(sp),
+    };
+
+    // uaMD5 with a SCRAM secret runs SCRAM; uaSCRAM with an MD5 secret runs
+    // SCRAM and fails (doomed).
+    let auth_result = if auth_method == uaMD5 && pwtype == crypt::PasswordType::Md5 {
+        CheckMD5Auth(port, shadow_pass.as_deref(), logdetail)?
+    } else {
+        auth_sasl::CheckSASLAuth(
+            &auth_scram::ScramMech,
+            port,
+            shadow_pass.as_deref(),
+            logdetail,
+            sendAuthRequest,
+        )?
+    };
+
+    // If get_role_password() returned error, authentication better not
+    // have succeeded.
+    debug_assert!(shadow_pass.is_some() || auth_result != STATUS_OK);
+
+    if auth_result == STATUS_OK {
+        set_authn_id(port, &user_name)?;
+    }
+    Ok(auth_result)
+}
+
+fn CheckMD5Auth(
+    port: &Port,
+    shadow_pass: Option<&str>,
+    logdetail: &mut Option<String>,
+) -> PgResult<i32> {
+    let mut md5_salt = [0u8; 4];
+    if !pg_strong_random::pg_strong_random(&mut md5_salt) {
+        ereport(LOG)
+            .errmsg("could not generate random MD5 salt")
+            .finish(loc(890, "CheckMD5Auth"))?;
+        return Ok(STATUS_ERROR);
+    }
+
+    sendAuthRequest(port, AUTH_REQ_MD5, &md5_salt)?;
+
+    let Some(passwd) = recv_password_packet(port)? else {
+        return Ok(STATUS_EOF); // client wouldn't send password
+    };
+
+    match shadow_pass {
+        Some(shadow_pass) => crypt::md5_crypt_verify(
+            port.user_name.as_deref().unwrap_or(""),
+            shadow_pass,
+            &passwd,
+            &md5_salt,
+            logdetail,
+        ),
+        None => Ok(STATUS_ERROR),
+    }
 }
 
 pub(crate) fn port_auth_method(port: &Port) -> UserAuth {

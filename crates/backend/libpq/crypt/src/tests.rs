@@ -117,3 +117,55 @@ fn plain_crypt_verify_all_arms() {
         Some("Password of user \"u\" is in unrecognized format.")
     );
 }
+
+fn install_role_fixtures() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        timestamp_seams::get_current_timestamp::set(|| 1_000_000);
+        syscache_seams::lookup_authid_rolpassword::set(|mcx, rolname| {
+            let (pass, vuntil) = match rolname {
+                "alice" => (Some(RFC7677_SECRET), None),
+                "nopass" => (None, None),
+                "expired" => (Some(RFC7677_SECRET), Some(999_999i64)),
+                "future" => (Some(RFC7677_SECRET), Some(1_000_001i64)),
+                _ => return Ok(None),
+            };
+            let rolpassword = match pass {
+                Some(p) => Some(mcx::PgString::from_str_in(p, mcx)?),
+                None => None,
+            };
+            Ok(Some(syscache_seams::AuthIdPasswordShape {
+                rolpassword,
+                rolvaliduntil: vuntil,
+            }))
+        });
+    });
+}
+
+#[test]
+fn get_role_password_arms() {
+    install_role_fixtures();
+
+    let mut ld = None;
+    assert_eq!(
+        get_role_password("alice", &mut ld).unwrap().as_deref(),
+        Some(RFC7677_SECRET)
+    );
+    assert!(ld.is_none());
+
+    let mut ld = None;
+    assert!(get_role_password("ghost", &mut ld).unwrap().is_none());
+    assert_eq!(ld.as_deref(), Some("Role \"ghost\" does not exist."));
+
+    let mut ld = None;
+    assert!(get_role_password("nopass", &mut ld).unwrap().is_none());
+    assert_eq!(ld.as_deref(), Some("User \"nopass\" has no password assigned."));
+
+    let mut ld = None;
+    assert!(get_role_password("expired", &mut ld).unwrap().is_none());
+    assert_eq!(ld.as_deref(), Some("User \"expired\" has an expired password."));
+
+    let mut ld = None;
+    assert!(get_role_password("future", &mut ld).unwrap().is_some());
+    assert!(ld.is_none());
+}

@@ -16,3 +16,11 @@ saslprep = { path = "../../../common/saslprep" }
 pg_strong_random = { path = "../../../port/pg_strong_random" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
+auth_sasl = { path = "../auth_sasl" }
+be_secure_seams = { path = "../be_secure_seams" }
+pg_hmac = { path = "../../../common/hmac" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_startup = { path = "../../../_support/types/types_startup" }
+
+[dev-dependencies]
+ip = { path = "../../../common/ip" }

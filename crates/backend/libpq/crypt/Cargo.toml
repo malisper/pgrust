@@ -16,3 +16,5 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 pg_md5 = { path = "../../../common/md5" }
 auth_scram = { path = "../auth_scram" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }

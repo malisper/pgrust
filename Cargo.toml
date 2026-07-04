@@ -553,6 +553,7 @@ members = [
     "crates/backend/access/common/detoast",
     "crates/backend/access/common/toast_internals_seams",
     "crates/backend/libpq/auth_seams",
+    "crates/backend/libpq/auth_sasl",
     "crates/backend/libpq/auth",
     "crates/backend/libpq/crypt",
     "crates/backend/libpq/hba",
