@@ -547,7 +547,7 @@ fn find_var_for_subquery_tle<'mcx>(
     for &id in run.root.rel_reltarget(rel).exprs.iter() {
         let node = *run.root.expr_node(id);
         let Some(var) = node.as_var() else { continue };
-        debug_assert!(var.varno == run.root.rel(rel).relid);
+        debug_assert!(var.varno as u32 == run.root.rel(rel).relid);
         if var.varattno as i32 == tle.resno {
             let copy = types_nodes::primnodes::Var {
                 varnullingrels: var.varnullingrels.clone_in(mcx)?,
