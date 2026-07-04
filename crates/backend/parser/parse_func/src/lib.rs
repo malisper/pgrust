@@ -272,26 +272,20 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
 
             let mut declared_arg_types = declared_arg_types;
-            // C: append omitted-argument defaults to the arg list.
+            // C: default types join the generic-consistency check, but the
+            // defaults are NOT put into the parse node — their values may
+            // change before execution; the planner inserts them at plan time.
             let mut all_arg_types: PgVec<'mcx, Oid> =
                 mcx::vec_with_capacity_in(mcx, actual_arg_types.len() + argdefaults.len())?;
             for &t in actual_arg_types {
                 all_arg_types.push(t);
             }
-            let fargs = if argdefaults.is_empty() {
-                fargs
-            } else {
-                let mut cells: PgVec<'mcx, Node<'mcx>> =
-                    mcx::vec_with_capacity_in(mcx, fargs.len() + argdefaults.len())?;
-                for c in fargs.iter() {
-                    cells.push(c);
+            for d in argdefaults.iter() {
+                if all_arg_types.len() >= FUNC_MAX_ARGS {
+                    return Err(too_many_arguments(pstate, location));
                 }
-                for d in argdefaults.iter() {
-                    cells.push(*d);
-                    all_arg_types.push(default_expr_type(*d));
-                }
-                NodeList::from_slice(mcx, cells.as_slice())?
-            };
+                all_arg_types.push(default_expr_type(*d));
+            }
             let actual_arg_types = all_arg_types.as_slice();
             let rettype = coerce::enforce_generic_type_consistency(
                 actual_arg_types,

@@ -772,6 +772,7 @@ name = "adt_timestamp"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_float",
  "adt_numeric",
  "datum",
  "elog",
@@ -782,6 +783,7 @@ dependencies = [
  "libc",
  "localtime",
  "mcx",
+ "nodes_core",
  "numutils",
  "pgtz",
  "pqformat",

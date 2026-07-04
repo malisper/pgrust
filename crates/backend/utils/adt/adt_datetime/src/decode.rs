@@ -271,6 +271,59 @@ pub fn DecodeTimezoneAbbrev<'a>(
     })
 }
 
+// Longest-prefix match, so no per-field memo: retries with successively
+// shorter tokens would thrash the fixed-slot cache.
+pub fn DecodeTimezoneAbbrevPrefix(
+    str_: &[u8],
+    offset: &mut i32,
+    tz: &mut Option<&'static PgTz>,
+) -> i32 {
+    *offset = 0;
+    *tz = None;
+
+    let mut lowtoken = [0u8; TOKMAXLEN + 1];
+    let mut len = 0usize;
+    while len < TOKMAXLEN {
+        match str_.get(len) {
+            Some(&c) if c.is_ascii_alphabetic() => lowtoken[len] = c.to_ascii_lowercase(),
+            _ => break,
+        }
+        len += 1;
+    }
+
+    while len > 0 {
+        lowtoken[len] = 0;
+        let tok = &lowtoken[..len];
+
+        if let Some((isfixed, off, _isdst)) = tz::session_tz_abbrev_probe(tok) {
+            if isfixed {
+                *offset = -off;
+            } else {
+                *tz = tz::session_timezone();
+            }
+            return len as i32;
+        }
+
+        if let Some(tp) = zoneabbrevtbl().and_then(|tbl| datebsearch(tok, tbl.abbrevs)) {
+            if tp.typ as i32 == DYNTZ {
+                let mut extra = DateTimeErrorExtra::default();
+                if let Some(tzp) = FetchDynamicTimeZone(zoneabbrevtbl().unwrap(), tp, &mut extra) {
+                    *tz = Some(tzp);
+                    return len as i32;
+                }
+            } else {
+                *offset = tp.value;
+                return len as i32;
+            }
+        }
+
+        len -= 1;
+        lowtoken[len] = 0;
+    }
+
+    -1
+}
+
 pub fn ParseFraction(cp: &[u8], frac: &mut f64) -> i32 {
     debug_assert!(cp.first() == Some(&b'.'));
     if cp.len() == 1 {
@@ -1262,7 +1315,7 @@ pub fn DecodeDateTime<'a>(
                             return dterr;
                         }
                     } else if flen >= 6
-                        && (fmask & DTK_DATE_M != DTK_DATE_M || fmask & DTK_TIME_M != DTK_TIME_M)
+                        && (fmask & DTK_DATE_M == 0 || fmask & DTK_TIME_M == 0)
                     {
                         // YMD/HMS concatenation (6+ digits), or a long year
                         let dterr = DecodeNumberField(

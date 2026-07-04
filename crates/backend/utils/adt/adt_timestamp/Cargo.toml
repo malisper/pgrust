@@ -20,6 +20,7 @@ hashfn = { path = "../../../../common/hashfn" }
 numeric = { package = "adt_numeric", path = "../numeric" }
 numutils = { path = "../numutils" }
 adt_datetime = { path = "../adt_datetime" }
+float = { package = "adt_float", path = "../float" }
 localtime = { path = "../../../timezone/localtime" }
 strftime = { path = "../../../timezone/strftime" }
 timestamp_seams = { path = "../timestamp_seams" }
@@ -27,6 +28,7 @@ xact = { path = "../../../access/transam/xact" }
 elog = { path = "../../error/elog" }
 funcapi = { path = "../../fmgr/funcapi" }
 types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 libc = "0.2"
 
 [dev-dependencies]

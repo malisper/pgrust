@@ -1,8 +1,8 @@
 //! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core, hosting the
 //! timestamp.c rows too (adt_timestamp has no fmgr table; adt_date already
-//! deps it). Not registrable (established precedents): typmodin (ArrayType),
+//! deps it). Not registrable (established precedents):
 //! sortsupport/skipsupport/time_support (planner nodes), age/overlaps_
-//! timestamp, in_range, generate_series, interval aggregates,
+//! timestamp, in_range, generate_series,
 //! date_part(text,date) 1384 (SQL-language). recv/send ride the binary-wire
 //! fmgr frame (types_fmgr::wire); interval/timetz by-ref results are
 //! 16/12-byte images via byref_result.
@@ -980,6 +980,50 @@ pub fn fc_timestamp_bin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     )?))
 }
 
+fn anytime_typmodin(fcinfo: &Fcinfo, istz: bool) -> PgResult<Datum> {
+    let mut tl = [0i32; 8];
+    let n = adt_timestamp::builtins::array_get_integer_typmods(
+        fcinfo,
+        &mut tl,
+        "invalid type modifier",
+    )?;
+    if n != 1 {
+        return Err(Box::new(
+            ::types_error::PgError::error("invalid type modifier")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    Ok(Datum::from_i32(crate::anytime_typmod_check(istz, tl[0])?))
+}
+
+pub fn fc_timetypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodin(fcinfo, false)
+}
+
+pub fn fc_timetztypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodin(fcinfo, true)
+}
+
+fn anytime_typmodout(fcinfo: &mut Fcinfo, istz: bool) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(0);
+    let tz: &[u8] = if istz { b" with time zone" } else { b" without time zone" };
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let len = adt_timestamp::builtins::typmod_paren_suffix_out(typmod, tz, buf);
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_timetypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodout(fcinfo, false)
+}
+
+pub fn fc_timetztypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodout(fcinfo, true)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -991,6 +1035,10 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // pg_proc.dat rows for date.c; alias OIDs over the same prosrc each get
 // their row, as in C's fmgr_builtins[].
 pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
+    b(2909, "timetypmodin", 1, fc_timetypmodin),
+    b(2910, "timetypmodout", 1, fc_timetypmodout),
+    b(2911, "timetztypmodin", 1, fc_timetztypmodin),
+    b(2912, "timetztypmodout", 1, fc_timetztypmodout),
     b(2468, "date_recv", 1, fc_date_recv),
     b(2469, "date_send", 1, fc_date_send),
     b(2470, "time_recv", 3, fc_time_recv),

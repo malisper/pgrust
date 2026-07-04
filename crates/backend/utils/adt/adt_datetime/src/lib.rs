@@ -22,7 +22,8 @@ pub use decode::{
     datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTables,
     ClearTimeZoneAbbrevCache, DecodeDate, DecodeDateTime, DecodeISO8601Interval, DecodeInterval,
     DecodeNumber, DecodeNumberField, DecodeSpecial, DecodeTime, DecodeTimeOnly, DecodeTimezone,
-    DecodeTimezoneAbbrev, DecodeUnits, ParseDateTime, ParseFraction, ParseFractionalSecond,
+    DecodeTimezoneAbbrev, DecodeTimezoneAbbrevPrefix, DecodeUnits, ParseDateTime, ParseFraction,
+    ParseFractionalSecond,
     ValidateDate,
 };
 pub use encode::{

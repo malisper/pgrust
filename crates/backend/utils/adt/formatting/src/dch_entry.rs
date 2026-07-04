@@ -151,6 +151,27 @@ pub fn timestamptz_to_char<'mcx>(mcx: Mcx<'mcx>, ts: i64, fmt: &[u8]) -> PgResul
     text_result(mcx, &out)
 }
 
+pub fn interval_to_char<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &::adt_datetime::Interval,
+    fmt: &[u8],
+) -> PgResult<Varlena<'mcx>> {
+    let mut tt = ::adt_datetime::pg_itm::default();
+    ::adt_timestamp::interval::interval2itm(*it, &mut tt);
+
+    let mut tmtc = TmToChar::zero();
+    tmtc.fsec = tt.tm_usec;
+    tmtc.tm.tm_sec = tt.tm_sec;
+    tmtc.tm.tm_min = tt.tm_min;
+    tmtc.tm.tm_hour = tt.tm_hour;
+    tmtc.tm.tm_mday = tt.tm_mday;
+    tmtc.tm.tm_mon = tt.tm_mon;
+    tmtc.tm.tm_year = tt.tm_year;
+
+    let out = datetime_to_char_body(mcx, &tmtc, fmt, true)?;
+    text_result(mcx, &out)
+}
+
 pub fn to_timestamp<'mcx>(mcx: Mcx<'mcx>, text: &[u8], fmt: &[u8]) -> PgResult<i64> {
     let mut tm = zero_tm();
     let mut ftz = FmtTz::default();
@@ -517,7 +538,16 @@ pub fn do_to_timestamp<'mcx>(
         }
     } else if tmfc.has_tz {
         tz.has_tz = true;
-        tz.gmtoffset = -tmfc.gmtoffset;
+        match tmfc.tzp {
+            None => tz.gmtoffset = -tmfc.gmtoffset,
+            Some(tzp) => {
+                tz.gmtoffset = ::adt_datetime::tz::DetermineTimeZoneAbbrevOffset(
+                    tm,
+                    &tmfc.abbrev[..tmfc.abbrev_len as usize],
+                    tzp,
+                );
+            }
+        }
     }
 
     Ok(true)
