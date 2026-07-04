@@ -1,8 +1,8 @@
-//! paramassign.c slice: replace_outer_var/assign_param_for_var. PHV/Aggref/
-//! GroupingFunc/MergeSupport/Returning replacement legs are loud upstream.
+//! paramassign.c slice. MergeSupport/Returning replacement legs are
+//! structurally absent (no MergeSupportFunc/ReturningExpr node types).
 
 use types_error::PgResult;
-use types_nodes::primnodes::{Param, ParamKind, Var};
+use types_nodes::primnodes::{Aggref, GroupingFunc, Param, ParamKind, PlaceHolderVar, Var};
 use types_nodes::Node;
 use types_pathnodes::PlannerParamItem;
 
@@ -79,6 +79,151 @@ fn assign_param_for_var<'mcx>(run: &mut PlannerRun<'mcx>, var: &Var<'mcx>) -> Pg
     Ok(param_id)
 }
 
+fn assign_param_for_placeholdervar<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    phv: &PlaceHolderVar<'mcx>,
+    phv_node: Node<'mcx>,
+) -> PgResult<i32> {
+    let idx = run
+        .suspended_roots
+        .len()
+        .checked_sub(phv.phlevelsup as usize)
+        .unwrap_or_else(|| {
+            panic!(
+                "assign_param_for_placeholdervar (paramassign.c): phlevelsup {} exceeds \
+                 the ancestor chain",
+                phv.phlevelsup
+            )
+        });
+    {
+        let target = &run.suspended_roots[idx].root;
+        for &pid in target.plan_params.iter() {
+            let pitem = target.planner_param_item(pid);
+            if let Some(pphv) = target.expr_node(pitem.item).as_place_holder_var() {
+                if pphv.phid == phv.phid {
+                    return Ok(pitem.paramId);
+                }
+            }
+        }
+    }
+    let mcx = run.mcx;
+    let copy = rewrite_manip::copy_node(mcx, phv_node)?;
+    rewrite_manip::IncrementVarSublevelsUp(copy, -(phv.phlevelsup as i32), 0)?;
+    let param_id = run.glob.param_exec_types.len() as i32;
+    let ptype = nodes_core::expr_type(phv.phexpr);
+    run.glob.param_exec_types.lappend(mcx, ptype)?;
+    let target = &mut run.suspended_roots[idx].root;
+    let item_id = target.alloc_expr_node(copy);
+    let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
+    target.plan_params.push(pp);
+    Ok(param_id)
+}
+
+/// replace_outer_placeholdervar (paramassign.c).
+#[allow(dead_code)]
+pub(crate) fn replace_outer_placeholdervar<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    phv: &PlaceHolderVar<'mcx>,
+    phv_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(phv.phlevelsup > 0);
+    let paramid = assign_param_for_placeholdervar(run, phv, phv_node)?;
+    Node::mk(
+        run.mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid,
+            paramtype: nodes_core::expr_type(phv.phexpr),
+            paramtypmod: nodes_core::expr_typmod(phv.phexpr),
+            paramcollid: nodes_core::expr_collation(phv.phexpr),
+            location: -1,
+        },
+    )
+}
+
+/// replace_outer_agg (paramassign.c): no dedupe — a new slot per reference.
+#[allow(dead_code)]
+pub(crate) fn replace_outer_agg<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    agg: &Aggref<'mcx>,
+    agg_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(agg.agglevelsup > 0);
+    let idx = run
+        .suspended_roots
+        .len()
+        .checked_sub(agg.agglevelsup as usize)
+        .unwrap_or_else(|| {
+            panic!(
+                "replace_outer_agg (paramassign.c): agglevelsup {} exceeds the \
+                 ancestor chain",
+                agg.agglevelsup
+            )
+        });
+    let mcx = run.mcx;
+    let copy = rewrite_manip::copy_node(mcx, agg_node)?;
+    rewrite_manip::IncrementVarSublevelsUp(copy, -(agg.agglevelsup as i32), 0)?;
+    let param_id = run.glob.param_exec_types.len() as i32;
+    run.glob.param_exec_types.lappend(mcx, agg.aggtype)?;
+    let target = &mut run.suspended_roots[idx].root;
+    let item_id = target.alloc_expr_node(copy);
+    let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
+    target.plan_params.push(pp);
+    Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: agg.aggtype,
+            paramtypmod: -1,
+            paramcollid: agg.aggcollid,
+            location: agg.location,
+        },
+    )
+}
+
+/// replace_outer_grouping (paramassign.c): no dedupe, as replace_outer_agg.
+#[allow(dead_code)]
+pub(crate) fn replace_outer_grouping<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    grp: &GroupingFunc<'mcx>,
+    grp_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(grp.agglevelsup > 0);
+    let idx = run
+        .suspended_roots
+        .len()
+        .checked_sub(grp.agglevelsup as usize)
+        .unwrap_or_else(|| {
+            panic!(
+                "replace_outer_grouping (paramassign.c): agglevelsup {} exceeds the \
+                 ancestor chain",
+                grp.agglevelsup
+            )
+        });
+    let mcx = run.mcx;
+    let ptype = nodes_core::expr_type(grp_node);
+    let copy = rewrite_manip::copy_node(mcx, grp_node)?;
+    rewrite_manip::IncrementVarSublevelsUp(copy, -(grp.agglevelsup as i32), 0)?;
+    let param_id = run.glob.param_exec_types.len() as i32;
+    run.glob.param_exec_types.lappend(mcx, ptype)?;
+    let target = &mut run.suspended_roots[idx].root;
+    let item_id = target.alloc_expr_node(copy);
+    let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
+    target.plan_params.push(pp);
+    Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: grp.location,
+        },
+    )
+}
+
 /// replace_nestloop_param_var (paramassign.c): PARAM_EXEC Param for a Var
 /// supplied by a nestloop outer rel, parked on root->curOuterParams.
 pub(crate) fn replace_nestloop_param_var<'mcx>(
@@ -119,6 +264,51 @@ pub(crate) fn replace_nestloop_param_var<'mcx>(
         mcx,
         Var { varnullingrels: var.varnullingrels.clone_in(mcx)?, ..*var },
     )?;
+    let nlp = Node::mk(
+        mcx,
+        types_nodes::plannodes::NestLoopParam { paramno: prm.paramid, paramval },
+    )?;
+    let id = run.intern_expr(nlp);
+    run.root.curOuterParams.push(id);
+    Node::mk(mcx, prm)
+}
+
+/// replace_nestloop_param_placeholdervar (paramassign.c).
+#[allow(dead_code)]
+pub(crate) fn replace_nestloop_param_placeholdervar<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    phv: &PlaceHolderVar<'mcx>,
+    phv_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (ptype, ptypmod, pcollid) = (
+        nodes_core::expr_type(phv.phexpr),
+        nodes_core::expr_typmod(phv.phexpr),
+        nodes_core::expr_collation(phv.phexpr),
+    );
+    for i in 0..run.root.curOuterParams.len() {
+        let id = run.root.curOuterParams[i];
+        let nlp = run
+            .root
+            .expr_node(id)
+            .as_nest_loop_param()
+            .expect("curOuterParams holds NestLoopParam nodes");
+        if types_nodes::equal(phv_node, nlp.paramval) {
+            return Node::mk(
+                mcx,
+                Param {
+                    paramkind: ParamKind::PARAM_EXEC,
+                    paramid: nlp.paramno,
+                    paramtype: ptype,
+                    paramtypmod: ptypmod,
+                    paramcollid: pcollid,
+                    location: -1,
+                },
+            );
+        }
+    }
+    let (prm, _) = crate::subselect::generate_new_exec_param(run, ptype, ptypmod, pcollid)?;
+    let paramval = rewrite_manip::copy_node(mcx, phv_node)?;
     let nlp = Node::mk(
         mcx,
         types_nodes::plannodes::NestLoopParam { paramno: prm.paramid, paramval },

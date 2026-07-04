@@ -1,6 +1,6 @@
 //! inherit.c + appendinfo.c slice: expand inheritance/partition parents into
-//! appendrel children. RowMarks, inherited-target DML, UNION-ALL appendrels,
-//! whole-row translation and partition pruning are loud.
+//! appendrel children. RowMarks and inherited-target DML are loud; the
+//! ROWID_VAR/RowIdentityVarInfo machinery is structurally absent (M4 lane).
 
 use mcx::{alloc_leak_in, Mcx, PgVec};
 use types_error::PgResult;
@@ -370,6 +370,9 @@ struct AppinfoMap<'mcx> {
     child_reltype: types_core::Oid,
     // None = dropped parent column.
     translated: PgVec<'mcx, Option<Node<'mcx>>>,
+    // Parent RTE eref colnames, snapshot only for typeless children (the
+    // whole-row RowExpr arm is the sole reader).
+    parent_colnames: Option<NodeList<'mcx>>,
 }
 
 pub fn adjust_appendrel_attrs_multi<'mcx>(
@@ -391,12 +394,18 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                 translated.push(Some(*run.root.expr_node(tid)));
             }
         }
+        let parent_colnames = if !types_core::OidIsValid(appinfo.child_reltype) {
+            Some(run.rte(appinfo.parent_relid as usize).eref.expect("RTE eref").colnames.clone_in(mcx)?)
+        } else {
+            None
+        };
         maps.push(AppinfoMap {
             parent_relid: appinfo.parent_relid,
             child_relid: appinfo.child_relid,
             parent_reltype: appinfo.parent_reltype,
             child_reltype: appinfo.child_reltype,
             translated,
+            parent_colnames,
         });
     }
     fn copy_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>) -> PgResult<Var<'mcx>> {
@@ -466,10 +475,34 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     }
                 } else if v.varattno == 0 {
                     if !types_core::OidIsValid(map.child_reltype) {
-                        panic!(
-                            "adjust_appendrel_attrs (appendinfo.c): whole-row Var over a \
-                             typeless child (RowExpr arm) unported"
+                        assert!(
+                            v.varreturningtype
+                                == types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                            "failed to apply returningtype to a non-Var"
                         );
+                        assert!(
+                            v.varnullingrels.is_empty(),
+                            "failed to apply nullingrels to a non-Var"
+                        );
+                        let mut fields = NodeList::nil();
+                        for t in map.translated.iter() {
+                            let t = t.expect("UNION ALL translated_vars carry no dropped slots");
+                            fields.lappend(mcx, crate::prepjointree::copy_expr(mcx, t, 0)?)?;
+                        }
+                        return Ok(Some(Node::mk(
+                            mcx,
+                            types_nodes::primnodes::RowExpr {
+                                args: fields,
+                                row_typeid: v.vartype,
+                                row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                                colnames: map
+                                    .parent_colnames
+                                    .as_ref()
+                                    .expect("typeless child snapshot")
+                                    .clone_in(mcx)?,
+                                location: -1,
+                            },
+                        )?));
                     }
                     debug_assert_eq!(v.vartype, map.parent_reltype);
                     let mut newvar = copy_var(mcx, v)?;
@@ -529,10 +562,21 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     },
                 )?))
             }
-            NodeTag::T_CurrentOfExpr => panic!(
-                "adjust_appendrel_attrs_mutator (appendinfo.c): {:?} arm unported",
-                node.node_tag()
-            ),
+            NodeTag::T_CurrentOfExpr => {
+                let c = node.as_current_of_expr().expect("CurrentOfExpr");
+                let cvarno = maps
+                    .iter()
+                    .find(|m| m.parent_relid == c.cvarno)
+                    .map_or(c.cvarno, |m| m.child_relid);
+                Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::CurrentOfExpr {
+                        cvarno,
+                        cursor_name: c.cursor_name,
+                        cursor_param: c.cursor_param,
+                    },
+                )?))
+            }
             _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, maps)),
         }
     }
@@ -617,6 +661,54 @@ pub fn adjust_child_relids_multilevel<'mcx>(
     }
     let appinfos = find_appinfos_by_relids(run, &run.root.rel(childrel).relids);
     adjust_child_relids(run.mcx, &relids, &appinfos)
+}
+
+// adjust_inherited_attnums (appendinfo.c).
+#[allow(dead_code)]
+pub fn adjust_inherited_attnums<'mcx>(
+    run: &PlannerRun<'mcx>,
+    attnums: &[i16],
+    appinfo: &AppendRelInfo<'mcx>,
+) -> PgVec<'mcx, i16> {
+    debug_assert!(types_core::OidIsValid(appinfo.parent_reloid));
+    let mut result: PgVec<'mcx, i16> = PgVec::new_in(run.mcx);
+    for &parentattno in attnums {
+        assert!(parentattno > 0, "attribute {parentattno} of relation does not exist");
+        let childvar = appinfo
+            .translated_vars
+            .get(parentattno as usize - 1)
+            .filter(|&&tid| tid != NodeId::default())
+            .map(|&tid| *run.root.expr_node(tid))
+            .and_then(|n| n.as_var())
+            .unwrap_or_else(|| {
+                panic!("attribute {parentattno} of relation does not exist")
+            });
+        result.push(childvar.varattno);
+    }
+    result
+}
+
+// adjust_inherited_attnums_multilevel (appendinfo.c).
+#[allow(dead_code)]
+pub fn adjust_inherited_attnums_multilevel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    attnums: &[i16],
+    child_relid: u32,
+    top_parent_relid: u32,
+) -> PgVec<'mcx, i16> {
+    let appinfo = run.root.append_rel_array[child_relid as usize]
+        .as_ref()
+        .unwrap_or_else(|| panic!("child rel {child_relid} not found in append_rel_array"));
+    if appinfo.parent_relid != top_parent_relid {
+        let up = adjust_inherited_attnums_multilevel(
+            run,
+            attnums,
+            appinfo.parent_relid,
+            top_parent_relid,
+        );
+        return adjust_inherited_attnums(run, &up, appinfo);
+    }
+    adjust_inherited_attnums(run, attnums, appinfo)
 }
 
 // The RestrictInfo arm of adjust_appendrel_attrs_mutator (appendinfo.c):
