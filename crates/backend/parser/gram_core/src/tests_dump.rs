@@ -338,20 +338,15 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "location", cc.location);
         out.push('}');
     } else if let Some(g) = n.as_grant_stmt() {
-        out.push_str("{GRANTSTMT");
-        bool_field(out, "is_grant", g.is_grant);
-        int_field(out, "targtype", g.targtype as i32);
-        int_field(out, "objtype", g.objtype as i32);
-        list_field(out, "objects", &g.objects);
-        list_field(out, "privileges", &g.privileges);
-        list_field(out, "grantees", &g.grantees);
-        bool_field(out, "grant_option", g.grant_option);
-        out.push_str(" :grantor ");
-        match g.grantor {
-            Some(r) => role_spec(out, r),
+        grant_stmt(out, g);
+    } else if let Some(a) = n.as_alter_default_privileges_stmt() {
+        out.push_str("{ALTERDEFAULTPRIVILEGESSTMT");
+        list_field(out, "options", &a.options);
+        out.push_str(" :action ");
+        match a.action {
+            Some(g) => grant_stmt(out, g),
             None => out.push_str("<>"),
         }
-        int_field(out, "behavior", g.behavior as i32);
         out.push('}');
     } else if let Some(ap) = n.as_access_priv() {
         out.push_str("{ACCESSPRIV");
@@ -1122,6 +1117,24 @@ fn variable_set_stmt(out: &mut String, v: &types_nodes::parsenodes::VariableSetS
     bool_field(out, "jumble_args", v.jumble_args);
     bool_field(out, "is_local", v.is_local);
     int_field(out, "location", v.location);
+    out.push('}');
+}
+
+fn grant_stmt(out: &mut String, g: &types_nodes::parsenodes::GrantStmt<'_>) {
+    out.push_str("{GRANTSTMT");
+    bool_field(out, "is_grant", g.is_grant);
+    int_field(out, "targtype", g.targtype as i32);
+    int_field(out, "objtype", g.objtype as i32);
+    list_field(out, "objects", &g.objects);
+    list_field(out, "privileges", &g.privileges);
+    list_field(out, "grantees", &g.grantees);
+    bool_field(out, "grant_option", g.grant_option);
+    out.push_str(" :grantor ");
+    match g.grantor {
+        Some(r) => role_spec(out, r),
+        None => out.push_str("<>"),
+    }
+    int_field(out, "behavior", g.behavior as i32);
     out.push('}');
 }
 
