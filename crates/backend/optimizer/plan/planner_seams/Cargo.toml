@@ -15,3 +15,6 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_portal = { path = "../../../../_support/types/portal" }
 types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_rel = { path = "../../../../_support/types/rel" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+adt_network = { path = "../../../utils/adt/network" }

@@ -5,3 +5,19 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+costsize = { path = "../costsize" }
+equivclass = { path = "../equivclass" }
+pathnode = { path = "../../util/pathnode" }
+vars = { path = "../../util/vars" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+adt_network = { path = "../../../utils/adt/network" }
+planner_seams = { path = "../../plan/planner_seams" }

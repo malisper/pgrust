@@ -3569,6 +3569,17 @@ dependencies = [
 [[package]]
 name = "equivclass"
 version = "0.1.0"
+dependencies = [
+ "costsize",
+ "lsyscache",
+ "mcx",
+ "nodes_core",
+ "planner_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+]
 
 [[package]]
 name = "error_small_seams"
@@ -5454,6 +5465,22 @@ dependencies = [
 [[package]]
 name = "indxpath"
 version = "0.1.0"
+dependencies = [
+ "adt_network",
+ "costsize",
+ "datum",
+ "equivclass",
+ "lsyscache",
+ "mcx",
+ "pathnode",
+ "planner_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "vars",
+]
 
 [[package]]
 name = "init_small"
@@ -8652,6 +8679,7 @@ dependencies = [
  "coerce",
  "costsize",
  "datum",
+ "equivclass",
  "execexpr",
  "execmain",
  "exectuples",
@@ -8664,6 +8692,7 @@ dependencies = [
  "guc_tables",
  "indexam",
  "indexcmds_seams",
+ "indxpath",
  "init_small",
  "inval",
  "lsyscache",
@@ -8728,8 +8757,11 @@ dependencies = [
 name = "planner_seams"
 version = "0.1.0"
 dependencies = [
+ "adt_network",
+ "datum",
  "mcx",
  "seam_core",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_pathnodes",
