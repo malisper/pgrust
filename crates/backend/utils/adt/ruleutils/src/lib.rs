@@ -1488,17 +1488,25 @@ pub fn pg_get_partition_constraintdef_worker(
     let rel = table::table_open(mcx, relation_id, types_rel::AccessShareLock)?;
     let and_args = partdesc::RelationGetPartitionQual(mcx, &rel)?;
     rel.close(types_rel::AccessShareLock)?;
+    // The cached qual list is 'static (List is invariant); copy into mcx as
+    // C's generate_partition_qual copyObject does.
     let expr = match and_args.len() {
         0 => return Ok(None),
-        1 => and_args.nth(0),
-        _ => Node::mk(
-            mcx,
-            types_nodes::primnodes::BoolExpr {
-                boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
-                args: and_args,
-                location: -1,
-            },
-        )?,
+        1 => copyfuncs::copy_object(mcx, and_args.nth(0))?,
+        _ => {
+            let mut args = NodeList::nil();
+            for a in and_args.iter() {
+                args.lappend(mcx, copyfuncs::copy_object(mcx, a)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::BoolExpr {
+                    boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                    args,
+                    location: -1,
+                },
+            )?
+        }
     };
     Ok(Some(deparse_expression_pretty(mcx, expr, relation_id, false, PRETTYFLAG_INDENT)?))
 }
