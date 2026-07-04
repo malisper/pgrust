@@ -1,16 +1,15 @@
 // CreateTrigger / RemoveTriggerById / get_trigger_oid / renametrig
-// (trigger.c) and the DROP TRIGGER slice of RemoveObjects (dropcmds.c) +
-// get_object_address_relobject (objectaddress.c). LOUD: partitioned-table
-// recursion, non-superuser owner checks.
+// (trigger.c). LOUD: partitioned-table recursion, non-superuser owner
+// checks.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
+    ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_nodes::parsenodes::{DropStmt, RenameStmt};
+use types_nodes::parsenodes::RenameStmt;
 use types_nodes::rawnodes::CreateTrigStmt;
 use types_rel::{
     AccessExclusiveLock, NoLock, RowExclusiveLock, RELKIND_RELATION,
@@ -49,78 +48,6 @@ pub fn CreateTrigger<'mcx>(
         false,
         TRIGGER_FIRES_ON_ORIGIN,
     )?;
-    Ok(())
-}
-
-// RemoveObjects (dropcmds.c), OBJECT_TRIGGER arm over
-// get_object_address_relobject: each object is [rel name parts..., trigname].
-pub fn RemoveTriggers<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
-    for object in stmt.objects.iter() {
-        let names = object.as_list().expect("DROP TRIGGER object list");
-        let nnames = names.len();
-        assert!((2..=4).contains(&nnames), "improper qualified name for DROP TRIGGER");
-        let trigname = names.nth(nnames - 1).as_string().expect("trigger name").sval;
-        let mut relbuf = [""; 3];
-        for i in 0..nnames - 1 {
-            relbuf[i] = names.nth(i).as_string().expect("relation name").sval;
-        }
-        let relnames = &relbuf[..nnames - 1];
-        let (schemaname, relname) = match relnames {
-            [r] => (None, *r),
-            [s, r] => (Some(*s), *r),
-            _ => panic!("unported: cross-database DROP TRIGGER qualification"),
-        };
-        let rv = rel_vocab::RangeVar {
-            catalogname: None,
-            schemaname,
-            relname,
-            inh: true,
-            relpersistence: b'p',
-            location: -1,
-        };
-        let display = {
-            let mut s = String::new();
-            for (i, part) in relnames.iter().enumerate() {
-                if i > 0 {
-                    s.push('.');
-                }
-                s.push_str(part);
-            }
-            s
-        };
-        let rel = table::table_openrv_extended(mcx, &rv, AccessExclusiveLock, stmt.missing_ok)?;
-        let Some(rel) = rel else {
-            // owningrel_does_not_exist_skipping (dropcmds.c).
-            let msg = match schemaname {
-                Some(s) if catalog_namespace::LookupNamespaceNoError(s)? == InvalidOid => {
-                    format!("schema \"{s}\" does not exist, skipping")
-                }
-                _ => format!("relation \"{display}\" does not exist, skipping"),
-            };
-            elog_seams::ereport_msg::call(NOTICE, msg, None)?;
-            continue;
-        };
-        let tgoid = get_trigger_oid(mcx, rel.rd_id, trigname, stmt.missing_ok)?;
-        rel.close(NoLock)?;
-        if tgoid == InvalidOid {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!(
-                    "trigger \"{trigname}\" for relation \"{display}\" does not exist, skipping"
-                ),
-                None,
-            )?;
-            continue;
-        }
-        dependency_seams::perform_deletion::call(
-            mcx,
-            TRIGGER_RELATION_ID,
-            tgoid,
-            0,
-            stmt.behavior,
-            0,
-        )?;
-    }
     Ok(())
 }
 

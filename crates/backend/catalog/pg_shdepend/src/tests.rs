@@ -75,12 +75,3 @@ fn comparator_orders_oid_class_subid_deptype() {
     );
 }
 
-#[test]
-fn quote_qualified_identifier_quotes_unsafe_parts() {
-    assert_eq!(quote_qualified_identifier(None, "tab"), "tab");
-    assert_eq!(quote_qualified_identifier(Some("s1"), "tab"), "s1.tab");
-    assert_eq!(
-        quote_qualified_identifier(Some("My Schema"), "select"),
-        "\"My Schema\".\"select\""
-    );
-}

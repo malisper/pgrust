@@ -4983,8 +4983,42 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // DropStmt: DROP {object_type_any_name any_name_list |
-            // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
-            // (TYPE/DOMAIN/INDEX CONCURRENTLY forms 924-929 stay loud).
+            // drop_type_name name_list | TYPE_P/DOMAIN_P type_name_list}
+            // [IF EXISTS] opt_drop_behavior
+            // (INDEX CONCURRENTLY/ON-name forms 922-923/928-929 stay loud).
+            924 | 926 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 924 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            925 | 927 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 925 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            965 => {
+                let t = view.v(1).node().expect("Typename");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            966 => {
+                let mut list = view.v(1).list();
+                let t = view.v(3).node().expect("Typename");
+                list.lappend(mcx, t)?;
+                *yyval = YYSTYPE::List(list);
+            }
             918 | 920 => {
                 let mut n = Node::build::<DropStmt>(mcx)?;
                 n.removeType = object_type(view.v(2).ival());
@@ -6129,6 +6163,34 @@ impl<'mcx> Parser<'mcx> {
                 };
                 n.number = view.v(2).ival();
                 n.class_args = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // DropOpClassStmt / DropOpFamilyStmt: DROP OPERATOR CLASS|FAMILY
+            // [IF_P EXISTS] any_name USING name opt_drop_behavior
+            912 | 913 | 914 | 915 => {
+                let (an, nm, bh) = if rule == 912 || rule == 914 { (4, 6, 7) } else { (6, 8, 9) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule <= 913 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut any_name = view.v(an).list();
+                any_name.lcons(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 913 || rule == 915;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RemoveOperStmt: DROP OPERATOR [IF_P EXISTS]
+            // operator_with_argtypes_list opt_drop_behavior
+            1232 | 1233 => {
+                let (ls, bh) = if rule == 1232 { (3, 4) } else { (5, 6) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = ObjectType::OBJECT_OPERATOR;
+                n.objects = view.v(ls).list();
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 1233;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // oper_argtypes: NONE arms (1236/1237) stay loud — NodeList cells

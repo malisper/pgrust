@@ -538,13 +538,10 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
-                OBJECT_TRIGGER => trigger::RemoveTriggers(mcx, stmt)?,
-                OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
+                // DROP POLICY stays specialized: dropcmds' get_object_address
+                // has no OBJECT_POLICY arm yet (C routes it through RemoveObjects).
                 OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
-                // Interim RemoveObjects specialization; collapses into
-                // dropcmds::RemoveObjects when the dropcmds lane lands.
-                OBJECT_EXTENSION => remove_extensions(mcx, stmt)?,
-                _ => handler_gap("RemoveObjects (dropcmds lane)"),
+                _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
             }
         }
 
@@ -936,49 +933,6 @@ fn dispatch_switch<'mcx>(
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }
     Ok(())
-}
-
-// RemoveObjects (dropcmds.c) bounded to OBJECT_EXTENSION: name lookup,
-// missing_ok NOTICE, ownership (superuser fast path), performMultipleDeletions.
-fn remove_extensions<'mcx>(
-    mcx: Mcx<'mcx>,
-    stmt: &types_nodes::parsenodes::DropStmt<'mcx>,
-) -> PgResult<()> {
-    let mut objects = catalog_dependency::ObjectAddresses::new();
-
-    for obj in stmt.objects.iter() {
-        let name = obj.as_string().expect("DROP EXTENSION object is a String node").sval;
-        let ext_oid = extension::get_extension_oid(name, true)?;
-
-        if ext_oid == types_core::InvalidOid {
-            if !stmt.missing_ok {
-                return Err(::elog::ereport(types_error::ERROR)
-                    .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
-                    .errmsg(format!("extension \"{name}\" does not exist"))
-                    .into_error()
-                    .into());
-            }
-            elog_seams::ereport_msg::call(
-                types_error::NOTICE,
-                format!("extension \"{name}\" does not exist, skipping"),
-                None,
-            )?;
-            continue;
-        }
-
-        // check_object_ownership (aclchk.c): superuser fast path; role ACL
-        // walks are the aclchk lane.
-        if !superuser::superuser()? {
-            handler_gap("RemoveObjects: object_ownercheck for non-superusers");
-        }
-
-        objects.add_exact_object_address(pg_depend::ObjectAddress::set(
-            types_core::EXTENSION_RELATION_ID,
-            ext_oid,
-        ));
-    }
-
-    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)
 }
 
 fn exec_index_stmt<'mcx>(

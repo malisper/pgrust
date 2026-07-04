@@ -656,14 +656,20 @@ pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
         types_tuple::heap_getattr(tup, Anum_pg_constraint_conrelid as i32, desc, &mut isnull)
     }
     .as_oid();
-    if conrelid == InvalidOid {
-        panic!("unported: RemoveConstraintById domain constraints");
+    // SAFETY: as above.
+    let contypid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_contypid as i32, desc, &mut isnull)
     }
-    let rel = table::table_open(mcx, conrelid, types_rel::AccessExclusiveLock)?;
-    if contype == CONSTRAINT_CHECK {
-        decrement_relchecks(mcx, conrelid)?;
+    .as_oid();
+    if conrelid != InvalidOid {
+        let rel = table::table_open(mcx, conrelid, types_rel::AccessExclusiveLock)?;
+        if contype == CONSTRAINT_CHECK {
+            decrement_relchecks(mcx, conrelid)?;
+        }
+        rel.close(types_rel::NoLock)?;
+    } else if contypid == InvalidOid {
+        panic!("constraint {con_id} is not of a known type");
     }
-    rel.close(types_rel::NoLock)?;
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&con_rel, &tid)?;
     genam::systable_endscan(mcx, scan)?;

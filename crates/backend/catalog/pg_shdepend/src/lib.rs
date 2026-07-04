@@ -15,9 +15,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_rel::{
-    AccessShareLock, Relation, RowExclusiveLock, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE,
-    RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
-    RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
+    AccessShareLock, Relation, RowExclusiveLock,
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, ItemPointerData, TupleDescData};
@@ -868,111 +866,20 @@ fn storeRemoteObjectDescription<'mcx>(
     descs.try_push_str(&format!("{count} {plural} in {objdesc}"))
 }
 
-// getObjectDescription (objectaddress.c) sliced to the classes pg_shdepend
-// rows can point at today; every other object class is loud.
+// getObjectDescription (objectaddress.c) lives in catalog_objectaddress;
+// seam because pg_depend (a dep of this crate) sits below it.
 fn getObjectDescription<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
     objectSubId: i32,
 ) -> PgResult<String> {
-    if classId == RELATION_RELATION_ID {
-        if objectSubId == 0 {
-            getRelationDescription(mcx, objectId)
-        } else {
-            let attname = lsyscache::get_attname(mcx, objectId, objectSubId as AttrNumber, false)?
-                .expect("get_attname(missing_ok=false) returned None");
-            let rel = getRelationDescription(mcx, objectId)?;
-            Ok(format!("column {} of {rel}", attname.as_str()))
-        }
-    } else if classId == NAMESPACE_RELATION_ID {
-        match lsyscache::get_namespace_name(mcx, objectId)? {
-            Some(nspname) => Ok(format!("schema {}", nspname.as_str())),
-            None => Err(Box::new(PgError::error(format!(
-                "cache lookup failed for namespace {objectId}"
-            )))),
-        }
-    } else if classId == DATABASE_RELATION_ID {
-        match dbcommands_seams::get_database_name::call(objectId)? {
-            Some(datname) => Ok(format!("database {datname}")),
-            None => Err(Box::new(PgError::error(format!(
-                "cache lookup failed for database {objectId}"
-            )))),
-        }
-    } else if classId == AUTH_ID_RELATION_ID {
-        match syscache_seams::lookup_authid_rolname::call(mcx, objectId)? {
-            Some(rolname) => Ok(format!("role {}", rolname.as_str())),
-            None => Err(Box::new(
-                PgError::error(format!("invalid role OID: {objectId}"))
-                    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
-            )),
-        }
-    } else {
-        panic!("getObjectDescription (objectaddress.c): unported object class {classId}")
-    }
-}
-
-fn getRelationDescription<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
-    let Some(relname) = lsyscache::get_rel_name(mcx, relid)? else {
-        return Err(Box::new(PgError::error(format!(
-            "cache lookup failed for relation {relid}"
-        ))));
-    };
-    let relnamespace = lsyscache::get_rel_namespace(relid)?;
-    let relkind = lsyscache::get_rel_relkind(relid)? as u8;
-
-    let nspname = if RelationIsVisible(mcx, relid, relname.as_str(), relnamespace)? {
-        None
-    } else {
-        lsyscache::get_namespace_name(mcx, relnamespace)?
-    };
-    let qualified =
-        quote_qualified_identifier(nspname.as_ref().map(|n| n.as_str()), relname.as_str());
-
-    let noun = match relkind {
-        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => "table",
-        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => "index",
-        RELKIND_SEQUENCE => "sequence",
-        RELKIND_TOASTVALUE => "toast table",
-        RELKIND_VIEW => "view",
-        RELKIND_MATVIEW => "materialized view",
-        RELKIND_COMPOSITE_TYPE => "composite type",
-        RELKIND_FOREIGN_TABLE => "foreign table",
-        _ => "relation",
-    };
-    Ok(format!("{noun} {qualified}"))
-}
-
-// RelationIsVisible (namespace.c): visible iff an unqualified lookup of
-// relname over the active search path lands on relid before any shadowing
-// entry.
-fn RelationIsVisible<'mcx>(
-    mcx: Mcx<'mcx>,
-    relid: Oid,
-    relname: &str,
-    relnamespace: Oid,
-) -> PgResult<bool> {
-    let path = namespace_seams::fetch_search_path::call(mcx, true)?;
-    for &namespaceId in path.iter() {
-        if namespaceId == relnamespace {
-            return Ok(true);
-        }
-        if OidIsValid(lsyscache::get_relname_relid(relname, namespaceId)?) {
-            return Ok(false);
-        }
-    }
-    Ok(false)
-}
-
-fn quote_qualified_identifier(qualifier: Option<&str>, ident: &str) -> String {
-    match qualifier {
-        Some(q) => format!(
-            "{}.{}",
-            format_type::quote_identifier(q),
-            format_type::quote_identifier(ident)
-        ),
-        None => format_type::quote_identifier(ident).into_owned(),
-    }
+    Ok(
+        objectaddress_seams::get_object_description::call(
+            mcx, classId, objectId, objectSubId, false,
+        )?
+        .expect("missing_ok=false"),
+    )
 }
 
 pub fn shdepDropOwned(roleids: &[Oid]) -> ! {

@@ -9,7 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 rewrite_define = { path = "../../rewrite/rewrite_define" }
-dropcmds = { path = "../../commands/dropcmds" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
@@ -18,6 +17,7 @@ tablecmds = { path = "../../commands/tablecmds" }
 trigger = { path = "../../commands/trigger" }
 typecmds = { path = "../../commands/typecmds" }
 commands_policy = { path = "../../commands/policy" }
+commands_dropcmds = { path = "../../commands/dropcmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }

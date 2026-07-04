@@ -9,6 +9,7 @@ name = "pg_shdepend"
 path = "src/lib.rs"
 
 [dependencies]
+objectaddress_seams = { path = "../objectaddress_seams" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -21,12 +22,9 @@ table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
-namespace_seams = { path = "../namespace_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
-format_type = { path = "../../utils/adt/format_type" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }

@@ -17,7 +17,7 @@ use mcx::Mcx;
 use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST};
-use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE};
+use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -55,8 +55,8 @@ const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const PolicyRelationId: Oid = 3256;
-const ConstraintRelationId: Oid = 2606;
 const RewriteRelationId: Oid = 2618;
+const ConstraintRelationId: Oid = 2606;
 const AuthMemRelationId: Oid = 1261;
 const TriggerRelationId: Oid = 2620;
 
@@ -113,7 +113,7 @@ impl Default for ObjectAddresses {
     }
 }
 
-fn object_address_present(object: &ObjectAddress, addrs: &ObjectAddresses) -> bool {
+pub fn object_address_present(object: &ObjectAddress, addrs: &ObjectAddresses) -> bool {
     addrs.refs.iter().rev().any(|thisobj| {
         object.classId == thisobj.classId
             && object.objectId == thisobj.objectId
@@ -294,7 +294,13 @@ fn findDependentObjects<'mcx>(
         return Ok(());
     }
     if catalog::IsPinnedObject(object.classId, object.objectId) {
-        unported("findDependentObjects: DROP of a pinned object (needs getObjectDescription)");
+        let desc = getObjectDescription(mcx, object)?.expect("pinned objects are describable");
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot drop {desc} because it is required by the database system"
+            ))
+            .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
+        ));
     }
 
     // Scan what this object depends on (owner detection).
@@ -557,8 +563,7 @@ fn dependent_objects_exist(
 
 const MAX_REPORTED_DEPS: i32 = 100;
 
-// The auto/internal cascade arm stays a silent DEBUG2 no-op; the CASCADE
-// NOTICE report is loud.
+// The auto/internal cascade arm stays a silent DEBUG2 no-op.
 fn reportDependentObjects<'mcx>(
     mcx: Mcx<'mcx>,
     targetObjects: &ObjectAddresses,
@@ -625,7 +630,20 @@ fn reportDependentObjects<'mcx>(
         } else if flags & PERFORM_DELETION_QUIETLY != 0 {
             // QUIETLY drops msglevel to DEBUG2: nothing client-visible.
         } else {
-            unported("reportDependentObjects: DROP CASCADE NOTICE report");
+            let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
+            if numReportedClient < MAX_REPORTED_DEPS {
+                if !clientdetail.is_empty() {
+                    clientdetail.push('\n');
+                }
+                clientdetail.push_str(&format!("drop cascades to {objDesc}"));
+                numReportedClient += 1;
+            } else {
+                numNotReportedClient += 1;
+            }
+            if !logdetail.is_empty() {
+                logdetail.push('\n');
+            }
+            logdetail.push_str(&format!("drop cascades to {objDesc}"));
         }
     }
 
@@ -642,6 +660,18 @@ fn reportDependentObjects<'mcx>(
             None => None,
         };
         return Err(dependent_objects_exist(orig_desc, clientdetail, logdetail));
+    }
+
+    if numReportedClient > 1 {
+        let total = numReportedClient + numNotReportedClient;
+        let noun = if total == 1 { "object" } else { "objects" };
+        elog_seams::ereport_msg::call(
+            types_error::NOTICE,
+            format!("drop cascades to {total} other {noun}"),
+            Some(clientdetail),
+        )?;
+    } else if numReportedClient == 1 {
+        elog_seams::ereport_msg::call(types_error::NOTICE, clientdetail, None)?;
     }
     Ok(())
 }
@@ -732,6 +762,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                 RELKIND_RELATION
                     | RELKIND_TOASTVALUE
                     | RELKIND_SEQUENCE
+                    | RELKIND_VIEW
                     | types_rel::RELKIND_MATVIEW
                     | types_rel::RELKIND_PARTITIONED_TABLE
             ) {
@@ -740,7 +771,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
                 }
             } else {
-                unported("doDeletion: non-table relkind (view/matview lanes)");
+                unported("doDeletion: non-table relkind (foreign-table/composite lanes)");
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
@@ -758,12 +789,27 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         TriggerRelationId => trigger::RemoveTriggerById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
+        types_core::NAMESPACE_RELATION_ID => {
+            pg_namespace::RemoveSchemaById(mcx, object.objectId)?
+        }
         RewriteRelationId => {
             rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
         }
         types_core::OPERATOR_RELATION_ID => {
             dependency_seams::remove_operator_by_id::call(mcx, object.objectId)?
         }
+        types_core::OPERATOR_CLASS_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::OPERATOR_CLASS_RELATION_ID,
+            types_core::OPCLASS_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::OPERATOR_FAMILY_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::OPERATOR_FAMILY_RELATION_ID,
+            types_core::OPFAMILY_OID_INDEX_ID,
+            object.objectId,
+        )?,
         types_core::ACCESS_METHOD_OPERATOR_RELATION_ID => drop_row_by_oid(
             mcx,
             types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
