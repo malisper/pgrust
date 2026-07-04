@@ -2147,7 +2147,10 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         }
         PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
-        PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
+        PlanStateNode::ValuesScan(vs) => {
+            ::nodevaluesscan::exec_end_values_scan(vs);
+            end_scan(&mut vs.ss)
+        }
         PlanStateNode::TableFuncScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),

@@ -208,7 +208,9 @@ fn exec_type_from_expr_list<'mcx>(
     Ok(d)
 }
 
-pub fn exec_end_values_scan(_node: &mut ValuesScanState<'_>) {}
+pub fn exec_end_values_scan(node: &mut ValuesScanState<'_>) {
+    node.exprstatelists.clear();
+}
 
 /// `ExecReScanValuesScan`.
 pub fn exec_rescan_values_scan<'mcx>(
@@ -221,5 +223,5 @@ pub fn exec_rescan_values_scan<'mcx>(
 }
 
 mcx::forget_safe_struct!(
-    ValuesScanState<'_> { ss, rowcontext, exprlists, exprstatelists, curr_idx, array_len },
+    ValuesScanState<'_> { ss, rowcontext, exprlists, curr_idx, array_len; exprstatelists },
 );
