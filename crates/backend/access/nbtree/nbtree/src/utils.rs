@@ -642,13 +642,16 @@ unsafe fn bt_advance_array_keys(
 /// _bt_checkkeys. `tupnatts` is the tuple's own attribute count (may be less
 /// than the key count for a truncated high key).
 ///
+/// ARRAY_KEYS is a const generic so the numArrayKeys==0 instantiation folds
+/// the array-advance tail dead and stays inlinable in the readpage loop —
+/// the runtime-bool form cost the plain range lane ~4% instr.
+///
 /// # Safety
 /// `tuple` points at a live index tuple on a page pinned+locked by caller.
-pub(crate) unsafe fn bt_checkkeys(
+pub(crate) unsafe fn bt_checkkeys<const ARRAY_KEYS: bool>(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     pstate: &mut BtReadPageState<'_>,
-    array_keys: bool,
     tuple: ITup,
     tupnatts: i32,
     frame: &mut OrderProcFrame,
@@ -656,8 +659,8 @@ pub(crate) unsafe fn bt_checkkeys(
     let dir = so.currPos.dir;
     let mut ikey = pstate.startikey;
     debug_assert!(!so.needPrimScan && !so.scanBehind && !so.oppositeDirCheck);
-    debug_assert!(array_keys || so.numArrayKeys == 0);
-    debug_assert!(!pstate.forcenonrequired || array_keys);
+    debug_assert!(ARRAY_KEYS || so.numArrayKeys == 0);
+    debug_assert!(!pstate.forcenonrequired || ARRAY_KEYS);
 
     let res = bt_check_compare(
         rel,
@@ -665,14 +668,14 @@ pub(crate) unsafe fn bt_checkkeys(
         dir,
         tuple,
         tupnatts,
-        array_keys,
+        ARRAY_KEYS,
         pstate.forcenonrequired,
         &mut pstate.continuescan,
         &mut ikey,
         frame,
     )?;
 
-    if !array_keys || pstate.continuescan {
+    if !ARRAY_KEYS || pstate.continuescan {
         return Ok(res);
     }
 
