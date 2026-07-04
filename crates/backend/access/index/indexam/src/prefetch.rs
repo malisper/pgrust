@@ -125,7 +125,12 @@ fn issue(
         if b == pf.last_issued {
             continue;
         }
-        if b.wrapping_sub(pf.last_issued) == 1 {
+        // Near-sequential window, not stride-1: a pool-DIO prefetch inside a
+        // sequential run punches a hole in the buffered-fd read stream and
+        // collapses kernel readahead for the whole run (m2cold correlated
+        // 245ms -> 1368ms with stride-1 only). 16 blocks = io_combine_limit
+        // (128kB), inside one kernel readahead window.
+        if (1..=16).contains(&b.wrapping_sub(pf.last_issued)) {
             pf.last_issued = b;
             pf.inflight += 1;
             continue;
