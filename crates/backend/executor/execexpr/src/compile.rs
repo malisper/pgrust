@@ -2436,7 +2436,11 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
-    fuse_program(state);
+    // Kernelized programs never run their steps; skipping the peephole there
+    // keeps compile-per-query lanes (point/select1) free of the pass cost.
+    if matches!(state.kernel, Kernel::Program) {
+        fuse_program(state);
+    }
     if dump_programs_enabled() {
         dump_program(state);
     }
@@ -2553,7 +2557,7 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
 // select_kernel so every kernel matcher still sees the raw program shape; a
 // pair whose second step is a jump target stays unfused (jumping to the
 // first executes both, as the raw program would).
-fn fuse_program(state: &mut ExprState<'_>) {
+pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     let len = state.steps.len();
     if len < 3 {
         return;

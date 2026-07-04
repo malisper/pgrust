@@ -592,11 +592,15 @@ fn step_footprint_and_program_shapes() {
     with_mcx(|mcx| {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
             .unwrap();
-        let state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        // Kernelized at ready (steps stay raw); forcing the program kernel
+        // fuses: [Fetch, Var, FuncStrict2, Qual, Done] ->
+        // [Fetch, ScanVarFuncStrict2, Qual(remapped), Done].
+        assert_eq!(state.steps().len(), 5);
+        assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
+        state.force_program_kernel();
         let shapes: alloc::vec::Vec<core::mem::Discriminant<Step>> =
             state.steps().iter().map(core::mem::discriminant).collect();
-        // Ready-time fusion: [Fetch, Var, FuncStrict2, Qual, Done] ->
-        // [Fetch, ScanVarFuncStrict2, Qual(remapped), Done].
         assert_eq!(state.steps().len(), 4);
         assert!(matches!(state.steps()[0], Step::ScanFetchSome { last_var: 1 }));
         assert!(matches!(

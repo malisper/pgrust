@@ -717,6 +717,9 @@ impl<'mcx> ExprState<'mcx> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn force_program_kernel(&mut self) {
-        self.kernel = Kernel::Program;
+        if !matches!(self.kernel, Kernel::Program) {
+            self.kernel = Kernel::Program;
+            crate::compile::fuse_program(self);
+        }
     }
 }
