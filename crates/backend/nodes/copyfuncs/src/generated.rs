@@ -22,9 +22,10 @@ use types_nodes::primnodes::{
     FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, InferenceElem, JoinExpr,
     JsonBehavior, JsonConstructorExpr, JsonExpr, JsonFormat, JsonIsPredicate, JsonReturning,
     JsonValueExpr, MergeAction, MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest,
-    OnConflictExpr, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan, SubscriptingRef,
-    TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
+    OnConflictExpr, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType,
+    RowCompareExpr, RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink,
+    SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition,
+    XmlExpr,
 };
 use types_nodes::parsenodes::{
     AccessPriv, AlterDatabaseRefreshCollStmt, AlterDatabaseSetStmt, AlterDatabaseStmt,
@@ -68,12 +69,13 @@ use types_nodes::rawnodes::{
 };
 use types_nodes::plannodes::{
     Agg, Append, AppendRelInfo, BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, CteScan,
-    FunctionScan, Hash, HashJoin, IncrementalSort, IndexOnlyScan, IndexScan, Join, Limit,
-    LockRows, Material, Memoize, MergeAppend, MergeJoin, ModifyTable, NamedTuplestoreScan,
-    NestLoop, NestLoopParam, PartitionPruneInfo, PartitionPruneStepCombine,
-    PartitionPruneStepOp, PartitionedRelPruneInfo, Plan, PlanInvalItem, PlanRowMark,
-    PlannedStmt, ProjectSet, RecursiveUnion, Result, Scan, SeqScan, SetOp, Sort, SubqueryScan,
-    TableFuncScan, TidRangeScan, TidScan, Unique, ValuesScan, WindowAgg, WorkTableScan,
+    FunctionScan, Group, Hash, HashJoin, IncrementalSort, IndexOnlyScan, IndexScan, Join,
+    Limit, LockRows, Material, Memoize, MergeAppend, MergeJoin, ModifyTable,
+    NamedTuplestoreScan, NestLoop, NestLoopParam, PartitionPruneInfo,
+    PartitionPruneStepCombine, PartitionPruneStepOp, PartitionedRelPruneInfo, Plan,
+    PlanInvalItem, PlanRowMark, PlannedStmt, ProjectSet, RecursiveUnion, Result, Scan, SeqScan,
+    SetOp, Sort, SubqueryScan, TableFuncScan, TidRangeScan, TidScan, Unique, ValuesScan,
+    WindowAgg, WorkTableScan,
 };
 
 pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Option<Node<'d>>> {
@@ -594,6 +596,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<GrantStmt>().expect("GrantStmt");
             Node::mk(mcx, copy_GrantStmt(mcx, s)?)?
         }
+        NodeTag::T_Group => {
+            let s = node.as_variant::<Group>().expect("Group");
+            Node::mk(mcx, copy_Group(mcx, s)?)?
+        }
         NodeTag::T_GroupingFunc => {
             let s = node.as_variant::<GroupingFunc>().expect("GroupingFunc");
             Node::mk(mcx, copy_GroupingFunc(mcx, s)?)?
@@ -889,6 +895,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_PartitionedRelPruneInfo => {
             let s = node.as_variant::<PartitionedRelPruneInfo>().expect("PartitionedRelPruneInfo");
             Node::mk(mcx, copy_PartitionedRelPruneInfo(mcx, s)?)?
+        }
+        NodeTag::T_PlaceHolderVar => {
+            let s = node.as_variant::<PlaceHolderVar>().expect("PlaceHolderVar");
+            Node::mk(mcx, copy_PlaceHolderVar(mcx, s)?)?
         }
         NodeTag::T_PlanInvalItem => {
             let s = node.as_variant::<PlanInvalItem>().expect("PlanInvalItem");
@@ -2517,6 +2527,16 @@ pub(crate) fn copy_GrantStmt<'d>(mcx: Mcx<'d>, s: &GrantStmt<'_>) -> PgResult<Gr
     })
 }
 
+pub(crate) fn copy_Group<'d>(mcx: Mcx<'d>, s: &Group<'_>) -> PgResult<Group<'d>> {
+    Ok(Group {
+        plan: copy_Plan(mcx, &s.plan)?,
+        numCols: s.numCols,
+        grpColIdx: copy_slice(mcx, s.grpColIdx)?,
+        grpOperators: copy_slice(mcx, s.grpOperators)?,
+        grpCollations: copy_slice(mcx, s.grpCollations)?,
+    })
+}
+
 pub(crate) fn copy_GroupingFunc<'d>(mcx: Mcx<'d>, s: &GroupingFunc<'_>) -> PgResult<GroupingFunc<'d>> {
     Ok(GroupingFunc {
         args: copy_node_list(mcx, &s.args)?,
@@ -3295,6 +3315,16 @@ pub(crate) fn copy_PartitionedRelPruneInfo<'d>(mcx: Mcx<'d>, s: &PartitionedRelP
         initial_pruning_steps: copy_node_list(mcx, &s.initial_pruning_steps)?,
         exec_pruning_steps: copy_node_list(mcx, &s.exec_pruning_steps)?,
         execparamids: copy_bms(mcx, &s.execparamids)?,
+    })
+}
+
+pub(crate) fn copy_PlaceHolderVar<'d>(mcx: Mcx<'d>, s: &PlaceHolderVar<'_>) -> PgResult<PlaceHolderVar<'d>> {
+    Ok(PlaceHolderVar {
+        phexpr: copy_node(mcx, s.phexpr)?,
+        phrels: copy_bms(mcx, &s.phrels)?,
+        phnullingrels: copy_bms(mcx, &s.phnullingrels)?,
+        phid: s.phid,
+        phlevelsup: s.phlevelsup,
     })
 }
 
