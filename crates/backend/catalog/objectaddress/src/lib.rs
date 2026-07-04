@@ -202,9 +202,6 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
     }
-    if !tn.arrayBounds.is_nil() {
-        unported("LookupTypeName array bounds");
-    }
     if tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
     }
@@ -227,6 +224,11 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
             }
         }
         None => catalog_namespace::TypenameGetTypidExtended(typname, true)?,
+    };
+    let typoid = if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
+        syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid)
+    } else {
+        typoid
     };
     if typoid == InvalidOid && !missing_ok {
         return Err(err(
@@ -1050,15 +1052,14 @@ fn get_object_address_opf_member<'mcx>(
 // open relation for relation-attached objects; caller closes it.
 
 // oidparse (nodes/value.c): Integer directly; Float carries oids beyond
-// int32 range as their decimal image.
-fn oidparse(node: Node<'_>) -> Oid {
+// int32 range (or non-numeric text) through oidin_subr.
+fn oidparse(node: Node<'_>) -> PgResult<Oid> {
     if let Some(i) = node.as_integer() {
-        return i.ival as Oid;
+        return Ok(i.ival as Oid);
     }
     if let Some(f) = node.as_float() {
-        return f.fval.parse::<Oid>().unwrap_or_else(|_| {
-            panic!("invalid OID literal {:?}", f.fval)
-        });
+        let (v, _) = numutils::uint32in_subr(f.fval, false, "oid", None)?;
+        return Ok(v);
     }
     panic!("unsupported node type in oidparse");
 }
@@ -1226,7 +1227,7 @@ pub fn get_object_address<'mcx>(
                 (ObjectAddress::set(class_id, oid), None)
             }
             OBJECT_LARGEOBJECT => {
-                let loid = oidparse(object);
+                let loid = oidparse(object)?;
                 if !pg_largeobject::LargeObjectExists(mcx, loid)? && !missing_ok {
                     return Err(err(
                         ERRCODE_UNDEFINED_OBJECT,

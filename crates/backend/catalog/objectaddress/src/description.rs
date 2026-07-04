@@ -766,6 +766,23 @@ pub fn getObjectDescription(
                 }
             }))
         }
+        crate::EventTriggerRelationId => {
+            let cacheid = cache_syscache::cacheinfo::EVENTTRIGGEROID;
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cacheid,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for event trigger {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let evtname =
+                name_from_datum(cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?);
+            cache_syscache::ReleaseSysCache(tup);
+            Ok(Some(format!("event trigger {evtname}")))
+        }
         crate::ParameterAclRelationId => {
             let cacheid = cache_syscache::cacheinfo::PARAMETERACLOID;
             let Some(tup) = cache_syscache::SearchSysCache1(

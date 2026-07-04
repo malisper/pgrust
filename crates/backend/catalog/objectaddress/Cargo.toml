@@ -64,3 +64,4 @@ arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 varlena = { path = "../../utils/adt/varlena" }
 detoast = { path = "../../access/common/detoast" }
 foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
+numutils = { path = "../../utils/adt/numutils" }
