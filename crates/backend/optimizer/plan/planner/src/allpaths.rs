@@ -112,11 +112,18 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
         RTEKind::RTE_VALUES => {
             crate::costsize::set_values_size_estimates(run, rel)?;
         }
+        RTEKind::RTE_TABLEFUNC => {
+            crate::costsize::set_tablefunc_size_estimates(run, rel)?;
+        }
         RTEKind::RTE_SUBQUERY => {
             set_subquery_pathlist(run, rel, rti)?;
         }
         RTEKind::RTE_CTE => {
-            crate::cte::set_cte_pathlist(run, rel, rti)?;
+            if rte.self_reference {
+                crate::cte::set_worktable_pathlist(run, rel, rti)?;
+            } else {
+                crate::cte::set_cte_pathlist(run, rel, rti)?;
+            }
         }
         RTEKind::RTE_RESULT => {
             crate::costsize::set_result_size_estimates(run, rel)?;
@@ -169,7 +176,7 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         rte.subquery.expect("RTE_SUBQUERY has a subquery"),
     )?;
     run.push_root()?;
-    crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
     run.root.rel_mut(rel).subroot_idx = Some(idx);
     // Isolate the params needed by this specific subplan.
@@ -386,6 +393,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
             RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
             RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
             RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
+            RTEKind::RTE_TABLEFUNC => set_tablefunc_pathlist(run, rel)?,
             RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
             RTEKind::RTE_CTE => {} // fully handled during set_rel_size
             RTEKind::RTE_RESULT => set_result_pathlist(run, rel)?,
@@ -411,10 +419,12 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         "set_append_rel_size (allpaths.c): joininfo translation \
          (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
     );
-    // add_child_rel_equivalences: only feeds child index-path pathkeys and
-    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
-    // stays loud where those could change the chosen plan.
-    debug_assert!(!run.root.rel(rel).has_eclass_joins);
+    // C divergence: add_child_rel_equivalences is unported (appendrel EC
+    // lane) — child EC members only feed child parameterized index paths and
+    // MergeAppend orderings; the indexlist gate in add_paths_to_append_rel
+    // stays loud where those could change the chosen plan. Join enforcement
+    // is unaffected: the parent appendrel's members drive
+    // generate_join_implied_equalities at the join level.
 
     let mut has_live_children = false;
     let mut parent_tuples = 0.0f64;
@@ -679,6 +689,13 @@ fn set_values_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     add_path(run, rel, path);
     Ok(())
 }
+// set_tablefunc_pathlist (allpaths.c).
+fn set_tablefunc_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_tablefuncscan_path(run, rel, &required_outer)?;
+    add_path(run, rel, path);
+    Ok(())
+}
 
 fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     crate::indxpath::check_index_predicates(run, rel)?;
@@ -697,7 +714,10 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             }
             debug_assert!(rte.tablesample.is_none());
         }
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_SUBQUERY => {
+        RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_SUBQUERY => {
             // C tests is_parallel_safe over the funcexprs/values_lists (and
             // security_barrier for subqueries); parallel plans are loud on
             // this lane, so the flag stays conservatively false.
@@ -733,8 +753,12 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
 fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     debug_assert!(run.root.rel(rel).lateral_relids.is_none());
 
-    // create_tidscan_paths: TID quals can't exist on this lane (M2 tidscan
-    // lane); create_plain_partial_paths: M3 parallel lane (Gather is loud).
+    // A CurrentOfExpr qual forces the TID path: the executor handles no other.
+    if crate::tidpath::create_tidscan_paths(run, rel)? {
+        return Ok(());
+    }
+
+    // create_plain_partial_paths: M3 parallel lane (Gather is loud).
     let seqscan = crate::pathnode::create_seqscan_path(run, rel, 0)?;
     add_path(run, rel, seqscan);
 

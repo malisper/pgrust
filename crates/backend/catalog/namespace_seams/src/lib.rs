@@ -72,6 +72,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_collation_oid(names, missing_ok) (namespace.c): encoding-aware
+    // search-path lookup; carries the undefined-collation error surface.
+    pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // get_ts_config_oid(names, missing_ok) (namespace.c).
+    pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // get_ts_dict_oid(names, missing_ok) (namespace.c).
+    pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // OpernameGetOprid(names, oprleft, oprright) (namespace.c).
+    pub fn opername_get_oprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // OpernameGetCandidates(names, oprkind, missing_schema_ok) (namespace.c)
+    // projected to candidate oids, list order.
+    pub fn opername_get_candidate_oids<'mcx>(
+        mcx: Mcx<'mcx>,
+        names: &[&str],
+        oprkind: i8,
+        missing_schema_ok: bool,
+    ) -> PgResult<mcx::PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
     // FindDefaultConversionProc(for_encoding, to_encoding) (namespace.c):
     // OID of the default conversion proc on the search path, or InvalidOid.
     // No Mcx: the owner runs its catalog lookups in a scratch context.

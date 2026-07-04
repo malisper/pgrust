@@ -210,21 +210,22 @@ EXPLAIN SELECT count(*) FROM selgin WHERE j ? ANY (ARRAY['tag', NULL]);
 EXPLAIN SELECT count(*) FROM selgin WHERE j ? ANY (ARRAY['tag', 'k1']);
 
 -- examine_indexcol_variable expression arm: skip-scan gap over an
--- expression index column (btree) and a BRIN expression index. Keys stay
--- distinct: pgrust's CREATE INDEX build lacks btree deduplication, so
--- duplicate-heavy keys give a different index size than C (dedup lane).
+-- expression index column (btree) and a BRIN expression index. Keys are
+-- duplicate-heavy: the CREATE INDEX build deduplicates into posting lists,
+-- so relpages must match C's (build-dedup lane).
 CREATE TABLE selexpr(a int4, b int4, c int4);
-INSERT INTO selexpr SELECT g % 5, g % 11, g FROM generate_series(1, 3000) g;
+INSERT INTO selexpr SELECT g % 5, g % 11, g % 3 FROM generate_series(1, 3000) g;
 CREATE INDEX selexpr_idx ON selexpr (a, (b + 1), c);
 ANALYZE selexpr;
 SELECT staattnum, stadistinct FROM pg_statistic WHERE starelid = 'selexpr_idx'::regclass ORDER BY staattnum;
+SELECT relpages FROM pg_class WHERE relname = 'selexpr_idx';
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
-EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 101;
+EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 2;
 SET enable_indexonlyscan = off;
-EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 101;
+EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 2;
 RESET enable_indexonlyscan;
-EXPLAIN SELECT * FROM selexpr WHERE a = 1 AND (b + 1) = 5 AND c = 101;
+EXPLAIN SELECT * FROM selexpr WHERE a = 1 AND (b + 1) = 5 AND c = 2;
 RESET enable_seqscan;
 RESET enable_bitmapscan;
 CREATE TABLE selbrin(x int4);
@@ -253,3 +254,31 @@ EXPLAIN SELECT n FROM selacl WHERE n = 2.5;
 RESET SESSION AUTHORIZATION;
 
 DROP TABLE selr, selm, seln, selb, seljoin, selmcv1, selmcv2, selbytea, selmvb1, selmvb2, selgin, selexpr, selbrin, selacl;
+
+-- estimate_num_groups completion: boolean group exprs (x2 short-circuit),
+-- whole-expression stats via expression index, SRF multiplier, known-equal
+-- cross-rel dedup; scalarineqsel CTID block-position arm.
+CREATE TABLE selgrp(a int4, b int4, flag bool, t text);
+INSERT INTO selgrp SELECT g % 50, g % 7, (g % 3 = 0), 'v' || (g % 20) FROM generate_series(1, 2000) g;
+CREATE INDEX selgrp_expr_idx ON selgrp ((a + b));
+ANALYZE selgrp;
+EXPLAIN SELECT flag, count(*) FROM selgrp GROUP BY flag;
+EXPLAIN SELECT a, flag, count(*) FROM selgrp GROUP BY a, flag;
+EXPLAIN SELECT count(*) FROM selgrp GROUP BY (a = 1);
+EXPLAIN SELECT a + b, count(*) FROM selgrp GROUP BY a + b;
+EXPLAIN SELECT DISTINCT a + b FROM selgrp;
+EXPLAIN SELECT DISTINCT t || 'x' FROM selgrp;
+EXPLAIN SELECT DISTINCT a, generate_series(1, 3) FROM selgrp;
+CREATE TABLE selgrp2(a int4, c int4);
+INSERT INTO selgrp2 SELECT g % 10, g % 4 FROM generate_series(1, 1000) g;
+ANALYZE selgrp2;
+EXPLAIN SELECT selgrp.a, selgrp2.a, count(*) FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp.a, selgrp2.a;
+EXPLAIN SELECT selgrp2.a, selgrp.a, count(*) FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp2.a, selgrp.a;
+SET enable_tidscan = off;
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid < '(3,0)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid <= '(3,10)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid > '(5,1)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid >= '(8,40)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE '(3,0)' > ctid;
+RESET enable_tidscan;
+DROP TABLE selgrp, selgrp2;

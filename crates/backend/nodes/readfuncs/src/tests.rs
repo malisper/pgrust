@@ -208,7 +208,7 @@ fn null_const_and_escaped_strings() {
 #[should_panic(expected = "read arm unported")]
 fn unknown_node_label_is_loud() {
     let ctx = MemoryContext::new("t");
-    let _ = stringToNode(ctx.mcx(), "{TABLEFUNC :ns_uris <>}");
+    let _ = stringToNode(ctx.mcx(), "{PLANNEDSTMT :commandType 1}");
 }
 
 #[test]
@@ -258,4 +258,49 @@ fn coerce_to_domain_node() {
     let cd = n.as_coerce_to_domain().unwrap();
     assert_eq!((cd.resulttype, cd.resulttypmod), (90001, -1));
     assert_eq!(cd.arg.as_const().unwrap().constvalue.as_u64(), 5);
+}
+
+#[test]
+fn merge_in_cte_ev_action() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = include_str!("../fixtures/merge_cte_ev_action.txt").trim();
+    let n = stringToNode(mcx, s).unwrap();
+    let q = n.as_list().unwrap().nth(0).as_query().unwrap();
+    let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+    let mq = cte.ctequery.unwrap().as_query().unwrap();
+    assert_eq!(mq.commandType, types_nodes::nodes_enums::CmdType::CMD_MERGE);
+    assert!(mq.mergeJoinCondition.is_some());
+    let kinds: Vec<_> = mq
+        .mergeActionList
+        .iter()
+        .map(|a| a.as_merge_action().unwrap().commandType)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            types_nodes::nodes_enums::CmdType::CMD_UPDATE,
+            types_nodes::nodes_enums::CmdType::CMD_INSERT
+        ]
+    );
+    assert!(!mq.returningList.is_nil());
+}
+
+#[test]
+fn search_cycle_ev_action() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = include_str!("../fixtures/search_cycle_ev_action.txt").trim();
+    let n = stringToNode(mcx, s).unwrap();
+    let q = n.as_list().unwrap().nth(0).as_query().unwrap();
+    let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+    let sc = cte.search_clause.unwrap().as_cte_search_clause().unwrap();
+    assert!(!sc.search_breadth_first);
+    assert_eq!(sc.search_seq_column, Some("ord"));
+    assert_eq!(sc.search_col_list.len(), 1);
+    let cc = cte.cycle_clause.unwrap().as_cte_cycle_clause().unwrap();
+    assert_eq!(cc.cycle_mark_column, Some("is_c"));
+    assert_eq!(cc.cycle_path_column, Some("pth"));
+    assert!(cc.cycle_mark_value.unwrap().as_const().unwrap().constvalue.as_bool());
+    assert_eq!(cc.cycle_mark_type, 16);
 }

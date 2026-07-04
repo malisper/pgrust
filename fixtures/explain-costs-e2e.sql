@@ -102,4 +102,47 @@ EXPLAIN SELECT a + b * 2, upper(d) FROM ec_big WHERE c IS NOT NULL;
 EXPLAIN SELECT CASE WHEN b < 10 THEN 'lo' ELSE 'hi' END FROM ec_big WHERE d IN ('row1', 'row2');
 EXPLAIN SELECT ec_big FROM ec_big WHERE a = 5;
 
+-- multi-index choice + bitmap AND/OR selection
+EXPLAIN SELECT * FROM ec_big WHERE a = 42 AND b = 3;
+EXPLAIN SELECT * FROM ec_big WHERE a < 100 AND b < 5;
+EXPLAIN SELECT * FROM ec_big WHERE a < 100 OR b > 90;
+EXPLAIN SELECT * FROM ec_big WHERE (a < 50 AND b = 1) OR a > 19900;
+EXPLAIN SELECT * FROM ec_big WHERE b = 5 AND c < 0.5;
+EXPLAIN SELECT a FROM ec_big WHERE b = 5 ORDER BY a;
+EXPLAIN SELECT * FROM ec_big WHERE 10 > b;
+
+-- EC-implied equalities: const propagation and derived join clauses
+EXPLAIN SELECT * FROM ec_big, ec_small WHERE ec_big.a = ec_small.x AND ec_small.x = 42;
+EXPLAIN SELECT * FROM ec_big, ec_small WHERE ec_big.a = ec_small.x AND ec_big.a = 42;
+EXPLAIN SELECT count(*) FROM ec_big b1, ec_big b2, ec_small s WHERE b1.a = b2.a AND b2.a = s.x;
+EXPLAIN SELECT count(*) FROM ec_big, ec_dup, ec_small WHERE ec_big.a = ec_dup.v AND ec_dup.v = ec_small.x;
+EXPLAIN SELECT count(*) FROM ec_small s1, ec_small s2, ec_dup d WHERE s1.x = s2.x AND s2.x = d.k AND d.v < 100;
+
+-- join order beyond 2-way
+EXPLAIN SELECT count(*) FROM ec_big b, ec_small s1, ec_small s2, ec_dup d
+  WHERE b.a = s1.x AND s1.x = s2.x AND s2.x = d.v;
+EXPLAIN SELECT count(*) FROM ec_small s1 JOIN ec_dup d ON s1.x = d.k JOIN ec_small s2 ON d.v = s2.x WHERE s1.y < 5;
+
+-- parameterized index scan under nestloop
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+EXPLAIN SELECT count(*) FROM ec_small s, ec_big b WHERE b.a = s.x;
+EXPLAIN SELECT count(*) FROM ec_small s, ec_big b WHERE b.a = s.x AND b.b < 20;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+
 DROP TABLE ec_big, ec_small, ec_dup;
+
+-- TID scan cost shapes (tidscan lane); ANALYZE first: unanalyzed
+-- estimate_rel_size diverges from C (known off-lane residual)
+CREATE TABLE ec_tid (id int, t text);
+INSERT INTO ec_tid SELECT g, 'row' || g FROM generate_series(1, 1000) g;
+ANALYZE ec_tid;
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,2)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = ANY(ARRAY['(0,1)','(1,3)']::tid[]);
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,1)' OR ctid = '(2,5)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid > '(1,0)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid >= '(0,5)' AND ctid < '(2,10)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,2)' AND id = 2;
+EXPLAIN SELECT id FROM ec_tid WHERE ctid < '(1,1)' ORDER BY id;
+DROP TABLE ec_tid;

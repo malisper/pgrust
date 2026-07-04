@@ -429,6 +429,14 @@ fn pull_up_simple_subquery<'mcx>(
         // rtable.
         let crte = copy.as_range_tbl_entry().expect("just built");
         match srte.rtekind {
+            // IncrementVarSublevelsUp(subquery, -1, 1) RTE leg: an uplevel
+            // CTE reference is one level closer after pull-up.
+            RTEKind::RTE_CTE => {
+                if crte.ctelevelsup >= 1 {
+                    // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.ctelevelsup -= 1) };
+                }
+            }
             RTEKind::RTE_JOIN => {
                 let off_aliasvars =
                     match clauses::walker::mutate_list(mcx, &crte.joinaliasvars, &mut |n| {

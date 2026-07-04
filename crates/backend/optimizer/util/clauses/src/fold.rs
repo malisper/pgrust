@@ -744,18 +744,56 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         NodeTag::T_NullTest => {
             use types_nodes::primnodes::{NullTest, NullTestType};
             let nt = node.as_null_test().unwrap();
-            if nt.argisrow {
-                deferred("eval_const_expressions_mutator: row-type NullTest", node.node_tag());
-            }
             let old_arg = nt.arg.expect("NullTest.arg");
             let arg = ece_mutator(old_arg, cx)?;
             let eff = arg.unwrap_or(old_arg);
-            if let Some(carg) = eff.as_const() {
-                let result = match nt.nulltesttype {
-                    NullTestType::IS_NULL => carg.constisnull,
-                    NullTestType::IS_NOT_NULL => !carg.constisnull,
-                };
-                return Ok(Some(make_bool_const(cx.mcx, result, false)?));
+            if nt.argisrow && eff.node_tag() == NodeTag::T_RowExpr {
+                // C breaks ROW(...) IS [NOT] NULL into scalar per-field tests
+                // (non-recursive semantics; see ExecEvalRowNullInt).
+                let rarg = eff.as_row_expr().unwrap();
+                let mut newargs = NodeList::nil();
+                for relem in &rarg.args {
+                    if let Some(carg) = relem.as_const() {
+                        let refutes = if carg.constisnull {
+                            nt.nulltesttype == NullTestType::IS_NOT_NULL
+                        } else {
+                            nt.nulltesttype == NullTestType::IS_NULL
+                        };
+                        if refutes {
+                            return Ok(Some(make_bool_const(cx.mcx, false, false)?));
+                        }
+                        continue;
+                    }
+                    let newntest = Node::mk(
+                        cx.mcx,
+                        NullTest {
+                            arg: Some(relem),
+                            nulltesttype: nt.nulltesttype,
+                            argisrow: false,
+                            location: nt.location,
+                        },
+                    )?;
+                    newargs.lappend(cx.mcx, newntest)?;
+                }
+                if newargs.is_nil() {
+                    return Ok(Some(make_bool_const(cx.mcx, true, false)?));
+                }
+                if newargs.len() == 1 {
+                    return Ok(Some(newargs.first().expect("one arg")));
+                }
+                return Ok(Some(Node::mk(
+                    cx.mcx,
+                    BoolExpr { boolop: BoolExprType::AND_EXPR, args: newargs, location: -1 },
+                )?));
+            }
+            if !nt.argisrow {
+                if let Some(carg) = eff.as_const() {
+                    let result = match nt.nulltesttype {
+                        NullTestType::IS_NULL => carg.constisnull,
+                        NullTestType::IS_NOT_NULL => !carg.constisnull,
+                    };
+                    return Ok(Some(make_bool_const(cx.mcx, result, false)?));
+                }
             }
             match arg {
                 None => Ok(None),
@@ -955,6 +993,8 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_TargetEntry
         | NodeTag::T_FromExpr
         | NodeTag::T_SubLink
+        | NodeTag::T_XmlExpr
+        | NodeTag::T_TableFunc
         | NodeTag::T_List => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }
@@ -1009,6 +1049,34 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_JsonExpr
         | NodeTag::T_JsonBehavior => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = ece_mutator(f.arg, cx)?.unwrap_or(f.arg);
+            if let Some(v) = arg.as_var() {
+                if v.varattno == 0 && v.varlevelsup == 0 {
+                    panic!(
+                        "eval_const_expressions_mutator (clauses.c): FieldSelect over a \
+                         whole-row Var fold; search-cycle lane carries the pass-through only"
+                    );
+                }
+            }
+            if arg.node_tag() == NodeTag::T_RowExpr || arg.node_tag() == NodeTag::T_Const {
+                panic!(
+                    "eval_const_expressions_mutator (clauses.c): FieldSelect over \
+                     RowExpr/Const fold; search-cycle lane carries the pass-through only"
+                );
+            }
+            Ok(Some(Node::mk(
+                cx.mcx,
+                ::types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
+                },
+            )?))
         }
         other => deferred("eval_const_expressions_mutator", other),
     }

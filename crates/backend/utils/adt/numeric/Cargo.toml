@@ -18,6 +18,7 @@ init_small = { path = "../../init/init_small" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
 pg_prng = { path = "../../../../common/pg_prng" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }

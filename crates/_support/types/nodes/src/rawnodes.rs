@@ -404,6 +404,43 @@ pub struct RangeFunction<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CompositeTypeStmt<'mcx> {
+    pub typevar: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub coldeflist: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct RangeTableFunc<'mcx> {
+    pub lateral: bool,
+    pub docexpr: Option<Node<'mcx>>,
+    pub rowexpr: Option<Node<'mcx>>,
+    pub namespaces: NodeList<'mcx>,
+    pub columns: NodeList<'mcx>,
+    pub alias: Option<&'mcx crate::primnodes::Alias<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct RangeTableFuncCol<'mcx> {
+    pub colname: Option<&'mcx str>,
+    pub typeName: Option<Node<'mcx>>,
+    pub for_ordinality: bool,
+    pub is_not_null: bool,
+    pub colexpr: Option<Node<'mcx>>,
+    pub coldefexpr: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct XmlSerialize<'mcx> {
+    pub xmloption: crate::primnodes::XmlOptionType,
+    pub expr: Option<Node<'mcx>>,
+    pub typeName: Option<Node<'mcx>>,
+    pub indent: bool,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct TypeName<'mcx> {
     pub names: NodeList<'mcx>,
     pub typeOid: Oid,
@@ -720,7 +757,10 @@ pub struct Constraint<'mcx> {
     pub nulls_not_distinct: bool,
     pub keys: NodeList<'mcx>,
     pub including: NodeList<'mcx>,
+    pub exclusions: NodeList<'mcx>,
     pub options: NodeList<'mcx>,
+    pub access_method: Option<&'mcx str>,
+    pub where_clause: Option<Node<'mcx>>,
     pub indexname: Option<&'mcx str>,
     pub indexspace: Option<&'mcx str>,
     pub pktable: Option<&'mcx crate::RangeVar<'mcx>>,
@@ -876,6 +916,18 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeSubselect<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeFunction<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeFunction;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CompositeTypeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CompositeTypeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeTableFunc<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeTableFunc;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeTableFuncCol<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeTableFuncCol;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for XmlSerialize<'mcx> {
+    const TAG: NodeTag = NodeTag::T_XmlSerialize;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TypeName<'mcx> {
     const TAG: NodeTag = NodeTag::T_TypeName;
@@ -1185,6 +1237,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_subselect(self) -> Option<&'mcx RangeSubselect<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_table_func(self) -> Option<&'mcx RangeTableFunc<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_table_func_col(self) -> Option<&'mcx RangeTableFuncCol<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_xml_serialize(self) -> Option<&'mcx XmlSerialize<'mcx>> {
         self.as_variant()
     }
 

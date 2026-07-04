@@ -4,7 +4,7 @@
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
 use ::gin_vocab::*;
-use ::mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::{InvalidBuffer, OffsetNumber};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
@@ -126,6 +126,7 @@ fn fill_scan_key(
     query: Datum,
     query_values: &[Datum],
     query_categories: &[GinNullCategory],
+    jsp_ops: PgVec<'static, JspGinOp>,
 ) -> PgResult<()> {
     // SAFETY: vectors stored in work (kcx contract).
     let kcx = unsafe { work.kcx() };
@@ -149,6 +150,7 @@ fn fill_scan_key(
             vec_append(&mut v, query_categories)?;
             v
         },
+        jspOps: jsp_ops,
         strategy,
         searchMode: search_mode,
         attnum,
@@ -227,7 +229,7 @@ pub(crate) fn ginNewScanKey(
 
         // SAFETY: query values stored in work (kcx contract).
         let kcx = unsafe { work.kcx() };
-        let (query_values, mut search_mode) =
+        let (query_values, mut search_mode, jsp_ops) =
             crate::opclass::extract_query(kcx, &state, skey.sk_argument, skey.sk_strategy)?;
 
         if !(GIN_SEARCH_MODE_DEFAULT..=GIN_SEARCH_MODE_ALL).contains(&search_mode) {
@@ -251,6 +253,7 @@ pub(crate) fn ginNewScanKey(
             skey.sk_argument,
             query_values.as_slice(),
             &categories,
+            jsp_ops,
         )?;
 
         if search_mode != GIN_SEARCH_MODE_ALL {
@@ -281,6 +284,8 @@ pub(crate) fn ginNewScanKey(
 
     if work.keys.is_empty() && !so.isVoidRes {
         has_null_query = true;
+        // SAFETY: vector stored in the key inside work (kcx contract).
+        let empty_ops = mcx::vec_new_in(unsafe { work.kcx() });
         fill_scan_key(
             &state,
             &mut work,
@@ -290,6 +295,7 @@ pub(crate) fn ginNewScanKey(
             Datum::null(),
             &[],
             &[],
+            empty_ops,
         )?;
     }
 

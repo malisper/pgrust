@@ -782,9 +782,11 @@ fn bt_readpage(
                 debug_assert!(!bt_tuple_is_pivot(itup));
 
                 pstate.offnum = offnum;
-                let passes_quals = bt_checkkeys(
-                    rel, so, &mut pstate, array_keys, itup, indnatts, &mut ctx.frame,
-                )?;
+                let passes_quals = if array_keys {
+                    bt_checkkeys::<true>(rel, so, &mut pstate, itup, indnatts, &mut ctx.frame)?
+                } else {
+                    bt_checkkeys::<false>(rel, so, &mut pstate, itup, indnatts, &mut ctx.frame)?
+                };
 
                 if array_keys && pstate.skip != 0 {
                     debug_assert!(!passes_quals && pstate.continuescan);
@@ -833,7 +835,11 @@ fn bt_readpage(
             // SAFETY: pinned+locked page item.
             unsafe {
                 let truncatt = bt_tuple_get_natts(itup, indnatts);
-                bt_checkkeys(rel, so, &mut pstate, array_keys, itup, truncatt, &mut ctx.frame)?;
+                if array_keys {
+                    bt_checkkeys::<true>(rel, so, &mut pstate, itup, truncatt, &mut ctx.frame)?;
+                } else {
+                    bt_checkkeys::<false>(rel, so, &mut pstate, itup, truncatt, &mut ctx.frame)?;
+                }
             }
         }
 
@@ -899,9 +905,11 @@ fn bt_readpage(
                     pstate.startikey = 0;
                     bt_start_array_keys(so, dir);
                 }
-                let passes_quals = bt_checkkeys(
-                    rel, so, &mut pstate, array_keys, itup, indnatts, &mut ctx.frame,
-                )?;
+                let passes_quals = if array_keys {
+                    bt_checkkeys::<true>(rel, so, &mut pstate, itup, indnatts, &mut ctx.frame)?
+                } else {
+                    bt_checkkeys::<false>(rel, so, &mut pstate, itup, indnatts, &mut ctx.frame)?
+                };
 
                 if array_keys && so.scanBehind {
                     // Done with this page, but not with the current primscan.

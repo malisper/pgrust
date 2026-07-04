@@ -132,7 +132,8 @@ pub fn XLogRecordPageWithFreeSpace(
     Ok(())
 }
 
-// InRecovery arm unreachable (redo path unported for smgr truncate callers).
+/// New FSM length in blocks, or `InvalidBlockNumber` when there is nothing to
+/// truncate; the caller runs the smgrtruncate.
 pub fn FreeSpaceMapPrepareTruncateRel(
     rel: &RelationData<'_>,
     nblocks: BlockNumber,
@@ -149,16 +150,30 @@ pub fn FreeSpaceMapPrepareTruncateRel(
             return Ok(InvalidBlockNumber);
         };
         let guard = pin.lock_exclusive()?;
-        // SAFETY: exclusive content lock held for `guard`'s lifetime.
-        let page =
-            unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
-        fsm_truncate_avail(page, first_removed_slot as i32);
-        bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
-        if relation_needs_wal(rel) && xlog_hint_bit_is_needed() {
-            xloginsert_seams::log_newpage_buffer::call(pin.buffer(), false)?;
-        }
+        init_small::globals::StartCriticalSection();
+        let res = (|| -> PgResult<()> {
+            // SAFETY: exclusive content lock held for `guard`'s lifetime.
+            let page =
+                unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+            fsm_truncate_avail(page, first_removed_slot as i32);
+            // Non-critical (fsm_does_block_exist rejects truncated-away
+            // blocks) but this clears up to SlotsPerFSMPage slots: full
+            // MarkBufferDirty plus the FPI MarkBufferDirtyHint would have
+            // logged, so the page cannot diverge from the rest of the file.
+            bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+            if !xlogutils_seams::in_recovery::call()
+                && rel.is_permanent()
+                && (transam_xlog_seams::data_checksums_enabled::call()
+                    || guc_tables::vars::wal_log_hints.read())
+            {
+                xloginsert_seams::log_newpage_buffer::call(pin.buffer(), false)?;
+            }
+            Ok(())
+        })();
+        init_small::globals::EndCriticalSection();
         guard.unlock();
         pin.release();
+        res?;
         Ok(fsm_logical_to_physical(first_removed_address) + 1)
     } else {
         let new_nfsmblocks = fsm_logical_to_physical(first_removed_address);

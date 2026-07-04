@@ -31,6 +31,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }
 parse_clause = { path = "../parse_clause" }
 parse_oper = { path = "../parse_oper" }
+typcache = { path = "../../utils/cache/typcache" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 parse_collate = { path = "../parse_collate" }
 parse_target = { path = "../parse_target" }

@@ -386,13 +386,29 @@ pub fn exec_end_project_set<'mcx>(
     node: &mut ProjectSetState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    shutdown_srf_elems(node)?;
     exec_end_node(&mut node.outer, estate)
+}
+
+// ShutdownExprContext(isCommit=true) for callbacks the callee planted via
+// rsinfo.srf_shutdown; must run before resowner release checks. Abort paths
+// skip it (C isCommit=false; resowner reclaims).
+fn shutdown_srf_elems(node: &mut ProjectSetState<'_>) -> PgResult<()> {
+    for elem in node.elems.iter_mut() {
+        if let Elem::Srf(srf) = elem {
+            if let Some(f) = srf.rsinfo.srf_shutdown.take() {
+                f(&mut srf.flinfo)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `ExecReScanProjectSet` (nodeProjectSet.c). C's ReScanExprContext fires
 /// shutdown_MultiFuncCall to drop cross-call SRF state; the fn_extra Box
 /// drops here instead, and setArgsValid resets with it (ShutdownSetExpr).
-pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) {
+pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) -> PgResult<()> {
+    shutdown_srf_elems(node)?;
     node.pending_srf_tuples = false;
     let ProjectSetState { elems, elemdone, .. } = node;
     for (i, elem) in elems.iter_mut().enumerate() {
@@ -403,6 +419,7 @@ pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) {
             elemdone[i] = ExprDoneCond::ExprSingleResult;
         }
     }
+    Ok(())
 }
 
 pub(crate) fn release_project_set(node: &mut ProjectSetState<'_>) {

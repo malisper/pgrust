@@ -8,6 +8,7 @@ publish.workspace = true
 bench-internals = []
 
 [dependencies]
+adt_numeric = { path = "../../../utils/adt/numeric" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }

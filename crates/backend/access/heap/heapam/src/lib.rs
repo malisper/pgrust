@@ -969,6 +969,50 @@ pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
     }
 }
 
+pub fn heap_batch_deform_soa<'mcx>(
+    scan: &mut HeapScanDescData<'mcx>,
+    plan: &exectuples::SoaDeformPlan<'_>,
+    soa: &mut exectuples::SoaBatch<'_>,
+    qual_col_only: Option<u16>,
+) {
+    let n = scan.rs_ntuples;
+    debug_assert!(!scan.rs_cpage.is_null() || n == 0);
+    soa.begin(n);
+    let relid = scan.rs_base.rs_rd.rd_id;
+    let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
+    if n == 0 {
+        return;
+    }
+    // SAFETY: as heap_batch_store_slot — pinned page, offsets from
+    // page_collect_tuples under the per-page bound.
+    let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
+    // Descending i = ascending tuple addresses (pages fill from pd_upper down;
+    // scanqual -8.3% wall); SoA writes are positional, so output is order-free.
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
+        let (ptr, len, lineoff) = unsafe {
+            let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+            let lpp = page.item_id_unchecked(lineoff);
+            debug_assert!(lpp.is_normal());
+            let (ptr, len) = page.item_raw_unchecked(lpp);
+            (ptr, len, lineoff)
+        };
+        // SAFETY: image on the page pinned by rs_cbuf for the whole batch.
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                ptr,
+                len,
+                ItemPointerData::new(scan.rs_cblock, lineoff),
+                relid,
+            )
+        };
+        exectuples::soa_classify_row(soa, plan, atts, i, &tuple);
+    }
+    exectuples::soa_deform_columns(soa, plan, atts, qual_col_only);
+}
+
+#[inline(always)]
 pub fn heap_batch_store_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut HeapScanDescData<'mcx>,

@@ -137,16 +137,7 @@ fn remove_leftjoinrel_from_query<'mcx>(
     }
 
     debug_assert!(run.root.placeholder_list.is_empty());
-    // Pathkey ECs (single-member, from qp_callback) never reference a
-    // removable rel or its ojrelid; a referencing EC is the unported
-    // remove_rel_from_eclass arm.
-    for ec in run.root.eq_classes.iter() {
-        assert!(
-            !relids_is_member(relid, &ec.ec_relids)
-                && !relids_is_member(ojrelid, &ec.ec_relids),
-            "remove_rel_from_eclass (analyzejoins.c): EC references removed rel; eclass lane"
-        );
-    }
+    crate::equivclass::remove_rel_from_eclasses(run, relid, ojrelid);
 
     // Reset attr_needed to only the "relation 0" bits; rebuilt below.
     for rti in 1..run.root.simple_rel_array_size as usize {
@@ -178,8 +169,9 @@ fn remove_leftjoinrel_from_query<'mcx>(
     run.root.simple_rel_array[relid as usize] = None;
     run.root.simple_rte_array[relid as usize] = types_pathnodes::RangeTblEntryId::Invalid;
 
-    // rebuild_placeholder/eclass_attr_needed: no PHVs, no ECs on this lane.
+    // rebuild_placeholder_attr_needed: no PHVs on this lane.
     rebuild_joinclause_attr_needed(run);
+    crate::equivclass::rebuild_eclass_attr_needed(run)?;
     crate::initsplan::rebuild_lateral_attr_needed(run)?;
     Ok(())
 }
@@ -204,7 +196,7 @@ fn remove_join_clause_from_rels(run: &mut PlannerRun<'_>, rid: RinfoId) {
     }
 }
 
-fn remove_rel_from_restrictinfo(run: &mut PlannerRun<'_>, rid: RinfoId, relid: i32, ojrelid: i32) {
+pub(crate) fn remove_rel_from_restrictinfo(run: &mut PlannerRun<'_>, rid: RinfoId, relid: i32, ojrelid: i32) {
     let mcx = run.mcx;
     let mut v = relids_del_member(mcx, &run.root.rinfo(rid).clause_relids, relid);
     v = relids_del_member(mcx, &v, ojrelid);
@@ -301,9 +293,14 @@ pub fn reduce_unique_semijoins(run: &mut PlannerRun<'_>) -> PgResult<()> {
         }
         let joinrelids = relids_union(run.mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
         debug_assert!(sjinfo.ojrelid == 0);
-        // Eclass-lite keeps join equalities in joininfo, so
-        // generate_join_implied_equalities contributes nothing extra.
-        let restrictlist = pgvec_clone_shallow(run.mcx, &run.root.rel(innerrel).joininfo);
+        let mut restrictlist = crate::equivclass::generate_join_implied_equalities(
+            run,
+            &joinrelids,
+            &sjinfo.min_lefthand,
+            innerrel,
+            None,
+        )?;
+        restrictlist.extend(run.root.rel(innerrel).joininfo.iter().copied());
         if !innerrel_is_unique(
             run,
             &joinrelids,

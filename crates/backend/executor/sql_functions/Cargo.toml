@@ -51,3 +51,9 @@ clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 planner = { path = "../../optimizer/plan/planner" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
+sql_functions_seams = { path = "../sql_functions_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+execscan = { path = "../execscan" }
+tupdesc = { path = "../../access/common/tupdesc" }
+rustc-hash = { version = "2", default-features = false }

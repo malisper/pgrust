@@ -33,20 +33,20 @@ pub use parsenodes::{
     AclMode, DefineStmt, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
     RangeTblFunction, RowMarkClause, SetOperation,
 };
-pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
+pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind,
-    NamedArgExpr, NullTest, NullTestType,
+    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction,
+    MergeMatchKind, NamedArgExpr, NullTest, NullTestType,
     JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
     JsonValueExpr, JsonValueType, JsonWrapper,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
     RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
-    SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TargetEntry, Var,
-    VarReturningType,
+    SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TableFunc, TableFuncType,
+    TargetEntry, Var, VarReturningType, XmlExpr, XmlExprOp, XmlOptionType,
 };
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
@@ -56,9 +56,10 @@ pub use rawnodes::{
     InferClause, InsertStmt, JsonAggConstructor, JsonArgument, JsonArrayAgg,
     JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
     JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonQuotes, JsonScalarExpr,
-    JsonSerializeExpr, LockingClause, MergeStmt, MergeWhenClause, OnConflictClause, PLAssignStmt, ParamRef, RangeFunction, RawStmt,
+    JsonSerializeExpr, LockingClause, MergeStmt, MergeWhenClause, OnConflictClause, PLAssignStmt, ParamRef, RangeFunction, RangeTableFunc,
+    RangeTableFuncCol, RawStmt,
     ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
-    UpdateStmt, ValUnion,
+    UpdateStmt, ValUnion, XmlSerialize,
 };
 pub use tags::NodeTag;
 

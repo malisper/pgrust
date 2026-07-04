@@ -152,7 +152,17 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for OffsetVars<'mcx> {
                 Ok(false)
             }
             NodeTag::T_CurrentOfExpr => {
-                panic!("OffsetVarNodes (rewriteManip.c): CurrentOfExpr vocabulary unported")
+                if self.sublevels_up == 0 {
+                    let offset = self.offset;
+                    // SAFETY: as above.
+                    unsafe {
+                        node.with_mut::<types_nodes::CurrentOfExpr, _>(|c| {
+                            c.cvarno = (c.cvarno as i32 + offset) as u32;
+                        })
+                    }
+                    .expect("CurrentOfExpr");
+                }
+                Ok(false)
             }
             NodeTag::T_RangeTblRef => {
                 if self.sublevels_up == 0 {
@@ -297,7 +307,19 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for ChangeVars<'mcx> {
                 Ok(false)
             }
             NodeTag::T_CurrentOfExpr => {
-                panic!("ChangeVarNodes (rewriteManip.c): CurrentOfExpr vocabulary unported")
+                if self.sublevels_up == 0 {
+                    let (rt_index, new_index) = (self.rt_index, self.new_index);
+                    // SAFETY: as above.
+                    unsafe {
+                        node.with_mut::<types_nodes::CurrentOfExpr, _>(|c| {
+                            if c.cvarno == rt_index as u32 {
+                                c.cvarno = new_index as u32;
+                            }
+                        })
+                    }
+                    .expect("CurrentOfExpr");
+                }
+                Ok(false)
             }
             NodeTag::T_RangeTblRef => {
                 if self.sublevels_up == 0 {
@@ -475,6 +497,12 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 .expect("GroupingFunc");
                 nodes_core::expression_tree_walker(node, self)
             }
+            NodeTag::T_CurrentOfExpr => {
+                if self.min_sublevels_up == 0 {
+                    return Err(internal("cannot push down CurrentOfExpr").into());
+                }
+                Ok(false)
+            }
             NodeTag::T_RangeTblEntry => {
                 let (min, delta) = (self.min_sublevels_up, self.delta);
                 // SAFETY: as above.
@@ -510,6 +538,16 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
     }
 }
 
+pub fn IncrementVarSublevelsUp_query<'mcx>(
+    q: &'mcx Query<'mcx>,
+    delta_sublevels_up: u32,
+    min_sublevels_up: u32,
+) -> PgResult<()> {
+    let mut w = IncrVarSublevels { delta: delta_sublevels_up, min_sublevels_up };
+    nodes_core::query_tree_walker(q, &mut w, nodes_core::QTW_EXAMINE_RTES_BEFORE)?;
+    Ok(())
+}
+
 pub fn IncrementVarSublevelsUp<'mcx>(
     node: Node<'mcx>,
     delta_sublevels_up: u32,
@@ -542,6 +580,9 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for RtiUsed {
                 Ok(v.varlevelsup == self.sublevels_up
                     && (v.varno == self.rt_index || v.varnullingrels.is_member(self.rt_index)))
             }
+            NodeTag::T_CurrentOfExpr => Ok(self.sublevels_up == 0
+                && node.as_current_of_expr().expect("CurrentOfExpr").cvarno
+                    == self.rt_index as u32),
             NodeTag::T_RangeTblRef => Ok(self.sublevels_up == 0
                 && node.as_range_tbl_ref().expect("RangeTblRef").rtindex == self.rt_index),
             NodeTag::T_JoinExpr => {
@@ -920,7 +961,13 @@ fn rv_mutate<'mcx>(
             Ok(None)
         }
         NodeTag::T_CurrentOfExpr => {
-            panic!("replace_rte_variables (rewriteManip.c): CurrentOfExpr vocabulary unported")
+            let cexpr = node.as_current_of_expr().expect("CurrentOfExpr");
+            if cexpr.cvarno == ctx.target_varno as u32 && ctx.sublevels_up == 0 {
+                return Err(feature_not_supported(
+                    "WHERE CURRENT OF on a view is not implemented",
+                ).into());
+            }
+            Ok(None)
         }
         // nodes_core's SubLink mutator arm skips the subselect C mutates.
         NodeTag::T_SubLink => {

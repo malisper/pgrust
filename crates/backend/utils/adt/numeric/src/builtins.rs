@@ -2,8 +2,8 @@
 //! Numeric results follow the result-mcx convention with the pool-backed
 //! NumericImage as call scratch (notes/fc-result-convention.md); numeric_out
 //! keeps the retained-cstring-scratch precedent. recv/send ride the
-//! binary-wire fmgr frame (types_fmgr::wire). Still deferred: sortsupport
-//! (see ops.rs).
+//! binary-wire fmgr frame (types_fmgr::wire). Hash lives here (432/780);
+//! sortsupport lives in sortsupport.rs.
 
 use ::datum::Datum;
 use ::types_error::PgResult;

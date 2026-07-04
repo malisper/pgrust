@@ -20,6 +20,7 @@ mod ops;
 mod pin;
 mod privref;
 mod read;
+mod uring;
 mod write;
 mod drop_buffers;
 
@@ -225,6 +226,10 @@ unported! {
 }
 
 pub use read::{PrefetchBuffer, PrefetchOutcome};
+pub use uring::{
+    collect_done as uring_collect_pins, start_read as uring_start_read, uring_clear_io_wref,
+    uring_read_complete, uring_set_io_wref,
+};
 
 pub fn BufferIsPermanent(buffer: Buffer) -> bool {
     if buffer < 0 {

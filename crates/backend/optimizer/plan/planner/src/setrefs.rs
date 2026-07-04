@@ -170,6 +170,56 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("SeqScan node");
             }
         }
+        NodeTag::T_TidScan => {
+            let s = plan.as_tid_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let tq = fix_scan_list(run, &s.tidquals, rtoffset, 1.0)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || tq.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::TidScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(v) = tq {
+                            p.tidquals = v;
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TidScan node");
+            }
+        }
+        NodeTag::T_TidRangeScan => {
+            let s = plan.as_tid_range_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let tq = fix_scan_list(run, &s.tidrangequals, rtoffset, 1.0)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || tq.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::TidRangeScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(v) = tq {
+                            p.tidrangequals = v;
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TidRangeScan node");
+            }
+        }
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -278,6 +328,30 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
             }
         }
+        NodeTag::T_TableFuncScan => {
+            let s = plan.as_table_func_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if let Some(tf) = s.tablefunc {
+                fix_scan_expr_walker(run, tf)?;
+            }
+            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::TableFuncScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TableFuncScan node");
+            }
+        }
         NodeTag::T_ValuesScan => {
             let s = plan.as_values_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -323,6 +397,32 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
                 .expect("CteScan node");
             }
+        }
+        NodeTag::T_WorkTableScan => {
+            let s = plan.as_work_table_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::WorkTableScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("WorkTableScan node");
+            }
+        }
+        NodeTag::T_RecursiveUnion => {
+            // Evaluates neither targetlist nor quals.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(plan.as_plan().unwrap().qual.is_nil());
         }
         NodeTag::T_ProjectSet => {
             set_upper_references(run, plan, rtoffset)?;
@@ -644,7 +744,11 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
     if let Some(child) = base.righttree {
         debug_assert!(matches!(
             plan.node_tag(),
-            NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin | NodeTag::T_SetOp
+            NodeTag::T_NestLoop
+                | NodeTag::T_MergeJoin
+                | NodeTag::T_HashJoin
+                | NodeTag::T_SetOp
+                | NodeTag::T_RecursiveUnion
         ));
         let new_child = set_plan_refs(run, child, rtoffset)?;
         // SAFETY: same exclusive plan-tree ownership as the prologue above.
@@ -897,7 +1001,7 @@ fn fix_upper_expr<'mcx>(
             Ok(node)
         }
         NodeTag::T_Aggref => {
-            if let Some(prm) = find_minmax_agg_replacement_param(run, node) {
+            if let Some(prm) = find_minmax_agg_replacement_param(&run.root, node) {
                 return Ok(*run.root.expr_node(prm));
             }
             let a = node.as_aggref().expect("Aggref");
@@ -1076,6 +1180,20 @@ fn fix_upper_expr<'mcx>(
                     resultcollid: c.resultcollid,
                     coercionformat: c.coercionformat,
                     location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_upper_expr(run, f.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
                 },
             )
         }
@@ -1596,6 +1714,12 @@ fn fix_scan_expr_mutator<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     match node.node_tag() {
+        NodeTag::T_CurrentOfExpr => {
+            let c = node.as_current_of_expr().unwrap();
+            let mut new = *c;
+            new.cvarno = (new.cvarno as i32 + rtoffset) as u32;
+            Ok(Node::mk(mcx, new)?)
+        }
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
             debug_assert!(var.varlevelsup == 0);
@@ -1630,7 +1754,7 @@ fn fix_scan_expr_mutator<'mcx>(
             Ok(node)
         }
         NodeTag::T_Aggref => {
-            let prm = find_minmax_agg_replacement_param(run, node)
+            let prm = find_minmax_agg_replacement_param(&run.root, node)
                 .expect("Aggref outside a minmax Result reaches fix_upper_expr");
             Ok(*run.root.expr_node(prm))
         }
@@ -1706,6 +1830,20 @@ fn fix_scan_expr_mutator<'mcx>(
                     resultcollid: c.resultcollid,
                     coercionformat: c.coercionformat,
                     location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_scan_expr_mutator(run, f.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
                 },
             )
         }
@@ -2176,8 +2314,13 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_Param => Ok(()),
         // fix_expr_common has nothing to record for a SQLValueFunction.
         NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(()),
+        // fix_expr_common ignores CurrentOfExpr; rtoffset==0 leaves cvarno.
+        NodeTag::T_CurrentOfExpr => Ok(()),
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_FieldSelect => {
+            fix_scan_expr_walker(run, node.as_field_select().unwrap().arg)
         }
         NodeTag::T_CoerceToDomain => {
             fix_scan_expr_walker(run, node.as_coerce_to_domain().unwrap().arg)
@@ -2272,6 +2415,31 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             Ok(())
         }
         NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter().chain(x.args.iter()) {
+                fix_scan_expr_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            for a in
+                tf.ns_uris.iter().chain(tf.colvalexprs.iter()).chain(tf.passingvalexprs.iter())
+            {
+                fix_scan_expr_walker(run, a)?;
+            }
+            for a in tf.colexprs.iter().chain(tf.coldefexprs.iter()).flatten() {
+                fix_scan_expr_walker(run, a)?;
+            }
+            if let Some(d) = tf.docexpr {
+                fix_scan_expr_walker(run, d)?;
+            }
+            if let Some(r) = tf.rowexpr {
+                fix_scan_expr_walker(run, r)?;
+            }
+            Ok(())
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
@@ -2779,6 +2947,20 @@ fn fix_join_expr_mutator<'mcx>(
                     resultcollid: c.resultcollid,
                     coercionformat: c.coercionformat,
                     location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_join_expr_mutator(run, f.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
                 },
             )
         }
@@ -3647,11 +3829,11 @@ fn clean_up_removed_plan_level<'mcx>(
 /// find_minmax_agg_replacement_param (setrefs.c); the returned NodeId is the
 /// InitPlan output Param in the current root's arena.
 pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
-    run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     node: Node<'mcx>,
 ) -> Option<types_pathnodes::NodeId> {
     let aggref = node.as_aggref()?;
-    if run.root.minmax_aggs.is_empty() || aggref.args.len() != 1 {
+    if root.minmax_aggs.is_empty() || aggref.args.len() != 1 {
         return None;
     }
     let cur_target = aggref
@@ -3660,10 +3842,10 @@ pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
         .as_target_entry()
         .expect("Aggref.args holds TargetEntries")
         .expr;
-    for i in 0..run.root.minmax_aggs.len() {
-        let mm = *run.root.minmax_agg_info(run.root.minmax_aggs[i]);
+    for i in 0..root.minmax_aggs.len() {
+        let mm = *root.minmax_agg_info(root.minmax_aggs[i]);
         if mm.aggfnoid == aggref.aggfnoid
-            && types_nodes::equal(*run.root.expr_node(mm.target), cur_target)
+            && types_nodes::equal(*root.expr_node(mm.target), cur_target)
         {
             return Some(mm.param);
         }

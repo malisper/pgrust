@@ -406,6 +406,40 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
     indexcmds_seams::get_default_opclass::set(|_typid, _am| Ok(0));
+    syscache_seams::lookup_pg_class_ls_shape::set(|relid| {
+        Ok((relid == T_OID || relid == V_OID).then(|| {
+            let is_view = relid == V_OID;
+            syscache_seams::PgClassLsShape {
+                relnamespace: 2200,
+                reltype: 0,
+                relam: if is_view { 0 } else { tableam_vocab::HEAP_TABLE_AM_OID },
+                reltablespace: 0,
+                relnatts: 2,
+                relkind: if is_view { b'v' as i8 } else { b'r' as i8 },
+                relpersistence: RELPERSISTENCE_PERMANENT as i8,
+                relispartition: false,
+                relhassubclass: false,
+            }
+        }))
+    });
+    syscache_seams::lookup_pg_attribute_shape::set(|relid, attnum| {
+        if relid != T_OID && relid != V_OID {
+            return Ok(None);
+        }
+        let mut n = types_tuple::NameData::default();
+        match attnum {
+            1 => n.namestrcpy("a"),
+            2 => n.namestrcpy("b"),
+            _ => return Ok(None),
+        }
+        Ok(Some(syscache_seams::PgAttributeLsShape {
+            attname: n,
+            atttypid: INT4OID,
+            atttypmod: -1,
+            attcollation: 0,
+            attgenerated: 0,
+        }))
+    });
     syscache_seams::syscache_hash_value_typeoid::set(|typid| {
         Ok(typid.wrapping_mul(0x9e37_79b1))
     });

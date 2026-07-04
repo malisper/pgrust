@@ -19,16 +19,20 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::catalog::BOOLOID,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
-        NodeTag::T_NamedArgExpr => expr_type(node.as_named_arg_expr().unwrap().arg),
+        NodeTag::T_NamedArgExpr => {
+            expr_type(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
-        | NodeTag::T_BooleanTest => types_core::catalog::BOOLOID,
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_CurrentOfExpr => types_core::catalog::BOOLOID,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
@@ -41,6 +45,11 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_XmlExpr => match node.as_xml_expr().unwrap().op {
+            types_nodes::XmlExprOp::IS_DOCUMENT => types_core::catalog::BOOLOID,
+            types_nodes::XmlExprOp::IS_XMLSERIALIZE => types_core::catalog::TEXTOID,
+            _ => types_core::catalog::XMLOID,
+        },
         NodeTag::T_NextValueExpr => {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
@@ -137,11 +146,14 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Var => node.as_var().unwrap().vartypmod,
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttypmod,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
-        NodeTag::T_NamedArgExpr => expr_typmod(node.as_named_arg_expr().unwrap().arg),
+        NodeTag::T_NamedArgExpr => {
+            expr_typmod(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
@@ -156,6 +168,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
+        | NodeTag::T_CurrentOfExpr
+        | NodeTag::T_XmlExpr
         | NodeTag::T_RowExpr => -1,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
@@ -230,16 +244,20 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
-        NodeTag::T_NamedArgExpr => expr_collation(node.as_named_arg_expr().unwrap().arg),
+        NodeTag::T_NamedArgExpr => {
+            expr_collation(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resultcollid,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_GroupingFunc
         | NodeTag::T_BooleanTest
+        | NodeTag::T_CurrentOfExpr
         | NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
@@ -258,6 +276,15 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
+        // C: XMLSERIALIZE returns text from non-collatable inputs; the other
+        // ops return boolean or XML, which are non-collatable.
+        NodeTag::T_XmlExpr => {
+            if node.as_xml_expr().unwrap().op == types_nodes::XmlExprOp::IS_XMLSERIALIZE {
+                types_core::catalog::DEFAULT_COLLATION_OID
+            } else {
+                types_core::InvalidOid
+            }
+        }
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -350,6 +377,8 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let r = node.as_relabel_type().unwrap();
             leftmost_loc(r.location, expr_location(r.arg))
         }
+        // C: FieldSelect has no location; report the argument's.
+        NodeTag::T_FieldSelect => expr_location(node.as_field_select().unwrap().arg),
         // C: CollateExpr just uses the argument's location.
         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
         NodeTag::T_Aggref => node.as_aggref().unwrap().location,
@@ -379,6 +408,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
+        NodeTag::T_CurrentOfExpr => -1,
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             leftmost_loc(c.location, expr_location(c.arg))
@@ -413,6 +443,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             leftmost_loc(d.location, expr_location_list(&d.args))
         }
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
+        // C: consider both function name and leftmost arg.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            leftmost_loc(x.location, expr_location_list(&x.args))
+        }
+        NodeTag::T_TableFunc => node.as_table_func().unwrap().location,
+        // C: XMLSERIALIZE keyword should always be the first thing.
+        NodeTag::T_XmlSerialize => node.as_xml_serialize().unwrap().location,
         NodeTag::T_CollateClause => {
             let c = node.as_collate_clause().unwrap();
             leftmost_loc(c.arg.map_or(-1, expr_location), c.location)

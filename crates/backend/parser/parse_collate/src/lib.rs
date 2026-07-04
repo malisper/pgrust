@@ -361,6 +361,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_JsonExpr
         | NodeTag::T_JsonBehavior
         | NodeTag::T_SubLink
+        | NodeTag::T_XmlExpr
         | NodeTag::T_SubscriptingRef
         | NodeTag::T_NamedArgExpr) => {
             match tag {
@@ -521,7 +522,7 @@ fn assign_collations_walker<'mcx>(
                 NodeTag::T_SQLValueFunction => {}
                 NodeTag::T_NamedArgExpr => {
                     assign_collations_walker(
-                        node.as_named_arg_expr().unwrap().arg,
+                        node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"),
                         &mut loccontext,
                     )?;
                 }
@@ -566,6 +567,15 @@ fn assign_collations_walker<'mcx>(
                 NodeTag::T_JsonBehavior => {
                     if let Some(e) = node.as_json_behavior().unwrap().expr {
                         assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_XmlExpr => {
+                    let x = node.as_xml_expr().unwrap();
+                    for arg in &x.named_args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                    for arg in &x.args {
+                        assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
                 _ => unreachable!(),
@@ -692,6 +702,20 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_ArrayExpr => node
                         .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
                         .unwrap(),
+                    // exprSetCollation(XmlExpr) is assert-only: the text
+                    // result (IS_XMLSERIALIZE) carries DEFAULT_COLLATION_OID,
+                    // xml results none.
+                    NodeTag::T_XmlExpr => {
+                        debug_assert!(
+                            if node.as_xml_expr().unwrap().op
+                                == types_nodes::XmlExprOp::IS_XMLSERIALIZE
+                            {
+                                set_coll == types_core::catalog::DEFAULT_COLLATION_OID
+                            } else {
+                                !OidIsValid(set_coll)
+                            }
+                        );
+                    }
                     NodeTag::T_SQLValueFunction => {
                         debug_assert!(
                             if node.as_sql_value_function().unwrap().r#type

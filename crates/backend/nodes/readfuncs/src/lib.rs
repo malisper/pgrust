@@ -9,19 +9,21 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
-    CTEMaterialize, CommonTableExpr, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
-    RangeTblFunction, SetOperation, SetOperationStmt, SortGroupClause, WindowClause,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, Query, QuerySource, RTEKind,
+    RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation, SetOperationStmt,
+    SortGroupClause, WindowClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
-    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MinMaxExpr,
-    MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
-    CollateExpr, RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var,
-    VarReturningType, WindowFunc,
+    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MergeAction,
+    MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr,
+    OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType, ScalarArrayOpExpr,
+    SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var, VarReturningType, WindowFunc,
+    XmlExpr, XmlExprOp, XmlOptionType,
 };
 use types_nodes::Node;
 
@@ -190,6 +192,27 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
+    fn read_opt_node_list(
+        &mut self,
+        name: &str,
+    ) -> PgResult<types_nodes::list::OptNodeList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(types_nodes::list::OptNodeList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
+        let mut l = types_nodes::list::OptNodeList::nil();
+        loop {
+            let tok = self.token("list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            let elem = self.node_read_token(tok)?;
+            l.lappend(self.mcx, elem)?;
+        }
+    }
+
     fn read_node_list(&mut self, name: &str) -> PgResult<NodeList<'mcx>> {
         self.label(name);
         let t = self.token(name);
@@ -349,7 +372,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"CONST" => self.read_const(),
             b"OPEXPR" => self.read_op_expr(),
             b"FUNCEXPR" => self.read_func_expr(),
-            b"NAMEDARGEXPR" => self.read_named_arg_expr(),
             b"BOOLEXPR" => self.read_bool_expr(),
             b"SQLVALUEFUNCTION" => self.read_sql_value_function(),
             b"RELABELTYPE" => self.read_relabel_type(),
@@ -373,9 +395,13 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"ARRAYEXPR" => self.read_array_expr(),
             b"SETTODEFAULT" => self.read_set_to_default(),
             b"BOOLEANTEST" => self.read_boolean_test(),
+            b"DISTINCTEXPR" => self.read_distinct_expr(),
+            b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
             b"COMMONTABLEEXPR" => self.read_common_table_expr(),
+            b"CTESEARCHCLAUSE" => self.read_cte_search_clause(),
+            b"CTECYCLECLAUSE" => self.read_cte_cycle_clause(),
             b"COLLATEEXPR" => self.read_collate_expr(),
             b"JSONFORMAT" => self.read_json_format(),
             b"JSONRETURNING" => self.read_json_returning(),
@@ -384,6 +410,10 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONISPREDICATE" => self.read_json_is_predicate(),
             b"JSONBEHAVIOR" => self.read_json_behavior(),
             b"JSONEXPR" => self.read_json_expr(),
+            b"NAMEDARGEXPR" => self.read_named_arg_expr(),
+            b"MERGEACTION" => self.read_merge_action(),
+            b"XMLEXPR" => self.read_xml_expr(),
+            b"TABLEFUNC" => self.read_table_func(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -488,6 +518,35 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Ok(j.seal())
     }
 
+    fn read_distinct_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::primnodes::DistinctExpr>(mcx)?;
+        d.opno = self.read_u32("opno");
+        d.opfuncid = self.read_u32("opfuncid");
+        d.opresulttype = self.read_u32("opresulttype");
+        d.opretset = self.read_bool("opretset");
+        d.opcollid = self.read_u32("opcollid");
+        d.inputcollid = self.read_u32("inputcollid");
+        d.args = self.read_node_list("args")?;
+        d.location = self.read_location("location");
+        Ok(d.seal())
+    }
+
+    fn read_subscripting_ref(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut sr = Node::build::<types_nodes::primnodes::SubscriptingRef>(mcx)?;
+        sr.refcontainertype = self.read_u32("refcontainertype");
+        sr.refelemtype = self.read_u32("refelemtype");
+        sr.refrestype = self.read_u32("refrestype");
+        sr.reftypmod = self.read_i32("reftypmod");
+        sr.refcollid = self.read_u32("refcollid");
+        sr.refupperindexpr = self.read_opt_node_list("refupperindexpr")?;
+        sr.reflowerindexpr = self.read_opt_node_list("reflowerindexpr")?;
+        sr.refexpr = self.read_node("refexpr")?;
+        sr.refassgnexpr = self.read_node("refassgnexpr")?;
+        Ok(sr.seal())
+    }
+
     fn read_boolean_test(&mut self) -> PgResult<Node<'mcx>> {
         let mcx = self.mcx;
         let mut bt = Node::build::<types_nodes::primnodes::BooleanTest>(mcx)?;
@@ -541,14 +600,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.aliascolnames = self.read_node_list("aliascolnames")?;
         c.ctematerialized = cte_materialize(self.read_u32("ctematerialized"));
         c.ctequery = self.read_node("ctequery")?;
-        c.search_clause = match self.read_node("search_clause")? {
-            None => None,
-            Some(_) => panic!("_readCTESearchClause (readfuncs.c): SEARCH clause unported"),
-        };
-        c.cycle_clause = match self.read_node("cycle_clause")? {
-            None => None,
-            Some(_) => panic!("_readCTECycleClause (readfuncs.c): CYCLE clause unported"),
-        };
+        c.search_clause = self.read_node("search_clause")?;
+        c.cycle_clause = self.read_node("cycle_clause")?;
         c.location = self.read_location("location");
         c.cterecursive = self.read_bool("cterecursive");
         c.cterefcount = self.read_i32("cterefcount");
@@ -557,6 +610,54 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.ctecoltypmods = self.read_int_list("ctecoltypmods")?;
         c.ctecolcollations = self.read_oid_list("ctecolcollations")?;
         Ok(c.seal())
+    }
+
+    fn read_cte_search_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut s = Node::build::<CTESearchClause>(mcx)?;
+        s.search_col_list = self.read_node_list("search_col_list")?;
+        s.search_breadth_first = self.read_bool("search_breadth_first");
+        s.search_seq_column = self.read_str("search_seq_column")?;
+        s.location = self.read_location("location");
+        Ok(s.seal())
+    }
+
+    fn read_cte_cycle_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<CTECycleClause>(mcx)?;
+        c.cycle_col_list = self.read_node_list("cycle_col_list")?;
+        c.cycle_mark_column = self.read_str("cycle_mark_column")?;
+        c.cycle_mark_value = self.read_node("cycle_mark_value")?;
+        c.cycle_mark_default = self.read_node("cycle_mark_default")?;
+        c.cycle_path_column = self.read_str("cycle_path_column")?;
+        c.location = self.read_location("location");
+        c.cycle_mark_type = self.read_u32("cycle_mark_type");
+        c.cycle_mark_typmod = self.read_i32("cycle_mark_typmod");
+        c.cycle_mark_collation = self.read_u32("cycle_mark_collation");
+        c.cycle_mark_neop = self.read_u32("cycle_mark_neop");
+        Ok(c.seal())
+    }
+
+    fn read_named_arg_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut n = Node::build::<NamedArgExpr>(mcx)?;
+        n.arg = self.read_node("arg")?;
+        n.name = self.read_str("name")?;
+        n.argnumber = self.read_i32("argnumber");
+        n.location = self.read_location("location");
+        Ok(n.seal())
+    }
+
+    fn read_merge_action(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut m = Node::build::<MergeAction>(mcx)?;
+        m.matchKind = merge_match_kind(self.read_u32("matchKind"));
+        m.commandType = cmd_type(self.read_u32("commandType"));
+        m.r#override = overriding_kind(self.read_u32("override"));
+        m.qual = self.read_node("qual")?;
+        m.targetList = self.read_node_list("targetList")?;
+        m.updateColnos = self.read_int_list("updateColnos")?;
+        Ok(m.seal())
     }
 
     fn read_collate_expr(&mut self) -> PgResult<Node<'mcx>> {
@@ -677,6 +778,16 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             RTEKind::RTE_FUNCTION => {
                 rte.functions = self.read_node_list("functions")?;
                 rte.funcordinality = self.read_bool("funcordinality");
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                let tfnode = self.read_node("tablefunc")?;
+                rte.tablefunc = tfnode;
+                // C: the RTE must carry a copy of the column type info.
+                if let Some(tf) = tfnode.and_then(|n| n.as_table_func()) {
+                    rte.coltypes = tf.coltypes.clone_in(mcx)?;
+                    rte.coltypmods = tf.coltypmods.clone_in(mcx)?;
+                    rte.colcollations = tf.colcollations.clone_in(mcx)?;
+                }
             }
             RTEKind::RTE_VALUES => {
                 rte.values_lists = self.read_node_list("values_lists")?;
@@ -965,17 +1076,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Node::mk(self.mcx, c)
     }
 
-    fn read_named_arg_expr(&mut self) -> PgResult<Node<'mcx>> {
-        let arg = self.read_node("arg")?.expect("NamedArgExpr has an arg");
-        let n = NamedArgExpr {
-            arg,
-            name: self.read_str("name")?,
-            argnumber: self.read_i32("argnumber"),
-            location: self.read_location("location"),
-        };
-        Node::mk(self.mcx, n)
-    }
-
     fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {
         let arg = self.read_node("arg")?.expect("RelabelType has an arg");
         let r = RelabelType {
@@ -1133,6 +1233,59 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         m.args = self.read_node_list("args")?;
         m.location = self.read_location("location");
         Ok(m.seal())
+    }
+
+    fn read_xml_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut x = Node::build::<XmlExpr>(mcx)?;
+        x.op = match self.read_u32("op") {
+            0 => XmlExprOp::IS_XMLCONCAT,
+            1 => XmlExprOp::IS_XMLELEMENT,
+            2 => XmlExprOp::IS_XMLFOREST,
+            3 => XmlExprOp::IS_XMLPARSE,
+            4 => XmlExprOp::IS_XMLPI,
+            5 => XmlExprOp::IS_XMLROOT,
+            6 => XmlExprOp::IS_XMLSERIALIZE,
+            7 => XmlExprOp::IS_DOCUMENT,
+            other => panic!("readfuncs.c: bad XmlExprOp {other}"),
+        };
+        x.name = self.read_str("name")?;
+        x.named_args = self.read_node_list("named_args")?;
+        x.arg_names = self.read_node_list("arg_names")?;
+        x.args = self.read_node_list("args")?;
+        x.xmloption = xml_option_type(self.read_u32("xmloption"));
+        x.indent = self.read_bool("indent");
+        x.r#type = self.read_u32("type");
+        x.typmod = self.read_i32("typmod");
+        x.location = self.read_location("location");
+        Ok(x.seal())
+    }
+
+    fn read_table_func(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut tf = Node::build::<TableFunc>(mcx)?;
+        tf.functype = match self.read_u32("functype") {
+            0 => TableFuncType::TFT_XMLTABLE,
+            1 => TableFuncType::TFT_JSON_TABLE,
+            other => panic!("readfuncs.c: bad TableFuncType {other}"),
+        };
+        tf.ns_uris = self.read_node_list("ns_uris")?;
+        tf.ns_names = self.read_opt_node_list("ns_names")?;
+        tf.docexpr = self.read_node("docexpr")?;
+        tf.rowexpr = self.read_node("rowexpr")?;
+        tf.colnames = self.read_node_list("colnames")?;
+        tf.coltypes = self.read_oid_list("coltypes")?;
+        tf.coltypmods = self.read_int_list("coltypmods")?;
+        tf.colcollations = self.read_oid_list("colcollations")?;
+        tf.colexprs = self.read_opt_node_list("colexprs")?;
+        tf.coldefexprs = self.read_opt_node_list("coldefexprs")?;
+        tf.colvalexprs = self.read_node_list("colvalexprs")?;
+        tf.passingvalexprs = self.read_node_list("passingvalexprs")?;
+        tf.notnulls = self.read_bitmapset("notnulls")?;
+        tf.plan = self.read_node("plan")?;
+        tf.ordinalitycol = self.read_i32("ordinalitycol");
+        tf.location = self.read_location("location");
+        Ok(tf.seal())
     }
 
     fn read_scalar_array_op_expr(&mut self) -> PgResult<Node<'mcx>> {
@@ -1337,6 +1490,14 @@ fn query_source(v: u32) -> QuerySource {
     }
 }
 
+fn xml_option_type(v: u32) -> XmlOptionType {
+    match v {
+        0 => XmlOptionType::XMLOPTION_DOCUMENT,
+        1 => XmlOptionType::XMLOPTION_CONTENT,
+        other => panic!("readfuncs.c: bad XmlOptionType {other}"),
+    }
+}
+
 fn rte_kind(v: u32) -> RTEKind {
     match v {
         0 => RTEKind::RTE_RELATION,
@@ -1375,6 +1536,15 @@ fn overriding_kind(v: u32) -> OverridingKind {
         1 => OverridingKind::OVERRIDING_USER_VALUE,
         2 => OverridingKind::OVERRIDING_SYSTEM_VALUE,
         other => panic!("readfuncs.c: bad OverridingKind {other}"),
+    }
+}
+
+fn merge_match_kind(v: u32) -> MergeMatchKind {
+    match v {
+        0 => MergeMatchKind::MERGE_WHEN_MATCHED,
+        1 => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+        2 => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET,
+        other => panic!("readfuncs.c: bad MergeMatchKind {other}"),
     }
 }
 

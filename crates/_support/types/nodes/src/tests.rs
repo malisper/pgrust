@@ -599,6 +599,73 @@ fn enum_values_match_c_headers() {
         ROW_MARK_EXCLUSIVE, ROW_MARK_NOKEYEXCLUSIVE, ROW_MARK_SHARE, ROW_MARK_KEYSHARE,
         ROW_MARK_REFERENCE, ROW_MARK_COPY,
     ]);
+    use crate::primnodes::{TableFuncType, XmlExprOp, XmlOptionType};
+    check_enum!(prim_h, "XmlExprOp", XmlExprOp, [
+        IS_XMLCONCAT, IS_XMLELEMENT, IS_XMLFOREST, IS_XMLPARSE, IS_XMLPI, IS_XMLROOT,
+        IS_XMLSERIALIZE, IS_DOCUMENT,
+    ]);
+    check_enum!(prim_h, "XmlOptionType", XmlOptionType, [
+        XMLOPTION_DOCUMENT, XMLOPTION_CONTENT,
+    ]);
+    check_enum!(prim_h, "TableFuncType", TableFuncType, [TFT_XMLTABLE, TFT_JSON_TABLE]);
+}
+
+#[test]
+fn xml_node_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    let prim_h = include_str!("../vendor/primnodes.h");
+
+    assert_eq!(
+        c_struct_fields(parse_h, "RangeTableFunc"),
+        ["lateral", "docexpr", "rowexpr", "namespaces", "columns", "alias", "location"]
+    );
+    let crate::rawnodes::RangeTableFunc {
+        lateral: _, docexpr: _, rowexpr: _, namespaces: _, columns: _, alias: _, location: _,
+    } = crate::rawnodes::RangeTableFunc::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "RangeTableFuncCol"),
+        ["colname", "typeName", "for_ordinality", "is_not_null", "colexpr", "coldefexpr",
+         "location"]
+    );
+    let crate::rawnodes::RangeTableFuncCol {
+        colname: _, typeName: _, for_ordinality: _, is_not_null: _, colexpr: _, coldefexpr: _,
+        location: _,
+    } = crate::rawnodes::RangeTableFuncCol::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "XmlSerialize"),
+        ["xmloption", "expr", "typeName", "indent", "location"]
+    );
+    let crate::rawnodes::XmlSerialize {
+        xmloption: _, expr: _, typeName: _, indent: _, location: _,
+    } = crate::rawnodes::XmlSerialize::default();
+
+    // The harness drops C fields literally named "type" (the NodeTag skip), so
+    // XmlExpr's Oid `type` (Rust r#type) is absent from the expected list.
+    let mut xe = c_struct_fields(prim_h, "XmlExpr");
+    assert_eq!(xe.remove(0), "xpr");
+    assert_eq!(
+        xe,
+        ["op", "name", "named_args", "arg_names", "args", "xmloption", "indent", "typmod",
+         "location"]
+    );
+    let crate::primnodes::XmlExpr {
+        op: _, name: _, named_args: _, arg_names: _, args: _, xmloption: _, indent: _,
+        r#type: _, typmod: _, location: _,
+    } = crate::primnodes::XmlExpr::default();
+
+    assert_eq!(
+        c_struct_fields(prim_h, "TableFunc"),
+        ["functype", "ns_uris", "ns_names", "docexpr", "rowexpr", "colnames", "coltypes",
+         "coltypmods", "colcollations", "colexprs", "coldefexprs", "colvalexprs",
+         "passingvalexprs", "notnulls", "plan", "ordinalitycol", "location"]
+    );
+    let crate::primnodes::TableFunc {
+        functype: _, ns_uris: _, ns_names: _, docexpr: _, rowexpr: _, colnames: _, coltypes: _,
+        coltypmods: _, colcollations: _, colexprs: _, coldefexprs: _, colvalexprs: _,
+        passingvalexprs: _, notnulls: _, plan: _, ordinalitycol: _, location: _,
+    } = crate::primnodes::TableFunc::default();
 }
 
 #[test]

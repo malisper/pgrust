@@ -21,3 +21,4 @@ xact_seams = { path = "../../access/transam/xact_seams" }
 spi_seams = { path = "../../executor/spi_seams" }
 createas_seams = { path = "../../commands/createas_seams" }
 matview_seams = { path = "../../commands/matview_seams" }
+sql_functions_seams = { path = "../../executor/sql_functions_seams" }

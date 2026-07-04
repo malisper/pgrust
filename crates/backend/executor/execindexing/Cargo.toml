@@ -17,7 +17,9 @@ types_nbtree = { path = "../../../_support/types/types_nbtree" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 indexam = { path = "../../access/index/indexam" }
+genam_seams = { path = "../../access/index/genam_seams" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
+relcache_build_seams = { path = "../../utils/cache/relcache_build_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
@@ -26,6 +28,7 @@ types_storage = { path = "../../../_support/types/types_storage" }
 types_scan = { path = "../../../_support/types/types_scan" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 heapam = { path = "../../access/heap/heapam" }
+snapmgr = { path = "../../utils/time/snapmgr" }
 heapam_visibility = { path = "../../access/heap/heapam_visibility" }
 pruneheap = { path = "../../access/heap/pruneheap" }
 procarray = { path = "../../storage/ipc/procarray" }
@@ -37,6 +40,7 @@ clauses = { path = "../../optimizer/util/clauses" }
 execexpr = { path = "../execexpr" }
 
 [dev-dependencies]
+test_boot = { path = "../../../_support/test_boot" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 nodeindexscan = { path = "../nodeindexscan" }
 types_scan = { path = "../../../_support/types/types_scan" }
