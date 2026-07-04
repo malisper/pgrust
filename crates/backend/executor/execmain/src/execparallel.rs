@@ -126,6 +126,7 @@ fn for_each_parallel_seqscan<'mcx>(
         }
         N::ProjectSet(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
         N::Agg(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Group(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
         N::Sort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
         N::IncrementalSort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
         N::Material(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
