@@ -303,7 +303,7 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 95);
+    assert_eq!(n, 98);
     for b in INT_BUILTINS {
         assert!(b.strict);
         assert_eq!(b.retset, b.foid == 1066 || b.foid == 1067);

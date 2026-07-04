@@ -1265,6 +1265,7 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "constructor", a.constructor);
         node_field(out, "arg", a.arg);
         bool_field(out, "absent_on_null", a.absent_on_null);
+        out.push('}');
     } else if let Some(d) = n.as_delete_stmt() {
         out.push_str("{DELETESTMT");
         node_field(out, "relation", d.relation);
