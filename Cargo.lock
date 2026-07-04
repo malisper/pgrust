@@ -1198,6 +1198,7 @@ dependencies = [
  "heaptuple",
  "mcx",
  "nbt_validate",
+ "spgist_validate",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -12603,6 +12604,8 @@ dependencies = [
  "smgr",
  "snapbuild",
  "snapmgr",
+ "spgist_kdtree",
+ "spgist_quadtree",
  "spgist_text",
  "spi",
  "sql_functions",
@@ -13180,6 +13183,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "spgist_kdtree"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
+]
+
+[[package]]
+name = "spgist_proc"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "adt_geo",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_scan",
+]
+
+[[package]]
+name = "spgist_quadtree"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
+]
+
+[[package]]
 name = "spgist_text"
 version = "0.1.0"
 dependencies = [
@@ -13194,6 +13238,26 @@ dependencies = [
  "types_spgist",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "spgist_validate"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "format_type",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_relscan",
+ "types_spgist",
 ]
 
 [[package]]

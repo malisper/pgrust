@@ -207,6 +207,7 @@ pub struct PgOpclassShape {
     pub opcmethod: Oid,
     pub opcfamily: Oid,
     pub opcintype: Oid,
+    pub opckeytype: Oid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

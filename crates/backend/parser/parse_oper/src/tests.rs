@@ -112,11 +112,13 @@ fn install_fixture() {
                     opcmethod: types_core::BTREE_AM_OID,
                     opcfamily: INT_BTREE_FAM,
                     opcintype: INT4OID,
+                    opckeytype: 0,
                 }),
                 INT4_HASH_OPCLASS => Some(syscache_seams::PgOpclassShape {
                     opcmethod: lsyscache::HASH_AM_OID,
                     opcfamily: INT_HASH_FAM,
                     opcintype: INT4OID,
+                    opckeytype: 0,
                 }),
                 _ => None,
             })

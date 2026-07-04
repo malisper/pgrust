@@ -359,6 +359,7 @@ fn install() {
                 opcmethod: types_core::BTREE_AM_OID,
                 opcfamily: INT_BTREE_FAM,
                 opcintype: INT4OID,
+                opckeytype: 0,
             }))
         });
         s::lookup_pg_opfamily_shape::set(|opfid| {
