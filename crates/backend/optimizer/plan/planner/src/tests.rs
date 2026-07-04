@@ -19,6 +19,7 @@ pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         crate::init_seams();
+        miscinit_seams::get_user_id::set(|| 10);
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
