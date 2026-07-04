@@ -33,19 +33,19 @@ use types_nodes::parsenodes::{
     AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt, AlterRoleStmt,
     AlterSubscriptionStmt, AlterTableCmd, AlterTableSpaceOptionsStmt, AlterTableStmt,
     CTECycleClause, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt,
-    CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt, CreateEventTrigStmt,
-    CreateFunctionStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt,
-    CreatePolicyStmt, CreatePublicationStmt, CreateRoleStmt, CreateSchemaStmt,
-    CreateSubscriptionStmt, CreateTableSpaceStmt, CreateTransformStmt, CreatedbStmt,
-    DeallocateStmt, DeclareCursorStmt, DefElem, DefineStmt, DiscardStmt, DoStmt, DropOwnedStmt,
-    DropRoleStmt, DropStmt, DropSubscriptionStmt, DropTableSpaceStmt, DropdbStmt, ExecuteStmt,
-    ExplainStmt, FetchStmt, FunctionParameter, GrantRoleStmt, GrantStmt, GroupingSet,
-    ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectWithArgs, PrepareStmt,
-    PublicationObjSpec, PublicationTable, Query, RTEPermissionInfo, RangeTblEntry,
-    RangeTblFunction, ReassignOwnedStmt, ReindexStmt, RenameStmt, ReplicaIdentityStmt,
-    RoleSpec, RowMarkClause, SetOperationStmt, SortGroupClause, TransactionStmt, TruncateStmt,
-    UnlistenStmt, VacuumRelation, VacuumStmt, VariableSetStmt, VariableShowStmt, WindowClause,
-    WithCheckOption, WithClause,
+    CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt, CreateConversionStmt,
+    CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem, CreateOpClassStmt,
+    CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt, CreatePublicationStmt,
+    CreateRoleStmt, CreateSchemaStmt, CreateSubscriptionStmt, CreateTableSpaceStmt,
+    CreateTransformStmt, CreatedbStmt, DeallocateStmt, DeclareCursorStmt, DefElem, DefineStmt,
+    DiscardStmt, DoStmt, DropOwnedStmt, DropRoleStmt, DropStmt, DropSubscriptionStmt,
+    DropTableSpaceStmt, DropdbStmt, ExecuteStmt, ExplainStmt, FetchStmt, FunctionParameter,
+    GrantRoleStmt, GrantStmt, GroupingSet, ListenStmt, LoadStmt, LockStmt, NotifyStmt,
+    ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
+    RTEPermissionInfo, RangeTblEntry, RangeTblFunction, ReassignOwnedStmt, ReindexStmt,
+    RenameStmt, ReplicaIdentityStmt, RoleSpec, RowMarkClause, SetOperationStmt,
+    SortGroupClause, TransactionStmt, TruncateStmt, UnlistenStmt, VacuumRelation, VacuumStmt,
+    VariableSetStmt, VariableShowStmt, WindowClause, WithCheckOption, WithClause,
 };
 use types_nodes::rawnodes::{
     A_ArrayExpr, A_Expr, A_Indices, A_Indirection, AlterEnumStmt, AlterExtensionStmt,
@@ -365,6 +365,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<CreateCastStmt>().expect("CreateCastStmt");
             Node::mk(mcx, copy_CreateCastStmt(mcx, s)?)?
         }
+        NodeTag::T_CreateConversionStmt => {
+            let s = node.as_variant::<CreateConversionStmt>().expect("CreateConversionStmt");
+            Node::mk(mcx, copy_CreateConversionStmt(mcx, s)?)?
+        }
         NodeTag::T_CreateDomainStmt => {
             let s = node.as_variant::<CreateDomainStmt>().expect("CreateDomainStmt");
             Node::mk(mcx, copy_CreateDomainStmt(mcx, s)?)?
@@ -408,6 +412,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_CreateOpFamilyStmt => {
             let s = node.as_variant::<CreateOpFamilyStmt>().expect("CreateOpFamilyStmt");
             Node::mk(mcx, copy_CreateOpFamilyStmt(mcx, s)?)?
+        }
+        NodeTag::T_CreatePLangStmt => {
+            let s = node.as_variant::<CreatePLangStmt>().expect("CreatePLangStmt");
+            Node::mk(mcx, copy_CreatePLangStmt(mcx, s)?)?
         }
         NodeTag::T_CreatePolicyStmt => {
             let s = node.as_variant::<CreatePolicyStmt>().expect("CreatePolicyStmt");
@@ -1957,6 +1965,16 @@ pub(crate) fn copy_CreateCastStmt<'d>(mcx: Mcx<'d>, s: &CreateCastStmt<'_>) -> P
     })
 }
 
+pub(crate) fn copy_CreateConversionStmt<'d>(mcx: Mcx<'d>, s: &CreateConversionStmt<'_>) -> PgResult<CreateConversionStmt<'d>> {
+    Ok(CreateConversionStmt {
+        conversion_name: copy_node_list(mcx, &s.conversion_name)?,
+        for_encoding_name: opt_str_in(mcx, s.for_encoding_name)?,
+        to_encoding_name: opt_str_in(mcx, s.to_encoding_name)?,
+        func_name: copy_node_list(mcx, &s.func_name)?,
+        def: s.def,
+    })
+}
+
 pub(crate) fn copy_CreateDomainStmt<'d>(mcx: Mcx<'d>, s: &CreateDomainStmt<'_>) -> PgResult<CreateDomainStmt<'d>> {
     Ok(CreateDomainStmt {
         domainname: copy_node_list(mcx, &s.domainname)?,
@@ -2055,6 +2073,17 @@ pub(crate) fn copy_CreateOpFamilyStmt<'d>(mcx: Mcx<'d>, s: &CreateOpFamilyStmt<'
     Ok(CreateOpFamilyStmt {
         opfamilyname: copy_node_list(mcx, &s.opfamilyname)?,
         amname: opt_str_in(mcx, s.amname)?,
+    })
+}
+
+pub(crate) fn copy_CreatePLangStmt<'d>(mcx: Mcx<'d>, s: &CreatePLangStmt<'_>) -> PgResult<CreatePLangStmt<'d>> {
+    Ok(CreatePLangStmt {
+        replace: s.replace,
+        plname: opt_str_in(mcx, s.plname)?,
+        plhandler: copy_node_list(mcx, &s.plhandler)?,
+        plinline: copy_node_list(mcx, &s.plinline)?,
+        plvalidator: copy_node_list(mcx, &s.plvalidator)?,
+        pltrusted: s.pltrusted,
     })
 }
 
