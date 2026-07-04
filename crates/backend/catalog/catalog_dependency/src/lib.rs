@@ -52,7 +52,6 @@ const DescriptionRelationId: Oid = 2609;
 const DescriptionObjIndexId: Oid = 2675;
 const InitPrivsRelationId: Oid = 3394;
 const InitPrivsObjIndexId: Oid = 3395;
-const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const PolicyRelationId: Oid = 3256;
 const DefaultAclRelationId: Oid = 826;
@@ -756,7 +755,7 @@ fn deleteOneObject<'mcx>(
     )?;
 
     DeleteComments(mcx, object.objectId, object.classId, object.objectSubId)?;
-    DeleteSecurityLabel(mcx, object)?;
+    seclabel::DeleteSecurityLabel(mcx, object)?;
     DeleteInitPrivs(mcx, object)?;
 
     xact::CommandCounterIncrement()?;
@@ -1009,35 +1008,6 @@ fn DeleteComments<'mcx>(mcx: Mcx<'mcx>, oid: Oid, classoid: Oid, subid: i32) -> 
     }
     let mut scan =
         genam::systable_beginscan(mcx, &rel, DescriptionObjIndexId, true, None, &keys)?;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let tid = tup.t_self;
-        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
-    }
-    genam::systable_endscan(mcx, scan)?;
-    rel.close(RowExclusiveLock)
-}
-
-// DeleteSecurityLabel (seclabel.c), local-object arm; pg_seclabel has no
-// usable index scan without the provider column, so scan by (objoid,
-// classoid, objsubid) prefix of pg_seclabel_object_index.
-fn DeleteSecurityLabel<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()> {
-    if catalog::IsSharedRelation(object.classId) {
-        unported("DeleteSharedSecurityLabel (pg_shseclabel)");
-    }
-    let rel = table::table_open(mcx, SecLabelRelationId, RowExclusiveLock)?;
-    let mut keys: Vec<ScanKeyData> =
-        vec![oid_key(1, object.objectId), oid_key(2, object.classId)];
-    if object.objectSubId != 0 {
-        keys.push(int4_key(3, object.objectSubId));
-    }
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &rel,
-        catalog::SecLabelObjectIndexId,
-        true,
-        None,
-        &keys,
-    )?;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let tid = tup.t_self;
         catalog_indexing::CatalogTupleDelete(&rel, &tid)?;

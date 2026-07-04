@@ -705,6 +705,17 @@ fn dispatch_switch<'mcx>(
             }
         }
 
+        T_SecLabelStmt => {
+            let stmt = parsetree.as_sec_label_stmt().unwrap();
+            if event_trigger::EventTriggerSupportsObjectType(stmt.objtype) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                exec_seclabel_stmt(mcx, parsetree)?;
+            }
+        }
+
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
@@ -1168,6 +1179,13 @@ fn slow_switch<'mcx>(
             // no address yet.
             collect_gap("COMMENT");
             exec_comment_stmt(mcx, parsetree)?;
+            Ok(None)
+        }
+
+        T_SecLabelStmt => {
+            // C: address = ExecSecLabelStmt; the address is not collected yet.
+            collect_gap("SECURITY LABEL");
+            exec_seclabel_stmt(mcx, parsetree)?;
             Ok(None)
         }
 
@@ -1727,6 +1745,19 @@ fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> 
         >(stmt)
     };
     commands_comment::CommentObject(mcx, stmt)
+}
+
+fn exec_seclabel_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
+    let stmt = parsetree.as_sec_label_stmt().unwrap();
+    // Retention contract as unify_stmt_lifetime.
+    let stmt = unsafe {
+        core::mem::transmute::<
+            &types_nodes::parsenodes::SecLabelStmt<'_>,
+            &types_nodes::parsenodes::SecLabelStmt<'mcx>,
+        >(stmt)
+    };
+    seclabel::ExecSecLabelStmt(mcx, stmt)?;
+    Ok(())
 }
 
 // ExecAlterOwnerStmt (alter.c) for the object types without event-trigger

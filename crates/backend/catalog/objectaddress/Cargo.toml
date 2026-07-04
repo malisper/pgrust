@@ -53,6 +53,7 @@ rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 objectaddress_seams = { path = "../objectaddress_seams" }
 adt_acl = { path = "../../utils/adt/acl" }
+aclchk = { path = "../aclchk" }
 adt_regproc = { path = "../../utils/adt/regproc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 statscmds = { path = "../../commands/statscmds" }

@@ -52,6 +52,7 @@ be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
 large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
+seclabel = { path = "../../backend/commands/seclabel" }
 catalog_objectaddress = { path = "../../backend/catalog/objectaddress" }
 event_trigger = { path = "../../backend/commands/event_trigger" }
 commands_cluster = { path = "../../backend/commands/cluster" }

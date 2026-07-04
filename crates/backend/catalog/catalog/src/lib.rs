@@ -60,6 +60,7 @@ pub const PgSubscriptionToastTable: Oid = 4183;
 pub const PgSubscriptionToastIndex: Oid = 4184;
 pub const PgTablespaceToastTable: Oid = 4185;
 pub const PgTablespaceToastIndex: Oid = 4186;
+pub const SecLabelRelationId: Oid = 3596;
 pub const SecLabelObjectIndexId: Oid = 3597;
 pub const LargeObjectRelationId: Oid = 2613;
 pub const NamespaceRelationId: Oid = 2615;

@@ -1385,10 +1385,43 @@ fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
     Ok(oid)
 }
 
+// has_createrole_privilege (aclchk.c).
+fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
+    if superuser::superuser_arg(roleid)? {
+        return Ok(true);
+    }
+    const Anum_pg_authid_rolcreaterole: i32 = 5;
+    match cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::AUTHOID,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(roleid)),
+    )? {
+        Some(tuple) => {
+            let result = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::AUTHOID,
+                &tuple,
+                Anum_pg_authid_rolcreaterole,
+            )?
+            .as_bool();
+            cache_syscache::ReleaseSysCache(tuple);
+            Ok(result)
+        }
+        None => Ok(false),
+    }
+}
+
+#[cold]
+fn permission_denied(attr_detail: String) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, "permission denied")
+            .with_detail(attr_detail)
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+    )
+}
+
 // check_object_ownership (objectaddress.c); objtypes without an arm below
 // are superuser-only until ported.
 pub fn check_object_ownership<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     roleid: Oid,
     objtype: ObjectType,
     address: ObjectAddress,
@@ -1567,6 +1600,11 @@ pub fn check_object_ownership<'mcx>(
             if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
                 let name = object.as_string().expect("object is a String node").sval;
                 aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
+            }
+        }
+        ObjectType::OBJECT_TYPE | ObjectType::OBJECT_DOMAIN | ObjectType::OBJECT_ATTRIBUTE => {
+            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
+                aclcheck_error_type(aclchk::ACLCHECK_NOT_OWNER, address.objectId)?;
             }
         }
         other => panic!("check_object_ownership: unsupported object type: {other:?}"),
