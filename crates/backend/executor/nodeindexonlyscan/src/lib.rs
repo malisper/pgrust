@@ -33,15 +33,19 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+pub struct IossRuntimeKeys<'mcx> {
+    pub keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    pub ready: bool,
+    pub ecxt: EcxtId,
+}
+
 pub struct IndexOnlyScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     pub recheckqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     pub ioss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub ioss_RelationDesc: Option<Relation<'mcx>>,
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
-    pub ioss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
-    pub ioss_RuntimeKeysReady: bool,
-    pub ioss_RuntimeContext: Option<EcxtId>,
+    pub ioss_Runtime: Option<PgBox<'mcx, IossRuntimeKeys<'mcx>>>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
     pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
@@ -79,7 +83,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 0,
             )?;
             scandesc.xs_want_itup = true;
-            if self.ioss_RuntimeKeys.is_empty() || self.ioss_RuntimeKeysReady {
+            if self.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
                 index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
             }
             // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
@@ -290,7 +294,7 @@ pub fn exec_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if !node.ioss_RuntimeKeys.is_empty() && !node.ioss_RuntimeKeysReady {
+    if node.ioss_Runtime.as_deref().is_some_and(|r| !r.ready) {
         exec_rescan_index_only_scan(node, estate)?;
     }
     execscan::exec_scan(node, estate)
@@ -360,12 +364,19 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         orderby_unported();
     }
 
-    let (ioss_ScanKeys, ioss_RuntimeKeys) =
+    let (ioss_ScanKeys, runtime_keys) =
         exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
-    let ioss_RuntimeContext = if ioss_RuntimeKeys.is_empty() {
+    let ioss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
-        Some(estate.exec_assign_expr_context())
+        Some(::mcx::alloc_in(
+            mcx,
+            IossRuntimeKeys {
+                keys: runtime_keys,
+                ready: false,
+                ecxt: estate.exec_assign_expr_context(),
+            },
+        )?)
     };
     let ioss_NameCStringAttNums = name_cstring_attnums(mcx, &index_rel)?;
 
@@ -375,9 +386,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_ScanDesc: None,
         ioss_RelationDesc: Some(index_rel),
         ioss_ScanKeys,
-        ioss_RuntimeKeys,
-        ioss_RuntimeKeysReady: false,
-        ioss_RuntimeContext,
+        ioss_Runtime,
         ioss_TableSlot,
         ioss_OrderDir: order_dir(node.indexorderdir),
         ioss_NameCStringAttNums,
@@ -431,7 +440,7 @@ pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<(
     }
     node.recheckqual = None;
     node.ioss_ScanKeys.clear();
-    node.ioss_RuntimeKeys.clear();
+    node.ioss_Runtime = None;
     Ok(())
 }
 
@@ -511,7 +520,7 @@ pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanSt
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
     IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_NameCStringAttNums,
-        ioss_PlanNodeId, ioss_RuntimeKeysReady, ioss_RuntimeContext;
+        ioss_PlanNodeId;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
-        ioss_RuntimeKeys, ioss_OrderDir, ioss_VMBuffer },
+        ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
 );
