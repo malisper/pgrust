@@ -1220,12 +1220,12 @@ fn run_program<'mcx>(
                     crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
                 };
                 if nd.isnull && other.isnull {
-                    write_out(*out, Datum::from_bool(false), false);
-                } else if nd.isnull || other.isnull {
                     write_out(*out, Datum::from_bool(true), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
                 } else {
                     let (value, isnull) = invoke2(call)?;
-                    write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
+                    write_out(*out, value, isnull);
                 }
             }
             Step::NotDistinctQual { call, jumpdone, out } => {
@@ -1237,12 +1237,12 @@ fn run_program<'mcx>(
                     )
                 };
                 let r = if a0.isnull && a1.isnull {
-                    NullableDatum { value: Datum::from_bool(false), isnull: false }
-                } else if a0.isnull || a1.isnull {
                     NullableDatum { value: Datum::from_bool(true), isnull: false }
+                } else if a0.isnull || a1.isnull {
+                    NullableDatum { value: Datum::from_bool(false), isnull: false }
                 } else {
                     let (value, isnull) = invoke2(call)?;
-                    NullableDatum { value: Datum::from_bool(!value.as_bool()), isnull }
+                    NullableDatum { value, isnull }
                 };
                 if r.isnull || !r.value.as_bool() {
                     write_out(*out, Datum::from_bool(false), false);
