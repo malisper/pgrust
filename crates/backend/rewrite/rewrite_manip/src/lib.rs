@@ -451,7 +451,7 @@ pub fn ChangeVarNodes<'mcx>(
 }
 
 struct IncrVarSublevels {
-    delta: u32,
+    delta: i32,
     min_sublevels_up: u32,
 }
 
@@ -464,7 +464,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 unsafe {
                     node.with_mut::<Var, _>(|v| {
                         if v.varlevelsup >= min {
-                            v.varlevelsup += delta;
+                            v.varlevelsup = v.varlevelsup.wrapping_add_signed(delta);
                         }
                     })
                 }
@@ -477,7 +477,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 unsafe {
                     node.with_mut::<Aggref, _>(|a| {
                         if a.agglevelsup >= min {
-                            a.agglevelsup += delta;
+                            a.agglevelsup = a.agglevelsup.wrapping_add_signed(delta);
                         }
                     })
                 }
@@ -490,7 +490,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 unsafe {
                     node.with_mut::<GroupingFunc, _>(|g| {
                         if g.agglevelsup >= min {
-                            g.agglevelsup += delta;
+                            g.agglevelsup = g.agglevelsup.wrapping_add_signed(delta);
                         }
                     })
                 }
@@ -509,7 +509,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 unsafe {
                     node.with_mut::<RangeTblEntry, _>(|rte| {
                         if rte.rtekind == RTEKind::RTE_CTE && rte.ctelevelsup >= min {
-                            rte.ctelevelsup += delta;
+                            rte.ctelevelsup = rte.ctelevelsup.wrapping_add_signed(delta);
                         }
                     })
                 }
@@ -540,7 +540,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
 
 pub fn IncrementVarSublevelsUp_query<'mcx>(
     q: &'mcx Query<'mcx>,
-    delta_sublevels_up: u32,
+    delta_sublevels_up: i32,
     min_sublevels_up: u32,
 ) -> PgResult<()> {
     let mut w = IncrVarSublevels { delta: delta_sublevels_up, min_sublevels_up };
@@ -550,7 +550,7 @@ pub fn IncrementVarSublevelsUp_query<'mcx>(
 
 pub fn IncrementVarSublevelsUp<'mcx>(
     node: Node<'mcx>,
-    delta_sublevels_up: u32,
+    delta_sublevels_up: i32,
     min_sublevels_up: u32,
 ) -> PgResult<()> {
     let mut w = IncrVarSublevels { delta: delta_sublevels_up, min_sublevels_up };
@@ -951,7 +951,7 @@ fn rv_mutate<'mcx>(
                     ctx.nomatch_option,
                 )?;
                 if var.varlevelsup > 0 {
-                    IncrementVarSublevelsUp(newnode, var.varlevelsup, 0)?;
+                    IncrementVarSublevelsUp(newnode, var.varlevelsup as i32, 0)?;
                 }
                 if !ctx.inserted_sublink {
                     ctx.inserted_sublink = checkExprHasSubLink(newnode)?;

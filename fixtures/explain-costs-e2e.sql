@@ -146,3 +146,50 @@ EXPLAIN SELECT * FROM ec_tid WHERE ctid >= '(0,5)' AND ctid < '(2,10)';
 EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,2)' AND id = 2;
 EXPLAIN SELECT id FROM ec_tid WHERE ctid < '(1,1)' ORDER BY id;
 DROP TABLE ec_tid;
+
+-- nested-CTE references (parent-root resolution) + sublink-view pull-up
+CREATE TABLE ec_ct(a int, b int);
+INSERT INTO ec_ct SELECT g, g % 23 FROM generate_series(1, 3000) g;
+CREATE TABLE ec_cd(k int, v int);
+INSERT INTO ec_cd SELECT g % 40, g FROM generate_series(1, 2000) g;
+ANALYZE ec_ct;
+ANALYZE ec_cd;
+
+-- CTE cross-reference: y's body reads x at ctelevelsup 1 while the outer
+-- level is still mid-SS_process_ctes
+EXPLAIN WITH x AS MATERIALIZED (SELECT a, b FROM ec_ct WHERE b < 7),
+  y AS MATERIALIZED (SELECT a FROM x WHERE b = 3)
+  SELECT count(*) FROM y;
+EXPLAIN WITH x AS MATERIALIZED (SELECT a, b FROM ec_ct WHERE b < 7),
+  y AS MATERIALIZED (SELECT x.a FROM x, ec_cd WHERE x.a = ec_cd.v)
+  SELECT count(*) FROM x, y WHERE x.a = y.a;
+-- outer-CTE reference from an unflattenable subquery (levelsup resolved
+-- through the suspended chain during set_subquery_pathlist)
+EXPLAIN WITH x AS MATERIALIZED (SELECT a, b FROM ec_ct WHERE b < 7)
+  SELECT * FROM (SELECT a FROM x ORDER BY a LIMIT 5) sub;
+EXPLAIN WITH x AS MATERIALIZED (SELECT a, b FROM ec_ct WHERE b < 7)
+  SELECT * FROM (SELECT * FROM (SELECT a FROM x ORDER BY a LIMIT 5) s1 ORDER BY a DESC LIMIT 3) s2;
+
+-- sublink views: pulled-up subquery bodies carrying SubLinks
+CREATE VIEW ec_vw1 AS SELECT a, b FROM ec_ct
+  WHERE EXISTS (SELECT 1 FROM ec_cd WHERE ec_cd.k = ec_ct.b);
+EXPLAIN SELECT count(*) FROM ec_vw1 WHERE a < 100;
+CREATE VIEW ec_vw2 AS SELECT a, b FROM ec_ct
+  WHERE b IN (SELECT k FROM ec_cd WHERE v < 500);
+EXPLAIN SELECT count(*) FROM ec_vw2;
+CREATE VIEW ec_vw3 AS SELECT a, b FROM ec_ct
+  WHERE NOT EXISTS (SELECT 1 FROM ec_cd WHERE ec_cd.k = ec_ct.b AND ec_cd.v > 1500);
+EXPLAIN SELECT count(*) FROM ec_vw3 WHERE a BETWEEN 10 AND 200;
+-- scalar sublink retained in the view tlist (substituted into the parent)
+CREATE VIEW ec_vw4 AS SELECT a,
+  (SELECT count(*) FROM ec_cd WHERE ec_cd.k = ec_ct.b) AS n FROM ec_ct;
+EXPLAIN SELECT * FROM ec_vw4 WHERE a < 50;
+-- view-over-view, sublinks at both levels
+CREATE VIEW ec_vw5 AS SELECT a FROM ec_vw1 WHERE b IN (SELECT k FROM ec_cd);
+EXPLAIN SELECT count(*) FROM ec_vw5;
+DROP VIEW ec_vw5;
+DROP VIEW ec_vw4;
+DROP VIEW ec_vw3;
+DROP VIEW ec_vw2;
+DROP VIEW ec_vw1;
+DROP TABLE ec_ct, ec_cd;

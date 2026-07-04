@@ -63,7 +63,7 @@ pub fn subquery_planner<'mcx>(
         .iter()
         .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
     {
-        crate::prepjointree::pull_up_subqueries(mcx, &mut parse)?;
+        crate::prepjointree::pull_up_subqueries(run, &mut parse)?;
     }
     if parse.rtable.iter().any(|n| {
         let r = n.as_range_tbl_entry().expect("rtable cell");
