@@ -259,9 +259,14 @@ pub fn DefineRelation<'mcx>(
 
     let mut partition_notnulls: mcx::PgVec<'mcx, inheritance::InheritedNotNull<'mcx>> =
         mcx::PgVec::new_in(mcx);
+    let mut partition_checks: mcx::PgVec<'mcx, inheritance::InheritedCheck<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    let mut partition_gendefs: mcx::PgVec<'mcx, (AttrNumber, types_nodes::Node<'mcx>)> =
+        mcx::PgVec::new_in(mcx);
     let descriptor = match parent_oid {
         // MergeAttributes, empty-column partition arm: the partition's
-        // columns are exactly the parent's (attislocal=false, attinhcount=1).
+        // columns are exactly the parent's (attislocal=false, attinhcount=1),
+        // so parent CHECK ccbin and generation expressions ride unmapped.
         Some(parent_oid) => {
             assert!(stmt.tableElts.is_nil(), "loud in transformCreateStmt");
             let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
@@ -273,8 +278,27 @@ pub fn DefineRelation<'mcx>(
                 ));
             }
             if let Some(constr) = parent.rd_att.constr.as_deref() {
-                if constr.num_check > 0 || constr.has_generated_stored {
-                    unported("inherited CHECK/generated constraints on partitions");
+                for check in constr.check.iter() {
+                    if check.ccnoinherit {
+                        continue;
+                    }
+                    let name = {
+                        let owned = check.ccname.as_ref().expect("check name").as_str();
+                        let bytes = mcx::slice_borrow_in(mcx, owned.as_bytes())?;
+                        // SAFETY: byte-for-byte copy of a &str.
+                        unsafe { core::str::from_utf8_unchecked(bytes) }
+                    };
+                    let expr = readfuncs::stringToNode(
+                        mcx,
+                        check.ccbin.as_ref().expect("check ccbin").as_str(),
+                    )?;
+                    partition_checks.push(inheritance::InheritedCheck {
+                        name,
+                        expr,
+                        inhcount: 1,
+                        is_enforced: check.ccenforced,
+                        skip_validation: !check.ccenforced,
+                    });
                 }
             }
             // The parent's catalogued not-null constraints ride to the
@@ -297,14 +321,27 @@ pub fn DefineRelation<'mcx>(
             let mut desc = tupdesc::CreateTupleDescCopy(mcx, parent.descr())?;
             for i in 0..desc.natts as usize {
                 let parent_att = parent.rd_att.attr(i);
-                if parent_att.atthasdef {
-                    unported("inherited column defaults on partitions");
+                if parent_att.attisdropped {
+                    continue;
                 }
-                if parent_att.attidentity != 0 || parent_att.attgenerated != 0 {
-                    unported("identity/generated columns on partitions");
+                if parent_att.attidentity != 0 {
+                    unported("identity columns on partitions");
+                }
+                if parent_att.atthasdef {
+                    if parent_att.attgenerated == 0 {
+                        unported("inherited column defaults on partitions");
+                    }
+                    let adbin =
+                        pg_attrdef::GetAttrDefaultBin(mcx, parent_oid, (i + 1) as AttrNumber)?
+                            .unwrap_or_else(|| {
+                                panic!("default expression not found for attribute {}", i + 1)
+                            });
+                    let expr = readfuncs::stringToNode(mcx, &adbin)?;
+                    partition_gendefs.push(((i + 1) as AttrNumber, expr));
                 }
                 let att = desc.attr_mut(i);
                 att.attnotnull = parent_att.attnotnull;
+                att.attgenerated = parent_att.attgenerated;
                 att.attislocal = false;
                 att.attinhcount = 1;
                 tupdesc::populate_compact_attribute(&mut desc, i);
@@ -334,9 +371,20 @@ pub fn DefineRelation<'mcx>(
     )?;
 
     // C StoreConstraints runs inside heap_create_with_catalog: inherited
-    // cooked CHECKs land before pg_inherits/pg_depend rows.
+    // cooked CHECKs and generation expressions land before pg_inherits rows.
     if let Some(m) = &merged {
         inheritance::store_inherited_checks(mcx, relation_id, &m.checks)?;
+    }
+    if !partition_checks.is_empty() {
+        inheritance::store_inherited_checks(mcx, relation_id, &partition_checks)?;
+    }
+    if !partition_gendefs.is_empty() {
+        xact::CommandCounterIncrement()?;
+        let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
+        for &(attnum, expr) in partition_gendefs.iter() {
+            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+        }
+        table::table_close(rel, types_rel::NoLock)?;
     }
 
     register_on_commit_action(relation_id, stmt.oncommit);

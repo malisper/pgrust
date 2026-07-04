@@ -100,6 +100,9 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_EnableAlwaysRule
             | AlterTableType::AT_EnableReplicaRule
             | AlterTableType::AT_DisableRule => AccessExclusiveLock,
+            AlterTableType::AT_AddInherit | AlterTableType::AT_DropInherit => {
+                AccessExclusiveLock
+            }
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
         if cmd_lockmode > lockmode {
@@ -213,6 +216,29 @@ struct AlteredTableInfo<'mcx> {
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
 }
 
+type Wqueue<'mcx> = PgVec<'mcx, AlteredTableInfo<'mcx>>;
+
+fn ATGetQueueEntry<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+) -> usize {
+    if let Some(i) = wqueue.iter().position(|t| t.relid == rel.rd_id) {
+        return i;
+    }
+    wqueue.push(AlteredTableInfo {
+        relid: rel.rd_id,
+        old_desc: rel.rd_att.clone(),
+        subcmds: core::array::from_fn(|_| NodeList::nil()),
+        rewrite: 0,
+        has_newvals: false,
+        verify_new_notnull: false,
+        newvals: PgVec::new_in(mcx),
+        constraints: PgVec::new_in(mcx),
+    });
+    wqueue.len() - 1
+}
+
 pub fn AlterTable<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
@@ -236,34 +262,53 @@ fn ATController<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
-    let mut tab = AlteredTableInfo {
-        relid: rel.rd_id,
-        old_desc: rel.rd_att.clone(),
-        subcmds: core::array::from_fn(|_| NodeList::nil()),
-        rewrite: 0,
-        has_newvals: false,
-        verify_new_notnull: false,
-        newvals: PgVec::new_in(mcx),
-        constraints: PgVec::new_in(mcx),
-    };
-
+    let mut wqueue: Wqueue<'mcx> = PgVec::new_in(mcx);
     for cnode in cmds.iter() {
-        ATPrepCmd(mcx, &mut tab, &rel, cnode, recurse, query_string)?;
+        ATPrepCmd(mcx, &mut wqueue, &rel, cnode, recurse, false, lockmode, query_string)?;
     }
     rel.close(NoLock)?;
 
-    ATRewriteCatalogs(mcx, &mut tab, lockmode, query_string)?;
-    ATRewriteTables(mcx, &mut tab, lockmode)
+    ATRewriteCatalogs(mcx, &mut wqueue, lockmode, query_string)?;
+    ATRewriteTables(mcx, &mut wqueue, lockmode)
+}
+
+// ATSimpleRecursion: prep-time recursion to all inheritors.
+fn ATSimpleRecursion<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    cnode: Node<'mcx>,
+    recurse: bool,
+    lockmode: LOCKMODE,
+    query_string: &str,
+) -> PgResult<()> {
+    if !recurse || !rel.rd_rel.relhassubclass {
+        return Ok(());
+    }
+    let relid = rel.rd_id;
+    let children = pg_inherits::find_all_inheritors(mcx, relid, lockmode)?;
+    for &childrelid in children.iter() {
+        if childrelid == relid {
+            continue;
+        }
+        let childrel = table::table_open(mcx, childrelid, NoLock)?;
+        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        ATPrepCmd(mcx, wqueue, &childrel, cnode, false, true, lockmode, query_string)?;
+        childrel.close(NoLock)?;
+    }
+    Ok(())
 }
 
 // ATPrepCmd: the statement arena is single-use, so the subcommand is
 // scribbled on in place instead of C's copyObject.
 fn ATPrepCmd<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     cnode: Node<'mcx>,
     recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
@@ -271,6 +316,7 @@ fn ATPrepCmd<'mcx>(
     if rel.rd_rel.relkind != RELKIND_RELATION {
         unported("ATSimplePermissions: non-plain-table relkind");
     }
+    let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
     let set_recurse = || {
         if recurse {
             // SAFETY: parse tree is statement-owned; no derived refs live.
@@ -300,7 +346,7 @@ fn ATPrepCmd<'mcx>(
         }
         AlterTableType::AT_AddConstraint => {
             set_recurse();
-            ATPrepAddPrimaryKey(mcx, tab, rel, cmd, recurse)?;
+            ATPrepAddPrimaryKey(mcx, &mut wqueue[tabidx], rel, cmd, recurse)?;
             AT_PASS_ADD_CONSTR
         }
         AlterTableType::AT_DropConstraint => {
@@ -308,7 +354,7 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_DROP
         }
         AlterTableType::AT_AlterColumnType => {
-            ATPrepAlterColumnType(mcx, tab, rel, cmd, query_string)?;
+            ATPrepAlterColumnType(mcx, &mut wqueue[tabidx], rel, cmd, query_string)?;
             AT_PASS_ALTER_TYPE
         }
         AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
@@ -317,39 +363,60 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_EnableReplicaRule
         | AlterTableType::AT_DisableRule => AT_PASS_MISC,
         AlterTableType::AT_SetStatistics => {
-            set_recurse();
+            ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
             AT_PASS_MISC
         }
         AlterTableType::AT_SetStorage => {
-            set_recurse();
+            ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
             AT_PASS_MISC
         }
+        AlterTableType::AT_AddInherit => {
+            ATPrepAddInherit(rel)?;
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_DropInherit => AT_PASS_MISC,
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
-    tab.subcmds[pass].lappend(mcx, cnode)?;
+    let _ = recursing;
+    wqueue[tabidx].subcmds[pass].lappend(mcx, cnode)?;
+    Ok(())
+}
+
+// ATPrepAddInherit: typed tables are loud upstream, so only the partition
+// arms are live.
+fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
+    if rel.rd_rel.relispartition {
+        return Err(Box::new(
+            PgError::new(ERROR, "cannot change inheritance of a partition".to_string())
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
     Ok(())
 }
 
 fn ATRewriteCatalogs<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
-    _lockmode: LOCKMODE,
+    wqueue: &mut Wqueue<'mcx>,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
     for pass in 0..AT_NUM_PASSES {
-        if tab.subcmds[pass].is_nil() {
+        let mut tabidx = 0;
+        while tabidx < wqueue.len() {
+        if wqueue[tabidx].subcmds[pass].is_nil() {
+            tabidx += 1;
             continue;
         }
         let mut nodes: mcx::PgVec<'_, Node<'mcx>> = mcx::PgVec::new_in(mcx);
-        for c in tab.subcmds[pass].iter() {
+        for c in wqueue[tabidx].subcmds[pass].iter() {
             nodes.push(c);
         }
         for &cnode in nodes.iter() {
-            let rel = table::table_open(mcx, tab.relid, NoLock)?;
+            let rel = table::table_open(mcx, wqueue[tabidx].relid, NoLock)?;
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
                 AlterTableType::AT_AddColumn => {
-                    ATExecAddColumn(mcx, tab, &rel, cnode, query_string)?;
+                    ATExecAddColumn(mcx, &mut wqueue[tabidx], &rel, cnode, query_string)?;
                 }
                 AlterTableType::AT_DropColumn => {
                     ATExecDropColumn(mcx, &rel, cmd)?;
@@ -361,7 +428,7 @@ fn ATRewriteCatalogs<'mcx>(
                     ATExecDropNotNull(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_SetNotNull => {
-                    ATExecSetNotNull(mcx, tab, &rel, cmd)?;
+                    ATExecSetNotNull(mcx, &mut wqueue[tabidx], &rel, cmd)?;
                 }
                 AlterTableType::AT_CookedColumnDefault => {
                     let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
@@ -378,32 +445,42 @@ fn ATRewriteCatalogs<'mcx>(
                                 parse_utilcmd::transformIndexConstraintForAlter(mcx, defnode)?;
                             parse_clause::transformIndexStmt(
                                 mcx,
-                                tab.relid,
+                                wqueue[tabidx].relid,
                                 istmt,
                                 query_string,
                             )?;
                             let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
                             newcmd.subtype = AlterTableType::AT_AddIndex;
                             newcmd.def = Some(istmt);
-                            tab.subcmds[AT_PASS_ADD_INDEX].lappend(mcx, newcmd.seal())?;
+                            wqueue[tabidx].subcmds[AT_PASS_ADD_INDEX].lappend(mcx, newcmd.seal())?;
                         }
                         ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
-                            tab.subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
+                            wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
                         }
-                        ConstrType::CONSTR_NOTNULL => {
-                            ATExecAddNotNullConstraint(mcx, tab, &rel, constr)?;
+                        ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
+                            ATAddCheckNNConstraint(
+                                mcx,
+                                wqueue,
+                                tabidx,
+                                &rel,
+                                defnode,
+                                cmd.recurse,
+                                false,
+                                lockmode,
+                                query_string,
+                            )?;
                         }
-                        _ => ATExecAddConstraint(mcx, tab, &rel, cmd, query_string)?,
+                        _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
                     }
                 }
                 AlterTableType::AT_DropConstraint => {
                     ATExecDropConstraint(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_AddIndex => {
-                    ATExecAddIndex(mcx, tab, &rel, cmd)?;
+                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd)?;
                 }
                 AlterTableType::AT_AlterColumnType => {
-                    ATExecAlterColumnType(mcx, tab, &rel, cmd)?;
+                    ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
                 }
                 AlterTableType::AT_EnableRule => {
                     rewrite_define::EnableDisableRule(
@@ -443,20 +520,42 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_SetStorage => {
                     ATExecSetStorage(mcx, &rel, cmd)?;
                 }
+                AlterTableType::AT_AddInherit => {
+                    ATExecAddInherit(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_DropInherit => {
+                    ATExecDropInherit(mcx, &rel, cmd)?;
+                }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             rel.close(NoLock)?;
             xact::CommandCounterIncrement()?;
+        }
+        tabidx += 1;
         }
         // ATPostAlterTypeCleanup: dependent constraints/indexes are loud in
         // ATExecAlterColumnType, so the re-add queue is always empty.
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
     // or none is needed.
-    catalog_toasting::NewRelationCreateToastTable(mcx, tab.relid)
+    for tabidx in 0..wqueue.len() {
+        catalog_toasting::NewRelationCreateToastTable(mcx, wqueue[tabidx].relid)?;
+    }
+    Ok(())
 }
 
 fn ATRewriteTables<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    for tabidx in 0..wqueue.len() {
+        ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode)?;
+    }
+    Ok(())
+}
+
+fn ATRewriteTableOne<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
     lockmode: LOCKMODE,
@@ -1375,46 +1474,117 @@ fn verify_notnull_pk_compatible(
     Ok(())
 }
 
-// The NOT NULL arm of ATAddCheckNNConstraint (existing-constraint merge is an
-// inheritance lane — loud).
-fn ATExecAddNotNullConstraint<'mcx>(
+// ATAddCheckNNConstraint (tablecmds.c): CHECK and NOT NULL constraints with
+// exec-time recursion, one inheritance level at a time.
+#[allow(clippy::too_many_arguments)]
+fn ATAddCheckNNConstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    tabidx: usize,
     rel: &Relation<'mcx>,
-    constr: &Constraint<'mcx>,
+    defnode: Node<'mcx>,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
+    query_string: &str,
 ) -> PgResult<()> {
-    let col_name = constr.keys.nth(0).as_string().expect("not-null keys").sval;
-    let relname = rel.name().to_string();
-    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
-        return Err(Box::new(
-            PgError::new(
-                ERROR,
-                format!("column \"{col_name}\" of relation \"{relname}\" does not exist"),
-            )
-            .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
-        ));
-    };
-    if attnum <= 0 {
-        return Err(cannot_alter_system_column(col_name));
+    if recursing && rel.rd_rel.relkind != RELKIND_RELATION {
+        unported("ATAddCheckNNConstraint: non-plain-table child relkind");
     }
-    if pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?.is_some() {
-        unported("ATAddCheckNNConstraint: merge with an existing not-null constraint");
-    }
-    if constr.is_no_inherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATAddCheckNNConstraint inheritance recursion");
-    }
-    create_notnull_constraint(
+    let constr = defnode.as_variant::<Constraint>().expect("Constraint");
+    let contype = constr.contype;
+    let conname_was_none = constr.conname.is_none();
+    let cooked = crate::constraints::add_relation_new_constraints_ext(
         mcx,
-        tab,
         rel,
-        attnum,
-        col_name,
-        constr.conname,
-        constr.is_no_inherit,
+        &[],
+        &NodeList::make1(mcx, defnode)?,
+        recursing, // allow_merge (is_readd rides the ALTER TYPE re-add lane)
+        !recursing,
+        query_string,
     )?;
+    debug_assert!(cooked.len() <= 1);
+    for c in cooked.iter() {
+        if !c.skip_validation && c.contype != ConstrType::CONSTR_NOTNULL {
+            wqueue[tabidx]
+                .constraints
+                .push(NewConstraint { name: c.name, qual: c.expr.expect("CHECK expr") });
+        }
+        if conname_was_none {
+            let assigned = c.name;
+            // SAFETY: parse tree is statement-owned; children must reuse the
+            // parent's assigned constraint name.
+            unsafe {
+                defnode
+                    .with_mut::<Constraint, _>(|cc| cc.conname = Some(assigned))
+                    .expect("Constraint");
+            }
+        }
+        if contype == ConstrType::CONSTR_NOTNULL {
+            set_attnotnull(mcx, wqueue, rel, c.attnum)?;
+        }
+    }
     xact::CommandCounterIncrement()?;
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATAddCheckNNConstraint inheritance recursion");
+
+    // Merged with an existing constraint: children already have it, and
+    // recursing again would double-count coninhcount.
+    if cooked.is_empty() {
+        return Ok(());
+    }
+    if defnode.as_variant::<Constraint>().expect("Constraint").is_no_inherit {
+        return Ok(());
+    }
+    let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+    if !recurse && !children.is_empty() {
+        return Err(Box::new(
+            PgError::new(ERROR, "constraint must be added to child tables too".to_string())
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    for &childrelid in children.iter() {
+        let childrel = table::table_open(mcx, childrelid, NoLock)?;
+        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        let childtabidx = ATGetQueueEntry(mcx, wqueue, &childrel);
+        ATAddCheckNNConstraint(
+            mcx,
+            wqueue,
+            childtabidx,
+            &childrel,
+            defnode,
+            recurse,
+            true,
+            lockmode,
+            query_string,
+        )?;
+        childrel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// set_attnotnull (tablecmds.c); NotNullImpliedByRelConstraints proof unported
+// so phase 3 always verifies.
+fn set_attnotnull<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+) -> PgResult<()> {
+    let att = rel.rd_att.attr(attnum as usize - 1);
+    if att.attisdropped {
+        return Ok(());
+    }
+    if !att.attnotnull {
+        update_pg_attribute(
+            mcx,
+            rel.rd_id,
+            attnum,
+            &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
+        )?;
+        let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
+        wqueue[tabidx].verify_new_notnull = true;
+        xact::CommandCounterIncrement()?;
+    } else {
+        inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
     }
     Ok(())
 }
@@ -1570,9 +1740,6 @@ fn ATExecSetStatistics<'mcx>(
             )?;
         }
     }
-    if cmd.recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecSetStatistics inheritance recursion");
-    }
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
@@ -1615,9 +1782,6 @@ fn ATExecSetStorage<'mcx>(
         .as_string()
         .expect("AT_SetStorage String")
         .sval;
-    if cmd.recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecSetStorage inheritance recursion");
-    }
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
@@ -1702,7 +1866,7 @@ fn pg_index_all_keys<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<PgVec<'mcx
     Ok(keys)
 }
 
-// ATExecAddConstraint -> ATAddCheckNNConstraint, CHECK arm.
+// ATExecAddConstraint residue: FK only (CHECK/NN ride ATAddCheckNNConstraint).
 fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
@@ -1710,31 +1874,41 @@ fn ATExecAddConstraint<'mcx>(
     cmd: &AlterTableCmd<'mcx>,
     query_string: &str,
 ) -> PgResult<()> {
+    let _ = (query_string, &tab.relid);
     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
         return crate::fk::ATExecAddConstraint(mcx, rel, constr);
     }
-    if constr.contype != ConstrType::CONSTR_CHECK {
-        unported(&format!("ATExecAddConstraint {:?}", constr.contype));
-    }
-    let cooked = crate::constraints::add_relation_new_constraints(
-        mcx,
-        rel,
-        &[],
-        &NodeList::make1(mcx, defnode)?,
-        query_string,
-    )?;
-    for c in cooked.iter() {
-        if !c.skip_validation {
-            tab.constraints.push(NewConstraint { name: c.name, qual: c.expr.expect("CHECK expr") });
-        }
-    }
-    xact::CommandCounterIncrement()?;
-    if !constr.is_no_inherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATAddCheckNNConstraint inheritance recursion");
-    }
-    Ok(())
+    unported(&format!("ATExecAddConstraint {:?}", constr.contype));
+}
+
+// ATExecAddInherit / ATExecDropInherit exec wrappers; the catalog work lives
+// in inheritance.rs.
+fn ATExecAddInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let prv = cmd
+        .def
+        .expect("AT_AddInherit RangeVar")
+        .as_variant::<types_nodes::primnodes::RangeVar>()
+        .expect("RangeVar");
+    crate::inheritance::ATExecAddInherit(mcx, rel, prv)
+}
+
+fn ATExecDropInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let prv = cmd
+        .def
+        .expect("AT_DropInherit RangeVar")
+        .as_variant::<types_nodes::primnodes::RangeVar>()
+        .expect("RangeVar");
+    crate::inheritance::ATExecDropInherit(mcx, rel, prv)
 }
 
 // ATPrepAlterColumnType: build the transform (no USING; loud upstream) and

@@ -10357,6 +10357,7 @@ dependencies = [
  "elog_seams",
  "execexpr",
  "exectuples",
+ "fmgr_core",
  "fmgr_seams",
  "format_type",
  "genam",
@@ -10417,6 +10418,7 @@ dependencies = [
  "types_slot",
  "types_trigger",
  "types_tuple",
+ "varlena",
  "vars",
  "xact",
 ]
