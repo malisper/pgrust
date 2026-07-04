@@ -809,3 +809,44 @@ static PG_PROC_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin 
 pub fn init_seams() {
     fmgr_core::register_late_builtins(PG_PROC_BUILTINS);
 }
+
+// IsThereFunctionInNamespace (pg_proc.c) with funcname_signature_string
+// (parse_func.c) inlined for the no-argnames call shape.
+pub fn IsThereFunctionInNamespace(
+    mcx: Mcx<'_>,
+    proname: &str,
+    proargtypes: &[Oid],
+    nsp_oid: Oid,
+) -> PgResult<()> {
+    // SAFETY: Oid is u32; viewing the slice as bytes for the oidvector cache
+    // key has no padding or aliasing hazard.
+    let argbytes = unsafe {
+        core::slice::from_raw_parts(proargtypes.as_ptr() as *const u8, 4 * proargtypes.len())
+    };
+    if cache_syscache::SearchSysCacheExists(
+        cache_syscache::cacheinfo::PROCNAMEARGSNSP,
+        cache_syscache::SysCacheKey::Str(proname),
+        cache_syscache::SysCacheKey::Bytes(argbytes),
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(nsp_oid)),
+        cache_syscache::SysCacheKey::UNUSED,
+    )? {
+        let mut sig = String::new();
+        sig.push_str(proname);
+        sig.push('(');
+        for (i, t) in proargtypes.iter().enumerate() {
+            if i > 0 {
+                sig.push_str(", ");
+            }
+            sig.push_str(&format_type::format_type_be(*t)?);
+        }
+        sig.push(')');
+        let nspname = lsyscache::get_namespace_name(mcx, nsp_oid)?
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        return Err(err(
+            format!("function {sig} already exists in schema \"{nspname}\""),
+            ERRCODE_DUPLICATE_FUNCTION,
+        ));
+    }
+    Ok(())
+}

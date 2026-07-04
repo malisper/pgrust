@@ -486,6 +486,68 @@ pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
     Ok(cfgoid)
 }
 
+fn get_ts_object_oid_cached(
+    cache_id: i32,
+    noun: &str,
+    names: &[&str],
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let (schemaname, objname) = DeconstructQualifiedName(names)?;
+    let mut oid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            oid = ts_cache_lookup(cache_id, objname, namespace_id)?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            oid = ts_cache_lookup(cache_id, objname, namespace_id)?;
+            if OidIsValid(oid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(oid) && !missing_ok {
+        return Err(undefined_ts_object(noun, names));
+    }
+    Ok(oid)
+}
+
+fn ts_cache_lookup(cache_id: i32, objname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    cache_syscache::GetSysCacheOid(
+        cache_id,
+        1,
+        cache_syscache::SysCacheKey::Str(objname),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(namespace_id)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )
+}
+
+pub fn get_ts_parser_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    get_ts_object_oid_cached(
+        cache_syscache::cacheinfo::TSPARSERNAMENSP,
+        "parser",
+        names,
+        missing_ok,
+    )
+}
+
+pub fn get_ts_template_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    get_ts_object_oid_cached(
+        cache_syscache::cacheinfo::TSTEMPLATENAMENSP,
+        "template",
+        names,
+        missing_ok,
+    )
+}
+
 pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
     let (schemaname, dict_name) = DeconstructQualifiedName(names)?;
     let mut dictoid = InvalidOid;

@@ -22,6 +22,9 @@ syscache_seams = { path = "../../utils/cache/syscache_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
 xact = { path = "../../access/transam/xact" }
 mbutils = { path = "../../utils/mb/mbutils" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+datum = { path = "../../../_support/types/datum" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 dbcommands = { path = "../dbcommands" }
 explain = { path = "../explain" }

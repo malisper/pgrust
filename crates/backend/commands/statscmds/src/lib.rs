@@ -535,3 +535,46 @@ pub fn RemoveStatisticsById(mcx: Mcx<'_>, statsOid: Oid) -> PgResult<()> {
     relation.close(RowExclusiveLock)?;
     Ok(())
 }
+
+// get_statistics_object_oid (statscmds.c): explicit schema or first
+// search-path hit.
+pub fn get_statistics_object_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, stats_name) = catalog_namespace::DeconstructQualifiedName(names)?;
+    let mut stats_oid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
+        if namespace_id != InvalidOid {
+            stats_oid = statext_name_lookup(stats_name, namespace_id)?;
+        }
+    } else {
+        let mut path = [InvalidOid; 64];
+        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+        for &nsp in &path[..n] {
+            stats_oid = statext_name_lookup(stats_name, nsp)?;
+            if stats_oid != InvalidOid {
+                break;
+            }
+        }
+    }
+    if stats_oid == InvalidOid && !missing_ok {
+        return Err(Box::new(
+            PgError::error(format!(
+                "statistics object \"{}\" does not exist",
+                names.join(".")
+            ))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    Ok(stats_oid)
+}
+
+fn statext_name_lookup(name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::STATEXTNAMENSP,
+        Anum_oid as i32,
+        cache_syscache::SysCacheKey::Str(name),
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(namespace_id)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )
+}

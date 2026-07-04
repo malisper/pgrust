@@ -7,6 +7,8 @@
 
 mod description;
 mod identity;
+mod properties;
+pub use properties::*;
 pub use description::{getObjectDescription, getObjectIdentity};
 pub use identity::{getObjectIdentityParts, getObjectTypeDescription, ObjectIdentity};
 
@@ -45,6 +47,10 @@ pub const CollationRelationId: Oid = 3456;
 pub const CastRelationId: Oid = 2605;
 pub const AccessMethodRelationId: Oid = 2601;
 pub const LargeObjectRelationId: Oid = 2613;
+pub const TSParserRelationId: Oid = 3601;
+pub const TSDictionaryRelationId: Oid = 3600;
+pub const TSTemplateRelationId: Oid = 3764;
+pub const TSConfigRelationId: Oid = 3602;
 
 pub fn init_seams() {
     objectaddress_seams::get_object_description::set(get_object_description_by_oids);
@@ -394,6 +400,14 @@ fn get_object_address_unqualified<'mcx>(
             proclang::LanguageRelationId,
             proclang::get_language_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_FDW => Ok(ObjectAddress::set(
+            types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+            get_foreign_data_wrapper_oid(name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_FOREIGN_SERVER => Ok(ObjectAddress::set(
+            types_core::FOREIGN_SERVER_RELATION_ID,
+            get_foreign_server_oid(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
 }
@@ -415,6 +429,44 @@ fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {
         return Err(err(
             ERRCODE_UNDEFINED_OBJECT,
             format!("event trigger \"{trigname}\" does not exist"),
+        ));
+    }
+    Ok(oid)
+}
+
+// get_foreign_data_wrapper_oid / get_foreign_server_oid (foreign.c); hosted
+// here because foreigncmds depends on this crate.
+fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid> {
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::FOREIGNDATAWRAPPERNAME,
+        1,
+        cache_syscache::SysCacheKey::Str(fdwname),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("foreign-data wrapper \"{fdwname}\" does not exist"),
+        ));
+    }
+    Ok(oid)
+}
+
+fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oid> {
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::FOREIGNSERVERNAME,
+        1,
+        cache_syscache::SysCacheKey::Str(servername),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("server \"{servername}\" does not exist"),
         ));
     }
     Ok(oid)
@@ -746,6 +798,51 @@ pub fn get_object_address<'mcx>(
                 let names = object.as_list().expect("opclass object is a name list");
                 (get_object_address_opcf(mcx, objtype, names, missing_ok)?, None)
             }
+            OBJECT_STATISTIC_EXT => {
+                let names = object.as_list().expect("statistics object is a name list");
+                let parts: Vec<&str> = names
+                    .iter()
+                    .map(|n| {
+                        n.as_string().expect("qualified name component is a String node").sval
+                    })
+                    .collect();
+                (
+                    ObjectAddress::set(
+                        statscmds::StatisticExtRelationId,
+                        statscmds::get_statistics_object_oid(&parts, missing_ok)?,
+                    ),
+                    None,
+                )
+            }
+            OBJECT_TSPARSER | OBJECT_TSDICTIONARY | OBJECT_TSTEMPLATE
+            | OBJECT_TSCONFIGURATION => {
+                let names = object.as_list().expect("text search object is a name list");
+                let parts: Vec<&str> = names
+                    .iter()
+                    .map(|n| {
+                        n.as_string().expect("qualified name component is a String node").sval
+                    })
+                    .collect();
+                let (class_id, oid) = match objtype {
+                    OBJECT_TSPARSER => (
+                        TSParserRelationId,
+                        catalog_namespace::get_ts_parser_oid(&parts, missing_ok)?,
+                    ),
+                    OBJECT_TSDICTIONARY => (
+                        TSDictionaryRelationId,
+                        catalog_namespace::get_ts_dict_oid(&parts, missing_ok)?,
+                    ),
+                    OBJECT_TSTEMPLATE => (
+                        TSTemplateRelationId,
+                        catalog_namespace::get_ts_template_oid(&parts, missing_ok)?,
+                    ),
+                    _ => (
+                        TSConfigRelationId,
+                        catalog_namespace::get_ts_config_oid(&parts, missing_ok)?,
+                    ),
+                };
+                (ObjectAddress::set(class_id, oid), None)
+            }
             OBJECT_LARGEOBJECT => {
                 let loid = oidparse(object);
                 if !pg_largeobject::LargeObjectExists(mcx, loid)? && !missing_ok {
@@ -820,53 +917,24 @@ pub fn get_object_address<'mcx>(
     }
 }
 
-// get_object_namespace (objectaddress.c): ObjectProperty namespace column for
-// the classes with live address lanes.
+// get_object_namespace (objectaddress.c): ObjectProperty namespace column.
 pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
-    match address.classId {
-        RELATION_RELATION_ID => lsyscache::get_rel_namespace(address.objectId),
-        TYPE_RELATION_ID => Ok(syscache_seams::pg_type_name_namespace::call(address.objectId)?
-            .map(|(_, nsp)| nsp)
-            .unwrap_or(InvalidOid)),
-        NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
-        | RewriteRelationId | TriggerRelationId | EventTriggerRelationId
-        | PublicationRelationId | PublicationRelRelationId
-        | PublicationNamespaceRelationId | SubscriptionRelationId
-        | AccessMethodRelationId => Ok(InvalidOid),
-        ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
-            .map(|s| s.pronamespace)
-            .unwrap_or(InvalidOid)),
-        EXTENSION_RELATION_ID => extension::get_extension_schema(address.objectId),
-        OPERATOR_RELATION_ID => syscache_oid_field(
-            cache_syscache::cacheinfo::OPEROID,
-            address.objectId,
-            Anum_pg_operator_oprnamespace,
-        ),
-        OPERATOR_CLASS_RELATION_ID => syscache_oid_field(
-            cache_syscache::cacheinfo::CLAOID,
-            address.objectId,
-            Anum_pg_opclass_opcnamespace,
-        ),
-        OPERATOR_FAMILY_RELATION_ID => syscache_oid_field(
-            cache_syscache::cacheinfo::OPFAMILYOID,
-            address.objectId,
-            Anum_pg_opfamily_opfnamespace,
-        ),
-        pg_conversion::ConversionRelationId => syscache_oid_field(
-            cache_syscache::cacheinfo::CONVOID,
-            address.objectId,
-            Anum_pg_conversion_connamespace,
-        ),
-        // pg_language rows carry no namespace.
-        proclang::LanguageRelationId => Ok(InvalidOid),
-        other => unported(&format!("get_object_namespace class {other}")),
+    // Publication sub-objects carry no ObjectProperty row; they never own a
+    // namespace.
+    if address.classId == PublicationRelRelationId
+        || address.classId == PublicationNamespaceRelationId
+    {
+        return Ok(InvalidOid);
     }
+    let property = get_object_property_data(address.classId);
+    if property.attnum_namespace == 0 {
+        return Ok(InvalidOid);
+    }
+    debug_assert!(property.oid_catcache_id != -1);
+    syscache_oid_field(property.oid_catcache_id, address.objectId, property.attnum_namespace)
 }
 
-const Anum_pg_operator_oprnamespace: i32 = 3;
-const Anum_pg_conversion_connamespace: i32 = 3;
-const Anum_pg_opclass_opcnamespace: i32 = 4;
-const Anum_pg_opfamily_opfnamespace: i32 = 4;
+const Anum_pg_constraint_contypid: i32 = 10;
 
 fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
     let Some(tup) = cache_syscache::SearchSysCache1(
@@ -925,10 +993,130 @@ pub fn check_object_ownership<'mcx>(
                 )?;
             }
         }
-        ObjectType::OBJECT_CONVERSION => {
+        ObjectType::OBJECT_TYPE | ObjectType::OBJECT_DOMAIN | ObjectType::OBJECT_ATTRIBUTE => {
             if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
-                let names = object.as_list().expect("conversion object is a name list");
+                aclcheck_error_type(aclchk::ACLCHECK_NOT_OWNER, address.objectId)?;
+            }
+        }
+        ObjectType::OBJECT_DOMCONSTRAINT => {
+            let contypid = syscache_oid_field(
+                cache_syscache::cacheinfo::CONSTROID,
+                address.objectId,
+                Anum_pg_constraint_contypid,
+            )?;
+            if !OidIsValid(contypid) {
+                return Err(Box::new(PgError::error(format!(
+                    "constraint with OID {} does not exist",
+                    address.objectId
+                ))));
+            }
+            // Domain constraints fall back to the type ownership check.
+            if !aclchk::object_ownercheck(TYPE_RELATION_ID, contypid, roleid)? {
+                aclcheck_error_type(aclchk::ACLCHECK_NOT_OWNER, contypid)?;
+            }
+        }
+        ObjectType::OBJECT_COLLATION
+        | ObjectType::OBJECT_CONVERSION
+        | ObjectType::OBJECT_OPCLASS
+        | ObjectType::OBJECT_OPFAMILY
+        | ObjectType::OBJECT_STATISTIC_EXT
+        | ObjectType::OBJECT_TSDICTIONARY
+        | ObjectType::OBJECT_TSCONFIGURATION => {
+            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
+                let names = object.as_list().expect("object is a name list");
                 aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, &NameListToString(names))?;
+            }
+        }
+        ObjectType::OBJECT_LARGEOBJECT => {
+            if !guc_tables::vars::lo_compat_privileges.read()
+                && !aclchk::object_ownercheck_lo(_mcx, address.objectId, roleid)?
+            {
+                return Err(err(
+                    types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                    format!("must be owner of large object {}", address.objectId),
+                ));
+            }
+        }
+        ObjectType::OBJECT_CAST => {
+            // Only the source/target type ownerships are checkable.
+            let objlist = object.as_list().expect("cast object is a TypeName pair");
+            let sourcetype = objlist
+                .first()
+                .and_then(|n| n.as_type_name())
+                .expect("cast source TypeName");
+            let targettype = objlist
+                .last()
+                .and_then(|n| n.as_type_name())
+                .expect("cast target TypeName");
+            let sourcetypeid = parse_utilcmd::LookupTypeNameOid(_mcx, sourcetype)?;
+            let targettypeid = parse_utilcmd::LookupTypeNameOid(_mcx, targettype)?;
+            if !aclchk::object_ownercheck(TYPE_RELATION_ID, sourcetypeid, roleid)?
+                && !aclchk::object_ownercheck(TYPE_RELATION_ID, targettypeid, roleid)?
+            {
+                return Err(err(
+                    types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                    format!(
+                        "must be owner of type {} or type {}",
+                        format_type::format_type_be(sourcetypeid)?,
+                        format_type::format_type_be(targettypeid)?
+                    ),
+                ));
+            }
+        }
+        ObjectType::OBJECT_TRANSFORM => {
+            let objlist = object.as_list().expect("transform object leads with a TypeName");
+            let tn = objlist
+                .first()
+                .and_then(|n| n.as_type_name())
+                .expect("transform type TypeName");
+            let typeid = parse_utilcmd::LookupTypeNameOid(_mcx, tn)?;
+            if !aclchk::object_ownercheck(TYPE_RELATION_ID, typeid, roleid)? {
+                aclcheck_error_type(aclchk::ACLCHECK_NOT_OWNER, typeid)?;
+            }
+        }
+        ObjectType::OBJECT_ROLE => {
+            // Roles are "owned" by CREATEROLE holders with ADMIN on the role;
+            // superuser roles only by superusers.
+            if superuser::superuser_arg(address.objectId)? {
+                if !superuser::superuser_arg(roleid)? {
+                    return Err(Box::new(
+                        PgError::error("permission denied")
+                            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                            .with_detail("The current user must have the SUPERUSER attribute."),
+                    ));
+                }
+            } else {
+                if !aclchk::has_createrole_privilege(roleid)? {
+                    return Err(Box::new(
+                        PgError::error("permission denied")
+                            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                            .with_detail("The current user must have the CREATEROLE attribute."),
+                    ));
+                }
+                if !adt_acl::is_admin_of_role(roleid, address.objectId)? {
+                    let rolename = miscinit::GetUserNameFromId(_mcx, address.objectId, true)?
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
+                    return Err(Box::new(
+                        PgError::error("permission denied")
+                            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                            .with_detail(format!(
+                                "The current user must have the ADMIN option on role \"{rolename}\"."
+                            )),
+                    ));
+                }
+            }
+        }
+        ObjectType::OBJECT_TSPARSER
+        | ObjectType::OBJECT_TSTEMPLATE
+        | ObjectType::OBJECT_ACCESS_METHOD
+        | ObjectType::OBJECT_PARAMETER_ACL => {
+            // Treated as owned by superusers.
+            if !superuser::superuser_arg(roleid)? {
+                return Err(err(
+                    types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                    "must be superuser".to_string(),
+                ));
             }
         }
         ObjectType::OBJECT_DATABASE
@@ -946,11 +1134,18 @@ pub fn check_object_ownership<'mcx>(
                 aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
             }
         }
-        _ => {
-            if !superuser::superuser_arg(roleid)? {
-                unported("check_object_ownership for non-superusers");
-            }
-        }
+        other => panic!("check_object_ownership: unsupported object type: {other:?}"),
     }
     Ok(())
+}
+
+// aclcheck_error_type (aclchk.c): arrays report their element type.
+fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
+    let element_type = lsyscache::get_element_type(type_oid)?;
+    let type_oid = if OidIsValid(element_type) { element_type } else { type_oid };
+    aclchk::aclcheck_error(
+        aclerr,
+        ObjectType::OBJECT_TYPE,
+        &format_type::format_type_be(type_oid)?,
+    )
 }

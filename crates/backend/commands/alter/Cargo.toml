@@ -35,3 +35,12 @@ pg_subscription = { path = "../../catalog/pg_subscription" }
 commands_publicationcmds = { path = "../publicationcmds" }
 subscriptioncmds = { path = "../subscriptioncmds" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_proc = { path = "../../catalog/pg_proc" }
+collationcmds = { path = "../collationcmds" }
+opclasscmds = { path = "../opclasscmds" }

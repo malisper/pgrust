@@ -1271,3 +1271,59 @@ fn dropProcedures(
     }
     Ok(())
 }
+
+// IsThereOpClassInNamespace / IsThereOpFamilyInNamespace (opclasscmds.c):
+// friendliness checks ahead of the unique-index failure.
+pub fn IsThereOpClassInNamespace(
+    mcx: Mcx<'_>,
+    opcname: &str,
+    opcmethod: Oid,
+    opcnamespace: Oid,
+) -> PgResult<()> {
+    if SearchSysCacheExists(
+        cache_syscache::cacheinfo::CLAAMNAMENSP,
+        SysCacheKey::Value(Datum::from_oid(opcmethod)),
+        SysCacheKey::Str(opcname),
+        SysCacheKey::Value(Datum::from_oid(opcnamespace)),
+        SysCacheKey::UNUSED,
+    )? {
+        let nspname = lsyscache::get_namespace_name(mcx, opcnamespace)?
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "operator class \"{opcname}\" for access method \"{}\" already exists in schema \"{nspname}\"",
+                get_am_name(opcmethod)?
+            ))
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    Ok(())
+}
+
+pub fn IsThereOpFamilyInNamespace(
+    mcx: Mcx<'_>,
+    opfname: &str,
+    opfmethod: Oid,
+    opfnamespace: Oid,
+) -> PgResult<()> {
+    if SearchSysCacheExists(
+        cache_syscache::cacheinfo::OPFAMILYAMNAMENSP,
+        SysCacheKey::Value(Datum::from_oid(opfmethod)),
+        SysCacheKey::Str(opfname),
+        SysCacheKey::Value(Datum::from_oid(opfnamespace)),
+        SysCacheKey::UNUSED,
+    )? {
+        let nspname = lsyscache::get_namespace_name(mcx, opfnamespace)?
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "operator family \"{opfname}\" for access method \"{}\" already exists in schema \"{nspname}\"",
+                get_am_name(opfmethod)?
+            ))
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    Ok(())
+}

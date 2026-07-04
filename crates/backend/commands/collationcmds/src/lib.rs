@@ -389,3 +389,39 @@ fn creation_namespace<'mcx, 'a>(
     }
     Ok((namespace, name))
 }
+
+// IsThereCollationInNamespace (collationcmds.c): friendliness check ahead of
+// the unique-index failure; must not match an any-encoding entry either.
+pub fn IsThereCollationInNamespace(mcx: Mcx<'_>, collname: &str, nsp_oid: Oid) -> PgResult<()> {
+    let dup = |msg: String| -> Box<PgError> {
+        Box::new(PgError::error(msg).with_sqlstate(types_error::ERRCODE_DUPLICATE_OBJECT))
+    };
+    let exists = |encoding: i32| -> PgResult<bool> {
+        cache_syscache::SearchSysCacheExists(
+            cache_syscache::cacheinfo::COLLNAMEENCNSP,
+            cache_syscache::SysCacheKey::Str(collname),
+            cache_syscache::SysCacheKey::Value(datum::Datum::from_i32(encoding)),
+            cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(nsp_oid)),
+            cache_syscache::SysCacheKey::UNUSED,
+        )
+    };
+    let nspname = || -> PgResult<String> {
+        Ok(lsyscache::get_namespace_name(mcx, nsp_oid)?
+            .map(|n| n.to_string())
+            .unwrap_or_default())
+    };
+    if exists(mbutils::GetDatabaseEncoding() as i32)? {
+        return Err(dup(format!(
+            "collation \"{collname}\" for encoding \"{}\" already exists in schema \"{}\"",
+            mbutils::GetDatabaseEncodingName(),
+            nspname()?
+        )));
+    }
+    if exists(-1)? {
+        return Err(dup(format!(
+            "collation \"{collname}\" already exists in schema \"{}\"",
+            nspname()?
+        )));
+    }
+    Ok(())
+}
