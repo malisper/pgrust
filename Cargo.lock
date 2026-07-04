@@ -6472,6 +6472,7 @@ dependencies = [
  "s_lock_seams",
  "seam_core",
  "shmem",
+ "skipsupport",
  "smgr",
  "smgr_seams",
  "syncrep_seams",
@@ -11468,6 +11469,19 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "skipsupport"
+version = "0.1.0"
+dependencies = [
+ "adt_date",
+ "datum",
+ "lsyscache",
+ "nbt_compare",
+ "types_core",
+ "types_error",
+ "types_nbtree",
 ]
 
 [[package]]

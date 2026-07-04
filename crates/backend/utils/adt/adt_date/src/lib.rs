@@ -61,6 +61,26 @@ pub struct TimeTzADT {
 pub const DATEVAL_NOBEGIN: DateADT = i32::MIN;
 pub const DATEVAL_NOEND: DateADT = i32::MAX;
 
+pub fn date_decrement(existing: datum::Datum, underflow: &mut bool) -> datum::Datum {
+    let d: DateADT = existing.as_i32();
+    if d == DATEVAL_NOBEGIN {
+        *underflow = true;
+        return datum::Datum::null();
+    }
+    *underflow = false;
+    datum::Datum::from_i32(d - 1)
+}
+
+pub fn date_increment(existing: datum::Datum, overflow: &mut bool) -> datum::Datum {
+    let d: DateADT = existing.as_i32();
+    if d == DATEVAL_NOEND {
+        *overflow = true;
+        return datum::Datum::null();
+    }
+    *overflow = false;
+    datum::Datum::from_i32(d + 1)
+}
+
 pub const DATETIME_MIN_JULIAN: i32 = 0;
 pub const DATE_END_JULIAN: i32 = 2_147_483_494;
 pub const TIMESTAMP_END_JULIAN: i32 = 109_203_528;

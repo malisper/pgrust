@@ -26,6 +26,7 @@ lsyscache = { path = "../../../utils/cache/lsyscache" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 genam_seams = { path = "../../index/genam_seams" }
 nbt_compare = { path = "../compare" }
+skipsupport = { path = "../../../utils/adt/skipsupport" }
 varlena = { path = "../../../utils/adt/varlena" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
