@@ -164,6 +164,7 @@ fn install() {
                 _ => InvalidOid,
             };
             Ok((oprcode != InvalidOid).then_some(s::PgOperatorShape {
+                oprnamespace: 11,
                 oprleft: InvalidOid,
                 oprright: InvalidOid,
                 oprresult: InvalidOid,

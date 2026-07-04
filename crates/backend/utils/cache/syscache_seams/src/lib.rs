@@ -197,6 +197,7 @@ pub struct PgOpfamilyShape {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgOperatorShape {
+    pub oprnamespace: Oid,
     pub oprleft: Oid,
     pub oprright: Oid,
     pub oprresult: Oid,

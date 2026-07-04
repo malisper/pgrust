@@ -84,7 +84,7 @@ pub fn ExecCreateTableAs<'mcx>(
         let mut query = query;
         let relid = create_ctas_nodata(mcx, &mut query, into_node, true)?;
         if do_refresh {
-            commands_matview::RefreshMatViewByOid(
+            matview_seams::refresh_mat_view_by_oid::call(
                 mcx,
                 relid,
                 true,

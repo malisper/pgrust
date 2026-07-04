@@ -13,3 +13,5 @@ types_rel = { path = "../../../_support/types/rel" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 mcx = { path = "../../../_support/mcx" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
