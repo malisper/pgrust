@@ -5851,6 +5851,7 @@ dependencies = [
  "aclchk_seams",
  "bufmgr_seams",
  "datum",
+ "detoast",
  "execexpr",
  "execscan",
  "exectuples",
