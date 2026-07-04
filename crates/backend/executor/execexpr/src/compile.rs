@@ -2485,7 +2485,7 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
                 attnum: *attnum,
                 vartype: *vartype,
                 argno,
-                call: *call,
+                call: (*call).into(),
                 out: *fout,
             })
         }
@@ -2497,10 +2497,15 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
                 return None;
             }
             let argno = arg_index_of(call2, *out1)?;
-            Some(Step::FuncFuncStrict2 { call1: *call1, argno, call2: *call2, out: *fout })
+            Some(Step::FuncFuncStrict2 {
+                call1: (*call1).into(),
+                argno,
+                call2: (*call2).into(),
+                out: *fout,
+            })
         }
         (Step::FuncExprStrict2 { call, out }, Step::Qual { jumpdone }) => {
-            Some(Step::FuncStrict2Qual { call: *call, jumpdone: *jumpdone, out: *out })
+            Some(Step::FuncStrict2Qual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
         }
         _ => None,
     }

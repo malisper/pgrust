@@ -223,9 +223,9 @@ pub enum Step {
     // Ready-time fused pairs (copyjit-superinstruction shape): semantics are
     // exactly the two source steps back-to-back; emitted by fuse_program only
     // where the second step is not a jump target.
-    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: FuncCall, out: OutRef },
-    FuncFuncStrict2 { call1: FuncCall, argno: u8, call2: FuncCall, out: OutRef },
-    FuncStrict2Qual { call: FuncCall, jumpdone: u32, out: OutRef },
+    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
+    FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -270,6 +270,21 @@ pub struct IoCoerceCalls {
     pub outcall: FuncCall,
     pub incall: FuncCall,
     pub in_strict: bool,
+}
+
+// FuncCall minus frame/nargs for the fused 2-arg steps: nargs is the
+// constant 2, so two of these + an OutRef stay inside the 64B Step budget.
+#[derive(Clone, Copy, Debug)]
+pub struct Call2 {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+impl From<FuncCall> for Call2 {
+    fn from(c: FuncCall) -> Call2 {
+        debug_assert!(c.nargs == 2);
+        Call2 { fcinfo: c.fcinfo, flinfo: c.flinfo }
+    }
 }
 
 // Resolved once at compile; fn_addr rides in the FmgrInfo header line —
