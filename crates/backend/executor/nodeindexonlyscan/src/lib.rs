@@ -6,14 +6,16 @@ extern crate alloc;
 
 use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState, INDEX_VAR};
 use ::execscan::{ScanNode, ScanState};
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
 use ::mcx::{Allocator, Mcx, PgBox, PgVec};
 use ::nbtree::itup::{index_getattr, ITup};
-use ::nodeindexscan::exec_index_build_scan_keys;
+use ::nodeindexscan::{
+    exec_index_build_scan_keys, exec_index_eval_runtime_keys, IndexRuntimeKeyInfo,
+};
 use ::tableam::table_slot_callbacks;
 use ::types_core::{AttrNumber, CSTRINGOID, NAMEOID};
 use ::types_error::{PgError, PgResult};
@@ -37,6 +39,9 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub ioss_RelationDesc: Option<Relation<'mcx>>,
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    pub ioss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    pub ioss_RuntimeKeysReady: bool,
+    pub ioss_RuntimeContext: Option<EcxtId>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
     pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
@@ -69,8 +74,9 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 0,
             )?;
             scandesc.xs_want_itup = true;
-            // No runtime keys in this lane, so the keys are always ready.
-            index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
+            if self.ioss_RuntimeKeys.is_empty() || self.ioss_RuntimeKeysReady {
+                index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
+            }
             // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
             self.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
         }
@@ -275,13 +281,15 @@ pub unsafe fn store_index_tuple<'mcx>(
     exectuples::exec_store_virtual_tuple(slot);
 }
 
-/// `ExecIndexOnlyScan`; the runtime-key ExecReScan arm is unreachable (init
-/// loud-panics on non-Const quals). IndexOnlyRecheck (the EPQ mtd) is an
-/// unconditional C error and lands with EPQState.
+/// `ExecIndexOnlyScan`; IndexOnlyRecheck (the EPQ mtd) is an unconditional C
+/// error and lands with EPQState.
 pub fn exec_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    if !node.ioss_RuntimeKeys.is_empty() && !node.ioss_RuntimeKeysReady {
+        exec_rescan_index_only_scan(node, estate)?;
+    }
     execscan::exec_scan(node, estate)
 }
 
@@ -349,7 +357,15 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         orderby_unported();
     }
 
-    let ioss_ScanKeys = exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual)?;
+    let (ioss_ScanKeys, ioss_RuntimeKeys) =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
+    // C keeps ps_ExprContext as the standard econtext and gives runtime keys
+    // their own, reset per rescan.
+    let ioss_RuntimeContext = if ioss_RuntimeKeys.is_empty() {
+        None
+    } else {
+        Some(estate.exec_assign_expr_context())
+    };
     let ioss_NameCStringAttNums = name_cstring_attnums(mcx, &index_rel)?;
 
     Ok(IndexOnlyScanState {
@@ -358,6 +374,9 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_ScanDesc: None,
         ioss_RelationDesc: Some(index_rel),
         ioss_ScanKeys,
+        ioss_RuntimeKeys,
+        ioss_RuntimeKeysReady: false,
+        ioss_RuntimeContext,
         ioss_TableSlot,
         ioss_OrderDir: order_dir(node.indexorderdir),
         ioss_NameCStringAttNums,
@@ -411,15 +430,26 @@ pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<(
     }
     node.recheckqual = None;
     node.ioss_ScanKeys.clear();
+    node.ioss_RuntimeKeys.clear();
     Ok(())
 }
 
-/// `ExecReScanIndexOnlyScan`; the runtime-key recompute arm is unreachable
-/// (that lane loud-panics at init).
+/// `ExecReScanIndexOnlyScan`.
 pub fn exec_rescan_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    if !node.ioss_RuntimeKeys.is_empty() {
+        let ecxt = node.ioss_RuntimeContext.expect("runtime keys have their econtext");
+        estate.reset_expr_context(ecxt);
+        exec_index_eval_runtime_keys(
+            estate,
+            ecxt,
+            &mut node.ioss_RuntimeKeys,
+            &mut node.ioss_ScanKeys,
+        )?;
+    }
+    node.ioss_RuntimeKeysReady = true;
     let IndexOnlyScanState { ioss_ScanDesc, ioss_ScanKeys, ss, .. } = node;
     if let Some(scandesc) = ioss_ScanDesc.as_deref_mut() {
         index_rescan(scandesc, Some(ioss_ScanKeys), None)?;
@@ -463,7 +493,7 @@ pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanSt
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
     IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_NameCStringAttNums,
-        ioss_PlanNodeId;
+        ioss_PlanNodeId, ioss_RuntimeKeysReady, ioss_RuntimeContext;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
-        ioss_OrderDir, ioss_VMBuffer },
+        ioss_RuntimeKeys, ioss_OrderDir, ioss_VMBuffer },
 );

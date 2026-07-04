@@ -200,18 +200,41 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_BitmapIndexScan => {
             let s = plan.as_bitmap_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
             debug_assert!(s.scan.plan.targetlist.is_nil() && s.scan.plan.qual.is_nil());
-            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let nr = s.scan.plan.plan_rows;
+            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
+            let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
+            if rtoffset != 0 {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::BitmapIndexScan, _>(|p| {
+                        p.scan.scanrelid += rtoffset as u32;
+                        if let Some(v) = iq { p.indexqual = v; }
+                        if let Some(v) = iqo { p.indexqualorig = v; }
+                    })
+                }
+                .expect("BitmapIndexScan node");
+            }
         }
         NodeTag::T_BitmapHeapScan => {
             let s = plan.as_bitmap_heap_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let nr = s.scan.plan.plan_rows;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, nr)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * nr)?;
+            let bqo = fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * nr)?;
+            if rtoffset != 0 {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::BitmapHeapScan, _>(|p| {
+                        p.scan.scanrelid += rtoffset as u32;
+                        if let Some(v) = tl { p.scan.plan.targetlist = v; }
+                        if let Some(v) = qual { p.scan.plan.qual = v; }
+                        if let Some(v) = bqo { p.bitmapqualorig = v; }
+                    })
+                }
+                .expect("BitmapHeapScan node");
+            }
         }
         NodeTag::T_BitmapAnd => {
             let s = plan.as_bitmap_and().unwrap();

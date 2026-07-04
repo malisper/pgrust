@@ -134,7 +134,7 @@ pub fn exec_re_scan<'mcx>(
             exec_re_scan(&mut b.bitmapqual, estate)
         }
         PlanStateNode::BitmapIndexScan(biss) => {
-            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss)
+            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss, estate)
         }
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
@@ -371,7 +371,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
             )?;
         }
         PlanStateNode::BitmapIndexScan(biss) => {
-            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss)?
+            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss, estate)?
         }
         PlanStateNode::BitmapAnd(bc) => {
             let subplans = &plan.as_bitmap_and().expect("BitmapAnd plan").bitmapplans;
