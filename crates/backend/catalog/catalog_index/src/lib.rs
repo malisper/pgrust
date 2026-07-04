@@ -1194,7 +1194,7 @@ pub fn CompareIndexInfo<'mcx>(
         }
         for (e1, e2) in l1.iter().zip(l2.iter()) {
             let (mapped, found_whole_row) =
-                rewrite_manip::map_variable_attnos(mcx, e2, 1, 0, attmap)?;
+                rewrite_manip::map_variable_attnos(mcx, e2, 1, 0, attmap, types_core::InvalidOid)?;
             if found_whole_row || !types_nodes::equal::equal(e1, mapped) {
                 return Ok(false);
             }

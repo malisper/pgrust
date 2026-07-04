@@ -22,10 +22,19 @@ pub fn map_variable_attnos<'mcx>(
     target_varno: i32,
     sublevels_up: u32,
     attnums: &[AttrNumber],
+    to_rowtype: types_core::Oid,
 ) -> PgResult<(Node<'mcx>, bool)> {
     let mut found_whole_row = false;
-    let mapped = mva_mutate(mcx, node, target_varno, sublevels_up, attnums, &mut found_whole_row)?
-        .unwrap_or(node);
+    let mapped = mva_mutate(
+        mcx,
+        node,
+        target_varno,
+        sublevels_up,
+        attnums,
+        to_rowtype,
+        &mut found_whole_row,
+    )?
+    .unwrap_or(node);
     Ok((mapped, found_whole_row))
 }
 
@@ -35,6 +44,7 @@ fn mva_mutate<'mcx>(
     target_varno: i32,
     sublevels_up: u32,
     attnums: &[AttrNumber],
+    to_rowtype: types_core::Oid,
     found_whole_row: &mut bool,
 ) -> PgResult<Option<Node<'mcx>>> {
     if node.node_tag() == NodeTag::T_Var {
@@ -57,6 +67,20 @@ fn mva_mutate<'mcx>(
             }
             if attno == 0 {
                 *found_whole_row = true;
+                if to_rowtype != types_core::InvalidOid && to_rowtype != var.vartype {
+                    let mut newvar = Var {
+                        varnullingrels: var.varnullingrels.clone_in(mcx)?,
+                        ..*var
+                    };
+                    newvar.vartype = to_rowtype;
+                    let cre = types_nodes::primnodes::ConvertRowtypeExpr {
+                        arg: Node::mk(mcx, newvar)?,
+                        resulttype: var.vartype,
+                        convertformat: types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                        location: -1,
+                    };
+                    return Ok(Some(Node::mk(mcx, cre)?));
+                }
             }
             // attno < 0 (system column): C copies the Var unchanged.
             return Ok(None);
@@ -64,14 +88,41 @@ fn mva_mutate<'mcx>(
         return Ok(None);
     }
     if node.node_tag() == NodeTag::T_ConvertRowtypeExpr {
-        panic!("unported: map_variable_attnos over ConvertRowtypeExpr");
+        // Collapse var::parenttype::grandparenttype to var::grandparenttype
+        // instead of stacking ConvertRowtypeExprs.
+        let r = node
+            .as_variant::<types_nodes::primnodes::ConvertRowtypeExpr>()
+            .expect("ConvertRowtypeExpr");
+        if let Some(var) = r.arg.as_variant::<Var>() {
+            if var.varno == target_varno
+                && var.varlevelsup == sublevels_up
+                && var.varattno == 0
+                && to_rowtype != types_core::InvalidOid
+                && to_rowtype != var.vartype
+            {
+                *found_whole_row = true;
+                let mut newvar = Var {
+                    varnullingrels: var.varnullingrels.clone_in(mcx)?,
+                    ..*var
+                };
+                newvar.vartype = to_rowtype;
+                let newnode = types_nodes::primnodes::ConvertRowtypeExpr {
+                    arg: Node::mk(mcx, newvar)?,
+                    resulttype: r.resulttype,
+                    convertformat: r.convertformat,
+                    location: r.location,
+                };
+                return Ok(Some(Node::mk(mcx, newnode)?));
+            }
+        }
     }
     if node.node_tag() == NodeTag::T_SubLink {
         // nodes_core's SubLink arm skips the subselect C recurses into.
         panic!("unported: map_variable_attnos over SubLink (Query walk)");
     }
-    let mut m =
-        |n: Node<'mcx>| mva_mutate(mcx, n, target_varno, sublevels_up, attnums, found_whole_row);
+    let mut m = |n: Node<'mcx>| {
+        mva_mutate(mcx, n, target_varno, sublevels_up, attnums, to_rowtype, found_whole_row)
+    };
     nodes_core::expression_tree_mutator(mcx, node, &mut m)
 }
 

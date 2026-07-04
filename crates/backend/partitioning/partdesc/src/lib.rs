@@ -275,11 +275,7 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     for q in my_qual.iter() {
         result.lappend(cmcx, q)?;
     }
-    // map_partition_varattnos: attno-remapped partitions are loud repo-wide.
-    assert_eq!(
-        rel.rd_att.natts, parent.rd_att.natts,
-        "partdesc: attno-remapped partition (map_partition_varattnos) unported"
-    );
+    let result = partbounds::map_partition_varattnos(cmcx, result, 1, rel, &parent)?;
     parent.close(types_rel::NoLock)?;
     let out = result.clone_in(cmcx)?;
     with_state(|st| st.quals.insert(relid, result));

@@ -156,6 +156,7 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_DropOf
             | AlterTableType::AT_SetTableSpace
             | AlterTableType::AT_SetAccessMethod
+            | AlterTableType::AT_ChangeOwner
             | AlterTableType::AT_GenericOptions => AccessExclusiveLock,
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
@@ -425,6 +426,200 @@ fn ATSimpleRecursion<'mcx>(
 }
 
 // ATPrepCmd: the statement arena is single-use, so the subcommand is
+const ATT_TABLE: i32 = 0x0001;
+const ATT_VIEW: i32 = 0x0002;
+const ATT_MATVIEW: i32 = 0x0004;
+const ATT_INDEX: i32 = 0x0008;
+const ATT_COMPOSITE_TYPE: i32 = 0x0010;
+const ATT_FOREIGN_TABLE: i32 = 0x0020;
+const ATT_PARTITIONED_INDEX: i32 = 0x0040;
+const ATT_SEQUENCE: i32 = 0x0080;
+const ATT_PARTITIONED_TABLE: i32 = 0x0100;
+
+// The ATSimplePermissions allowed_targets per ATPrepCmd case arm; None for
+// arms C leaves unchecked (AT_ChangeOwner).
+fn at_allowed_targets(subtype: AlterTableType) -> Option<i32> {
+    use AlterTableType::*;
+    Some(match subtype {
+        AT_AddColumn | AT_DropColumn | AT_AlterColumnType => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE
+        }
+        AT_AddColumnToView => ATT_VIEW,
+        AT_ColumnDefault | AT_AddIdentity | AT_SetIdentity | AT_DropIdentity => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE
+        }
+        AT_CookedColumnDefault
+        | AT_DropNotNull
+        | AT_SetNotNull
+        | AT_SetExpression
+        | AT_DropExpression
+        | AT_AddConstraint
+        | AT_DropConstraint
+        | AT_ValidateConstraint
+        | AT_DropOids
+        | AT_AddInherit
+        | AT_DropInherit
+        | AT_EnableTrig
+        | AT_EnableAlwaysTrig
+        | AT_EnableReplicaTrig
+        | AT_EnableTrigAll
+        | AT_EnableTrigUser
+        | AT_DisableTrig
+        | AT_DisableTrigAll
+        | AT_DisableTrigUser => ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+        AT_SetStatistics => {
+            ATT_TABLE
+                | ATT_PARTITIONED_TABLE
+                | ATT_MATVIEW
+                | ATT_INDEX
+                | ATT_PARTITIONED_INDEX
+                | ATT_FOREIGN_TABLE
+        }
+        AT_SetOptions | AT_ResetOptions | AT_SetStorage => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW | ATT_FOREIGN_TABLE
+        }
+        AT_SetCompression | AT_ClusterOn | AT_DropCluster | AT_SetAccessMethod
+        | AT_ReplicaIdentity => ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW,
+        AT_AddIndex | AT_AddIndexConstraint | AT_AlterConstraint => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE
+        }
+        AT_AlterColumnGenericOptions | AT_GenericOptions => ATT_FOREIGN_TABLE,
+        AT_SetLogged | AT_SetUnLogged => ATT_TABLE | ATT_SEQUENCE,
+        AT_SetTableSpace => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW | ATT_INDEX | ATT_PARTITIONED_INDEX
+        }
+        AT_SetRelOptions | AT_ResetRelOptions | AT_ReplaceRelOptions => {
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_MATVIEW | ATT_INDEX
+        }
+        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule | AT_AddOf
+        | AT_DropOf | AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
+        | AT_NoForceRowSecurity => ATT_TABLE | ATT_PARTITIONED_TABLE,
+        AT_AttachPartition => ATT_PARTITIONED_TABLE | ATT_PARTITIONED_INDEX,
+        AT_DetachPartition | AT_DetachPartitionFinalize => ATT_PARTITIONED_TABLE,
+        AT_ChangeOwner | AT_ReAddIndex | AT_ReAddConstraint | AT_ReAddDomainConstraint
+        | AT_ReAddComment | AT_ReAddStatistics => return None,
+    })
+}
+
+fn alter_table_type_to_string(cmdtype: AlterTableType) -> Option<&'static str> {
+    use AlterTableType::*;
+    Some(match cmdtype {
+        AT_AddColumn | AT_AddColumnToView => "ADD COLUMN",
+        AT_ColumnDefault | AT_CookedColumnDefault => "ALTER COLUMN ... SET DEFAULT",
+        AT_DropNotNull => "ALTER COLUMN ... DROP NOT NULL",
+        AT_SetNotNull => "ALTER COLUMN ... SET NOT NULL",
+        AT_SetExpression => "ALTER COLUMN ... SET EXPRESSION",
+        AT_DropExpression => "ALTER COLUMN ... DROP EXPRESSION",
+        AT_SetStatistics => "ALTER COLUMN ... SET STATISTICS",
+        AT_SetOptions => "ALTER COLUMN ... SET",
+        AT_ResetOptions => "ALTER COLUMN ... RESET",
+        AT_SetStorage => "ALTER COLUMN ... SET STORAGE",
+        AT_SetCompression => "ALTER COLUMN ... SET COMPRESSION",
+        AT_DropColumn => "DROP COLUMN",
+        AT_AddConstraint | AT_ReAddConstraint | AT_ReAddDomainConstraint
+        | AT_AddIndexConstraint => "ADD CONSTRAINT",
+        AT_AlterConstraint => "ALTER CONSTRAINT",
+        AT_ValidateConstraint => "VALIDATE CONSTRAINT",
+        AT_DropConstraint => "DROP CONSTRAINT",
+        AT_AlterColumnType => "ALTER COLUMN ... SET DATA TYPE",
+        AT_AlterColumnGenericOptions => "ALTER COLUMN ... OPTIONS",
+        AT_ChangeOwner => "OWNER TO",
+        AT_ClusterOn => "CLUSTER ON",
+        AT_DropCluster => "SET WITHOUT CLUSTER",
+        AT_SetAccessMethod => "SET ACCESS METHOD",
+        AT_SetLogged => "SET LOGGED",
+        AT_SetUnLogged => "SET UNLOGGED",
+        AT_DropOids => "SET WITHOUT OIDS",
+        AT_SetTableSpace => "SET TABLESPACE",
+        AT_SetRelOptions => "SET",
+        AT_ResetRelOptions => "RESET",
+        AT_EnableTrig => "ENABLE TRIGGER",
+        AT_EnableAlwaysTrig => "ENABLE ALWAYS TRIGGER",
+        AT_EnableReplicaTrig => "ENABLE REPLICA TRIGGER",
+        AT_DisableTrig => "DISABLE TRIGGER",
+        AT_EnableTrigAll => "ENABLE TRIGGER ALL",
+        AT_DisableTrigAll => "DISABLE TRIGGER ALL",
+        AT_EnableTrigUser => "ENABLE TRIGGER USER",
+        AT_DisableTrigUser => "DISABLE TRIGGER USER",
+        AT_EnableRule => "ENABLE RULE",
+        AT_EnableAlwaysRule => "ENABLE ALWAYS RULE",
+        AT_EnableReplicaRule => "ENABLE REPLICA RULE",
+        AT_DisableRule => "DISABLE RULE",
+        AT_AddInherit => "INHERIT",
+        AT_DropInherit => "NO INHERIT",
+        AT_AddOf => "OF",
+        AT_DropOf => "NOT OF",
+        AT_ReplicaIdentity => "REPLICA IDENTITY",
+        AT_EnableRowSecurity => "ENABLE ROW SECURITY",
+        AT_DisableRowSecurity => "DISABLE ROW SECURITY",
+        AT_ForceRowSecurity => "FORCE ROW SECURITY",
+        AT_NoForceRowSecurity => "NO FORCE ROW SECURITY",
+        AT_GenericOptions => "OPTIONS",
+        AT_AttachPartition => "ATTACH PARTITION",
+        AT_DetachPartition => "DETACH PARTITION",
+        AT_DetachPartitionFinalize => "DETACH PARTITION ... FINALIZE",
+        AT_AddIdentity => "ALTER COLUMN ... ADD IDENTITY",
+        AT_SetIdentity => "ALTER COLUMN ... SET",
+        AT_DropIdentity => "ALTER COLUMN ... DROP IDENTITY",
+        AT_AddIndex | AT_ReAddIndex | AT_ReAddComment | AT_ReplaceRelOptions
+        | AT_ReAddStatistics => return None,
+    })
+}
+
+fn ATSimplePermissions(
+    cmdtype: AlterTableType,
+    rel: &Relation<'_>,
+    allowed_targets: i32,
+) -> PgResult<()> {
+    let actual_target = match rel.rd_rel.relkind {
+        RELKIND_RELATION => ATT_TABLE,
+        types_rel::RELKIND_PARTITIONED_TABLE => ATT_PARTITIONED_TABLE,
+        types_rel::RELKIND_VIEW => ATT_VIEW,
+        types_rel::RELKIND_MATVIEW => ATT_MATVIEW,
+        types_rel::RELKIND_INDEX => ATT_INDEX,
+        types_rel::RELKIND_PARTITIONED_INDEX => ATT_PARTITIONED_INDEX,
+        types_rel::RELKIND_COMPOSITE_TYPE => ATT_COMPOSITE_TYPE,
+        types_rel::RELKIND_FOREIGN_TABLE => ATT_FOREIGN_TABLE,
+        types_rel::RELKIND_SEQUENCE => ATT_SEQUENCE,
+        _ => 0,
+    };
+    if actual_target & allowed_targets == 0 {
+        let Some(action_str) = alter_table_type_to_string(cmdtype) else {
+            panic!("invalid ALTER action attempted on relation \"{}\"", rel.name());
+        };
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "ALTER action {action_str} cannot be performed on relation \"{}\"",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(
+                rel.rd_rel.relkind,
+            )?),
+        ));
+    }
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, rel.rd_id, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(rel.rd_rel.relkind),
+            rel.name(),
+        )?;
+    }
+    if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(rel) {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("permission denied: \"{}\" is a system catalog", rel.name()),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    Ok(())
+}
+
 // scribbled on in place instead of C's copyObject.
 fn ATPrepCmd<'mcx>(
     mcx: Mcx<'mcx>,
@@ -437,27 +632,8 @@ fn ATPrepCmd<'mcx>(
     query_string: &str,
 ) -> PgResult<()> {
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-    // ATSimplePermissions relkind gate; ownership was checked at lookup.
-    // SET/RESET (...) accepts ATT_TABLE|ATT_PARTITIONED_TABLE|ATT_VIEW|
-    // ATT_MATVIEW|ATT_INDEX; table + view + index are live.
-    // SET/RESET (...) and SET STATISTICS also accept index relkinds per C's
-    // per-subtype ATT_* masks.
-    let index_ok = match cmd.subtype {
-        AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
-            rel.rd_rel.relkind == types_rel::RELKIND_INDEX
-                || rel.rd_rel.relkind == types_rel::RELKIND_VIEW
-        }
-        AlterTableType::AT_SetStatistics => {
-            rel.rd_rel.relkind == types_rel::RELKIND_INDEX
-                || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
-        }
-        // AT_ColumnDefault: ATT_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE.
-        AlterTableType::AT_ColumnDefault => rel.rd_rel.relkind == types_rel::RELKIND_VIEW,
-        _ => false,
-    };
-    let partitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
-    if rel.rd_rel.relkind != RELKIND_RELATION && !partitioned && !index_ok {
-        unported("ATSimplePermissions: non-plain-table relkind");
+    if let Some(allowed) = at_allowed_targets(cmd.subtype) {
+        ATSimplePermissions(cmd.subtype, rel, allowed)?;
     }
     let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
     let set_recurse = || {
@@ -532,6 +708,7 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_DROP
         }
         AlterTableType::AT_ClusterOn | AlterTableType::AT_DropCluster => AT_PASS_MISC,
+        AlterTableType::AT_ChangeOwner => AT_PASS_MISC,
         AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {
             if wqueue[tabidx].chg_persistence {
                 return Err(Box::new(
@@ -1022,6 +1199,20 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_DropOf => {
                     ATExecDropOf(mcx, &rel)?;
+                }
+                AlterTableType::AT_ChangeOwner => {
+                    let newowner = cmd
+                        .newowner
+                        .expect("AT_ChangeOwner RoleSpec")
+                        .as_role_spec()
+                        .expect("RoleSpec");
+                    crate::owner::ATExecChangeOwner(
+                        mcx,
+                        rel.rd_id,
+                        aclchk::get_rolespec_oid(newowner, false)?,
+                        false,
+                        lockmode,
+                    )?;
                 }
                 // Phase-2 arms only fire for partitioned relkinds (no
                 // storage), which are unreachable here; phase 3 does the work.
@@ -1690,7 +1881,23 @@ fn ATExecDropColumn<'mcx>(
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
-    // has_partition_attrs: false for plain relations (partitioning unported).
+    let mut is_expr = false;
+    let mut attset = types_nodes::Bitmapset::empty();
+    attset.add_member(
+        mcx,
+        attnum as i32 - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
+    )?;
+    if crate::partition::has_partition_attrs(mcx, rel, &attset, &mut is_expr)? {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "cannot drop column \"{col_name}\" because it is part of the partition key of relation \"{relname}\""
+                ),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
 
     if find_inheritance_children_exist(mcx, rel.rd_id)? {
         unported("ATExecDropColumn inheritance recursion");
@@ -3502,6 +3709,30 @@ fn ATPrepAlterColumnType<'mcx>(
             PgError::new(ERROR, format!("cannot alter inherited column \"{col_name}\""))
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
+    }
+    let mut is_expr = false;
+    let mut attset = types_nodes::Bitmapset::empty();
+    attset.add_member(
+        mcx,
+        attnum as i32 - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
+    )?;
+    if crate::partition::has_partition_attrs(mcx, rel, &attset, &mut is_expr)? {
+        let mut e = PgError::new(
+            ERROR,
+            format!(
+                "cannot alter column \"{col_name}\" because it is part of the partition key of relation \"{relname}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION);
+        let pos = parser_small1::parser_errposition_source(
+            Some(query_string.as_bytes()),
+            def.location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if pos > 0 {
+            e = e.with_cursor_position(pos);
+        }
+        return Err(Box::new(e));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
 

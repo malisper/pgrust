@@ -9,6 +9,7 @@ mod partition;
 mod constraints;
 mod fk;
 mod drop;
+mod owner;
 mod oncommit;
 mod rename;
 mod truncate;

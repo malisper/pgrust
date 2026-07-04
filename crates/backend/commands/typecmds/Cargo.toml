@@ -64,3 +64,4 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 varlena = { path = "../../utils/adt/varlena" }
 elog_seams = { path = "../../utils/error/elog_seams" }
+typecmds_seams = { path = "../typecmds_seams" }

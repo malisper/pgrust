@@ -243,7 +243,7 @@ pub(crate) fn MergeAttributes<'mcx>(
                 });
             let raw = readfuncs::stringToNode(mcx, &adbin)?;
             let (expr, found_whole_row) =
-                rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap)?;
+                rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap, types_core::InvalidOid)?;
             let def = &mut inh_defs[idx];
             if found_whole_row {
                 return Err(Box::new(
@@ -279,7 +279,7 @@ pub(crate) fn MergeAttributes<'mcx>(
                     check.ccbin.as_ref().expect("check ccbin").as_str(),
                 )?;
                 let (expr, found_whole_row) =
-                    rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap)?;
+                    rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap, types_core::InvalidOid)?;
                 if found_whole_row {
                     return Err(Box::new(
                         PgError::new(ERROR, "cannot convert whole-row table reference".to_string())

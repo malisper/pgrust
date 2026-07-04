@@ -154,7 +154,7 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
     }
 
     if relid == default_part_oid {
-        unported("heap_drop_with_catalog: update_default_partition_oid (DEFAULT partitions)");
+        crate::partition::update_default_partition_oid(mcx, parent_oid, types_core::InvalidOid)?;
     }
 
     if RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {

@@ -569,7 +569,6 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
                 run.root.update_colnos =
                     extract_update_targetlist_colnos(mcx, &parse.targetList);
             }
-            debug_assert!(!rte.inh);
             add_row_identity_columns(mcx, run, &parse.targetList, parse.resultRelation, &rel)?
         }
     };
@@ -695,9 +694,9 @@ fn add_row_identity_columns<'mcx>(
         // TLE; no ctid exists (appendinfo.c adds nothing for views).
         return tlist.clone_in(mcx);
     }
-    // C's ctid arm covers RELATION | MATVIEW | PARTITIONED_TABLE.
     if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_MATVIEW
+        && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
     {
         panic!(
             "add_row_identity_columns (appendinfo.c): relkind '{}' (wholerow/FDW \

@@ -113,10 +113,8 @@ pub(crate) fn transformTableLikeClause<'mcx>(
 
     let relkind = relation.rd_rel.relkind;
     match relkind {
-        RELKIND_RELATION | RELKIND_VIEW | RELKIND_MATVIEW => {}
-        RELKIND_COMPOSITE_TYPE | RELKIND_FOREIGN_TABLE | RELKIND_PARTITIONED_TABLE => {
-            unported("LIKE from composite/foreign/partitioned relations")
-        }
+        RELKIND_RELATION | RELKIND_VIEW | RELKIND_MATVIEW | RELKIND_COMPOSITE_TYPE
+        | RELKIND_FOREIGN_TABLE | RELKIND_PARTITIONED_TABLE => {}
         _ => {
             return Err(attach_errpos(Box::new(
                 PgError::new(
@@ -129,15 +127,33 @@ pub(crate) fn transformTableLikeClause<'mcx>(
         }
     }
 
-    let aclresult = aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT)?;
-    if aclresult != 0 {
-        // get_relkind_objtype (objectaddress.c) for the reachable kinds.
-        let objtype = match relkind {
-            RELKIND_VIEW => ObjectType::OBJECT_VIEW,
-            RELKIND_MATVIEW => ObjectType::OBJECT_MATVIEW,
-            _ => ObjectType::OBJECT_TABLE,
-        };
-        aclchk::aclcheck_error(aclresult, objtype, relation.name())?;
+    if relkind == RELKIND_COMPOSITE_TYPE {
+        const ACL_USAGE: u64 = 1 << 8;
+        let aclresult = aclchk::object_aclcheck(
+            types_core::TYPE_RELATION_ID,
+            relation.rd_rel.reltype,
+            miscinit::GetUserId(),
+            ACL_USAGE,
+        )?;
+        if aclresult != 0 {
+            aclchk::aclcheck_error(
+                aclresult,
+                ObjectType::OBJECT_TYPE,
+                &format_type::format_type_be(relation.rd_rel.reltype)?,
+            )?;
+        }
+    } else {
+        let aclresult = aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT)?;
+        if aclresult != 0 {
+            // get_relkind_objtype (objectaddress.c) for the reachable kinds.
+            let objtype = match relkind {
+                RELKIND_VIEW => ObjectType::OBJECT_VIEW,
+                RELKIND_MATVIEW => ObjectType::OBJECT_MATVIEW,
+                RELKIND_FOREIGN_TABLE => ObjectType::OBJECT_FOREIGN_TABLE,
+                _ => ObjectType::OBJECT_TABLE,
+            };
+            aclchk::aclcheck_error(aclresult, objtype, relation.name())?;
+        }
     }
 
     let tuple_desc = &relation.rd_att;
@@ -343,7 +359,7 @@ pub fn expandTableLikeClause<'mcx>(
                 });
             let this_default = readfuncs::stringToNode(mcx, defbin.as_str())?;
             let (mapped, found_whole_row) =
-                rewrite_manip::map_variable_attnos(mcx, this_default, 1, 0, &attmap)?;
+                rewrite_manip::map_variable_attnos(mcx, this_default, 1, 0, &attmap, types_core::InvalidOid)?;
             if found_whole_row {
                 return Err(whole_row_error(
                     format!(
@@ -370,7 +386,7 @@ pub fn expandTableLikeClause<'mcx>(
                 let ccbin = cc.ccbin.as_ref().expect("check constraint bin").as_str();
                 let ccbin_node = readfuncs::stringToNode(mcx, ccbin)?;
                 let (mapped, found_whole_row) =
-                    rewrite_manip::map_variable_attnos(mcx, ccbin_node, 1, 0, &attmap)?;
+                    rewrite_manip::map_variable_attnos(mcx, ccbin_node, 1, 0, &attmap, types_core::InvalidOid)?;
                 if found_whole_row {
                     return Err(whole_row_error(format!(
                         "Constraint \"{}\" contains a whole-row reference to table \"{}\".",
@@ -559,7 +575,7 @@ pub fn generateClonedIndexStmt<'mcx>(
             let indexkey =
                 indexpr_item.next().expect("too few entries in indexprs list");
             let (mapped, found_whole_row) =
-                rewrite_manip::map_variable_attnos(mcx, indexkey, 1, 0, attmap)?;
+                rewrite_manip::map_variable_attnos(mcx, indexkey, 1, 0, attmap, types_core::InvalidOid)?;
             if found_whole_row {
                 return Err(whole_row_error(format!(
                     "Index \"{}\" contains a whole-row table reference.",
@@ -612,7 +628,7 @@ pub fn generateClonedIndexStmt<'mcx>(
     if let Some(src) = idxrec.indpred_src.as_ref() {
         let pred = readfuncs::stringToNode(mcx, src.as_str())?;
         let (mapped, found_whole_row) =
-            rewrite_manip::map_variable_attnos(mcx, pred, 1, 0, attmap)?;
+            rewrite_manip::map_variable_attnos(mcx, pred, 1, 0, attmap, types_core::InvalidOid)?;
         if found_whole_row {
             return Err(whole_row_error(format!(
                 "Index \"{}\" contains a whole-row table reference.",
