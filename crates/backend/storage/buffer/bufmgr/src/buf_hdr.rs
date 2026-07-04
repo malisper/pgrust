@@ -80,12 +80,25 @@ impl BufferDesc {
         *self.free_next.get() = next;
     }
 
-    /// Read under the header lock; armed == unported aio writer appeared.
+    /// Read under the header lock; armed == a uring read is (or was) in flight.
     #[inline]
     pub(crate) fn io_wref_armed(&self) -> bool {
         // SAFETY: header lock held per contract above.
         let w = unsafe { &*self.io_wref.get() };
         w.aio_index != 0 || w.generation_upper != 0 || w.generation_lower != 0
+    }
+
+    /// Read under the header lock.
+    #[inline]
+    pub(crate) fn io_wref(&self) -> PgAioWaitRef {
+        // SAFETY: header lock held per contract above.
+        unsafe { *self.io_wref.get() }
+    }
+
+    /// # Safety: header lock held.
+    #[inline]
+    pub(crate) unsafe fn set_io_wref(&self, w: PgAioWaitRef) {
+        *self.io_wref.get() = w;
     }
 }
 
@@ -250,6 +263,10 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
 /// re-run init (leaks NBuffers×8K). Page bytes stay: cleared tags make them
 /// unreachable (notes/crash-restart-design.md).
 pub fn BufferManagerShmemResetAfterCrash() {
+    // In-flight uring DMA targets pool pages; wait it out before recycling.
+    if aio_seams::uring_drain_all_raw::is_installed() {
+        aio_seams::uring_drain_all_raw::call();
+    }
     let n = NBuffersInited();
     assert!(
         n > 0 && n == globals::NBuffers(),

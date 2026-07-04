@@ -860,6 +860,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio_uring"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "bufmgr",
+ "datum",
+ "elog",
+ "ipc_seams",
+ "libc",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1393,6 +1407,8 @@ dependencies = [
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
+ "aio_uring",
  "bufmgr_seams",
  "catalog_storage_seams",
  "checkpointer_seams",
@@ -9675,6 +9691,7 @@ dependencies = [
  "adt_rowtypes",
  "adt_timestamp",
  "aio_config",
+ "aio_uring",
  "auth",
  "auth_scram",
  "autovacuum",

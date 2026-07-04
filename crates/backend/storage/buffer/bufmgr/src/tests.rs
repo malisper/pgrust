@@ -704,7 +704,7 @@ fn abort_resowner_release_aborts_leaked_io_and_wakes_waiter() {
     // extend.rs beyond-EOF shape: invalidate, take input IO, "error out".
     let s = LockBufHdr(desc);
     UnlockBufHdr(desc, s & !BM_VALID);
-    assert!(crate::read::StartBufferIO(desc, true, false).unwrap());
+    assert!(crate::read::StartBufferIO(desc, true, false, true).unwrap());
 
     let waiter = spawn_reader(rel, std::time::Duration::ZERO);
     std::thread::sleep(std::time::Duration::from_millis(150));
@@ -974,4 +974,179 @@ fn buf_table_dense_grow_delete_reinsert() {
     }
     let err = bt_delete(&synth_tag(rel, 0)).unwrap_err();
     assert!(format!("{err:?}").contains("shared buffer hash table corrupted"));
+}
+
+// ---- io_uring reads into pool pages ----
+
+const URING_REL: u32 = 9600;
+const URING_FILE_PAGES: u32 = 8;
+
+static URING_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+fn uring_file_fd() -> i32 {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    URING_FILE
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("bufmgr-uring-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(dir.join("rel.dat"))
+                .unwrap();
+            let mut page = vec![0u8; BLCKSZ];
+            for blk in 0..URING_FILE_PAGES {
+                // +100 distinguishes uring-DMA'd pages from smgr_read fallbacks.
+                valid_page_into(&mut page, blk + 100);
+                f.write_all(&page).unwrap();
+            }
+            f.flush().unwrap();
+            f
+        })
+        .as_raw_fd()
+}
+
+fn setup_uring_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        aio_uring::init_seams();
+        smgr_seams::smgr_start_buffer_read::set(|rlb, _f, blocknum, buffer| {
+            assert_eq!(rlb.locator.relNumber, URING_REL);
+            Ok(aio_seams::uring_buf_read::call(
+                uring_file_fd(),
+                blocknum as i64 * BLCKSZ as i64,
+                buffer,
+            ))
+        });
+    });
+}
+
+fn uring_smgr() -> types_storage::RelFileLocatorBackend {
+    types_storage::RelFileLocatorBackend {
+        locator: rloc(URING_REL),
+        backend: INVALID_PROC_NUMBER,
+    }
+}
+
+fn uring_start(blk: u32) -> Option<PrefetchOutcome> {
+    crate::uring::start_read(
+        uring_smgr(),
+        types_core::RELPERSISTENCE_PERMANENT,
+        ForkNumber::MAIN_FORKNUM,
+        blk,
+    )
+    .unwrap()
+}
+
+fn page_block_field(b: Buffer) -> u32 {
+    let p = crate::buf_hdr::BufferGetBlockPtr(b);
+    // SAFETY: pinned valid buffer in the test.
+    let s = unsafe { core::slice::from_raw_parts(p, BLCKSZ) };
+    u32::from_ne_bytes(s[24..28].try_into().unwrap())
+}
+
+#[test]
+fn uring_prefetch_lands_in_pool_and_arrival_hits() {
+    let _g = setup();
+    setup_uring_seams();
+    if !aio_seams::uring_available::call() {
+        eprintln!("io_uring unavailable here; skipping");
+        return;
+    }
+    let before_sync = rel_reads(URING_REL);
+    for blk in 0..4u32 {
+        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued), "block {blk}");
+    }
+    // Re-advising an in-flight/landed block reports Cached.
+    assert_eq!(uring_start(0), Some(PrefetchOutcome::Cached));
+    let mut bufs = Vec::new();
+    for blk in 0..4u32 {
+        let b = read_blk(URING_REL, blk);
+        let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+        assert!(state & BM_VALID != 0);
+        assert_eq!(page_block_field(b), blk + 100, "page must come from the file via uring");
+        ReleaseBuffer(b).unwrap();
+        bufs.push(b);
+    }
+    assert_eq!(rel_reads(URING_REL), before_sync, "no sync fallback read");
+    crate::uring::drain_own();
+    for b in bufs {
+        assert_eq!(GetPrivateRefCount(b), 0, "prefetch pin must be collected");
+    }
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn uring_short_read_degrades_to_sync_arrival() {
+    let _g = setup();
+    setup_uring_seams();
+    if !aio_seams::uring_available::call() {
+        eprintln!("io_uring unavailable here; skipping");
+        return;
+    }
+    let blk = URING_FILE_PAGES + 50;
+    let before_sync = rel_reads(URING_REL);
+    assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+    let b = read_blk(URING_REL, blk);
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert!(state & BM_VALID != 0);
+    assert!(state & types_storage::buf::BM_IO_ERROR == 0);
+    assert_eq!(page_block_field(b), blk, "content must come from the sync re-read");
+    assert_eq!(rel_reads(URING_REL), before_sync + 1);
+    ReleaseBuffer(b).unwrap();
+    crate::uring::drain_own();
+    assert_eq!(GetPrivateRefCount(b), 0);
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn uring_foreign_thread_completes_issuers_io() {
+    let _g = setup();
+    setup_uring_seams();
+    if !aio_seams::uring_available::call() {
+        eprintln!("io_uring unavailable here; skipping");
+        return;
+    }
+    let blk = 5u32;
+    let before_sync = rel_reads(URING_REL);
+    assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+    let t = std::thread::spawn(move || {
+        become_backend();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "uring-foreign")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        let b = read_blk(URING_REL, blk);
+        let field = page_block_field(b);
+        ReleaseBuffer(b).unwrap();
+        field
+    });
+    assert_eq!(t.join().unwrap(), blk + 100);
+    assert_eq!(rel_reads(URING_REL), before_sync, "foreign thread must drain, not re-read");
+    crate::uring::drain_own();
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn uring_eoxact_drains_unread_prefetches() {
+    let _g = setup();
+    setup_uring_seams();
+    if !aio_seams::uring_available::call() {
+        eprintln!("io_uring unavailable here; skipping");
+        return;
+    }
+    for blk in 6..URING_FILE_PAGES {
+        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued), "block {blk}");
+    }
+    AtEOXact_Buffers(true);
+    for blk in 6..URING_FILE_PAGES {
+        let b = read_blk(URING_REL, blk);
+        assert_eq!(page_block_field(b), blk + 100);
+        assert_eq!(GetPrivateRefCount(b), 1, "only the arrival pin may remain");
+        ReleaseBuffer(b).unwrap();
+    }
+    AtEOXact_Buffers(true);
 }
