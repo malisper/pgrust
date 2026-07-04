@@ -348,12 +348,15 @@ pub fn StartupXLOG() -> PgResult<()> {
     ctl.lastSegSwitchLSN.store(end_of_log, Relaxed);
 
     // latestCompletedXid = nextXid - 1 (under ProcArrayLock in C; startup is
-    // still single-threaded here).
+    // still single-threaded here). FullTransactionIdRetreat: values still in
+    // the first epoch below FirstNormalTransactionId stay put (no wrap).
     {
         let mut latest = procarray::TransamVariables().nextXid.load(Relaxed);
         latest -= 1;
-        while (latest as u32) < types_core::FirstNormalTransactionId {
-            latest -= 1;
+        if latest >= types_core::FirstNormalTransactionId as u64 {
+            while (latest as u32) < types_core::FirstNormalTransactionId {
+                latest -= 1;
+            }
         }
         procarray::TransamVariables().latestCompletedXid.store(latest, Relaxed);
     }
