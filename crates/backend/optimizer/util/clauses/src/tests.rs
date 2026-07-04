@@ -86,7 +86,7 @@ fn install_fixtures() {
             })
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            let op = |negate: u32| syscache_seams::PgOperatorShape {
+            let op = |negate: u32| syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 25,
                 oprright: 25,
                 oprresult: 16,

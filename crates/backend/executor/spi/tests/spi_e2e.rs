@@ -451,7 +451,7 @@ fn install_parser_fixture_seams() {
     });
     syscache_seams::lookup_pg_operator_shape::set(|opno| {
         Ok(match opno {
-            96 => Some(syscache_seams::PgOperatorShape {
+            96 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: INT4OID,
                 oprright: INT4OID,
                 oprresult: BOOLOID,
@@ -463,7 +463,7 @@ fn install_parser_fixture_seams() {
                 oprcanmerge: true,
                 oprcanhash: true,
             }),
-            551 => Some(syscache_seams::PgOperatorShape {
+            551 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: INT4OID,
                 oprright: INT4OID,
                 oprresult: INT4OID,

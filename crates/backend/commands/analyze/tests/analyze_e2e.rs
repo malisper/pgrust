@@ -656,7 +656,7 @@ fn install_syscache_fixture_overrides() {
         })
     });
     syscache_seams::lookup_pg_operator_shape::set(|opno| {
-        let mk = |code, com, neg, rest| syscache_seams::PgOperatorShape {
+        let mk = |code, com, neg, rest| syscache_seams::PgOperatorShape { oprnamespace: 11,
             oprleft: INT4OID,
             oprright: INT4OID,
             oprresult: 16,

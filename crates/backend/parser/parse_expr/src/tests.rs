@@ -82,7 +82,7 @@ fn install_oper_fixture() {
             // 551 = int4pl (proc 177 -> int4); 96 = int4eq (proc 65 -> bool);
             // 518 = int4ne (proc 144 -> bool); pg_operator.dat/pg_proc.dat.
             Ok(match opno {
-                551 => Some(syscache_seams::PgOperatorShape {
+                551 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                     oprleft: INT4OID,
                     oprright: INT4OID,
                     oprresult: INT4OID,
@@ -94,7 +94,7 @@ fn install_oper_fixture() {
                     oprcanmerge: false,
                     oprcanhash: false,
                 }),
-                96 => Some(syscache_seams::PgOperatorShape {
+                96 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                     oprleft: INT4OID,
                     oprright: INT4OID,
                     oprresult: types_core::catalog::BOOLOID,
@@ -106,7 +106,7 @@ fn install_oper_fixture() {
                     oprcanmerge: true,
                     oprcanhash: true,
                 }),
-                518 => Some(syscache_seams::PgOperatorShape {
+                518 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                     oprleft: INT4OID,
                     oprright: INT4OID,
                     oprresult: types_core::catalog::BOOLOID,

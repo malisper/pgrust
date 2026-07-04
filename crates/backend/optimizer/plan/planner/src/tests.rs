@@ -152,7 +152,7 @@ fn install_scan_fixtures() {
     clauses_seams::evaluate_expr::set(|_, _, _, _, _| panic!("evaluate_expr not exercised"));
     syscache_seams::lookup_pg_operator_shape::set(|opno| {
         Ok(match opno {
-            INT4EQ_OP => Some(syscache_seams::PgOperatorShape {
+            INT4EQ_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 23,
                 oprright: 23,
                 oprresult: 16,
@@ -164,7 +164,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: true,
                 oprcanhash: true,
             }),
-            INT4_LT_OP => Some(syscache_seams::PgOperatorShape {
+            INT4_LT_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 23,
                 oprright: 23,
                 oprresult: 16,
@@ -176,7 +176,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
-            INT4_GT_OP => Some(syscache_seams::PgOperatorShape {
+            INT4_GT_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 23,
                 oprright: 23,
                 oprresult: 16,
@@ -188,7 +188,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
-            TEXTEQ_OP => Some(syscache_seams::PgOperatorShape {
+            TEXTEQ_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 25,
                 oprright: 25,
                 oprresult: 16,
@@ -200,7 +200,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: true,
                 oprcanhash: true,
             }),
-            TEXT_LT_OP => Some(syscache_seams::PgOperatorShape {
+            TEXT_LT_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 25,
                 oprright: 25,
                 oprresult: 16,
@@ -212,7 +212,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
-            TEXT_GE_OP => Some(syscache_seams::PgOperatorShape {
+            TEXT_GE_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 25,
                 oprright: 25,
                 oprresult: 16,
@@ -224,7 +224,7 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
-            TEXT_REGEXEQ_OP => Some(syscache_seams::PgOperatorShape {
+            TEXT_REGEXEQ_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 25,
                 oprright: 25,
                 oprresult: 16,
@@ -237,7 +237,7 @@ fn install_scan_fixtures() {
                 oprcanhash: false,
             }),
             // int8 > int8 (HAVING-lane tests).
-            INT8GT_OP => Some(syscache_seams::PgOperatorShape {
+            INT8GT_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 20,
                 oprright: 20,
                 oprresult: 16,

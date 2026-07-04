@@ -157,7 +157,7 @@ fn install_seams() {
             })
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape {
+            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: INT4OID,
                 oprright: INT4OID,
                 oprresult: BOOLOID,

@@ -542,7 +542,7 @@ fn install_parser_fixture_seams() {
     syscache_seams::pg_operator_name_candidates_exist::set(|_, _| Ok(false));
     syscache_seams::lookup_pg_operator_shape::set(|opno| {
         Ok(match opno {
-            INT4LE_OP => Some(syscache_seams::PgOperatorShape {
+            INT4LE_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                 oprleft: 23,
                 oprright: 23,
                 oprresult: 16,
