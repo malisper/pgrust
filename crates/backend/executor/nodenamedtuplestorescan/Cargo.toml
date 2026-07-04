@@ -1,0 +1,43 @@
+[package]
+name = "nodenamedtuplestorescan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+execexpr = { path = "../execexpr" }
+execscan = { path = "../execscan" }
+executils = { path = "../executils" }
+mcx = { path = "../../../_support/mcx" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+
+[dev-dependencies]
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+datum = { path = "../../../_support/types/datum" }
+execmain = { path = "../execmain" }
+execmain_seams = { path = "../execmain_seams" }
+exectuples = { path = "../exectuples" }
+gram_core = { path = "../../parser/gram_core" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+parse_expr = { path = "../../parser/parse_expr" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+parser_seams = { path = "../../parser/parser_seams" }
+planner = { path = "../../optimizer/plan/planner" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+tcop_dest = { path = "../../tcop/dest" }
+tstore_receiver = { path = "../tstore_receiver" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+xact = { path = "../../access/transam/xact" }

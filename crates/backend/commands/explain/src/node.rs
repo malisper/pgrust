@@ -121,6 +121,10 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_NamedTuplestoreScan => {
+            rels_used
+                .add_member(mcx, node.as_named_tuplestore_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_WorkTableScan => {
             rels_used
                 .add_member(mcx, node.as_work_table_scan().unwrap().scan.scanrelid as i32)?;
@@ -373,6 +377,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_TableFuncScan => "Table Function Scan",
         NodeTag::T_ValuesScan => "Values Scan",
         NodeTag::T_CteScan => "CTE Scan",
+        NodeTag::T_NamedTuplestoreScan => "Named Tuplestore Scan",
         NodeTag::T_WorkTableScan => "WorkTable Scan",
         NodeTag::T_RecursiveUnion => "Recursive Union",
         // C interpolates the join type into the node name in TEXT format:
@@ -514,6 +519,9 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
+    if node.node_tag() == NodeTag::T_NamedTuplestoreScan {
+        ExplainScanTarget(node.as_named_tuplestore_scan().unwrap().scan.scanrelid, es)?;
+    }
     if node.node_tag() == NodeTag::T_WorkTableScan {
         ExplainScanTarget(node.as_work_table_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -590,6 +598,7 @@ pub fn ExplainNode<'mcx>(
     match node.node_tag() {
         NodeTag::T_SeqScan
         | NodeTag::T_CteScan
+        | NodeTag::T_NamedTuplestoreScan
         | NodeTag::T_ValuesScan
         | NodeTag::T_WorkTableScan
         | NodeTag::T_TableFuncScan => {
@@ -1891,6 +1900,7 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
             relname.as_ref().map(|s| s.as_str())
         }
         RTEKind::RTE_CTE => rte.ctename,
+        RTEKind::RTE_NAMEDTUPLESTORE => rte.enrname,
         RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => None,
         other => node_gap(
             "ExplainTargetRel",

@@ -141,6 +141,14 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             AlterTableType::AT_AddInherit | AlterTableType::AT_DropInherit => {
                 AccessExclusiveLock
             }
+            AlterTableType::AT_EnableTrig
+            | AlterTableType::AT_EnableAlwaysTrig
+            | AlterTableType::AT_EnableReplicaTrig
+            | AlterTableType::AT_EnableTrigAll
+            | AlterTableType::AT_EnableTrigUser
+            | AlterTableType::AT_DisableTrig
+            | AlterTableType::AT_DisableTrigAll
+            | AlterTableType::AT_DisableTrigUser => ShareRowExclusiveLock,
             AlterTableType::AT_ReplicaIdentity
             | AlterTableType::AT_AddOf
             | AlterTableType::AT_DropOf
@@ -506,6 +514,17 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_EnableAlwaysRule
         | AlterTableType::AT_EnableReplicaRule
         | AlterTableType::AT_DisableRule => AT_PASS_MISC,
+        AlterTableType::AT_EnableTrig
+        | AlterTableType::AT_EnableAlwaysTrig
+        | AlterTableType::AT_EnableReplicaTrig
+        | AlterTableType::AT_EnableTrigAll
+        | AlterTableType::AT_EnableTrigUser
+        | AlterTableType::AT_DisableTrig
+        | AlterTableType::AT_DisableTrigAll
+        | AlterTableType::AT_DisableTrigUser => {
+            set_recurse();
+            AT_PASS_MISC
+        }
         AlterTableType::AT_EnableRowSecurity
         | AlterTableType::AT_DisableRowSecurity
         | AlterTableType::AT_ForceRowSecurity
@@ -751,6 +770,46 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_DropExpression => {
                     ATExecDropExpression(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_EnableTrig
+                | AlterTableType::AT_EnableAlwaysTrig
+                | AlterTableType::AT_EnableReplicaTrig
+                | AlterTableType::AT_EnableTrigAll
+                | AlterTableType::AT_EnableTrigUser
+                | AlterTableType::AT_DisableTrig
+                | AlterTableType::AT_DisableTrigAll
+                | AlterTableType::AT_DisableTrigUser => {
+                    use types_trigger::{
+                        TRIGGER_DISABLED, TRIGGER_FIRES_ALWAYS, TRIGGER_FIRES_ON_ORIGIN,
+                        TRIGGER_FIRES_ON_REPLICA,
+                    };
+                    let (fires_when, skip_system, named) = match cmd.subtype {
+                        AlterTableType::AT_EnableTrig => (TRIGGER_FIRES_ON_ORIGIN, false, true),
+                        AlterTableType::AT_EnableAlwaysTrig => (TRIGGER_FIRES_ALWAYS, false, true),
+                        AlterTableType::AT_EnableReplicaTrig => {
+                            (TRIGGER_FIRES_ON_REPLICA, false, true)
+                        }
+                        AlterTableType::AT_DisableTrig => (TRIGGER_DISABLED, false, true),
+                        AlterTableType::AT_EnableTrigAll => (TRIGGER_FIRES_ON_ORIGIN, false, false),
+                        AlterTableType::AT_DisableTrigAll => (TRIGGER_DISABLED, false, false),
+                        AlterTableType::AT_EnableTrigUser => (TRIGGER_FIRES_ON_ORIGIN, true, false),
+                        _ => (TRIGGER_DISABLED, true, false),
+                    };
+                    let name = if named {
+                        Some(cmd.name.expect("ENABLE/DISABLE TRIGGER has a name"))
+                    } else {
+                        None
+                    };
+                    trigger::EnableDisableTrigger(
+                        mcx,
+                        &rel,
+                        name,
+                        types_core::InvalidOid,
+                        fires_when,
+                        skip_system,
+                        cmd.recurse,
+                        types_rel::ShareRowExclusiveLock,
+                    )?;
                 }
                 AlterTableType::AT_EnableRule => {
                     rewrite_define::EnableDisableRule(

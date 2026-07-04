@@ -1584,6 +1584,74 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
+// ENRs are never checked for access rights: no addRTEPermissionInfo. The
+// relid records a dependency for plan invalidation, never a lockable target.
+pub fn addRangeTableEntryForENR<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    rv: &types_nodes::RangeVar<'mcx>,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let relname = rv.relname.expect("grammar always sets relname");
+    let alias = rv.alias;
+    let refname = alias.and_then(|a| a.aliasname).unwrap_or(relname);
+
+    let enrmd = parser_small1::get_visible_ENR(&*pstate, relname)
+        .expect("caller checked name_matches_visible_ENR");
+    debug_assert!(enrmd.enrtype == queryenvironment::ENR_NAMED_TUPLESTORE);
+    let tupdesc = queryenvironment::ENRMetadataGetTupDesc(mcx, enrmd)?;
+
+    let (eref, rebuilt_alias) =
+        buildRelationAliases(mcx, &tupdesc, alias, str_in(mcx, refname)?)?;
+
+    let mut coltypes = types_nodes::list::OidList::nil();
+    let mut coltypmods = types_nodes::list::IntList::nil();
+    let mut colcollations = types_nodes::list::OidList::nil();
+    for attno in 0..tupdesc.natts as usize {
+        let att = tupdesc.attr(attno);
+        if att.attisdropped {
+            coltypes.lappend(mcx, InvalidOid)?;
+            coltypmods.lappend(mcx, 0)?;
+            colcollations.lappend(mcx, InvalidOid)?;
+        } else {
+            assert!(
+                OidIsValid(att.atttypid),
+                "atttypid is invalid for non-dropped column in \"{relname}\""
+            );
+            coltypes.lappend(mcx, att.atttypid)?;
+            coltypmods.lappend(mcx, att.atttypmod)?;
+            colcollations.lappend(mcx, att.attcollation)?;
+        }
+    }
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_NAMEDTUPLESTORE,
+        alias: rebuilt_alias,
+        relid: enrmd.reliddesc,
+        enrname: Some(str_in(mcx, enrmd.name.as_str())?),
+        enrtuples: enrmd.enrtuples,
+        coltypes,
+        coltypmods,
+        colcollations,
+        eref: Some(eref),
+        lateral: false,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let nsitem = buildNSItemFromTupleDesc(
+        mcx,
+        rte_node.as_range_tbl_entry().expect("just built"),
+        rtindex,
+        None,
+        &tupdesc,
+    )?;
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
 // buildVarFromNSColumn (parse_relation.c): joinaliasvars entries; no column
 // SELECT privilege is requested here.
 pub fn buildVarFromNSColumn<'mcx>(
@@ -1809,13 +1877,17 @@ pub fn expandRTE<'mcx>(
         ),
         // C shares this leg across TABLEFUNC/VALUES/CTE/ENR (coltypes lists +
         // eref colnames); only TABLEFUNC arrives here today.
-        RTEKind::RTE_TABLEFUNC => {
+        RTEKind::RTE_TABLEFUNC | RTEKind::RTE_NAMEDTUPLESTORE => {
             let mut colnames = NodeList::nil();
             let mut colvars = NodeList::nil();
-            let eref = rte.eref.expect("tablefunc RTE has eref");
+            let eref = rte.eref.expect("coltypes-list RTE has eref");
             for varattno in 0..rte.coltypes.len() {
                 let coltype = rte.coltypes.nth(varattno);
-                debug_assert!(coltype != InvalidOid, "tablefunc RTEs have no dropped cols");
+                assert!(
+                    coltype != InvalidOid,
+                    "expandRTE (parse_relation.c): dropped-column arm unported — \
+                     unit backend-parser-relation"
+                );
                 colnames.lappend(mcx, eref.colnames.nth(varattno))?;
                 colvars.lappend(
                     mcx,

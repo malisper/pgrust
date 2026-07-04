@@ -112,6 +112,10 @@ pub fn puttupleslot(h: TuplestoreHandle, slot: &mut SlotData<'_>) -> PgResult<()
     with_store(h, |store| store.puttupleslot(slot, mcx))
 }
 
+pub fn put_heap_tuple(h: TuplestoreHandle, htup: &::types_tuple::HeapTupleData<'_>) -> PgResult<()> {
+    with_store(h, |store| store.put_heap_tuple(htup))
+}
+
 pub fn putvalues(
     h: TuplestoreHandle,
     tdesc: &::types_tuple::TupleDescData<'_>,

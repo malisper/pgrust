@@ -293,7 +293,7 @@ pub(crate) fn _SPI_execute_plan(
             }
 
             let cplan =
-                plancache::GetCachedPlan(psrc, options.params, None, QueryEnvHandle::NULL)?;
+                plancache::GetCachedPlan(psrc, options.params, None, crate::current_query_env())?;
             held_cplan = Some(cplan);
             let stmt_list = plancache::CachedPlanStmtList(cplan);
             let query_string = plancache::CachedPlanQueryString(psrc);
@@ -368,7 +368,7 @@ pub(crate) fn _SPI_execute_plan(
                         crosscheck_snapshot.clone(),
                         dest.mydest(),
                         options.params,
-                        QueryEnvHandle::NULL,
+                        crate::current_query_env(),
                         0,
                     )?;
                     let tcount = if can_set_tag { options.tcount } else { 0 };
@@ -396,7 +396,7 @@ pub(crate) fn _SPI_execute_plan(
                         !plan.oneshot,
                         context,
                         options.params,
-                        QueryEnvHandle::NULL,
+                        crate::current_query_env(),
                         &mut dest,
                         Some(&mut qc),
                     )?;

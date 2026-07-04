@@ -133,6 +133,10 @@ pub struct TriggerDesc<'mcx> {
     pub trig_delete_after_statement: bool,
     pub trig_truncate_before_statement: bool,
     pub trig_truncate_after_statement: bool,
+    pub trig_insert_new_table: bool,
+    pub trig_update_old_table: bool,
+    pub trig_update_new_table: bool,
+    pub trig_delete_old_table: bool,
 }
 
 impl<'mcx> TriggerDesc<'mcx> {

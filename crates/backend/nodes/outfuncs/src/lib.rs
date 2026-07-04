@@ -48,6 +48,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_Var => out_var(out, node.as_variant::<Var>().expect("Var")),
         NodeTag::T_Const => out_const(out, node.as_variant::<Const>().expect("Const")),
         NodeTag::T_OpExpr => out_op_expr(out, node.as_variant::<OpExpr>().expect("OpExpr"))?,
+        NodeTag::T_DistinctExpr => out_distinct_expr(
+            out,
+            node.as_variant::<types_nodes::primnodes::DistinctExpr>().expect("DistinctExpr"),
+        )?,
         NodeTag::T_FuncExpr => {
             out_func_expr(out, node.as_variant::<FuncExpr>().expect("FuncExpr"))?
         }
@@ -399,6 +403,22 @@ fn out_op_expr(out: &mut PgString<'_>, o: &OpExpr<'_>) -> PgResult<()> {
     w!(
         out,
         "{{OPEXPR :opno {} :opfuncid {} :opresulttype {} :opretset ",
+        o.opno, o.opfuncid, o.opresulttype
+    );
+    out_bool(out, o.opretset);
+    w!(out, " :opcollid {} :inputcollid {} :args ", o.opcollid, o.inputcollid);
+    out_list(out, &o.args)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_distinct_expr(
+    out: &mut PgString<'_>,
+    o: &types_nodes::primnodes::DistinctExpr<'_>,
+) -> PgResult<()> {
+    w!(
+        out,
+        "{{DISTINCTEXPR :opno {} :opfuncid {} :opresulttype {} :opretset ",
         o.opno, o.opfuncid, o.opresulttype
     );
     out_bool(out, o.opretset);

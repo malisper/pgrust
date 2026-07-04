@@ -6,15 +6,19 @@ mod exec;
 mod queue;
 mod state;
 
-pub use catalog::{CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs};
-pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById};
-pub use exec::{ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache};
+pub use catalog::{map_partition_qual, CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs};
+pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, EnableDisableTrigger, RemoveTriggerById};
+pub use exec::{
+    ExecBSTruncateTriggers, ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache,
+    TriggerWhenCache, TriggerWhenEval,
+};
 pub use queue::{
     before_stmt_triggers_fired, AfterTriggerBeginQuery, AfterTriggerBeginSubXact,
     AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
     AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
     ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
-    ExecASUpdateTriggers,
+    ExecASTruncateTriggers, ExecASUpdateTriggers, MakeTransitionCaptureState,
+    TransitionCaptureState,
 };
 pub use state::AfterTriggerSetState;
 

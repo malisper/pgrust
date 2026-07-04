@@ -545,6 +545,49 @@ pub fn set_cte_size_estimates(run: &mut PlannerRun<'_>, rel: RelId, cte_rows: f6
     set_baserel_size_estimates(run, rel)
 }
 
+// set_namedtuplestore_size_estimates (costsize.c): enrtuples < 0 means the
+// registrant offered no estimate; C's default is 1000.
+pub fn set_namedtuplestore_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let rti = run.root.rel(rel).relid as usize;
+    debug_assert!(rti > 0);
+    let enrtuples = {
+        let rte = run.rte(rti);
+        debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_NAMEDTUPLESTORE);
+        rte.enrtuples
+    };
+    run.root.rel_mut(rel).tuples = if enrtuples < 0.0 { 1000.0 } else { enrtuples };
+    set_baserel_size_estimates(run, rel)
+}
+
+pub fn cost_namedtuplestorescan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_NAMEDTUPLESTORE);
+    debug_assert!(run.root.path(path_id).base().param_info.is_none());
+    let rows = base_rows;
+
+    let mut startup_cost = 0.0;
+    let mut cpu_per_tuple = gucs::cpu_tuple_cost();
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
+    startup_cost += qpqual_cost.startup;
+    cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let run_cost = cpu_per_tuple * tuples;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
 // cost_recursive_union (costsize.c): ~10 recursive iterations assumed.
 pub fn cost_recursive_union(
     run: &mut PlannerRun<'_>,

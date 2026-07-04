@@ -125,6 +125,9 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
                 crate::cte::set_cte_pathlist(run, rel, rti)?;
             }
         }
+        RTEKind::RTE_NAMEDTUPLESTORE => {
+            crate::costsize::set_namedtuplestore_size_estimates(run, rel)?;
+        }
         RTEKind::RTE_RESULT => {
             crate::costsize::set_result_size_estimates(run, rel)?;
         }
@@ -402,6 +405,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
             RTEKind::RTE_TABLEFUNC => set_tablefunc_pathlist(run, rel)?,
             RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
             RTEKind::RTE_CTE => {} // fully handled during set_rel_size
+            RTEKind::RTE_NAMEDTUPLESTORE => set_namedtuplestore_pathlist(run, rel)?,
             RTEKind::RTE_RESULT => set_result_pathlist(run, rel)?,
             other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
         }
@@ -718,6 +722,15 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
 }
 // set_result_pathlist (allpaths.c): one Result path, parameterized only by
 // lateral refs (join quals never push into a Result scan).
+// set_namedtuplestore_pathlist (allpaths.c); sizing ran in set_rel_size (the
+// RTE_RESULT split here), required_outer empty on this lane.
+fn set_namedtuplestore_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    let path = crate::pathnode::create_namedtuplestorescan_path(run, rel)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+
 fn set_result_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
     let path = crate::pathnode::create_resultscan_path(run, rel, &required_outer)?;
@@ -765,7 +778,7 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             // this lane, so the flag stays conservatively false.
             return Ok(());
         }
-        RTEKind::RTE_CTE => {
+        RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE => {
             return Ok(()); // tuplestores aren't shared among workers
         }
         RTEKind::RTE_RESULT => {

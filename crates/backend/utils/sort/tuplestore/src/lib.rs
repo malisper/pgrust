@@ -172,6 +172,17 @@ impl Tuplestore {
         })
     }
 
+    pub fn put_heap_tuple(&mut self, htup: &::types_tuple::HeapTupleData<'_>) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let mtup =
+                heaptuple::minimal_tuple_from_heap_tuple(st.tuplecontext.mcx(), htup, 0)?;
+            let t_len = mtup.t_len() as usize;
+            let tuple = mtup.as_ptr().cast_mut().cast::<MinimalTupleData>();
+            mem::forget(mtup);
+            st.puttuple_common(tuple, generation_chunk_space(t_len))
+        })
+    }
+
     pub fn putvalues(
         &mut self,
         tdesc: &TupleDescData<'_>,

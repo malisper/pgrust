@@ -176,12 +176,21 @@ pub(crate) fn build_trigger_desc(
         trig_delete_after_statement: false,
         trig_truncate_before_statement: false,
         trig_truncate_after_statement: false,
+        trig_insert_new_table: false,
+        trig_update_old_table: false,
+        trig_update_new_table: false,
+        trig_delete_old_table: false,
     };
     for i in 0..desc.triggers.len() {
         let t = desc.triggers[i].tgtype;
-        // SetTriggerFlags (trigger.c); transition-table flags are absent from
-        // the trimmed desc (transition tables are a loud lane).
+        // SetTriggerFlags (trigger.c).
         let m = |level, timing, event| trigger_type_matches(t, level, timing, event);
+        let has_old = desc.triggers[i].tgoldtable.is_some();
+        let has_new = desc.triggers[i].tgnewtable.is_some();
+        desc.trig_insert_new_table |= t & TRIGGER_TYPE_INSERT != 0 && has_new;
+        desc.trig_update_old_table |= t & TRIGGER_TYPE_UPDATE != 0 && has_old;
+        desc.trig_update_new_table |= t & TRIGGER_TYPE_UPDATE != 0 && has_new;
+        desc.trig_delete_old_table |= t & TRIGGER_TYPE_DELETE != 0 && has_old;
         desc.trig_insert_before_row |= m(TRIGGER_TYPE_ROW, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT);
         desc.trig_insert_after_row |= m(TRIGGER_TYPE_ROW, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_INSERT);
         desc.trig_insert_instead_row |=

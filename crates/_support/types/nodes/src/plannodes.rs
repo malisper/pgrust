@@ -409,6 +409,13 @@ pub struct CteScan<'mcx> {
 
 #[derive(Default)]
 #[repr(C)]
+pub struct NamedTuplestoreScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub enrname: Option<&'mcx str>,
+}
+
+#[derive(Default)]
+#[repr(C)]
 pub struct WorkTableScan<'mcx> {
     pub scan: Scan<'mcx>,
     pub wtParam: i32,
@@ -862,6 +869,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TableFuncScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CteScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_CteScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NamedTuplestoreScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NamedTuplestoreScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for WorkTableScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_WorkTableScan;
 }
@@ -949,6 +959,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for TableFuncScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for NamedTuplestoreScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for WorkTableScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for RecursiveUnion<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -1046,6 +1058,10 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<CteScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(NamedTuplestoreScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<NamedTuplestoreScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(ValuesScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<ValuesScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -1107,6 +1123,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_FunctionScan
             | NodeTag::T_TableFuncScan
             | NodeTag::T_CteScan
+            | NodeTag::T_NamedTuplestoreScan
             | NodeTag::T_WorkTableScan
             | NodeTag::T_RecursiveUnion
             | NodeTag::T_ValuesScan
@@ -1200,6 +1217,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_cte_scan(self) -> Option<&'mcx CteScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_named_tuplestore_scan(self) -> Option<&'mcx NamedTuplestoreScan<'mcx>> {
         self.as_variant()
     }
 

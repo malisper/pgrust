@@ -35,6 +35,7 @@ nodefunctionscan = { path = "../nodefunctionscan" }
 nodetablefuncscan = { path = "../nodetablefuncscan" }
 nodevaluesscan = { path = "../nodevaluesscan" }
 nodectescan = { path = "../nodectescan" }
+nodenamedtuplestorescan = { path = "../nodenamedtuplestorescan" }
 noderecursiveunion = { path = "../noderecursiveunion" }
 nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
@@ -69,6 +70,7 @@ hashfn = { path = "../../../common/hashfn" }
 tupdesc = { path = "../../access/common/tupdesc" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

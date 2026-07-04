@@ -45,6 +45,7 @@ fn create_plan_recurse<'mcx>(
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_NamedTuplestoreScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_WorkTableScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_TableFuncScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
@@ -349,6 +350,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_CteScan) => {
             create_ctescan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_NamedTuplestoreScan) => {
+            create_namedtuplestorescan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_WorkTableScan) => {
             create_worktablescan_plan(run, best_path, tlist, scan_clauses)?
@@ -880,6 +884,34 @@ fn create_ctescan_plan<'mcx>(
     plan.scan.scanrelid = scan_relid;
     plan.ctePlanId = plan_id;
     plan.cteParam = cte_param_id;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_namedtuplestorescan_plan (createplan.c); param_info empty on this
+// lane (asserted at costing), so no nestloop-param replacement.
+fn create_namedtuplestorescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_NAMEDTUPLESTORE);
+    let enrname = rte.enrname;
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::NamedTuplestoreScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.enrname = enrname;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }

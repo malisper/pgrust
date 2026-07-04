@@ -76,6 +76,13 @@ pub struct ModifyTableState<'mcx> {
     // C ri_TrigFunctions + ExecGetTriggerOldSlot.
     trig_fmgr: ::trigger::TriggerFmgrCache,
     trig_old_slot: Option<ExecSlotId>,
+    // C ri_TrigWhenExprs.
+    trig_when: ::trigger::TriggerWhenCache<'mcx>,
+    // mt_transition_capture + mt_oc_transition_capture.
+    transition_capture: Option<::trigger::TransitionCaptureState>,
+    oc_transition_capture: Option<::trigger::TransitionCaptureState>,
+    // ExecGetAllUpdatedCols, resolved once (C caches in ri_all_updated_cols).
+    all_updated_cols: Option<types_nodes::Bitmapset<'mcx>>,
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
     // is perf-only (values are immutable functions of non-generated columns).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
@@ -87,6 +94,11 @@ pub struct ModifyTableState<'mcx> {
     leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
     leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
     leaf_virtual_nn: Vec<Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
+    // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
+    // fields); outer Option = resolved yet.
+    leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
+    leaf_trig_fmgr: Vec<::trigger::TriggerFmgrCache>,
+    leaf_trig_when: Vec<::trigger::TriggerWhenCache<'mcx>>,
     merge: Option<MergeState<'mcx>>,
 }
 
@@ -179,23 +191,34 @@ pub fn exec_init_modify_table<'mcx>(
             .as_ref()
             .expect("result relation opened");
         let td = if rel.rd_hastriggers {
-            let td = relcache::RelationGetTriggerDesc(rel.rd_id)?;
-            if let Some(td) = &td {
-                if td.triggers.iter().any(|t| t.tgoldtable.is_some() || t.tgnewtable.is_some())
-                {
-                    panic!(
-                        "ExecInitModifyTable (nodeModifyTable.c): transition tables \
-                         unported"
-                    );
-                }
-            }
-            td
+            relcache::RelationGetTriggerDesc(rel.rd_id)?
         } else {
             None
         };
         check_valid_result_rel(rel, node.operation, td.as_deref())?;
         (td, rel.rd_rel.relkind)
     };
+
+    // ExecSetupTransitionCaptureState (skipped in explain-only mode).
+    let mut transition_capture = None;
+    let mut oc_transition_capture = None;
+    if estate.es_top_eflags & types_slot::EXEC_FLAG_EXPLAIN_ONLY == 0 {
+        if let Some(td) = &trigdesc {
+            let relid = estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened")
+                .rd_id;
+            transition_capture =
+                ::trigger::MakeTransitionCaptureState(td, relid, node.operation)?;
+            if node.operation == CmdType::CMD_INSERT
+                && node.onConflictAction
+                    == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
+            {
+                oc_transition_capture =
+                    ::trigger::MakeTransitionCaptureState(td, relid, CmdType::CMD_UPDATE)?;
+            }
+        }
+    }
 
     // The UPDATE/DELETE row identity: plain relations carry a junk ctid in
     // the subplan targetlist; views (INSTEAD OF lane) a junk wholerow.
@@ -508,12 +531,19 @@ pub fn exec_init_modify_table<'mcx>(
         trigdesc,
         trig_fmgr: ::trigger::TriggerFmgrCache::default(),
         trig_old_slot: None,
+        trig_when: ::trigger::TriggerWhenCache::default(),
+        transition_capture,
+        oc_transition_capture,
+        all_updated_cols: None,
         generated_exprs: None,
         virtual_nn_exprs: None,
         router: None,
         leaf_indexes: Vec::new(),
         leaf_checks: Vec::new(),
         leaf_virtual_nn: Vec::new(),
+        leaf_trigdesc: Vec::new(),
+        leaf_trig_fmgr: Vec::new(),
+        leaf_trig_when: Vec::new(),
         merge,
     })
 }
@@ -750,6 +780,46 @@ pub fn exec_modify_table<'mcx>(
     Ok(None)
 }
 
+// ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols; extraUpdatedCols
+// would come from generated columns, whose interplay with UPDATE OF is loud.
+fn ensure_all_updated_cols<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
+    if mt.all_updated_cols.is_some() {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let rte = estate.es_range_table[(mt.result_rti - 1) as usize];
+    let mut cols = types_nodes::Bitmapset::empty();
+    if rte.perminfoindex > 0 {
+        let pis = estate.es_rteperminfos.expect("result RTE carries a perminfo");
+        let pi = pis
+            .nth(rte.perminfoindex as usize - 1)
+            .as_rte_permission_info()
+            .expect("permInfos cell");
+        cols = pi.updatedCols.clone_in(mcx)?;
+    }
+    {
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        if rel
+            .rd_att
+            .constr
+            .as_ref()
+            .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
+        {
+            panic!(
+                "ExecGetAllUpdatedCols (execUtils.c): extraUpdatedCols over \
+                 generated columns unported (UPDATE OF trigger interplay)"
+            );
+        }
+    }
+    mt.all_updated_cols = Some(cols);
+    Ok(())
+}
+
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
 // DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
 // first); MERGE fires per present subcommand.
@@ -782,17 +852,36 @@ fn fire_as_triggers<'mcx>(
         return Ok(());
     };
     let (ins, upd, del) = stmt_trigger_ops(mt, false);
-    let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+    if upd && td.triggers.iter().any(|t| t.tgnattr > 0) {
+        ensure_all_updated_cols(mt, estate)?;
+    }
+    let mcx = estate.es_query_cxt;
+    let result_rti = mt.result_rti;
+    let ModifyTableState {
+        trig_when, transition_capture, oc_transition_capture, all_updated_cols, ..
+    } = mt;
+    let rel = estate.es_relations[(result_rti - 1) as usize]
         .as_ref()
         .expect("result relation opened");
+    let tc = transition_capture.as_ref();
     if del {
-        ::trigger::ExecASDeleteTriggers(rel, &td)?;
+        let mut when =
+            ::trigger::TriggerWhenEval { mcx, cache: trig_when, modified_cols: None };
+        ::trigger::ExecASDeleteTriggers(rel, &td, tc, Some(&mut when))?;
     }
     if upd {
-        ::trigger::ExecASUpdateTriggers(rel, &td)?;
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx,
+            cache: trig_when,
+            modified_cols: all_updated_cols.as_ref(),
+        };
+        let oc = oc_transition_capture.as_ref();
+        ::trigger::ExecASUpdateTriggers(rel, &td, if oc.is_some() { oc } else { tc }, Some(&mut when))?;
     }
     if ins {
-        ::trigger::ExecASInsertTriggers(rel, &td)?;
+        let mut when =
+            ::trigger::TriggerWhenEval { mcx, cache: trig_when, modified_cols: None };
+        ::trigger::ExecASInsertTriggers(rel, &td, tc, Some(&mut when))?;
     }
     Ok(())
 }
@@ -856,6 +945,11 @@ fn exec_bs_triggers<'mcx>(
     if ::trigger::before_stmt_triggers_fired(relid, event_op) {
         return Ok(());
     }
+    if event_op == types_trigger::TRIGGER_EVENT_UPDATE
+        && trigdesc.triggers.iter().any(|t| t.tgnattr > 0)
+    {
+        ensure_all_updated_cols(mt, estate)?;
+    }
     let mcx = estate.es_query_cxt;
     let tg_event = event_op | TRIGGER_EVENT_BEFORE;
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
@@ -868,10 +962,17 @@ fn exec_bs_triggers<'mcx>(
             continue;
         }
         if trigger.tgnattr > 0 || trigger.tgqual.is_some() {
-            panic!(
-                "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
-                 unported on the BEFORE STATEMENT path"
-            );
+            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let mut when = ::trigger::TriggerWhenEval {
+                mcx,
+                cache: &mut mt.trig_when,
+                modified_cols: mt.all_updated_cols.as_ref(),
+            };
+            if !when.check(i, trigger, rel, tg_event, None, None)? {
+                continue;
+            }
         }
         let ret = {
             let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
@@ -1265,15 +1366,40 @@ fn merge_update_act<'mcx>(
             )?;
         }
     }
-    if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
+    let ar_new_tid = slot.base().tts_tid;
+    if let Some(td) = mt.trigdesc.clone() {
+        if td.triggers.iter().any(|t| t.tgnattr > 0) {
+            ensure_all_updated_cols(mt, estate)?;
+        }
+        let result_rti = mt.result_rti;
+        let ModifyTableState {
+            trig_when, all_updated_cols, transition_capture, oc_transition_capture, operation, ..
+        } = mt;
+        // ON CONFLICT DO UPDATE (operation == INSERT) captures into the
+        // UPDATE tables via mt_oc_transition_capture (C ExecOnConflictUpdate).
+        let tc = if *operation == CmdType::CMD_INSERT {
+            oc_transition_capture.as_ref()
+        } else {
+            transition_capture.as_ref()
+        };
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx,
+            cache: trig_when,
+            modified_cols: all_updated_cols.as_ref(),
+        };
+        let rel = estate.es_relations[(result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        ::trigger::ExecARUpdateTriggers(
+            mcx, rel, &td, *tupleid, ar_new_tid, &recheck_indexes, tc, Some(&mut when),
+        )?;
     }
     Ok(TM_Result::TM_Ok)
 }
 
 // ExecDeleteAct + ExecDeleteEpilogue for a MERGE DELETE action.
 fn merge_delete_act<'mcx>(
-    mt: &ModifyTableState<'mcx>,
+    mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &ItemPointerData,
     tmfd: &mut TM_FailureData,
@@ -1293,12 +1419,21 @@ fn merge_delete_act<'mcx>(
     if result != TM_Result::TM_Ok {
         return Ok(result);
     }
-    if let Some(td) = &mt.trigdesc {
+    if let Some(td) = mt.trigdesc.clone() {
+        let result_rti = mt.result_rti;
+        let ModifyTableState { trig_when, transition_capture, .. } = mt;
         let EStateData { es_relations, es_query_cxt, .. } = &*estate;
-        let rel = es_relations[(mt.result_rti - 1) as usize]
+        let rel = es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        ::trigger::ExecARDeleteTriggers(*es_query_cxt, rel, td, *tupleid)?;
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx: *es_query_cxt,
+            cache: trig_when,
+            modified_cols: None,
+        };
+        ::trigger::ExecARDeleteTriggers(
+            *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
+        )?;
     }
     Ok(TM_Result::TM_Ok)
 }
@@ -1764,6 +1899,7 @@ fn exec_update<'mcx>(
             types_trigger::TRIGGER_EVENT_UPDATE,
             Some(old_slot),
             Some(slot_id),
+            None,
         )? {
             return Ok(false);
         }
@@ -1917,8 +2053,33 @@ fn exec_update<'mcx>(
         }
     }
 
-    if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
+    let ar_new_tid = slot.base().tts_tid;
+    if let Some(td) = mt.trigdesc.clone() {
+        if td.triggers.iter().any(|t| t.tgnattr > 0) {
+            ensure_all_updated_cols(mt, estate)?;
+        }
+        let result_rti = mt.result_rti;
+        let ModifyTableState {
+            trig_when, all_updated_cols, transition_capture, oc_transition_capture, operation, ..
+        } = mt;
+        // ON CONFLICT DO UPDATE (operation == INSERT) captures into the
+        // UPDATE tables via mt_oc_transition_capture (C ExecOnConflictUpdate).
+        let tc = if *operation == CmdType::CMD_INSERT {
+            oc_transition_capture.as_ref()
+        } else {
+            transition_capture.as_ref()
+        };
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx,
+            cache: trig_when,
+            modified_cols: all_updated_cols.as_ref(),
+        };
+        let rel = estate.es_relations[(result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        ::trigger::ExecARUpdateTriggers(
+            mcx, rel, &td, *tupleid, ar_new_tid, &recheck_indexes, tc, Some(&mut when),
+        )?;
     }
 
     if mt.canSetTag {
@@ -1948,6 +2109,7 @@ fn exec_delete<'mcx>(
             types_trigger::TRIGGER_TYPE_DELETE,
             types_trigger::TRIGGER_EVENT_DELETE,
             Some(old_slot),
+            None,
             None,
         )? {
             return Ok(false);
@@ -2043,12 +2205,21 @@ fn exec_delete<'mcx>(
         }
     }
 
-    if let Some(td) = &mt.trigdesc {
+    if let Some(td) = mt.trigdesc.clone() {
+        let result_rti = mt.result_rti;
+        let ModifyTableState { trig_when, transition_capture, .. } = mt;
         let EStateData { es_relations, es_query_cxt, .. } = &*estate;
-        let rel = es_relations[(mt.result_rti - 1) as usize]
+        let rel = es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        ::trigger::ExecARDeleteTriggers(*es_query_cxt, rel, td, *tupleid)?;
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx: *es_query_cxt,
+            cache: trig_when,
+            modified_cols: None,
+        };
+        ::trigger::ExecARDeleteTriggers(
+            *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
+        )?;
     }
 
     if mt.canSetTag {
@@ -2133,8 +2304,9 @@ fn br_row_triggers<'mcx>(
     event_op: u32,
     old_slot: Option<ExecSlotId>,
     new_slot: Option<ExecSlotId>,
+    leaf: Option<usize>,
 ) -> PgResult<bool> {
-    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, false)
+    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, false, leaf)
 }
 
 // ExecIR{Insert,Update,Delete}Triggers (trigger.c): same protocol as BEFORE
@@ -2147,7 +2319,7 @@ fn ir_row_triggers<'mcx>(
     old_slot: Option<ExecSlotId>,
     new_slot: Option<ExecSlotId>,
 ) -> PgResult<bool> {
-    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, true)
+    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, true, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2159,6 +2331,7 @@ fn row_triggers_common<'mcx>(
     old_slot: Option<ExecSlotId>,
     new_slot: Option<ExecSlotId>,
     instead: bool,
+    leaf: Option<usize>,
 ) -> PgResult<bool> {
     use types_trigger::{
         TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSTEAD, TRIGGER_EVENT_ROW,
@@ -2174,7 +2347,13 @@ fn row_triggers_common<'mcx>(
         Some(id) => Some(slot_raw_tuple(estate, id)?),
         None => None,
     };
-    let trigdesc = mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone();
+    let trigdesc = match leaf {
+        None => mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone(),
+        Some(ix) => mt.leaf_trigdesc[ix]
+            .clone()
+            .flatten()
+            .expect("leaf BR caller checked trigdesc"),
+    };
     let (type_timing, event_timing) = if instead {
         (TRIGGER_TYPE_INSTEAD, TRIGGER_EVENT_INSTEAD)
     } else {
@@ -2182,6 +2361,11 @@ fn row_triggers_common<'mcx>(
     };
     let tg_event = event_op | TRIGGER_EVENT_ROW | event_timing;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
+    if event_op == types_trigger::TRIGGER_EVENT_UPDATE
+        && trigdesc.triggers.iter().any(|t| t.tgnattr > 0)
+    {
+        ensure_all_updated_cols(mt, estate)?;
+    }
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
             != TRIGGER_TYPE_ROW | type_timing | tgtype_event
@@ -2191,12 +2375,6 @@ fn row_triggers_common<'mcx>(
         if !::trigger::TriggerEnabled(trigger) {
             continue;
         }
-        if trigger.tgnattr > 0 || trigger.tgqual.is_some() {
-            panic!(
-                "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
-                 unported on the BEFORE ROW path"
-            );
-        }
         // SAFETY (both): materialized query-context images; the slots are not
         // written while these handles live within this iteration.
         let mut old_t = raw_old.map(|(img, len, tid, oid)| unsafe {
@@ -2205,6 +2383,28 @@ fn row_triggers_common<'mcx>(
         let mut new_t = raw_new.map(|(img, len, tid, oid)| unsafe {
             types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
         });
+        if trigger.tgnattr > 0 || trigger.tgqual.is_some() {
+            let (rel, cache) = match leaf {
+                None => (
+                    estate.es_relations[(mt.result_rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened"),
+                    &mut mt.trig_when,
+                ),
+                Some(ix) => (
+                    mt.router.as_ref().expect("routed insert has a router").leaf_rel(ix),
+                    &mut mt.leaf_trig_when[ix],
+                ),
+            };
+            let mut when = ::trigger::TriggerWhenEval {
+                mcx,
+                cache,
+                modified_cols: mt.all_updated_cols.as_ref(),
+            };
+            if !when.check_tuples(i, trigger, rel, tg_event, old_t.as_ref(), new_t.as_ref())? {
+                continue;
+            }
+        }
         // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE
         // carries old in tg_trigtuple and new in tg_newtuple.
         let old_nn = old_t.as_mut().map(core::ptr::NonNull::from);
@@ -2213,10 +2413,18 @@ fn row_triggers_common<'mcx>(
             if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
         let expected = if newtup_nn.is_some() { newtup_nn } else { trig_nn };
         let ret = {
-            let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
-            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
-                .as_ref()
-                .expect("result relation opened");
+            let finfo = match leaf {
+                None => mt.trig_fmgr.get(i, trigger.tgfoid)?,
+                Some(ix) => mt.leaf_trig_fmgr[ix].get(i, trigger.tgfoid)?,
+            };
+            let rel = match leaf {
+                None => estate.es_relations[(mt.result_rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened"),
+                Some(ix) => {
+                    mt.router.as_ref().expect("routed insert has a router").leaf_rel(ix)
+                }
+            };
             let mut tdata = types_trigger_call::TriggerData::from_raw(
                 tg_event, rel, trig_nn, newtup_nn, trigger,
             );
@@ -2439,6 +2647,74 @@ enum OnConflictOutcome {
 // arms. Returns the slot RETURNING should project from, or None when the row
 // was consumed without producing one (DO NOTHING, or a DO UPDATE whose WHERE
 // filtered). Row triggers are undetectable (no TrigDesc yet).
+fn resolve_leaf_trigdesc<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    idx: usize,
+) -> PgResult<Option<Rc<types_trigger::TriggerDesc<'static>>>> {
+    while mt.leaf_trigdesc.len() <= idx {
+        mt.leaf_trigdesc.push(None);
+        mt.leaf_trig_fmgr.push(::trigger::TriggerFmgrCache::default());
+        mt.leaf_trig_when.push(::trigger::TriggerWhenCache::default());
+    }
+    if mt.leaf_trigdesc[idx].is_none() {
+        let rel = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+        let td = if rel.rd_hastriggers {
+            relcache::RelationGetTriggerDesc(rel.rd_id)?
+        } else {
+            None
+        };
+        mt.leaf_trigdesc[idx] = Some(td);
+    }
+    Ok(mt.leaf_trigdesc[idx].clone().expect("just resolved"))
+}
+
+// The ExecARInsertTriggers call of ExecInsert: routed inserts fire the leaf's
+// (cloned) triggers with the leaf relation (C: resultRelInfo is the leaf);
+// transition capture always uses the root's state.
+fn ar_insert_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    recheck_indexes: &[Oid],
+    leaf: Option<usize>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let td = match leaf {
+        None => mt.trigdesc.clone(),
+        Some(ix) => resolve_leaf_trigdesc(mt, ix)?,
+    };
+    if td.is_none() && mt.transition_capture.is_none() {
+        return Ok(());
+    }
+    let new_tid = estate.es_tupleTable[slot_id.0 as usize].base().tts_tid;
+    let result_rti = mt.result_rti;
+    let ModifyTableState {
+        trig_when, leaf_trig_when, transition_capture, router, ..
+    } = mt;
+    let (rel, cache) = match leaf {
+        None => (
+            estate.es_relations[(result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+            trig_when,
+        ),
+        Some(ix) => (
+            router.as_ref().expect("routed insert has a router").leaf_rel(ix),
+            &mut leaf_trig_when[ix],
+        ),
+    };
+    let mut when = ::trigger::TriggerWhenEval { mcx, cache, modified_cols: None };
+    ::trigger::ExecARInsertTriggers(
+        mcx,
+        rel,
+        td.as_deref(),
+        new_tid,
+        recheck_indexes,
+        transition_capture.as_ref(),
+        Some(&mut when),
+    )
+}
+
 fn exec_insert<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -2467,7 +2743,10 @@ fn exec_insert<'mcx>(
         return Ok(Some(slot_id));
     }
 
-    if mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row) {
+    let partitioned_target = mt.result_relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    if !partitioned_target
+        && mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row)
+    {
         if !br_row_triggers(
             mt,
             estate,
@@ -2475,6 +2754,7 @@ fn exec_insert<'mcx>(
             types_trigger::TRIGGER_EVENT_INSERT,
             None,
             Some(slot_id),
+            None,
         )? {
             return Ok(None);
         }
@@ -2511,6 +2791,24 @@ fn exec_insert<'mcx>(
             None
         }
     };
+
+    // C fires BR INSERT on the routed leaf's ResultRelInfo (cloned triggers).
+    if let Some(idx) = leaf_idx {
+        let td = resolve_leaf_trigdesc(mt, idx)?;
+        if td.is_some_and(|t| t.trig_insert_before_row)
+            && !br_row_triggers(
+                mt,
+                estate,
+                types_trigger::TRIGGER_TYPE_INSERT,
+                types_trigger::TRIGGER_EVENT_INSERT,
+                None,
+                Some(slot_id),
+                Some(idx),
+            )?
+        {
+            return Ok(None);
+        }
+    }
 
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
@@ -2682,14 +2980,8 @@ fn exec_insert<'mcx>(
         }
     }
 
-    if let Some(td) = &mt.trigdesc {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let rel = es_relations[(mt.result_rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let slot = &es_tupleTable[slot_id.0 as usize];
-        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid, &recheck_indexes)?;
-    }
+    let ar_leaf = leaf_idx;
+    ar_insert_triggers(mt, estate, slot_id, &recheck_indexes, ar_leaf)?;
 
     if mt.canSetTag {
         estate.es_processed += 1;
@@ -3474,5 +3766,7 @@ mcx::forget_safe_struct!(
         operation, indexes, snapshot_any, project_returning, on_conflict,
         check_exprs, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
         virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn,
+        leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when, trig_when,
+        transition_capture, oc_transition_capture, all_updated_cols,
         index_eval_cx, wco_exprs, merge },
 );

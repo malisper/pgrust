@@ -9,6 +9,9 @@ name = "spi"
 path = "src/lib.rs"
 
 [dependencies]
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
 spi_seams = { path = "../spi_seams" }
 datum = { path = "../../../_support/types/datum" }
 mcx = { path = "../../../_support/mcx" }

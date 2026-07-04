@@ -533,7 +533,7 @@ pub fn DefineRelation<'mcx>(
     }
 
     // Create in the new partition every index (and index-backed constraint)
-    // the parent carries; triggers and FKs have no cloning lane yet.
+    // and row trigger the parent carries; FKs have no cloning lane yet.
     if let Some(parent_oid) = parent_oid {
         let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
         let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
@@ -559,7 +559,7 @@ pub fn DefineRelation<'mcx>(
             indexam::index_close(idx_rel, types_rel::AccessShareLock)?;
         }
         if parent.rd_hastriggers {
-            unported("CloneRowTriggersToPartition");
+            partition::CloneRowTriggersToPartition(mcx, &parent, &rel)?;
         }
         if rel_has_fk_constraints(mcx, parent_oid)? {
             unported("CloneForeignKeyConstraints onto new partitions");

@@ -103,6 +103,7 @@ pub const RTE_FUNCTION: RTEKind = 3;
 pub const RTE_TABLEFUNC: RTEKind = 4;
 pub const RTE_VALUES: RTEKind = 5;
 pub const RTE_CTE: RTEKind = 6;
+pub const RTE_NAMEDTUPLESTORE: RTEKind = 7;
 
 pub type RelOptKind = u32;
 pub const RELOPT_BASEREL: RelOptKind = 0;

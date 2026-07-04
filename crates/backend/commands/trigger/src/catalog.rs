@@ -1,8 +1,8 @@
-// CreateTriggerFiringOn (trigger.c), plain-table lane: user CREATE
-// [CONSTRAINT] TRIGGER (incl. OR REPLACE, UPDATE OF columns, WHEN, trigger
-// args, transition-table names) and the internal RI constraint-trigger
-// callers. LOUD: triggers on views/foreign/partitioned rels, non-superuser
-// ACL walks, non-pinned functions in WHEN expressions.
+// CreateTriggerFiringOn (trigger.c): user CREATE [CONSTRAINT] TRIGGER (incl.
+// OR REPLACE, UPDATE OF columns, WHEN, trigger args, transition-table names,
+// partitioned-table recursion with tgparentid clones) and the internal RI
+// constraint-trigger callers. LOUD: non-superuser ACL walks, non-pinned
+// functions in WHEN expressions, non-identity partition attribute maps.
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use nodes_core::{expression_tree_walker, NodeWalker};
@@ -21,7 +21,8 @@ use types_nodes::primnodes::{Alias, Var};
 use types_nodes::rawnodes::CreateTrigStmt;
 use types_nodes::{Node, NodeList, NodeTag};
 use types_rel::{
-    AccessShareLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, RELKIND_RELATION,
+    AccessShareLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock,
+    RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_trigger::{
@@ -105,13 +106,16 @@ pub fn CreateTriggerInternal<'mcx>(
         args.constraint_oid,
         args.index_oid,
         args.funcoid,
+        InvalidOid,
+        None,
         true,
+        false,
         TRIGGER_FIRES_ON_ORIGIN,
     )
 }
 
 // errdetail_relkind_not_supported (pg_class.c), triggerable-rel error slice.
-fn relkind_not_supported_detail(relkind: u8) -> &'static str {
+pub(crate) fn relkind_not_supported_detail(relkind: u8) -> &'static str {
     match relkind {
         b'S' => "This operation is not supported for sequences.",
         b't' => "This operation is not supported for TOAST tables.",
@@ -132,7 +136,10 @@ pub fn CreateTriggerFiringOn<'mcx>(
     mut constraint_oid: Oid,
     index_oid: Oid,
     mut funcoid: Oid,
+    parent_trigger_oid: Oid,
+    when_clause: Option<Node<'mcx>>,
     is_internal: bool,
+    in_partition: bool,
     fires_when: i8,
 ) -> PgResult<Oid> {
     let trigname_given = stmt.trigname.expect("CreateTrigStmt.trigname");
@@ -153,6 +160,27 @@ pub fn CreateTriggerFiringOn<'mcx>(
                 ));
             }
         }
+        RELKIND_PARTITIONED_TABLE => {
+            if stmt.timing != TRIGGER_TYPE_BEFORE && stmt.timing != TRIGGER_TYPE_AFTER {
+                return Err(Box::new(
+                    (*err(format!("\"{relname}\" is a table"), ERRCODE_WRONG_OBJECT_TYPE))
+                        .with_detail("Tables cannot have INSTEAD OF triggers.".to_string()),
+                ));
+            }
+            if stmt.row && !stmt.transitionRels.is_nil() {
+                return Err(Box::new(
+                    (*err(
+                        format!("\"{relname}\" is a partitioned table"),
+                        ERRCODE_FEATURE_NOT_SUPPORTED,
+                    ))
+                    .with_detail(
+                        "ROW triggers with transition tables are not supported on partitioned \
+                         tables."
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
         b'v' => {
             if stmt.timing != TRIGGER_TYPE_INSTEAD && stmt.row {
                 return Err(Box::new(
@@ -170,7 +198,26 @@ pub fn CreateTriggerFiringOn<'mcx>(
                 ));
             }
         }
-        b'p' | b'f' => unported("triggers on partitioned/foreign relations"),
+        RELKIND_FOREIGN_TABLE => {
+            if stmt.timing != TRIGGER_TYPE_BEFORE && stmt.timing != TRIGGER_TYPE_AFTER {
+                return Err(Box::new(
+                    (*err(
+                        format!("\"{relname}\" is a foreign table"),
+                        ERRCODE_WRONG_OBJECT_TYPE,
+                    ))
+                    .with_detail("Foreign tables cannot have INSTEAD OF triggers.".to_string()),
+                ));
+            }
+            if stmt.isconstraint {
+                return Err(Box::new(
+                    (*err(
+                        format!("\"{relname}\" is a foreign table"),
+                        ERRCODE_WRONG_OBJECT_TYPE,
+                    ))
+                    .with_detail("Foreign tables cannot have constraint triggers.".to_string()),
+                ));
+            }
+        }
         other => {
             return Err(Box::new(
                 (*err(
@@ -205,6 +252,12 @@ pub fn CreateTriggerFiringOn<'mcx>(
     // path (aclchk role walk unported; DefineIndex precedent).
     if !is_internal && !superuser::superuser_arg(miscinit::GetUserId())? {
         unported("pg_class_aclcheck ACL_TRIGGER for non-superusers");
+    }
+
+    let partition_recurse =
+        !is_internal && stmt.row && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
+    if partition_recurse {
+        pg_inherits::find_all_inheritors(mcx, rel.rd_id, ShareRowExclusiveLock)?;
     }
 
     let mut tgtype: i16 = 0;
@@ -242,11 +295,18 @@ pub fn CreateTriggerFiringOn<'mcx>(
         }
     }
 
-    let (oldtablename, newtablename) = validate_transition_rels(stmt, tgtype)?;
+    let (oldtablename, newtablename) = validate_transition_rels(mcx, stmt, &rel, tgtype)?;
 
-    let (qual, when_vars) = match stmt.whenClause {
-        Some(when) => transform_when_clause(mcx, &rel, when, tgtype, query_string)?,
-        None => (None, NodeList::nil()),
+    let (when_node, qual, when_vars) = match when_clause {
+        Some(w) => (Some(w), Some(outfuncs::nodeToString(mcx, w)?), NodeList::nil()),
+        None => match stmt.whenClause {
+            Some(when) => {
+                let (node, qual, vars) =
+                    transform_when_clause(mcx, &rel, when, tgtype, query_string)?;
+                (Some(node), Some(qual), vars)
+            }
+            None => (None, None, NodeList::nil()),
+        },
     };
 
     if funcoid == InvalidOid {
@@ -324,7 +384,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
                     ERRCODE_DUPLICATE_OBJECT,
                 ));
             }
-            if existing_int || existing_clone {
+            if (existing_int || existing_clone) && !is_internal && !in_partition {
                 return Err(err(
                     format!(
                         "trigger \"{trigname_given}\" for relation \"{relname}\" is an internal \
@@ -377,7 +437,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
     let (tgnargs, tgargs) = build_args(mcx, &stmt.args)?;
     values[0] = Datum::from_oid(trigoid);
     values[1] = Datum::from_oid(rel.rd_id);
-    values[2] = Datum::from_oid(InvalidOid);
+    values[2] = Datum::from_oid(parent_trigger_oid);
     values[3] = Datum::from_usize(cname.as_ptr() as usize);
     values[4] = Datum::from_oid(funcoid);
     values[5] = Datum::from_i16(tgtype);
@@ -467,6 +527,20 @@ pub fn CreateTriggerFiringOn<'mcx>(
                 DependencyType::Internal,
             )?;
         }
+        if parent_trigger_oid != InvalidOid {
+            pg_depend::recordDependencyOn(
+                mcx,
+                &myself,
+                &ObjectAddress::set(TRIGGER_RELATION_ID, parent_trigger_oid),
+                DependencyType::PartitionPri,
+            )?;
+            pg_depend::recordDependencyOn(
+                mcx,
+                &myself,
+                &ObjectAddress::set(RELATION_RELATION_ID, rel.rd_id),
+                DependencyType::PartitionSec,
+            )?;
+        }
     }
 
     for &attnum in columns.iter() {
@@ -480,8 +554,79 @@ pub fn CreateTriggerFiringOn<'mcx>(
 
     record_when_dependencies(mcx, &myself, rel.rd_id, &when_vars)?;
 
+    if partition_recurse {
+        let partdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;
+        debug_assert!(index_oid == InvalidOid);
+        for i in 0..partdesc.nparts {
+            let child_oid = partdesc.oids[i];
+            let child = table::table_open(mcx, child_oid, ShareRowExclusiveLock)?;
+            let child_qual = match when_node {
+                Some(q) => Some(map_partition_qual(mcx, q, &child, &rel)?),
+                None => None,
+            };
+            let child_stmt = CreateTrigStmt {
+                replace: stmt.replace,
+                isconstraint: stmt.isconstraint,
+                trigname: stmt.trigname,
+                relation: None,
+                funcname: NodeList::nil(),
+                args: stmt.args.clone_in(mcx)?,
+                row: stmt.row,
+                timing: stmt.timing,
+                events: stmt.events,
+                columns: stmt.columns.clone_in(mcx)?,
+                whenClause: None,
+                transitionRels: NodeList::nil(),
+                deferrable: stmt.deferrable,
+                initdeferred: stmt.initdeferred,
+                constrrel: stmt.constrrel,
+            };
+            CreateTriggerFiringOn(
+                mcx,
+                &child_stmt,
+                query_string,
+                child_oid,
+                ref_rel_oid,
+                InvalidOid,
+                InvalidOid,
+                funcoid,
+                trigoid,
+                child_qual,
+                is_internal,
+                true,
+                fires_when,
+            )?;
+            child.close(NoLock)?;
+        }
+    }
+
     rel.close(NoLock)?;
     Ok(trigoid)
+}
+
+// map_partition_varattnos (catalog/partition.c) shim: passes the qual through
+// unchanged when the name-built attribute map is the identity and no
+// whole-row Var needs a ConvertRowtypeExpr wrap; everything else is loud.
+pub fn map_partition_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    qual: Node<'mcx>,
+    child: &Relation<'mcx>,
+    parent: &Relation<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let vars = vars::pull_var_clause(mcx, qual, 0)?;
+    for v in vars.iter() {
+        let var = v.as_variant::<Var>().expect("pull_var_clause Var");
+        if var.varattno == 0 {
+            unported("map_partition_varattnos whole-row Var (ConvertRowtypeExpr)");
+        }
+    }
+    let attmap = tupdesc::build_attrmap_by_name(mcx, child.descr(), parent.descr())?;
+    let identity = child.rd_att.natts == parent.rd_att.natts
+        && attmap.iter().enumerate().all(|(i, &a)| a as usize == i + 1);
+    if !identity {
+        unported("map_partition_varattnos non-identity attribute map");
+    }
+    Ok(qual)
 }
 
 fn to_rangevar<'a>(rv: &'a types_nodes::primnodes::RangeVar<'a>) -> rel_vocab::RangeVar<'a> {
@@ -496,7 +641,9 @@ fn to_rangevar<'a>(rv: &'a types_nodes::primnodes::RangeVar<'a>) -> rel_vocab::R
 }
 
 fn validate_transition_rels<'mcx>(
+    mcx: Mcx<'mcx>,
     stmt: &CreateTrigStmt<'mcx>,
+    rel: &Relation<'mcx>,
     tgtype: i16,
 ) -> PgResult<(Option<&'mcx str>, Option<&'mcx str>)> {
     let mut oldtablename: Option<&'mcx str> = None;
@@ -513,6 +660,31 @@ fn validate_transition_rels<'mcx>(
                 ))
                 .with_hint("Use OLD TABLE or NEW TABLE for naming transition tables.".to_string()),
             ));
+        }
+        if rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+            return Err(Box::new(
+                (*err(
+                    format!("\"{}\" is a foreign table", rel.name()),
+                    ERRCODE_WRONG_OBJECT_TYPE,
+                ))
+                .with_detail(
+                    "Triggers on foreign tables cannot have transition tables.".to_string(),
+                ),
+            ));
+        }
+        if rel.rd_rel.relkind == b'v' {
+            return Err(Box::new(
+                (*err(format!("\"{}\" is a view", rel.name()), ERRCODE_WRONG_OBJECT_TYPE))
+                    .with_detail("Triggers on views cannot have transition tables.".to_string()),
+            ));
+        }
+        if tgtype & TRIGGER_TYPE_ROW != 0 && pg_inherits::has_superclass(mcx, rel.rd_id)? {
+            let msg = if rel.rd_rel.relispartition {
+                "ROW triggers with transition tables are not supported on partitions"
+            } else {
+                "ROW triggers with transition tables are not supported on inheritance children"
+            };
+            return Err(err(msg.to_string(), ERRCODE_FEATURE_NOT_SUPPORTED));
         }
         if stmt.timing != TRIGGER_TYPE_AFTER {
             return Err(err(
@@ -595,9 +767,18 @@ impl<'mcx> NodeWalker<'mcx> for WhenFuncGuard {
             }
         };
         match node.node_tag() {
-            NodeTag::T_OpExpr | NodeTag::T_DistinctExpr | NodeTag::T_NullIfExpr => {
+            NodeTag::T_OpExpr => {
                 let op = node.as_variant::<types_nodes::primnodes::OpExpr>().expect("OpExpr");
                 check(op.opno);
+            }
+            NodeTag::T_DistinctExpr => {
+                let op = node
+                    .as_variant::<types_nodes::primnodes::DistinctExpr>()
+                    .expect("DistinctExpr");
+                check(op.opno);
+            }
+            NodeTag::T_NullIfExpr => {
+                panic!("WhenFuncGuard: T_NullIfExpr node shape unported (no constructor exists)")
             }
             NodeTag::T_ScalarArrayOpExpr => {
                 let op = node
@@ -621,7 +802,7 @@ fn transform_when_clause<'mcx>(
     when: Node<'mcx>,
     tgtype: i16,
     query_string: Option<&str>,
-) -> PgResult<(Option<mcx::PgString<'mcx>>, NodeList<'mcx>)> {
+) -> PgResult<(Node<'mcx>, mcx::PgString<'mcx>, NodeList<'mcx>)> {
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     if let Some(s) = query_string {
         let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
@@ -677,7 +858,7 @@ fn transform_when_clause<'mcx>(
     WhenFuncGuard.visit(when_clause)?;
 
     let qual = outfuncs::nodeToString(mcx, when_clause)?;
-    Ok((Some(qual), vars))
+    Ok((when_clause, qual, vars))
 }
 
 #[cold]

@@ -17,6 +17,9 @@ pub struct TriggerData<'a, 'mcx> {
     pub tg_trigtuple: Option<NonNull<HeapTupleData<'a>>>,
     pub tg_newtuple: Option<NonNull<HeapTupleData<'a>>>,
     pub tg_trigger: &'a Trigger<'mcx>,
+    // TuplestoreHandle.0 for REFERENCING transition tables; 0 = C NULL.
+    pub tg_oldtable: u64,
+    pub tg_newtable: u64,
 }
 
 impl<'a, 'mcx> TriggerData<'a, 'mcx> {
@@ -34,6 +37,8 @@ impl<'a, 'mcx> TriggerData<'a, 'mcx> {
             tg_trigtuple: tg_trigtuple.map(|r| NonNull::from(r).cast()),
             tg_newtuple: tg_newtuple.map(|r| NonNull::from(r).cast()),
             tg_trigger,
+            tg_oldtable: 0,
+            tg_newtable: 0,
         }
     }
 
@@ -51,6 +56,8 @@ impl<'a, 'mcx> TriggerData<'a, 'mcx> {
             tg_trigtuple,
             tg_newtuple,
             tg_trigger,
+            tg_oldtable: 0,
+            tg_newtable: 0,
         }
     }
 

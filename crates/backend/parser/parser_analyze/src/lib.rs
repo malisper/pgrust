@@ -58,10 +58,9 @@ pub fn parse_analyze_fixedparams<'a, 'mcx>(
     }
 
     if !query_env.is_null() {
-        panic!(
-            "parse_analyze_fixedparams (analyze.c): QueryEnvHandle resolution unported \
-             (SPI/trigger transition tables) — unit backend-parser-analyze"
-        );
+        // SAFETY: the registrant keeps the environment alive across this
+        // parse (queryenvironment::hold contract).
+        pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
@@ -99,10 +98,8 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
     );
 
     if !query_env.is_null() {
-        panic!(
-            "parse_analyze_sql_fn (analyze.c): QueryEnvHandle resolution unported \
-             (SPI/trigger transition tables) — unit backend-parser-analyze"
-        );
+        // SAFETY: as parse_analyze_fixedparams.
+        pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
@@ -139,10 +136,8 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
     parser_small1::setup_parse_variable_parameters(&mut pstate, parstate.clone());
 
     if !query_env.is_null() {
-        panic!(
-            "parse_analyze_varparams (analyze.c): QueryEnvHandle resolution unported \
-             (SPI/trigger transition tables) — unit backend-parser-analyze"
-        );
+        // SAFETY: as parse_analyze_fixedparams.
+        pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
@@ -191,10 +186,8 @@ pub fn parse_analyze_plpgsql<'a, 'mcx>(
     pstate.p_ref_hook_state = parser_small1::ParseRefHookState::PlpgsqlParams(*hooks);
 
     if !query_env.is_null() {
-        panic!(
-            "parse_analyze_plpgsql (analyze.c): QueryEnvHandle resolution unported \
-             (SPI/trigger transition tables) — unit backend-parser-analyze"
-        );
+        // SAFETY: as parse_analyze_fixedparams.
+        pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;

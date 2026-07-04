@@ -86,6 +86,7 @@ pub(crate) struct SpiConnection {
     pub outer_processed: u64,
     pub outer_tuptable: Option<TuptabHandle>,
     pub outer_result: i32,
+    pub query_env: types_portal::QueryEnvHandle,
 }
 
 thread_local! {
@@ -179,6 +180,7 @@ pub fn SPI_connect_ext(options: i32) -> PgResult<i32> {
         outer_processed: SPI_processed(),
         outer_tuptable: SPI_tuptable(),
         outer_result: SPI_result(),
+        query_env: types_portal::QueryEnvHandle::NULL,
     };
     SPI_STACK.with(|s| s.borrow_mut().push(conn));
     sync_connected();
@@ -191,6 +193,7 @@ pub fn SPI_connect_ext(options: i32) -> PgResult<i32> {
 fn teardown_connection(conn: SpiConnection) {
     plan::free_connection_plans(&conn.plans);
     drop(conn.tuptables);
+    queryenvironment::hold::unregister(conn.query_env);
     reclaim_ctx(conn.exec_cxt);
     reclaim_ctx(conn.proc_cxt);
 }
@@ -356,8 +359,59 @@ pub fn SPI_cursor_find(name: &str) -> Option<cursor::SpiCursor> {
 
 pub use cursor::SPI_cursor_find_portal;
 
-pub fn SPI_register_trigger_data() -> ! {
-    panic!("SPI_register_trigger_data (spi.c): ENR/queryEnv lane not ported")
+pub(crate) fn current_query_env() -> types_portal::QueryEnvHandle {
+    with_current(|c| c.query_env).unwrap_or(types_portal::QueryEnvHandle::NULL)
+}
+
+// SPI_register_trigger_data (spi.c): expose REFERENCING transition tables as
+// ENRs in this connection's query environment.
+pub fn SPI_register_trigger_data(tdata: &types_trigger_call::TriggerData<'_, '_>) -> PgResult<i32> {
+    if SPI_STACK.with(|s| s.borrow().is_empty()) {
+        return Ok(SPI_ERROR_UNCONNECTED);
+    }
+    let h = with_current(|conn| {
+        if conn.query_env.is_null() {
+            let mcx = ctx_mcx(conn.proc_cxt);
+            conn.query_env =
+                queryenvironment::hold::register(queryenvironment::create_queryEnv(mcx));
+        }
+        conn.query_env
+    })
+    .expect("checked nonempty");
+    let relid = tdata.tg_relation.rd_id;
+    for (name, store) in [
+        (tdata.tg_trigger.tgoldtable.as_ref(), tdata.tg_oldtable),
+        (tdata.tg_trigger.tgnewtable.as_ref(), tdata.tg_newtable),
+    ] {
+        let Some(name) = name else { continue };
+        let store = types_portal::TuplestoreHandle(store);
+        if store.is_null() {
+            continue;
+        }
+        let enrtuples = tuplestore::hold::with_store(store, |ts| ts.tuple_count()) as f64;
+        let rc = queryenvironment::hold::with_env(h, |env| {
+            let mcx = *env.namedRelList.allocator();
+            let enr = queryenvironment::EphemeralNamedRelationData {
+                md: queryenvironment::EphemeralNamedRelationMetadataData {
+                    name: mcx::PgString::from_str_in(name.as_str(), mcx)?,
+                    reliddesc: relid,
+                    tupdesc: None,
+                    enrtype: queryenvironment::ENR_NAMED_TUPLESTORE,
+                    enrtuples,
+                },
+                reldata: store,
+            };
+            if queryenvironment::get_ENR(env, name.as_str()).is_some() {
+                return Ok(SPI_ERROR_REL_DUPLICATE);
+            }
+            queryenvironment::register_ENR(env, enr)?;
+            Ok::<i32, Box<types_error::PgError>>(SPI_OK_TD_REGISTER)
+        })?;
+        if rc != SPI_OK_TD_REGISTER {
+            return Ok(rc);
+        }
+    }
+    Ok(SPI_OK_TD_REGISTER)
 }
 
 pub fn init_seams() {
