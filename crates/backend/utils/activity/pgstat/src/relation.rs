@@ -341,9 +341,15 @@ fn timestamp_difference_milliseconds(
     stop: types_core::TimestampTz,
 ) -> PgStat_Counter {
     if start >= stop {
-        0
+        return 0;
+    }
+    let Some(diff) = stop.checked_sub(start) else {
+        return i32::MAX as PgStat_Counter;
+    };
+    if diff >= i32::MAX as i64 * 1000 - 999 {
+        i32::MAX as PgStat_Counter
     } else {
-        (stop - start + 999) / 1000
+        (diff + 999) / 1000
     }
 }
 
@@ -431,6 +437,7 @@ pub fn pgstat_report_analyze(
             tabentry.total_analyze_time += elapsedtime;
         }
     });
+    // C flushes IO stats here (pgstat_flush_io/pgstat_flush_backend): IO-stats lane.
 }
 
 pub fn pgstat_fetch_stat_tabentry(relid: Oid) -> Option<crate::shmem::PgStat_StatTabEntry> {
