@@ -5618,6 +5618,65 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(param));
             }
+            // aggr_arg / aggr_args (ordered-set form 1168 stays loud:
+            // makeOrderedSetArgs unported). aggr_args' C shape is
+            // (arglist, Integer numdirect); NIL rides as an empty List node.
+            1164 => {
+                let param = view.v(1).node().expect("func_arg");
+                let mode = param
+                    .as_variant::<FunctionParameter>()
+                    .expect("func_arg is FunctionParameter")
+                    .mode;
+                if !matches!(
+                    mode,
+                    FunctionParameterMode::FUNC_PARAM_DEFAULT
+                        | FunctionParameterMode::FUNC_PARAM_IN
+                        | FunctionParameterMode::FUNC_PARAM_VARIADIC
+                ) {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            "aggregates cannot have output arguments".into(),
+                            view.l(1),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                *yyval = YYSTYPE::Node(Some(param));
+            }
+            1169 => {
+                let el = view.v(1).node().expect("aggr_arg");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1170 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("aggr_arg"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1165..=1167 => {
+                let (args, numdirect) = match rule {
+                    1165 => (NodeList::nil(), -1),
+                    1166 => (view.v(2).list(), -1),
+                    _ => (view.v(4).list(), 0),
+                };
+                let mut pair = NodeList::make1(mcx, Node::mk_list(mcx, args)?)?;
+                pair.lappend(mcx, Node::mk_integer(mcx, numdirect)?)?;
+                *yyval = YYSTYPE::List(pair);
+            }
+            // aggregate_with_argtypes: func_name aggr_args
+            1171 => {
+                let pair = view.v(2).list();
+                let fargs = pair
+                    .first()
+                    .and_then(|n| n.as_list())
+                    .expect("aggr_args carries the arg list first");
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                owa.objname = view.v(1).list();
+                owa.objargs = extract_arg_types(mcx, fargs)?;
+                for cell in fargs {
+                    owa.objfuncargs.lappend(mcx, cell)?;
+                }
+                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
             // createfunc_opt_list
             1176 => {
                 let el = view.v(1).node().expect("createfunc_opt_item");
@@ -6286,16 +6345,69 @@ impl<'mcx> Parser<'mcx> {
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
             969 => *yyval = YYSTYPE::Boolean(true),
-            // CommentStmt TABLE/COLUMN arms (object forms 973-988 stay louds).
-            971 | 972 => {
+            // CommentStmt (TRANSFORM 984 parses; its address arm is loud).
+            971..=988 => {
                 let mut n = Node::build::<CommentStmt>(mcx)?;
-                n.objtype = if rule == 972 {
-                    ObjectType::OBJECT_COLUMN
-                } else {
-                    object_type(view.v(3).ival())
+                let comment_at = match rule {
+                    979 | 981 => 8,
+                    980 | 984..=986 => 9,
+                    987 => 7,
+                    988 => 10,
+                    _ => 6,
                 };
-                n.object = Some(Node::mk_list(mcx, view.v(4).list())?);
-                let c = view.v(6);
+                n.objtype = match rule {
+                    971 | 973 | 981 => object_type(view.v(3).ival()),
+                    972 => ObjectType::OBJECT_COLUMN,
+                    974 => ObjectType::OBJECT_TYPE,
+                    975 => ObjectType::OBJECT_DOMAIN,
+                    976 => ObjectType::OBJECT_AGGREGATE,
+                    977 => ObjectType::OBJECT_FUNCTION,
+                    978 => ObjectType::OBJECT_OPERATOR,
+                    979 => ObjectType::OBJECT_TABCONSTRAINT,
+                    980 => ObjectType::OBJECT_DOMCONSTRAINT,
+                    982 => ObjectType::OBJECT_PROCEDURE,
+                    983 => ObjectType::OBJECT_ROUTINE,
+                    984 => ObjectType::OBJECT_TRANSFORM,
+                    985 => ObjectType::OBJECT_OPCLASS,
+                    986 => ObjectType::OBJECT_OPFAMILY,
+                    987 => ObjectType::OBJECT_LARGEOBJECT,
+                    _ => ObjectType::OBJECT_CAST,
+                };
+                n.object = match rule {
+                    971 | 972 => Some(Node::mk_list(mcx, view.v(4).list())?),
+                    973 => Some(Node::mk_string(mcx, view.v(4).str_val())?),
+                    974..=978 | 982 | 983 => view.v(4).node(),
+                    979 | 981 => {
+                        let mut list = view.v(6).list();
+                        list.lappend(mcx, Node::mk_string(mcx, view.v(4).str_val())?)?;
+                        Some(Node::mk_list(mcx, list)?)
+                    }
+                    980 => {
+                        let tn = make_type_name(mcx, view.v(7).list(), NodeList::nil(), -1)?;
+                        let mut list = NodeList::make1(mcx, tn)?;
+                        list.lappend(mcx, Node::mk_string(mcx, view.v(4).str_val())?)?;
+                        Some(Node::mk_list(mcx, list)?)
+                    }
+                    984 => {
+                        let mut list =
+                            NodeList::make1(mcx, view.v(5).node().expect("Typename"))?;
+                        list.lappend(mcx, Node::mk_string(mcx, view.v(7).str_val())?)?;
+                        Some(Node::mk_list(mcx, list)?)
+                    }
+                    985 | 986 => {
+                        let mut list = view.v(5).list();
+                        list.lcons(mcx, Node::mk_string(mcx, view.v(7).str_val())?)?;
+                        Some(Node::mk_list(mcx, list)?)
+                    }
+                    987 => view.v(5).node(),
+                    _ => {
+                        let mut list =
+                            NodeList::make1(mcx, view.v(5).node().expect("Typename"))?;
+                        list.lappend(mcx, view.v(7).node().expect("Typename"))?;
+                        Some(Node::mk_list(mcx, list)?)
+                    }
+                };
+                let c = view.v(comment_at);
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }

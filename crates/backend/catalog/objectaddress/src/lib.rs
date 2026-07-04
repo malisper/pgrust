@@ -1,7 +1,7 @@
-// objectaddress.c, DROP-matrix slice: get_object_address over the object
-// classes with live DDL lanes (relations, columns, types/domains, schemas),
-// getObjectDescription/getObjectIdentity for the classes pg_depend can reach
-// from those; every other objtype/class is a named panic.
+// objectaddress.c: get_object_address over the object classes with live DDL
+// lanes (DROP matrix + COMMENT matrix unions), getObjectDescription/
+// getObjectIdentity for the classes pg_depend can reach; every other
+// objtype/class is a named panic.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -14,9 +14,10 @@ use mcx::Mcx;
 use rel_vocab::RangeVar;
 use types_core::primitive::OidIsValid;
 use types_core::{
-    InvalidOid, Oid, AUTH_ID_RELATION_ID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
-    NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID,
-    OPERATOR_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+    InvalidOid, Oid, AUTH_ID_RELATION_ID, CONSTRAINT_RELATION_ID, DATABASE_RELATION_ID,
+    EXTENSION_RELATION_ID, NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID,
+    OPERATOR_FAMILY_RELATION_ID, OPERATOR_RELATION_ID, RELATION_RELATION_ID,
+    TABLE_SPACE_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
@@ -33,8 +34,55 @@ use types_rel::{
 
 pub use pg_depend::ObjectAddress;
 
+pub const ProcedureRelationId: Oid = types_core::PROCEDURE_RELATION_ID;
+pub const ConstraintRelationId: Oid = 2606;
+pub const AttrDefaultRelationId: Oid = 2604;
+pub const RewriteRelationId: Oid = 2618;
+pub const TriggerRelationId: Oid = 2620;
+pub const PolicyRelationId: Oid = 3256;
+pub const EventTriggerRelationId: Oid = 3466;
+pub const CollationRelationId: Oid = 3456;
+pub const CastRelationId: Oid = 2605;
+pub const LargeObjectRelationId: Oid = 2613;
+
 pub fn init_seams() {
     objectaddress_seams::get_object_description::set(get_object_description_by_oids);
+    objectaddress_seams::get_object_address::set(get_object_address_marshal);
+    objectaddress_seams::check_object_ownership::set(check_object_ownership_marshal);
+}
+
+fn get_object_address_marshal<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    object: Node<'mcx>,
+    lockmode: LOCKMODE,
+    missing_ok: bool,
+) -> PgResult<(objectaddress_seams::ObjectAddr, Option<Relation<'mcx>>)> {
+    let (a, rel) = get_object_address(mcx, objtype, object, lockmode, missing_ok)?;
+    Ok((
+        objectaddress_seams::ObjectAddr {
+            classId: a.classId,
+            objectId: a.objectId,
+            objectSubId: a.objectSubId,
+        },
+        rel,
+    ))
+}
+
+fn check_object_ownership_marshal<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    objtype: ObjectType,
+    address: objectaddress_seams::ObjectAddr,
+    object: Node<'mcx>,
+) -> PgResult<()> {
+    check_object_ownership(
+        mcx,
+        roleid,
+        objtype,
+        ObjectAddress::sub_set(address.classId, address.objectId, address.objectSubId),
+        object,
+    )
 }
 
 fn get_object_description_by_oids(
@@ -47,14 +95,6 @@ fn get_object_description_by_oids(
     let object = ObjectAddress::sub_set(class_id, object_id, object_sub_id);
     getObjectDescription(mcx, &object, missing_ok)
 }
-
-pub const ProcedureRelationId: Oid = types_core::PROCEDURE_RELATION_ID;
-pub const ConstraintRelationId: Oid = 2606;
-pub const AttrDefaultRelationId: Oid = 2604;
-pub const RewriteRelationId: Oid = 2618;
-pub const TriggerRelationId: Oid = 2620;
-pub const PolicyRelationId: Oid = 3256;
-pub const EventTriggerRelationId: Oid = 3466;
 
 #[cold]
 #[inline(never)]
@@ -103,6 +143,7 @@ pub fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> 
         .collect();
     fill_range_var(&parts)
 }
+
 
 pub fn NameListToString(names: &NodeList<'_>) -> String {
     let mut out = String::new();
@@ -169,6 +210,7 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
     }
     Ok(typoid)
 }
+
 
 fn get_relation_by_qualified_name<'mcx>(
     mcx: Mcx<'mcx>,
@@ -263,6 +305,7 @@ fn get_object_address_attribute<'mcx>(
     ))
 }
 
+
 fn get_object_address_type(
     objtype: ObjectType,
     tn: &TypeName<'_>,
@@ -289,7 +332,10 @@ fn get_object_address_type(
     Ok(address)
 }
 
-fn get_object_address_unqualified(
+
+
+fn get_object_address_unqualified<'mcx>(
+    mcx: Mcx<'mcx>,
     objtype: ObjectType,
     object: Node<'_>,
     missing_ok: bool,
@@ -300,9 +346,21 @@ fn get_object_address_unqualified(
             NAMESPACE_RELATION_ID,
             catalog_namespace::get_namespace_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_DATABASE => Ok(ObjectAddress::set(
+            DATABASE_RELATION_ID,
+            dbcommands::get_database_oid(mcx, name, missing_ok)?,
+        )),
         ObjectType::OBJECT_EXTENSION => Ok(ObjectAddress::set(
             EXTENSION_RELATION_ID,
             extension::get_extension_oid(name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_TABLESPACE => Ok(ObjectAddress::set(
+            TABLE_SPACE_RELATION_ID,
+            commands_tablespace::get_tablespace_oid(mcx, name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_ROLE => Ok(ObjectAddress::set(
+            AUTH_ID_RELATION_ID,
+            adt_acl::get_role_oid(name, missing_ok)?,
         )),
         ObjectType::OBJECT_EVENT_TRIGGER => Ok(ObjectAddress::set(
             EventTriggerRelationId,
@@ -311,6 +369,7 @@ fn get_object_address_unqualified(
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
 }
+
 
 // get_event_trigger_oid (event_trigger.c); hosted here because event_trigger
 // depends on this crate for identity parts.
@@ -335,6 +394,7 @@ fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {
 
 // get_object_address_relobject (objectaddress.c), OBJECT_RULE arm; the
 // TRIGGER/POLICY/TABCONSTRAINT forms wait on their grammar lanes.
+
 fn get_object_address_relobject<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
@@ -342,51 +402,64 @@ fn get_object_address_relobject<'mcx>(
     missing_ok: bool,
 ) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
     let nnames = object.len();
+    let depname = object
+        .last()
+        .and_then(|n| n.as_string())
+        .expect("dependent object name is a String node")
+        .sval;
     if nnames < 2 {
         return Err(err(
             ERRCODE_SYNTAX_ERROR,
             "must specify relation and object name".into(),
         ));
     }
-    let depname = object
-        .last()
-        .and_then(|n| n.as_string())
-        .expect("dependent object name is a String node")
-        .sval;
-    let relparts: Vec<&'mcx str> = object
+    let parts: Vec<&'mcx str> = object
         .iter()
         .take(nnames - 1)
         .map(|n| n.as_string().expect("qualified name component is a String node").sval)
         .collect();
-    let rv = fill_range_var(&relparts);
-    let reloid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, missing_ok)?;
-    if !OidIsValid(reloid) {
-        debug_assert!(missing_ok);
-        let class_id = match objtype {
-            ObjectType::OBJECT_RULE => RewriteRelationId,
-            ObjectType::OBJECT_TRIGGER => TriggerRelationId,
-            other => unported(&format!("get_object_address_relobject {other:?}")),
-        };
-        return Ok((ObjectAddress::set(class_id, InvalidOid), None));
-    }
-    let relation = relation::relation_open(mcx, reloid, types_rel::NoLock)?;
-    let address = match objtype {
-        ObjectType::OBJECT_RULE => ObjectAddress::set(
+    let rv = fill_range_var(&parts);
+    let rel = table::table_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?;
+    let reloid = rel.as_ref().map(|r| r.rd_id).unwrap_or(InvalidOid);
+    let (classId, objectId) = match objtype {
+        ObjectType::OBJECT_RULE => (
             RewriteRelationId,
-            rewrite_define_seams::get_rewrite_oid::call(mcx, reloid, depname, missing_ok)?,
+            match &rel {
+                Some(_) => rewrite_define_seams::get_rewrite_oid::call(mcx, reloid, depname, missing_ok)?,
+                None => InvalidOid,
+            },
         ),
-        ObjectType::OBJECT_TRIGGER => ObjectAddress::set(
+        ObjectType::OBJECT_TRIGGER => (
             TriggerRelationId,
-            trigger::get_trigger_oid(mcx, reloid, depname, missing_ok)?,
+            match &rel {
+                Some(_) => trigger::get_trigger_oid(mcx, reloid, depname, missing_ok)?,
+                None => InvalidOid,
+            },
         ),
-        other => unported(&format!("get_object_address_relobject {other:?}")),
+        ObjectType::OBJECT_TABCONSTRAINT => (
+            CONSTRAINT_RELATION_ID,
+            match &rel {
+                Some(_) => {
+                    pg_constraint::get_relation_constraint_oid(mcx, reloid, depname, missing_ok)?
+                }
+                None => InvalidOid,
+            },
+        ),
+        ObjectType::OBJECT_POLICY => {
+            unported("get_object_address_relobject OBJECT_POLICY (rls lane)")
+        }
+        other => panic!("unrecognized object type: {other:?}"),
     };
+    let address = ObjectAddress::set(classId, objectId);
     if !OidIsValid(address.objectId) {
-        relation.close(types_rel::AccessShareLock)?;
+        if let Some(rel) = rel {
+            rel.close(types_rel::AccessShareLock)?;
+        }
         return Ok((address, None));
     }
-    Ok((address, Some(relation)))
+    Ok((address, rel))
 }
+
 
 // get_object_address_opcf (objectaddress.c).
 fn get_object_address_opcf<'mcx>(
@@ -417,6 +490,22 @@ fn get_object_address_opcf<'mcx>(
 
 // get_object_address (objectaddress.c). Returns the resolved address plus the
 // open relation for relation-attached objects; caller closes it.
+
+// oidparse (nodes/value.c): Integer directly; Float carries oids beyond
+// int32 range as their decimal image.
+fn oidparse(node: Node<'_>) -> Oid {
+    if let Some(i) = node.as_integer() {
+        return i.ival as Oid;
+    }
+    if let Some(f) = node.as_float() {
+        return f.fval.parse::<Oid>().unwrap_or_else(|_| {
+            panic!("invalid OID literal {:?}", f.fval)
+        });
+    }
+    panic!("unsupported node type in oidparse");
+}
+
+// open relation for relation-attached objects; caller closes it.
 pub fn get_object_address<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
@@ -434,7 +523,7 @@ pub fn get_object_address<'mcx>(
             | OBJECT_FOREIGN_TABLE => get_relation_by_qualified_name(
                 mcx,
                 objtype,
-                object.as_list().expect("relation drop object is a name list"),
+                object.as_list().expect("relation object is a name list"),
                 lockmode,
                 missing_ok,
             )?,
@@ -444,20 +533,45 @@ pub fn get_object_address<'mcx>(
                 lockmode,
                 missing_ok,
             )?,
-            OBJECT_RULE | OBJECT_TRIGGER => get_object_address_relobject(
-                mcx,
-                objtype,
-                object.as_list().expect("relation-attached object is a name list"),
-                missing_ok,
-            )?,
+            OBJECT_RULE | OBJECT_TRIGGER | OBJECT_TABCONSTRAINT | OBJECT_POLICY => {
+                get_object_address_relobject(
+                    mcx,
+                    objtype,
+                    object.as_list().expect("relation-attached object is a name list"),
+                    missing_ok,
+                )?
+            }
+            OBJECT_DOMCONSTRAINT => {
+                let objlist = object.as_list().expect("domain constraint object is a list");
+                let tn = objlist
+                    .first()
+                    .and_then(|n| n.as_type_name())
+                    .expect("domain constraint leads with a TypeName");
+                let constrname = objlist
+                    .last()
+                    .and_then(|n| n.as_string())
+                    .expect("constraint name is a String node")
+                    .sval;
+                let domaddr = get_object_address_type(OBJECT_DOMAIN, tn, missing_ok)?;
+                let conoid = pg_constraint::get_domain_constraint_oid(
+                    mcx,
+                    domaddr.objectId,
+                    constrname,
+                    missing_ok,
+                )?;
+                (ObjectAddress::set(CONSTRAINT_RELATION_ID, conoid), None)
+            }
+            OBJECT_DATABASE | OBJECT_EXTENSION | OBJECT_TABLESPACE | OBJECT_ROLE
+            | OBJECT_SCHEMA | OBJECT_LANGUAGE | OBJECT_FDW | OBJECT_FOREIGN_SERVER
+            | OBJECT_EVENT_TRIGGER | OBJECT_PARAMETER_ACL | OBJECT_ACCESS_METHOD
+            | OBJECT_PUBLICATION | OBJECT_SUBSCRIPTION => {
+                (get_object_address_unqualified(mcx, objtype, object, missing_ok)?, None)
+            }
             OBJECT_TYPE | OBJECT_DOMAIN => {
                 let tn = object.as_type_name().expect("type object is a TypeName");
                 (get_object_address_type(objtype, tn, missing_ok)?, None)
             }
-            OBJECT_SCHEMA | OBJECT_EXTENSION | OBJECT_EVENT_TRIGGER => {
-                (get_object_address_unqualified(objtype, object, missing_ok)?, None)
-            }
-            OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE => {
+            OBJECT_AGGREGATE | OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE => {
                 let owa = object
                     .as_variant::<ObjectWithArgs>()
                     .expect("function object is an ObjectWithArgs");
@@ -473,23 +587,46 @@ pub fn get_object_address<'mcx>(
                 let owa = object
                     .as_variant::<ObjectWithArgs>()
                     .expect("operator object is an ObjectWithArgs");
-                (
-                    ObjectAddress::set(
-                        OPERATOR_RELATION_ID,
-                        parse_oper::LookupOperWithArgs(&owa.objname, &owa.objargs, missing_ok)?,
-                    ),
-                    None,
-                )
+                let oid = parse_oper::LookupOperWithArgs(&owa.objname, &owa.objargs, missing_ok)?;
+                (ObjectAddress::set(OPERATOR_RELATION_ID, oid), None)
             }
-            OBJECT_OPCLASS | OBJECT_OPFAMILY => (
-                get_object_address_opcf(
-                    mcx,
-                    objtype,
-                    object.as_list().expect("opclass object is a name list"),
-                    missing_ok,
-                )?,
-                None,
-            ),
+            OBJECT_COLLATION => {
+                let names = object.as_list().expect("collation object is a name list");
+                let oid = catalog_namespace::get_collation_oid_list(names, missing_ok)?;
+                (ObjectAddress::set(CollationRelationId, oid), None)
+            }
+            OBJECT_OPCLASS | OBJECT_OPFAMILY => {
+                let names = object.as_list().expect("opclass object is a name list");
+                (get_object_address_opcf(mcx, objtype, names, missing_ok)?, None)
+            }
+            OBJECT_LARGEOBJECT => {
+                let loid = oidparse(object);
+                if !pg_largeobject::LargeObjectExists(mcx, loid)? && !missing_ok {
+                    return Err(err(
+                        ERRCODE_UNDEFINED_OBJECT,
+                        format!("large object {loid} does not exist"),
+                    ));
+                }
+                (ObjectAddress::set(LargeObjectRelationId, loid), None)
+            }
+            OBJECT_CAST => {
+                let objlist = object.as_list().expect("cast object is a TypeName pair");
+                let source = objlist
+                    .first()
+                    .and_then(|n| n.as_type_name())
+                    .expect("cast source TypeName");
+                let target = objlist
+                    .last()
+                    .and_then(|n| n.as_type_name())
+                    .expect("cast target TypeName");
+                if missing_ok {
+                    unported("OBJECT_CAST missing_ok lane");
+                }
+                let sourcetypeid = parse_utilcmd::LookupTypeNameOid(mcx, source)?;
+                let targettypeid = parse_utilcmd::LookupTypeNameOid(mcx, target)?;
+                let oid = lsyscache::get_cast_oid(sourcetypeid, targettypeid, missing_ok)?;
+                (ObjectAddress::set(CastRelationId, oid), None)
+            }
             other => unported(&format!("get_object_address {other:?}")),
         };
 
@@ -585,4 +722,19 @@ fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
     let oid = d.as_oid();
     cache_syscache::ReleaseSysCache(tup);
     Ok(oid)
+}
+
+// check_object_ownership (objectaddress.c): superuser fast path; the role
+// ownership walks are the unported remainder.
+pub fn check_object_ownership<'mcx>(
+    _mcx: Mcx<'mcx>,
+    roleid: Oid,
+    _objtype: ObjectType,
+    _address: ObjectAddress,
+    _object: Node<'mcx>,
+) -> PgResult<()> {
+    if !superuser::superuser_arg(roleid)? {
+        unported("check_object_ownership for non-superusers");
+    }
+    Ok(())
 }
