@@ -577,7 +577,7 @@ fn ATRewriteCatalogs<'mcx>(
                     if rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
                         unported("ATExecAttachPartitionIdx (ALTER TABLE form)");
                     }
-                    crate::attach::ATExecAttachPartition(mcx, wqueue, &rel, pcmd)?;
+                    crate::attach::ATExecAttachPartition(mcx, wqueue, &rel, pcmd, query_string)?;
                 }
                 AlterTableType::AT_DetachPartition => {
                     let pcmd = cmd
@@ -729,6 +729,17 @@ fn ATRewriteTable<'mcx>(
 
     if newrel.is_some() || needscan {
         let relname = oldrel.name().to_string();
+        if newrel.is_some() {
+            elog_seams::ereport::call(PgError::new(
+                types_error::DEBUG1,
+                format!("rewriting table \"{relname}\""),
+            ))?;
+        } else {
+            elog_seams::ereport::call(PgError::new(
+                types_error::DEBUG1,
+                format!("verifying table \"{relname}\""),
+            ))?;
+        }
         let mut oldslot = if tab.rewrite > 0 {
             exectuples::make_tuple_table_slot(
                 mcx,
@@ -2464,7 +2475,8 @@ fn at_wrong_relkind(action: &str, relname: &str) -> Box<PgError> {
             ERROR,
             format!("ALTER action {action} cannot be performed on relation \"{relname}\""),
         )
-        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+        .with_detail("This operation is not supported for tables.".to_string()),
     )
 }
 
