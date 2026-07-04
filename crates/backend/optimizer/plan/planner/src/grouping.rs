@@ -64,6 +64,8 @@ pub fn grouping_planner<'mcx>(
             count_est,
         );
     }
+    // A recursive query always has setOperations.
+    debug_assert!(!run.root.hasRecursion);
     if !parse.groupingSets.is_nil() {
         run.gset_data = Some(crate::groupingsets::preprocess_grouping_sets(run)?);
     } else {

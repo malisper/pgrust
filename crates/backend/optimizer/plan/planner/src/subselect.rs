@@ -856,7 +856,7 @@ fn make_subplan<'mcx>(
 
     debug_assert!(run.root.plan_params.is_empty());
     run.push_root()?;
-    crate::subquery::subquery_planner(run, subquery, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(run, subquery, false, tuple_fraction, None)?;
 
     let final_rel = fetch_final_rel(run);
     let best_path = get_cheapest_fractional_path(run, final_rel, tuple_fraction);
@@ -883,7 +883,7 @@ fn make_subplan<'mcx>(
             convert_exists_to_any(run, subquery)?
         {
             run.push_root()?;
-            crate::subquery::subquery_planner(run, subquery, 0.0, None)?;
+            crate::subquery::subquery_planner(run, subquery, false, 0.0, None)?;
             let final_rel = fetch_final_rel(run);
             let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
             let hashable = {
@@ -1766,6 +1766,7 @@ fn finalize_plan<'mcx>(
 ) -> PgResult<types_nodes::bitmapset::Bitmapset<'mcx>> {
     let mcx = run.mcx;
     let mut paramids = types_nodes::bitmapset::Bitmapset::empty();
+    let mut locally_added_param: i32 = -1;
     let base = plan.as_plan().expect("plan node");
 
     let mut init_ext_param = types_nodes::bitmapset::Bitmapset::empty();
@@ -1860,7 +1861,17 @@ fn finalize_plan<'mcx>(
         }
         // epqParam becomes valid for descendants; never propagated up.
         NodeTag::T_LockRows => {
-            valid.add_member(mcx, plan.as_lock_rows().unwrap().epqParam)?;
+            locally_added_param = plan.as_lock_rows().unwrap().epqParam;
+            valid.add_member(mcx, locally_added_param)?;
+        }
+        // Child nodes may reference wtParam; it never joins extParams
+        // (WorkTableScan's wtParam is a local of the RecursiveUnion level).
+        NodeTag::T_RecursiveUnion => {
+            locally_added_param = plan.as_recursive_union().unwrap().wtParam;
+            valid.add_member(mcx, locally_added_param)?;
+        }
+        NodeTag::T_WorkTableScan => {
+            paramids.add_member(mcx, plan.as_work_table_scan().unwrap().wtParam)?;
         }
         NodeTag::T_NestLoop => {
             let nl = plan.as_nest_loop().unwrap();
@@ -1946,6 +1957,10 @@ fn finalize_plan<'mcx>(
             child_params.del_members(&nestloop_params);
             paramids.add_members(mcx, &child_params)?;
         }
+    }
+
+    if locally_added_param >= 0 {
+        paramids.del_member(locally_added_param);
     }
 
     assert!(

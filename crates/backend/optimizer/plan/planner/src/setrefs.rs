@@ -324,6 +324,32 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("CteScan node");
             }
         }
+        NodeTag::T_WorkTableScan => {
+            let s = plan.as_work_table_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::WorkTableScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("WorkTableScan node");
+            }
+        }
+        NodeTag::T_RecursiveUnion => {
+            // Evaluates neither targetlist nor quals.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(plan.as_plan().unwrap().qual.is_nil());
+        }
         NodeTag::T_ProjectSet => {
             set_upper_references(run, plan, rtoffset)?;
         }
@@ -644,7 +670,11 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
     if let Some(child) = base.righttree {
         debug_assert!(matches!(
             plan.node_tag(),
-            NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin | NodeTag::T_SetOp
+            NodeTag::T_NestLoop
+                | NodeTag::T_MergeJoin
+                | NodeTag::T_HashJoin
+                | NodeTag::T_SetOp
+                | NodeTag::T_RecursiveUnion
         ));
         let new_child = set_plan_refs(run, child, rtoffset)?;
         // SAFETY: same exclusive plan-tree ownership as the prologue above.

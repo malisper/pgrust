@@ -425,11 +425,54 @@ pub fn cost_ctescan(
     Ok(())
 }
 
-// set_cte_size_estimates (costsize.c); self-reference worktable arm loud upstream.
+// set_cte_size_estimates (costsize.c).
 pub fn set_cte_size_estimates(run: &mut PlannerRun<'_>, rel: RelId, cte_rows: f64) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).relid > 0);
-    run.root.rel_mut(rel).tuples = cte_rows;
+    let rti = run.root.rel(rel).relid as usize;
+    debug_assert!(rti > 0);
+    let self_reference = {
+        let rte = run.rte(rti);
+        debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+        rte.self_reference
+    };
+    run.root.rel_mut(rel).tuples = if self_reference {
+        clamp_row_est(gucs::recursive_worktable_factor() * cte_rows)
+    } else {
+        cte_rows
+    };
     set_baserel_size_estimates(run, rel)
+}
+
+// cost_recursive_union (costsize.c): ~10 recursive iterations assumed.
+pub fn cost_recursive_union(
+    run: &mut PlannerRun<'_>,
+    runion: PathId,
+    nrterm: PathId,
+    rterm: PathId,
+) {
+    let (n_startup, n_total, n_rows, n_disabled, n_width) = {
+        let p = run.root.path(nrterm).base();
+        (
+            p.startup_cost,
+            p.total_cost,
+            p.rows,
+            p.disabled_nodes,
+            run.root.path_pathtarget(nrterm).width,
+        )
+    };
+    let (r_total, r_rows, r_disabled, r_width) = {
+        let p = run.root.path(rterm).base();
+        (p.total_cost, p.rows, p.disabled_nodes, run.root.path_pathtarget(rterm).width)
+    };
+    let mut total_cost = n_total + 10.0 * r_total;
+    let total_rows = n_rows + 10.0 * r_rows;
+    total_cost += gucs::cpu_tuple_cost() * total_rows;
+
+    let p = run.root.path_mut(runion).base_mut();
+    p.disabled_nodes = n_disabled + r_disabled;
+    p.startup_cost = n_startup;
+    p.total_cost = total_cost;
+    p.rows = total_rows;
+    run.root.path_pathtarget_mut(runion).width = n_width.max(r_width);
 }
 
 // set_values_size_estimates (costsize.c): tuples = row count of the list.

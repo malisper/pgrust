@@ -40,6 +40,8 @@ cache_syscache = { path = "../../../utils/cache/cache_syscache" }
 arrayutils = { path = "../../../utils/adt/arrayutils" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 readfuncs = { path = "../../../nodes/readfuncs" }
+outfuncs = { path = "../../../nodes/outfuncs" }
+rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }

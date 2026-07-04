@@ -23,10 +23,11 @@ pub const EXPRKIND_LIMIT: i32 = 6;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
-// child root's query_level); hasRecursion/setops stay behind the panics below.
+// child root's query_level).
 pub fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     mut parse: Query<'mcx>,
+    has_recursion: bool,
     tuple_fraction: f64,
     setops: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<()> {
@@ -38,7 +39,13 @@ pub fn subquery_planner<'mcx>(
     if parse.resultRelation != 0 {
         run.root.all_result_relids = relids_singleton(mcx, parse.resultRelation as u32);
     }
-    run.root.wt_param_id = -1;
+    run.root.hasRecursion = has_recursion;
+    run.root.wt_param_id = if has_recursion {
+        crate::cte::assign_special_exec_param(run)?
+    } else {
+        -1
+    };
+    run.root.non_recursive_path = None;
     run.root.join_domains.push(JoinDomain::default());
 
     if !parse.cteList.is_nil() {
@@ -161,9 +168,12 @@ pub fn subquery_planner<'mcx>(
                 panic!("preprocess_function_rtes (prepjointree.c): {:?}; M2 lane", rte.rtekind)
             }
             RTEKind::RTE_CTE => {
-                assert!(
-                    !rte.self_reference,
-                    "subquery_planner (planner.c): recursive self-reference; M2 recursive-CTE lane"
+                // A self-reference is only legal under a recursive-union level
+                // somewhere up the chain.
+                debug_assert!(
+                    !rte.self_reference
+                        || run.root.hasRecursion
+                        || run.suspended_roots.iter().any(|s| s.root.hasRecursion)
                 );
             }
             RTEKind::RTE_NAMEDTUPLESTORE => {
