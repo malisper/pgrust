@@ -16,3 +16,4 @@ costsize = { path = "../costsize" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 planner_seams = { path = "../../plan/planner_seams" }
+clauses = { path = "../../util/clauses" }
