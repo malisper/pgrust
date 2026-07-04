@@ -624,6 +624,10 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str("{VARIABLESHOWSTMT");
         string_field(out, "name", v.name);
         out.push('}');
+    } else if let Some(d) = n.as_do_stmt() {
+        out.push_str("{DOSTMT");
+        list_field(out, "args", &d.args);
+        out.push('}');
     } else if let Some(t) = n.as_transaction_stmt() {
         out.push_str("{TRANSACTIONSTMT");
         int_field(out, "kind", t.kind as i32);
