@@ -218,8 +218,12 @@ pub fn exec_rescan_merge_append_chg<'mcx>(node: &mut MergeAppendState<'mcx>, chg
     exec_rescan_merge_append(node);
 }
 
-// Exempt: ms_prune_state is a droppy owner, released by exec_end_merge_append.
+const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
+
+// Exempt: ms_prune_state is a droppy owner, released by exec_end_merge_append;
+// ms_sortkeys holds drop-free SortSupport (assert above).
 mcx::forget_safe_struct!(
-    MergeAppendState<'_> { plan, ms_nplans, ms_sortkeys, ms_slots, ms_heap,
-        ms_initialized, ms_valid_subplans_identified, ms_valid_subplans; ms_prune_state },
+    MergeAppendState<'_> { plan, ms_nplans, ms_slots, ms_heap,
+        ms_initialized, ms_valid_subplans_identified, ms_valid_subplans;
+        ms_prune_state, ms_sortkeys },
 );
