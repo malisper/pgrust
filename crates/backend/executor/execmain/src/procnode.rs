@@ -41,7 +41,7 @@ pub enum PlanStateNode<'mcx> {
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
     CteScan(PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
-    IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
+    IndexOnlyScan(PgBox<'mcx, ::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
     Sort(SortNode<'mcx>),
     IncrementalSort(PgBox<'mcx, IncrementalSortNode<'mcx>>),
@@ -399,12 +399,13 @@ pub fn exec_init_node<'mcx>(
         }
         NodeTag::T_IndexOnlyScan => {
             let mcx = estate.es_query_cxt;
-            PlanStateNode::IndexOnlyScan(::nodeindexonlyscan::exec_init_index_only_scan(
+            let ios = ::nodeindexonlyscan::exec_init_index_only_scan(
                 mcx,
                 node.as_index_only_scan().unwrap(),
                 estate,
                 eflags,
-            )?)
+            )?;
+            PlanStateNode::IndexOnlyScan(::mcx::alloc_in(mcx, ios)?)
         }
         NodeTag::T_BitmapHeapScan => {
             let mcx = estate.es_query_cxt;
