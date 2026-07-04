@@ -183,6 +183,7 @@ fn patternsel_common<'mcx>(
         let mut opproc = fmgr_core::fmgr_info(opfuncid)?;
 
         let (mut selec, hist_size) = selfuncs::histogram_selectivity(
+            run.mcx,
             &vardata, &mut opproc, collation, constval, true, 10, 1,
         )?;
 

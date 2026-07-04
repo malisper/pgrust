@@ -58,7 +58,10 @@ pub(crate) fn opproc_for(operator: Oid) -> PgResult<FmgrInfo> {
     fmgr_core::fmgr_info(opcode)
 }
 
+// Armed frame: comparison procs detoast short/packed args into `mcx`
+// (C's DatumGetNumeric detoast lands in the planner context).
 pub(crate) fn op_test(
+    mcx: mcx::Mcx<'_>,
     opproc: &mut FmgrInfo,
     collation: Oid,
     slot_value: Datum,
@@ -66,7 +69,7 @@ pub(crate) fn op_test(
     varonleft: bool,
 ) -> PgResult<bool> {
     let (a0, a1) = if varonleft { (slot_value, constval) } else { (constval, slot_value) };
-    Ok(types_fmgr::function_call2_coll(opproc, collation, a0, a1)?.as_bool())
+    Ok(types_fmgr::function_call2_coll_in(opproc, collation, mcx, a0, a1)?.as_bool())
 }
 
 const DEFAULT_UNK_SEL: f64 = 0.005;
@@ -276,7 +279,7 @@ pub(crate) fn mcv_selectivity<'mcx>(
     if vardata.stats.is_some() && statistic_proc_security_check(vardata, opproc.fn_oid)? {
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
             for (i, &v) in sslot.values()?.iter().enumerate() {
-                if op_test(opproc, collation, v, constval, varonleft)? {
+                if op_test(run.mcx, opproc, collation, v, constval, varonleft)? {
                     mcv_selec += sslot.numbers()?[i] as f64;
                 }
                 sumcommon += sslot.numbers()?[i] as f64;
@@ -495,6 +498,7 @@ pub(crate) fn endpoint_datum_copy<'mcx>(
 }
 
 pub(crate) fn histogram_selectivity<'mcx>(
+    mcx: mcx::Mcx<'_>,
     vardata: &VariableStatData<'mcx>,
     opproc: &mut FmgrInfo,
     collation: Oid,
@@ -517,7 +521,7 @@ pub(crate) fn histogram_selectivity<'mcx>(
     }
     let mut nmatch = 0usize;
     for &v in &values[n_skip..hist_size - n_skip] {
-        if op_test(opproc, collation, v, constval, varonleft)? {
+        if op_test(mcx, opproc, collation, v, constval, varonleft)? {
             nmatch += 1;
         }
     }
@@ -586,7 +590,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
             } else {
                 sslot.values()?[probe as usize]
             };
-            let mut ltcmp = op_test(opproc, collation, probe_val, constval, true)?;
+            let mut ltcmp = op_test(run.mcx, opproc, collation, probe_val, constval, true)?;
             if isgt {
                 ltcmp = !ltcmp;
             }
@@ -670,7 +674,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
     } else if nvalues > 1 {
         let mut nmatch = 0;
         for &v in sslot.values()?.iter() {
-            if op_test(opproc, collation, v, constval, true)? {
+            if op_test(run.mcx, opproc, collation, v, constval, true)? {
                 nmatch += 1;
             }
         }
@@ -1585,7 +1589,7 @@ pub(crate) fn var_eq_const<'mcx>(
                 let mut eqproc = opproc_for(oproid)?;
                 let mut matched = None;
                 for (i, &v) in sslot.values()?.iter().enumerate() {
-                    if op_test(&mut eqproc, collation, v, constval, varonleft)? {
+                    if op_test(run.mcx, &mut eqproc, collation, v, constval, varonleft)? {
                         matched = Some(i);
                         break;
                     }
