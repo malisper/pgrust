@@ -44,7 +44,6 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 latch = { path = "../../ipc/latch" }
 
 [dev-dependencies]
-aio_uring = { path = "../../aio/aio_uring" }
 shmem_seams = { path = "../../ipc/shmem_seams" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
 pg_sema = { path = "../../../port/pg_sema" }

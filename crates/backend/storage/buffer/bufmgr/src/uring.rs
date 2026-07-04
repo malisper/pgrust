@@ -15,7 +15,7 @@ use crate::PrefetchOutcome;
 
 const SLOTS: usize = 128;
 
-pub(crate) fn start_read(
+pub fn start_read(
     smgr: RelFileLocatorBackend,
     relpersistence: u8,
     forknum: ForkNumber,
@@ -53,7 +53,7 @@ pub(crate) fn start_read(
     }
 }
 
-pub(crate) fn collect_done() {
+pub fn collect_done() {
     if !aio_seams::uring_collect_done::is_installed() {
         return;
     }
