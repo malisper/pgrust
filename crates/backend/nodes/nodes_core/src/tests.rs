@@ -364,3 +364,172 @@ fn walker_and_mutator_cover_saop_array_relabel_case() {
     assert_eq!(new_saop.args.nth(0).as_param().unwrap().paramid, 9);
     assert!(new_saop.args.nth(1).ptr_eq(arr));
 }
+
+const CPRINT_CORPUS: &str = include_str!("../cprint_corpus.txt");
+const CPRINT_EXPECTED: &str = include_str!("../cprint_expected.txt");
+
+fn corpus_entries() -> Vec<&'static str> {
+    let mut v: Vec<&str> = CPRINT_CORPUS.split('\n').collect();
+    if v.last() == Some(&"") {
+        v.pop();
+    }
+    v
+}
+
+// (entry index, "FORMAT"|"PRETTY") -> expected bytes between the markers.
+fn expected_sections() -> Vec<(usize, &'static str, &'static str)> {
+    let mut out = Vec::new();
+    let mut rest = CPRINT_EXPECTED;
+    loop {
+        let Some(start) = rest.find("#ENTRY ") else { break };
+        let hdr_end = rest[start..].find('\n').map(|p| start + p + 1).unwrap();
+        let hdr = &rest[start..hdr_end - 1];
+        let mut it = hdr.split(' ');
+        it.next();
+        let idx: usize = it.next().unwrap().parse().unwrap();
+        let kind = it.next().unwrap();
+        let body_end =
+            rest[hdr_end..].find("#ENTRY ").map(|p| hdr_end + p).unwrap_or(rest.len());
+        out.push((idx, kind, &rest[hdr_end..body_end]));
+        rest = &rest[body_end..];
+        if rest.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+#[test]
+fn print_formatters_match_c_oracle() {
+    assert!(
+        !CPRINT_EXPECTED.is_empty(),
+        "cprint_expected.txt missing — run scripts/print-oracle-e2e.sh and vendor its output"
+    );
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let entries = corpus_entries();
+    let sections = expected_sections();
+    assert_eq!(sections.len(), entries.len() * 2, "oracle section count");
+    for (idx, kind, want) in sections {
+        let dump = entries[idx];
+        let got = match kind {
+            "FORMAT" => print::format_node_dump(mcx, dump).unwrap(),
+            "PRETTY" => print::pretty_format_node_dump(mcx, dump).unwrap(),
+            other => panic!("bad oracle section kind {other}"),
+        };
+        assert_eq!(got.as_str(), want, "entry {idx} {kind}: dump={dump:?}");
+    }
+}
+
+// Corpus lines 0-2 are pinned nodeToString outputs; if outfuncs drifts, the
+// oracle corpus (and C fixtures) must be regenerated together.
+#[test]
+fn print_corpus_head_matches_node_to_string() {
+    use datum::Datum;
+    use types_nodes::primnodes::{Const, Var, VarReturningType};
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let entries = corpus_entries();
+    let int4_const = |v: i32| Const {
+        consttype: 23,
+        consttypmod: -1,
+        constcollid: 0,
+        constlen: 4,
+        constvalue: Datum::from_i32(v),
+        constisnull: false,
+        constbyval: true,
+        location: 7,
+    };
+    let c42 = Node::mk(mcx, int4_const(42)).unwrap();
+    assert_eq!(outfuncs::nodeToString(mcx, c42).unwrap().as_str(), entries[0]);
+    let var = Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: 2,
+            vartype: 23,
+            vartypmod: -1,
+            varcollid: 0,
+            varnullingrels: types_nodes::Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            varnosyn: 1,
+            varattnosyn: 2,
+            location: 33,
+        },
+    )
+    .unwrap();
+    let zero = Node::mk(mcx, int4_const(0)).unwrap();
+    let mut args = NodeList::nil();
+    args.lappend(mcx, var).unwrap();
+    args.lappend(mcx, zero).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 521,
+            opfuncid: 147,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args,
+            location: 35,
+        },
+    )
+    .unwrap();
+    assert_eq!(outfuncs::nodeToString(mcx, op).unwrap().as_str(), entries[1]);
+}
+
+#[test]
+fn expr_input_collation_arms() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let mut args = NodeList::nil();
+    args.lappend(mcx, extern_param(mcx, 1)).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 98,
+            opfuncid: 67,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 100,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(expr_input_collation(op), 100);
+    assert_eq!(expr_input_collation(extern_param(mcx, 1)), types_core::InvalidOid);
+}
+
+#[test]
+fn qoe_mutator_non_query_applies_directly() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let p = extern_param(mcx, 1);
+    let mut m = |n: Node<'_>| {
+        Ok(if n.node_tag() == NodeTag::T_Param { Some(extern_param(mcx, 2)) } else { None })
+    };
+    let out = query_or_expression_tree_mutator(mcx, p, &mut m, 0).unwrap().unwrap();
+    assert_eq!(out.as_param().unwrap().paramid, 2);
+}
+
+#[test]
+fn make_whole_row_var_default_arms() {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let mut rte = RangeTblEntry::default();
+    rte.rtekind = RTEKind::RTE_VALUES;
+    let v = makefuncs::make_whole_row_var(mcx, &rte, 3, 1, false).unwrap();
+    assert_eq!(v.vartype, types_core::catalog::RECORDOID);
+    assert_eq!(v.varno, 3);
+    assert_eq!(v.varattno, 0);
+    assert_eq!(v.varlevelsup, 1);
+    let mut rte = RangeTblEntry::default();
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
+    let v = makefuncs::make_whole_row_var(mcx, &rte, 1, 0, true).unwrap();
+    assert_eq!(v.vartype, types_core::catalog::RECORDOID);
+}
