@@ -238,10 +238,16 @@ mod tests {
             st.convert(img("42").payload()) as i64,
             -((44i64 << 56) | (42i64 << 42))
         );
-        assert_eq!(st.convert(img("1e84").payload()) as i64, -i64::MAX);
-        assert_eq!(st.convert(img("-1e84").payload()) as i64, i64::MAX);
-        assert_eq!(st.convert(img("1e-45").payload()) as i64, 0);
-        assert_eq!(st.convert(img("-1e-45").payload()) as i64, 0);
+        // Weight clamps are in NBASE-10000 words: > 83 (~10^332) and < -44
+        // (~10^-176).
+        assert_eq!(st.convert(img("1e400").payload()) as i64, -i64::MAX);
+        assert_eq!(st.convert(img("-1e400").payload()) as i64, i64::MAX);
+        assert_eq!(st.convert(img("1e-200").payload()) as i64, 0);
+        assert_eq!(st.convert(img("-1e-200").payload()) as i64, 0);
+        assert_eq!(
+            st.convert(img("1e84").payload()) as i64,
+            -(((84 / 4 + 44) as i64) << 56 | 1i64 << 42)
+        );
     }
 
     #[test]
