@@ -17,6 +17,8 @@ datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 elog = { path = "../../../utils/error/elog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
 init_small = { path = "../../../utils/init/init_small" }
 file_seams = { path = "../file_seams" }
 resowner_seams = { path = "../../../utils/resowner/resowner_seams" }

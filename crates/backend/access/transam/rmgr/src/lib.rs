@@ -128,8 +128,11 @@ fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
     dbcommands_seams::dbase_redo::call(record)
 }
 
+fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    tablespace_seams::tblspc_redo::call(record)
+}
+
 unported_redo! {
-    tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";

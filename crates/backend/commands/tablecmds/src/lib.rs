@@ -37,7 +37,9 @@ pub fn init_seams() {
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
-use types_error::{PgError, PgResult, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+
+use commands_tablespace::{GLOBALTABLESPACE_OID, TableSpaceRelationId};
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
 use types_rel::{RELKIND_RELATION, RELKIND_SEQUENCE};
 use types_tuple::TupleDescData;
@@ -203,9 +205,6 @@ pub fn DefineRelation<'mcx>(
             reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
         }
     }
-    if stmt.tablespacename.is_some() {
-        unported("TABLESPACE clauses");
-    }
     // PARTITION OF: the parent's partition descriptor changes — take an
     // exclusive lock (C parentLockmode).
     let parent_lockmode = if stmt.partbound.is_some() {
@@ -250,6 +249,55 @@ pub fn DefineRelation<'mcx>(
         return Err(Box::new(
             PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
                 .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+
+    let mut tablespace_id = match stmt.tablespacename {
+        Some(name) => {
+            let oid = commands_tablespace::get_tablespace_oid(mcx, name, false)?;
+            if partitioned && oid == init_small::globals::MyDatabaseTableSpace() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot specify default tablespace for partitioned relations".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            oid
+        }
+        None if stmt.partbound.is_some() => lsyscache::get_rel_tablespace(inherit_oids[0])?,
+        None => InvalidOid,
+    };
+    if tablespace_id == InvalidOid {
+        tablespace_id =
+            commands_tablespace::GetDefaultTablespace(mcx, relpersistence as u8, partitioned)?;
+    }
+    if tablespace_id != InvalidOid && tablespace_id != init_small::globals::MyDatabaseTableSpace()
+    {
+        let aclresult = aclchk::object_aclcheck(
+            TableSpaceRelationId,
+            tablespace_id,
+            miscinit::GetUserId(),
+            adt_acl::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            let ctx = mcx::MemoryContext::new("DefineRelation");
+            let name = commands_tablespace::get_tablespace_name(ctx.mcx(), tablespace_id)?;
+            aclchk::aclcheck_error(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE,
+                name.as_ref().map(|n| std::str::from_utf8(n.name_str()).unwrap_or("")).unwrap_or(""),
+            )?;
+        }
+    }
+    if tablespace_id == GLOBALTABLESPACE_OID {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "only shared relations can be placed in pg_global tablespace".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
 
@@ -395,7 +443,7 @@ pub fn DefineRelation<'mcx>(
         &catalog_heap::HeapCreateParams {
             relname,
             relnamespace: namespace_id,
-            reltablespace: InvalidOid,
+            reltablespace: tablespace_id,
             ownerid: owner_id,
             accessmtd: access_method_id,
             relkind,

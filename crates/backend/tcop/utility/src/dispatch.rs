@@ -295,13 +295,38 @@ fn dispatch_switch<'mcx>(
 
         T_CreateTableSpaceStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE TABLESPACE")?;
-            handler_gap("CreateTableSpace (tablespace lane)")
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::CreateTableSpaceStmt>()
+                .expect("CreateTableSpaceStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateTableSpaceStmt<'_>,
+                    &types_nodes::parsenodes::CreateTableSpaceStmt<'mcx>,
+                >(stmt)
+            };
+            commands_tablespace::CreateTableSpace(mcx, stmt)?;
         }
         T_DropTableSpaceStmt => {
             xact::PreventInTransactionBlock(is_top_level, "DROP TABLESPACE")?;
-            handler_gap("DropTableSpace (tablespace lane)")
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::DropTableSpaceStmt>()
+                .expect("DropTableSpaceStmt");
+            commands_tablespace::DropTableSpace(mcx, stmt)?;
         }
-        T_AlterTableSpaceOptionsStmt => handler_gap("AlterTableSpaceOptions (tablespace lane)"),
+        T_AlterTableSpaceOptionsStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableSpaceOptionsStmt>()
+                .expect("AlterTableSpaceOptionsStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterTableSpaceOptionsStmt<'_>,
+                    &types_nodes::parsenodes::AlterTableSpaceOptionsStmt<'mcx>,
+                >(stmt)
+            };
+            commands_tablespace::AlterTableSpaceOptions(mcx, stmt)?;
+        }
 
         T_TruncateStmt => {
             let stmt = parsetree.as_truncate_stmt().unwrap();
@@ -1365,6 +1390,21 @@ fn slow_switch<'mcx>(
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
                     Ok(None)
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
+                    let name = stmt
+                        .object
+                        .expect("AlterOwnerStmt.object")
+                        .as_string()
+                        .expect("tablespace name String")
+                        .sval;
+                    let newowner = aclchk::get_rolespec_oid(
+                        stmt.newowner.expect("AlterOwnerStmt.newowner"),
+                        false,
+                    )?;
+                    collect_gap("ALTER OWNER");
+                    commands_tablespace::AlterTableSpaceOwner(mcx, name, newowner)?;
+                    Ok(None)
+                }
                 _ => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
             }
         }
@@ -1488,6 +1528,13 @@ fn exec_rename_stmt_inner<'mcx>(
                 >(stmt)
             };
             typecmds::RenameDomainConstraint(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
+            commands_tablespace::RenameTableSpace(
+                mcx,
+                stmt.subname.expect("RenameStmt.subname"),
+                stmt.newname.expect("RenameStmt.newname"),
+            )?;
         }
         other => panic!("unported: ExecRenameStmt {other:?}"),
     }

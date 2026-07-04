@@ -533,6 +533,15 @@ pub fn recordDependencyOnOwner<'mcx>(
     pg_shdepend::recordDependencyOnOwner(mcx, classId, objectId, owner)
 }
 
+pub fn recordDependencyOnTablespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    tablespace: Oid,
+) -> PgResult<()> {
+    pg_shdepend::recordDependencyOnTablespace(mcx, classId, objectId, tablespace)
+}
+
 pub fn updateAclDependencies<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,

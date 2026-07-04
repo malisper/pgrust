@@ -45,6 +45,7 @@ genam = { path = "../../access/index/genam" }
 parse_func_seams = { path = "../../parser/parse_func_seams" }
 parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
 
 [dev-dependencies]
 init_small = { path = "../../utils/init/init_small" }

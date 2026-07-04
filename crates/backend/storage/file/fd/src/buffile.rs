@@ -45,22 +45,23 @@ pub struct BufFile<'mcx> {
     buffer: PgVec<'mcx, u8>,
 }
 
-// C PrepareTempTablespaces (commands/tablespace.c): the default empty GUC
-// resolves to zero temp tablespaces; a configured list is unported.
-pub fn PrepareTempTablespaces() {
+// C PrepareTempTablespaces (commands/tablespace.c): the empty-GUC fast path
+// stays local; a configured list needs catalog access, so it delegates to
+// commands_tablespace.
+pub fn PrepareTempTablespaces() -> PgResult<()> {
     if crate::temp::TempTablespacesAreSet() {
-        return;
+        return Ok(());
     }
     let spaces = guc_tables::vars::temp_tablespaces.read();
-    assert!(
-        spaces.as_deref().unwrap_or("").is_empty(),
-        "PrepareTempTablespaces (tablespace.c): non-empty temp_tablespaces GUC; tablespace lane unported"
-    );
-    crate::temp::SetTempTablespaces(&[]);
+    if spaces.as_deref().unwrap_or("").is_empty() {
+        crate::temp::SetTempTablespaces(&[]);
+        return Ok(());
+    }
+    tablespace_seams::prepare_temp_tablespaces::call()
 }
 
 pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<BufFile<'mcx>> {
-    PrepareTempTablespaces();
+    PrepareTempTablespaces()?;
     let pfile = OpenTemporaryFile(inter_xact)?;
     debug_assert!(pfile.0 >= 0);
     let mut files = vec_with_capacity_in(mcx, 1)?;

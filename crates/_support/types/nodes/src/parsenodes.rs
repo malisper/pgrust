@@ -854,6 +854,27 @@ pub struct AlterDatabaseRefreshCollStmt<'mcx> {
     pub dbname: Option<&'mcx str>,
 }
 
+#[derive(Default)]
+pub struct CreateTableSpaceStmt<'mcx> {
+    pub tablespacename: Option<&'mcx str>,
+    pub owner: Option<&'mcx RoleSpec<'mcx>>,
+    pub location: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropTableSpaceStmt<'mcx> {
+    pub tablespacename: Option<&'mcx str>,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
+pub struct AlterTableSpaceOptionsStmt<'mcx> {
+    pub tablespacename: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub isReset: bool,
+}
+
 // C: setstmt is a VariableSetStmt node.
 #[derive(Default)]
 pub struct AlterDatabaseSetStmt<'mcx> {
@@ -1508,6 +1529,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseRefreshCollStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterDatabaseSetStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableSpaceStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTableSpaceStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropTableSpaceStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropTableSpaceStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableSpaceOptionsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTableSpaceOptionsStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableStmt;

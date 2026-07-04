@@ -42,6 +42,8 @@ explain = { path = "../explain" }
 tablecmds = { path = "../tablecmds" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 aclchk = { path = "../../catalog/aclchk" }
+commands_tablespace = { path = "../tablespace" }
+init_small = { path = "../../utils/init/init_small" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 lock = { path = "../../storage/lmgr/lock" }

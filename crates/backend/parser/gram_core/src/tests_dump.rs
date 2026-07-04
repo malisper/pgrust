@@ -1213,6 +1213,28 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "defexpr", p.defexpr);
         int_field(out, "location", p.location);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateTableSpaceStmt>() {
+        out.push_str("{CREATETABLESPACESTMT");
+        string_field(out, "tablespacename", c.tablespacename);
+        out.push_str(" :owner ");
+        match c.owner {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "location", c.location);
+        list_field(out, "options", &c.options);
+        out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DropTableSpaceStmt>() {
+        out.push_str("{DROPTABLESPACESTMT");
+        string_field(out, "tablespacename", d.tablespacename);
+        bool_field(out, "missing_ok", d.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterTableSpaceOptionsStmt>() {
+        out.push_str("{ALTERTABLESPACEOPTIONSSTMT");
+        string_field(out, "tablespacename", a.tablespacename);
+        list_field(out, "options", &a.options);
+        bool_field(out, "isReset", a.isReset);
+        out.push('}');
     } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::RenameStmt>() {
         out.push_str("{RENAMESTMT");
         int_field(out, "renameType", r.renameType as i32);
