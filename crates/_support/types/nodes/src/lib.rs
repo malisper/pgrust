@@ -33,12 +33,12 @@ pub use parsenodes::{
     AclMode, DefineStmt, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry,
     RangeTblFunction, RowMarkClause, SetOperation,
 };
-pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
+pub use plannodes::{AppendRelInfo, Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullTest, NullTestType,
+    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullIfExpr, NullTest, NullTestType,
     JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
     JsonValueExpr, JsonValueType, JsonWrapper,

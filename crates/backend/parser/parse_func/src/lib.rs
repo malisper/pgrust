@@ -1373,6 +1373,7 @@ fn lookup_func_name_internal(
         scratch.mcx(),
         parts,
         nargs,
+        &[],
         false,
         false,
         missing_ok,
