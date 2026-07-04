@@ -702,6 +702,7 @@ fn get_relation_policy_oid<'mcx>(
     keys[0].sk_argument = datum::Datum::from_oid(relid);
     keys[1].sk_attno = 2;
     keys[1].sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    keys[1].sk_collation = types_core::C_COLLATION_OID;
     keys[1].sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_NAMEEQ)?;
     keys[1].sk_argument = datum::Datum::from_usize(namebuf.as_ptr() as usize);
     let mut scan = genam::systable_beginscan(
