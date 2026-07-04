@@ -540,13 +540,14 @@ fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) 
             // is unported.
 
             pg_depend::updateAclDependencies(
+                mcx,
                 RELATION_RELATION_ID,
                 rel_oid,
                 0,
                 owner_id,
                 old_members.as_deref().unwrap_or(&[]),
                 &new_members,
-            );
+            )?;
         } else {
             unlock_class_tuple(&otid)?;
         }
@@ -720,13 +721,14 @@ fn exec_grant_attribute<'mcx>(
         catalog_indexing::CatalogTupleUpdate(mcx, att_relation, &otid, &mut newtuple)?;
 
         pg_depend::updateAclDependencies(
+            mcx,
             RELATION_RELATION_ID,
             rel_oid,
             attnum as i32,
             owner_id,
             old_members.as_deref().unwrap_or(&[]),
             &new_members,
-        );
+        )?;
     }
 
     ReleaseSysCache(attr_tuple);

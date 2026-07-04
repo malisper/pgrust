@@ -56,6 +56,7 @@ exectuples = { path = "../exectuples" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 hashfn = { path = "../../../common/hashfn" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }

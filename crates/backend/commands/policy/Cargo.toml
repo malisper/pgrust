@@ -30,6 +30,7 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
 aclchk = { path = "../../catalog/aclchk" }
 inval = { path = "../../utils/cache/inval" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

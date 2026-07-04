@@ -1242,12 +1242,12 @@ fn preprocess_limit<'mcx>(
     Ok(tuple_fraction)
 }
 
-// The no-postponable-columns arm returns final_target; the projection-
-// building arm is loud.
+// make_sort_input_target (planner.c); the SRF-postponement leg is loud.
 fn make_sort_input_target<'mcx>(
     run: &mut PlannerRun<'mcx>,
     final_target: types_pathnodes::PtId,
 ) -> PgResult<types_pathnodes::PtId> {
+    let mcx = run.mcx;
     let parse = run.parse();
     debug_assert!(!parse.sortClause.is_nil());
     let mut have_srf = false;
@@ -1255,10 +1255,12 @@ fn make_sort_input_target<'mcx>(
     let mut have_volatile = false;
     let mut have_expensive = false;
     let n = run.root.pathtarget(final_target).exprs.len();
+    let mut postpone_col: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
     for i in 0..n {
         let ft = run.root.pathtarget(final_target);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
         let expr = *run.root.expr_node(ft.exprs[i]);
+        let mut postpone = false;
         if sgref != 0 {
             if !have_srf_sortcols
                 && parse.hasTargetSRFs
@@ -1266,18 +1268,19 @@ fn make_sort_input_target<'mcx>(
             {
                 have_srf_sortcols = true;
             }
-            continue;
-        }
-        if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
+        } else if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
             have_srf = true;
         } else if clauses::contain_volatile_functions(expr)? {
+            postpone = true;
             have_volatile = true;
         } else {
             let cost = crate::costsize::cost_qual_eval_node(expr)?;
             if cost.per_tuple > 10.0 * crate::gucs::cpu_operator_cost() {
+                postpone = true;
                 have_expensive = true;
             }
         }
+        postpone_col.push(postpone);
     }
     let postpone_srfs = have_srf && !have_srf_sortcols;
     if !(postpone_srfs
@@ -1286,7 +1289,62 @@ fn make_sort_input_target<'mcx>(
     {
         return Ok(final_target);
     }
-    panic!("make_sort_input_target (planner.c): postponed-column projection; M2 sort lane");
+    assert!(
+        !postpone_srfs,
+        "make_sort_input_target (planner.c): SRF postponement; M2 sort lane"
+    );
+
+    let mut input = types_pathnodes::PathTarget::new(mcx);
+    let mut postponable = types_nodes::list::NodeList::nil();
+    for i in 0..n {
+        let ft = run.root.pathtarget(final_target);
+        let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
+        let eid = ft.exprs[i];
+        if postpone_col[i] {
+            postponable.lappend(mcx, *run.root.expr_node(eid))?;
+        } else {
+            input.exprs.push(eid);
+            input.sortgrouprefs.push(sgref);
+        }
+    }
+    let postponable_vars = vars::pull_var_clause(
+        mcx,
+        types_nodes::Node::mk_list(mcx, postponable)?,
+        vars::PVC_INCLUDE_AGGREGATES
+            | vars::PVC_INCLUDE_WINDOWFUNCS
+            | vars::PVC_INCLUDE_PLACEHOLDERS,
+    )?;
+    for v in &postponable_vars {
+        let dup = input
+            .exprs
+            .iter()
+            .any(|&eid| types_nodes::equal(*run.root.expr_node(eid), v));
+        if !dup {
+            input.exprs.push(run.intern_expr(v));
+            input.sortgrouprefs.push(0);
+        }
+    }
+    if input.sortgrouprefs.iter().all(|&r| r == 0) {
+        input.sortgrouprefs.clear();
+    }
+
+    // set_pathtarget_cost_width (costsize.c), as create_pathtarget.
+    for i in 0..input.exprs.len() {
+        let expr = *run.root.expr_node(input.exprs[i]);
+        if expr.node_tag() != types_nodes::NodeTag::T_Var {
+            let cost = crate::costsize::cost_qual_eval_node(expr)?;
+            input.cost.startup += cost.startup;
+            input.cost.per_tuple += cost.per_tuple;
+        }
+    }
+    let id = run.root.alloc_pathtarget(input);
+    let mut tuple_width: i64 = 0;
+    for i in 0..run.root.pathtarget(id).exprs.len() {
+        let expr = run.root.pathtarget(id).exprs[i];
+        tuple_width += crate::costsize::get_expr_width(run, expr)? as i64;
+    }
+    run.root.pathtarget_mut(id).width = crate::costsize::clamp_width_est(tuple_width);
+    Ok(id)
 }
 
 // Incremental sort and partial paths are loud/absent.
@@ -1359,13 +1417,15 @@ fn create_ordered_paths<'mcx>(
             .base()
             .pathtarget_id
             .expect("sorted path has a pathtarget");
-        if !crate::pathnode::exprs_same(
+        let sorted_path = if !crate::pathnode::exprs_same(
             run,
             &run.root.pathtarget(sorted_target).exprs,
             &run.root.pathtarget(target).exprs,
         ) {
-            panic!("apply_projection_to_path (pathnode.c): post-sort projection; M2 sort lane");
-        }
+            crate::pathnode::apply_projection_to_path(run, ordered_rel, sorted_path, target)?
+        } else {
+            sorted_path
+        };
         crate::pathnode::add_path(run, ordered_rel, sorted_path);
     }
     debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());

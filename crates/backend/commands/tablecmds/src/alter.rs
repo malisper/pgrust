@@ -215,6 +215,7 @@ struct AlteredTableInfo<'mcx> {
     verify_new_notnull: bool,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
+    fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
 }
 
 pub fn AlterTable<'mcx>(
@@ -249,6 +250,7 @@ fn ATController<'mcx>(
         verify_new_notnull: false,
         newvals: PgVec::new_in(mcx),
         constraints: PgVec::new_in(mcx),
+        fk_checks: PgVec::new_in(mcx),
     };
 
     for cnode in cmds.iter() {
@@ -509,6 +511,15 @@ fn ATRewriteTables<'mcx>(
         ATRewriteTable(mcx, tab, InvalidOid)?;
     }
     let _ = tab.has_newvals;
+
+    // C's final pass: FK constraints are checked after all rewrites.
+    if !tab.fk_checks.is_empty() {
+        let rel = table::table_open(mcx, tab.relid, NoLock)?;
+        for item in tab.fk_checks.iter() {
+            crate::fk::validate_foreign_key_constraint(mcx, &rel, item)?;
+        }
+        rel.close(NoLock)?;
+    }
     Ok(())
 }
 
@@ -1733,7 +1744,10 @@ fn ATExecAddConstraint<'mcx>(
     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
-        return crate::fk::ATExecAddConstraint(mcx, rel, constr);
+        if let Some(item) = crate::fk::ATExecAddConstraint(mcx, rel, constr)? {
+            tab.fk_checks.push(item);
+        }
+        return Ok(());
     }
     if constr.contype != ConstrType::CONSTR_CHECK {
         unported(&format!("ATExecAddConstraint {:?}", constr.contype));

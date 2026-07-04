@@ -32,8 +32,7 @@ use parse_collate::assign_expr_collations;
 use parse_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
 use parser_small1::{make_parsestate, ParseExprKind};
 use pg_depend::{
-    recordDependencyOn, recordSharedDependencyOn, DependencyType, ObjectAddress,
-    SHARED_DEPENDENCY_POLICY,
+    recordDependencyOn, DependencyType, ObjectAddress,
 };
 
 pub const POLICY_RELATION_ID: Oid = 3256;
@@ -396,7 +395,7 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
     if let Some(q) = &with_check {
         recordDependencyOnExpr(mcx, &myself, q.expr, &q.rtable, DependencyType::Normal)?;
     }
-    record_role_dependencies(&myself, &role_oids);
+    record_role_dependencies(mcx, &myself, &role_oids)?;
 
     inval::invalidate::CacheInvalidateRelcache(&target_table)?;
 
@@ -405,16 +404,24 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
     Ok(())
 }
 
-fn record_role_dependencies(myself: &ObjectAddress, role_oids: &[Oid]) {
+fn record_role_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    myself: &ObjectAddress,
+    role_oids: &[Oid],
+) -> PgResult<()> {
     for &oid in role_oids {
         if oid != ACL_ID_PUBLIC {
-            recordSharedDependencyOn(
-                myself,
-                &ObjectAddress::set(AUTH_ID_RELATION_ID, oid),
-                SHARED_DEPENDENCY_POLICY,
-            );
+            pg_shdepend::recordSharedDependencyOn(
+                mcx,
+                myself.classId,
+                myself.objectId,
+                AUTH_ID_RELATION_ID,
+                oid,
+                pg_shdepend::SharedDependencyType::Policy,
+            )?;
         }
     }
+    Ok(())
 }
 
 fn policy_scan_exists<'mcx>(
@@ -585,7 +592,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     }
 
     deleteSharedDependencyRecordsFor(mcx, POLICY_RELATION_ID, policy_id, 0)?;
-    record_role_dependencies(&myself, &role_oids);
+    record_role_dependencies(mcx, &myself, &role_oids)?;
 
     inval::invalidate::CacheInvalidateRelcache(&target_table)?;
 
@@ -733,7 +740,7 @@ pub fn RemoveRoleFromObjectPolicy<'mcx>(
 
         deleteSharedDependencyRecordsFor(mcx, POLICY_RELATION_ID, policy_id, 0)?;
         let myself = ObjectAddress::set(POLICY_RELATION_ID, policy_id);
-        record_role_dependencies(&myself, &remaining);
+        record_role_dependencies(mcx, &myself, &remaining)?;
 
         xact::CommandCounterIncrement()?;
 

@@ -1,10 +1,9 @@
-// The immediate after-trigger queue: AfterTriggerSaveEvent /
-// AfterTriggerBeginQuery / AfterTriggerEndQuery / afterTriggerInvokeEvents /
-// AfterTriggerExecute (trigger.c), RI lane. Deferrable triggers and
-// transition tables are loud; events re-fetch tuples by ctid under
-// SnapshotAny as C's table_tuple_fetch_row_version does (slot machinery
-// replaced by direct pinned-page reads).
-use std::cell::RefCell;
+// The afterTriggers machinery (trigger.c): per-query event lists, the
+// transaction-level deferred list, SET CONSTRAINTS state, and subxact
+// save/restore. Events re-fetch tuples by ctid under SnapshotAny as C's
+// table_tuple_fetch_row_version does. LOUD: transition tables, statement
+// triggers, WHEN/UPDATE-OF on the AFTER save path.
+use std::cell::{Cell, RefCell};
 
 use mcx::Mcx;
 use ri_triggers_seams::RiTriggerData;
@@ -13,15 +12,13 @@ use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_rel::{NoLock, Relation};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_trigger::{
-    Trigger, TriggerDesc, RI_TRIGGER_FK, RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_DISABLED,
-    TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW,
-    TRIGGER_EVENT_UPDATE, TRIGGER_FIRES_ON_REPLICA, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE,
-    TRIGGER_TYPE_INSERT, TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK,
-    TRIGGER_TYPE_UPDATE,
+    Trigger, TriggerDesc, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED, RI_TRIGGER_FK,
+    RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_DISABLED, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT,
+    TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, TRIGGER_EVENT_UPDATE, TRIGGER_FIRES_ON_REPLICA,
+    TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_LEVEL_MASK,
+    TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK, TRIGGER_TYPE_UPDATE,
 };
 use types_tuple::{HeapTupleData, ItemPointerData};
-
-use crate::{FIRING_COUNTER, QUERY_DEPTH};
 
 const F_RI_FKEY_CHECK_INS: Oid = 1644;
 const F_RI_FKEY_CHECK_UPD: Oid = 1645;
@@ -35,17 +32,59 @@ const AFTER_TRIGGER_IN_PROGRESS: u32 = 0x2000_0000;
 
 struct AfterTriggerEvent {
     flags: u32,
+    // ats_event: op | ROW | DEFERRABLE | INITDEFERRED.
+    event: u32,
     ctid1: ItemPointerData,
     ctid2: ItemPointerData,
-    event: u32,
     tgoid: Oid,
     relid: Oid,
     firing_id: CommandId,
 }
 
+pub(crate) struct SetConstraintState {
+    pub all_isset: bool,
+    pub all_isdeferred: bool,
+    pub trigstates: Vec<(Oid, bool)>,
+}
+
+impl SetConstraintState {
+    pub(crate) fn create() -> Self {
+        SetConstraintState { all_isset: false, all_isdeferred: false, trigstates: Vec::new() }
+    }
+    fn copy(&self) -> Self {
+        SetConstraintState {
+            all_isset: self.all_isset,
+            all_isdeferred: self.all_isdeferred,
+            trigstates: self.trigstates.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SavedTrans {
+    state: Option<SetConstraintState>,
+    state_saved: bool,
+    events_len: usize,
+    query_depth: i32,
+    firing_counter: CommandId,
+}
+
 thread_local! {
+    static FIRING_COUNTER: Cell<CommandId> = const { Cell::new(0) };
+    static QUERY_DEPTH: Cell<i32> = const { Cell::new(-1) };
     static QUERY_STACK: RefCell<Vec<Vec<AfterTriggerEvent>>> =
         const { RefCell::new(Vec::new()) };
+    static XACT_EVENTS: RefCell<Vec<AfterTriggerEvent>> = const { RefCell::new(Vec::new()) };
+    static CON_STATE: RefCell<Option<SetConstraintState>> = const { RefCell::new(None) };
+    static TRANS_STACK: RefCell<Vec<SavedTrans>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn query_depth() -> i32 {
+    QUERY_DEPTH.with(|c| c.get())
+}
+
+pub(crate) fn firing_counter() -> CommandId {
+    FIRING_COUNTER.with(|c| c.get())
 }
 
 fn ri_trigger_kind(tgfoid: Oid) -> i32 {
@@ -58,16 +97,134 @@ fn ri_trigger_kind(tgfoid: Oid) -> i32 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum EvList {
+    Query(usize),
+    Xact,
+}
+
+fn with_list<R>(sel: EvList, f: impl FnOnce(&mut Vec<AfterTriggerEvent>) -> R) -> R {
+    match sel {
+        EvList::Query(d) => QUERY_STACK.with(|s| {
+            let mut st = s.borrow_mut();
+            while st.len() <= d {
+                st.push(Vec::new());
+            }
+            f(&mut st[d])
+        }),
+        EvList::Xact => XACT_EVENTS.with(|s| f(&mut s.borrow_mut())),
+    }
+}
+
+// afterTriggerCheckState (trigger.c).
+fn check_state(event: u32, tgoid: Oid) -> bool {
+    if event & AFTER_TRIGGER_DEFERRABLE == 0 {
+        return false;
+    }
+    CON_STATE.with(|c| {
+        if let Some(state) = c.borrow().as_ref() {
+            for &(oid, deferred) in &state.trigstates {
+                if oid == tgoid {
+                    return deferred;
+                }
+            }
+            if state.all_isset {
+                return state.all_isdeferred;
+            }
+        }
+        event & AFTER_TRIGGER_INITDEFERRED != 0
+    })
+}
+
+// afterTriggerMarkEvents (trigger.c); move_deferred = (move_list != NULL).
+fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
+    debug_assert!(move_deferred == matches!(sel, EvList::Query(_)));
+    let firing_id = FIRING_COUNTER.with(|c| c.get());
+    let mut moved: Vec<AfterTriggerEvent> = Vec::new();
+    let found = with_list(sel, |evs| {
+        let mut found = false;
+        for ev in evs.iter_mut() {
+            if ev.flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS) != 0 {
+                continue;
+            }
+            if immediate_only && check_state(ev.event, ev.tgoid) {
+                if move_deferred {
+                    moved.push(AfterTriggerEvent {
+                        flags: 0,
+                        event: ev.event,
+                        ctid1: ev.ctid1,
+                        ctid2: ev.ctid2,
+                        tgoid: ev.tgoid,
+                        relid: ev.relid,
+                        firing_id: 0,
+                    });
+                    ev.flags |= AFTER_TRIGGER_DONE;
+                }
+            } else {
+                ev.firing_id = firing_id;
+                ev.flags |= AFTER_TRIGGER_IN_PROGRESS;
+                found = true;
+            }
+        }
+        found
+    });
+    if !moved.is_empty() {
+        XACT_EVENTS.with(|s| s.borrow_mut().append(&mut moved));
+    }
+    found
+}
+
+// afterTriggerInvokeEvents (trigger.c); returns all_fired.
+fn invoke_events<'mcx>(
+    mcx: Mcx<'mcx>,
+    sel: EvList,
+    firing_id: CommandId,
+    delete_ok: bool,
+) -> PgResult<bool> {
+    let mut i = 0;
+    loop {
+        // Borrow per event: firing re-enters the queue (RI SPI queries,
+        // cascade DML).
+        let next = with_list(sel, |evs| {
+            while i < evs.len() {
+                let ev = &evs[i];
+                if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
+                    return Some((ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid));
+                }
+                i += 1;
+            }
+            None
+        });
+        let Some((ctid1, ctid2, event, tgoid, relid)) = next else {
+            break;
+        };
+        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid)?;
+        with_list(sel, |evs| {
+            let ev = &mut evs[i];
+            ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
+            ev.flags |= AFTER_TRIGGER_DONE;
+        });
+        i += 1;
+    }
+    let all_fired =
+        with_list(sel, |evs| evs.iter().all(|ev| ev.flags & AFTER_TRIGGER_DONE != 0));
+    if delete_ok && all_fired {
+        with_list(sel, |evs| evs.clear());
+    }
+    Ok(all_fired)
+}
+
+pub fn AfterTriggerBeginXact() -> PgResult<()> {
+    FIRING_COUNTER.with(|c| c.set(1));
+    QUERY_DEPTH.with(|c| c.set(-1));
+    debug_assert!(XACT_EVENTS.with(|s| s.borrow().is_empty()));
+    debug_assert!(CON_STATE.with(|c| c.borrow().is_none()));
+    debug_assert!(!QUERY_STACK.with(|s| s.borrow().iter().any(|q| !q.is_empty())));
+    Ok(())
+}
+
 pub fn AfterTriggerBeginQuery() {
     QUERY_DEPTH.with(|c| c.set(c.get() + 1));
-}
-
-pub(crate) fn query_stack_nonempty() -> bool {
-    QUERY_STACK.with(|s| s.borrow().iter().any(|q| !q.is_empty()))
-}
-
-pub(crate) fn query_stack_clear() {
-    QUERY_STACK.with(|s| s.borrow_mut().clear());
 }
 
 // Owns its scratch context (C's AfterTriggerTupleContext): the caller must
@@ -84,25 +241,17 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
     let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
     let mcx = scratch.mcx();
     loop {
-        // afterTriggerMarkEvents: stamp unscheduled events for this cycle.
-        let firing_id = FIRING_COUNTER.with(|c| c.get());
-        let found = QUERY_STACK.with(|s| {
-            let mut st = s.borrow_mut();
-            let mut found = false;
-            for ev in &mut st[d] {
-                if ev.flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS) == 0 {
-                    ev.firing_id = firing_id;
-                    ev.flags |= AFTER_TRIGGER_IN_PROGRESS;
-                    found = true;
-                }
-            }
-            found
-        });
-        if !found {
+        if !mark_events(EvList::Query(d), true, true) {
             break;
         }
-        FIRING_COUNTER.with(|c| c.set(firing_id + 1));
-        afterTriggerInvokeEvents(mcx, d, firing_id)?;
+        let firing_id = FIRING_COUNTER.with(|c| {
+            let id = c.get();
+            c.set(id + 1);
+            id
+        });
+        if invoke_events(mcx, EvList::Query(d), firing_id, false)? {
+            break;
+        }
     }
     QUERY_STACK.with(|s| {
         let mut st = s.borrow_mut();
@@ -113,40 +262,156 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
     Ok(())
 }
 
-fn afterTriggerInvokeEvents<'mcx>(mcx: Mcx<'mcx>, d: usize, firing_id: CommandId) -> PgResult<()> {
-    let mut i = 0;
-    loop {
-        // Borrow per event: firing re-enters the queue (RI SPI queries).
-        let next = QUERY_STACK.with(|s| {
-            let st = s.borrow();
-            let evs = &st[d];
-            while i < evs.len() {
-                let ev = &evs[i];
-                if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
-                    return Some((
-                        ev.ctid1,
-                        ev.ctid2,
-                        ev.event,
-                        ev.tgoid,
-                        ev.relid,
-                    ));
-                }
-                i += 1;
-            }
-            None
-        });
-        let Some((ctid1, ctid2, event, tgoid, relid)) = next else {
-            return Ok(());
-        };
-        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid)?;
-        QUERY_STACK.with(|s| {
-            let mut st = s.borrow_mut();
-            let ev = &mut st[d][i];
-            ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
-            ev.flags |= AFTER_TRIGGER_DONE;
-        });
-        i += 1;
+pub fn AfterTriggerFireDeferred() -> PgResult<()> {
+    debug_assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
+    let snap_pushed = XACT_EVENTS.with(|s| !s.borrow().is_empty());
+    if snap_pushed {
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
     }
+    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
+    let mcx = scratch.mcx();
+    loop {
+        if !mark_events(EvList::Xact, false, false) {
+            break;
+        }
+        let firing_id = FIRING_COUNTER.with(|c| {
+            let id = c.get();
+            c.set(id + 1);
+            id
+        });
+        if invoke_events(mcx, EvList::Xact, firing_id, true)? {
+            break;
+        }
+    }
+    if snap_pushed {
+        snapmgr::PopActiveSnapshot()?;
+    }
+    Ok(())
+}
+
+pub fn AfterTriggerEndXact(_is_commit: bool) -> PgResult<()> {
+    XACT_EVENTS.with(|s| s.borrow_mut().clear());
+    QUERY_STACK.with(|s| s.borrow_mut().clear());
+    CON_STATE.with(|c| *c.borrow_mut() = None);
+    TRANS_STACK.with(|s| s.borrow_mut().clear());
+    QUERY_DEPTH.with(|c| c.set(-1));
+    Ok(())
+}
+
+pub fn AfterTriggerBeginSubXact() -> PgResult<()> {
+    let my_level = xact::GetCurrentTransactionNestLevel() as usize;
+    TRANS_STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        while st.len() <= my_level {
+            st.push(SavedTrans::default());
+        }
+        st[my_level] = SavedTrans {
+            state: None,
+            state_saved: false,
+            events_len: XACT_EVENTS.with(|e| e.borrow().len()),
+            query_depth: QUERY_DEPTH.with(|c| c.get()),
+            firing_counter: FIRING_COUNTER.with(|c| c.get()),
+        };
+    });
+    Ok(())
+}
+
+pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
+    let my_level = xact::GetCurrentTransactionNestLevel() as usize;
+    if is_commit {
+        TRANS_STACK.with(|s| {
+            let mut st = s.borrow_mut();
+            assert!(my_level < st.len());
+            st[my_level].state = None;
+            st[my_level].state_saved = false;
+            debug_assert_eq!(QUERY_DEPTH.with(|c| c.get()), st[my_level].query_depth);
+        });
+        return Ok(());
+    }
+    let saved = TRANS_STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        if my_level >= st.len() {
+            return None;
+        }
+        Some(std::mem::take(&mut st[my_level]))
+    });
+    let Some(saved) = saved else {
+        return Ok(());
+    };
+    // Free query levels the aborted subxact opened; restore query_depth.
+    QUERY_STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        let keep = (saved.query_depth + 1).max(0) as usize;
+        for q in st.iter_mut().skip(keep) {
+            q.clear();
+        }
+        st.truncate(keep);
+    });
+    QUERY_DEPTH.with(|c| c.set(saved.query_depth));
+    XACT_EVENTS.with(|s| s.borrow_mut().truncate(saved.events_len));
+    if saved.state_saved {
+        CON_STATE.with(|c| *c.borrow_mut() = saved.state);
+    }
+    // Un-mark deferred events scheduled by this subxact or a child.
+    XACT_EVENTS.with(|s| {
+        for ev in s.borrow_mut().iter_mut() {
+            if ev.flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS) != 0
+                && ev.firing_id >= saved.firing_counter
+            {
+                ev.flags &= !(AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS);
+            }
+        }
+    });
+    Ok(())
+}
+
+// AfterTriggerSetState's write access to the shared state (state.rs).
+pub(crate) fn with_con_state<R>(f: impl FnOnce(&mut SetConstraintState) -> R) -> R {
+    let my_level = xact::GetCurrentTransactionNestLevel() as usize;
+    CON_STATE.with(|c| {
+        let mut b = c.borrow_mut();
+        let state = b.get_or_insert_with(SetConstraintState::create);
+        if my_level > 1 {
+            TRANS_STACK.with(|s| {
+                let mut st = s.borrow_mut();
+                if my_level < st.len() && !st[my_level].state_saved {
+                    st[my_level].state = Some(state.copy());
+                    st[my_level].state_saved = true;
+                }
+            });
+        }
+        f(state)
+    })
+}
+
+// The SET CONSTRAINTS ... IMMEDIATE retroactive firing loop (state.rs).
+pub(crate) fn fire_now_immediate() -> PgResult<()> {
+    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
+    let mcx = scratch.mcx();
+    let mut snapshot_set = false;
+    loop {
+        if !mark_events(EvList::Xact, true, false) {
+            break;
+        }
+        if !snapshot_set {
+            let snap = snapmgr::GetTransactionSnapshot()?;
+            snapmgr::PushActiveSnapshot(&snap)?;
+            snapshot_set = true;
+        }
+        let firing_id = FIRING_COUNTER.with(|c| {
+            let id = c.get();
+            c.set(id + 1);
+            id
+        });
+        if invoke_events(mcx, EvList::Xact, firing_id, !xact::IsSubTransaction())? {
+            break;
+        }
+    }
+    if snapshot_set {
+        snapmgr::PopActiveSnapshot()?;
+    }
+    Ok(())
 }
 
 fn AfterTriggerExecute<'mcx>(
@@ -170,10 +435,10 @@ fn AfterTriggerExecute<'mcx>(
     if !r1.found {
         return Err(fetch_failed(1));
     }
-    let t1 = r1.tuple().expect("found fetch has a tuple");
+    let mut t1 = r1.tuple().expect("found fetch has a tuple");
     let is_update = event & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_UPDATE;
     let r2;
-    let t2 = if is_update {
+    let mut t2 = if is_update {
         r2 = heapam::heap_fetch(&rel, &snap, ctid2, false)?;
         if !r2.found {
             return Err(fetch_failed(2));
@@ -183,22 +448,28 @@ fn AfterTriggerExecute<'mcx>(
         None
     };
 
-    if ri_trigger_kind(trigger.tgfoid) == RI_TRIGGER_NONE {
-        panic!(
-            "AfterTriggerExecute (trigger.c): non-RI trigger function {} unported \
-             (fmgr trigger-call lane)",
-            trigger.tgfoid
+    let tg_event = event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW);
+    let result = if ri_trigger_kind(trigger.tgfoid) == RI_TRIGGER_NONE {
+        let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
+        let mut tdata = types_trigger_call::TriggerData::new(
+            tg_event,
+            &rel,
+            Some(&mut t1),
+            t2.as_mut(),
+            trigger,
         );
-    }
-    let data = RiTriggerData {
-        tg_event: event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW),
-        tg_relation: &rel,
-        tg_trigtuple: &t1,
-        tg_newtuple: t2.as_ref(),
-        tg_trigger: trigger,
+        // AFTER ROW triggers: the returned tuple is ignored (C frees it).
+        crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ())
+    } else {
+        let data = RiTriggerData {
+            tg_event,
+            tg_relation: &rel,
+            tg_trigtuple: &t1,
+            tg_newtuple: t2.as_ref(),
+            tg_trigger: trigger,
+        };
+        ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
     };
-    let result = ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data);
-    drop(data);
     rel.close(NoLock)?;
     result
 }
@@ -209,7 +480,10 @@ fn trigger_enabled(t: &Trigger<'_>) -> bool {
         return false;
     }
     if t.tgqual.is_some() || t.tgnattr > 0 {
-        panic!("TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns unported");
+        panic!(
+            "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
+             unported on the AFTER ROW save path"
+        );
     }
     true
 }
@@ -243,10 +517,10 @@ fn after_trigger_save_event<'mcx>(
         if !trigger_enabled(trigger) {
             continue;
         }
-        if trigger.tgdeferrable || trigger.tginitdeferred {
+        if trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some() {
             panic!(
-                "AfterTriggerSaveEvent (trigger.c): deferrable constraint \
-                 trigger {} unported",
+                "AfterTriggerSaveEvent (trigger.c): transition tables unported \
+                 (trigger {})",
                 trigger.tgname.as_str()
             );
         }
@@ -286,16 +560,23 @@ fn after_trigger_save_event<'mcx>(
                 _ => {}
             }
         }
-        QUERY_STACK.with(|s| {
-            let mut st = s.borrow_mut();
-            while st.len() <= d {
-                st.push(Vec::new());
-            }
-            st[d].push(AfterTriggerEvent {
+        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
+        if trigger.tgfoid == F_UNIQUE_KEY_RECHECK {
+            panic!(
+                "AfterTriggerSaveEvent (trigger.c): unique_key_recheck \
+                 (recheckIndexes) unported"
+            );
+        }
+        let ats_event = (event & TRIGGER_EVENT_OPMASK)
+            | TRIGGER_EVENT_ROW
+            | if trigger.tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 }
+            | if trigger.tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 };
+        with_list(EvList::Query(d), |evs| {
+            evs.push(AfterTriggerEvent {
                 flags: 0,
                 ctid1,
                 ctid2,
-                event: event | TRIGGER_EVENT_ROW,
+                event: ats_event,
                 tgoid: trigger.tgoid,
                 relid: rel.rd_id,
                 firing_id: 0,

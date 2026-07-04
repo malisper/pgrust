@@ -66,6 +66,8 @@ pub fn init_all() {
     nodememoize::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
+    auth_scram::init_seams();
+    crypt::init_seams();
     be_secure::init_seams();
     hba::init_seams();
     libpq_pqsignal::init_seams();
@@ -189,6 +191,7 @@ pub fn init_all() {
     guc_funcs::init_seams();
     variable::init_seams();
     gin::init_seams();
+    user::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
     stack_depth::init_seams();

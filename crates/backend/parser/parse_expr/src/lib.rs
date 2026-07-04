@@ -160,12 +160,24 @@ fn transformAExprOp<'mcx>(
     }
 
     if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
-        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_SubLink)
+        && rexpr.is_some_and(|n| {
+            n.as_sub_link()
+                .is_some_and(|s| s.subLinkType == types_nodes::SubLinkType::EXPR_SUBLINK)
+        })
     {
-        panic!(
-            "transformAExprOp (parse_expr.c): ROW() op (SELECT...) ROWCOMPARE sublink \
-             unported — unit backend-parser-expr"
-        );
+        let s = rexpr.expect("checked above").as_sub_link().expect("checked above");
+        let converted = Node::mk(
+            mcx,
+            types_nodes::SubLink {
+                subLinkType: types_nodes::SubLinkType::ROWCOMPARE_SUBLINK,
+                subLinkId: s.subLinkId,
+                testexpr: lexpr,
+                operName: a.name.clone_in(mcx)?,
+                subselect: s.subselect,
+                location: a.location,
+            },
+        )?;
+        return transformExprRecurse(mcx, pstate, converted);
     }
     if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
         && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
@@ -2047,7 +2059,7 @@ fn transformSubLink<'mcx>(
 
     let (testexpr, oper_name) = match sublink.subLinkType {
         SubLinkType::EXISTS_SUBLINK => (None, types_nodes::NodeList::nil()),
-        SubLinkType::EXPR_SUBLINK => {
+        SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
             let nonjunk = qtree
                 .targetList
                 .iter()
@@ -2058,7 +2070,7 @@ fn transformSubLink<'mcx>(
             }
             (None, types_nodes::NodeList::nil())
         }
-        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
+        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
             let oper_name = if sublink.operName.is_nil() {
                 types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?
             } else {
@@ -2067,24 +2079,21 @@ fn transformSubLink<'mcx>(
             let lefthand = transformExprRecurse(
                 mcx,
                 pstate,
-                sublink.testexpr.expect("ANY/ALL sublink carries a testexpr"),
+                sublink.testexpr.expect("ANY/ALL/ROWCOMPARE sublink carries a testexpr"),
             )?;
-            if lefthand.node_tag() == NodeTag::T_RowExpr {
-                panic!(
-                    "transformSubLink (parse_expr.c): RowExpr lefthand (multi-column \
-                     row comparison) unported — unit backend-parser-expr"
-                );
-            }
-            let mut right_param = None;
-            let mut right_count = 0usize;
+            let left_list = match lefthand.as_row_expr() {
+                Some(r) => r.args.clone_in(mcx)?,
+                None => types_nodes::NodeList::make1(mcx, lefthand)?,
+            };
+            let mut right_list = types_nodes::NodeList::nil();
             for te_node in &qtree.targetList {
                 let tent = te_node.as_target_entry().expect("tlist entry");
                 if tent.resjunk {
                     continue;
                 }
-                right_count += 1;
-                if right_param.is_none() {
-                    right_param = Some(Node::mk(
+                right_list.lappend(
+                    mcx,
+                    Node::mk(
                         mcx,
                         types_nodes::Param {
                             paramkind: types_nodes::ParamKind::PARAM_SUBLINK,
@@ -2094,30 +2103,36 @@ fn transformSubLink<'mcx>(
                             paramcollid: expr_collation(tent.expr),
                             location: -1,
                         },
-                    )?);
-                }
+                    )?,
+                )?;
             }
-            if right_count > 1 {
+            if left_list.len() < right_list.len() {
                 return Err(column_count_mismatch(
                     pstate,
                     "subquery has too many columns",
                     sublink.location,
                 ));
             }
-            let Some(rarg) = right_param else {
+            if left_list.len() > right_list.len() {
                 return Err(column_count_mismatch(
                     pstate,
                     "subquery has too few columns",
                     sublink.location,
                 ));
-            };
-            let test =
-                make_row_comparison_op(mcx, pstate, &oper_name, lefthand, rarg, sublink.location)?;
+            }
+            let test = make_row_comparison_op_lists(
+                mcx,
+                pstate,
+                &oper_name,
+                &left_list,
+                &right_list,
+                sublink.location,
+            )?;
             (Some(test), oper_name)
         }
         other => panic!(
-            "transformSubLink (parse_expr.c): {other:?} arm (ROWCOMPARE/MULTIEXPR/\
-             ARRAY) unported — unit backend-parser-expr"
+            "transformSubLink (parse_expr.c): {other:?} arm (MULTIEXPR/CTE) \
+             unported — unit backend-parser-expr"
         ),
     };
 
