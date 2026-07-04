@@ -55,6 +55,8 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 execindexing = { path = "../../executor/execindexing" }
 exectuples = { path = "../../executor/exectuples" }
 nodes_core = { path = "../../nodes/nodes_core" }
+pgstat = { path = "../../utils/activity/pgstat" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }
