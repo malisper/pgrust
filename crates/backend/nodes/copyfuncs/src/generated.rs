@@ -53,17 +53,18 @@ use types_nodes::rawnodes::{
     AlterTSDictionaryStmt, AlterUserMappingStmt, CallStmt, ColumnDef, ColumnRef,
     CompositeTypeStmt, Constraint, ConstraintsSetStmt, CreateDomainStmt, CreateEnumStmt,
     CreateExtensionStmt, CreateFdwStmt, CreateForeignServerStmt, CreateForeignTableStmt,
-    CreateSeqStmt, CreateStatsStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt,
-    CreateUserMappingStmt, DeleteStmt, DropUserMappingStmt, FuncCall, ImportForeignSchemaStmt,
-    IndexElem, IndexStmt, InferClause, InsertStmt, IntoClause, JsonAggConstructor,
-    JsonArgument, JsonArrayAgg, JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr,
-    JsonKeyValue, JsonObjectAgg, JsonObjectConstructor, JsonOutput, JsonParseExpr,
-    JsonScalarExpr, JsonSerializeExpr, LockingClause, MergeStmt, MergeWhenClause,
-    OnConflictClause, PLAssignStmt, ParamRef, PartitionBoundSpec, PartitionCmd, PartitionElem,
-    PartitionRangeDatum, PartitionSpec, RangeFunction, RangeSubselect, RangeTableFunc,
-    RangeTableFuncCol, RawStmt, RefreshMatViewStmt, ResTarget, ReturningClause, RuleStmt,
-    SelectStmt, SortBy, StatsElem, TableLikeClause, TriggerTransition, TypeCast, TypeName,
-    UpdateStmt, ViewStmt, WindowDef, XmlSerialize,
+    CreateRangeStmt, CreateSeqStmt, CreateStatsStmt, CreateStmt, CreateTableAsStmt,
+    CreateTrigStmt, CreateUserMappingStmt, DeleteStmt, DropUserMappingStmt, FuncCall,
+    ImportForeignSchemaStmt, IndexElem, IndexStmt, InferClause, InsertStmt, IntoClause,
+    JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
+    JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
+    JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonScalarExpr, JsonSerializeExpr,
+    LockingClause, MergeStmt, MergeWhenClause, OnConflictClause, PLAssignStmt, ParamRef,
+    PartitionBoundSpec, PartitionCmd, PartitionElem, PartitionRangeDatum, PartitionSpec,
+    RangeFunction, RangeSubselect, RangeTableFunc, RangeTableFuncCol, RawStmt,
+    RefreshMatViewStmt, ResTarget, ReturningClause, RuleStmt, SelectStmt, SortBy, StatsElem,
+    TableLikeClause, TriggerTransition, TypeCast, TypeName, UpdateStmt, ViewStmt, WindowDef,
+    XmlSerialize,
 };
 use types_nodes::plannodes::{
     Agg, Append, AppendRelInfo, BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, CteScan,
@@ -424,6 +425,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_CreatePublicationStmt => {
             let s = node.as_variant::<CreatePublicationStmt>().expect("CreatePublicationStmt");
             Node::mk(mcx, copy_CreatePublicationStmt(mcx, s)?)?
+        }
+        NodeTag::T_CreateRangeStmt => {
+            let s = node.as_variant::<CreateRangeStmt>().expect("CreateRangeStmt");
+            Node::mk(mcx, copy_CreateRangeStmt(mcx, s)?)?
         }
         NodeTag::T_CreateRoleStmt => {
             let s = node.as_variant::<CreateRoleStmt>().expect("CreateRoleStmt");
@@ -2105,6 +2110,13 @@ pub(crate) fn copy_CreatePublicationStmt<'d>(mcx: Mcx<'d>, s: &CreatePublication
         options: copy_node_list(mcx, &s.options)?,
         pubobjects: copy_node_list(mcx, &s.pubobjects)?,
         for_all_tables: s.for_all_tables,
+    })
+}
+
+pub(crate) fn copy_CreateRangeStmt<'d>(mcx: Mcx<'d>, s: &CreateRangeStmt<'_>) -> PgResult<CreateRangeStmt<'d>> {
+    Ok(CreateRangeStmt {
+        typeName: copy_node_list(mcx, &s.typeName)?,
+        params: copy_node_list(mcx, &s.params)?,
     })
 }
 
