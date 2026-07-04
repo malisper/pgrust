@@ -1961,6 +1961,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "readfuncs",
  "stack_depth",
  "syscache_seams",
  "typcache_seams",
@@ -6707,6 +6708,7 @@ name = "parse_func"
 version = "0.0.0"
 dependencies = [
  "catalog_namespace",
+ "clauses_seams",
  "coerce",
  "elog",
  "format_type",
@@ -6767,6 +6769,8 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nodes_core",
+ "parse_utilcmd_seams",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
@@ -6827,6 +6831,7 @@ dependencies = [
  "miscinit",
  "nodes_core",
  "outfuncs",
+ "parse_utilcmd_seams",
  "parser_seams",
  "parser_small1",
  "pg_constraint",
@@ -6847,6 +6852,18 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+]
+
+[[package]]
+name = "parse_utilcmd_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_small1",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -9728,6 +9745,8 @@ dependencies = [
  "parse_clause",
  "parse_collate",
  "parse_expr",
+ "parse_func",
+ "parse_utilcmd",
  "parser_analyze",
  "parser_driver",
  "partitionfuncs",

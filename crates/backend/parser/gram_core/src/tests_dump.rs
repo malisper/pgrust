@@ -282,6 +282,13 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "funcformat", f.funcformat as i32);
         int_field(out, "location", f.location);
         out.push('}');
+    } else if let Some(na) = n.as_named_arg_expr() {
+        out.push_str("{NAMEDARGEXPR");
+        node_field(out, "arg", Some(na.arg));
+        string_field(out, "name", na.name);
+        int_field(out, "argnumber", na.argnumber);
+        int_field(out, "location", na.location);
+        out.push('}');
     } else if let Some(t) = n.as_type_name() {
         out.push_str("{TYPENAME");
         list_field(out, "names", &t.names);
@@ -965,18 +972,7 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "lateral", rf.lateral);
         bool_field(out, "ordinality", rf.ordinality);
         bool_field(out, "is_rowsfrom", rf.is_rowsfrom);
-        // C: functions is a list of (funcexpr, coldeflist) 2-lists; the port
-        // holds bare funcexprs with NIL coldeflists (actions.rs rule 1884).
-        out.push_str(" :functions (");
-        for (i, f) in rf.functions.iter().enumerate() {
-            if i > 0 {
-                out.push(' ');
-            }
-            out.push('(');
-            node(out, f);
-            out.push_str(" <>)");
-        }
-        out.push(')');
+        list_field(out, "functions", &rf.functions);
         out.push_str(" :alias ");
         match rf.alias {
             Some(a) => alias(out, a),

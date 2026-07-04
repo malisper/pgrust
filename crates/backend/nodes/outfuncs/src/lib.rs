@@ -16,7 +16,7 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
+    Const, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
     ScalarArrayOpExpr, SubLink, TargetEntry, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
@@ -48,6 +48,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_OpExpr => out_op_expr(out, node.as_variant::<OpExpr>().expect("OpExpr"))?,
         NodeTag::T_FuncExpr => {
             out_func_expr(out, node.as_variant::<FuncExpr>().expect("FuncExpr"))?
+        }
+        NodeTag::T_NamedArgExpr => {
+            out_named_arg_expr(out, node.as_variant::<NamedArgExpr>().expect("NamedArgExpr"))?
         }
         NodeTag::T_BoolExpr => {
             out_bool_expr(out, node.as_variant::<BoolExpr>().expect("BoolExpr"))?
@@ -304,6 +307,15 @@ fn out_func_expr(out: &mut PgString<'_>, f: &FuncExpr<'_>) -> PgResult<()> {
     );
     out_list(out, &f.args)?;
     w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_named_arg_expr(out: &mut PgString<'_>, n: &NamedArgExpr<'_>) -> PgResult<()> {
+    w!(out, "{{NAMEDARGEXPR :arg ");
+    out_node(out, n.arg)?;
+    w!(out, " :name ");
+    out_str(out, n.name);
+    w!(out, " :argnumber {} :location -1}}", n.argnumber);
     Ok(())
 }
 

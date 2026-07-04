@@ -104,6 +104,20 @@ pub fn transformExprRecurse<'mcx>(
             transformArrayExpr(mcx, pstate, expr.as_a_array_expr().unwrap(), 0, 0, -1)
         }
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
+        // C mutates na->arg in place; sealed nodes rebuild the wrapper.
+        NodeTag::T_NamedArgExpr => {
+            let na = expr.as_named_arg_expr().unwrap();
+            let arg = transformExprRecurse(mcx, pstate, na.arg)?;
+            Node::mk(
+                mcx,
+                types_nodes::NamedArgExpr {
+                    arg,
+                    name: na.name,
+                    argnumber: na.argnumber,
+                    location: na.location,
+                },
+            )
+        }
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
         NodeTag::T_GroupingFunc => parse_agg::transformGroupingFunc(
@@ -1616,7 +1630,7 @@ fn transformColumnRef<'mcx>(
                             // function of that name exists; otherwise C falls
                             // through to errorMissingColumn.
                             if !catalog_namespace::FuncnameGetCandidates(
-                                mcx, &[name], 1, false, false,
+                                mcx, &[name], 1, &[], false, false,
                             )?
                             .is_empty()
                             {

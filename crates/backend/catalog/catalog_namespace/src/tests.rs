@@ -337,7 +337,7 @@ fn funcname_candidates_filter_arity_and_visibility() {
     set_search_path("public");
 
     let ctx = MemoryContext::new("t");
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["f"], 1, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["f"], 1, &[], true, true).unwrap();
     // 9002 is in an off-path namespace; 9003 has the wrong arity.
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, 9001);
@@ -351,7 +351,7 @@ fn variadic_candidate_expands() {
     set_search_path("public");
 
     let ctx = MemoryContext::new("t");
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 3, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 3, &[], true, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, 9004);
     assert_eq!(cands[0].nargs, 3);
@@ -360,7 +360,7 @@ fn variadic_candidate_expands() {
     assert_eq!(cands[0].args.as_slice(), &[2283, 2283, 2283]);
 
     // expand_variadic=false: the raw signature.
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 1, false, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 1, &[], false, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].nvargs, 0);
     assert_eq!(cands[0].args.as_slice(), &[2277]);
@@ -373,7 +373,7 @@ fn nonvariadic_masks_variadic_with_same_expansion() {
     set_search_path("public");
 
     let ctx = MemoryContext::new("t");
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["pf"], 1, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["pf"], 1, &[], true, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, 9005);
     assert_eq!(cands[0].nvargs, 0);
@@ -388,13 +388,13 @@ fn defaults_candidate_conflicts_with_exact_arity_sibling() {
     // C's own ambiguity example: f(int) vs f(int, int DEFAULT ...) at one
     // arg — dedup ignores defaulted args, preference is undecidable.
     let ctx = MemoryContext::new("t");
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 1, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 1, &[], true, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, InvalidOid);
     assert_eq!(cands[0].args.as_slice(), &[23]);
 
     // At two args only the defaulted signature matches; no expansion needed.
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 2, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 2, &[], true, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, 9008);
     assert_eq!(cands[0].ndargs, 0);
@@ -409,7 +409,7 @@ fn undecidable_duplicate_marked_ambiguous() {
     // f(int, VARIADIC int[]) vs f(VARIADIC int[]) at 2 args: C marks the
     // surviving entry InvalidOid (parse_func turns it into "not unique").
     let ctx = MemoryContext::new("t");
-    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["amb"], 2, true, true).unwrap();
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["amb"], 2, &[], true, true).unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, InvalidOid);
     assert_eq!(cands[0].args.as_slice(), &[23, 23]);

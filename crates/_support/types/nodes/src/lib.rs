@@ -38,7 +38,8 @@ pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullTest, NullTestType,
+    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NamedArgExpr,
+    NullTest, NullTestType,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
     RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
     SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TargetEntry, Var,
