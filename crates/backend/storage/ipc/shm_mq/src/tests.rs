@@ -221,22 +221,17 @@ fn oversize_message_errors() {
     );
 }
 
-#[test]
-fn two_thread_stress_blocking() {
-    let _s = serial();
-    setup();
-
-    const N: usize = 10_000;
-    let mq = shm_mq_create(4096);
-    mq.set_receiver(0);
-    mq.set_sender(2);
+fn two_thread_stress(ring_size: usize, n: usize, max_len: usize, procs: (ProcNumber, ProcNumber), pids: (i32, i32)) {
+    let mq = shm_mq_create(ring_size);
+    mq.set_receiver(procs.0);
+    mq.set_sender(procs.1);
 
     let tx_mq = Arc::clone(&mq);
     let sender = std::thread::spawn(move || {
-        become_backend(2, 7201);
+        become_backend(procs.1, pids.1);
         let mut tx = shm_mq_attach(tx_mq);
-        for i in 0..N {
-            let len = if i % 97 == 0 { 0 } else { (i * 37) % 1000 };
+        for i in 0..n {
+            let len = if i % 97 == 0 { 0 } else { (i * 37) % max_len };
             let msg = msg_body(i, len);
             assert_eq!(tx.send(&msg, false, false).unwrap(), ShmMqResult::Success);
         }
@@ -244,10 +239,10 @@ fn two_thread_stress_blocking() {
 
     let rx_mq = Arc::clone(&mq);
     let receiver = std::thread::spawn(move || {
-        become_backend(0, 7200);
+        become_backend(procs.0, pids.0);
         let mut rx = shm_mq_attach(rx_mq);
-        for i in 0..N {
-            let len = if i % 97 == 0 { 0 } else { (i * 37) % 1000 };
+        for i in 0..n {
+            let len = if i % 97 == 0 { 0 } else { (i * 37) % max_len };
             let expected = msg_body(i, len);
             assert_eq!(recv_success(&mut rx, false), expected, "message {i}");
         }
@@ -259,4 +254,20 @@ fn two_thread_stress_blocking() {
 
     sender.join().unwrap();
     receiver.join().unwrap();
+}
+
+#[test]
+fn two_thread_stress_blocking() {
+    let _s = serial();
+    setup();
+    two_thread_stress(4096, 10_000, 1000, (0, 2), (7200, 7201));
+}
+
+// Tiny ring: every message wraps and reuses ring bytes — pressure on the
+// inc_bytes_read release edge that licenses sender overwrite.
+#[test]
+fn two_thread_stress_small_ring() {
+    let _s = serial();
+    setup();
+    two_thread_stress(64, 10_000, 200, (0, 2), (7210, 7211));
 }

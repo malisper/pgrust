@@ -103,6 +103,40 @@ fn worker_error_clamps_level_and_appends_context() {
 }
 
 #[test]
+fn frontend_redirect_captures_sub_error_reports() {
+    let _s = serial();
+    guc_boot();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Box<PgError>>(4);
+    let prev = elog::set_frontend_redirect(Some(Box::new(move |e: &PgError| {
+        if e.level < ERROR {
+            let _ = tx.send(Box::new(e.clone()));
+        }
+    })));
+    let prev_dest = elog::config::where_to_send_output();
+    elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
+    let _ = elog::elog(types_error::NOTICE, "worker says hi");
+    elog::config::set_where_to_send_output(prev_dest);
+    elog::set_frontend_redirect(prev);
+    let captured = rx.try_recv().expect("notice did not reach the redirect");
+    assert_eq!(captured.message(), "worker says hi");
+    assert_eq!(captured.level, types_error::NOTICE);
+}
+
+// C dlist_push_head: AtEOSubXact scans newest-first or inner-subxact
+// contexts leak past subxact end.
+#[test]
+fn pcxt_list_is_lifo() {
+    let _s = serial();
+    let _g = ParallelModeGuard::enter();
+    let a = CreateParallelContext("postgres", "substrate_test_entry", 0).unwrap();
+    let b = CreateParallelContext("postgres", "substrate_test_entry", 0).unwrap();
+    let front = PCXT_LIST.with(|l| l.borrow().first().map(|p| ParallelContextId(p.id)));
+    assert_eq!(front, Some(b));
+    DestroyParallelContext(b).unwrap();
+    DestroyParallelContext(a).unwrap();
+}
+
+#[test]
 fn parallel_context_requires_parallel_mode_and_lists() {
     let _s = serial();
     assert!(!ParallelContextActive());

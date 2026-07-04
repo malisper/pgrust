@@ -104,3 +104,26 @@ pub(crate) fn call_emit_log_hook(error: &PgError, output_to_server: &mut bool) {
         hook(error, output_to_server);
     }
 }
+
+// C's pq_redirect_to_shm_mq: while installed, client-bound reports go to the
+// closure (structured, no wire encode) instead of the frontend socket.
+pub type FrontendRedirect = Box<dyn Fn(&PgError)>;
+
+thread_local! {
+    static FRONTEND_REDIRECT: std::cell::RefCell<Option<FrontendRedirect>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_frontend_redirect(redirect: Option<FrontendRedirect>) -> Option<FrontendRedirect> {
+    FRONTEND_REDIRECT.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), redirect))
+}
+
+pub(crate) fn call_frontend_redirect(error: &PgError) -> bool {
+    FRONTEND_REDIRECT.with(|slot| match slot.borrow().as_ref() {
+        Some(redirect) => {
+            redirect(error);
+            true
+        }
+        None => false,
+    })
+}

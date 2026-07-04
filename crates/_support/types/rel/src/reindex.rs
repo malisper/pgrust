@@ -92,11 +92,58 @@ pub fn remove_reindex_pending(indexOid: Oid) {
     });
 }
 
+// index.c Estimate/Serialize/RestoreReindexState; the caller supplies C's
+// GetCurrentTransactionNestLevel() at restore.
+#[derive(Clone)]
+pub struct SerializedReindexState {
+    heap: Oid,
+    index: Oid,
+    pending: [Oid; PENDING_CAP],
+    pending_len: usize,
+}
+
+pub fn serialize_reindex_state() -> SerializedReindexState {
+    SerializedReindexState {
+        heap: CURRENTLY_REINDEXED_HEAP.with(|c| c.get()),
+        index: CURRENTLY_REINDEXED_INDEX.with(|c| c.get()),
+        pending: PENDING.with(|p| p.get()),
+        pending_len: PENDING_LEN.with(|c| c.get()),
+    }
+}
+
+pub fn restore_reindex_state(state: &SerializedReindexState, nest_level: i32) {
+    CURRENTLY_REINDEXED_HEAP.with(|c| c.set(state.heap));
+    CURRENTLY_REINDEXED_INDEX.with(|c| c.set(state.index));
+    PENDING.with(|p| p.set(state.pending));
+    PENDING_LEN.with(|c| c.set(state.pending_len));
+    REINDEXING_NEST_LEVEL.with(|c| c.set(nest_level));
+}
+
 pub fn reset_reindex_state(nest_level: i32) {
     if REINDEXING_NEST_LEVEL.with(|c| c.get()) >= nest_level {
         CURRENTLY_REINDEXED_HEAP.with(|c| c.set(InvalidOid));
         CURRENTLY_REINDEXED_INDEX.with(|c| c.set(InvalidOid));
         PENDING_LEN.with(|c| c.set(0));
         REINDEXING_NEST_LEVEL.with(|c| c.set(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_restore_roundtrip() {
+        set_reindex_pending(&[11, 12], 1);
+        set_reindex_processing(1, 11, 1);
+        let s = serialize_reindex_state();
+        reset_reindex_state(0);
+        assert!(!ReindexIsProcessingIndex(12));
+        restore_reindex_state(&s, 2);
+        assert!(ReindexIsProcessingHeap(1));
+        assert!(ReindexIsCurrentlyProcessingIndex(11));
+        assert!(ReindexIsProcessingIndex(12));
+        assert!(!ReindexIsProcessingIndex(11) || ReindexIsCurrentlyProcessingIndex(11));
+        reset_reindex_state(0);
     }
 }

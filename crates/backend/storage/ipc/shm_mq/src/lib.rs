@@ -155,8 +155,11 @@ impl ShmMq {
     }
 
     fn inc_bytes_read(&self, n: usize) {
-        // Prior mq_ring reads stay before the bump; pairs with send_bytes.
-        fence(Ordering::Acquire);
+        // Release: prior mq_ring reads happen-before the bump that licenses
+        // the sender to overwrite; pairs with send_bytes' SeqCst fence.
+        // (C's pg_read_barrier relies on a hardware dependent-write argument
+        // that has no C11/Rust-model equivalent.)
+        fence(Ordering::Release);
         let cur = self.bytes_read();
         self.mq_bytes_read.store(cur + n as u64, Ordering::Relaxed);
         let sender = self
