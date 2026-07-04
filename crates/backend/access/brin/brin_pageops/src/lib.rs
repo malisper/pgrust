@@ -482,6 +482,30 @@ fn brin_initialize_empty_new_buffer(idxrel: &Relation<'_>, buffer: Buffer) -> Pg
     )
 }
 
+// RelationGetTargetBlock/RelationSetTargetBlock: the cache is C's
+// rd_smgr->smgr_targblock, so RelationTruncate's smgr reset invalidates it.
+fn relation_get_target_block(rel: &RelationData<'_>) -> BlockNumber {
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return InvalidBlockNumber;
+    }
+    smgr::smgrgettargblock(::types_storage::RelFileLocatorBackend {
+        locator,
+        backend: rel.rd_backend,
+    })
+}
+
+fn relation_set_target_block(rel: &RelationData<'_>, blk: BlockNumber) {
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return;
+    }
+    let key = ::types_storage::RelFileLocatorBackend { locator, backend: rel.rd_backend };
+    if smgr::smgropen(key.locator, key.backend).is_ok() {
+        smgr::smgrsettargblock(key, blk);
+    }
+}
+
 // brin_getinsertbuffer: (InvalidBuffer, false) = caller restarts (old page
 // became a revmap page). On success the returned buffer AND oldbuf (if
 // valid) are exclusively locked.
@@ -498,7 +522,7 @@ fn brin_getinsertbuffer(
         InvalidBlockNumber
     };
 
-    let mut newblk = ::bufmgr_seams::targblock::relation_get_target_block(irel);
+    let mut newblk = relation_get_target_block(irel);
     if newblk == InvalidBlockNumber {
         newblk = freespace::GetPageWithFreeSpace(irel, itemsz)?;
     }
@@ -565,7 +589,7 @@ fn brin_getinsertbuffer(
             br_page_get_freespace(&page)
         };
         if freesp >= itemsz {
-            ::bufmgr_seams::targblock::relation_set_target_block(irel, newblk);
+            relation_set_target_block(irel, newblk);
 
             if oldbuf != InvalidBuffer && oldblk > newblk {
                 lock_buffer::call(oldbuf, BUFFER_LOCK_EXCLUSIVE)?;

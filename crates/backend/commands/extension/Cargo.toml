@@ -1,0 +1,62 @@
+[package]
+name = "extension"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_portal = { path = "../../../_support/types/portal" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_guc = { path = "../../../_support/types/types_guc" }
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+guc_file = { path = "../../utils/misc/guc_file" }
+mbutils = { path = "../../utils/mb/mbutils" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+init_small = { path = "../../utils/init/init_small" }
+xact = { path = "../../access/transam/xact" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+tcop_dest = { path = "../../tcop/dest" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+pg_depend = { path = "../../catalog/pg_depend" }
+heaptuple = { path = "../../access/common/heaptuple" }
+detoast = { path = "../../access/common/detoast" }
+varlena = { path = "../../utils/adt/varlena" }
+adt_bool = { path = "../../utils/adt/bool" }
+adt_acl = { path = "../../utils/adt/acl" }
+aclchk = { path = "../../catalog/aclchk" }
+pg_path = { path = "../../../port/pg_path" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+parser_seams = { path = "../../parser/parser_seams" }
+analyze_seams = { path = "../../parser/analyze_seams" }
+rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+execmain_seams = { path = "../../executor/execmain_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+schemacmds = { path = "../schemacmds" }
+commands_comment = { path = "../comment" }
+explain = { path = "../explain" }
+extension_seams = { path = "../extension_seams" }
+adt_quote = { path = "../../utils/adt/quote" }

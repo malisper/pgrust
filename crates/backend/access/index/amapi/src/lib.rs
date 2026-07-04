@@ -14,6 +14,7 @@ pub const F_BTHANDLER: Oid = 330;
 pub const F_HASHHANDLER: Oid = 331;
 pub const F_GINHANDLER: Oid = 333;
 pub const F_GISTHANDLER: Oid = 332;
+pub const F_SPGHANDLER: Oid = 334;
 pub const F_BRINHANDLER: Oid = 335;
 const AMTYPE_INDEX: i8 = b'i' as i8;
 const Anum_pg_am_amname: i32 = 2;
@@ -30,6 +31,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
         F_GISTHANDLER => IndexAmKind::Gist,
+        F_SPGHANDLER => IndexAmKind::Spgist,
         F_BRINHANDLER => IndexAmKind::Brin,
         other => unported_handler(other),
     }
@@ -97,6 +99,8 @@ pub fn IndexAmTranslateStrategy(
         // amtranslatestrategy == NULL for gist.
         IndexAmKind::Gist => COMPARE_INVALID,
         // amtranslatestrategy == NULL.
+        IndexAmKind::Spgist => COMPARE_INVALID,
+        // amtranslatestrategy == NULL.
         IndexAmKind::Brin => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
@@ -140,6 +144,8 @@ pub fn IndexAmTranslateCompareType(
              temporal/WITHOUT OVERLAPS lane)"
         ),
         // amtranslatecmptype == NULL.
+        IndexAmKind::Spgist => InvalidStrategy,
+        // amtranslatecmptype == NULL.
         IndexAmKind::Brin => InvalidStrategy,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
@@ -153,8 +159,31 @@ pub fn IndexAmTranslateCompareType(
     Ok(result)
 }
 
-pub fn amvalidate(_opclassoid: Oid) -> PgResult<bool> {
-    panic!("unported: amvalidate (DDL opclass-validation lane; needs CLAOID probe + per-AM validate)")
+pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
+    let shape = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for operator class {opclassoid}"));
+    let kind = GetIndexAmRoutineByAmId(shape.opcmethod, false)?.expect("noerror=false");
+    match kind {
+        IndexAmKind::Btree => nbt_validate::btvalidate(opclassoid),
+        other => panic!("unported: amvalidate for index AM {other:?} (hashvalidate lane)"),
+    }
+}
+
+// amadjustmembers dispatch (DefineOpClass/AlterOpFamilyAdd).
+pub fn am_adjust_members(
+    kind: IndexAmKind,
+    opfamilyoid: Oid,
+    opclassoid: Oid,
+    operators: &mut [types_relscan::OpFamilyMember],
+    functions: &mut [types_relscan::OpFamilyMember],
+) -> PgResult<()> {
+    match kind {
+        IndexAmKind::Btree => {
+            nbt_validate::btadjustmembers(opfamilyoid, opclassoid, operators, functions)
+        }
+        // hashadjustmembers exists in C; loud until the hash opclass lane.
+        other => panic!("unported: amadjustmembers for index AM {other:?}"),
+    }
 }
 
 fn am_name(tuple: &catcache::CatCTuple) -> PgResult<String> {

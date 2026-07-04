@@ -1,7 +1,8 @@
-//! outfuncs.c minimal arm: nodeToString for the expression node set stored in
-//! pg_attrdef.adbin / pg_constraint.conbin / pg_trigger.tgqual. Every other
-//! node tag is a loud panic naming the C writer. Output is byte-compatible
-//! with C 18.3 nodeToString (locations stripped to -1, WRITE_LOCATION_FIELD).
+//! outfuncs.c nodeToString for the node sets stored in pg_attrdef.adbin /
+//! pg_constraint.conbin (DEFAULT/CHECK corpus), pg_trigger.tgqual, and
+//! pg_rewrite.ev_action (view SELECT-rule Query trees). Every other node tag
+//! is a loud panic naming the C writer. Output is byte-compatible with C 18.3
+//! nodeToString (write_location_fields=false: every location renders as -1).
 
 #![allow(non_snake_case)]
 
@@ -11,17 +12,26 @@ use datum::Datum;
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::NodeList;
+use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
 use types_nodes::primnodes::{
-    BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, Const, FuncExpr,
-    NullTest, OpExpr, RelabelType, Var,
+    Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
+    Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
+    ScalarArrayOpExpr, SubLink, TargetEntry, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
-use types_nodes::{Node, NodeTag};
+use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
     let mut out = PgString::new_in(mcx);
     out_node(&mut out, node)?;
+    Ok(out)
+}
+
+// Query reachable only as RangeTblEntry.subquery's &Query (no node handle).
+pub fn queryToString<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<PgString<'mcx>> {
+    let mut out = PgString::new_in(mcx);
+    out_query(&mut out, q)?;
     Ok(out)
 }
 
@@ -48,6 +58,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
+        NodeTag::T_List => out_list(out, node.as_list().expect("List"))?,
         NodeTag::T_CoerceViaIO => {
             out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }
@@ -63,6 +74,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
+            out,
+            node.as_variant::<ScalarArrayOpExpr>().expect("ScalarArrayOpExpr"),
+        )?,
         NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
             out,
             node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),
@@ -71,8 +86,64 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<PartitionRangeDatum>().expect("PartitionRangeDatum"),
         )?,
+        NodeTag::T_BooleanTest => {
+            let bt = node
+                .as_variant::<types_nodes::primnodes::BooleanTest>()
+                .expect("BooleanTest");
+            w!(out, "{{BOOLEANTEST :arg ");
+            out_opt_node(out, bt.arg)?;
+            w!(out, " :booltesttype {} :location -1}}", bt.booltesttype as u32);
+        }
+        NodeTag::T_SetToDefault => {
+            let d = node
+                .as_variant::<types_nodes::primnodes::SetToDefault>()
+                .expect("SetToDefault");
+            w!(
+                out,
+                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location -1}}",
+                d.typeId, d.typeMod, d.collation
+            );
+        }
+        NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
+        NodeTag::T_RangeTblEntry => {
+            out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
+        }
+        NodeTag::T_RTEPermissionInfo => out_rte_permission_info(
+            out,
+            node.as_variant::<RTEPermissionInfo>().expect("RTEPermissionInfo"),
+        ),
+        NodeTag::T_Alias => out_alias(out, node.as_variant::<Alias>().expect("Alias"))?,
+        NodeTag::T_FromExpr => {
+            out_from_expr(out, node.as_variant::<FromExpr>().expect("FromExpr"))?
+        }
+        NodeTag::T_JoinExpr => {
+            out_join_expr(out, node.as_variant::<JoinExpr>().expect("JoinExpr"))?
+        }
+        NodeTag::T_RangeTblRef => {
+            out_range_tbl_ref(out, node.as_variant::<RangeTblRef>().expect("RangeTblRef"))
+        }
+        NodeTag::T_TargetEntry => {
+            out_target_entry(out, node.as_variant::<TargetEntry>().expect("TargetEntry"))?
+        }
+        NodeTag::T_SortGroupClause => out_sort_group_clause(
+            out,
+            node.as_variant::<SortGroupClause>().expect("SortGroupClause"),
+        ),
+        NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
+        NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
+        NodeTag::T_IntList => out_int_list(out, node.as_int_list().expect("IntList")),
+        NodeTag::T_OidList => out_oid_list(out, node.as_oid_list().expect("OidList")),
+        NodeTag::T_String => out_string_node(out, node.as_string().expect("String").sval),
+        NodeTag::T_Integer => {
+            w!(out, "{}", node.as_variant::<Integer>().expect("Integer").ival)
+        }
+        NodeTag::T_Float => w!(out, "{}", node.as_variant::<Float>().expect("Float").fval),
+        NodeTag::T_Boolean => {
+            out_bool(out, node.as_variant::<Boolean>().expect("Boolean").boolval)
+        }
         other => panic!(
-            "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK expr set only)"
+            "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK + view \
+             SELECT-rule sets)"
         ),
     }
     Ok(())
@@ -160,6 +231,15 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
         -1 => {
             // SAFETY: byref const datum points at a live in-line varlena.
             unsafe { varlena_size(p) }
+        }
+        -2 => {
+            // cstring (unknown-type Consts): NUL included, as C's strlen+1.
+            let mut n = 0usize;
+            // SAFETY: byref cstring datum points at a live NUL-terminated string.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
         }
         other => panic!("_outDatum (outfuncs.c): typlen {other} unported"),
     };
@@ -306,6 +386,413 @@ fn out_coerce_via_io(out: &mut PgString<'_>, c: &CoerceViaIO<'_>) -> PgResult<()
         " :resulttype {} :resultcollid {} :coerceformat {} :location -1}}",
         c.resulttype, c.resultcollid, c.coerceformat as u32
     );
+    Ok(())
+}
+
+// outToken (outfuncs.c): backslash-escape anything read.c treats specially.
+fn out_token(out: &mut PgString<'_>, s: &str) {
+    if s.is_empty() {
+        w!(out, "\"\"");
+        return;
+    }
+    let b = s.as_bytes();
+    if b[0] == b'<'
+        || b[0] == b'"'
+        || b[0].is_ascii_digit()
+        || ((b[0] == b'+' || b[0] == b'-')
+            && b.len() > 1
+            && (b[1].is_ascii_digit() || b[1] == b'.'))
+    {
+        w!(out, "\\");
+    }
+    for c in s.chars() {
+        if matches!(c, ' ' | '\n' | '\t' | '(' | ')' | '{' | '}' | '\\') {
+            w!(out, "\\");
+        }
+        w!(out, "{c}");
+    }
+}
+
+fn out_str(out: &mut PgString<'_>, s: Option<&str>) {
+    match s {
+        None => w!(out, "<>"),
+        Some(s) => out_token(out, s),
+    }
+}
+
+// outChar (outfuncs.c): '\0' keeps its traditional <> encoding.
+fn out_char(out: &mut PgString<'_>, c: u8) {
+    if c == 0 {
+        w!(out, "<>");
+        return;
+    }
+    let buf = [c];
+    out_token(out, core::str::from_utf8(&buf).expect("outChar ascii"));
+}
+
+// _outString (outfuncs.c): always quoted, content escaped via outToken.
+fn out_string_node(out: &mut PgString<'_>, s: &str) {
+    w!(out, "\"");
+    if !s.is_empty() {
+        out_token(out, s);
+    }
+    w!(out, "\"");
+}
+
+fn out_opt_node(out: &mut PgString<'_>, n: Option<Node<'_>>) -> PgResult<()> {
+    match n {
+        None => {
+            w!(out, "<>");
+            Ok(())
+        }
+        Some(n) => out_node(out, n),
+    }
+}
+
+fn out_int_list(out: &mut PgString<'_>, l: &IntList<'_>) {
+    if l.is_nil() {
+        w!(out, "<>");
+        return;
+    }
+    w!(out, "(i");
+    for v in l.iter() {
+        w!(out, " {v}");
+    }
+    w!(out, ")");
+}
+
+fn out_oid_list(out: &mut PgString<'_>, l: &OidList<'_>) {
+    if l.is_nil() {
+        w!(out, "<>");
+        return;
+    }
+    w!(out, "(o");
+    for v in l.iter() {
+        w!(out, " {v}");
+    }
+    w!(out, ")");
+}
+
+fn out_alias(out: &mut PgString<'_>, a: &Alias<'_>) -> PgResult<()> {
+    w!(out, "{{ALIAS :aliasname ");
+    out_str(out, a.aliasname);
+    w!(out, " :colnames ");
+    out_list(out, &a.colnames)?;
+    w!(out, "}}");
+    Ok(())
+}
+
+fn out_opt_alias(out: &mut PgString<'_>, a: Option<&Alias<'_>>) -> PgResult<()> {
+    match a {
+        None => {
+            w!(out, "<>");
+            Ok(())
+        }
+        Some(a) => out_alias(out, a),
+    }
+}
+
+fn out_query(out: &mut PgString<'_>, q: &Query<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{QUERY :commandType {} :querySource {} :canSetTag ",
+        q.commandType as u32, q.querySource as u32
+    );
+    out_bool(out, q.canSetTag);
+    w!(out, " :utilityStmt ");
+    out_opt_node(out, q.utilityStmt)?;
+    w!(out, " :resultRelation {} :hasAggs ", q.resultRelation);
+    out_bool(out, q.hasAggs);
+    w!(out, " :hasWindowFuncs ");
+    out_bool(out, q.hasWindowFuncs);
+    w!(out, " :hasTargetSRFs ");
+    out_bool(out, q.hasTargetSRFs);
+    w!(out, " :hasSubLinks ");
+    out_bool(out, q.hasSubLinks);
+    w!(out, " :hasDistinctOn ");
+    out_bool(out, q.hasDistinctOn);
+    w!(out, " :hasRecursive ");
+    out_bool(out, q.hasRecursive);
+    w!(out, " :hasModifyingCTE ");
+    out_bool(out, q.hasModifyingCTE);
+    w!(out, " :hasForUpdate ");
+    out_bool(out, q.hasForUpdate);
+    w!(out, " :hasRowSecurity ");
+    out_bool(out, q.hasRowSecurity);
+    w!(out, " :hasGroupRTE ");
+    out_bool(out, q.hasGroupRTE);
+    w!(out, " :isReturn ");
+    out_bool(out, q.isReturn);
+    w!(out, " :cteList ");
+    out_list(out, &q.cteList)?;
+    w!(out, " :rtable ");
+    out_list(out, &q.rtable)?;
+    w!(out, " :rteperminfos ");
+    out_list(out, &q.rteperminfos)?;
+    w!(out, " :jointree ");
+    match q.jointree {
+        None => w!(out, "<>"),
+        Some(f) => out_from_expr(out, f)?,
+    }
+    w!(out, " :mergeActionList ");
+    out_list(out, &q.mergeActionList)?;
+    w!(out, " :mergeTargetRelation {} :mergeJoinCondition ", q.mergeTargetRelation);
+    out_opt_node(out, q.mergeJoinCondition)?;
+    w!(out, " :targetList ");
+    out_list(out, &q.targetList)?;
+    w!(out, " :override {} :onConflict ", q.r#override as u32);
+    out_opt_node(out, q.onConflict)?;
+    w!(out, " :returningOldAlias ");
+    out_str(out, q.returningOldAlias);
+    w!(out, " :returningNewAlias ");
+    out_str(out, q.returningNewAlias);
+    w!(out, " :returningList ");
+    out_list(out, &q.returningList)?;
+    w!(out, " :groupClause ");
+    out_list(out, &q.groupClause)?;
+    w!(out, " :groupDistinct ");
+    out_bool(out, q.groupDistinct);
+    w!(out, " :groupingSets ");
+    out_list(out, &q.groupingSets)?;
+    w!(out, " :havingQual ");
+    out_opt_node(out, q.havingQual)?;
+    w!(out, " :windowClause ");
+    out_list(out, &q.windowClause)?;
+    w!(out, " :distinctClause ");
+    out_list(out, &q.distinctClause)?;
+    w!(out, " :sortClause ");
+    out_list(out, &q.sortClause)?;
+    w!(out, " :limitOffset ");
+    out_opt_node(out, q.limitOffset)?;
+    w!(out, " :limitCount ");
+    out_opt_node(out, q.limitCount)?;
+    w!(out, " :limitOption {} :rowMarks ", q.limitOption as u32);
+    out_list(out, &q.rowMarks)?;
+    w!(out, " :setOperations ");
+    out_opt_node(out, q.setOperations)?;
+    w!(out, " :constraintDeps ");
+    out_oid_list(out, &q.constraintDeps);
+    w!(out, " :withCheckOptions ");
+    out_list(out, &q.withCheckOptions)?;
+    w!(out, " :stmt_location -1 :stmt_len -1}}");
+    Ok(())
+}
+
+fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResult<()> {
+    w!(out, "{{RANGETBLENTRY :alias ");
+    out_opt_alias(out, r.alias)?;
+    w!(out, " :eref ");
+    out_opt_alias(out, r.eref)?;
+    w!(out, " :rtekind {}", r.rtekind as u32);
+    match r.rtekind {
+        RTEKind::RTE_RELATION => {
+            w!(out, " :relid {} :inh ", r.relid);
+            out_bool(out, r.inh);
+            w!(out, " :relkind ");
+            out_char(out, r.relkind);
+            w!(
+                out,
+                " :rellockmode {} :perminfoindex {} :tablesample ",
+                r.rellockmode, r.perminfoindex
+            );
+            out_opt_node(out, r.tablesample)?;
+        }
+        RTEKind::RTE_SUBQUERY => {
+            w!(out, " :subquery ");
+            match r.subquery {
+                None => w!(out, "<>"),
+                Some(q) => out_query(out, q)?,
+            }
+            w!(out, " :security_barrier ");
+            out_bool(out, r.security_barrier);
+            w!(out, " :relid {} :inh ", r.relid);
+            out_bool(out, r.inh);
+            w!(out, " :relkind ");
+            out_char(out, r.relkind);
+            w!(
+                out,
+                " :rellockmode {} :perminfoindex {}",
+                r.rellockmode, r.perminfoindex
+            );
+        }
+        RTEKind::RTE_JOIN => {
+            w!(
+                out,
+                " :jointype {} :joinmergedcols {} :joinaliasvars ",
+                r.jointype as u32, r.joinmergedcols
+            );
+            out_list(out, &r.joinaliasvars)?;
+            w!(out, " :joinleftcols ");
+            out_int_list(out, &r.joinleftcols);
+            w!(out, " :joinrightcols ");
+            out_int_list(out, &r.joinrightcols);
+            w!(out, " :join_using_alias ");
+            out_opt_alias(out, r.join_using_alias)?;
+        }
+        RTEKind::RTE_VALUES => {
+            w!(out, " :values_lists ");
+            out_list(out, &r.values_lists)?;
+            w!(out, " :coltypes ");
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
+        }
+        RTEKind::RTE_GROUP => {
+            w!(out, " :groupexprs ");
+            out_list(out, &r.groupexprs)?;
+        }
+        other => panic!(
+            "_outRangeTblEntry (outfuncs.c): {other:?} arm unported (view SELECT-rule set)"
+        ),
+    }
+    w!(out, " :lateral ");
+    out_bool(out, r.lateral);
+    w!(out, " :inFromCl ");
+    out_bool(out, r.inFromCl);
+    w!(out, " :securityQuals ");
+    out_list(out, &r.securityQuals)?;
+    w!(out, "}}");
+    Ok(())
+}
+
+fn out_rte_permission_info(out: &mut PgString<'_>, p: &RTEPermissionInfo<'_>) {
+    w!(out, "{{RTEPERMISSIONINFO :relid {} :inh ", p.relid);
+    out_bool(out, p.inh);
+    w!(
+        out,
+        " :requiredPerms {} :checkAsUser {} :selectedCols ",
+        p.requiredPerms, p.checkAsUser
+    );
+    out_bitmapset(out, &p.selectedCols);
+    w!(out, " :insertedCols ");
+    out_bitmapset(out, &p.insertedCols);
+    w!(out, " :updatedCols ");
+    out_bitmapset(out, &p.updatedCols);
+    w!(out, "}}");
+}
+
+fn out_from_expr(out: &mut PgString<'_>, f: &FromExpr<'_>) -> PgResult<()> {
+    w!(out, "{{FROMEXPR :fromlist ");
+    out_list(out, &f.fromlist)?;
+    w!(out, " :quals ");
+    out_opt_node(out, f.quals)?;
+    w!(out, "}}");
+    Ok(())
+}
+
+fn out_join_expr(out: &mut PgString<'_>, j: &JoinExpr<'_>) -> PgResult<()> {
+    w!(out, "{{JOINEXPR :jointype {} :isNatural ", j.jointype as u32);
+    out_bool(out, j.isNatural);
+    w!(out, " :larg ");
+    out_node(out, j.larg)?;
+    w!(out, " :rarg ");
+    out_node(out, j.rarg)?;
+    w!(out, " :usingClause ");
+    out_list(out, &j.usingClause)?;
+    w!(out, " :join_using_alias ");
+    out_opt_alias(out, j.join_using_alias)?;
+    w!(out, " :quals ");
+    out_opt_node(out, j.quals)?;
+    w!(out, " :alias ");
+    out_opt_alias(out, j.alias)?;
+    w!(out, " :rtindex {}}}", j.rtindex);
+    Ok(())
+}
+
+fn out_range_tbl_ref(out: &mut PgString<'_>, r: &RangeTblRef) {
+    w!(out, "{{RANGETBLREF :rtindex {}}}", r.rtindex);
+}
+
+fn out_target_entry(out: &mut PgString<'_>, t: &TargetEntry<'_>) -> PgResult<()> {
+    w!(out, "{{TARGETENTRY :expr ");
+    out_node(out, t.expr)?;
+    w!(out, " :resno {} :resname ", t.resno);
+    out_str(out, t.resname);
+    w!(
+        out,
+        " :ressortgroupref {} :resorigtbl {} :resorigcol {} :resjunk ",
+        t.ressortgroupref, t.resorigtbl, t.resorigcol
+    );
+    out_bool(out, t.resjunk);
+    w!(out, "}}");
+    Ok(())
+}
+
+fn out_sort_group_clause(out: &mut PgString<'_>, s: &SortGroupClause) {
+    w!(
+        out,
+        "{{SORTGROUPCLAUSE :tleSortGroupRef {} :eqop {} :sortop {} :reverse_sort ",
+        s.tleSortGroupRef, s.eqop, s.sortop
+    );
+    out_bool(out, s.reverse_sort);
+    w!(out, " :nulls_first ");
+    out_bool(out, s.nulls_first);
+    w!(out, " :hashable ");
+    out_bool(out, s.hashable);
+    w!(out, "}}");
+}
+
+fn out_aggref(out: &mut PgString<'_>, a: &Aggref<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{AGGREF :aggfnoid {} :aggtype {} :aggcollid {} :inputcollid {} :aggtranstype {} \
+         :aggargtypes ",
+        a.aggfnoid, a.aggtype, a.aggcollid, a.inputcollid, a.aggtranstype
+    );
+    out_oid_list(out, &a.aggargtypes);
+    w!(out, " :aggdirectargs ");
+    out_list(out, &a.aggdirectargs)?;
+    w!(out, " :args ");
+    out_list(out, &a.args)?;
+    w!(out, " :aggorder ");
+    out_list(out, &a.aggorder)?;
+    w!(out, " :aggdistinct ");
+    out_list(out, &a.aggdistinct)?;
+    w!(out, " :aggfilter ");
+    out_opt_node(out, a.aggfilter)?;
+    w!(out, " :aggstar ");
+    out_bool(out, a.aggstar);
+    w!(out, " :aggvariadic ");
+    out_bool(out, a.aggvariadic);
+    w!(out, " :aggkind ");
+    out_char(out, a.aggkind as u8);
+    w!(out, " :aggpresorted ");
+    out_bool(out, a.aggpresorted);
+    w!(
+        out,
+        " :agglevelsup {} :aggsplit {} :aggno {} :aggtransno {} :location -1}}",
+        a.agglevelsup, a.aggsplit, a.aggno, a.aggtransno
+    );
+    Ok(())
+}
+
+fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{SUBLINK :subLinkType {} :subLinkId {} :testexpr ",
+        s.subLinkType as u32, s.subLinkId
+    );
+    out_opt_node(out, s.testexpr)?;
+    w!(out, " :operName ");
+    out_list(out, &s.operName)?;
+    w!(out, " :subselect ");
+    out_node(out, s.subselect)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_scalar_array_op_expr(out: &mut PgString<'_>, s: &ScalarArrayOpExpr<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{SCALARARRAYOPEXPR :opno {} :opfuncid {} :hashfuncid {} :negfuncid {} :useOr ",
+        s.opno, s.opfuncid, s.hashfuncid, s.negfuncid
+    );
+    out_bool(out, s.useOr);
+    w!(out, " :inputcollid {} :args ", s.inputcollid);
+    out_list(out, &s.args)?;
+    w!(out, " :location -1}}");
     Ok(())
 }
 

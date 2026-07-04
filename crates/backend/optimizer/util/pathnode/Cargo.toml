@@ -1,0 +1,21 @@
+[package]
+name = "pathnode"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+costsize = { path = "../../path/costsize" }
+planner_seams = { path = "../../plan/planner_seams" }
+clauses = { path = "../clauses" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+init_small = { path = "../../../utils/init/init_small" }
+nodehash = { path = "../../../executor/nodehash" }

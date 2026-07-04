@@ -26,7 +26,7 @@ use ::types_rel::{Relation, RelationData};
 use ::types_scan::scankey::{ScanKeyData, SK_ISNULL};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_slot::SlotData;
-use ::types_snapshot::{HTSV_Result, IsMVCCSnapshot, SnapshotData};
+use ::types_snapshot::{HTSV_Result, IsMVCCSnapshot, SnapshotData, SnapshotType, XidVisMemo};
 use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber, PageRef};
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 use ::types_storage::multixact::ISUPDATE_from_mxstatus;
@@ -105,10 +105,18 @@ fn unexpected_during_logical_decoding() -> bool {
     TransactionIdIsValid(CHECK_XID_ALIVE)
 }
 
-fn check_for_interrupts() {
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        unported("ProcessInterrupts (tcop/postgres.c)");
+        return process_interrupts();
     }
+    Ok(())
 }
 
 #[inline]
@@ -217,7 +225,7 @@ pub fn HeapCheckForSerializableConflictOut(
     buffer: Buffer,
     snapshot: &SnapshotData<'_>,
 ) -> PgResult<()> {
-    if !predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot) {
+    if !predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot)? {
         return Ok(());
     }
 
@@ -377,6 +385,9 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
     lines: OffsetNumber,
 ) -> PgResult<u32> {
     let mut ntup: u32 = 0;
+    // Page-batch visibility: resolve each distinct xid's status once per page.
+    let mvcc = snapshot.snapshot_type == SnapshotType::SNAPSHOT_MVCC;
+    let mut memo = XidVisMemo::new();
 
     // C's `for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)`:
     // a manual while — RangeInclusive drags an exhausted-flag (cset/cinc)
@@ -408,6 +419,10 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
             };
             let valid = if ALL_VISIBLE {
                 true
+            } else if mvcc {
+                hv_seam::heap_tuple_satisfies_mvcc_page::call(
+                    &mut loctup, snapshot, buffer, &mut memo,
+                )?
             } else {
                 hv_seam::heap_tuple_satisfies_visibility::call(&mut loctup, snapshot, buffer)?
             };
@@ -448,7 +463,7 @@ pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
         .as_deref()
         .expect("page-at-a-time mode requires an MVCC snapshot");
     let check_serializable =
-        predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot);
+        predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot)?;
 
     let pin = scan.rs_cbuf.as_ref().expect("pagescan without buffer");
     debug_assert!(pin.block_number() == block);
@@ -591,7 +606,7 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -
         pin.release();
     }
 
-    check_for_interrupts();
+    check_for_interrupts()?;
 
     // Direction change = read_stream_reset: prefetch restarts at the current block.
     if scan.rs_dir != dir {
@@ -929,6 +944,60 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirecti
 
     end_of_scan(scan);
     Ok(())
+}
+
+// Page-batch scan feed (upstream batch table-AM scan design, CF 6176):
+// forward pagemode only, whole pages consumed by the fused executor drive.
+// INVARIANT: no interleaving with per-tuple getnext calls on the same scan
+// (rs_cindex parks at the page end so a stray continue-walk advances pages).
+pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
+    debug_assert!((scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0);
+    debug_assert!(scan.rs_base.rs_nkeys == 0);
+    loop {
+        if !pagemode_next_page(scan, ScanDirection::ForwardScanDirection)? {
+            end_of_scan(scan);
+            return Ok(0);
+        }
+        if scan.rs_ntuples > 0 {
+            scan.rs_cindex = scan.rs_ntuples - 1;
+            if scan.rs_base.rs_rd.pgstat_enabled.get() {
+                scan.rs_pgstat_getnext += scan.rs_ntuples as u64;
+            }
+            return Ok(scan.rs_ntuples);
+        }
+    }
+}
+
+pub fn heap_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut HeapScanDescData<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    debug_assert!(i < scan.rs_ntuples && !scan.rs_cpage.is_null());
+    // SAFETY: the heapgettup_pagemode walk verbatim — i < rs_ntuples <=
+    // MaxHeapTuplesPerPage (heap_prepare_pagescan's per-page bound), lineoff
+    // from page_collect_tuples on the page pinned by rs_cbuf.
+    let (ptr, len, lineoff) = unsafe {
+        let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+        let page: PageRef<'_> = PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage));
+        let lpp = page.item_id_unchecked(lineoff);
+        debug_assert!(lpp.is_normal());
+        let (ptr, len) = page.item_raw_unchecked(lpp);
+        (ptr, len, lineoff)
+    };
+    let pin = scan.rs_cbuf.as_ref().expect("batch store without buffer");
+    // SAFETY: image on the page pinned by rs_cbuf; the buffer-slot store
+    // takes its own pin (C contract).
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            ptr,
+            len,
+            ItemPointerData::new(scan.rs_cblock, lineoff),
+            scan.rs_base.rs_rd.rd_id,
+        )
+    };
+    exectuples::exec_store_buffer_heap_tuple(slot, mcx, tuple, pin.buffer());
 }
 
 #[allow(clippy::too_many_arguments)]

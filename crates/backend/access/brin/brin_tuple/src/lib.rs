@@ -32,31 +32,7 @@ fn alloc_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx [u8]> {
     Ok(v.leak())
 }
 
-/// datumCopy for a stored value; by-ref copies land in `mcx`.
-pub fn datum_copy<'mcx>(
-    mcx: Mcx<'mcx>,
-    value: Datum,
-    typbyval: bool,
-    typlen: i16,
-) -> PgResult<Datum> {
-    if typbyval {
-        return Ok(value);
-    }
-    let p = value.as_usize() as *const u8;
-    // SAFETY: by-ref datum is live per caller contract; size from its varlena
-    // header or the fixed typlen.
-    let sz = unsafe {
-        if typlen == -1 {
-            varsize_any(p)
-        } else {
-            debug_assert!(typlen > 0);
-            typlen as usize
-        }
-    };
-    // SAFETY: as above.
-    let copied = alloc_bytes(mcx, unsafe { core::slice::from_raw_parts(p, sz) })?;
-    Ok(Datum::from_usize(copied.as_ptr() as usize))
-}
+pub use ::types_brin::datum_copy;
 
 // SAFETY: p is a live non-external varlena.
 unsafe fn varlena_image<'a>(p: *const u8) -> &'a [u8] {
@@ -68,7 +44,7 @@ pub fn brin_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     bdesc: &BrinDesc<'_>,
     blkno: BlockNumber,
-    tuple: &BrinMemTuple,
+    tuple: &mut BrinMemTuple,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let natts = bdesc.natts();
     debug_assert!(bdesc.bd_totalstored > 0);
@@ -78,7 +54,7 @@ pub fn brin_form_tuple<'mcx>(
     let mut anynulls = false;
 
     for keyno in 0..natts {
-        let col = &tuple.bt_columns[keyno];
+        let col = &mut tuple.bt_columns[keyno];
         let nstored = bdesc.bd_info[keyno].oi_nstored as usize;
 
         if col.bv_allnulls {
@@ -92,6 +68,12 @@ pub fn brin_form_tuple<'mcx>(
         if col.bv_hasnulls {
             anynulls = true;
         }
+
+        if col.bv_mem_value.is_some() {
+            debug_assert!(bdesc.bd_info[keyno].kind == types_brin::BrinOpcKind::MinMaxMulti);
+            brin_minmax_multi::brin_minmax_multi_serialize(mcx, bdesc, col)?;
+        }
+        let col = &tuple.bt_columns[keyno];
 
         for datumno in 0..nstored {
             let mut value = col.bv_values[datumno];
@@ -267,6 +249,7 @@ pub fn brin_new_memtuple(bdesc: &BrinDesc<'_>) -> BrinMemTuple {
             bv_hasnulls: false,
             bv_allnulls: true,
             bv_values: [Datum::null(); BRIN_MAX_NSTORED],
+            bv_mem_value: None,
         });
     }
     dtup
@@ -282,6 +265,7 @@ pub fn brin_memtuple_initialize(dtuple: &mut BrinMemTuple, bdesc: &BrinDesc<'_>)
         col.bv_allnulls = true;
         col.bv_hasnulls = false;
         col.bv_values = [Datum::null(); BRIN_MAX_NSTORED];
+        col.bv_mem_value = None;
     }
     dtuple.bt_empty_range = true;
 }

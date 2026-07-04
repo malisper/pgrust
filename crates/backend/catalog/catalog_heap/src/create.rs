@@ -319,8 +319,10 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relkind == RELKIND_RELATION
             || p.relkind == types_rel::RELKIND_TOASTVALUE
             || p.relkind == types_rel::RELKIND_SEQUENCE
-            || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE,
-        "only plain/partitioned tables, toast tables and sequences ported"
+            || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+            || p.relkind == RELKIND_VIEW
+            || p.relkind == types_rel::RELKIND_MATVIEW,
+        "only plain/partitioned tables, toast, sequences, views and matviews ported"
     );
     // C: no rowtype/array pg_type entry where the relation is an
     // implementation detail (toast, sequences, indexes).
@@ -466,9 +468,8 @@ pub fn heap_create_with_catalog<'mcx>(
         pg_depend::recordDependencyOnOwner(RELATION_RELATION_ID, relid, p.ownerid);
         // recordDependencyOnNewAcl: relacl is always NULL here (divergence
         // above) and the owner needs no entry, so C records nothing.
-        // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
-        // outside CREATE EXTENSION scripts.
-        let mut addrs = [
+        pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+        let mut addrs: [ObjectAddress; 2] = [
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
             ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
         ];

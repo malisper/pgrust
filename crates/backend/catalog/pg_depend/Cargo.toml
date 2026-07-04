@@ -21,5 +21,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 catalog = { path = "../catalog" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
 catalog_indexing = { path = "../catalog_indexing" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

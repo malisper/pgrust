@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::gin_vocab::GinScanOpaqueData;
-use ::types_core::{Oid, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID};
+use ::types_core::{Oid, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID};
 use ::types_hash::HashScanOpaqueData;
 use ::types_error::PgResult;
 use ::types_gist::state::GISTScanOpaqueData;
@@ -26,6 +26,7 @@ pub enum IndexAmKind {
     Hash,
     Gin,
     Gist,
+    Spgist,
     Brin,
     #[cfg(feature = "mock")]
     Mock,
@@ -38,6 +39,7 @@ impl IndexAmKind {
             HASH_AM_OID => IndexAmKind::Hash,
             GIN_AM_OID => IndexAmKind::Gin,
             GIST_AM_OID => IndexAmKind::Gist,
+            SPGIST_AM_OID => IndexAmKind::Spgist,
             BRIN_AM_OID => IndexAmKind::Brin,
             #[cfg(feature = "mock")]
             MOCK_AM_OID => IndexAmKind::Mock,
@@ -51,6 +53,7 @@ impl IndexAmKind {
             IndexAmKind::Hash => true,
             IndexAmKind::Gin => true,
             IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
@@ -63,6 +66,7 @@ impl IndexAmKind {
             IndexAmKind::Hash => false,
             IndexAmKind::Gin => false,
             IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
@@ -75,6 +79,98 @@ impl IndexAmKind {
             IndexAmKind::Hash => false,
             IndexAmKind::Gin => false,
             IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
+    pub const fn amstrategies(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 5,
+            IndexAmKind::Hash => 1,
+            IndexAmKind::Gin => 0,
+            IndexAmKind::Gist => 0,
+            IndexAmKind::Spgist => 0,
+            IndexAmKind::Brin => 0,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 5,
+        }
+    }
+
+    pub const fn amsupport(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 6,
+            IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 12,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 15,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 6,
+        }
+    }
+
+    pub const fn amoptsprocnum(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 5,
+            IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 10,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 5,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 5,
+        }
+    }
+
+    pub const fn amstorage(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => true,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
+            IndexAmKind::Brin => true,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
+    pub const fn amcanorder(self) -> bool {
+        match self {
+            IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => true,
+        }
+    }
+
+    pub const fn amcanhash(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => true,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
+    pub const fn amcanorderbyop(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
             IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
@@ -87,6 +183,7 @@ impl IndexAmKind {
             IndexAmKind::Hash => false,
             IndexAmKind::Gin => false,
             IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
             IndexAmKind::Brin => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
@@ -94,10 +191,40 @@ impl IndexAmKind {
     }
 }
 
+// amapi.h OpFamilyMember: DDL carrier for opclass/opfamily member entries.
+#[derive(Clone, Copy, Debug)]
+pub struct OpFamilyMember {
+    pub is_func: bool,
+    pub object: Oid,
+    pub number: i16,
+    pub sortfamily: Oid,
+    pub lefttype: Oid,
+    pub righttype: Oid,
+    pub ref_is_hard: bool,
+    pub ref_is_family: bool,
+    pub refobjid: Oid,
+}
+
+impl Default for OpFamilyMember {
+    fn default() -> Self {
+        OpFamilyMember {
+            is_func: false,
+            object: 0,
+            number: 0,
+            sortfamily: 0,
+            lefttype: 0,
+            righttype: 0,
+            ref_is_hard: false,
+            ref_is_family: false,
+            refobjid: 0,
+        }
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn unported_index_am(relam: Oid) -> ! {
-    panic!("unported: index AM {relam} (IndexAmKind covers btree+hash+gin+gist+brin)")
+    panic!("unported: index AM {relam} (IndexAmKind covers btree+hash+gin+gist+spgist+brin)")
 }
 
 pub enum IndexScanOpaque<'mcx> {
@@ -105,6 +232,7 @@ pub enum IndexScanOpaque<'mcx> {
     Hash(PgBox<'mcx, HashScanOpaqueData<'mcx>>),
     Gin(PgBox<'mcx, GinScanOpaqueData>),
     Gist(PgBox<'mcx, GISTScanOpaqueData<'mcx>>),
+    Spgist(PgBox<'mcx, ::types_spgist::state::SpGistScanOpaqueData<'mcx>>),
     Brin(PgBox<'mcx, ::types_brin::BrinOpaque<'mcx>>),
     #[cfg(feature = "mock")]
     Mock(MockOpaque),
@@ -118,6 +246,7 @@ impl IndexScanOpaque<'_> {
             IndexScanOpaque::Hash(_) => IndexAmKind::Hash,
             IndexScanOpaque::Gin(_) => IndexAmKind::Gin,
             IndexScanOpaque::Gist(_) => IndexAmKind::Gist,
+            IndexScanOpaque::Spgist(_) => IndexAmKind::Spgist,
             IndexScanOpaque::Brin(_) => IndexAmKind::Brin,
             #[cfg(feature = "mock")]
             IndexScanOpaque::Mock(_) => IndexAmKind::Mock,

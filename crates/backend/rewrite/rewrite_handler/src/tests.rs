@@ -136,12 +136,13 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> R
         rd_options: None,
         pgstat_enabled: std::cell::Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false,
+            rd_hasrules: relkind == RELKIND_VIEW,
     };
     Relation::open(data, None)
 }
@@ -375,15 +376,18 @@ fn acquire_locks_recurses_into_subquery_rte() {
 }
 
 #[test]
-#[should_panic(expected = "mergeActionList arm")]
-fn merge_rewrite_defers_loud() {
+fn merge_rewrite_plain_table_passes() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
     query.commandType = CmdType::CMD_MERGE;
     query.resultRelation = 1;
-    let _ = QueryRewrite(mcx, query);
+    query.rtable =
+        NodeList::make1(mcx, relation_rte(mcx, TBL, RELKIND_RELATION, RowExclusiveLock))
+            .unwrap();
+    let out = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(out.len(), 1);
 }
 
 #[test]

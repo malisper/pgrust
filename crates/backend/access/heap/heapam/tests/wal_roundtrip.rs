@@ -154,6 +154,8 @@ fn install_seams() {
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));
     freespace_seams::record_and_get_page_with_free_space::set(|_rel, _old, _avail, _need| {
         Ok(InvalidBlockNumber)
@@ -297,12 +299,12 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -465,7 +467,7 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
         );
         let mut tup =
             heap_form_tuple(mcx, &tupdesc, &[::datum::Datum::from_i32(*val)], &[false]).unwrap();
-        heap_insert(&rel, tup.as_tuple_mut(), CID, 0).unwrap();
+        heap_insert(&rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
         tids.push(tup.as_tuple().t_self);
     }
     assert_eq!(tids[0], ItemPointerData::new(0, 1));

@@ -1,0 +1,314 @@
+// plpgsql.h compile-output structures, phase-1 subset.
+//
+// Std collections justification (AGENTS.md rule 3): the compiled function is
+// a cold, backend-lifetime artifact mirroring C's dedicated func_cxt (freed
+// wholesale on recompile — Drop here); it is outside context accounting and
+// never allocated per row.
+use types_core::Oid;
+
+pub type Dno = i32;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeKind {
+    Scalar,
+    Rec,
+    Pseudo,
+}
+
+// PLpgSQL_type; typinput resolved once at compile (C fmgr_info into func_cxt).
+#[derive(Clone, Debug)]
+pub struct PlType {
+    pub typoid: Oid,
+    pub ttype: TypeKind,
+    pub typlen: i16,
+    pub typbyval: bool,
+    pub typtype: i8,
+    pub collation: Oid,
+    pub typisarray: bool,
+    pub atttypmod: i32,
+    pub typinput: Oid,
+    pub typioparam: Oid,
+}
+
+// PLpgSQL_expr. `ns` indexes the function's namespace arena (the item
+// visible at parse time); plan/simple-expr state lives in exec-side slots
+// keyed by expr_id (interior runtime state kept out of the shared AST).
+#[derive(Debug)]
+pub struct PlExpr {
+    pub query: String,
+    pub parse_mode: parser_seams::RawParseMode,
+    pub ns: i32,
+    pub expr_id: u32,
+    /// RAW_PARSE_PLPGSQL_ASSIGN target datum (C target_param), -1 if none.
+    pub target_param: Dno,
+}
+
+#[derive(Debug)]
+pub struct PlVar {
+    pub dno: Dno,
+    pub refname: String,
+    pub lineno: i32,
+    pub datatype: PlType,
+    pub isconst: bool,
+    pub notnull: bool,
+    pub default_val: Option<PlExpr>,
+}
+
+#[derive(Debug)]
+pub struct PlRow {
+    pub dno: Dno,
+    pub refname: String,
+    pub lineno: i32,
+    pub fieldnames: Vec<String>,
+    pub varnos: Vec<Dno>,
+}
+
+#[derive(Debug)]
+pub struct PlRec {
+    pub dno: Dno,
+    pub refname: String,
+    pub lineno: i32,
+}
+
+#[derive(Debug)]
+pub struct PlRecField {
+    pub dno: Dno,
+    pub recparentno: Dno,
+    pub fieldname: String,
+}
+
+#[derive(Debug)]
+pub enum PlDatum {
+    Var(PlVar),
+    Row(PlRow),
+    Rec(PlRec),
+    RecField(PlRecField),
+}
+
+impl PlDatum {
+    pub fn dno(&self) -> Dno {
+        match self {
+            PlDatum::Var(v) => v.dno,
+            PlDatum::Row(r) => r.dno,
+            PlDatum::Rec(r) => r.dno,
+            PlDatum::RecField(f) => f.dno,
+        }
+    }
+
+    pub fn refname(&self) -> &str {
+        match self {
+            PlDatum::Var(v) => &v.refname,
+            PlDatum::Row(r) => &r.refname,
+            PlDatum::Rec(r) => &r.refname,
+            PlDatum::RecField(f) => &f.fieldname,
+        }
+    }
+}
+
+// PLpgSQL_nsitem, arena-index chained (C is pointer-chained).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NsType {
+    Label,
+    Var,
+    Row,
+    Rec,
+}
+
+#[derive(Debug)]
+pub struct NsItem {
+    pub itemtype: NsType,
+    pub itemno: i32,
+    pub name: String,
+    pub prev: i32,
+}
+
+pub const GETDIAG_ROW_COUNT: i32 = 0;
+
+#[derive(Debug)]
+pub struct GetDiagItem {
+    pub kind: i32,
+    pub target: Dno,
+}
+
+// Loop bodies carry the enclosing label for EXIT/CONTINUE matching.
+#[derive(Debug)]
+pub enum PlStmt {
+    Block(PlBlock),
+    Assign {
+        lineno: i32,
+        varno: Dno,
+        expr: PlExpr,
+    },
+    If {
+        lineno: i32,
+        cond: PlExpr,
+        then_body: Vec<PlStmt>,
+        elsifs: Vec<(PlExpr, Vec<PlStmt>)>,
+        else_body: Option<Vec<PlStmt>>,
+    },
+    Loop {
+        lineno: i32,
+        label: Option<String>,
+        body: Vec<PlStmt>,
+    },
+    While {
+        lineno: i32,
+        label: Option<String>,
+        cond: PlExpr,
+        body: Vec<PlStmt>,
+    },
+    ForI {
+        lineno: i32,
+        label: Option<String>,
+        var: Dno,
+        lower: PlExpr,
+        upper: PlExpr,
+        step: Option<PlExpr>,
+        reverse: bool,
+        body: Vec<PlStmt>,
+    },
+    ForS {
+        lineno: i32,
+        label: Option<String>,
+        /// Rec or Row datum receiving each result row.
+        var: Dno,
+        query: PlExpr,
+        body: Vec<PlStmt>,
+    },
+    ExitContinue {
+        lineno: i32,
+        is_exit: bool,
+        label: Option<String>,
+        cond: Option<PlExpr>,
+    },
+    Return {
+        lineno: i32,
+        expr: Option<PlExpr>,
+        retvarno: Dno,
+    },
+    Raise {
+        lineno: i32,
+        elog_level: i32,
+        condname: Option<String>,
+        message: Option<String>,
+        params: Vec<PlExpr>,
+        options: Vec<RaiseOption>,
+    },
+    Assert {
+        lineno: i32,
+        cond: PlExpr,
+        message: Option<PlExpr>,
+    },
+    ExecSql {
+        lineno: i32,
+        sqlstmt: PlExpr,
+        mod_stmt: bool,
+        into: bool,
+        strict: bool,
+        target: Dno,
+    },
+    Perform {
+        lineno: i32,
+        expr: PlExpr,
+    },
+    GetDiag {
+        lineno: i32,
+        is_stacked: bool,
+        items: Vec<GetDiagItem>,
+    },
+}
+
+pub const PLPGSQL_RAISEOPTION_ERRCODE: i32 = 0;
+pub const PLPGSQL_RAISEOPTION_MESSAGE: i32 = 1;
+pub const PLPGSQL_RAISEOPTION_DETAIL: i32 = 2;
+pub const PLPGSQL_RAISEOPTION_HINT: i32 = 3;
+pub const PLPGSQL_RAISEOPTION_COLUMN: i32 = 4;
+pub const PLPGSQL_RAISEOPTION_CONSTRAINT: i32 = 5;
+pub const PLPGSQL_RAISEOPTION_DATATYPE: i32 = 6;
+pub const PLPGSQL_RAISEOPTION_TABLE: i32 = 7;
+pub const PLPGSQL_RAISEOPTION_SCHEMA: i32 = 8;
+
+#[derive(Debug)]
+pub struct RaiseOption {
+    pub opt_type: i32,
+    pub expr: PlExpr,
+}
+
+#[derive(Debug)]
+pub struct PlBlock {
+    pub lineno: i32,
+    pub label: Option<String>,
+    pub body: Vec<PlStmt>,
+    /// dnos of block-local variables to initialize on entry.
+    pub initvarnos: Vec<Dno>,
+}
+
+pub fn stmt_lineno(s: &PlStmt) -> i32 {
+    match s {
+        PlStmt::Block(b) => b.lineno,
+        PlStmt::Assign { lineno, .. }
+        | PlStmt::If { lineno, .. }
+        | PlStmt::Loop { lineno, .. }
+        | PlStmt::While { lineno, .. }
+        | PlStmt::ForI { lineno, .. }
+        | PlStmt::ForS { lineno, .. }
+        | PlStmt::ExitContinue { lineno, .. }
+        | PlStmt::Return { lineno, .. }
+        | PlStmt::Raise { lineno, .. }
+        | PlStmt::Assert { lineno, .. }
+        | PlStmt::ExecSql { lineno, .. }
+        | PlStmt::Perform { lineno, .. }
+        | PlStmt::GetDiag { lineno, .. } => *lineno,
+    }
+}
+
+pub fn stmt_typename(s: &PlStmt) -> &'static str {
+    // plpgsql_stmt_typename (pl_funcs.c) subset — context-line vocabulary.
+    match s {
+        PlStmt::Block(_) => "statement block",
+        PlStmt::Assign { .. } => "assignment",
+        PlStmt::If { .. } => "IF",
+        PlStmt::Loop { .. } => "LOOP",
+        PlStmt::While { .. } => "WHILE",
+        PlStmt::ForI { .. } => "FOR with integer loop variable",
+        PlStmt::ForS { .. } => "FOR over SELECT rows",
+        PlStmt::ExitContinue { is_exit: true, .. } => "EXIT",
+        PlStmt::ExitContinue { is_exit: false, .. } => "CONTINUE",
+        PlStmt::Return { .. } => "RETURN",
+        PlStmt::Raise { .. } => "RAISE",
+        PlStmt::Assert { .. } => "ASSERT",
+        PlStmt::ExecSql { .. } => "SQL statement",
+        PlStmt::Perform { .. } => "PERFORM",
+        PlStmt::GetDiag { is_stacked: false, .. } => "GET DIAGNOSTICS",
+        PlStmt::GetDiag { is_stacked: true, .. } => "GET STACKED DIAGNOSTICS",
+    }
+}
+
+// PLpgSQL_function (phase-1 fields).
+#[derive(Debug)]
+pub struct PlFunction {
+    pub fn_signature: String,
+    pub fn_oid: Oid,
+    pub fn_xmin: u32,
+    pub fn_tid: (u32, u16),
+    pub fn_input_collation: Oid,
+    pub fn_rettype: Oid,
+    pub fn_rettyplen: i16,
+    pub fn_retbyval: bool,
+    pub fn_retistuple: bool,
+    pub fn_retisdomain: bool,
+    pub fn_retset: bool,
+    pub fn_readonly: bool,
+    pub fn_prokind: i8,
+    pub fn_nargs: i16,
+    pub fn_argvarnos: Vec<Dno>,
+    pub found_varno: Dno,
+    pub datums: Vec<PlDatum>,
+    pub ns: Vec<NsItem>,
+    pub action: PlBlock,
+    pub resolve_option: i32,
+    pub print_strict_params: bool,
+    pub nstatements: u32,
+    /// Every expr's id (exec-side plan-table cleanup on recompile).
+    pub expr_ids: Vec<u32>,
+}

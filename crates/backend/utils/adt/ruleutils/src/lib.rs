@@ -6,11 +6,21 @@
 
 pub mod builtins;
 mod deparse;
+mod functiondef;
+mod query;
+mod ruledef;
+mod viewdef;
 #[cfg(test)]
 mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
 pub use deparse::deparse_expression_pretty;
+pub use functiondef::{
+    pg_get_function_arguments_worker, pg_get_function_identity_arguments_worker,
+    pg_get_function_result_worker, pg_get_functiondef_worker,
+};
+pub use ruledef::pg_get_ruledef_worker;
+pub use viewdef::pg_get_viewdef_worker;
 pub use format_type::quote_identifier;
 
 use cache_syscache::{
@@ -44,7 +54,7 @@ pub(crate) fn gap(func: &str, what: &str) -> ! {
 
 #[cold]
 #[inline(never)]
-fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for {what} {oid}")).into()
 }
 
@@ -60,26 +70,30 @@ fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
 }
 
 /// GETSTRUCT-shape read: fixed-width NOT NULL leading column.
-fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
+pub(crate) fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
     // SAFETY: callers pass a tuple of this catalog's row type and a fixed
     // NOT NULL leading attnum (GETSTRUCT invariant).
     unsafe { types_tuple::fastgetattr_fixed(tuple, attnum, tupdesc_for(cache_id)) }
 }
 
-fn getattr_null(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Option<Datum> {
+pub(crate) fn getattr_null(
+    tuple: &HeapTupleData<'_>,
+    cache_id: i32,
+    attnum: i32,
+) -> Option<Datum> {
     let mut isnull = false;
     // SAFETY: callers pass a tuple of this catalog's row type.
     let d = unsafe { types_tuple::heap_getattr(tuple, attnum, tupdesc_for(cache_id), &mut isnull) };
     if isnull { None } else { Some(d) }
 }
 
-fn name_at(d: Datum) -> String {
+pub(crate) fn name_at(d: Datum) -> String {
     // SAFETY: NameData column datums point at the 64-byte in-tuple buffer.
     let n = unsafe { *(d.as_usize() as *const NameData) };
     String::from_utf8_lossy(n.name_str()).into_owned()
 }
 
-fn text_at(d: Datum) -> String {
+pub(crate) fn text_at(d: Datum) -> String {
     // SAFETY: catalog text/pg_node_tree datum, live while the tuple is pinned;
     // PackedVarlena panics loudly on external/compressed images.
     let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
@@ -91,11 +105,11 @@ fn i16_array_at(d: Datum) -> Vec<i16> {
     array_body(d, 2).chunks_exact(2).map(|c| i16::from_ne_bytes([c[0], c[1]])).collect()
 }
 
-fn oid_array_at(d: Datum) -> Vec<Oid> {
+pub(crate) fn oid_array_at(d: Datum) -> Vec<Oid> {
     array_body(d, 4).chunks_exact(4).map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
-fn array_body(d: Datum, elem_width: usize) -> Vec<u8> {
+pub(crate) fn array_body(d: Datum, elem_width: usize) -> Vec<u8> {
     // SAFETY: as text_at; header fields read bytewise (short varlena headers
     // leave the body unaligned).
     let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
@@ -123,7 +137,7 @@ pub fn quote_qualified_identifier(qualifier: Option<&str>, ident: &str) -> Strin
     }
 }
 
-fn namespace_name_or_temp(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
+pub(crate) fn namespace_name_or_temp(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
     if catalog_namespace::isTempNamespace(nspid) {
         return Ok(Some("pg_temp".into()));
     }
@@ -223,6 +237,59 @@ pub(crate) fn generate_operator_name(
     Ok(format!("OPERATOR({}.{oprname})", quote_identifier(&nspname)))
 }
 
+// CollationIsVisibleExt reduced to the lookup_collation probe pair
+// (encoding-exact, then any-encoding) over the search path.
+fn collation_is_visible(collid: Oid, collname: &str, collnamespace: Oid) -> PgResult<bool> {
+    let encoding = mbutils::GetDatabaseEncoding() as i32;
+    let mut path = [InvalidOid; 64];
+    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+    for &nsp in &path[..n] {
+        if nsp == collnamespace {
+            return Ok(true);
+        }
+        for enc in [encoding, -1] {
+            let found = cache_syscache::GetSysCacheOid(
+                cache_syscache::COLLNAMEENCNSP,
+                1,
+                SysCacheKey::Str(collname),
+                SysCacheKey::Value(Datum::from_i32(enc)),
+                SysCacheKey::Value(Datum::from_oid(nsp)),
+                SysCacheKey::UNUSED,
+            )?;
+            if found != InvalidOid {
+                return Ok(found == collid);
+            }
+        }
+    }
+    Ok(false)
+}
+
+const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
+const ANUM_PG_COLLATION_COLLNAMESPACE: i32 = 3;
+
+pub fn generate_collation_name(mcx: Mcx<'_>, collid: Oid) -> PgResult<String> {
+    let Some(ht) = SearchSysCache1(
+        cache_syscache::COLLOID,
+        SysCacheKey::Value(Datum::from_oid(collid)),
+    )?
+    else {
+        return Err(cache_lookup_failed("collation", collid));
+    };
+    let t = ht.tuple();
+    let collname = name_at(getattr(&t, cache_syscache::COLLOID, ANUM_PG_COLLATION_COLLNAME));
+    let collnamespace =
+        getattr(&t, cache_syscache::COLLOID, ANUM_PG_COLLATION_COLLNAMESPACE).as_oid();
+    drop(t);
+    ReleaseSysCache(ht);
+
+    let nspname = if collation_is_visible(collid, &collname, collnamespace)? {
+        None
+    } else {
+        namespace_name_or_temp(mcx, collnamespace)?
+    };
+    Ok(quote_qualified_identifier(nspname.as_deref(), &collname))
+}
+
 pub(crate) fn generate_function_name(
     mcx: Mcx<'_>,
     funcid: Oid,
@@ -244,16 +311,17 @@ pub(crate) fn generate_function_name(
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
     if best.is_none() && !cands.is_empty() {
-        if argtypes.len() == 1 {
-            // C consults the FuncNameAsType coercion arm before fuzzy matching.
-            gap("generate_function_name", "single-arg fuzzy resolution (coercion arm)");
-        }
         let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
         best = match matched.len() {
             0 => None,
             1 => Some(matched[0].oid),
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
+    }
+    if best.is_none() && argtypes.len() == 1 {
+        // func_get_detail falls back to the FuncNameAsType coercion arm only
+        // after normal resolution fails.
+        gap("generate_function_name", "single-arg coercion-arm resolution (FuncNameAsType)");
     }
     if best == Some(funcid) {
         return Ok(quote_identifier(&proname).into_owned());

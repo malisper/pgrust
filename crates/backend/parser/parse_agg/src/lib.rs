@@ -326,6 +326,9 @@ fn check_agg_arguments_walker<'mcx>(
         NodeTag::T_RelabelType => {
             check_agg_arguments_walker(pstate, node.as_relabel_type().unwrap().arg, ctx)
         }
+        NodeTag::T_CollateExpr => {
+            check_agg_arguments_walker(pstate, node.as_collate_expr().unwrap().arg, ctx)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 check_agg_arguments_walker(pstate, arg, ctx)?;
@@ -358,7 +361,75 @@ fn check_agg_arguments_walker<'mcx>(
             }
             Ok(())
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            for w in &c.args {
+                check_agg_arguments_walker(pstate, w, ctx)?;
+            }
+            match c.defresult {
+                Some(d) => check_agg_arguments_walker(pstate, d, ctx),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            check_agg_arguments_walker(pstate, cw.expr.expect("CaseWhen.expr"), ctx)?;
+            check_agg_arguments_walker(pstate, cw.result.expect("CaseWhen.result"), ctx)
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                check_agg_arguments_walker(pstate, elem, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            check_agg_arguments_walker(pstate, node.as_coerce_via_io().unwrap().arg, ctx)
+        }
+        NodeTag::T_CoerceToDomain => {
+            check_agg_arguments_walker(pstate, node.as_coerce_to_domain().unwrap().arg, ctx)
+        }
         other => panic!(
             "check_agg_arguments_walker (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg (Query recursion needs query_tree_walker)"
@@ -672,16 +743,12 @@ pub fn parseCheckAggregates<'mcx>(
         }
     }
 
-    for rte in &qry.rtable {
-        let rte = rte.as_range_tbl_entry().expect("rtable cell");
-        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
-            panic!(
-                "parseCheckAggregates (parse_agg.c): flatten_join_alias_vars unported — \
-                 backend-parser-agg join lane"
-            );
-        }
-    }
+    let has_join_rtes = qry.rtable.iter().any(|rte| {
+        rte.as_range_tbl_entry().expect("rtable cell").rtekind
+            == types_nodes::parsenodes::RTEKind::RTE_JOIN
+    });
 
+    let mut hnvg = false;
     for gc_node in &qry.groupClause {
         let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
         let tle = qry
@@ -691,23 +758,31 @@ pub fn parseCheckAggregates<'mcx>(
                 n.as_target_entry().expect("tlist cell").ressortgroupref == gc.tleSortGroupRef
             })
             .expect("groupClause sortgroupref has a tlist entry");
-        if tle.as_target_entry().unwrap().expr.as_var().is_none() {
-            panic!(
-                "parseCheckAggregates (parse_agg.c): non-Var grouping expression needs \
-                 equal() matching (have_non_var_grouping) — backend-parser-agg lane"
-            );
+        let expr = tle.as_target_entry().unwrap().expr;
+        if has_join_rtes {
+            vars::flatten_join_alias_vars(qry, expr)?;
+        }
+        if expr.as_var().is_none() {
+            hnvg = true;
         }
     }
 
+    let hnvg = hnvg;
     for tle in &qry.targetList {
-        finalize_grouping_exprs(mcx, pstate, qry, tle)?;
+        finalize_grouping_exprs(mcx, pstate, qry, hnvg, tle)?;
     }
     for tle in &qry.targetList {
-        check_ungrouped_columns(pstate, qry, tle)?;
+        if has_join_rtes {
+            vars::flatten_join_alias_vars(qry, tle)?;
+        }
+        check_ungrouped_columns(pstate, qry, hnvg, tle)?;
     }
     if let Some(having) = qry.havingQual {
-        finalize_grouping_exprs(mcx, pstate, qry, having)?;
-        check_ungrouped_columns(pstate, qry, having)?;
+        finalize_grouping_exprs(mcx, pstate, qry, hnvg, having)?;
+        if has_join_rtes {
+            vars::flatten_join_alias_vars(qry, having)?;
+        }
+        check_ungrouped_columns(pstate, qry, hnvg, having)?;
     }
     Ok(())
 }
@@ -744,6 +819,7 @@ fn finalize_grouping_exprs<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
+    hnvg: bool,
     node: Node<'mcx>,
 ) -> PgResult<()> {
     match node.node_tag() {
@@ -755,7 +831,7 @@ fn finalize_grouping_exprs<'mcx>(
                 // arguments, ORDER BY, or filter; only direct arguments are
                 // checked as though outside the aggregate.
                 for arg in &agg.aggdirectargs {
-                    finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                    finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
                 }
                 return Ok(());
             }
@@ -771,13 +847,14 @@ fn finalize_grouping_exprs<'mcx>(
             for expr in &grp.args {
                 // Each argument must match a grouping entry at the current
                 // query level; no functional dependencies or outer
-                // references.  All grouping exprs are Vars on this lane
-                // (non-Var grouping is loud in parseCheckAggregates), so the
-                // have_non_var_grouping equal() leg is unreachable.
-                let r#ref = expr
-                    .as_var()
-                    .filter(|v| v.varlevelsup == 0)
-                    .and_then(|var| grouping_var_ref(qry, var));
+                // references.
+                let r#ref = if hnvg {
+                    grouping_expr_ref(qry, expr)
+                } else {
+                    expr.as_var()
+                        .filter(|v| v.varlevelsup == 0)
+                        .and_then(|var| grouping_var_ref(qry, var))
+                };
                 let Some(r#ref) = r#ref else {
                     return Err(grouping_error(
                         pstate,
@@ -797,53 +874,147 @@ fn finalize_grouping_exprs<'mcx>(
             }
             let grp = node.as_grouping_func().unwrap();
             for arg in &grp.args {
-                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
             for arg in &wf.args {
-                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
             }
             match wf.aggfilter {
-                Some(f) => finalize_grouping_exprs(mcx, pstate, qry, f),
+                Some(f) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, f),
                 None => Ok(()),
             }
         }
         NodeTag::T_TargetEntry => {
-            finalize_grouping_exprs(mcx, pstate, qry, node.as_target_entry().unwrap().expr)
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_target_entry().unwrap().expr)
         }
         NodeTag::T_OpExpr => {
             for arg in &node.as_op_expr().unwrap().args {
-                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_FuncExpr => {
             for arg in &node.as_func_expr().unwrap().args {
-                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_RelabelType => {
-            finalize_grouping_exprs(mcx, pstate, qry, node.as_relabel_type().unwrap().arg)
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_CollateExpr => {
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_collate_expr().unwrap().arg)
         }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
-                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
-            Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, arg),
+            Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SQLValueFunction | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            for w in &c.args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, w)?;
+            }
+            match c.defresult {
+                Some(d) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, cw.expr.expect("CaseWhen.expr"))?;
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, cw.result.expect("CaseWhen.result"))
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_List => {
+            for elem in node.as_list().unwrap() {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "finalize_grouping_exprs (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"
         ),
     }
+}
+
+// The equal() leg of the GROUPING()-argument match (have_non_var_grouping).
+fn grouping_expr_ref(qry: &Query<'_>, expr: Node<'_>) -> Option<Index> {
+    for gc_node in &qry.groupClause {
+        let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
+        let tle = qry
+            .targetList
+            .iter()
+            .find(|n| {
+                n.as_target_entry().expect("tlist cell").ressortgroupref == gc.tleSortGroupRef
+            })
+            .expect("groupClause sortgroupref has a tlist entry")
+            .as_target_entry()
+            .unwrap();
+        if types_nodes::equal(tle.expr, expr) {
+            return Some(tle.ressortgroupref);
+        }
+    }
+    None
 }
 
 // The Var leg of the GROUPING()-argument match against group-clause TLEs.
@@ -916,12 +1087,31 @@ fn is_var_grouped(qry: &Query<'_>, var: &types_nodes::primnodes::Var<'_>) -> boo
 fn check_ungrouped_columns<'mcx>(
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
+    hnvg: bool,
     node: Node<'mcx>,
 ) -> PgResult<()> {
+    // With non-Var grouping exprs, any subtree equal() to one is grouped —
+    // checked before the Var leg, as C ("if we didn't do it above").
+    if hnvg {
+        for gc_node in &qry.groupClause {
+            let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
+            let tle = qry
+                .targetList
+                .iter()
+                .find(|n| {
+                    n.as_target_entry().expect("tlist cell").ressortgroupref
+                        == gc.tleSortGroupRef
+                })
+                .expect("groupClause sortgroupref has a tlist entry");
+            if types_nodes::equal(tle.as_target_entry().unwrap().expr, node) {
+                return Ok(());
+            }
+        }
+    }
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
-            if var.varlevelsup == 0 && !is_var_grouped(qry, var) {
+            if var.varlevelsup == 0 && (hnvg || !is_var_grouped(qry, var)) {
                 return Err(ungrouped_var_error(pstate, qry, var));
             }
             Ok(())
@@ -942,58 +1132,119 @@ fn check_ungrouped_columns<'mcx>(
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
             for arg in &wf.args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             match wf.aggfilter {
-                Some(f) => check_ungrouped_columns(pstate, qry, f),
+                Some(f) => check_ungrouped_columns(pstate, qry, hnvg, f),
                 None => Ok(()),
             }
         }
         NodeTag::T_TargetEntry => {
-            check_ungrouped_columns(pstate, qry, node.as_target_entry().unwrap().expr)
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_target_entry().unwrap().expr)
         }
         NodeTag::T_OpExpr => {
             for arg in &node.as_op_expr().unwrap().args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_FuncExpr => {
             for arg in &node.as_func_expr().unwrap().args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_RelabelType => {
-            check_ungrouped_columns(pstate, qry, node.as_relabel_type().unwrap().arg)
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_CollateExpr => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_collate_expr().unwrap().arg)
         }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
-            Some(arg) => check_ungrouped_columns(pstate, qry, arg),
+            Some(arg) => check_ungrouped_columns(pstate, qry, hnvg, arg),
             None => Ok(()),
         },
         NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
-            Some(arg) => check_ungrouped_columns(pstate, qry, arg),
+            Some(arg) => check_ungrouped_columns(pstate, qry, hnvg, arg),
             None => Ok(()),
         },
         NodeTag::T_DistinctExpr => {
             for arg in &node.as_distinct_expr().unwrap().args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
         NodeTag::T_RowExpr => {
             for arg in &node.as_row_expr().unwrap().args {
-                check_ungrouped_columns(pstate, qry, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
             }
             Ok(())
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            for w in &c.args {
+                check_ungrouped_columns(pstate, qry, hnvg, w)?;
+            }
+            match c.defresult {
+                Some(d) => check_ungrouped_columns(pstate, qry, hnvg, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            check_ungrouped_columns(pstate, qry, hnvg, cw.expr.expect("CaseWhen.expr"))?;
+            check_ungrouped_columns(pstate, qry, hnvg, cw.result.expect("CaseWhen.result"))
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_List => {
+            for elem in node.as_list().unwrap() {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "check_ungrouped_columns (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"

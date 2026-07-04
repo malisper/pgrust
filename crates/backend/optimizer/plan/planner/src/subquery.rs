@@ -16,7 +16,9 @@ use crate::run::PlannerRun;
 pub const EXPRKIND_QUAL: i32 = 0;
 pub const EXPRKIND_TARGET: i32 = 1;
 pub const EXPRKIND_RTFUNC: i32 = 2;
+pub const EXPRKIND_RTFUNC_LATERAL: i32 = 3;
 pub const EXPRKIND_VALUES: i32 = 4;
+pub const EXPRKIND_VALUES_LATERAL: i32 = 5;
 pub const EXPRKIND_LIMIT: i32 = 6;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 
@@ -42,9 +44,7 @@ pub fn subquery_planner<'mcx>(
     if !parse.cteList.is_nil() {
         crate::cte::ss_process_ctes(run, &parse)?;
     }
-    if parse.commandType == CmdType::CMD_MERGE {
-        panic!("transform_MERGE_to_join (prepjointree.c): M2 MERGE lane");
-    }
+    crate::prepjointree::transform_MERGE_to_join(mcx, &mut parse)?;
     replace_empty_jointree(mcx, &mut parse)?;
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
@@ -98,15 +98,50 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_FUNCTION => {
                 // preprocess_function_rtes: inline_set_returning_function is a
                 // no-op for non-SQL-language functions and non-builtins cannot
-                // resolve on this lane; EXPRKIND_RTFUNC preprocess_expression
-                // skipped (grammar-Const args).
+                // resolve on this lane. Non-lateral EXPRKIND_RTFUNC
+                // preprocess_expression skipped (grammar-Const args); lateral
+                // args carry Vars (possibly uplevel) and must be processed.
+                if rte.lateral {
+                    let mut new_functions = NodeList::nil();
+                    for f_node in &rte.functions {
+                        let f = f_node.as_range_tbl_function().expect("functions cell");
+                        let funcexpr = preprocess_expression(
+                            run,
+                            f.funcexpr,
+                            EXPRKIND_RTFUNC_LATERAL,
+                            parse.hasSubLinks,
+                        )?;
+                        new_functions.lappend(
+                            mcx,
+                            Node::mk(
+                                mcx,
+                                types_nodes::parsenodes::RangeTblFunction {
+                                    funcexpr,
+                                    funccolcount: f.funccolcount,
+                                    funccolnames: f.funccolnames.clone_in(mcx)?,
+                                    funccoltypes: f.funccoltypes.clone_in(mcx)?,
+                                    funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
+                                    funccolcollations: f.funccolcollations.clone_in(mcx)?,
+                                    funcparams: f.funcparams.clone_in(mcx)?,
+                                },
+                            )?,
+                        )?;
+                    }
+                    // SAFETY: as the RTE_RELATION arm above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.functions = new_functions
+                        })
+                    };
+                }
             }
             RTEKind::RTE_VALUES => {
-                assert!(!rte.lateral, "preprocess_expression (planner.c): EXPRKIND_VALUES_LATERAL; M2 lateral lane");
+                let kind =
+                    if rte.lateral { EXPRKIND_VALUES_LATERAL } else { EXPRKIND_VALUES };
                 let lists = preprocess_expression_list(
                     run,
                     rte.values_lists.clone_in(mcx)?,
-                    EXPRKIND_VALUES,
+                    kind,
                     parse.hasSubLinks,
                 )?;
                 // SAFETY: as the RTE_RELATION arm above.
@@ -172,9 +207,26 @@ pub fn subquery_planner<'mcx>(
         preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
     parse.limitCount =
         preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
-    if !parse.mergeActionList.is_nil() {
-        panic!("preprocess_expression (planner.c): MERGE; M4 MERGE lane");
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_tlist = preprocess_expression_list(
+            run,
+            action.targetList.clone_in(mcx)?,
+            EXPRKIND_TARGET,
+            has_sublinks,
+        )?;
+        let new_qual = preprocess_expression(run, action.qual, EXPRKIND_QUAL, has_sublinks)?;
+        // SAFETY: parse tree is planner-owned; no derived refs live.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.targetList = new_tlist;
+                a.qual = new_qual;
+            })
+        }
+        .expect("MergeAction");
     }
+    parse.mergeJoinCondition =
+        preprocess_expression(run, parse.mergeJoinCondition, EXPRKIND_QUAL, has_sublinks)?;
     if let Some(oc_node) = parse.onConflict {
         let oc = oc_node.as_on_conflict_expr().expect("onConflict is OnConflictExpr");
         for elem_node in &oc.arbiterElems {
@@ -270,6 +322,9 @@ pub fn subquery_planner<'mcx>(
     if has_outer_joins {
         crate::prepjointree::reduce_outer_joins(mcx, &mut parse)?;
     }
+    if has_result_rtes {
+        remove_useless_result_rtes(run, &mut parse)?;
+    }
 
     // Mutation done; seal the Query (C shares root->parse by pointer).
     let sealed: &'mcx Query<'mcx> = alloc_leak_in(mcx, parse)?;
@@ -288,10 +343,6 @@ pub fn subquery_planner<'mcx>(
     }
     run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
         && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;
-
-    if has_result_rtes {
-        remove_useless_result_rtes(run, sealed);
-    }
 
     grouping_planner(run, tuple_fraction, setops)?;
 

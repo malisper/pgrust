@@ -379,7 +379,6 @@ pub(crate) fn FastPathTransferRelationLocks(
 
 /// Return the PROCLOCK for a fast-path lock, transferring it to the shared
 /// table if necessary. Sole C caller is AtPrepare_Locks (2PC, phase 2).
-#[allow(dead_code)]
 pub(crate) fn FastPathGetRelationLockEntry(
     tag: &types_storage::lock::LOCALLOCKTAG,
 ) -> PgResult<*mut types_storage::lock::PROCLOCK> {

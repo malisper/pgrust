@@ -282,6 +282,9 @@ fn install() {
         });
         s::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == F_INT4EQ).then_some(PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: BOOLOID,
                 provariadic: InvalidOid,

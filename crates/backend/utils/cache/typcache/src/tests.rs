@@ -14,6 +14,7 @@ const MULTI_OID: Oid = 90007;
 const F_INT4RANGE_CANONICAL: Oid = 3914;
 const SHELL_OID: Oid = 90003;
 const NOHASH_OID: Oid = 90006;
+const ENUM_OID: Oid = 90008;
 
 const INT4_BTREE_OPCLASS: Oid = 1978;
 const INT4_HASH_OPCLASS: Oid = 1979;
@@ -67,11 +68,22 @@ fn typrow(
 
 static SEAMS: Once = Once::new();
 
+thread_local! {
+    static ENUM_MEMBERS: core::cell::RefCell<Vec<(Oid, f32)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
 fn install() {
     SEAMS.call_once(|| {
         use syscache_seams as s;
         fmgr_core::init_seams();
         clauses::init_seams();
+        pg_enum_seams::scan_enum_members::set(|mcx, typid| {
+            assert_eq!(typid, ENUM_OID);
+            let mut out = mcx::PgVec::new_in(mcx);
+            ENUM_MEMBERS.with(|m| out.extend_from_slice(&m.borrow()));
+            Ok(out)
+        });
         s::lookup_pg_type_typcache_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(typrow("int4", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
@@ -89,6 +101,7 @@ fn install() {
                 MULTI_OID => Some(typrow("mrng", b'm' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 SHELL_OID => Some(typrow("shell", b'b' as i8, false, InvalidOid, InvalidOid, InvalidOid)),
                 NOHASH_OID => Some(typrow("nohash", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
+                ENUM_OID => Some(typrow("mood", b'e' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 _ => None,
             })
         });
@@ -224,6 +237,9 @@ fn install() {
         });
         s::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == 147).then_some(s::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: 16,
                 provariadic: InvalidOid,
@@ -480,4 +496,31 @@ fn deferred_lane_flags_are_noops_for_other_typtypes() {
     )
     .unwrap();
     assert_eq!(e.type_id, INT4OID);
+}
+
+#[test]
+fn enum_compare_fast_path_and_reload() {
+    install();
+    ENUM_MEMBERS.with(|m| {
+        *m.borrow_mut() = vec![(90100, 1.0), (90102, 2.0), (90104, 3.0)];
+    });
+    let e = lookup_type_cache(ENUM_OID, 0).unwrap();
+    // Even in-order OIDs land in the known-sorted bitmap: bare OID compare.
+    assert_eq!(compare_values_of_enum(&e, 90100, 90104).unwrap(), -1);
+    assert_eq!(compare_values_of_enum(&e, 90104, 90100).unwrap(), 1);
+    assert_eq!(compare_values_of_enum(&e, 90102, 90102).unwrap(), 0);
+
+    // New odd-OID midpoint member appears after the cache loaded: the miss
+    // forces a reload, then sort_order decides.
+    ENUM_MEMBERS.with(|m| m.borrow_mut().push((90101, 2.5)));
+    assert_eq!(compare_values_of_enum(&e, 90101, 90102).unwrap(), 1);
+    assert_eq!(compare_values_of_enum(&e, 90101, 90104).unwrap(), -1);
+    assert_eq!(compare_values_of_enum(&e, 90100, 90101).unwrap(), -1);
+
+    // Out-of-order even OID (sorts before everything): binary-search path.
+    ENUM_MEMBERS.with(|m| m.borrow_mut().push((90106, 0.5)));
+    let e2 = lookup_type_cache(ENUM_OID, 0).unwrap();
+    *e2.enum_data.borrow_mut() = None;
+    assert_eq!(compare_values_of_enum(&e2, 90106, 90100).unwrap(), -1);
+    assert_eq!(compare_values_of_enum(&e2, 90104, 90106).unwrap(), 1);
 }

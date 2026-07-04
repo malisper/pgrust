@@ -53,6 +53,8 @@ pub struct RelationData<'mcx> {
     // C rd_amcache, gin arm (resolved opclass dispatch; gin crate owns the
     // tag mapping — 0 == jsonb_ops).
     pub rd_amcache_gin: Cell<Option<RdAmCacheGin>>,
+    // C rd_amcache, spgist arm (SpGistCache POD: opclass config + lastUsedPages).
+    pub rd_amcache_spgist: Cell<Option<types_spgist::SpGistCache>>,
     // C rd_support: nkey x amsupport support-proc OIDs, row-major.
     pub rd_support: PgVec<'mcx, Oid>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
@@ -67,6 +69,8 @@ pub struct RelationData<'mcx> {
     // pg_class.relhastriggers, threaded beside the trimmed rd_rel form
     // (ScannedPgClass.relchecks precedent).
     pub rd_hastriggers: bool,
+    // pg_class.relhasrules, same threading (matchLocks/fireRIRrules gate).
+    pub rd_hasrules: bool,
 }
 
 #[derive(Debug)]
@@ -336,11 +340,12 @@ mod tests {
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
             rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
             rd_support: PgVec::new_in(mcx),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         }
     }
 

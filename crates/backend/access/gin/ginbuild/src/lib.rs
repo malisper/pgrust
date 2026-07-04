@@ -27,7 +27,7 @@ pub fn ginbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    indexInfo: &mut execindexing::IndexInfo,
+    indexInfo: &mut execindexing::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bm::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)? != 0 {
         panic!("index \"{}\" already contains data", index.name());

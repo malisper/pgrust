@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 analyze_seams = { path = "../analyze_seams" }
 coerce = { path = "../coerce" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+datum = { path = "../../../_support/types/datum" }
 parse_collate_seams = { path = "../parse_collate_seams" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }

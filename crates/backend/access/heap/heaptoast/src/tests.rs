@@ -151,6 +151,9 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
             Ok((htup.t_data().t_infomask & HEAP_XMAX_INVALID) != 0)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            Ok((htup.t_data().t_infomask & HEAP_XMAX_INVALID) != 0)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_, _| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_| Ok(false));
         heapam_visibility_seams::heap_tuple_satisfies_update::set(|htup, _cid, _buf| {
@@ -171,7 +174,9 @@ fn install_seams() {
         combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
         multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
         predicate_seams::check_for_serializable_conflict_in::set(|_, _, _| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_, _| false);
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_, _| Ok(false));
         predicate_seams::predicate_lock_relation::set(|_, _| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_, _, _, _| Ok(()));
         predicate_seams::predicate_lock_page::set(|_, _, _| Ok(()));
@@ -324,12 +329,12 @@ fn rel_from<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: vec_of(&vec![0; opcintype.len()]),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -402,6 +407,8 @@ fn fixture_rel<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
                     indisready: false,
                     indkey,
                     has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
                 }),
                 &[26, 23],
             );
@@ -573,7 +580,7 @@ fn insert_row(mcx: Mcx<'_>, rel: &Relation<'_>, payloads: &[&[u8]]) -> ItemPoint
         .collect();
     let isnull = vec![false; payloads.len()];
     let mut tup = heaptuple::heap_form_tuple(mcx, &rel.rd_att, &values, &isnull).unwrap();
-    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0).unwrap();
+    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
     tup.as_tuple().t_self
 }
 

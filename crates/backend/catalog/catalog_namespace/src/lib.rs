@@ -31,13 +31,14 @@ mod visibility;
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
-    RangeVarGetCreationNamespace, ResetTempTableNamespace,
+    QualifiedNameGetCreationNamespace, RangeVarGetCreationNamespace, ResetTempTableNamespace,
 };
 
 pub use lookup::{
-    get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
+    get_collation_oid, get_collation_oid_list, get_namespace_oid, DeconstructQualifiedName,
+    FuncCandidate, FuncnameGetCandidates,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
-    OpernameGetOprid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
+    OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
     TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{
@@ -95,7 +96,7 @@ pub(crate) fn base_path_nth(i: usize) -> Oid {
     with_path_state(|st| st.base_search_path[i])
 }
 
-pub(crate) fn my_temp_namespace() -> Oid {
+pub fn my_temp_namespace() -> Oid {
     MY_TEMP_NAMESPACE.with(Cell::get)
 }
 

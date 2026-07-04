@@ -11,3 +11,4 @@ fmgr = { package = "types_fmgr", path = "../fmgr" }
 types_core = { path = "../types_core" }
 types_storage = { path = "../types_storage" }
 types_tuple = { path = "../types_tuple" }
+types_error = { path = "../types_error" }

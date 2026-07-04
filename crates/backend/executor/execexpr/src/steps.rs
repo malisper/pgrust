@@ -58,6 +58,7 @@ pub enum Step {
     Qual { jumpdone: u32 },
     Jump { jumpdone: u32 },
     JumpIfNotTrue { jumpdone: u32, out: OutRef },
+    JumpIfNotNull { jumpdone: u32, out: OutRef },
     // slot: the owning CASE's compile-allocated testval workspace
     // (C d.casetest.value/isnull; the EXT econtext form is unported).
     CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },
@@ -108,6 +109,17 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
+    // element table (and its hash FuncCall) lives in state.saop_tables.
+    HashedScalarArrayOp {
+        call: FuncCall,
+        inclause: bool,
+        typlen: i16,
+        typbyval: bool,
+        typalign: u8,
+        table: u32,
+        out: OutRef,
+    },
     // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
@@ -189,6 +201,12 @@ pub enum Step {
     DomainNotNull { resulttype: Oid, out: OutRef },
     // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
+    JumpIfNull { jumpdone: u32, out: OutRef },
+    ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
+    SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
+    SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
+    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
@@ -263,6 +281,16 @@ impl FuncCall {
         // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
         unsafe { self.flinfo.as_ref() }.fn_addr
     }
+}
+
+// C ScalarArrayOpExprHashTable: lazily built on first eval, per-query
+// lifetime; buckets keyed by the element type's hash-fn result, dedup and
+// probe through the step's equality FuncCall.
+pub(crate) struct SaopTable<'mcx> {
+    pub(crate) hashcall: FuncCall,
+    pub(crate) built: bool,
+    pub(crate) has_nulls: bool,
+    pub(crate) map: ::mcx::PgFxHashMap<'mcx, u32, PgVec<'mcx, Datum>>,
 }
 
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image
@@ -535,6 +563,7 @@ pub enum SlotSrc {
 pub struct ExprState<'mcx> {
     pub(crate) steps: PgVec<'mcx, Step>,
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
+    pub(crate) saop_tables: PgVec<'mcx, SaopTable<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
@@ -547,6 +576,8 @@ pub struct ExprState<'mcx> {
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
     // C ExprState.innermost_domainval/innermost_domainnull: compile-time only.
     pub(crate) innermost_domain: Option<OutRef>,
+    // resmcx fields of allocating array-op step states, armed with frames.
+    pub(crate) alloc_mcx_slots: PgVec<'mcx, NonNull<crate::arrayops::ResMcx>>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -568,12 +599,14 @@ impl<'mcx> ExprState<'mcx> {
             p.write(ExprState {
                 steps,
                 frames: PgVec::new_in(mcx),
+                saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
                 resnd,
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
                 innermost_domain: None,
+                alloc_mcx_slots: PgVec::new_in(mcx),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -619,6 +652,11 @@ impl<'mcx> ExprState<'mcx> {
             // outlives every call through the frame.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
         }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field,
+            // live for 'mcx; the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
+        }
     }
 
     /// Lifetime-erased [`Self::arm_result_mcx`] (nodeAgg tmpcontext).
@@ -628,6 +666,11 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: frame image live for 'mcx, sole reference; the caller
             // guarantees the armed context outlives every call.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field;
+            // the caller guarantees the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
         }
     }
 

@@ -432,7 +432,8 @@ pub fn expandTableLikeClause<'mcx>(
         let parent_indexes = relcache::RelationGetIndexList(mcx, relation.rd_id)?;
         for &parent_index_oid in parent_indexes.iter() {
             let parent_index = indexam::index_open(mcx, parent_index_oid, AccessShareLock)?;
-            let mut index_stmt = generateClonedIndexStmt(mcx, heap_rel, &parent_index)?;
+            let mut index_stmt =
+                generateClonedIndexStmt(mcx, heap_rel, &parent_index, &attmap)?;
             if (options & CREATE_TABLE_LIKE_COMMENTS) != 0 {
                 if let Some(comment) =
                     commands_comment::GetComment(mcx, parent_index_oid, RELATION_RELATION_ID, 0)?
@@ -470,6 +471,7 @@ fn generateClonedIndexStmt<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: &'mcx RangeVar<'mcx>,
     source_idx: &Relation<'mcx>,
+    attmap: &[AttrNumber],
 ) -> PgResult<IndexStmt<'mcx>> {
     let idxrec = source_idx.rd_index.as_ref().expect("index relation without rd_index");
     let indrelid = idxrec.indrelid;
@@ -485,9 +487,6 @@ fn generateClonedIndexStmt<'mcx>(
     }
     if idxrec.indisexclusion {
         unported("generateClonedIndexStmt: exclusion constraints");
-    }
-    if idxrec.has_indpred {
-        unported("generateClonedIndexStmt: partial-index predicates");
     }
     if idxrec.indnatts != idxrec.indnkeyatts {
         unported("generateClonedIndexStmt: INCLUDE columns");
@@ -515,16 +514,40 @@ fn generateClonedIndexStmt<'mcx>(
     }
 
     let indclass = read_indclass(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)?;
+    let indexprs = match idxrec.indexprs_src.as_ref() {
+        Some(src) => Some(
+            readfuncs::stringToNode(mcx, src.as_str())?
+                .as_list()
+                .expect("indexprs is a List"),
+        ),
+        None => None,
+    };
+    let mut indexpr_item = indexprs.into_iter().flat_map(|l| l.iter());
     let mut params = NodeList::nil();
     for keyno in 0..idxrec.indnkeyatts as usize {
         let attnum = idxrec.indkey[keyno];
-        if attnum == 0 {
-            unported("generateClonedIndexStmt: expression index columns");
-        }
         let opt = source_idx.rd_indoption[keyno];
-        let attname = lsyscache::get_attname(mcx, indrelid, attnum, false)?
-            .expect("index key column");
-        let keycoltype = lsyscache::get_atttype(indrelid, attnum)?;
+        let (elem_name, elem_expr, keycoltype) = if attnum != 0 {
+            let attname = lsyscache::get_attname(mcx, indrelid, attnum, false)?
+                .expect("index key column");
+            (
+                Some(str_in(mcx, attname.as_str())?),
+                None,
+                lsyscache::get_atttype(indrelid, attnum)?,
+            )
+        } else {
+            let indexkey =
+                indexpr_item.next().expect("too few entries in indexprs list");
+            let (mapped, found_whole_row) =
+                rewrite_manip::map_variable_attnos(mcx, indexkey, 1, 0, attmap)?;
+            if found_whole_row {
+                return Err(whole_row_error(format!(
+                    "Index \"{}\" contains a whole-row table reference.",
+                    source_idx.name()
+                )));
+            }
+            (None, Some(mapped), nodes_core::expr_type(mapped))
+        };
 
         let indcollation = source_idx.rd_indcollation[keyno];
         let typcollation = syscache_seams::lookup_pg_type_shape::call(keycoltype)?
@@ -549,8 +572,8 @@ fn generateClonedIndexStmt<'mcx>(
         }
 
         let iparam = IndexElem {
-            name: Some(str_in(mcx, attname.as_str())?),
-            expr: None,
+            name: elem_name,
+            expr: elem_expr,
             indexcolname: Some(str_in(
                 mcx,
                 core::str::from_utf8(source_idx.rd_att.attr(keyno).attname.name_str())
@@ -563,6 +586,19 @@ fn generateClonedIndexStmt<'mcx>(
         params.lappend(mcx, Node::mk(mcx, iparam)?)?;
     }
     stmt.indexParams = params;
+
+    if let Some(src) = idxrec.indpred_src.as_ref() {
+        let pred = readfuncs::stringToNode(mcx, src.as_str())?;
+        let (mapped, found_whole_row) =
+            rewrite_manip::map_variable_attnos(mcx, pred, 1, 0, attmap)?;
+        if found_whole_row {
+            return Err(whole_row_error(format!(
+                "Index \"{}\" contains a whole-row table reference.",
+                source_idx.name()
+            )));
+        }
+        stmt.whereClause = Some(mapped);
+    }
     Ok(stmt)
 }
 
