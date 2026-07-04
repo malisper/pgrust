@@ -514,6 +514,15 @@ fn assign_collations_walker<'mcx>(
                     }
                 }
                 NodeTag::T_SQLValueFunction => {}
+                NodeTag::T_XmlExpr => {
+                    let x = node.as_xml_expr().unwrap();
+                    for arg in &x.named_args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                    for arg in &x.args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
                 _ => unreachable!(),
             }
 
