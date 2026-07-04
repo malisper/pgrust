@@ -821,9 +821,9 @@ pub fn transformCreateStmt<'mcx>(
             NodeTag::T_Constraint => {
                 let c = elt.as_variant::<Constraint>().expect("Constraint");
                 match c.contype {
-                    ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
-                        ixconstraints.lappend(mcx, elt)?
-                    }
+                    ConstrType::CONSTR_PRIMARY
+                    | ConstrType::CONSTR_UNIQUE
+                    | ConstrType::CONSTR_EXCLUSION => ixconstraints.lappend(mcx, elt)?,
                     ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, elt)?,
                     ConstrType::CONSTR_NOTNULL => nnconstraints.lappend(mcx, elt)?,
                     ConstrType::CONSTR_FOREIGN => fkconstraints.lappend(mcx, elt)?,
@@ -959,8 +959,11 @@ fn transform_index_constraints<'mcx>(
         let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
         debug_assert!(matches!(
             constraint.contype,
-            ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
+            ConstrType::CONSTR_PRIMARY
+                | ConstrType::CONSTR_UNIQUE
+                | ConstrType::CONSTR_EXCLUSION
         ));
+        let is_exclusion = constraint.contype == ConstrType::CONSTR_EXCLUSION;
         if constraint.indexname.is_some() {
             return Err(cursor_at(
                 Box::new(
@@ -974,12 +977,12 @@ fn transform_index_constraints<'mcx>(
                 constraint.location,
             ));
         }
-        if constraint.deferrable || constraint.initdeferred {
-            unported("transformIndexConstraint: DEFERRABLE constraint indexes");
+        if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
+            unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
         }
 
         let mut index = Node::build::<IndexStmt>(mcx)?;
-        index.unique = true;
+        index.unique = !is_exclusion;
         index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
         if index.primary {
             if pkey.is_some() {
@@ -988,9 +991,12 @@ fn transform_index_constraints<'mcx>(
         }
         index.nulls_not_distinct = constraint.nulls_not_distinct;
         index.isconstraint = true;
+        index.deferrable = constraint.deferrable;
+        index.initdeferred = constraint.initdeferred;
         index.idxname = constraint.conname;
         index.relation = Some(relation);
-        index.accessMethod = Some("btree");
+        index.accessMethod = Some(constraint.access_method.unwrap_or("btree"));
+        index.whereClause = constraint.where_clause;
         // SAFETY: parse tree is analyze-owned; the constraint node's options
         // list moves onto the IndexStmt (C shares the pointer).
         index.options =
@@ -999,6 +1005,20 @@ fn transform_index_constraints<'mcx>(
         index.tableSpace = constraint.indexspace;
         if !constraint.including.is_nil() {
             unported("transformIndexConstraint: INCLUDE columns");
+        }
+
+        if is_exclusion {
+            let mut index_params = NodeList::nil();
+            let mut exclude_op_names = NodeList::nil();
+            for pair in constraint.exclusions.iter() {
+                let pair = pair.as_list().expect("exclusions pair");
+                index_params.lappend(mcx, pair.nth(0))?;
+                exclude_op_names.lappend(mcx, pair.nth(1))?;
+            }
+            index.indexParams = index_params;
+            index.excludeOpNames = exclude_op_names;
+            indexlist.lappend(mcx, index.seal())?;
+            continue;
         }
 
         let is_primary = index.primary;
@@ -1074,7 +1094,14 @@ fn transform_index_constraints<'mcx>(
         let mut keep = true;
         for pnode in finalindexlist.iter() {
             let prior = pnode.as_variant::<IndexStmt>().expect("IndexStmt");
+            // C compares whereClause with equal(); predicate exclusions
+            // conservatively never merge (only identical duplicate
+            // constraints diverge: both indexes get built).
             if index_params_equal(&index.indexParams, &prior.indexParams)
+                && exclude_op_names_equal(&index.excludeOpNames, &prior.excludeOpNames)
+                && index.accessMethod == prior.accessMethod
+                && index.whereClause.is_none()
+                && prior.whereClause.is_none()
                 && index.nulls_not_distinct == prior.nulls_not_distinct
                 && index.deferrable == prior.deferrable
                 && index.initdeferred == prior.initdeferred
@@ -1118,30 +1145,49 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
     debug_assert!(matches!(
         constraint.contype,
-        ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
+        ConstrType::CONSTR_PRIMARY
+            | ConstrType::CONSTR_UNIQUE
+            | ConstrType::CONSTR_EXCLUSION
     ));
+    let is_exclusion = constraint.contype == ConstrType::CONSTR_EXCLUSION;
     if constraint.indexname.is_some() {
         return transform_existing_index_constraint(mcx, rel, cnode, query_string);
     }
-    if constraint.deferrable || constraint.initdeferred {
-        unported("transformIndexConstraint: DEFERRABLE constraint indexes");
+    if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
+        unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
     }
     if !constraint.including.is_nil() {
         unported("transformIndexConstraint: INCLUDE columns");
     }
     let mut index = Node::build::<IndexStmt>(mcx)?;
-    index.unique = true;
+    index.unique = !is_exclusion;
     index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
     index.nulls_not_distinct = constraint.nulls_not_distinct;
     index.isconstraint = true;
+    index.deferrable = constraint.deferrable;
+    index.initdeferred = constraint.initdeferred;
     index.idxname = constraint.conname;
-    index.accessMethod = Some("btree");
+    index.accessMethod = Some(constraint.access_method.unwrap_or("btree"));
+    index.whereClause = constraint.where_clause;
     // SAFETY: parse tree is statement-owned; the constraint node's options
     // list moves onto the IndexStmt (C shares the pointer).
     index.options =
         unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
             .expect("Constraint");
     index.tableSpace = constraint.indexspace;
+
+    if is_exclusion {
+        let mut index_params = NodeList::nil();
+        let mut exclude_op_names = NodeList::nil();
+        for pair in constraint.exclusions.iter() {
+            let pair = pair.as_list().expect("exclusions pair");
+            index_params.lappend(mcx, pair.nth(0))?;
+            exclude_op_names.lappend(mcx, pair.nth(1))?;
+        }
+        index.indexParams = index_params;
+        index.excludeOpNames = exclude_op_names;
+        return Ok((index.seal(), NodeList::nil()));
+    }
 
     let is_primary = index.primary;
     let mut index_params = NodeList::nil();
@@ -1409,11 +1455,34 @@ fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
     for (x, y) in a.iter().zip(b.iter()) {
         let xe = x.as_variant::<IndexElem>().expect("IndexElem");
         let ye = y.as_variant::<IndexElem>().expect("IndexElem");
+        // Expression elems: C uses equal(); never merged here (see dedup note).
+        if xe.expr.is_some() || ye.expr.is_some() {
+            return false;
+        }
         if xe.name != ye.name
             || xe.ordering != ye.ordering
             || xe.nulls_ordering != ye.nulls_ordering
         {
             return false;
+        }
+    }
+    true
+}
+
+fn exclude_op_names_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (x, y) in a.iter().zip(b.iter()) {
+        let xs = x.as_list().expect("op name list");
+        let ys = y.as_list().expect("op name list");
+        if xs.len() != ys.len() {
+            return false;
+        }
+        for (xn, yn) in xs.iter().zip(ys.iter()) {
+            if xn.as_string().expect("op name").sval != yn.as_string().expect("op name").sval {
+                return false;
+            }
         }
     }
     true
