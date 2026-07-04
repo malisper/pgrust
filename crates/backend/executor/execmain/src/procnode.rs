@@ -230,6 +230,12 @@ pub struct ProbeBatch<'mcx> {
     // tail) re-eval per row.
     hash_col: u16,
     hashes: Option<PgVec<'mcx, u32>>,
+    // Bloom pushed from the hash build; a miss on the staged hash skips the
+    // batch fetch (false positives only — survivors run the hashclause
+    // recheck). Exempt Rc: released on disarm/rebuild and in release_owned.
+    filter: Option<std::rc::Rc<::nodehash::ProbeBloom<'mcx>>>,
+    flt_seen: u32,
+    flt_drop: u32,
 }
 
 impl<'mcx> ProbeBatch<'mcx> {
@@ -240,6 +246,9 @@ impl<'mcx> ProbeBatch<'mcx> {
             i: 0,
             hash_col: u16::MAX,
             hashes: None,
+            filter: None,
+            flt_seen: 0,
+            flt_drop: 0,
         }
     }
 
@@ -1965,9 +1974,31 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
             while self.cur.i < self.cur.n {
                 let i = self.cur.i;
                 self.cur.i += 1;
+                if let Some(f) = self.cur.filter.as_deref() {
+                    // Bloom on the staged hash: a miss proves the bucket walk
+                    // finds nothing (rows past hashes.len() — the fallback
+                    // tail — pass conservatively and re-eval per row).
+                    if let Some(&h) =
+                        self.cur.hashes.as_deref().and_then(|h| h.get(i as usize))
+                    {
+                        self.cur.flt_seen += 1;
+                        if !f.test(h) {
+                            self.cur.flt_drop += 1;
+                            continue;
+                        }
+                    }
+                }
                 if ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)? {
                     return Ok(Some(self.ss.ss.ss_ScanTupleSlot));
                 }
+            }
+            // Adaptive page-boundary disarm: a near-passthrough filter costs
+            // more than it saves on non-selective joins.
+            if self.cur.filter.is_some()
+                && self.cur.flt_seen >= 1024
+                && self.cur.flt_drop < self.cur.flt_seen / 8
+            {
+                self.cur.filter = None;
             }
             let n = ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)?;
             if n == 0 {
@@ -2009,6 +2040,24 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> 
     fn staged_hash(&self) -> Option<u32> {
         let h = self.cur.hashes.as_deref()?;
         h.get((self.cur.i as usize).wrapping_sub(1)).copied()
+    }
+
+    // Composed bloom seat: the filter rides the staged columnar hashes, so it
+    // arms only when that cover exists (same key column both sides).
+    fn set_hash_filter(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        push: Option<::nodehashjoin::ProbeFilterPush<'mcx>>,
+    ) -> PgResult<()> {
+        self.cur.flt_seen = 0;
+        self.cur.flt_drop = 0;
+        self.cur.filter = match push {
+            Some(p) if self.cur.hashes.is_some() && p.key_attnum == self.cur.hash_col => {
+                Some(p.filter)
+            }
+            _ => None,
+        };
+        Ok(())
     }
 }
 
@@ -2199,6 +2248,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
         PlanStateNode::Sort(s) => s.outer_desc = None,
         PlanStateNode::SubqueryScan(s) => end_scan(&mut s.ss),
+        PlanStateNode::HashJoin(hj) => hj.probe_batch.filter = None,
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
         | PlanStateNode::SetOp(_)
@@ -2210,7 +2260,6 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         | PlanStateNode::BitmapOr(_)
         | PlanStateNode::ModifyTable(_)
         | PlanStateNode::NestLoop(_)
-        | PlanStateNode::HashJoin(_)
         | PlanStateNode::MergeJoin(_)
         | PlanStateNode::WindowAgg(_)
         | PlanStateNode::Material(_)
@@ -2786,7 +2835,9 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 // Exempt fields: released by release_owned/the per-node end fns before
 // standard_executor_end forgets the bundle (Drop stays the abort path).
 ::mcx::forget_safe_nodrop!(ProbeBatchMode);
-::mcx::forget_safe_struct!(ProbeBatch<'_> { mode, n, i, hash_col, hashes });
+::mcx::forget_safe_struct!(
+    ProbeBatch<'_> { mode, n, i, hash_col, hashes, flt_seen, flt_drop; filter }
+);
 ::mcx::forget_safe_struct!(
     PlanStateBase<'_> { plan, ps_ExprContext, ps_ResultTupleSlot;
         ps_ResultTupleDesc, ps_ProjInfo, qual },
