@@ -113,12 +113,21 @@ pub fn exec_re_scan<'mcx>(
             }
             Ok(())
         }
-        // ExecReScanMemoize, chgParam-NULL arm: no purge (an empty chgParam
-        // has no members outside keyparamids).
+        // ExecReScanMemoize: while outer_chg (C outerPlan->chgParam) is
+        // pending, the child rescan stays deferred to the next pull and the
+        // purge test runs on the accumulated set.
         PlanStateNode::Memoize(m) => {
             let m = &mut **m;
             ::nodememoize::exec_rescan_memoize(&mut m.state);
-            exec_re_scan(&mut m.outer, estate)
+            if m.outer_chg.is_empty() {
+                exec_re_scan(&mut m.outer, estate)?;
+            } else if m
+                .outer_chg
+                .nonempty_difference(::nodememoize::keyparamids(&m.state))
+            {
+                ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
+            }
+            Ok(())
         }
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).
@@ -388,20 +397,28 @@ pub fn exec_re_scan_with_chg<'mcx>(
             let m = &mut **m;
             ::nodememoize::exec_rescan_memoize(&mut m.state);
             let outer_plan = base.lefttree.expect("Memoize outer plan");
-            // C purges when outerPlan->chgParam (= chg ∩ outer allParam) has
-            // members outside the cache keys; alloc-free member walk (this
-            // runs per outer tuple).
+            // UpdateChangedParamSet: chg ∩ outer allParam accumulates into
+            // outer_chg (C outerPlan->chgParam); the child rescan is DEFERRED
+            // to the next pull so cache hits never walk the child subtree
+            // (this arm runs per outer tuple — C ExecReScanMemoize skips
+            // ExecReScan(outerPlan) whenever chgParam is pending).
             let outer_allparam = &outer_plan.as_plan().expect("plan node").allParam;
-            let keyparamids = ::nodememoize::keyparamids(&m.state);
+            let mcx = estate.es_query_cxt;
             let mut x = chg.next_member(-1);
             while x >= 0 {
-                if outer_allparam.is_member(x) && !keyparamids.is_member(x) {
-                    ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
-                    break;
+                if outer_allparam.is_member(x) {
+                    m.outer_chg.add_member(mcx, x)?;
                 }
                 x = chg.next_member(x);
             }
-            exec_re_scan_with_chg(&mut m.outer, outer_plan, estate, chg)?;
+            if m.outer_chg.is_empty() {
+                exec_re_scan(&mut m.outer, estate)?;
+            } else if m
+                .outer_chg
+                .nonempty_difference(::nodememoize::keyparamids(&m.state))
+            {
+                ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
+            }
         }
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_rescan_sort_chg(&mut s.state, estate);
