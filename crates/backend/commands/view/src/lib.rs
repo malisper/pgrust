@@ -246,7 +246,7 @@ fn ReplaceViewQuery<'mcx>(
     catalog_heap::CheckTableNotInUse(&rel, "CREATE OR REPLACE VIEW")?;
 
     let descriptor = tablecmds::BuildDescForRelation(mcx, &attrList)?;
-    checkViewColumns(mcx, &descriptor, &rel.rd_att)?;
+    checkViewColumns(mcx, &descriptor, rel.descr())?;
 
     let old_natts = rel.rd_att.natts;
     if attrList.len() as i32 > old_natts {

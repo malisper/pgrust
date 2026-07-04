@@ -485,7 +485,7 @@ pub fn AlterCollation<'mcx>(
 
     let newversion = pg_locale::get_collation_actual_version(collprovider, &locale)?;
 
-    let loc = |line: u32| {
+    let loc = |line: i32| {
         types_error::ErrorLocation::new(
             "src/backend/commands/collationcmds.c",
             line,
