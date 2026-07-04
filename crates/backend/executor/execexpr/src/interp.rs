@@ -1462,15 +1462,17 @@ fn eval_hashed_scalar_array_op(
     if !tab.built {
         let hashcall = tab.hashcall;
         let p = arr.value.as_usize() as *const u8;
-        // SAFETY: non-null const array datum with an inline 4-byte header.
-        let b0 = unsafe { *p };
-        assert!(b0 != 0x01 && b0 & 0x03 == 0, "hashed scalararrayop: toasted/packed array image");
-        // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
-        let img = unsafe {
-            core::slice::from_raw_parts(
-                p,
-                ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)),
-            )
+        // DatumGetArrayTypeP (as the non-hashed SAOP walk): borrow in place on
+        // an inline 4-byte header, else detoast/unpack into the table's mcx.
+        // SAFETY: non-null array datum addresses a live varlena.
+        let img: &[u8] = unsafe {
+            if ::types_tuple::varatt::varatt_is_4b_u(p) {
+                core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+            } else {
+                let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+                let flat = ::detoast_seams::detoast_attr::call(*tab.map.allocator(), raw)?;
+                &*(flat.leak() as *const [u8])
+            }
         };
         let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
         let mut nitems = 1i64;
