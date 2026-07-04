@@ -106,6 +106,7 @@ fn typename_type_id_and_mod<'mcx>(
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(t)
             if t == b'b' as i8
+                || t == b'c' as i8
                 || t == b'e' as i8
                 || t == b'r' as i8
                 || t == b'm' as i8

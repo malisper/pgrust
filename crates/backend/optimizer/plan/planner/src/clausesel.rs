@@ -389,11 +389,46 @@ pub(crate) fn clause_selectivity_node<'mcx>(
             let tuples = run.root.rel(crel_id).tuples;
             Ok(if tuples > 0.0 { 1.0 / tuples } else { 0.5 })
         }
+        NodeTag::T_RowCompareExpr => rowcomparesel(run, clause, varrelid, jointype, sjinfo),
         // C's catch-all default: no way to estimate, use 0.5.
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
         // C's final else: boolvarsel.
         NodeTag::T_CaseExpr => crate::selfuncs::boolvarsel(run, clause, varrelid),
         other => panic!("clause_selectivity_ext (clausesel.c): {other:?}; M2 qual lane"),
+    }
+}
+
+
+// rowcomparesel (selfuncs.c): estimate on the leading column pair only.
+fn rowcomparesel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clause: Node<'mcx>,
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    let rc = clause.as_row_compare_expr().unwrap();
+    let opno = rc.opnos.nth(0);
+    let inputcollid = rc.inputcollids.nth(0);
+    let (larg, rarg) = (rc.largs.nth(0), rc.rargs.nth(0));
+    let args = {
+        let mut ids = PgVec::new_in(run.mcx);
+        ids.push(run.intern_expr(larg));
+        ids.push(run.intern_expr(rarg));
+        ids
+    };
+    let is_join = if varrelid != 0 || sjinfo.is_none() {
+        false
+    } else {
+        let mut bms = vars::pull_varnos(run.mcx, larg)?;
+        bms.add_members(run.mcx, &vars::pull_varnos(run.mcx, rarg)?)?;
+        debug_assert!(run.root.outer_join_rels.is_none());
+        bms.iter().count() > 1
+    };
+    if is_join {
+        crate::plancat::join_selectivity(run, opno, &args, inputcollid, jointype, sjinfo)
+    } else {
+        crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)
     }
 }
 

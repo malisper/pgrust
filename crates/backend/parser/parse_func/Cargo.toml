@@ -18,6 +18,8 @@ elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_utilcmd = { path = "../parse_utilcmd" }
+parse_relation = { path = "../parse_relation" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_agg = { path = "../parse_agg" }

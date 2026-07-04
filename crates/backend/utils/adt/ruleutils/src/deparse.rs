@@ -512,6 +512,51 @@ pub(crate) fn get_rule_expr<'mcx>(
             Ok(())
         }
         NodeTag::T_JsonExpr => get_json_expr(node.as_json_expr().unwrap(), ctx, showimplicit),
+        // C get_rule_list_toplevel: whole-row Vars inside ROW() print as x.*.
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            ctx.buf.push_str("(ROW(");
+            get_rule_list_toplevel(&rc.largs, ctx, showimplicit)?;
+            let opname = generate_operator_name(
+                ctx.mcx,
+                rc.opnos.nth(0),
+                parse_expr::expr_type(rc.largs.nth(0)),
+                parse_expr::expr_type(rc.rargs.nth(0)),
+            )?;
+            ctx.buf.push_str(&format!(") {opname} ROW("));
+            get_rule_list_toplevel(&rc.rargs, ctx, showimplicit)?;
+            ctx.buf.push_str("))");
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            let tupdesc = if r.row_typeid != types_core::catalog::RECORDOID {
+                Some(typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                    ctx.mcx,
+                    r.row_typeid,
+                    -1,
+                )?)
+            } else {
+                None
+            };
+            ctx.buf.push_str("ROW(");
+            let mut first = true;
+            for (i, e) in r.args.iter().enumerate() {
+                if tupdesc.as_ref().is_none_or(|d| !d.attr(i).attisdropped) {
+                    if !first {
+                        ctx.buf.push_str(", ");
+                    }
+                    first = false;
+                    get_rule_expr_toplevel(e, ctx, true)?;
+                }
+            }
+            ctx.buf.push(')');
+            if r.row_format == CoercionForm::COERCE_EXPLICIT_CAST {
+                let tyname = format_type_with_typemod(r.row_typeid, -1)?;
+                ctx.buf.push_str(&format!("::{tyname}"));
+            }
+            Ok(())
+        }
         other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
     }
 }
@@ -765,6 +810,34 @@ fn get_json_expr<'mcx>(
         },
     )?;
     ctx.buf.push(')');
+// get_rule_expr_toplevel / get_rule_list_toplevel (ruleutils.c): a whole-row
+// Var at list top level prints its .* form via get_variable(istoplevel).
+fn get_rule_expr_toplevel<'mcx>(
+    node: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    if let Some(v) = node.as_var() {
+        if v.varattno == types_core::InvalidAttrNumber {
+            return get_variable(v, 0, true, ctx).map(|_| ());
+        }
+    }
+    get_rule_expr(node, ctx, showimplicit)
+}
+
+fn get_rule_list_toplevel<'mcx>(
+    lst: &NodeList<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    let mut first = true;
+    for item in lst.iter() {
+        if !first {
+            ctx.buf.push_str(", ");
+        }
+        first = false;
+        get_rule_expr_toplevel(item, ctx, showimplicit)?;
+    }
     Ok(())
 }
 

@@ -170,6 +170,13 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_FieldSelect => pull_var_nodes(node.as_field_select().unwrap().arg, out),
         NodeTag::T_ArrayExpr => {
             for a in &node.as_array_expr().unwrap().elements {
                 pull_var_nodes(a, out);

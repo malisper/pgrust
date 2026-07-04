@@ -950,6 +950,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_RowCompareExpr => 16,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
         NodeTag::T_NextValueExpr => {
             node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
@@ -1150,6 +1152,12 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(e, info);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for e in rc.largs.iter().chain(rc.rargs.iter()) {
+                setup_walker(e, info);
+            }
+        }
         NodeTag::T_FieldSelect => setup_walker(node.as_field_select().unwrap().arg, info),
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
@@ -1332,6 +1340,10 @@ pub(crate) fn init_expr_rec<'mcx>(
                 _ => unreachable!("init_func returns a FuncExpr step"),
             };
             push_step(state, mcx, Step::Distinct { call, out })
+        }
+        NodeTag::T_RowCompareExpr => {
+            init_row_compare(node, state, mcx, out, agg, params, sub)?;
+            Ok(())
         }
         NodeTag::T_BooleanTest => {
             use ::types_nodes::BoolTestType;
@@ -2116,6 +2128,89 @@ fn expr_typmod_closed(node: Node<'_>) -> i32 {
     }
 }
 
+// C T_RowCompareExpr: per-column BTORDER procs resolve here.
+#[allow(clippy::too_many_arguments)]
+fn init_row_compare<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    const BTORDER_PROC: i16 = 1;
+    let rc = node.as_row_compare_expr().unwrap();
+    let nopers = rc.opnos.len();
+    assert_eq!(rc.largs.len(), nopers);
+    assert_eq!(rc.rargs.len(), nopers);
+    assert_eq!(rc.opfamilies.len(), nopers);
+    assert_eq!(rc.inputcollids.len(), nopers);
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    for i in 0..nopers {
+        let opno = rc.opnos.nth(i);
+        let opfamily = rc.opfamilies.nth(i);
+        let inputcollid = rc.inputcollids.nth(i);
+        let (_strategy, lefttype, righttype) =
+            ::lsyscache::get_op_opfamily_properties(opno, opfamily, false)?;
+        let proc = ::lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC)?;
+        if !::types_core::OidIsValid(proc) {
+            panic!(
+                "missing support function {BTORDER_PROC}({lefttype},{righttype}) \
+                 in opfamily {opfamily}"
+            );
+        }
+        let mut flinfo = fmgr_core::fmgr_info(proc)?;
+        flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
+        let strict = flinfo.fn_strict;
+        let frame = FuncFrame::new_in(mcx, flinfo, 2, inputcollid)?;
+        let call = crate::steps::Call2 { fcinfo: frame.fcinfo, flinfo: frame.flinfo };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+        // SAFETY: args 0/1 of the frame's fresh 2-arg fcinfo image.
+        let (l_out, r_out) = unsafe {
+            (
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 0)),
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 1)),
+            )
+        };
+        init_expr_rec(rc.largs.nth(i), state, mcx, l_out, agg, params, sub)?;
+        init_expr_rec(rc.rargs.nth(i), state, mcx, r_out, agg, params, sub)?;
+        adjust_jumps.push(state.steps.len());
+        push_step(
+            state,
+            mcx,
+            Step::RowCompareStep {
+                call,
+                strict,
+                jumpnull: u32::MAX,
+                jumpdone: u32::MAX,
+                out,
+            },
+        )?;
+    }
+    if nopers == 0 {
+        push_step(state, mcx, Step::Const { value: ::datum::Datum::from_i32(0), isnull: false, out })?;
+    }
+    let final_ix = state.steps.len() as u32;
+    push_step(state, mcx, Step::RowCompareFinal { cmptype: rc.cmptype, out })?;
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::RowCompareStep { jumpnull, jumpdone, .. } => {
+                *jumpdone = final_ix;
+                *jumpnull = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
 // C ExecInitExprRec T_RowExpr, anonymous-RECORD leg (named-rowtype casts are
 // unported loud); the blessed tupdesc is built once at compile.
 #[allow(clippy::too_many_arguments)]
@@ -2854,6 +2949,10 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             }
             Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "sbsref jump target out of range");
+            }
+            Step::RowCompareStep { jumpnull, jumpdone, .. } => {
+                assert!((*jumpnull as usize) < len, "rowcompare jump target out of range");
+                assert!((*jumpdone as usize) < len, "rowcompare jump target out of range");
             }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }

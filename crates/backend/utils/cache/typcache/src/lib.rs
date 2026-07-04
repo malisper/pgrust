@@ -63,6 +63,11 @@ const TCFLAGS_HAVE_ELEM_EQUALITY: i32 = 0x000400;
 const TCFLAGS_HAVE_ELEM_COMPARE: i32 = 0x000800;
 const TCFLAGS_HAVE_ELEM_HASHING: i32 = 0x001000;
 const TCFLAGS_HAVE_ELEM_EXTENDED_HASHING: i32 = 0x002000;
+const TCFLAGS_CHECKED_FIELD_PROPERTIES: i32 = 0x004000;
+const TCFLAGS_HAVE_FIELD_EQUALITY: i32 = 0x008000;
+const TCFLAGS_HAVE_FIELD_COMPARE: i32 = 0x010000;
+const TCFLAGS_HAVE_FIELD_HASHING: i32 = 0x020000;
+const TCFLAGS_HAVE_FIELD_EXTENDED_HASHING: i32 = 0x040000;
 pub(crate) const TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS: i32 = 0x080000;
 pub(crate) const TCFLAGS_DOMAIN_BASE_IS_COMPOSITE: i32 = 0x100000;
 pub(crate) const TCFLAGS_OPERATOR_FLAGS: i32 = !(TCFLAGS_HAVE_PG_TYPE_DATA
@@ -562,8 +567,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
         }
         if eq_opr == ARRAY_EQ_OP && !array_element_has(e, TCFLAGS_HAVE_ELEM_EQUALITY)? {
             eq_opr = InvalidOid;
-        } else if eq_opr == RECORD_EQ_OP {
-            lane_unported("record/composite field-properties", type_id);
+        } else if eq_opr == RECORD_EQ_OP
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_EQUALITY)?
+        {
+            eq_opr = InvalidOid;
         }
         if e.eq_opr.get() != eq_opr {
             e.eq_opr_finfo.borrow_mut().fn_oid = InvalidOid;
@@ -585,8 +592,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
         }
         if lt_opr == ARRAY_LT_OP && !array_element_has(e, TCFLAGS_HAVE_ELEM_COMPARE)? {
             lt_opr = InvalidOid;
-        } else if lt_opr == RECORD_LT_OP {
-            lane_unported("record/composite field-properties", type_id);
+        } else if lt_opr == RECORD_LT_OP
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_COMPARE)?
+        {
+            lt_opr = InvalidOid;
         }
         e.lt_opr.set(lt_opr);
         e.set_flags(TCFLAGS_CHECKED_LT_OPR);
@@ -604,8 +613,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
         }
         if gt_opr == ARRAY_GT_OP && !array_element_has(e, TCFLAGS_HAVE_ELEM_COMPARE)? {
             gt_opr = InvalidOid;
-        } else if gt_opr == RECORD_GT_OP {
-            lane_unported("record/composite field-properties", type_id);
+        } else if gt_opr == RECORD_GT_OP
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_COMPARE)?
+        {
+            gt_opr = InvalidOid;
         }
         e.gt_opr.set(gt_opr);
         e.set_flags(TCFLAGS_CHECKED_GT_OPR);
@@ -625,8 +636,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
         }
         if cmp_proc == F_BTARRAYCMP && !array_element_has(e, TCFLAGS_HAVE_ELEM_COMPARE)? {
             cmp_proc = InvalidOid;
-        } else if cmp_proc == F_BTRECORDCMP {
-            lane_unported("record/composite field-properties", type_id);
+        } else if cmp_proc == F_BTRECORDCMP
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_COMPARE)?
+        {
+            cmp_proc = InvalidOid;
         }
         if e.cmp_proc.get() != cmp_proc {
             e.cmp_proc_finfo.borrow_mut().fn_oid = InvalidOid;
@@ -641,8 +654,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
         let mut hash_proc = resolve_hash_proc(e, HASHSTANDARD_PROC)?;
         if hash_proc == F_HASH_ARRAY && !array_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)? {
             hash_proc = InvalidOid;
-        } else if hash_proc == F_HASH_RECORD {
-            lane_unported("record/composite field-properties", type_id);
+        } else if hash_proc == F_HASH_RECORD
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_HASHING)?
+        {
+            hash_proc = InvalidOid;
         } else if hash_proc == F_HASH_RANGE && !range_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)? {
             hash_proc = InvalidOid;
         }
@@ -666,8 +681,10 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             && !array_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
         {
             hash_extended_proc = InvalidOid;
-        } else if hash_extended_proc == F_HASH_RECORD_EXTENDED {
-            lane_unported("record/composite field-properties", type_id);
+        } else if hash_extended_proc == F_HASH_RECORD_EXTENDED
+            && !record_fields_have(e, TCFLAGS_HAVE_FIELD_EXTENDED_HASHING)?
+        {
+            hash_extended_proc = InvalidOid;
         } else if hash_extended_proc == F_HASH_RANGE_EXTENDED
             && !range_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
         {
@@ -858,6 +875,60 @@ fn propagate_elem_hash_flags(e: &TypeCacheEntry, elem_oid: Oid) -> PgResult<()> 
     if el.hash_extended_proc.get() != InvalidOid {
         e.set_flags(TCFLAGS_HAVE_ELEM_EXTENDED_HASHING);
     }
+    Ok(())
+}
+
+fn record_fields_have(e: &TypeCacheEntry, have_bit: i32) -> PgResult<bool> {
+    if e.flags.get() & TCFLAGS_CHECKED_FIELD_PROPERTIES == 0 {
+        cache_record_field_properties(e)?;
+    }
+    Ok(e.flags.get() & have_bit != 0)
+}
+
+// C cache_record_field_properties: RECORD is assumed sortable (a wrong guess
+// costs a runtime error, matching C); composites check every non-dropped
+// field; domain-over-composite is loud.
+fn cache_record_field_properties(e: &TypeCacheEntry) -> PgResult<()> {
+    if e.type_id == types_core::catalog::RECORDOID {
+        e.set_flags(TCFLAGS_HAVE_FIELD_EQUALITY | TCFLAGS_HAVE_FIELD_COMPARE);
+    } else if e.typtype.get() == TYPTYPE_COMPOSITE {
+        let mcx = with_state(|st| st.mcx);
+        let tupdesc = lookup_rowtype_tupdesc_copy(mcx, e.type_id, -1)?;
+        let mut newflags = TCFLAGS_HAVE_FIELD_EQUALITY
+            | TCFLAGS_HAVE_FIELD_COMPARE
+            | TCFLAGS_HAVE_FIELD_HASHING
+            | TCFLAGS_HAVE_FIELD_EXTENDED_HASHING;
+        for i in 0..tupdesc.natts as usize {
+            let attr = tupdesc.attr(i);
+            if attr.attisdropped {
+                continue;
+            }
+            let fe = lookup_type_cache(
+                attr.atttypid,
+                TYPECACHE_EQ_OPR | TYPECACHE_CMP_PROC | TYPECACHE_HASH_PROC
+                    | TYPECACHE_HASH_EXTENDED_PROC,
+            )?;
+            if fe.eq_opr.get() == InvalidOid {
+                newflags &= !TCFLAGS_HAVE_FIELD_EQUALITY;
+            }
+            if fe.cmp_proc.get() == InvalidOid {
+                newflags &= !TCFLAGS_HAVE_FIELD_COMPARE;
+            }
+            if fe.hash_proc.get() == InvalidOid {
+                newflags &= !TCFLAGS_HAVE_FIELD_HASHING;
+            }
+            if fe.hash_extended_proc.get() == InvalidOid {
+                newflags &= !TCFLAGS_HAVE_FIELD_EXTENDED_HASHING;
+            }
+            if newflags == 0 {
+                break;
+            }
+        }
+        e.set_flags(newflags);
+    } else if e.typtype.get() == TYPTYPE_DOMAIN {
+        lane_unported("record field-properties over a domain", e.type_id);
+    }
+    e.set_flags(TCFLAGS_CHECKED_FIELD_PROPERTIES);
     Ok(())
 }
 

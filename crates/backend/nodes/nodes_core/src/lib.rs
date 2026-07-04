@@ -220,6 +220,14 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(j.on_error, w)?)
         }
         NodeTag::T_JsonBehavior => walk_opt(node.as_json_behavior().unwrap().expr, w),
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            Ok(walk_list(&rc.largs, w)? || walk_list(&rc.rargs, w)?)
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            Ok(w.visit(fs.arg)? || walk_list(&fs.newvals, w)?)
+        }
         NodeTag::T_CoerceToDomain => w.visit(node.as_coerce_to_domain().unwrap().arg),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
@@ -733,7 +741,14 @@ where
             };
             checker(opfuncid)
         }
-        t @ NodeTag::T_RowCompareExpr => deferred("check_functions_in_node", t),
+        NodeTag::T_RowCompareExpr => {
+            for opno in &node.as_row_compare_expr().unwrap().opnos {
+                if checker(lsyscache::operator::get_opcode(opno)?)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
         _ => Ok(false),
     }
 }
@@ -1217,6 +1232,11 @@ where
             let raw = mutate_opt(j.raw_expr, m)?;
             let formatted = mutate_opt(j.formatted_expr, m)?;
             if raw.is_none() && formatted.is_none() {
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let largs = mutate_list(mcx, &rc.largs, m)?;
+            let rargs = mutate_list(mcx, &rc.rargs, m)?;
+            if largs.is_none() && rargs.is_none() {
                 return Ok(None);
             }
             Ok(Some(Node::mk(
@@ -1323,6 +1343,42 @@ where
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(mcx)?,
+                    largs: match largs {
+                        Some(l) => l,
+                        None => rc.largs.clone_in(mcx)?,
+                    },
+                    rargs: match rargs {
+                        Some(l) => l,
+                        None => rc.rargs.clone_in(mcx)?,
+                    },
+                },
+            )?))
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            let arg = m(fs.arg)?;
+            let newvals = mutate_list(mcx, &fs.newvals, m)?;
+            if arg.is_none() && newvals.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::FieldStore {
+                    arg: match arg {
+                        Some(a) => a,
+                        None => fs.arg,
+                    },
+                    newvals: match newvals {
+                        Some(l) => l,
+                        None => fs.newvals.clone_in(mcx)?,
+                    },
+                    fieldnums: fs.fieldnums.clone_in(mcx)?,
+                    resulttype: fs.resulttype,
                 },
             )?))
         }

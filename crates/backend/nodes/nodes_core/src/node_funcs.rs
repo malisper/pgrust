@@ -36,6 +36,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_FieldStore => node.as_field_store().unwrap().resulttype,
+        NodeTag::T_RowCompareExpr => types_core::catalog::BOOLOID,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
@@ -172,6 +174,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_NullIfExpr
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_XmlExpr
+        | NodeTag::T_FieldStore
+        | NodeTag::T_RowCompareExpr
         | NodeTag::T_RowExpr => -1,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
@@ -260,6 +264,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         | NodeTag::T_GroupingFunc
         | NodeTag::T_BooleanTest
         | NodeTag::T_CurrentOfExpr
+        | NodeTag::T_FieldStore
+        | NodeTag::T_RowCompareExpr
         | NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opcollid,
@@ -461,6 +467,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_TableFunc => node.as_table_func().unwrap().location,
         // C: XMLSERIALIZE keyword should always be the first thing.
         NodeTag::T_XmlSerialize => node.as_xml_serialize().unwrap().location,
+        NodeTag::T_FieldStore => expr_location(node.as_field_store().unwrap().arg),
+        NodeTag::T_RowCompareExpr => {
+            expr_location_list(&node.as_row_compare_expr().unwrap().largs)
+        }
         NodeTag::T_CollateClause => {
             let c = node.as_collate_clause().unwrap();
             leftmost_loc(c.arg.map_or(-1, expr_location), c.location)

@@ -192,22 +192,35 @@ fn namefastcmp_c(a: &[u8; 64], b: &[u8; 64]) -> i32 {
     0
 }
 
+std::thread_local! {
+    static SHIM_FLINFO: core::cell::RefCell<Option<(Oid, ::types_fmgr::FmgrInfo)>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+// TLS carrier = C's ssup_cxt-lived flinfo (record_cmp memoizes in fn_extra);
+// out of line so apply_cmp_in's fast arms don't pay for it.
+#[inline(never)]
+fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
+    let call = SHIM_FLINFO.with(|c| {
+        let mut slot = c.borrow_mut();
+        if !matches!(&*slot, Some((o, _)) if *o == shim.fn_oid) {
+            *slot = Some((shim.fn_oid, ::fmgr_seams::fmgr_info::call(shim.fn_oid)?));
+        }
+        let (_, fl) = slot.as_mut().expect("just filled");
+        ::types_fmgr::function_call2_coll_in(fl, collation, mcx, x, y)
+    });
+    match call {
+        Ok(d) => d.as_i32(),
+        // The comparator sits under infallible qsort plumbing; a failing
+        // btree proc is C's ereport-out-of-sort, surfaced here as a panic.
+        Err(e) => panic!("sort comparison proc {} failed: {}", shim.fn_oid, e.message()),
+    }
+}
+
 #[inline(always)]
 pub fn apply_cmp_in(cmp: SortComparator, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
     match cmp {
-        SortComparator::Shim(shim) => {
-            match direct_function_call2_coll_in(shim.fn_addr, collation, mcx, x, y) {
-                Ok(d) => d.as_i32(),
-                // The comparator sits under infallible qsort plumbing; a
-                // failing btree proc is C's ereport-out-of-sort, surfaced
-                // here as a panic.
-                Err(e) => panic!(
-                    "sort comparison proc {} failed: {}",
-                    shim.fn_oid,
-                    e.message()
-                ),
-            }
-        }
+        SortComparator::Shim(shim) => shim_cmp(shim, x, y, collation, mcx),
         other => apply_cmp(other, x, y),
     }
 }

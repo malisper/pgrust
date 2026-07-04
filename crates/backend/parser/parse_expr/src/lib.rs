@@ -462,7 +462,8 @@ fn transformAExprIn<'mcx>(
 }
 
 // transformIndirection (parse_expr.c): adjacent A_Indices merge into one
-// SubscriptingRef; field selection (String) needs FieldSelect — loud.
+// SubscriptingRef; String members project via ParseComplexProjection (the
+// attribute-notation function fallback is loud).
 fn transformIndirection<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -471,6 +472,7 @@ fn transformIndirection<'mcx>(
     let ind = expr.as_a_indirection().unwrap();
     let mut result = transformExprRecurse(mcx, pstate, ind.arg.expect("A_Indirection.arg"))?;
     let mut subscripts: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    let location = expr_location(result);
 
     for n in ind.indirection.iter() {
         match n.node_tag() {
@@ -478,10 +480,49 @@ fn transformIndirection<'mcx>(
             NodeTag::T_A_Star => {
                 return Err(row_expansion_error(pstate, expr_location(result)));
             }
-            _ => panic!(
-                "transformIndirection (parse_expr.c): field selection \
-                 (ParseFuncOrColumn over composite) unported — misc2 rowtypes lane"
-            ),
+            _ => {
+                let name = n.as_string().expect("indirection member is String").sval;
+                if !subscripts.is_nil() {
+                    result = transformContainerSubscripts(
+                        mcx,
+                        pstate,
+                        result,
+                        expr_type(result),
+                        expr_typmod(result),
+                        &subscripts,
+                        false,
+                    )?;
+                    subscripts = types_nodes::NodeList::nil();
+                }
+                let argtype = expr_type(result);
+                let could_be_projection = argtype == types_core::catalog::RECORDOID
+                    || types_core::OidIsValid(lsyscache::get_typ_typrelid(argtype)?);
+                let projected = if could_be_projection {
+                    parse_func::ParseComplexProjection(mcx, pstate, name, result, location)?
+                } else {
+                    None
+                };
+                match projected {
+                    Some(newresult) => result = newresult,
+                    None => {
+                        if !catalog_namespace::FuncnameGetCandidates(
+                            mcx,
+                            &[name],
+                            1,
+                            false,
+                            false,
+                        )?
+                        .is_empty()
+                        {
+                            panic!(
+                                "transformIndirection (parse_expr.c): attribute-notation \
+                                 function call unported — rowtypes lane"
+                            );
+                        }
+                        return Err(unknown_attribute(pstate, result, name, location));
+                    }
+                }
+            }
         }
     }
     if !subscripts.is_nil() {
@@ -512,6 +553,56 @@ fn row_expansion_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_
             ))
             .into_error()
             .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformIndirection")),
+    )
+}
+
+#[cold]
+fn unknown_attribute(
+    pstate: &ParseState<'_, '_>,
+    relref: Node<'_>,
+    attname: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{
+        ErrorLocation, ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    };
+    let errpos =
+        parser_small1::parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+    let builder = if let Some(v) = relref.as_var().filter(|v| v.varattno == types_core::InvalidAttrNumber)
+    {
+        let rte = parse_relation::GetRTEByRangeTablePosn(pstate, v.varno, v.varlevelsup as i32);
+        let alias = rte.eref.and_then(|a| a.aliasname).unwrap_or("");
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!("column {alias}.{attname} does not exist"))
+    } else {
+        let rel_type_id = expr_type(relref);
+        let is_complex = types_core::OidIsValid(
+            lsyscache::get_typ_typrelid(rel_type_id).unwrap_or(types_core::InvalidOid),
+        );
+        let tyname = format_type::format_type_be(rel_type_id)
+            .unwrap_or_else(|_| std::string::String::from("???"));
+        if is_complex {
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!("column \"{attname}\" not found in data type {tyname}"))
+        } else if rel_type_id == types_core::catalog::RECORDOID {
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "could not identify column \"{attname}\" in record data type"
+                ))
+        } else {
+            elog::ereport(ERROR).errcode(ERRCODE_WRONG_OBJECT_TYPE).errmsg(format!(
+                "column notation .{attname} applied to type {tyname}, which is not a composite type"
+            ))
+        }
+    };
+    Box::new(
+        builder
+            .errposition(errpos)
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "unknown_attribute")),
     )
 }
 
@@ -966,16 +1057,20 @@ fn transformAExprDistinct<'mcx>(
         None => None,
     };
 
-    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+    let result = if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
         && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
     {
-        panic!(
-            "transformAExprDistinct (parse_expr.c): make_row_distinct_op (ROW IS \
-             DISTINCT FROM ROW) unported — unit backend-parser-expr"
-        );
-    }
-
-    let result = make_distinct_op(mcx, pstate, &a.name, lexpr, rexpr, a.location)?;
+        make_row_distinct_op(
+            mcx,
+            pstate,
+            &a.name,
+            lexpr.unwrap().as_row_expr().unwrap(),
+            rexpr.unwrap().as_row_expr().unwrap(),
+            a.location,
+        )?
+    } else {
+        make_distinct_op(mcx, pstate, &a.name, lexpr, rexpr, a.location)?
+    };
 
     if a.kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
         return Node::mk(
@@ -1023,6 +1118,54 @@ fn make_distinct_op<'mcx>(
             location: op.location,
         },
     )
+}
+
+// make_row_distinct_op (parse_expr.c): pairwise IS DISTINCT ORed together;
+// zero-length rows fold to constant FALSE.
+fn make_row_distinct_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &types_nodes::NodeList<'mcx>,
+    lrow: &types_nodes::RowExpr<'mcx>,
+    rrow: &types_nodes::RowExpr<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    if lrow.args.len() != rrow.args.len() {
+        return Err(row_length_error(
+            pstate,
+            types_error::ERRCODE_SYNTAX_ERROR,
+            "unequal number of entries in row expressions",
+            location,
+        ));
+    }
+    let mut result: Option<Node<'mcx>> = None;
+    for (larg, rarg) in lrow.args.iter().zip(rrow.args.iter()) {
+        let cmp = make_distinct_op(mcx, pstate, opname, Some(larg), Some(rarg), location)?;
+        result = Some(match result {
+            None => cmp,
+            Some(prev) => Node::mk(
+                mcx,
+                types_nodes::BoolExpr {
+                    boolop: types_nodes::BoolExprType::OR_EXPR,
+                    args: types_nodes::NodeList::make2(mcx, prev, cmp)?,
+                    location,
+                },
+            )?,
+        });
+    }
+    match result {
+        Some(r) => Ok(r),
+        None => Node::mk_const(
+            mcx,
+            types_core::catalog::BOOLOID,
+            -1,
+            types_core::InvalidOid,
+            1,
+            datum::Datum::from_bool(false),
+            false,
+            true,
+        ),
+    }
 }
 
 fn make_nulltest_from_distinct<'mcx>(
@@ -2502,6 +2645,7 @@ fn make_row_comparison_op_lists<'mcx>(
     }
     // Intersect each operator's index interpretations; C picks the lowest
     // common CompareType.
+    let mut opinfo_lists = mcx::PgVec::new_in(mcx);
     let mut common: Option<u64> = None;
     for cmp in &opexprs {
         let opno = cmp.as_op_expr().expect("make_op returns an OpExpr").opno;
@@ -2510,6 +2654,7 @@ fn make_row_comparison_op_lists<'mcx>(
         for it in interps.iter() {
             mask |= 1u64 << (it.cmptype as u32);
         }
+        opinfo_lists.push(interps);
         common = Some(match common {
             None => mask,
             Some(c) => c & mask,
@@ -2540,10 +2685,66 @@ fn make_row_comparison_op_lists<'mcx>(
             },
         );
     }
-    panic!(
-        "make_row_comparison_op (parse_expr.c): ordered row comparison \
-         (RowCompareExpr end-to-end) unported — unit backend-parser-expr"
-    );
+
+    let mut opfamilies = types_nodes::list::OidList::nil();
+    for interps in &opinfo_lists {
+        let opfamily = interps
+            .iter()
+            .find(|it| it.cmptype == cmptype)
+            .map(|it| it.opfamily_id)
+            .ok_or_else(|| row_comparison_ambiguous(pstate, opname, location))?;
+        opfamilies.lappend(mcx, opfamily)?;
+    }
+
+    // C rebuilds largs/rargs from the OpExprs: make_op may have inserted
+    // coercions.
+    let mut opnos = types_nodes::list::OidList::nil();
+    let mut new_largs = types_nodes::NodeList::nil();
+    let mut new_rargs = types_nodes::NodeList::nil();
+    for cmp in &opexprs {
+        let op = cmp.as_op_expr().expect("make_op returns an OpExpr");
+        opnos.lappend(mcx, op.opno)?;
+        new_largs.lappend(mcx, op.args.nth(0))?;
+        new_rargs.lappend(mcx, op.args.nth(1))?;
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::RowCompareExpr {
+            cmptype,
+            opnos,
+            opfamilies,
+            // assign_expr_collations fills inputcollids.
+            inputcollids: types_nodes::list::OidList::nil(),
+            largs: new_largs,
+            rargs: new_rargs,
+        },
+    )
+}
+
+#[cold]
+fn row_comparison_ambiguous(
+    pstate: &ParseState<'_, '_>,
+    opname: &types_nodes::NodeList<'_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    let op = opname.last().and_then(|n| n.as_string()).map(|s| s.sval).unwrap_or("");
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "could not determine interpretation of row comparison operator {op}"
+            ))
+            .errdetail("There are multiple equally-plausible candidates.".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+    )
 }
 
 #[cold]

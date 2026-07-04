@@ -17,8 +17,8 @@ use crate::parsenodes::{
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FieldSelect, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
-    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
+    CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     XmlExpr,
 };
@@ -59,6 +59,9 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
+        NodeTag::T_FieldSelect => cmp!(as_field_select),
+        NodeTag::T_FieldStore => cmp!(as_field_store),
+        NodeTag::T_RowCompareExpr => cmp!(as_row_compare_expr),
         NodeTag::T_SQLValueFunction => cmp!(as_sql_value_function),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_NamedArgExpr => cmp!(as_named_arg_expr),
@@ -68,7 +71,6 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
-        NodeTag::T_FieldSelect => cmp!(as_field_select),
         NodeTag::T_CollateExpr => cmp!(as_collate_expr),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
@@ -361,6 +363,36 @@ impl NodeEqual for RowExpr<'_> {
     }
 }
 
+impl NodeEqual for FieldSelect<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.fieldnum == b.fieldnum
+            && self.resulttype == b.resulttype
+            && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for FieldStore<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.newvals.node_equal(&b.newvals)
+            && self.fieldnums.node_equal(&b.fieldnums)
+            && self.resulttype == b.resulttype
+    }
+}
+
+impl NodeEqual for RowCompareExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.cmptype == b.cmptype
+            && self.opnos.node_equal(&b.opnos)
+            && self.opfamilies.node_equal(&b.opfamilies)
+            && self.inputcollids.node_equal(&b.inputcollids)
+            && self.largs.node_equal(&b.largs)
+            && self.rargs.node_equal(&b.rargs)
+    }
+}
+
 impl NodeEqual for WindowFunc<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.winfnoid == b.winfnoid
@@ -466,16 +498,6 @@ fn equal_opt_pair(a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
 impl NodeEqual for BoolExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.boolop == b.boolop && self.args.node_equal(&b.args)
-    }
-}
-
-impl NodeEqual for FieldSelect<'_> {
-    fn node_equal(&self, b: &Self) -> bool {
-        equal(self.arg, b.arg)
-            && self.fieldnum == b.fieldnum
-            && self.resulttype == b.resulttype
-            && self.resulttypmod == b.resulttypmod
-            && self.resultcollid == b.resultcollid
     }
 }
 

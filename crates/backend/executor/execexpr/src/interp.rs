@@ -1217,6 +1217,28 @@ fn run_program<'mcx>(
                     write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
+            Step::RowCompareStep { call, strict, jumpnull, jumpdone, out } => {
+                match eval_row_compare_step(call, *strict)? {
+                    None => {
+                        write_out(*out, Datum::null(), true);
+                        // SAFETY: jump targets validated < steps.len() at ready.
+                        sp = unsafe { base.add(*jumpnull as usize) };
+                        continue;
+                    }
+                    Some(v) => {
+                        write_out(*out, Datum::from_i32(v), false);
+                        if v != 0 {
+                            // SAFETY: jump targets validated < steps.len() at ready.
+                            sp = unsafe { base.add(*jumpdone as usize) };
+                            continue;
+                        }
+                    }
+                }
+            }
+            Step::RowCompareFinal { cmptype, out } => {
+                let v = eval_row_compare_final(*cmptype, read_out(*out).value.as_i32());
+                write_out(*out, Datum::from_bool(v), false);
+            }
             Step::ScanVarFuncStrict2 { attnum, argno, call, out, .. } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
                 // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
@@ -2526,3 +2548,34 @@ fn row_type_mismatch_dropped(i: usize) -> alloc::boxed::Box<PgError> {
     )
 }
 
+// Out of line: the kernel fast paths ride the loop's inlining. None = NULL.
+#[inline(never)]
+fn eval_row_compare_step(call: &crate::steps::Call2, strict: bool) -> PgResult<Option<i32>> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if strict && (a0.isnull || a1.isnull) {
+        return Ok(None);
+    }
+    let (value, isnull) = invoke2(call)?;
+    if isnull {
+        return Ok(None);
+    }
+    Ok(Some(value.as_i32()))
+}
+
+// CompareType (cmptype.h): LT=1 LE=2 GE=4 GT=5; EQ/NE never reach here.
+#[inline(never)]
+fn eval_row_compare_final(cmptype: i32, cmpresult: i32) -> bool {
+    match cmptype {
+        1 => cmpresult < 0,
+        2 => cmpresult <= 0,
+        4 => cmpresult >= 0,
+        5 => cmpresult > 0,
+        other => unreachable!("RowCompareFinal cmptype {other}"),
+    }
+}

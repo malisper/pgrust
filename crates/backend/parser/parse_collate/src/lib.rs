@@ -246,6 +246,40 @@ fn assign_collations_walker<'mcx>(
             walk_top_list(context.mcx, context.pstate, &node.as_row_expr().unwrap().args)?;
             return Ok(());
         }
+        // Each column pair gets its own common collation; no common collation
+        // stores InvalidOid (may or may not error at runtime, per C).
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let mut colls = types_nodes::list::OidList::nil();
+            for (le, re) in rc.largs.iter().zip(rc.rargs.iter()) {
+                let pair = types_nodes::NodeList::make2(context.mcx, le, re)?;
+                let coll = select_common_collation(context.mcx, context.pstate, &pair, true)?;
+                colls.lappend(context.mcx, coll)?;
+            }
+            // SAFETY: parse analysis exclusively owns the just-built tree; the
+            // child borrows above have ended.
+            unsafe {
+                node.with_mut::<types_nodes::RowCompareExpr, _>(|e| e.inputcollids = colls)
+                    .unwrap();
+            }
+            return Ok(());
+        }
+        // The field's declared collation was saved in the node; the composite
+        // argument is never collatable.
+        NodeTag::T_FieldSelect => {
+            let fs = node.as_field_select().unwrap();
+            assign_collations_walker(fs.arg, &mut loccontext)?;
+            let rescoll = fs.resultcollid;
+            if OidIsValid(rescoll) {
+                collation = rescoll;
+                strength = CollateStrength::Implicit;
+                location = expr_location(node);
+            } else {
+                collation = InvalidOid;
+                strength = CollateStrength::None;
+                location = -1;
+            }
+        }
         // Non-default domain COLLATE overrides the child; DEFAULT bubbles the
         // child state up; the node ignores input collation.
         NodeTag::T_CoerceToDomain => {
