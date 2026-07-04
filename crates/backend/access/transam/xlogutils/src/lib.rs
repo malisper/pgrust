@@ -572,9 +572,10 @@ pub fn XLogReadDetermineTimeline(
         let timelineHistory =
             timeline_seams::read_timeline_history::call(history_cx.mcx(), currTLI)?;
 
-        state.currTLI = timeline_seams::tli_of_point_in_history::call(endOfSegment, &timelineHistory);
+        state.currTLI =
+            timeline_seams::tli_of_point_in_history::call(endOfSegment, &timelineHistory)?;
         let (valid_until, next_tli) =
-            timeline_seams::tli_switch_point::call(state.currTLI, &timelineHistory);
+            timeline_seams::tli_switch_point::call(state.currTLI, &timelineHistory)?;
         state.currTLIValidUntil = valid_until;
         state.nextTLI = next_tli;
 

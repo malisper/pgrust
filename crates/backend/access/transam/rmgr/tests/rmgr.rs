@@ -117,10 +117,10 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: commit_ts_redo — land backend-access-transam-commit-ts")]
+#[should_panic(expected = "rmgr callback not ported: replorigin_redo — land backend-replication-origin")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
-    let _ = (GetRmgr(RM_COMMIT_TS_ID as u8).unwrap().rm_redo)(&mut record);
+    let _ = (GetRmgr(RM_REPLORIGIN_ID as u8).unwrap().rm_redo)(&mut record);
 }
 
 #[test]

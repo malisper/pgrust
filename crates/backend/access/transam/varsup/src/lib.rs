@@ -236,8 +236,7 @@ pub fn GetNewTransactionId(isSubXact: bool) -> PgResult<FullTransactionId> {
     // Zero any fresh commit-log page under XidGenLock, else a later XID
     // could commit before the page exists.
     clog::ExtendCLOG(xid)?;
-    // commit_ts unit unported; C's ExtendCommitTs no-ops with
-    // track_commit_timestamp off (startup.rs is_installed precedent).
+    // C keeps ExtendCommitTs's commitTsActive cheap-out inside the callee.
     if commit_ts_seams::extend_commit_ts::is_installed() {
         commit_ts_seams::extend_commit_ts::call(xid)?;
     }

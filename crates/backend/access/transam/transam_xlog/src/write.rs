@@ -399,7 +399,10 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                 LOGWRT_RESULT.set((lw_write, lw_write));
 
                 if XLogArchivingActive() {
-                    panic!("XLogArchiveNotifySeg: xlogarchive not ported (archive_mode must be off)");
+                    xlogarchive_seams::xlog_archive_notify_seg::call(
+                        OPEN_LOG_SEG_NO.get(),
+                        tli,
+                    )?;
                 }
 
                 ctl.lastSegSwitchTime.store(crate::now_pg_time(), Relaxed);

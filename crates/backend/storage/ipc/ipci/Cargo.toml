@@ -25,8 +25,10 @@ lock = { path = "../../lmgr/lock" }
 bufmgr = { path = "../../buffer/bufmgr" }
 varsup = { path = "../../../access/transam/varsup" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
+xlogprefetcher = { path = "../../../access/transam/xlogprefetcher" }
 commands_async = { path = "../../../commands/commands_async" }
 clog = { path = "../../../access/transam/clog" }
+commit_ts = { path = "../../../access/transam/commit_ts" }
 subtrans = { path = "../../../access/transam/subtrans" }
 multixact = { path = "../../../access/transam/multixact" }
 twophase = { path = "../../../access/transam/twophase" }
@@ -35,6 +37,7 @@ pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
 slot = { path = "../../../replication/slot" }
+pgarch = { path = "../../../postmaster/pgarch" }
 syncscan = { path = "../../../access/common/syncscan" }
 procarray = { path = "../procarray" }
 ipci_seams = { path = "../ipci_seams" }

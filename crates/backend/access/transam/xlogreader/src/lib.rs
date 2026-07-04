@@ -422,6 +422,25 @@ struct AllocSlot {
     oversized: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ReadAheadRecordInfo {
+    pub lsn: XLogRecPtr,
+    pub xl_rmid: RmgrId,
+    pub xl_info: u8,
+    pub max_block_id: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReadAheadBlock {
+    pub in_use: bool,
+    pub rlocator: RelFileLocator,
+    pub forknum: ForkNumber,
+    pub blkno: BlockNumber,
+    pub flags: u8,
+    pub has_image: bool,
+    pub prefetch_buffer: Buffer,
+}
+
 pub struct XLogReaderState<'mcx> {
     /// The consumer-facing projection (redo/xlogutils vocabulary); page-read
     /// callbacks receive `&mut v` and may set seg/timeline/end-of-wal fields.
@@ -635,6 +654,51 @@ impl<'mcx> XLogReaderState<'mcx> {
             return Ok(Some(tail.lsn));
         }
         Ok(None)
+    }
+
+    // C decode_queue_head includes the record NextRecord handed out (it stays
+    // queued until released); here that record lives in `current`.
+    pub fn decode_queue_head_lsn(&self) -> Option<XLogRecPtr> {
+        self.current.as_ref().or_else(|| self.queue.first()).map(|r| r.lsn)
+    }
+
+    pub fn decode_queue_tail_lsn(&self) -> Option<XLogRecPtr> {
+        self.queue.last().or(self.current.as_ref()).map(|r| r.lsn)
+    }
+
+    pub fn read_ahead_record_info(&self) -> Option<ReadAheadRecordInfo> {
+        self.queue.last().map(|r| ReadAheadRecordInfo {
+            lsn: r.lsn,
+            xl_rmid: r.header.xl_rmid,
+            xl_info: r.header.xl_info,
+            max_block_id: r.max_block_id,
+        })
+    }
+
+    pub fn read_ahead_main_data(&self) -> &[u8] {
+        let rec = self.queue.last().expect("read-ahead accessors require a queued record");
+        self.payload(rec, rec.main_data)
+    }
+
+    pub fn read_ahead_block(&self, block_id: i32) -> ReadAheadBlock {
+        let rec = self.queue.last().expect("read-ahead accessors require a queued record");
+        let blk = self.block(rec, block_id as usize);
+        ReadAheadBlock {
+            in_use: blk.in_use,
+            rlocator: blk.rlocator,
+            forknum: blk.forknum,
+            blkno: blk.blkno,
+            flags: blk.flags,
+            has_image: blk.has_image,
+            prefetch_buffer: blk.prefetch_buffer,
+        }
+    }
+
+    pub fn set_read_ahead_block_prefetch_buffer(&mut self, block_id: i32, buffer: Buffer) {
+        let rec = self.queue.last().expect("read-ahead accessors require a queued record");
+        debug_assert!((block_id as u32) < rec.nblocks);
+        let idx = rec.blocks_start as usize + block_id as usize;
+        self.blocks_pool[idx].prefetch_buffer = buffer;
     }
 
     fn XLogReadRecordAlloc(&mut self, xl_tot_len: usize, allow_oversized: bool) -> Option<AllocSlot> {

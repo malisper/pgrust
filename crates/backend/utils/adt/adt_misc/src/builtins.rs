@@ -124,6 +124,18 @@ fn recovery_in_progress_err(fname: &str) -> Box<types_error::PgError> {
     )
 }
 
+pub fn fc_pg_switch_wal(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(Box::new(
+            types_error::PgError::error("recovery is in progress")
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint("WAL control functions cannot be executed during recovery."),
+        ));
+    }
+    let switchpoint = transam_xlog::RequestXLogSwitch(false)?;
+    Ok(Datum::from_i64(switchpoint as i64))
+}
+
 pub fn fc_pg_walfile_name(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let lsn = fcinfo.arg(0).as_u64();
     if transam_xlog::RecoveryInProgress() {
@@ -386,6 +398,7 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(1215, "obj_description", 2, fc_obj_description),
     b(1597, "PG_encoding_to_char", 1, fc_pg_encoding_to_char),
     b(1216, "col_description", 2, fc_col_description),
+    b(2848, "pg_switch_wal", 0, fc_pg_switch_wal),
     b(2850, "pg_walfile_name_offset", 1, fc_pg_walfile_name_offset),
     b(2851, "pg_walfile_name", 1, fc_pg_walfile_name),
     b(6213, "pg_split_walfile_name", 1, fc_pg_split_walfile_name),

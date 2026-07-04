@@ -180,7 +180,7 @@ pub fn StartupXLOG() -> PgResult<()> {
         commit_ts_seams::set_commit_ts_limit::call(
             check_point.oldestCommitTsXid,
             check_point.newestCommitTsXid,
-        );
+        )?;
     }
     ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
 
@@ -542,8 +542,7 @@ pub fn XLogReportParameters() -> PgResult<()> {
     let max_senders = guc_tables::vars::max_wal_senders.read();
     let max_prepared = guc_tables::vars::max_prepared_xacts.read();
     let max_locks = guc_tables::vars::max_locks_per_xact.read();
-    // Var home is commit_ts.c (unported): the slot stays at its boot-default
-    // false until that owner installs it.
+    // Var home is commit_ts.c; installed() survives seam-free unit tests.
     let track_cts = guc_tables::vars::track_commit_timestamp.installed()
         && guc_tables::vars::track_commit_timestamp.read();
 
@@ -773,8 +772,13 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         check_point.oldestXidDB = tv.oldestXidDB.load(Relaxed);
         LWLockRelease(xid_gen_lock)?;
 
-        check_point.oldestCommitTsXid = control_file().checkPointCopy.oldestCommitTsXid;
-        check_point.newestCommitTsXid = control_file().checkPointCopy.newestCommitTsXid;
+        // xlog.c CreateCheckPoint reads these under CommitTsLock, LW_SHARED.
+        let commit_ts_lock =
+            lwlock::main_lock(types_storage::storage::COMMIT_TS_LOCK);
+        LWLockAcquire(commit_ts_lock, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
+        check_point.oldestCommitTsXid = tv.oldestCommitTsXid.load(Relaxed);
+        check_point.newestCommitTsXid = tv.newestCommitTsXid.load(Relaxed);
+        LWLockRelease(commit_ts_lock)?;
 
         // An online checkpoint's nextOid covers the prefetched-but-unlogged
         // range so crash replay never hands out an OID below what the
@@ -922,7 +926,7 @@ pub fn ShutdownXLOG() -> PgResult<()> {
         panic!("CreateRestartPoint not ported (shutdown during recovery)");
     }
     if XLogArchivingActive() {
-        panic!("RequestXLogSwitch-at-shutdown: xlogarchive not ported");
+        crate::RequestXLogSwitch(false)?;
     }
     CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
     crate::write::open_log_file_close_if_open()?;

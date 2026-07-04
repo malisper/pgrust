@@ -297,8 +297,7 @@ fn xact_redo_commit(
         parsed.xact_time
     };
 
-    // Guarded: commit_ts unported means track_commit_timestamp is stuck at
-    // its boot-default false, where C's TransactionTreeSetCommitTsData no-ops.
+    // is_installed guard survives seam-free unit tests; installed = live.
     if commit_ts_seams::transaction_tree_set_commit_ts_data::is_installed() {
         commit_ts_seams::transaction_tree_set_commit_ts_data::call(
             xid,

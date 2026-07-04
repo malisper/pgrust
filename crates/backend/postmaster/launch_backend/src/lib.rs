@@ -74,7 +74,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     ChildProcessKind { name: "standalone backend", main_fn: Main::None, shmem_attach: false },
     ChildProcessKind {
         name: "archiver",
-        main_fn: Main::Unported("PgArchiverMain (backend-postmaster-pgarch)"),
+        main_fn: Main::Ported(pgarch::PgArchiverMain),
         shmem_attach: true,
     },
     ChildProcessKind {

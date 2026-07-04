@@ -99,26 +99,14 @@ enum XLogSource {
     PgWal,
 }
 
-#[derive(Clone, Copy)]
-struct Tle {
-    tli: TimeLineID,
-    begin: XLogRecPtr,
-    end: XLogRecPtr,
-}
+use timeline_seams::TimeLineHistoryEntry as Tle;
 
-// readTimeLineHistory (timeline.c), reduced: a real history file means a
-// timeline switch happened — the timeline unit owns that; an absent file
-// (the fresh-cluster case) yields C's dummy single-entry history.
-fn read_timeline_history(target_tli: TimeLineID) -> Vec<Tle> {
-    let path = data_path(&format!("{XLOGDIR}/{target_tli:08X}.history"));
-    if target_tli != 1 && std::path::Path::new(&path).exists() {
-        panic!("timeline history file parsing not ported (timeline.c): {path}");
-    }
-    vec![Tle {
-        tli: target_tli,
-        begin: InvalidXLogRecPtr,
-        end: InvalidXLogRecPtr,
-    }]
+// The scoped context is C's palloc'd history list (a few entries, boot-only);
+// copied out because expectedTLEs outlives it.
+fn read_timeline_history(target_tli: TimeLineID) -> PgResult<Vec<Tle>> {
+    let history_cx = mcx::MemoryContext::new("timeline history");
+    let tles = timeline_seams::read_timeline_history::call(history_cx.mcx(), target_tli)?;
+    Ok(tles.iter().copied().collect())
 }
 
 fn tli_in_history(tli: TimeLineID, tles: &[Tle]) -> bool {
@@ -126,15 +114,7 @@ fn tli_in_history(tli: TimeLineID, tles: &[Tle]) -> bool {
 }
 
 fn tli_of_point_in_history(ptr: XLogRecPtr, tles: &[Tle]) -> PgResult<TimeLineID> {
-    for t in tles {
-        if t.begin <= ptr && (t.end == InvalidXLogRecPtr || ptr < t.end) {
-            return Ok(t.tli);
-        }
-    }
-    ereport(types_error::ERROR)
-        .errmsg(format!("timeline of point {} not found in history", lsn_fmt(ptr)))
-        .finish(loc("tliOfPointInHistory"))?;
-    unreachable!()
+    timeline_seams::tli_of_point_in_history::call(ptr, tles)
 }
 
 // The file-static read state of xlogrecovery.c plus the XLogPageReadPrivate
@@ -231,7 +211,7 @@ impl PageSource {
     fn xlog_file_read_any_tli(&mut self, segno: XLogSegNo) -> PgResult<i32> {
         let wal_segsz = transam_xlog::wal_segment_size();
         let tles = if self.expected_tles.is_empty() {
-            read_timeline_history(RECOVERY_TARGET_TLI.load(Relaxed))
+            read_timeline_history(RECOVERY_TARGET_TLI.load(Relaxed))?
         } else {
             std::mem::take(&mut self.expected_tles)
         };
@@ -379,6 +359,7 @@ impl XLogReaderRoutine for PageSource {
 struct Recovery {
     context: &'static mcx::MemoryContext,
     reader: XLogReaderState<'static>,
+    prefetcher: xlogprefetcher::XLogPrefetcher<'static>,
     src: PageSource,
     check_point_loc: XLogRecPtr,
     check_point_tli: TimeLineID,
@@ -402,7 +383,7 @@ fn read_record(
     rec.src.replay_tli = replay_tli;
     rec.src.last_source_failed = false;
 
-    let got = rec.reader.XLogReadRecord(&mut rec.src)?;
+    let got = rec.prefetcher.XLogPrefetcherReadRecord(&mut rec.reader, &mut rec.src)?;
     let mut have_record = got.is_some();
     match got {
         None => {
@@ -457,7 +438,7 @@ fn read_checkpoint_record(
         let _ = elog(LOG, "invalid checkpoint location".to_string());
         return Ok(false);
     }
-    rec.reader.XLogBeginRead(rec_ptr);
+    rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, rec_ptr);
     if !read_record(rec, LOG, true, replay_tli)? {
         let _ = elog(LOG, "invalid checkpoint record".to_string());
         return Ok(false);
@@ -522,8 +503,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     let mut reader = XLogReaderState::allocate(context.mcx(), transam_xlog::wal_segment_size())?;
     reader.system_identifier = cf.system_identifier;
     reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);
-    // No XLogPrefetcher: the prefetcher unit is unported; reads fall back to
-    // XLogReadRecord exactly as C's prefetcher does on a cold queue.
+    let prefetcher = xlogprefetcher::XLogPrefetcher::XLogPrefetcherAllocate(context.mcx());
 
     if std::path::Path::new(&data_path(BACKUP_LABEL_FILE)).exists() {
         panic!(
@@ -552,6 +532,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     let mut rec = Recovery {
         context,
         reader,
+        prefetcher,
         src: PageSource::new(),
         check_point_loc: cf.checkPoint,
         check_point_tli: cf.checkPointCopy.ThisTimeLineID,
@@ -579,7 +560,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     rec.redo_start_tli = check_point.ThisTimeLineID;
 
     if check_point.redo < rec.check_point_loc {
-        rec.reader.XLogBeginRead(check_point.redo);
+        rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, check_point.redo);
         if !read_record(&mut rec, LOG, false, check_point.ThisTimeLineID)? {
             ereport(PANIC)
                 .errmsg(format!(
@@ -819,7 +800,7 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     if rec.redo_start_lsn < rec.check_point_loc {
         replay_tli = rec.redo_start_tli;
         let redo_start = rec.redo_start_lsn;
-        rec.reader.XLogBeginRead(redo_start);
+        rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, redo_start);
         have_record = read_record(rec, PANIC, false, replay_tli)?;
         debug_assert!(have_record);
         if rec.reader.XLogRecGetRmid() != transam_xlog::RM_XLOG_ID
@@ -883,7 +864,7 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
                 LAST_REPLAYED_TLI.load(Relaxed),
             )
         };
-        rec.reader.XLogBeginRead(last_rec);
+        rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, last_rec);
         if !read_record(rec, PANIC, false, last_rec_tli)? {
             ereport(PANIC)
                 .errmsg(format!("could not re-read record at {}", lsn_fmt(last_rec)))
@@ -945,42 +926,6 @@ fn recovery_oldest_active_xid() -> TransactionId {
 
 pub fn init_seams() {
     use xlogrecovery_seams as s;
-
-    // timeline.c's read-side trio over the reduced single-timeline history
-    // (a real .history file panics loudly in read_timeline_history); homed
-    // here until the timeline unit lands.
-    timeline_seams::read_timeline_history::set(|mcx, target_tli| {
-        let tles = read_timeline_history(target_tli);
-        let mut v = mcx::PgVec::new_in(mcx);
-        for t in tles {
-            v.push(timeline_seams::TimeLineHistoryEntry {
-                tli: t.tli,
-                begin: t.begin,
-                end: t.end,
-            });
-        }
-        Ok(v)
-    });
-    timeline_seams::tli_of_point_in_history::set(|ptr, history| {
-        for t in history {
-            if t.begin <= ptr && (t.end == InvalidXLogRecPtr || ptr < t.end) {
-                return t.tli;
-            }
-        }
-        panic!("timeline of point {ptr:X} not found in history");
-    });
-    // tliSwitchPoint (timeline.c): history is newest-first; entries before
-    // the match are the future timelines, the last one seen is nextTLI.
-    timeline_seams::tli_switch_point::set(|tli, history| {
-        let mut next_tli: TimeLineID = 0;
-        for t in history {
-            if t.tli == tli {
-                return (t.end, next_tli);
-            }
-            next_tli = t.tli;
-        }
-        panic!("could not find timeline {tli} in history");
-    });
 
     s::reached_consistency::set(|| REACHED_CONSISTENCY.load(Relaxed));
     s::get_xlog_replay_rec_ptr::set(GetXLogReplayRecPtr);

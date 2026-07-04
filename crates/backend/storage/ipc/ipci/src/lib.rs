@@ -58,7 +58,9 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, lmgr_proc::ProcGlobalShmemSize(cfg)?)?;
     size = shmem::add_size(size, varsup::VarsupShmemSize())?;
     size = shmem::add_size(size, transam_xlog::XLOGShmemSize())?;
+    size = shmem::add_size(size, xlogprefetcher::XLogPrefetchShmemSize())?;
     size = shmem::add_size(size, clog::CLOGShmemSize())?;
+    size = shmem::add_size(size, commit_ts::CommitTsShmemSize())?;
     size = shmem::add_size(size, subtrans::SUBTRANSShmemSize())?;
     size = shmem::add_size(size, multixact::MultiXactShmemSize())?;
     size = shmem::add_size(size, twophase::TwoPhaseShmemSize())?;
@@ -74,6 +76,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, commands_async::AsyncShmemSize())?;
     size = shmem::add_size(size, checkpointer::CheckpointerShmemSize(g::NBuffers()))?;
     size = shmem::add_size(size, slot::ReplicationSlotsShmemSize())?;
+    size = shmem::add_size(size, pgarch::PgArchShmemSize())?;
 
     size = shmem::add_size(size, TOTAL_ADDIN_REQUEST.get())?;
 
@@ -115,7 +118,9 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
 
     varsup::VarsupShmemInit();
     transam_xlog::XLOGShmemInit();
+    xlogprefetcher::XLogPrefetchShmemInit();
     clog::CLOGShmemInit()?;
+    commit_ts::CommitTsShmemInit()?;
     subtrans::SUBTRANSShmemInit()?;
     multixact::MultiXactShmemInit()?;
     bufmgr::BufferManagerShmemInit()?;
@@ -136,6 +141,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     procsignal::ProcSignalShmemInit();
     checkpointer::CheckpointerShmemInit(g::NBuffers());
     slot::ReplicationSlotsShmemInit();
+    pgarch::PgArchShmemInit();
     syncscan::SyncScanShmemInit();
     commands_async::AsyncShmemInit()?;
 
@@ -158,7 +164,9 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
 
     varsup::VarsupShmemReset();
     transam_xlog::XLOGShmemResetAfterCrash();
+    xlogprefetcher::XLogPrefetchShmemResetAfterCrash();
     clog::CLOGShmemResetAfterCrash();
+    commit_ts::CommitTsShmemResetAfterCrash();
     subtrans::SUBTRANSShmemResetAfterCrash();
     multixact::MultiXactShmemResetAfterCrash();
     bufmgr::BufferManagerShmemResetAfterCrash();
@@ -177,6 +185,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     procsignal::ProcSignalShmemResetAfterCrash();
     checkpointer::CheckpointerShmemResetAfterCrash();
     slot::ReplicationSlotsShmemResetAfterCrash();
+    pgarch::PgArchShmemResetAfterCrash();
     syncscan::SyncScanShmemResetAfterCrash();
     commands_async::AsyncShmemResetAfterCrash()?;
 

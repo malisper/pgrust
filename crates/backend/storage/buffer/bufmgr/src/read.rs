@@ -9,7 +9,8 @@ use elog::ereport;
 use types_resowner::{ResourceOwnerDesc, RELEASE_PRIO_BUFFER_IOS, RESOURCE_RELEASE_BEFORE_LOCKS};
 use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 use types_core::{
-    BlockNumber, Buffer, BufferIsValid, ForkNumber, InvalidBlockNumber, BLCKSZ, INIT_FORKNUM,
+    BlockNumber, Buffer, BufferIsValid, ForkNumber, InvalidBlockNumber, InvalidBuffer, BLCKSZ,
+    INIT_FORKNUM,
     INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 use types_error::{
@@ -680,29 +681,69 @@ pub fn PrefetchBuffer(
         return Ok(PrefetchOutcome::Skipped);
     }
     let smgr = crate::rel_locator_backend(rel);
-    let tag = init_buffer_tag(smgr.locator, forknum, blkno);
-    let hash = BufTableHashCode(&tag);
-    let partition_lock = BufMappingPartitionLock(hash);
-    LWLockAcquire(partition_lock, LW_SHARED, init_small::globals::MyProcNumber())?;
-    let buf_id = BufTableLookup(&tag, hash)?;
-    LWLockRelease(partition_lock)?;
-    if buf_id >= 0 {
-        return Ok(PrefetchOutcome::Cached);
-    }
-    if fd::io_direct_flags() & types_storage::IO_DIRECT_DATA != 0 {
-        return Ok(PrefetchOutcome::Skipped);
-    }
-    if aio_seams::uring_available::is_installed() && aio_seams::uring_available::call() {
-        if let Some(outcome) =
-            crate::uring::start_read(smgr, rel.rd_rel.relpersistence, forknum, blkno)?
-        {
-            return Ok(outcome);
-        }
-        // Ring momentarily full or submit failed: advisory fallback below.
-    }
-    Ok(if smgr_seams::smgr_prefetch::call(smgr, forknum, blkno, 1)? {
+    let result = PrefetchSharedBuffer(smgr, rel.rd_rel.relpersistence, forknum, blkno)?;
+    Ok(if BufferIsValid(result.recent_buffer) {
+        PrefetchOutcome::Cached
+    } else if result.initiated_io {
         PrefetchOutcome::Issued
     } else {
         PrefetchOutcome::Skipped
+    })
+}
+
+/// C PrefetchBufferResult: `recent_buffer` valid = already resident (recovery
+/// stores it in the decoded block so redo can try ReadRecentBuffer).
+#[derive(Clone, Copy, Debug)]
+pub struct PrefetchBufferResult {
+    pub recent_buffer: Buffer,
+    pub initiated_io: bool,
+}
+
+pub fn PrefetchSharedBuffer(
+    smgr: RelFileLocatorBackend,
+    relpersistence: u8,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+) -> PgResult<PrefetchBufferResult> {
+    debug_assert!(blkno != P_NEW);
+    let tag = init_buffer_tag(smgr.locator, forknum, blkno);
+    let hash = BufTableHashCode(&tag);
+    let partition_lock = BufMappingPartitionLock(hash);
+    let lookup = || -> PgResult<Buffer> {
+        LWLockAcquire(partition_lock, LW_SHARED, init_small::globals::MyProcNumber())?;
+        let buf_id = BufTableLookup(&tag, hash)?;
+        LWLockRelease(partition_lock)?;
+        Ok(if buf_id >= 0 { buf_id + 1 } else { InvalidBuffer })
+    };
+    let recent_buffer = lookup()?;
+    if BufferIsValid(recent_buffer) {
+        return Ok(PrefetchBufferResult { recent_buffer, initiated_io: false });
+    }
+    if fd::io_direct_flags() & types_storage::IO_DIRECT_DATA != 0 {
+        return Ok(PrefetchBufferResult { recent_buffer: InvalidBuffer, initiated_io: false });
+    }
+    if aio_seams::uring_available::is_installed() && aio_seams::uring_available::call() {
+        match crate::uring::start_read(smgr, relpersistence, forknum, blkno)? {
+            Some(PrefetchOutcome::Issued) => {
+                return Ok(PrefetchBufferResult {
+                    recent_buffer: InvalidBuffer,
+                    initiated_io: true,
+                });
+            }
+            Some(_) => {
+                // start_read found (or left) the block in the pool; re-probe
+                // for its id. An eviction race downgrades to initiated_io.
+                let recent_buffer = lookup()?;
+                return Ok(PrefetchBufferResult {
+                    recent_buffer,
+                    initiated_io: !BufferIsValid(recent_buffer),
+                });
+            }
+            None => {} // Ring momentarily full or submit failed: advisory fallback.
+        }
+    }
+    Ok(PrefetchBufferResult {
+        recent_buffer: InvalidBuffer,
+        initiated_io: smgr_seams::smgr_prefetch::call(smgr, forknum, blkno, 1)?,
     })
 }

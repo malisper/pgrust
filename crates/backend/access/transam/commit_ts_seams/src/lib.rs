@@ -27,7 +27,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     // SetCommitTsLimit(oldestXact, newestXact) (commit_ts.c).
-    pub fn set_commit_ts_limit(oldest_xact: TransactionId, newest_xact: TransactionId)
+    pub fn set_commit_ts_limit(
+        oldest_xact: TransactionId,
+        newest_xact: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CommitTsParameterChange(newvalue, oldvalue) (commit_ts.c); xlog_redo's
+    // XLOG_PARAMETER_CHANGE arm.
+    pub fn commit_ts_parameter_change(newvalue: bool, oldvalue: bool) -> PgResult<()>
 );
 
 seam_core::seam!(

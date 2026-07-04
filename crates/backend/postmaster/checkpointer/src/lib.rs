@@ -559,7 +559,15 @@ fn CheckArchiveTimeout() -> PgResult<()> {
 
     if now - LAST_XLOG_SWITCH_TIME.get() >= archive_timeout as i64 {
         if transam_xlog::GetLastImportantRecPtr() > last_switch_lsn {
-            panic!("CheckArchiveTimeout: RequestXLogSwitch unported (xlogarchive)");
+            let switchpoint = transam_xlog::RequestXLogSwitch(false)?;
+            if transam_xlog::XLogSegmentOffset(switchpoint, transam_xlog::wal_segment_size()) != 0 {
+                elog(
+                    DEBUG1,
+                    format!(
+                        "write-ahead log switch forced (\"archive_timeout\"={archive_timeout})"
+                    ),
+                )?;
+            }
         }
         LAST_XLOG_SWITCH_TIME.set(now);
     }

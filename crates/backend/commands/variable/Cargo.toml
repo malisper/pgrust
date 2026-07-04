@@ -23,6 +23,7 @@ init_small = { path = "../../utils/init/init_small" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
+xlogprefetcher_seams = { path = "../../access/transam/xlogprefetcher_seams" }
 pseudorandomfuncs = { path = "../../utils/adt/pseudorandomfuncs" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 superuser = { path = "../../utils/misc/superuser" }

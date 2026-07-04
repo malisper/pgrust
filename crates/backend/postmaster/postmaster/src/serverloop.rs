@@ -363,6 +363,7 @@ pub fn LaunchMissingBackgroundProcesses() {
                 && with_pm(|pm| {
                     matches!(pm.pm_state, PMState::PM_RECOVERY | PMState::PM_HOT_STANDBY)
                 })))
+        && pgarch::PgArchCanRestart()
     {
         let c = StartChildProcess(BackendType::Archiver);
         with_pm(|pm| pm.pgarch = c);

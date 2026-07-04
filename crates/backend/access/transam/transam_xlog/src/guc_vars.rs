@@ -55,6 +55,29 @@ thread_local! {
     static WAL_CONSISTENCY_CHECKING_STRING: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 
+// XLogArchiveCommand (xlog.c): same leaked-&'static-str shape; SIGHUP
+// reloads are boot-rare.
+thread_local! {
+    static XLOG_ARCHIVE_COMMAND: Cell<Option<&'static str>> = const { Cell::new(Some("")) };
+}
+
+pub(crate) fn install_xlog_archive_command() {
+    vars::XLogArchiveCommand.install(GucVarAccessors {
+        get: || XLOG_ARCHIVE_COMMAND.get().map(str::to_string),
+        set: |v| XLOG_ARCHIVE_COMMAND.set(v.map(|s| &*s.leak())),
+    });
+    guc_tables::hooks::show_archive_command.install(show_archive_command);
+}
+
+// show_archive_command (xlog.c).
+fn show_archive_command() -> String {
+    if crate::XLogArchivingActive() {
+        XLOG_ARCHIVE_COMMAND.get().unwrap_or("").to_string()
+    } else {
+        "(disabled)".to_string()
+    }
+}
+
 pub(crate) fn install_wal_consistency_checking_string() {
     vars::wal_consistency_checking_string.install(GucVarAccessors {
         get: || WAL_CONSISTENCY_CHECKING_STRING.get().map(str::to_string),

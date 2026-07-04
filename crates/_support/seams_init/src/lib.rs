@@ -18,6 +18,7 @@ pub fn init_all() {
     sequence::init_seams();
     extension::init_seams();
     clog::init_seams();
+    commit_ts::init_seams();
     multixact::init_seams();
     rmgr::init_seams();
     subtrans::init_seams();
@@ -27,7 +28,10 @@ pub fn init_all() {
     xact::init_seams();
     xloginsert::init_seams();
     xlogreader::init_seams();
+    xlogprefetcher::init_seams();
     xlogrecovery::init_seams();
+    timeline::init_seams();
+    xlogarchive::init_seams();
     xlogutils::init_seams();
     twophase::init_seams();
     twophase_config::init_seams();
@@ -102,6 +106,7 @@ pub fn init_all() {
     checkpointer::init_seams();
     bgwriter::init_seams();
     walwriter::init_seams();
+    pgarch::init_seams();
     postmaster_startup::init_seams();
     syslogger::init_seams();
     launcher::init_seams();

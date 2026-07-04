@@ -21,6 +21,7 @@ init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 miscinit = { path = "../../../utils/init/miscinit" }
 xlogreader = { path = "../xlogreader" }
+xlogprefetcher = { path = "../xlogprefetcher" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 xlogutils = { path = "../xlogutils" }
 transam_xlog = { path = "../transam_xlog" }
@@ -34,6 +35,7 @@ timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 libc = "0.2"
 
 [dev-dependencies]
+timeline = { path = "../timeline" }
 crc32c = { path = "../../../../port/crc32c" }
 relpath = { path = "../../../../common/relpath" }
 heapam = { path = "../../heap/heapam" }
