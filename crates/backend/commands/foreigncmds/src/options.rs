@@ -48,12 +48,10 @@ pub(crate) fn untransform_options<'mcx>(
     let Some(d) = options else {
         return Ok(result);
     };
-    let (elems, nulls) = arrayfuncs::construct::deconstruct_array_builtin(
-        mcx,
-        varlena_image(d),
-        TEXTOID,
-        false,
-    )?;
+    // pg_detoast_datum: tuple-stored arrays come back short-headered.
+    let image = detoast::detoast_attr(mcx, varlena_image(d))?;
+    let (elems, nulls) =
+        arrayfuncs::construct::deconstruct_array_builtin(mcx, &image, TEXTOID, false)?;
     debug_assert!(!nulls.iter().any(|&n| n));
     for elem in elems.iter() {
         let body = text_body(varlena_image(*elem));
@@ -179,9 +177,11 @@ fn call_validator<'mcx>(
             &empty
         }
     };
-    fmgr_core::oid_function_call2_coll(
-        fdwvalidator,
+    let mut flinfo = fmgr_core::fmgr_info(fdwvalidator)?;
+    types_fmgr::function_call2_coll_in(
+        &mut flinfo,
         InvalidOid,
+        mcx,
         Datum::from_usize(image.as_ptr() as usize),
         Datum::from_oid(catalog_id),
     )?;
