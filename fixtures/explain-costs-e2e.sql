@@ -132,3 +132,17 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 
 DROP TABLE ec_big, ec_small, ec_dup;
+
+-- TID scan cost shapes (tidscan lane); ANALYZE first: unanalyzed
+-- estimate_rel_size diverges from C (known off-lane residual)
+CREATE TABLE ec_tid (id int, t text);
+INSERT INTO ec_tid SELECT g, 'row' || g FROM generate_series(1, 1000) g;
+ANALYZE ec_tid;
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,2)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = ANY(ARRAY['(0,1)','(1,3)']::tid[]);
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,1)' OR ctid = '(2,5)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid > '(1,0)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid >= '(0,5)' AND ctid < '(2,10)';
+EXPLAIN SELECT * FROM ec_tid WHERE ctid = '(0,2)' AND id = 2;
+EXPLAIN SELECT id FROM ec_tid WHERE ctid < '(1,1)' ORDER BY id;
+DROP TABLE ec_tid;
