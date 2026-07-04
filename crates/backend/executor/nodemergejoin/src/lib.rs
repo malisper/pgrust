@@ -1,6 +1,6 @@
-// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI/FULL MJ_* state machine; the
-// MergeJoinInner trait carries ExecMarkPos/ExecRestrPos. RIGHT_SEMI/RIGHT_ANTI
-// and clauseless/parallel merge are loud.
+// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI/FULL MJ_* state machine
+// (clauseless FULL included); the MergeJoinInner trait carries
+// ExecMarkPos/ExecRestrPos. RIGHT_SEMI/RIGHT_ANTI and parallel merge are loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;

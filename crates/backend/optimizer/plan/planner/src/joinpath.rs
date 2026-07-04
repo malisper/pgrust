@@ -383,7 +383,9 @@ fn generate_mergejoin_paths<'mcx>(
         crate::relnode::pgvec_clone_shallow(mcx, &run.root.path(outerpath).base().pathkeys);
     let mergeclauses =
         find_mergeclauses_for_outer_pathkeys(run, &outer_pathkeys, mergeclause_list)?;
-    if mergeclauses.is_empty() {
+    // FULL may try a clauseless merge join (its only legal plan for e.g.
+    // FULL JOIN ON FALSE), per C.
+    if mergeclauses.is_empty() && jointype != types_pathnodes::JOIN_FULL {
         return Ok(());
     }
     if useallclauses && mergeclauses.len() != mergeclause_list.len() {
