@@ -17,7 +17,7 @@ use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCache
 use elog::ereport;
 
 use crate::{
-    lookup_failed, name_str, read_argnames_attr, read_oidvector_attr, varlena_str,
+    lookup_failed, name_str, read_oidvector_attr, varlena_str,
     ANUM_PG_PROC_PROARGMODES, ANUM_PG_PROC_PROARGNAMES, ANUM_PG_PROC_PROARGTYPES,
     ANUM_PG_PROC_PROISSTRICT, ANUM_PG_PROC_PRONAME, ANUM_PG_PROC_PROSQLBODY,
     ANUM_PG_PROC_PROSRC, ANUM_PG_PROC_PROVOLATILE,
@@ -58,7 +58,14 @@ fn read_inline_proc_row<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<InlinePro
     let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
     let argtypes = read_oidvector_attr(mcx, argv)?;
     let (argnames_d, argnames_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
-    let argnames = read_argnames_attr(mcx, argnames_d, argnames_null, argtypes.len())?;
+    let argnames = crate::cache::read_input_argnames(
+        mcx,
+        argnames_d,
+        argnames_null,
+        Datum::null(),
+        true,
+        argtypes.len(),
+    )?;
     let (provolatile, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROVOLATILE)?;
     let (proisstrict, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROISSTRICT)?;
     ReleaseSysCache(tup);
@@ -225,8 +232,14 @@ fn inline_body<'a, 'mcx>(
 
     // check_sql_fn_retval: coerces the lone tlist expression to the call's
     // resolved result type in place, or errors (as C: the function would
-    // fail at runtime anyway).
-    crate::retval::check_query_retval(mcx, query, result_type)?;
+    // fail at runtime anyway). Tuple results and injected projections
+    // decline inlining (clauses.c:4743-4753).
+    let Some(checked) =
+        crate::retval::check_query_retval_inline(mcx, crate::clone_query(query), result_type)?
+    else {
+        return Ok(None);
+    };
+    let query = mcx::leak_in(mcx::alloc_in(mcx, checked)?);
 
     let tle = query
         .targetList

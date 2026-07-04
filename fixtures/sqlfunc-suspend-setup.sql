@@ -1,0 +1,6 @@
+CREATE TABLE probe_t(v int);
+INSERT INTO probe_t SELECT g FROM generate_series(1,10) g;
+CREATE FUNCTION probe_srf(lo int) RETURNS SETOF int LANGUAGE sql VOLATILE
+AS 'SELECT v FROM probe_t WHERE v >= lo ORDER BY v';
+CREATE FUNCTION probe_srf0() RETURNS SETOF int LANGUAGE sql VOLATILE
+AS 'SELECT v FROM probe_t ORDER BY v';

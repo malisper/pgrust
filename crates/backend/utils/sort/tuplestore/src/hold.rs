@@ -82,6 +82,25 @@ pub fn end(h: TuplestoreHandle) {
     }
 }
 
+/// Unregister and hand back the store (C: transferring the
+/// `Tuplestorestate *` itself, e.g. into `ReturnSetInfo.setResult`).
+pub fn take(h: TuplestoreHandle) -> Option<crate::Tuplestore> {
+    if h.is_null() {
+        return None;
+    }
+    let (idx, generation) = decode(h);
+    ENTRIES.with(|e| {
+        let mut e = e.borrow_mut();
+        match e.get_mut(idx as usize) {
+            Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
+                FREE.with(|f| f.borrow_mut().push(idx));
+                slot.take().map(|en| en.store)
+            }
+            _ => None,
+        }
+    })
+}
+
 // The slot's own allocator IS C's tts_mcxt; ambient there, carried here.
 #[inline]
 fn slot_mcx<'mcx>(slot: &SlotData<'mcx>) -> Mcx<'mcx> {
