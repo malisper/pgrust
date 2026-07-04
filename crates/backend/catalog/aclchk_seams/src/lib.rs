@@ -66,3 +66,49 @@ seam_core::seam!(
         how_all: bool,
     ) -> types_error::PgResult<i32>
 );
+
+seam_core::seam!(
+    // get_user_default_acl (aclchk.c); objtype is the DEFACLOBJ_* char
+    // (pg_default_acl.h). Some(image) is the aclitem[] varlena to store at
+    // object creation; None means built-in defaults (store SQL NULL).
+    pub fn get_user_default_acl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        objtype: u8,
+        owner_id: types_core::Oid,
+        nsp_oid: types_core::Oid,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    // recordDependencyOnNewAcl (aclchk.c); acl_img is the stored aclitem[]
+    // varlena image. Callers skip the call entirely for a NULL acl.
+    pub fn record_dependency_on_new_acl(
+        mcx: mcx::Mcx<'_>,
+        class_id: types_core::Oid,
+        object_id: types_core::Oid,
+        objsub_id: i32,
+        owner_id: types_core::Oid,
+        acl_img: &[u8],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // pg_attribute_aclcheck_ext (aclchk.c): (AclResult, is_missing).
+    pub fn pg_attribute_aclcheck_ext(
+        table_oid: types_core::Oid,
+        attnum: i16,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<(i32, bool)>
+);
+
+seam_core::seam!(
+    // pg_attribute_aclcheck_all_ext (aclchk.c): (AclResult, is_missing);
+    // how_all selects ACLMASK_ALL vs ACLMASK_ANY.
+    pub fn pg_attribute_aclcheck_all_ext(
+        table_oid: types_core::Oid,
+        roleid: types_core::Oid,
+        mode: u64,
+        how_all: bool,
+    ) -> types_error::PgResult<(i32, bool)>
+);
