@@ -108,6 +108,17 @@ pub fn relids_add_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: u32) -> Reli
     relids_union(mcx, a, &relids_singleton(mcx, x))
 }
 
+// bms_add_member's mutate-in-place shape; allocates only to widen.
+pub fn relids_add_member_mut<'mcx>(mcx: Mcx<'mcx>, a: &mut Relids<'mcx>, x: u32) {
+    let wordnum = x as usize / 64;
+    match a {
+        Some(b) if b.words.len() > wordnum => {
+            b.words[wordnum] |= 1u64 << (x % 64);
+        }
+        _ => *a = relids_union(mcx, a, &relids_singleton(mcx, x)),
+    }
+}
+
 pub fn relids_del_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: i32) -> Relids<'mcx> {
     let mut out = relids_copy(mcx, a);
     if x >= 0 {
