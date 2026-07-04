@@ -195,7 +195,7 @@ pub fn exec_init_modify_table<'mcx>(
         } else {
             None
         };
-        check_valid_result_rel(estate.es_query_cxt, rel, node, td.as_deref())?;
+        check_valid_result_rel(rel, node.operation, td.as_deref())?;
         (td, rel.rd_rel.relkind)
     };
 
@@ -556,13 +556,11 @@ fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_nam
 }
 
 // CheckValidResultRel (execMain.c), plain-table + view + matview arms.
-fn check_valid_result_rel<'mcx>(
-    mcx: ::mcx::Mcx<'mcx>,
-    rel: &Relation<'mcx>,
-    node: &'mcx ModifyTable<'mcx>,
+fn check_valid_result_rel(
+    rel: &Relation<'_>,
+    operation: CmdType,
     trigdesc: Option<&types_trigger::TriggerDesc<'static>>,
 ) -> PgResult<()> {
-    let operation = node.operation;
     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         if operation != CmdType::CMD_INSERT {
             panic!(
@@ -600,22 +598,6 @@ fn check_valid_result_rel<'mcx>(
             "CheckValidResultRel (execMain.c): relkind '{}' result relation not ported",
             rel.rd_rel.relkind as char
         );
-    }
-    if operation == CmdType::CMD_MERGE {
-        let mal = node
-            .mergeActionLists
-            .nth(0)
-            .as_list()
-            .expect("mergeActionLists cell is a List");
-        for action_node in mal {
-            let action = action_node.as_merge_action().expect("MergeAction cell");
-            execreplication::CheckCmdReplicaIdentity(mcx, rel, action.commandType)?;
-        }
-    } else {
-        execreplication::CheckCmdReplicaIdentity(mcx, rel, operation)?;
-    }
-    if node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
-        execreplication::CheckCmdReplicaIdentity(mcx, rel, CmdType::CMD_UPDATE)?;
     }
     if rel.rd_rel.relispartition
         && matches!(operation, CmdType::CMD_INSERT | CmdType::CMD_UPDATE)
