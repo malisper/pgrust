@@ -142,6 +142,9 @@ pub fn init_seams() {
     planner_seams::generate_join_implied_equalities::set(
         crate::equivclass::generate_join_implied_equalities,
     );
+    planner_seams::generate_join_implied_equalities_for_ecs::set(
+        crate::equivclass::generate_join_implied_equalities_for_ecs,
+    );
     use guc_tables::GucVarAccessors;
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
