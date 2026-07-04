@@ -969,7 +969,9 @@ impl<'a> Estate<'a> {
 
     pub fn exec_toplevel_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
         self.err_stmt = Some((block.lineno, "statement block"));
-        self.exec_stmt_block(block)
+        let rc = self.exec_stmt_block(block)?;
+        self.err_stmt = None;
+        Ok(rc)
     }
 
     fn exec_stmts(&mut self, stmts: &'a [PlStmt]) -> PgResult<i32> {

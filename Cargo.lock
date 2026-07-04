@@ -8920,6 +8920,7 @@ dependencies = [
  "predicate_seams",
  "resowner_portal_seams",
  "resowner_seams",
+ "snapmgr_seams",
  "types_error",
  "types_resowner",
  "types_snapshot",
