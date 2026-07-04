@@ -1296,9 +1296,20 @@ fn datum_put_slow<'m>(
     val: Datum,
     is_null: bool,
 ) -> PgResult<(*mut SortTuple, *mut SortTuple)> {
-    datum_put_flush(st, next);
     let datum1 = if is_null { Datum::null() } else { val };
-    st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
+    // Bounded: the window is permanently empty (watermark 0) and len is
+    // already flushed at `bound`, so every put lands here — skip the flush +
+    // puttuple_common re-dispatch (C's shape: one call to the bounded arm).
+    if st.status == TupSortStatus::Bounded {
+        st.puttuple_bounded(SortTuple {
+            tuple: core::ptr::null_mut(),
+            datum1,
+            isnull1: is_null,
+        })?;
+    } else {
+        datum_put_flush(st, next);
+        st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
+    }
     Ok(datum_put_window(st))
 }
 
