@@ -95,6 +95,7 @@ fn stub_seams() {
     waitevent_seams::pgstat_report_wait_end::set(|| {});
     waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
     ipc_seams::on_shmem_exit::set(|_, _| {});
+    ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
     deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
     pmsignal_seams::register_postmaster_child_active::set(|| {});
     syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
