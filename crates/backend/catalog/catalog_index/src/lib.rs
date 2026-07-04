@@ -470,13 +470,10 @@ pub fn index_create<'mcx>(
     );
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_INDEX } else { RELKIND_INDEX };
     if extra.constr_flags
-        & (INDEX_CONSTR_CREATE_DEFERRABLE
-            | INDEX_CONSTR_CREATE_INIT_DEFERRED
-            | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS
-            | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
+        & (INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
         != 0
     {
-        unported("index_create: deferrable/existing-index/temporal constraint flags");
+        unported("index_create: existing-index/temporal constraint flags");
     }
     if accessMethodId != BTREE_AM_OID
         && accessMethodId != HASH_AM_OID
@@ -620,8 +617,8 @@ pub fn index_create<'mcx>(
         opclassIds,
         coloptions,
         isprimary,
-        false,
-        true,
+        indexInfo.ii_HasExclusion,
+        extra.constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE == 0,
         !concurrent && !invalid,
         !concurrent,
     )?;
@@ -642,8 +639,10 @@ pub fn index_create<'mcx>(
                 pg_constraint::CONSTRAINT_PRIMARY
             } else if indexInfo.ii_Unique {
                 pg_constraint::CONSTRAINT_UNIQUE
+            } else if indexInfo.ii_HasExclusion {
+                pg_constraint::CONSTRAINT_EXCLUSION
             } else {
-                unported("index_create: EXCLUDE constraint type");
+                panic!("constraint must be PRIMARY, UNIQUE or EXCLUDE");
             };
             constraintId = index_constraint_create(
                 mcx,
@@ -768,10 +767,9 @@ pub fn index_create<'mcx>(
     Ok((indexRelationId, constraintId))
 }
 
-// index_constraint_create (index.c), non-deferrable lane; the pg_index
-// update arm is unreachable (mark-as-primary was set at insert).
+// index_constraint_create (index.c), non-deferrable lane.
 #[allow(clippy::too_many_arguments)]
-fn index_constraint_create<'mcx>(
+pub fn index_constraint_create<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelationId: Oid,
@@ -783,14 +781,26 @@ fn index_constraint_create<'mcx>(
     allow_system_table_mods: bool,
 ) -> PgResult<Oid> {
     let namespaceId = heapRelation.rd_rel.relnamespace;
-    debug_assert!(
-        constr_flags
-            & (INDEX_CONSTR_CREATE_DEFERRABLE
-                | INDEX_CONSTR_CREATE_INIT_DEFERRED
-                | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS
-                | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
-            == 0
-    );
+    if constr_flags & INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS != 0 {
+        unported("index_constraint_create: temporal (WITHOUT OVERLAPS) constraint flag");
+    }
+    let deferrable = constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE != 0;
+    let initdeferred = constr_flags & INDEX_CONSTR_CREATE_INIT_DEFERRED != 0;
+    debug_assert!(!initdeferred || deferrable);
+    if !indexInfo.ii_Expressions.is_nil()
+        && constraintType != pg_constraint::CONSTRAINT_EXCLUSION
+    {
+        panic!("constraints cannot have index expressions");
+    }
+    if constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            RELATION_RELATION_ID,
+            indexRelationId,
+            RELATION_RELATION_ID,
+            pg_depend::DependencyType::Auto,
+        )?;
+    }
     if !allow_system_table_mods
         && catalog::IsSystemRelation(heapRelation)
         && !miscinit_seams::is_bootstrap_processing_mode::call()
@@ -810,6 +820,11 @@ fn index_constraint_create<'mcx>(
     entry.conkey = &indexInfo.ii_IndexAttrNumbers[..indexInfo.ii_NumIndexAttrs as usize];
     entry.n_keys = indexInfo.ii_NumIndexKeyAttrs as usize;
     entry.index_relid = indexRelationId;
+    entry.deferrable = deferrable;
+    entry.deferred = initdeferred;
+    if indexInfo.ii_HasExclusion {
+        entry.excl_op = &indexInfo.ii_ExclusionOps[..indexInfo.ii_NumIndexKeyAttrs as usize];
+    }
     if parentConstraintId != InvalidOid {
         entry.parent_constr_id = parentConstraintId;
         entry.is_local = false;
@@ -839,6 +854,65 @@ fn index_constraint_create<'mcx>(
             &myself,
             &tbl,
             pg_depend::DependencyType::PartitionSec,
+        )?;
+    }
+
+    if constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX != 0
+        && constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY != 0
+    {
+        let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
+        let key = oid_scankey(1, indexRelationId);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {indexRelationId}"));
+        let desc = pg_index.descr();
+        let isprimary = getattr(tup, Anum_pg_index_indisprimary, desc).as_bool();
+        if !isprimary {
+            let natts = desc.natts as usize;
+            let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[Anum_pg_index_indisprimary - 1] = Datum::from_bool(true);
+            replace[Anum_pg_index_indisprimary - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            let otid = tup.t_self;
+            genam::systable_endscan(mcx, scan)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &otid, &mut newtup)?;
+            // Marking an existing index primary must flush the parent
+            // table's relcache entry (replication behavior depends on it).
+            inval::invalidate::CacheInvalidateRelcacheByRelid(heapRelation.rd_id)?;
+        } else {
+            genam::systable_endscan(mcx, scan)?;
+        }
+        pg_index.close(RowExclusiveLock)?;
+    }
+
+    if deferrable {
+        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
+        trigger::CreateTriggerInternal(
+            mcx,
+            &trigger::InternalTriggerArgs {
+                trigname_base: if constraintType == pg_constraint::CONSTRAINT_PRIMARY {
+                    "PK_ConstraintTrigger"
+                } else {
+                    "Unique_ConstraintTrigger"
+                },
+                relid: heapRelation.rd_id,
+                constrrelid: InvalidOid,
+                constraint_oid: con_oid,
+                index_oid: indexRelationId,
+                funcoid: F_UNIQUE_KEY_RECHECK,
+                tgtype: types_trigger::TRIGGER_TYPE_ROW
+                    | types_trigger::TRIGGER_TYPE_INSERT
+                    | types_trigger::TRIGGER_TYPE_UPDATE,
+                deferrable: true,
+                initdeferred,
+            },
         )?;
     }
     Ok(con_oid)
@@ -900,6 +974,10 @@ pub fn index_build<'mcx>(
     index_update_stats(mcx, indexRelation, false, stats.1)?;
 
     xact::CommandCounterIncrement()?;
+
+    if indexInfo.ii_HasExclusion {
+        execindexing::IndexCheckExclusion(mcx, heapRelation, indexRelation, indexInfo)?;
+    }
 
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
@@ -1098,9 +1176,10 @@ pub fn CompareIndexInfo<'mcx>(
     if !map_list_equal(&info1.ii_Predicate, &info2.ii_Predicate)? {
         return Ok(false);
     }
-    // C ends with `ii_ExclusionOps != NULL -> false`; the trimmed IndexInfo
-    // has no exclusion fields and BuildIndexInfo panics on indisexclusion,
-    // so both inputs are exclusion-free here. Revisit with the EXCLUDE lane.
+    // C: no support currently for comparing exclusion indexes.
+    if info1.ii_HasExclusion || info2.ii_HasExclusion {
+        return Ok(false);
+    }
     Ok(true)
 }
 

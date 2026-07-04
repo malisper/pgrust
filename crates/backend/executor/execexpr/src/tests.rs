@@ -1553,3 +1553,44 @@ fn fusion_skips_jump_targets() {
         }
     });
 }
+
+#[test]
+fn qual_bitmap_matches_scalar_cmp() {
+    use crate::steps::qual_bitmap_cmp_const;
+    let n = 291usize;
+    let mut values = alloc::vec::Vec::new();
+    let mut isnull = alloc::vec::Vec::new();
+    for i in 0..n {
+        values.push(Datum::from_i32((i as i32 % 7) - 3));
+        isnull.push(i % 11 == 0);
+    }
+    let konst = Datum::from_i32(0);
+    for cmp in [
+        CmpOp::Int4Eq,
+        CmpOp::Int4Ne,
+        CmpOp::Int4Lt,
+        CmpOp::Int4Le,
+        CmpOp::Int4Gt,
+        CmpOp::Int4Ge,
+    ] {
+        let mut sel = [0u64; 5];
+        qual_bitmap_cmp_const(cmp, konst, &values, &isnull, &mut sel);
+        for i in 0..n {
+            let want = !isnull[i] && cmp.eval(values[i], konst);
+            let got = sel[i / 64] & (1u64 << (i % 64)) != 0;
+            assert_eq!(got, want, "{cmp:?} row {i}");
+        }
+        for i in n..5 * 64 {
+            assert!(sel[i / 64] & (1u64 << (i % 64)) == 0, "tail bit {i}");
+        }
+    }
+    let mut sel = [0u64; 5];
+    qual_bitmap_cmp_const(
+        CmpOp::Int84Lt,
+        Datum::from_i32(1),
+        &[Datum::from_i64(-9), Datum::from_i64(1), Datum::from_i64(0)],
+        &[false, false, false],
+        &mut sel,
+    );
+    assert_eq!(sel[0], 0b101);
+}

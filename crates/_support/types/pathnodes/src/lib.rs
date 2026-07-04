@@ -48,10 +48,38 @@ pub type NodeTagValue = u16;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JoinSearchPrivate {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bitmapset<'mcx> {
-    pub words: PgVec<'mcx, u64>,
+// One-word sets carry the word inline: one arena allocation, like C's
+// single-palloc bms. Small(w) is exactly a len-1 word vec; representation is
+// deterministic by word count, so slice-equality semantics are unchanged.
+#[derive(Clone, Debug)]
+pub enum Bitmapset<'mcx> {
+    Small(u64),
+    Big(PgVec<'mcx, u64>),
 }
+
+impl<'mcx> Bitmapset<'mcx> {
+    #[inline]
+    pub fn word_slice(&self) -> &[u64] {
+        match self {
+            Bitmapset::Small(w) => core::slice::from_ref(w),
+            Bitmapset::Big(v) => v.as_slice(),
+        }
+    }
+    #[inline]
+    pub fn word_slice_mut(&mut self) -> &mut [u64] {
+        match self {
+            Bitmapset::Small(w) => core::slice::from_mut(w),
+            Bitmapset::Big(v) => v.as_mut_slice(),
+        }
+    }
+}
+
+impl PartialEq for Bitmapset<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.word_slice() == other.word_slice()
+    }
+}
+impl Eq for Bitmapset<'_> {}
 
 /// `Bitmapset *`; the empty set is `None` (planner convention).
 pub type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
@@ -215,7 +243,7 @@ pub enum JoinlistNode<'mcx> {
     Sub(PgVec<'mcx, JoinlistNode<'mcx>>),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ECDerivesKey {
     pub em1: Option<EmId>,
     pub em2: Option<EmId>,
@@ -645,7 +673,7 @@ pub struct TidPath<'mcx> {
 #[derive(Clone, Debug)]
 pub struct TidRangePath<'mcx> {
     pub path: Path<'mcx>,
-    pub tidrangequals: PgVec<'mcx, NodeId>,
+    pub tidrangequals: PgVec<'mcx, RinfoId>,
 }
 
 #[derive(Clone, Debug)]
@@ -1071,7 +1099,7 @@ pub struct EquivalenceClass<'mcx> {
     pub ec_childmembers: PgVec<'mcx, PgVec<'mcx, EmId>>,
     pub ec_sources: PgVec<'mcx, RinfoId>,
     pub ec_derives_list: PgVec<'mcx, RinfoId>,
-    pub ec_derives_hash: Option<PgBox<'mcx, DerivesHash<'mcx>>>,
+    pub ec_derives_hash: Option<mcx::PgFxHashMap<'mcx, ECDerivesKey, RinfoId>>,
     pub ec_relids: Relids<'mcx>,
     pub ec_has_const: bool,
     pub ec_has_volatile: bool,
@@ -1112,7 +1140,8 @@ pub struct EquivalenceMember<'mcx> {
     pub em_is_const: bool,
     pub em_is_child: bool,
     pub em_datatype: Oid,
-    pub em_jdomain: Option<PgBox<'mcx, JoinDomain<'mcx>>>,
+    /// Index into PlannerInfo.join_domains; C's pointer identity.
+    pub em_jdomain: usize,
     pub em_parent: Option<EmId>,
 }
 
@@ -1726,6 +1755,10 @@ pub struct PlannerInfo<'mcx> {
     pub wt_param_id: i32,
     pub non_recursive_path: Option<PathId>,
     pub non_recursive_rows: Option<f64>,
+    /// Not in C: cteroot->wt_param_id resolved at set_worktable_pathlist time
+    /// for this level's self-reference RTEs, because the C parent_root chain
+    /// is unavailable at createplan time (rel_subroots swap detaches it).
+    pub self_ref_wt_param: i32,
     pub curOuterRels: Relids<'mcx>,
     pub curOuterParams: PgVec<'mcx, NodeId>,
     pub partColsUpdated: bool,
@@ -1822,6 +1855,7 @@ impl<'mcx> PlannerInfo<'mcx> {
             hasNonSerialAggs: false,
             wt_param_id: 0,
             non_recursive_path: None,
+            self_ref_wt_param: -1,
             non_recursive_rows: None,
             curOuterRels: None,
             curOuterParams: PgVec::new_in(mcx),
@@ -2162,7 +2196,6 @@ mcx::forget_safe_nodrop!(
 );
 
 mcx::forget_safe_struct!(
-    Bitmapset<'_> { words },
     DerivesHash<'_> { size, sizemask, members, grow_threshold, data },
     PartitionBoundInfoData<'_> { strategy, ndatums, nindexes, null_index, default_index, indexes, datums, kind, interleaved_parts },
     JoinDomain<'_> { jd_relids },
@@ -2228,7 +2261,7 @@ mcx::forget_safe_struct!(
     AggInfo<'_> { aggrefs, transno, shareable, finalfn_oid },
     AggTransInfo<'_> { args, aggfilter, transfn_oid, serialfn_oid, deserialfn_oid, combinefn_oid, aggtranstype, aggtranstypmod, transtypeLen, transtypeByVal, aggtransspace, initValue, initValueIsNull, initValueImage },
     TargetEntryNode<'_> { expr, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk },
-    PlannerInfo<'_> { mcx, parse, glob, query_level, parent_root, plan_params, outer_params, simple_rel_array, simple_rel_array_size, simple_rte_array, append_rel_array, all_baserels, outer_join_rels, all_query_rels, join_rel_list, join_rel_hash, join_rel_level, join_cur_level, init_plans, cte_plan_ids, multiexpr_params, join_domains, eq_classes, ec_merging_done, canon_pathkeys, left_join_clauses, right_join_clauses, full_join_clauses, join_info_list, last_rinfo_serial, all_result_relids, leaf_result_relids, append_rel_list, row_identity_vars, rowMarks, placeholder_list, placeholder_array, placeholder_array_size, fkey_list, query_pathkeys, group_pathkeys, num_groupby_pathkeys, window_pathkeys, distinct_pathkeys, sort_pathkeys, setop_pathkeys, part_schemes, initial_rels, upper_rels, upper_targets, processed_groupClause, processed_distinctClause, processed_tlist, update_colnos, grouping_map, minmax_aggs, total_table_pages, tuple_fraction, limit_tuples, qual_security_level, hasJoinRTEs, hasLateralRTEs, hasHavingQual, hasPseudoConstantQuals, hasAlternativeSubPlans, placeholdersFrozen, hasRecursion, group_rtindex, agginfos, aggtransinfos, numOrderedAggs, hasNonPartialAggs, hasNonSerialAggs, wt_param_id, non_recursive_path, non_recursive_rows, curOuterRels, curOuterParams, partColsUpdated, join_search_private, isAltSubplan, isUsedSubplan, rel_arena, path_arena, rinfo_arena, em_arena, ph_info_arena, node_arena, pathtarget_arena },
+    PlannerInfo<'_> { mcx, parse, glob, query_level, parent_root, plan_params, outer_params, simple_rel_array, simple_rel_array_size, simple_rte_array, append_rel_array, all_baserels, outer_join_rels, all_query_rels, join_rel_list, join_rel_hash, join_rel_level, join_cur_level, init_plans, cte_plan_ids, multiexpr_params, join_domains, eq_classes, ec_merging_done, canon_pathkeys, left_join_clauses, right_join_clauses, full_join_clauses, join_info_list, last_rinfo_serial, all_result_relids, leaf_result_relids, append_rel_list, row_identity_vars, rowMarks, placeholder_list, placeholder_array, placeholder_array_size, fkey_list, query_pathkeys, group_pathkeys, num_groupby_pathkeys, window_pathkeys, distinct_pathkeys, sort_pathkeys, setop_pathkeys, part_schemes, initial_rels, upper_rels, upper_targets, processed_groupClause, processed_distinctClause, processed_tlist, update_colnos, grouping_map, minmax_aggs, total_table_pages, tuple_fraction, limit_tuples, qual_security_level, hasJoinRTEs, hasLateralRTEs, hasHavingQual, hasPseudoConstantQuals, hasAlternativeSubPlans, placeholdersFrozen, hasRecursion, group_rtindex, agginfos, aggtransinfos, numOrderedAggs, hasNonPartialAggs, hasNonSerialAggs, wt_param_id, non_recursive_path, non_recursive_rows, self_ref_wt_param, curOuterRels, curOuterParams, partColsUpdated, join_search_private, isAltSubplan, isUsedSubplan, rel_arena, path_arena, rinfo_arena, em_arena, ph_info_arena, node_arena, pathtarget_arena },
 );
 
 // partsupfunc exempt: plain fmgr_info resolutions, fn_expr never set on the
@@ -2242,6 +2275,7 @@ mcx::forget_safe_struct!(
 mcx::forget_safe_tuple!(Subroot<'_>(inner));
 
 mcx::forget_safe_enum!(
+    Bitmapset<'_> { Small(x), Big(x) },
     JoinlistNode<'_> { Rel(x), Sub(x) },
     DatumImage<'_> { ByVal(x), Bytes(x) },
     ArenaNode<'_> { Reserved, Expr(x), TargetEntry(x), ForeignKey(x),

@@ -6,14 +6,14 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{
-    JoinlistNode, OuterJoinClauseInfo, QualCost, RestrictInfo, RinfoId, SpecialJoinInfo,
-    JOIN_ANTI, JOIN_LEFT, VOLATILITY_UNKNOWN,
+    JoinlistNode, OuterJoinClauseInfo, QualCost, RestrictInfo, RinfoId, SpecialJoinInfo, JOIN_ANTI,
+    JOIN_LEFT, VOLATILITY_UNKNOWN,
 };
 
 use crate::relnode::{
-    find_base_rel, relids_add_member, relids_copy, relids_difference,
-    relids_intersect, relids_is_empty, relids_is_member, relids_is_subset, relids_members,
-    relids_num_members, relids_overlap, relids_singleton, relids_singleton_member, relids_union,
+    find_base_rel, relids_add_member, relids_copy, relids_difference, relids_intersect,
+    relids_is_empty, relids_is_member, relids_is_subset, relids_members, relids_num_members,
+    relids_overlap, relids_singleton, relids_singleton_member, relids_union,
 };
 use crate::run::PlannerRun;
 pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
@@ -108,9 +108,7 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
-        NodeTag::T_CoerceToDomain => {
-            pull_var_nodes(node.as_coerce_to_domain().unwrap().arg, out)
-        }
+        NodeTag::T_CoerceToDomain => pull_var_nodes(node.as_coerce_to_domain().unwrap().arg, out),
         NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_List => {
             for a in node.as_list().unwrap() {
@@ -317,7 +315,9 @@ pub fn find_lateral_references(run: &mut PlannerRun<'_>) -> PgResult<()> {
         return Ok(());
     }
     for rti in 1..run.root.simple_rel_array_size as usize {
-        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        let Some(rel) = run.root.simple_rel_array[rti] else {
+            continue;
+        };
         debug_assert_eq!(run.root.rel(rel).relid as usize, rti);
         if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
             continue;
@@ -364,7 +364,9 @@ fn extract_lateral_references<'mcx>(
     }
     let mut newvars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for node in &vars {
-        let v = node.as_var().expect("pull_vars_of_level returns Vars (PHVs are loud)");
+        let v = node
+            .as_var()
+            .expect("pull_vars_of_level returns Vars (PHVs are loud)");
         if levelsup != 0 {
             let nv = types_nodes::primnodes::Var {
                 varlevelsup: 0,
@@ -394,7 +396,9 @@ pub fn rebuild_lateral_attr_needed(run: &mut PlannerRun<'_>) -> PgResult<()> {
     }
     let mcx = run.mcx;
     for rti in 1..run.root.simple_rel_array_size as usize {
-        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        let Some(rel) = run.root.simple_rel_array[rti] else {
+            continue;
+        };
         if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
             continue;
         }
@@ -424,7 +428,9 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
     let mut found_laterals = false;
     let size = run.root.simple_rel_array_size as usize;
     for rti in 1..size {
-        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        let Some(rel) = run.root.simple_rel_array[rti] else {
+            continue;
+        };
         debug_assert_eq!(run.root.rel(rel).relid as usize, rti);
         if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
             continue;
@@ -432,7 +438,11 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
         let mut lateral_relids: types_pathnodes::Relids<'_> = None;
         for i in 0..run.root.rel(rel).lateral_vars.len() {
             let id = run.root.rel(rel).lateral_vars[i];
-            let v = run.root.expr_node(id).as_var().expect("lateral_vars hold Vars");
+            let v = run
+                .root
+                .expr_node(id)
+                .as_var()
+                .expect("lateral_vars hold Vars");
             found_laterals = true;
             lateral_relids = relids_add_member(mcx, &lateral_relids, v.varno as u32);
         }
@@ -447,7 +457,9 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
 
     // Warshall transitive closure over lateral_relids.
     for rti in 1..size {
-        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        let Some(rel) = run.root.simple_rel_array[rti] else {
+            continue;
+        };
         if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
             continue;
         }
@@ -456,7 +468,9 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
             continue;
         }
         for rti2 in 1..size {
-            let Some(rel2) = run.root.simple_rel_array[rti2] else { continue };
+            let Some(rel2) = run.root.simple_rel_array[rti2] else {
+                continue;
+            };
             if run.root.rel(rel2).reloptkind != types_pathnodes::RELOPT_BASEREL {
                 continue;
             }
@@ -469,7 +483,9 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
 
     // Inverse mapping: lateral_referencers.
     for rti in 1..size {
-        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        let Some(rel) = run.root.simple_rel_array[rti] else {
+            continue;
+        };
         if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
             continue;
         }
@@ -487,8 +503,7 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
                 types_pathnodes::RELOPT_BASEREL
             );
             let cur = run.root.rel_mut(rel2).lateral_referencers.take();
-            run.root.rel_mut(rel2).lateral_referencers =
-                relids_add_member(mcx, &cur, rti as u32);
+            run.root.rel_mut(rel2).lateral_referencers = relids_add_member(mcx, &cur, rti as u32);
         }
     }
     Ok(())
@@ -499,7 +514,9 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
 // upstream). C's three phases map to: recurse (relids/joinlist/JtItems in
 // post-order), distribute each item's quals, then distribute the postponed
 // non-degenerate LEFT-join quals (deconstruct_distribute_oj_quals).
-pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<'mcx, JoinlistNode<'mcx>>> {
+pub fn deconstruct_jointree<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+) -> PgResult<PgVec<'mcx, JoinlistNode<'mcx>>> {
     let mcx = run.mcx;
     debug_assert!(!run.root.join_domains.is_empty());
     run.root.placeholdersFrozen = true;
@@ -523,7 +540,11 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     run.root.all_baserels = relids_difference(mcx, &qualscope, &run.root.outer_join_rels);
     run.root.all_query_rels = relids_copy(mcx, &qualscope);
     run.root.join_domains[0].jd_relids = relids_copy(mcx, &qualscope);
-    items.push(JtItem::Plain { quals: f.quals, qualscope, jdomain: 0 });
+    items.push(JtItem::Plain {
+        quals: f.quals,
+        qualscope,
+        jdomain: 0,
+    });
 
     let mut oj_postponed: PgVec<'mcx, (usize, PgVec<'mcx, Node<'mcx>>)> = PgVec::new_in(mcx);
     // Per-JtItem quals postponed by children for carrying lateral references
@@ -565,7 +586,11 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
         }
         let item = &items[idx];
         match item {
-            JtItem::Plain { quals, qualscope, jdomain } => {
+            JtItem::Plain {
+                quals,
+                qualscope,
+                jdomain,
+            } => {
                 distribute_quals_to_rels(
                     run,
                     *quals,
@@ -732,7 +757,9 @@ fn distribute_quals_to_rels<'mcx>(
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
 ) -> PgResult<()> {
     let Some(quals) = quals else { return Ok(()) };
-    let list = quals.as_list().expect("preprocessed quals are an implicit-AND list");
+    let list = quals
+        .as_list()
+        .expect("preprocessed quals are an implicit-AND list");
     for clause in list {
         distribute_qual_to_rels(
             run,
@@ -918,25 +945,21 @@ fn deconstruct_recurse<'mcx>(
                         .push(types_pathnodes::JoinDomain { jd_relids: None });
                     let (l_relids, l_inner, l_list) =
                         deconstruct_recurse(run, j.larg, l_domain, items)?;
-                    run.root.join_domains[fj_domain].jd_relids = relids_copy(
-                        mcx,
-                        &run.root.join_domains[l_domain].jd_relids,
-                    );
+                    run.root.join_domains[fj_domain].jd_relids =
+                        relids_copy(mcx, &run.root.join_domains[l_domain].jd_relids);
                     let r_domain = run.root.join_domains.len();
                     run.root
                         .join_domains
                         .push(types_pathnodes::JoinDomain { jd_relids: None });
                     let (r_relids, r_inner, r_list) =
                         deconstruct_recurse(run, j.rarg, r_domain, items)?;
-                    let r_dom_relids =
-                        relids_copy(mcx, &run.root.join_domains[r_domain].jd_relids);
+                    let r_dom_relids = relids_copy(mcx, &run.root.join_domains[r_domain].jd_relids);
                     run.root.join_domains[fj_domain].jd_relids = relids_union(
                         mcx,
                         &run.root.join_domains[fj_domain].jd_relids,
                         &r_dom_relids,
                     );
-                    let fj_relids =
-                        relids_copy(mcx, &run.root.join_domains[fj_domain].jd_relids);
+                    let fj_relids = relids_copy(mcx, &run.root.join_domains[fj_domain].jd_relids);
                     run.root.join_domains[parent_domain].jd_relids = relids_union(
                         mcx,
                         &run.root.join_domains[parent_domain].jd_relids,
@@ -1006,8 +1029,11 @@ fn mark_rels_nulled_by_join<'mcx>(
             continue;
         }
         let rel = find_base_rel(&run.root, relid);
-        let nulled =
-            relids_add_member(mcx, &run.root.rel(rel).nulling_relids.clone(), ojrelid as u32);
+        let nulled = relids_add_member(
+            mcx,
+            &run.root.rel(rel).nulling_relids.clone(),
+            ojrelid as u32,
+        );
         run.root.rel_mut(rel).nulling_relids = nulled;
     }
 }
@@ -1075,17 +1101,13 @@ fn make_outerjoininfo<'mcx>(
         right_rels,
     );
 
-    let is_semi_or_anti =
-        matches!(jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
+    let is_semi_or_anti = matches!(jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
     for i in 0..run.root.join_info_list.len() {
         let other = run.root.join_info_list[i].clone();
         assert!(
             matches!(
                 other.jointype,
-                JOIN_LEFT
-                    | types_pathnodes::JOIN_SEMI
-                    | JOIN_ANTI
-                    | types_pathnodes::JOIN_FULL
+                JOIN_LEFT | types_pathnodes::JOIN_SEMI | JOIN_ANTI | types_pathnodes::JOIN_FULL
             ),
             "make_outerjoininfo (initsplan.c): lower {} join ordering arm; join-outer lane",
             other.jointype
@@ -1119,8 +1141,7 @@ fn make_outerjoininfo<'mcx>(
         }
         if relids_overlap(left_rels, &other.syn_righthand) {
             if relids_overlap(&clause_relids, &other.syn_righthand)
-                && (is_semi_or_anti
-                    || !relids_overlap(&strict_relids, &other.min_righthand))
+                && (is_semi_or_anti || !relids_overlap(&strict_relids, &other.min_righthand))
             {
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_lefthand);
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_righthand);
@@ -1300,29 +1321,9 @@ fn check_redundant_nullability_qual(run: &PlannerRun<'_>, clause: Node<'_>) -> b
     })
 }
 
-// reconsider_outer_join_clauses (equivclass.c): the const-EC substitution leg
-// is dead under eclass-lite (no ECs carry constants), so every set-aside
-// outer-join clause is thrown back to the regular lists.
-pub fn reconsider_outer_join_clauses(run: &mut PlannerRun<'_>) -> PgResult<()> {
-    for i in 0..run.root.left_join_clauses.len() {
-        let rinfo = run.root.left_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    for i in 0..run.root.right_join_clauses.len() {
-        let rinfo = run.root.right_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    // reconsider_full_join_clause's const-EC substitution is dead under
-    // eclass-lite; every full-join clause is thrown back too.
-    for i in 0..run.root.full_join_clauses.len() {
-        let rinfo = run.root.full_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    Ok(())
-}
-
-// distribute_qual_to_rels (initsplan.c); the EC detour is the documented
-// divergence (see reconsider_outer_join_clauses).
+// distribute_qual_to_rels (initsplan.c). allow_equivalence is true for every
+// live caller (the clone-variant OJ commutation that passes false is loud in
+// make_outerjoininfo), so maybe_equivalence needs no parameter.
 #[allow(clippy::too_many_arguments)]
 fn distribute_qual_to_rels<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1348,9 +1349,11 @@ fn distribute_qual_to_rels<'mcx>(
             "distribute_qual_to_rels (initsplan.c): qual outside qualscope without \
              lateral RTEs"
         );
-        assert!(sjinfo.is_none(), "mustn't postpone lateral qual past outer join");
-        let (items, idx) =
-            jt.expect("lateral qual postponement outside deconstruct_jointree");
+        assert!(
+            sjinfo.is_none(),
+            "mustn't postpone lateral qual past outer join"
+        );
+        let (items, idx) = jt.expect("lateral qual postponement outside deconstruct_jointree");
         for pidx in idx + 1..items.len() {
             let pscope = match &items[pidx] {
                 JtItem::Plain { qualscope, .. } | JtItem::Sj { qualscope, .. } => qualscope,
@@ -1428,47 +1431,57 @@ fn distribute_qual_to_rels<'mcx>(
     }
 
     check_mergejoinable(run, rinfo)?;
-    check_hashjoinable(run, rinfo)?;
-    check_memoizable(run, rinfo)?;
-    // C divergence: C routes a mergejoinable qual through the EC machinery
-    // (process_equivalence); for a single-rel qual the detour rebuilds this
-    // identical clause, and for a join qual the EC would regenerate the same
-    // RestrictInfo at the join via generate_join_implied_equalities. Both
-    // collapse to distributing the clause directly. The equivclass unit owns
-    // the real path; every consumer of EC state (pathkeys, mergejoin,
-    // EC-derived clauses at higher join levels) is a loud arm.
-    if maybe_outer_join
-        && run.root.rinfo(rinfo).can_join
-        && !run.root.rinfo(rinfo).mergeopfamilies.is_empty()
-    {
-        let (left_sub, right_over, right_sub, left_over) = {
-            let ri = run.root.rinfo(rinfo);
-            (
-                relids_is_subset(&ri.left_relids, outerjoin_nonnullable),
-                relids_overlap(&ri.right_relids, outerjoin_nonnullable),
-                relids_is_subset(&ri.right_relids, outerjoin_nonnullable),
-                relids_overlap(&ri.left_relids, outerjoin_nonnullable),
-            )
-        };
-        let sjinfo = sjinfo.expect("outer-join clause carries its sjinfo").clone();
-        if left_sub && !right_over {
-            run.root.left_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
-        }
-        if right_sub && !left_over {
-            run.root.right_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
-        }
-        if sjinfo.jointype == types_pathnodes::JOIN_FULL {
-            // FULL JOIN: the one-sided tests above can never match.
-            run.root.full_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
+    let mut rinfo = rinfo;
+    if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
+        if !maybe_outer_join {
+            if crate::equivclass::process_equivalence(run, &mut rinfo, jdomain)? {
+                return Ok(());
+            }
+            // EC rejected it; set left_ec/right_ec the hard way.
+            if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
+                crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
+            }
+        } else if run.root.rinfo(rinfo).can_join {
+            crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
+            let (left_sub, right_over, right_sub, left_over) = {
+                let ri = run.root.rinfo(rinfo);
+                (
+                    relids_is_subset(&ri.left_relids, outerjoin_nonnullable),
+                    relids_overlap(&ri.right_relids, outerjoin_nonnullable),
+                    relids_is_subset(&ri.right_relids, outerjoin_nonnullable),
+                    relids_overlap(&ri.left_relids, outerjoin_nonnullable),
+                )
+            };
+            let sjinfo = sjinfo
+                .expect("outer-join clause carries its sjinfo")
+                .clone();
+            if left_sub && !right_over {
+                run.root
+                    .left_join_clauses
+                    .push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+            if right_sub && !left_over {
+                run.root
+                    .right_join_clauses
+                    .push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+            if sjinfo.jointype == types_pathnodes::JOIN_FULL {
+                // FULL JOIN: the one-sided tests above can never match.
+                run.root
+                    .full_join_clauses
+                    .push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+        } else {
+            crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
         }
     }
     distribute_restrictinfo_to_rels(run, rinfo)
 }
 
-fn pull_varnos_relids<'mcx>(
+pub(crate) fn pull_varnos_relids<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<types_pathnodes::Relids<'mcx>> {
@@ -1535,8 +1548,11 @@ pub fn make_restrictinfo<'mcx>(
     } else {
         relids_copy(mcx, &clause_relids)
     };
-    let num_base_rels =
-        relids_num_members(&relids_difference(mcx, &clause_relids, &run.root.outer_join_rels));
+    let num_base_rels = relids_num_members(&relids_difference(
+        mcx,
+        &clause_relids,
+        &run.root.outer_join_rels,
+    ));
 
     run.root.last_rinfo_serial += 1;
     let rinfo_serial = run.root.last_rinfo_serial;
@@ -1562,7 +1578,10 @@ pub fn make_restrictinfo<'mcx>(
         num_base_rels,
         rinfo_serial,
         parent_ec: None,
-        eval_cost: QualCost { startup: -1.0, per_tuple: 0.0 },
+        eval_cost: QualCost {
+            startup: -1.0,
+            per_tuple: 0.0,
+        },
         norm_selec: -1.0,
         outer_selec: -1.0,
         mergeopfamilies: PgVec::new_in(mcx),
@@ -1583,6 +1602,54 @@ pub fn make_restrictinfo<'mcx>(
     Ok(run.root.alloc_rinfo(ri))
 }
 
+// commute_restrictinfo (restrictinfo.c): cached selectivity/cost, parent_ec,
+// and rinfo_serial carry over; scansel_cache does not.
+pub fn commute_restrictinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rid: RinfoId,
+    comm_op: types_core::Oid,
+) -> PgResult<RinfoId> {
+    let mcx = run.mcx;
+    let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+    let op = clause.as_op_expr().expect("commute_restrictinfo: OpExpr");
+    assert!(op.args.len() == 2);
+    let newclause = types_nodes::Node::mk(
+        mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: comm_op,
+            opfuncid: lsyscache::get_opcode(comm_op)?,
+            opresulttype: op.opresulttype,
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            args: types_nodes::NodeList::make2(mcx, op.args.nth(1), op.args.nth(0))?,
+            location: op.location,
+        },
+    )?;
+    let mut ri = run.root.rinfo(rid).clone();
+    ri.clause = run.intern_expr(newclause);
+    ri.left_relids = run.root.rinfo(rid).right_relids.clone();
+    ri.right_relids = run.root.rinfo(rid).left_relids.clone();
+    assert!(ri.orclause.is_none());
+    ri.left_ec = run.root.rinfo(rid).right_ec;
+    ri.right_ec = run.root.rinfo(rid).left_ec;
+    ri.left_em = run.root.rinfo(rid).right_em;
+    ri.right_em = run.root.rinfo(rid).left_em;
+    ri.scansel_cache = PgVec::new_in(mcx);
+    ri.hashjoinoperator = if run.root.rinfo(rid).hashjoinoperator == op.opno {
+        comm_op
+    } else {
+        0
+    };
+    ri.left_bucketsize = run.root.rinfo(rid).right_bucketsize;
+    ri.right_bucketsize = run.root.rinfo(rid).left_bucketsize;
+    ri.left_mcvfreq = run.root.rinfo(rid).right_mcvfreq;
+    ri.right_mcvfreq = run.root.rinfo(rid).left_mcvfreq;
+    ri.left_hasheqoperator = 0;
+    ri.right_hasheqoperator = 0;
+    Ok(run.root.alloc_rinfo(ri))
+}
+
 // check_mergejoinable (initsplan.c).
 fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
@@ -1591,7 +1658,8 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     };
     let (opno, args0) = (o.opno, o.args.nth(0));
     let lefttype = crate::costsize::expr_type_typmod(args0).0;
-    if lsyscache::op_mergejoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)? {
+    if lsyscache::op_mergejoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)?
+    {
         let fams = lsyscache::get_mergejoin_opfamilies(run.mcx, opno)?;
         run.root.rinfo_mut(rinfo).mergeopfamilies = fams;
     }
@@ -1636,7 +1704,8 @@ fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> 
     };
     let (opno, args0) = (o.opno, o.args.nth(0));
     let lefttype = crate::costsize::expr_type_typmod(args0).0;
-    if lsyscache::op_hashjoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)? {
+    if lsyscache::op_hashjoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)?
+    {
         run.root.rinfo_mut(rinfo).hashjoinoperator = opno;
     }
     Ok(())
@@ -1648,6 +1717,8 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     if let Some(relid) = relids_singleton_member(&relids) {
         return add_base_clause_to_rel(run, relid, rinfo);
     }
+    check_hashjoinable(run, rinfo)?;
+    check_memoizable(run, rinfo)?;
     // add_join_clause_to_rels (joininfo.c): one shared RestrictInfo handle
     // linked into every participating baserel's joininfo list (outer-join
     // relids have no RelOptInfo — C's find_base_rel_ignore_join skip).
@@ -1657,7 +1728,7 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     let rinfo = substitute_false_if_always_false(run, rinfo)?;
     debug_assert!(relids_num_members(&relids) > 1);
     let members = relids.as_ref().expect("multi-member relids");
-    for (i, w) in members.words.iter().enumerate() {
+    for (i, w) in members.word_slice().iter().enumerate() {
         let mut w = *w;
         while w != 0 {
             let relid = (i * 64) as i32 + w.trailing_zeros() as i32;
@@ -1678,13 +1749,15 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
 // constant qual must hold for every partition too.
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
     let rte = run.rte(relid as usize);
-    let apply_shortcuts =
-        !rte.inh || rte.relkind == ::types_rel::RELKIND_PARTITIONED_TABLE;
+    let apply_shortcuts = !rte.inh || rte.relkind == ::types_rel::RELKIND_PARTITIONED_TABLE;
     if apply_shortcuts && restriction_is_always_true(run, rinfo) {
         return Ok(());
     }
-    let rinfo =
-        if apply_shortcuts { substitute_false_if_always_false(run, rinfo)? } else { rinfo };
+    let rinfo = if apply_shortcuts {
+        substitute_false_if_always_false(run, rinfo)?
+    } else {
+        rinfo
+    };
     let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);
@@ -1697,7 +1770,11 @@ fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) 
 // OR leg reads orclause sub-RestrictInfos, which stay None here (documented
 // make_restrictinfo divergence).
 pub(crate) fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
-    restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NOT_NULL)
+    restriction_nulltest_verdict(
+        run,
+        rinfo,
+        types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+    )
 }
 
 pub(crate) fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
@@ -1715,7 +1792,9 @@ fn restriction_nulltest_verdict(
         return false;
     }
     let clause = *run.root.expr_node(ri.clause);
-    let Some(nt) = clause.as_null_test() else { return false };
+    let Some(nt) = clause.as_null_test() else {
+        return false;
+    };
     if nt.nulltesttype != testtype || nt.argisrow {
         return false;
     }
@@ -1724,7 +1803,9 @@ fn restriction_nulltest_verdict(
 
 // expr_is_nonnullable (initsplan.c): simple Vars only.
 fn expr_is_nonnullable(run: &PlannerRun<'_>, expr: Node<'_>) -> bool {
-    let Some(var) = expr.as_var() else { return false };
+    let Some(var) = expr.as_var() else {
+        return false;
+    };
     if !var.varnullingrels.is_empty() {
         return false;
     }
@@ -1732,8 +1813,7 @@ fn expr_is_nonnullable(run: &PlannerRun<'_>, expr: Node<'_>) -> bool {
         return true;
     }
     let rel = find_base_rel(&run.root, var.varno);
-    var.varattno > 0
-        && relids_is_member(var.varattno as i32, &run.root.rel(rel).notnullattnums)
+    var.varattno > 0 && relids_is_member(var.varattno as i32, &run.root.rel(rel).notnullattnums)
 }
 
 // The always-false substitution shared by add_base_clause_to_rel and
@@ -1775,4 +1855,118 @@ fn substitute_false_if_always_false<'mcx>(
     run.root.rinfo_mut(new_rinfo).rinfo_serial = save_rinfo_serial;
     run.root.last_rinfo_serial = save_last_rinfo_serial;
     Ok(new_rinfo)
+}
+
+// process_implied_equality (initsplan.c): build "item1 op item2" and push it
+// into the restrictinfo lists. None = reduced to constant TRUE and dropped.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_implied_equality<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    opno: u32,
+    collation: u32,
+    item1: Node<'mcx>,
+    item2: Node<'mcx>,
+    qualscope: types_pathnodes::Relids<'mcx>,
+    security_level: u32,
+    both_const: bool,
+) -> PgResult<Option<RinfoId>> {
+    let mcx = run.mcx;
+    // C copyObject's both items; the arena share is our copy model.
+    let mut clause = crate::like_support::make_opclause(mcx, opno, item1, item2, collation)?;
+    if both_const {
+        clause = clauses::fold::eval_const_expressions(mcx, clause)?;
+        if let Some(c) = clause.as_const() {
+            debug_assert_eq!(c.consttype, 16);
+            if !c.constisnull && c.constvalue.as_bool() {
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut relids = pull_varnos_relids(run, clause)?;
+    debug_assert!(relids_is_subset(&relids, &qualscope));
+    let mut pseudoconstant = false;
+    if relids_is_empty(&relids) {
+        relids = get_join_domain_min_rels(run, &qualscope);
+        pseudoconstant = true;
+        run.root.hasPseudoConstantQuals = true;
+    }
+
+    let rinfo = make_restrictinfo(
+        run,
+        clause,
+        true,
+        false,
+        false,
+        pseudoconstant,
+        security_level,
+        relids,
+        None,
+        None,
+    )?;
+
+    if relids_num_members(&run.root.rinfo(rinfo).required_relids) > 1 {
+        let mut vars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pull_var_nodes(clause, &mut vars);
+        let where_needed = relids_copy(mcx, &run.root.rinfo(rinfo).required_relids);
+        add_vars_to_targetlist(run, &vars, &where_needed)?;
+    }
+
+    // Usually succeeds (the op came from an EC), unless the clause was
+    // reduced to a constant.
+    check_mergejoinable(run, rinfo)?;
+
+    distribute_restrictinfo_to_rels(run, rinfo)?;
+    Ok(Some(rinfo))
+}
+
+// build_implied_join_equality (initsplan.c): like process_implied_equality
+// but never pushed into the joininfo tree.
+pub(crate) fn build_implied_join_equality<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    opno: u32,
+    collation: u32,
+    item1: Node<'mcx>,
+    item2: Node<'mcx>,
+    qualscope: types_pathnodes::Relids<'mcx>,
+    security_level: u32,
+) -> PgResult<RinfoId> {
+    let mcx = run.mcx;
+    let clause = crate::like_support::make_opclause(mcx, opno, item1, item2, collation)?;
+    let rinfo = make_restrictinfo(
+        run,
+        clause,
+        true,
+        false,
+        false,
+        false,
+        security_level,
+        qualscope,
+        None,
+        None,
+    )?;
+    check_mergejoinable(run, rinfo)?;
+    check_hashjoinable(run, rinfo)?;
+    check_memoizable(run, rinfo)?;
+    Ok(rinfo)
+}
+
+// get_join_domain_min_rels (initsplan.c): strip lower LEFT joins that could
+// commute out from under a derived pseudoconstant qual.
+fn get_join_domain_min_rels<'mcx>(
+    run: &PlannerRun<'mcx>,
+    domain_relids: &types_pathnodes::Relids<'mcx>,
+) -> types_pathnodes::Relids<'mcx> {
+    let mcx = run.mcx;
+    let mut result = relids_copy(mcx, domain_relids);
+    if crate::relnode::relids_equal(&result, &run.root.all_query_rels) {
+        return result;
+    }
+    for sjinfo in run.root.join_info_list.iter() {
+        if sjinfo.jointype == JOIN_LEFT && relids_is_member(sjinfo.ojrelid as i32, &result) {
+            result = crate::relnode::relids_del_member(mcx, &result, sjinfo.ojrelid as i32);
+            result = relids_difference(mcx, &result, &sjinfo.syn_righthand);
+        }
+    }
+    result
 }

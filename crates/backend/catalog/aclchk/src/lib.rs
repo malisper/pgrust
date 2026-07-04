@@ -706,12 +706,25 @@ fn objtype_noun(objtype: ObjectType) -> &'static str {
     }
 }
 
-// object_ownercheck (aclchk.c), pg_class arm only; other classes are loud.
+// object_ownercheck (aclchk.c), pg_class/pg_type arms only; other classes are loud.
 pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {
         return Ok(true);
     }
     let owner_id = match classid {
+        TYPE_RELATION_ID => {
+            let Some(tuple) =
+                SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(objectid)))?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for type {objectid}"
+                ))));
+            };
+            let owner =
+                SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPOWNER)?.as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
         RELATION_RELATION_ID => {
             let Some(tuple) =
                 SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(objectid)))?

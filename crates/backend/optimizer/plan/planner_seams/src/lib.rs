@@ -5,7 +5,7 @@ use types_nodes::plannodes::PlannedStmt;
 use types_portal::ParamListHandle;
 use types_nodes::Node;
 use types_pathnodes::run::PlannerRun;
-use types_pathnodes::{IndexOptInfo, JoinType, NodeId, PathId, QualCost, Relids, RinfoId, SpecialJoinInfo};
+use types_pathnodes::{EcId, IndexOptInfo, JoinType, NodeId, PathId, QualCost, RelId, Relids, RinfoId, SpecialJoinInfo};
 use types_rel::Relation;
 
 seam_core::seam!(
@@ -139,4 +139,24 @@ seam_core::seam!(
         indexcol: usize,
         index: &'a IndexOptInfo<'mcx>,
     ) -> bool
+);
+
+seam_core::seam!(
+    pub fn generate_join_implied_equalities<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        join_relids: &'a Relids<'mcx>,
+        outer_relids: &'a Relids<'mcx>,
+        inner_rel: RelId,
+        sjinfo: Option<&'a SpecialJoinInfo<'mcx>>,
+    ) -> PgResult<mcx::PgVec<'mcx, RinfoId>>
+);
+
+seam_core::seam!(
+    pub fn generate_join_implied_equalities_for_ecs<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        eclasses: &'a [EcId],
+        join_relids: &'a Relids<'mcx>,
+        outer_relids: &'a Relids<'mcx>,
+        inner_rel: RelId,
+    ) -> PgResult<mcx::PgVec<'mcx, RinfoId>>
 );

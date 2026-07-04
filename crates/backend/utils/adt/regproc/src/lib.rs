@@ -1,7 +1,13 @@
-//! regproc.c reg* I/O slice: regproc/regclass/regtype/regnamespace/regrole,
-//! plus regprocedurein/parseNameAndArgTypes for the has_function_privilege
-//! family; regoper/regoperator/regconfig/regdictionary/regcollation stay
-//! unregistered. Namespace access rides the existing namespace_seams
+//! regproc.c reg* I/O slice: regproc/regprocedure/regclass/regtype/
+//! regnamespace/regrole/regoper/regoperator/regconfig/regdictionary/
+//! regcollation. regprocedurein's argument types ride the
+//! regproc_seams::parse_type_string seam (a direct parse_utilcmd dep
+//! cycles through fmgr_core); regoper/regoperator/regconfig/regdictionary/
+//! regcollation ride namespace_seams lookups (get_collation_oid /
+//! get_ts_config_oid / get_ts_dict_oid / opername_*); regtypein's type-name
+//! arm rides the same parse_type_string seam, soft-catching the seam's hard
+//! errors when the caller is soft (C parseTypeString reports through
+//! escontext). Namespace access rides the existing namespace_seams
 //! (direct catalog_namespace dep cycles through fmgr_core); the nargs=-1
 //! FuncnameGetCandidates lane and LookupExplicitNamespace's lookup+ACL steps
 //! are transcribed here from namespace.c until seams for them exist. The
@@ -16,7 +22,9 @@ use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid, OidIsValid, RELPERSISTENCE_PERMANENT};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_AMBIGUOUS_FUNCTION,
-    ERRCODE_INVALID_NAME, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_INVALID_NAME, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_UNDEFINED_PARAMETER,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
     ERRCODE_UNDEFINED_TABLE,
 };
@@ -56,6 +64,79 @@ fn undefined_function(s: &str) -> PgError {
 fn ambiguous_function(s: &str) -> PgError {
     PgError::error(format!("more than one function named \"{s}\""))
         .with_sqlstate(ERRCODE_AMBIGUOUS_FUNCTION)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_operator(s: &str) -> PgError {
+    PgError::error(format!("operator does not exist: {s}"))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION)
+}
+
+#[cold]
+#[inline(never)]
+fn ambiguous_operator(s: &str) -> PgError {
+    PgError::error(format!("more than one operator named {s}"))
+        .with_sqlstate(ERRCODE_AMBIGUOUS_FUNCTION)
+}
+
+#[cold]
+#[inline(never)]
+fn operator_missing_argument() -> PgError {
+    PgError::error("missing argument")
+        .with_sqlstate(ERRCODE_UNDEFINED_PARAMETER)
+        .with_hint("Use NONE to denote the missing argument of a unary operator.")
+}
+
+#[cold]
+#[inline(never)]
+fn operator_too_many_arguments() -> PgError {
+    PgError::error("too many arguments")
+        .with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS)
+        .with_hint("Provide two argument types for operator.")
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_collation(names: &[String]) -> PgError {
+    PgError::error(format!(
+        "collation \"{}\" for encoding \"{}\" does not exist",
+        names.join("."),
+        mbutils::GetDatabaseEncodingName()
+    ))
+    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_ts_config(names: &[String]) -> PgError {
+    PgError::error(format!(
+        "text search configuration \"{}\" does not exist",
+        names.join(".")
+    ))
+    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_ts_dict(names: &[String]) -> PgError {
+    PgError::error(format!(
+        "text search dictionary \"{}\" does not exist",
+        names.join(".")
+    ))
+    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_text_rep(msg: &'static str) -> PgError {
+    PgError::error(msg).with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_arguments() -> PgError {
+    PgError::error("too many arguments").with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS)
 }
 
 #[cold]
@@ -192,10 +273,14 @@ struct FuncCand {
     raw_index: usize,
 }
 
-/// C FuncnameGetCandidates(names, -1, NIL, false, false, false, _): every
-/// arity, path-ordered, same-signature shadowing resolved to the earlier
-/// namespace.
-fn funcname_candidates_any(mcx: Mcx<'_>, names: &[&str]) -> PgResult<Vec<Oid>> {
+/// C FuncnameGetCandidates(names, nargs, NIL, false, false, false, _):
+/// path-ordered, same-signature shadowing resolved to the earlier namespace;
+/// nargs None = every arity (-1).
+fn funcname_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[&str],
+    nargs: Option<usize>,
+) -> PgResult<(PgVec<'mcx, syscache_seams::PgProcCandidate<'mcx>>, Vec<FuncCand>)> {
     let (schemaname, funcname) = deconstruct_qualified_name(names)?;
     let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
     let ns_filter = match schemaname {
@@ -208,6 +293,9 @@ fn funcname_candidates_any(mcx: Mcx<'_>, names: &[&str]) -> PgResult<Vec<Oid>> {
     };
     let mut kept: Vec<FuncCand> = Vec::new();
     for (i, cand) in raw.iter().enumerate() {
+        if nargs.is_some_and(|n| cand.pronargs as usize != n) {
+            continue;
+        }
         let pathpos = match (&ns_filter, &path) {
             (Some(id), _) => {
                 if cand.pronamespace != *id {
@@ -232,6 +320,11 @@ fn funcname_candidates_any(mcx: Mcx<'_>, names: &[&str]) -> PgResult<Vec<Oid>> {
             None => kept.push(FuncCand { oid: cand.oid, pathpos, raw_index: i }),
         }
     }
+    Ok((raw, kept))
+}
+
+fn funcname_candidates_any(mcx: Mcx<'_>, names: &[&str]) -> PgResult<Vec<Oid>> {
+    let (_, kept) = funcname_candidates(mcx, names, None)?;
     Ok(kept.into_iter().map(|c| c.oid).collect())
 }
 
@@ -267,6 +360,123 @@ pub fn regprocin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
         [] => ereturn(esc, Some(InvalidOid), undefined_function(s)),
         [oid] => Ok(Some(*oid)),
         _ => ereturn(esc, Some(InvalidOid), ambiguous_function(s)),
+    }
+}
+
+fn scanner_isspace(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b'\x0B' | b'\x0C')
+}
+
+/// C parseNameAndArgTypes; None = soft-reported failure (caller returns SQL
+/// NULL). Type names resolve through parse_type_string, whose escontext=NULL
+/// shape hard-errors where C could soft-fail.
+fn parse_name_and_arg_types(
+    mcx: Mcx<'_>,
+    s: &str,
+    allow_none: bool,
+    mut esc: Esc,
+) -> PgResult<Option<(Vec<String>, Vec<Oid>)>> {
+    let b = s.as_bytes();
+    let mut in_quote = false;
+    let mut lparen = None;
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'"' {
+            in_quote = !in_quote;
+        } else if c == b'(' && !in_quote {
+            lparen = Some(i);
+            break;
+        }
+    }
+    let Some(lp) = lparen else {
+        return ereturn(esc, None, invalid_text_rep("expected a left parenthesis"));
+    };
+    let Some(names) = string_to_qualified_name_list(mcx, &s[..lp], esc.as_deref_mut())? else {
+        return Ok(None);
+    };
+    let rest = &b[lp + 1..];
+    let mut end = rest.len() as isize - 1;
+    while end > 0 && scanner_isspace(rest[end as usize]) {
+        end -= 1;
+    }
+    if end < 0 || rest[end as usize] != b')' {
+        return ereturn(esc, None, invalid_text_rep("expected a right parenthesis"));
+    }
+    let mut ptr = &rest[..end as usize];
+    let mut argtypes: Vec<Oid> = Vec::new();
+    let mut had_comma = false;
+    loop {
+        while let [c, tail @ ..] = ptr {
+            if !scanner_isspace(*c) {
+                break;
+            }
+            ptr = tail;
+        }
+        if ptr.is_empty() {
+            if had_comma {
+                return ereturn(esc, None, invalid_text_rep("expected a type name"));
+            }
+            break;
+        }
+        let mut in_quote = false;
+        let mut paren_count = 0i32;
+        let mut i = 0;
+        while i < ptr.len() {
+            let c = ptr[i];
+            if c == b'"' {
+                in_quote = !in_quote;
+            } else if c == b',' && !in_quote && paren_count == 0 {
+                break;
+            } else if !in_quote {
+                match c {
+                    b'(' | b'[' => paren_count += 1,
+                    b')' | b']' => paren_count -= 1,
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        if in_quote || paren_count != 0 {
+            return ereturn(esc, None, invalid_text_rep("improper type name"));
+        }
+        let mut token = &ptr[..i];
+        (had_comma, ptr) = if i < ptr.len() { (true, &ptr[i + 1..]) } else { (false, &[][..]) };
+        while let [head @ .., c] = token {
+            if !scanner_isspace(*c) {
+                break;
+            }
+            token = head;
+        }
+        // Split points are all ASCII bytes of a valid &str, so UTF-8 holds.
+        let typename = core::str::from_utf8(token).expect("ASCII-boundary slices of a str");
+        let typeid = if allow_none && typename.eq_ignore_ascii_case("none") {
+            InvalidOid
+        } else {
+            regproc_seams::parse_type_string::call(mcx, typename)?.0
+        };
+        if argtypes.len() >= types_core::FUNC_MAX_ARGS {
+            return ereturn(esc, None, too_many_arguments());
+        }
+        argtypes.push(typeid);
+    }
+    Ok(Some((names, argtypes)))
+}
+
+pub fn regprocedurein(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some((names, argtypes)) = parse_name_and_arg_types(mcx, s, false, esc.as_deref_mut())?
+    else {
+        return Ok(None);
+    };
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let (raw, kept) = funcname_candidates(mcx, &refs, Some(argtypes.len()))?;
+    match kept
+        .iter()
+        .find(|c| raw[c.raw_index].proargtypes.as_slice() == argtypes.as_slice())
+    {
+        Some(c) => Ok(Some(c.oid)),
+        None => ereturn(esc, Some(InvalidOid), undefined_function(s)),
     }
 }
 
@@ -322,185 +532,12 @@ pub fn regtypein(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
     if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
         return Ok(Some(handled.unwrap_or(InvalidOid)));
     }
-    match parse_utilcmd_seams::parseTypeString::call(mcx, s) {
-        Ok((oid, _typmod)) => Ok(Some(oid)),
-        // C plumbs the escontext into parseTypeString, so soft callers see
-        // every parse/lookup failure as a soft error.
-        Err(e) => match esc {
-            Some(esc) => ereturn(Some(esc), Some(InvalidOid), *e),
-            None => Err(e),
-        },
+    // C parseTypeString reports through escontext; the seam's escontext=NULL
+    // shape hard-errors, re-routed into the caller's soft context here.
+    match regproc_seams::parse_type_string::call(mcx, s) {
+        Ok((typid, _typmod)) => Ok(Some(typid)),
+        Err(e) => ereturn(esc, None, *e),
     }
-}
-
-#[cold]
-#[inline(never)]
-fn improper_arg_list(msg: &'static str) -> PgError {
-    PgError::error(msg).with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
-}
-
-const fn scanner_isspace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c')
-}
-
-// parseNameAndArgTypes (regproc.c), allowNone=false slice (the operator
-// callers stay unregistered).
-fn parse_name_and_arg_types(
-    mcx: Mcx<'_>,
-    s: &str,
-    mut esc: Esc,
-) -> PgResult<Option<(Vec<String>, Vec<Oid>)>> {
-    const FUNC_MAX_ARGS: usize = 100;
-    let bytes = s.as_bytes();
-    let mut in_quote = false;
-    let mut lparen = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'"' {
-            in_quote = !in_quote;
-        } else if b == b'(' && !in_quote {
-            lparen = Some(i);
-            break;
-        }
-    }
-    let Some(lp) = lparen else {
-        return ereturn(esc, None, improper_arg_list("expected a left parenthesis"));
-    };
-    let Some(names) = string_to_qualified_name_list(mcx, &s[..lp], esc.as_deref_mut())? else {
-        return Ok(None);
-    };
-
-    let rest = &bytes[lp + 1..];
-    let mut end = rest.len();
-    while end > 0 && scanner_isspace(rest[end - 1]) {
-        end -= 1;
-    }
-    if end == 0 || rest[end - 1] != b')' {
-        return ereturn(esc, None, improper_arg_list("expected a right parenthesis"));
-    }
-    let args = &rest[..end - 1];
-
-    let mut argtypes: Vec<Oid> = Vec::new();
-    let mut ptr = 0usize;
-    let mut had_comma = false;
-    loop {
-        while ptr < args.len() && scanner_isspace(args[ptr]) {
-            ptr += 1;
-        }
-        if ptr >= args.len() {
-            if had_comma {
-                return ereturn(esc, None, improper_arg_list("expected a type name"));
-            }
-            break;
-        }
-        let start = ptr;
-        let mut in_quote = false;
-        let mut paren_count = 0i32;
-        while ptr < args.len() {
-            let b = args[ptr];
-            if b == b'"' {
-                in_quote = !in_quote;
-            } else if b == b',' && !in_quote && paren_count == 0 {
-                break;
-            } else if !in_quote {
-                match b {
-                    b'(' | b'[' => paren_count += 1,
-                    b')' | b']' => paren_count -= 1,
-                    _ => {}
-                }
-            }
-            ptr += 1;
-        }
-        if in_quote || paren_count != 0 {
-            return ereturn(esc, None, improper_arg_list("improper type name"));
-        }
-        let mut tend = ptr;
-        if ptr < args.len() {
-            had_comma = true;
-            ptr += 1;
-        } else {
-            had_comma = false;
-        }
-        while tend > start && scanner_isspace(args[tend - 1]) {
-            tend -= 1;
-        }
-        let typename = core::str::from_utf8(&args[start..tend])
-            .map_err(|_| Box::new(PgError::error("invalid UTF-8 in type name")))?;
-        let typeid = match parse_utilcmd_seams::parseTypeString::call(mcx, typename) {
-            Ok((oid, _typmod)) => oid,
-            Err(e) => match esc {
-                Some(esc) => return ereturn(Some(esc), None, *e),
-                None => return Err(e),
-            },
-        };
-        if argtypes.len() >= FUNC_MAX_ARGS {
-            return ereturn(
-                esc,
-                None,
-                PgError::error("too many arguments")
-                    .with_sqlstate(types_error::ERRCODE_TOO_MANY_ARGUMENTS),
-            );
-        }
-        argtypes.push(typeid);
-    }
-
-    Ok(Some((names, argtypes)))
-}
-
-// regprocedurein (regproc.c).
-pub fn regprocedurein(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
-    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
-        return Ok(Some(handled.unwrap_or(InvalidOid)));
-    }
-    let Some((names, argtypes)) = parse_name_and_arg_types(mcx, s, esc.as_deref_mut())? else {
-        return Ok(None);
-    };
-    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
-    // FuncnameGetCandidates(names, nargs, ...) + the exact-argtype scan.
-    let cands = funcname_candidates_exact(mcx, &refs, &argtypes)?;
-    match cands {
-        Some(oid) => Ok(Some(oid)),
-        None => ereturn(esc, Some(InvalidOid), undefined_function(s)),
-    }
-}
-
-fn funcname_candidates_exact(
-    mcx: Mcx<'_>,
-    names: &[&str],
-    argtypes: &[Oid],
-) -> PgResult<Option<Oid>> {
-    let (schemaname, funcname) = deconstruct_qualified_name(names)?;
-    let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
-    let ns_filter = match schemaname {
-        Some(name) => Some(lookup_explicit_namespace(name)?),
-        None => None,
-    };
-    let path = match ns_filter {
-        Some(_) => None,
-        None => Some(namespace_seams::fetch_search_path::call(mcx, true)?),
-    };
-    let mut best: Option<(usize, Oid)> = None;
-    for cand in raw.iter() {
-        if cand.proargtypes.as_slice() != argtypes {
-            continue;
-        }
-        let pathpos = match (&ns_filter, &path) {
-            (Some(id), _) => {
-                if cand.pronamespace != *id {
-                    continue;
-                }
-                0
-            }
-            (None, Some(p)) => match p.iter().position(|&n| n == cand.pronamespace) {
-                Some(pos) => pos,
-                None => continue,
-            },
-            (None, None) => unreachable!(),
-        };
-        if best.map(|(bp, _)| pathpos < bp).unwrap_or(true) {
-            best = Some((pathpos, cand.oid));
-        }
-    }
-    Ok(best.map(|(_, oid)| oid))
 }
 
 fn cstr_in<'mcx>(mcx: Mcx<'mcx>, parts: &[&[u8]]) -> PgResult<RegName<'mcx>> {
@@ -561,6 +598,184 @@ pub fn regprocout(mcx: Mcx<'_>, proid: Oid) -> PgResult<RegName<'_>> {
         None => None,
     };
     quote_qualified(mcx, nspname.as_deref(), proname)
+}
+
+pub fn regprocedureout(mcx: Mcx<'_>, proid: Oid) -> PgResult<RegName<'_>> {
+    if proid == InvalidOid {
+        return cstr_in(mcx, &[b"-"]);
+    }
+    let s = format_procedure(mcx, proid)?;
+    cstr_in(mcx, &[s.as_bytes()])
+}
+
+pub fn regoperin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_numeric_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
+        return Ok(None);
+    };
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let cands = namespace_seams::opername_get_candidate_oids::call(mcx, &refs, 0, true)?;
+    match cands.as_slice() {
+        [] => ereturn(esc, Some(InvalidOid), undefined_operator(s)),
+        [oid] => Ok(Some(*oid)),
+        _ => ereturn(esc, Some(InvalidOid), ambiguous_operator(s)),
+    }
+}
+
+pub fn regoperout(mcx: Mcx<'_>, oprid: Oid) -> PgResult<RegName<'_>> {
+    if oprid == InvalidOid {
+        return cstr_in(mcx, &[b"0"]);
+    }
+    let Some((namedata, oprnamespace)) = syscache_seams::pg_operator_oprnamensp::call(oprid)?
+    else {
+        return oid_numeric_cstr(mcx, oprid);
+    };
+    let oprname = core::str::from_utf8(namedata.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_operator.oprname is not UTF-8")))?;
+    let cands = namespace_seams::opername_get_candidate_oids::call(mcx, &[oprname], 0, false)?;
+    if matches!(cands.as_slice(), [oid] if *oid == oprid) {
+        return cstr_in(mcx, &[oprname.as_bytes()]);
+    }
+    // C quotes only the namespace: sprintf("%s.%s", quote_identifier(nspname), oprname).
+    match lsyscache::get_namespace_name(mcx, oprnamespace)? {
+        Some(nspname) => {
+            let qnsp = format_type::quote_identifier(&nspname);
+            cstr_in(mcx, &[qnsp.as_bytes(), b".", oprname.as_bytes()])
+        }
+        None => cstr_in(mcx, &[oprname.as_bytes()]),
+    }
+}
+
+pub fn regoperatorin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_numeric_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some((names, argtypes)) = parse_name_and_arg_types(mcx, s, true, esc.as_deref_mut())?
+    else {
+        return Ok(None);
+    };
+    if argtypes.len() == 1 {
+        return ereturn(esc, Some(InvalidOid), operator_missing_argument());
+    }
+    if argtypes.len() != 2 {
+        return ereturn(esc, Some(InvalidOid), operator_too_many_arguments());
+    }
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let result = namespace_seams::opername_get_oprid::call(&refs, argtypes[0], argtypes[1])?;
+    if !OidIsValid(result) {
+        return ereturn(esc, Some(InvalidOid), undefined_operator(s));
+    }
+    Ok(Some(result))
+}
+
+pub fn regoperatorout(mcx: Mcx<'_>, oprid: Oid) -> PgResult<RegName<'_>> {
+    if oprid == InvalidOid {
+        return cstr_in(mcx, &[b"0"]);
+    }
+    let s = format_operator(mcx, oprid)?;
+    cstr_in(mcx, &[s.as_bytes()])
+}
+
+pub fn regcollationin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
+        return Ok(None);
+    };
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let result = namespace_seams::get_collation_oid::call(&refs, true)?;
+    if !OidIsValid(result) {
+        return ereturn(esc, Some(InvalidOid), undefined_collation(&names));
+    }
+    Ok(Some(result))
+}
+
+pub fn regcollationout(mcx: Mcx<'_>, collationid: Oid) -> PgResult<RegName<'_>> {
+    if collationid == InvalidOid {
+        return cstr_in(mcx, &[b"-"]);
+    }
+    let Some(row) = syscache_seams::lookup_pg_collation_locale_row::call(mcx, collationid)? else {
+        return oid_numeric_cstr(mcx, collationid);
+    };
+    let collname = core::str::from_utf8(row.collname.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_collation.collname is not UTF-8")))?;
+    // C CollationIsVisible == "would regcollationin find it unqualified".
+    let visible = namespace_seams::get_collation_oid::call(&[collname], true)? == collationid;
+    let nspname = if visible {
+        None
+    } else {
+        lsyscache::get_namespace_name(mcx, row.collnamespace)?
+    };
+    quote_qualified(mcx, nspname.as_deref(), collname)
+}
+
+pub fn regconfigin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
+        return Ok(None);
+    };
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let result = namespace_seams::get_ts_config_oid::call(&refs, true)?;
+    if !OidIsValid(result) {
+        return ereturn(esc, Some(InvalidOid), undefined_ts_config(&names));
+    }
+    Ok(Some(result))
+}
+
+pub fn regconfigout(mcx: Mcx<'_>, cfgid: Oid) -> PgResult<RegName<'_>> {
+    if cfgid == InvalidOid {
+        return cstr_in(mcx, &[b"-"]);
+    }
+    let Some(row) = syscache_seams::lookup_pg_ts_config_row::call(cfgid)? else {
+        return oid_numeric_cstr(mcx, cfgid);
+    };
+    let cfgname = core::str::from_utf8(row.name.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_ts_config.cfgname is not UTF-8")))?;
+    let visible = namespace_seams::get_ts_config_oid::call(&[cfgname], true)? == cfgid;
+    let nspname = if visible {
+        None
+    } else {
+        lsyscache::get_namespace_name(mcx, row.namespace_oid)?
+    };
+    quote_qualified(mcx, nspname.as_deref(), cfgname)
+}
+
+pub fn regdictionaryin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
+    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
+        return Ok(Some(handled.unwrap_or(InvalidOid)));
+    }
+    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
+        return Ok(None);
+    };
+    let refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let result = namespace_seams::get_ts_dict_oid::call(&refs, true)?;
+    if !OidIsValid(result) {
+        return ereturn(esc, Some(InvalidOid), undefined_ts_dict(&names));
+    }
+    Ok(Some(result))
+}
+
+pub fn regdictionaryout(mcx: Mcx<'_>, dictid: Oid) -> PgResult<RegName<'_>> {
+    if dictid == InvalidOid {
+        return cstr_in(mcx, &[b"-"]);
+    }
+    let Some(row) = syscache_seams::lookup_pg_ts_dict_row::call(dictid)? else {
+        return oid_numeric_cstr(mcx, dictid);
+    };
+    let dictname = core::str::from_utf8(row.name.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_ts_dict.dictname is not UTF-8")))?;
+    let visible = namespace_seams::get_ts_dict_oid::call(&[dictname], true)? == dictid;
+    let nspname = if visible {
+        None
+    } else {
+        lsyscache::get_namespace_name(mcx, row.namespace_oid)?
+    };
+    quote_qualified(mcx, nspname.as_deref(), dictname)
 }
 
 pub fn regclassout(mcx: Mcx<'_>, classid: Oid) -> PgResult<RegName<'_>> {

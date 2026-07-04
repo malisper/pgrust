@@ -513,7 +513,6 @@ pub fn RegisterSnapshotOnOwner(snapshot: &Snapshot, owner: ResourceOwner) -> PgR
     if snap.regd_count.get() == 1 {
         with_state(|s| s.registered.push(snap.clone()));
     }
-
     Ok(snap)
 }
 
@@ -746,6 +745,9 @@ pub fn init_seams() {
         RegisterSnapshotOnOwner(&snapshot, resowner_seams::current_resource_owner::call())
     });
     snapmgr_seams::unregister_snapshot::set(|snapshot| UnregisterSnapshot(Some(&snapshot)));
+    snapmgr_seams::unregister_snapshot_no_owner::set(|snapshot| {
+        UnregisterSnapshotNoOwner(&snapshot)
+    });
     snapmgr_portal_seams::unregister_snapshot_from_owner::set(|snapshot, owner| {
         UnregisterSnapshotFromOwner(&snapshot, owner)
     });

@@ -31,12 +31,16 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;
     let opclass = match extract {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
+        opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
         2743 => unported("array_ops GIN opclass (arrays lane)"),
         other => unported(&format!("GIN opclass with extractValue proc {other}")),
     };
     debug_assert!(
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
-            == opclass::F_GIN_COMPARE_JSONB
+            == match opclass {
+                GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
+                GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
+            }
     );
     let partial = lsyscache::get_opfamily_proc(
         opfamily,

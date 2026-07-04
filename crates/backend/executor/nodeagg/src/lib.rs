@@ -1480,6 +1480,12 @@ pub trait AggBatchSource<'mcx> {
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
     fn outer_slot(&self) -> ExecSlotId;
     fn has_qual(&self) -> bool;
+    /// True only when `next_batch` counts VISIBLE, qual-passing rows (the
+    /// storeless drain never calls `fetch_tuple`). Sources resolving
+    /// visibility or quals at fetch time must return false.
+    fn storeless_ok(&self) -> bool {
+        !self.has_qual()
+    }
 }
 
 /// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
@@ -1489,6 +1495,22 @@ pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
         && node.pertrans_sort.is_empty()
         && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
         && node.evaltrans.is_some()
+}
+
+/// Outer-slot deform prefix the batched drive reads per row (evaltrans
+/// FETCHSOME bound + hashed grouping columns); None = shape unknown, the
+/// SoA batch deform stays disarmed.
+pub fn agg_batch_outer_prefix(node: &AggStateData<'_>) -> Option<i32> {
+    debug_assert!(agg_batch_drainable(node));
+    let mut p = node
+        .evaltrans
+        .as_deref()
+        .expect("drainable Agg has evaltrans")
+        .max_fetch(::execexpr::SlotSrc::Outer)?;
+    if node.plan.aggstrategy == AGG_HASHED {
+        p = p.max(node.perhash.as_ref().expect("hashed Agg has perhash").largest_grp_col_idx);
+    }
+    Some(p)
 }
 
 /// `exec_agg` over a page-batch source: identical per-row transition order,
@@ -1511,7 +1533,7 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
     }
     initialize_aggregates(node)?;
 
-    let storeless = !src.has_qual()
+    let storeless = src.storeless_ok()
         && matches!(
             node.evaltrans.as_deref().unwrap().kernel(),
             ::execexpr::Kernel::AggTransByVal { .. }

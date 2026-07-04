@@ -1,8 +1,6 @@
-// nbtsort.c, serial build: spool via tuplesort + _bt_load page accumulation.
-// Loud: parallel builds, spool2 merge (dead tuples under UNIQUE), posting-list
-// deduplication (C compresses duplicate keys into posting lists at build time;
-// we emit plain tuples — a valid btree C reads and writes, not byte-identical
-// to C's build output when duplicate keys exist).
+// nbtsort.c, serial build: spool via tuplesort + _bt_load page accumulation,
+// duplicate keys merged into posting lists. Loud: parallel builds, spool2
+// merge (dead tuples under UNIQUE).
 #![allow(non_snake_case)]
 
 use ::mcx::Mcx;
@@ -14,12 +12,13 @@ use ::types_nbtree::{
 };
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{ItemIdData, PageMut, SizeOfPageHeaderData};
-use ::types_tuple::itemptr::ItemPointerData;
+use ::types_nbtree::dedup::BTDedupState;
+use ::types_tuple::itemptr::{ItemPointerData, InvalidOffsetNumber};
 use bulkwrite::{BulkWriteBuffer, BulkWriteState};
 use execindexing::IndexInfo;
 use nbtree::itup::{
     self, index_tuple_size, maxalign, set_t_info, set_t_tid, ITup, ItupBuf,
-    INDEX_TUPLE_HEADER_SIZE,
+    INDEX_SIZE_MASK, INDEX_TUPLE_HEADER_SIZE,
 };
 use nbtree::{BtScanInsert, OrderProcFrame};
 
@@ -43,6 +42,7 @@ struct BTPageState<'mcx> {
     blkno: BlockNumber,
     lowkey: Option<ItupBuf<'mcx>>,
     lastoff: OffsetNumber,
+    lastextra: usize,
     level: u32,
     full: usize,
 }
@@ -86,7 +86,7 @@ pub fn btbuild<'mcx>(
         },
     )?;
 
-    leafbuild(mcx, index, sortstate)?;
+    leafbuild(mcx, index, sortstate, indexInfo.ii_Unique)?;
 
     Ok(IndexBuildResult { heap_tuples: reltuples, index_tuples: indtuples })
 }
@@ -110,6 +110,7 @@ fn leafbuild<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     mut sortstate: tuplesort::Tuplesort,
+    is_unique: bool,
 ) -> PgResult<()> {
     sortstate.performsort()?;
 
@@ -124,15 +125,48 @@ fn leafbuild<'mcx>(
         pages_alloced: BTREE_METAPAGE + 1,
     };
 
+    let deduplicate =
+        wstate.inskey.allequalimage && !is_unique && bt_get_deduplicate_items(index);
+
     let mut levels: Vec<BTPageState<'mcx>> = Vec::new();
-    while let Some(itup) = sortstate.getindextuple(true)? {
-        if levels.is_empty() {
-            let st = pagestate(&mut wstate, 0);
-            levels.push(st);
+    if deduplicate {
+        let keysz = index.indnkeyatts();
+        // C: 1/10 of the page, MAXALIGN_DOWN, minus one line pointer.
+        let maxpostingsize = ((BLCKSZ * 10 / 100) & !7) - core::mem::size_of::<ItemIdData>();
+        let mut dstate = BTDedupState::new(maxpostingsize);
+        let mut basebuf = ItupBuf::with_size(mcx, INDEX_SIZE_MASK as usize + 1)?;
+        while let Some(itup) = sortstate.getindextuple(true)? {
+            // SAFETY: sorted-run image stays live until the next
+            // getindextuple call; base is copied into basebuf, htids into
+            // dstate, before that.
+            unsafe {
+                if levels.is_empty() {
+                    let st = pagestate(&mut wstate, 0);
+                    levels.push(st);
+                    start_pending_copy(&mut dstate, &mut basebuf, itup);
+                } else if nbtree::bt_keep_natts_fast(index, dstate.base, itup) > keysz
+                    && dstate.save_htid(itup)
+                {
+                } else {
+                    sort_dedup_finish_pending(mcx, &mut wstate, &mut levels, &mut dstate)?;
+                    start_pending_copy(&mut dstate, &mut basebuf, itup);
+                }
+            }
         }
-        // SAFETY: sorted-run image stays live until the next getindextuple
-        // call; buildadd copies what it retains.
-        unsafe { buildadd(mcx, &mut wstate, &mut levels, 0, itup)? };
+        if !levels.is_empty() {
+            // SAFETY: base lives in basebuf.
+            unsafe { sort_dedup_finish_pending(mcx, &mut wstate, &mut levels, &mut dstate)? };
+        }
+    } else {
+        while let Some(itup) = sortstate.getindextuple(true)? {
+            if levels.is_empty() {
+                let st = pagestate(&mut wstate, 0);
+                levels.push(st);
+            }
+            // SAFETY: sorted-run image stays live until the next
+            // getindextuple call; buildadd copies what it retains.
+            unsafe { buildadd(mcx, &mut wstate, &mut levels, 0, itup, 0)? };
+        }
     }
 
     uppershutdown(mcx, &mut wstate, levels)?;
@@ -169,7 +203,40 @@ fn pagestate<'mcx>(wstate: &mut BTWriteState<'_, '_>, level: u32) -> BTPageState
     } else {
         bt_get_target_page_free_space(wstate.index)
     };
-    BTPageState { buf, blkno, lowkey: None, lastoff: P_HIKEY, level, full }
+    BTPageState { buf, blkno, lowkey: None, lastoff: P_HIKEY, lastextra: 0, level, full }
+}
+
+// BTGetDeduplicateItems; the reloption rides the reloptions lane (default
+// true; relcache panics on any non-null pg_class.reloptions until then).
+fn bt_get_deduplicate_items(index: &Relation<'_>) -> bool {
+    if index.rd_options.is_some() {
+        unported("BTGetDeduplicateItems: btree reloptions");
+    }
+    true
+}
+
+/// _bt_dedup_start_pending over an owned base copy (C's CopyIndexTuple).
+/// # Safety
+/// `itup` is a live index-tuple image.
+unsafe fn start_pending_copy(dstate: &mut BTDedupState, basebuf: &mut ItupBuf<'_>, itup: ITup) {
+    core::ptr::copy_nonoverlapping(itup, basebuf.as_mut_ptr(), index_tuple_size(itup));
+    dstate.start_pending(basebuf.as_ptr(), InvalidOffsetNumber);
+}
+
+/// _bt_sort_dedup_finish_pending.
+/// # Safety
+/// `dstate.base` lives in the caller's basebuf.
+unsafe fn sort_dedup_finish_pending<'mcx>(
+    mcx: Mcx<'mcx>,
+    wstate: &mut BTWriteState<'_, 'mcx>,
+    levels: &mut Vec<BTPageState<'mcx>>,
+    dstate: &mut BTDedupState,
+) -> PgResult<()> {
+    let base = dstate.base;
+    match dstate.sort_finish_pending() {
+        None => buildadd(mcx, wstate, levels, 0, base, 0),
+        Some((posting, _, truncextra)) => buildadd(mcx, wstate, levels, 0, posting, truncextra),
+    }
 }
 
 // BTGetTargetPageFreeSpace
@@ -215,7 +282,7 @@ unsafe fn sortaddtup(
     Ok(())
 }
 
-/// _bt_buildadd, truncextra fixed 0 (no posting lists).
+/// _bt_buildadd.
 /// # Safety
 /// `itup` is a live index-tuple image.
 unsafe fn buildadd<'mcx>(
@@ -224,9 +291,13 @@ unsafe fn buildadd<'mcx>(
     levels: &mut Vec<BTPageState<'mcx>>,
     level_idx: usize,
     itup: ITup,
+    truncextra: usize,
 ) -> PgResult<()> {
     let itupsz = maxalign(index_tuple_size(itup));
     let isleaf = levels[level_idx].level == 0;
+    let last_truncextra = levels[level_idx].lastextra;
+    levels[level_idx].lastextra = truncextra;
+    debug_assert!(last_truncextra == 0 || isleaf);
 
     if itupsz > BTMaxItemSize {
         let state = &mut levels[level_idx];
@@ -245,7 +316,9 @@ unsafe fn buildadd<'mcx>(
     } else {
         0
     };
-    if pgspc < itupsz + tid_space || (pgspc < levels[level_idx].full && last_off > P_FIRSTKEY) {
+    if pgspc < itupsz + tid_space
+        || (pgspc + last_truncextra < levels[level_idx].full && last_off > P_FIRSTKEY)
+    {
         let obuf_blkno = levels[level_idx].blkno;
         let level = levels[level_idx].level;
         let nblkno = wstate.pages_alloced;
@@ -300,7 +373,7 @@ unsafe fn buildadd<'mcx>(
         // Link the old page into its parent via its low key.
         let mut lowkey = levels[level_idx].lowkey.take().expect("low key for finished page");
         itup::bt_tuple_set_downlink(lowkey.as_mut_ptr(), obuf_blkno);
-        buildadd(mcx, wstate, levels, level_idx + 1, lowkey.as_ptr())?;
+        buildadd(mcx, wstate, levels, level_idx + 1, lowkey.as_ptr(), 0)?;
         drop(lowkey);
 
         // New page's low key = old page's high key.
@@ -375,7 +448,7 @@ fn uppershutdown<'mcx>(
             // SAFETY: lowkey is a live owned tuple image.
             unsafe {
                 itup::bt_tuple_set_downlink(lowkey.as_mut_ptr(), blkno);
-                buildadd(mcx, wstate, &mut levels, i + 1, lowkey.as_ptr())?;
+                buildadd(mcx, wstate, &mut levels, i + 1, lowkey.as_ptr(), 0)?;
             }
         }
         let state = &mut levels[i];

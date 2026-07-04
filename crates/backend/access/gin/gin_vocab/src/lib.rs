@@ -213,6 +213,19 @@ pub const fn size_of_gin_posting_list(nbytes: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GinOpclass {
     JsonbOps,
+    JsonbPathOps,
+}
+
+pub const JSP_GIN_OR: u8 = 0;
+pub const JSP_GIN_AND: u8 = 1;
+pub const JSP_GIN_ENTRY: u8 = 2;
+
+/// Preorder-flattened jsonpath GIN expression tree (jsonb_gin.c
+/// JsonPathGinNode, C's extra_data[0]); val = nargs (OR/AND) or check index.
+#[derive(Clone, Copy, Debug)]
+pub struct JspGinOp {
+    pub kind: u8,
+    pub val: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -237,6 +250,7 @@ pub struct GinScanKeyData {
     pub query: Datum,
     pub queryValues: PgVec<'static, Datum>,
     pub queryCategories: PgVec<'static, GinNullCategory>,
+    pub jspOps: PgVec<'static, JspGinOp>,
     pub strategy: StrategyNumber,
     pub searchMode: i32,
     pub attnum: OffsetNumber,

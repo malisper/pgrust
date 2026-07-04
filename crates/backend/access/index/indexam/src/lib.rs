@@ -575,6 +575,46 @@ pub fn index_getnext_slot<'mcx>(
     }
 }
 
+/// Fused-drive support: advance to the next TID and stage its same-block
+/// heap-fetch run (batch_fill under one lock). Returns TIDs staged, first
+/// already current in `xs_heaptid`; 0 = scan exhausted. Consumers drain via
+/// `index_getnext_tid` + `index_fetch_heap` in fill order (batch hits).
+pub fn index_getnext_tidrun<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+) -> PgResult<u32> {
+    if index_getnext_tid(scan, direction)?.is_none() {
+        return Ok(0);
+    }
+    prefetch::on_heap_fetch(scan)?;
+    if !scan.xs_heap_continue && scan.xs_snapshot.as_deref().is_some_and(IsMVCCSnapshot) {
+        if let IndexScanOpaque::Btree(so) = &scan.opaque {
+            let mut run: [MaybeUninit<ItemPointerData>; INDEX_FETCH_BATCH_MAX] =
+                [const { MaybeUninit::uninit() }; INDEX_FETCH_BATCH_MAX];
+            let n = nbtree::bt_peek_same_block_tids(so, &mut run[..INDEX_FETCH_BATCH_MAX - 1]);
+            if n > 0 {
+                // SAFETY: prefix written by the peek.
+                let rest = unsafe {
+                    core::slice::from_raw_parts(run.as_ptr() as *const ItemPointerData, n)
+                };
+                let IndexScanDescData {
+                    xs_heapfetch,
+                    xs_heaptid,
+                    xs_snapshot,
+                    ..
+                } = scan;
+                let heapfetch = xs_heapfetch
+                    .as_mut()
+                    .expect("index_getnext_tidrun: xs_heapfetch not armed");
+                fetch::batch_fill(mcx, heapfetch, xs_heaptid, rest, xs_snapshot)?;
+                return Ok(1 + n as u32);
+            }
+        }
+    }
+    Ok(1)
+}
+
 // One probe on the enabled flag then one add: C's pgstat_should_count_relation shape.
 #[inline]
 fn pgstat_count_index_tuples(scan: &mut IndexScanDescData<'_>, n: u64) {

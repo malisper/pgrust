@@ -147,6 +147,24 @@ impl GucSetting {
             GucSetting::Enum(s) => s.group,
         }
     }
+    pub fn short_desc(self) -> Option<&'static str> {
+        match self {
+            GucSetting::Bool(s) => s.short_desc,
+            GucSetting::Int(s) => s.short_desc,
+            GucSetting::Real(s) => s.short_desc,
+            GucSetting::String(s) => s.short_desc,
+            GucSetting::Enum(s) => s.short_desc,
+        }
+    }
+    pub fn long_desc(self) -> Option<&'static str> {
+        match self {
+            GucSetting::Bool(s) => s.long_desc,
+            GucSetting::Int(s) => s.long_desc,
+            GucSetting::Real(s) => s.long_desc,
+            GucSetting::String(s) => s.long_desc,
+            GucSetting::Enum(s) => s.long_desc,
+        }
+    }
     pub fn flags(self) -> i32 {
         match self {
             GucSetting::Bool(s) => s.flags,

@@ -126,12 +126,20 @@ fn create_sources(
 }
 
 pub(crate) fn prepare_oneshot(src: &str, cursor_options: i32) -> PgResult<SpiPlanState> {
+    prepare_oneshot_args(src, cursor_options, &[])
+}
+
+pub(crate) fn prepare_oneshot_args(
+    src: &str,
+    cursor_options: i32,
+    argtypes: &[Oid],
+) -> PgResult<SpiPlanState> {
     Ok(SpiPlanState {
-        sources: create_sources(src, true, &[], cursor_options)?,
+        sources: create_sources(src, true, argtypes, cursor_options)?,
         oneshot: true,
         saved: false,
         cursor_options,
-        argtypes: Vec::new(),
+        argtypes: argtypes.to_vec(),
     })
 }
 

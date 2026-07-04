@@ -856,7 +856,7 @@ fn make_subplan<'mcx>(
 
     debug_assert!(run.root.plan_params.is_empty());
     run.push_root()?;
-    crate::subquery::subquery_planner(run, subquery, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(run, subquery, false, tuple_fraction, None)?;
 
     let final_rel = fetch_final_rel(run);
     let best_path = get_cheapest_fractional_path(run, final_rel, tuple_fraction);
@@ -883,7 +883,7 @@ fn make_subplan<'mcx>(
             convert_exists_to_any(run, subquery)?
         {
             run.push_root()?;
-            crate::subquery::subquery_planner(run, subquery, 0.0, None)?;
+            crate::subquery::subquery_planner(run, subquery, false, 0.0, None)?;
             let final_rel = fetch_final_rel(run);
             let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
             let hashable = {
@@ -1738,13 +1738,14 @@ pub fn ss_attach_initplans<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
 /// SS_finalize_plan (subselect.c): compute extParam/allParam for every node.
 pub fn ss_finalize_plan<'mcx>(
     run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     plan: Node<'mcx>,
     outer_params: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<()> {
     // Planner-arena set -> nodes-side bitmapset, converted once at the boundary.
     let mut valid = types_nodes::bitmapset::Bitmapset::empty();
     if let Some(b) = outer_params {
-        for (i, w) in b.words.iter().enumerate() {
+        for (i, w) in b.word_slice().iter().enumerate() {
             let mut w = *w;
             while w != 0 {
                 let bit = w.trailing_zeros();
@@ -1753,7 +1754,7 @@ pub fn ss_finalize_plan<'mcx>(
             }
         }
     }
-    finalize_plan(run, plan, &valid)?;
+    finalize_plan(run, root, plan, &valid)?;
     Ok(())
 }
 
@@ -1761,11 +1762,13 @@ pub fn ss_finalize_plan<'mcx>(
 // scan_params legs (parallel, EPQ) are dead here.
 fn finalize_plan<'mcx>(
     run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     plan: Node<'mcx>,
     valid_params: &types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<types_nodes::bitmapset::Bitmapset<'mcx>> {
     let mcx = run.mcx;
     let mut paramids = types_nodes::bitmapset::Bitmapset::empty();
+    let mut locally_added_param: i32 = -1;
     let base = plan.as_plan().expect("plan node");
 
     let mut init_ext_param = types_nodes::bitmapset::Bitmapset::empty();
@@ -1784,14 +1787,14 @@ fn finalize_plan<'mcx>(
     let mut valid = valid_params.clone_in(mcx)?;
     valid.add_members(mcx, &init_set_param)?;
 
-    finalize_primnode_list(run, &base.targetlist, &mut paramids)?;
-    finalize_primnode_list(run, &base.qual, &mut paramids)?;
+    finalize_primnode_list(run, root, &base.targetlist, &mut paramids)?;
+    finalize_primnode_list(run, root, &base.qual, &mut paramids)?;
     debug_assert!(!base.parallel_aware, "gather_param leg; M3 parallel lane");
 
     match plan.node_tag() {
         NodeTag::T_Result => {
             if let Some(rcq) = plan.as_result().unwrap().resconstantqual {
-                finalize_primnode(run, rcq, &mut paramids)?;
+                finalize_primnode(run, root, rcq, &mut paramids)?;
             }
         }
         NodeTag::T_SeqScan
@@ -1800,7 +1803,7 @@ fn finalize_plan<'mcx>(
         | NodeTag::T_Agg
         | NodeTag::T_Material => {}
         NodeTag::T_Memoize => {
-            finalize_primnode_list(run, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
+            finalize_primnode_list(run, root, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
         }
         // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
         NodeTag::T_CteScan => {
@@ -1814,18 +1817,19 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
-            finalize_primnode_list(run, &s.indexqual, &mut paramids)?;
-            finalize_primnode_list(run, &s.indexorderby, &mut paramids)?;
+            finalize_primnode_list(run, root, &s.indexqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &s.indexorderby, &mut paramids)?;
         }
         NodeTag::T_IndexOnlyScan => {
             let s = plan.as_index_only_scan().unwrap();
-            finalize_primnode_list(run, &s.indexqual, &mut paramids)?;
-            finalize_primnode_list(run, &s.recheckqual, &mut paramids)?;
-            finalize_primnode_list(run, &s.indexorderby, &mut paramids)?;
+            finalize_primnode_list(run, root, &s.indexqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &s.recheckqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &s.indexorderby, &mut paramids)?;
         }
         NodeTag::T_BitmapIndexScan => {
             finalize_primnode_list(
                 run,
+                root,
                 &plan.as_bitmap_index_scan().unwrap().indexqual,
                 &mut paramids,
             )?;
@@ -1833,6 +1837,7 @@ fn finalize_plan<'mcx>(
         NodeTag::T_BitmapHeapScan => {
             finalize_primnode_list(
                 run,
+                root,
                 &plan.as_bitmap_heap_scan().unwrap().bitmapqualorig,
                 &mut paramids,
             )?;
@@ -1845,32 +1850,42 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_BitmapAnd => {
             for sub in &plan.as_bitmap_and().unwrap().bitmapplans {
-                let child = finalize_plan(run, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_BitmapOr => {
             for sub in &plan.as_bitmap_or().unwrap().bitmapplans {
-                let child = finalize_plan(run, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_Limit => {
             let l = plan.as_limit().unwrap();
             if let Some(off) = l.limitOffset {
-                finalize_primnode(run, off, &mut paramids)?;
+                finalize_primnode(run, root, off, &mut paramids)?;
             }
             if let Some(cnt) = l.limitCount {
-                finalize_primnode(run, cnt, &mut paramids)?;
+                finalize_primnode(run, root, cnt, &mut paramids)?;
             }
         }
         // epqParam becomes valid for descendants; never propagated up.
         NodeTag::T_LockRows => {
-            valid.add_member(mcx, plan.as_lock_rows().unwrap().epqParam)?;
+            locally_added_param = plan.as_lock_rows().unwrap().epqParam;
+            valid.add_member(mcx, locally_added_param)?;
+        }
+        // Child nodes may reference wtParam; it never joins extParams
+        // (WorkTableScan's wtParam is a local of the RecursiveUnion level).
+        NodeTag::T_RecursiveUnion => {
+            locally_added_param = plan.as_recursive_union().unwrap().wtParam;
+            valid.add_member(mcx, locally_added_param)?;
+        }
+        NodeTag::T_WorkTableScan => {
+            paramids.add_member(mcx, plan.as_work_table_scan().unwrap().wtParam)?;
         }
         NodeTag::T_NestLoop => {
             let nl = plan.as_nest_loop().unwrap();
-            finalize_primnode_list(run, &nl.join.joinqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &nl.join.joinqual, &mut paramids)?;
         }
         NodeTag::T_FunctionScan => {
             // Per-function param sets are recorded in funcparams; the
@@ -1881,7 +1896,7 @@ fn finalize_plan<'mcx>(
                 let f = f_node.as_range_tbl_function().expect("functions cell");
                 let mut func_params = types_nodes::bitmapset::Bitmapset::empty();
                 if let Some(e) = f.funcexpr {
-                    finalize_primnode(run, e, &mut func_params)?;
+                    finalize_primnode(run, root, e, &mut func_params)?;
                 }
                 paramids.add_members(mcx, &func_params)?;
                 // SAFETY: plan tree is exclusively owned by this planning
@@ -1896,30 +1911,31 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_ValuesScan => {
             let vs = plan.as_values_scan().unwrap();
-            finalize_primnode_list(run, &vs.values_lists, &mut paramids)?;
+            finalize_primnode_list(run, root, &vs.values_lists, &mut paramids)?;
         }
         NodeTag::T_SubqueryScan => {
             let ss = plan.as_subquery_scan().unwrap();
-            let rel = crate::relnode::find_base_rel(&run.root, ss.scan.scanrelid as i32);
-            let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
-            let sub_outer = &run.rel_subroots[idx].root.outer_params;
+            let rel = crate::relnode::find_base_rel(root, ss.scan.scanrelid as i32);
+            let idx = root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
+            let subroot = &run.rel_subroots[idx].root;
+            let sub_outer = &subroot.outer_params;
             let subplan = ss.subplan.expect("SubqueryScan subplan");
-            ss_finalize_plan(run, subplan, sub_outer)?;
+            ss_finalize_plan(run, subroot, subplan, sub_outer)?;
             paramids
                 .add_members(mcx, &subplan.as_plan().expect("plan node").extParam)?;
         }
         NodeTag::T_MergeJoin => {
             let mj = plan.as_merge_join().unwrap();
-            finalize_primnode_list(run, &mj.join.joinqual, &mut paramids)?;
-            finalize_primnode_list(run, &mj.mergeclauses, &mut paramids)?;
+            finalize_primnode_list(run, root, &mj.join.joinqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &mj.mergeclauses, &mut paramids)?;
         }
         NodeTag::T_HashJoin => {
             let hj = plan.as_hash_join().unwrap();
-            finalize_primnode_list(run, &hj.join.joinqual, &mut paramids)?;
-            finalize_primnode_list(run, &hj.hashclauses, &mut paramids)?;
+            finalize_primnode_list(run, root, &hj.join.joinqual, &mut paramids)?;
+            finalize_primnode_list(run, root, &hj.hashclauses, &mut paramids)?;
         }
         NodeTag::T_Hash => {
-            finalize_primnode_list(run, &plan.as_hash().unwrap().hashkeys, &mut paramids)?;
+            finalize_primnode_list(run, root, &plan.as_hash().unwrap().hashkeys, &mut paramids)?;
         }
         NodeTag::T_Unique => {}
         NodeTag::T_ModifyTable => {
@@ -1929,7 +1945,7 @@ fn finalize_plan<'mcx>(
     }
 
     if let Some(child) = base.lefttree {
-        let child_params = finalize_plan(run, child, &valid)?;
+        let child_params = finalize_plan(run, root, child, &valid)?;
         paramids.add_members(mcx, &child_params)?;
     }
     if let Some(child) = base.righttree {
@@ -1943,15 +1959,19 @@ fn finalize_plan<'mcx>(
             }
         }
         if nestloop_params.is_empty() {
-            let child_params = finalize_plan(run, child, &valid)?;
+            let child_params = finalize_plan(run, root, child, &valid)?;
             paramids.add_members(mcx, &child_params)?;
         } else {
             let mut inner_valid = valid.clone_in(mcx)?;
             inner_valid.add_members(mcx, &nestloop_params)?;
-            let mut child_params = finalize_plan(run, child, &inner_valid)?;
+            let mut child_params = finalize_plan(run, root, child, &inner_valid)?;
             child_params.del_members(&nestloop_params);
             paramids.add_members(mcx, &child_params)?;
         }
+    }
+
+    if locally_added_param >= 0 {
+        paramids.del_member(locally_added_param);
     }
 
     assert!(
@@ -1979,17 +1999,19 @@ fn finalize_plan<'mcx>(
 
 fn finalize_primnode_list<'mcx>(
     run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     list: &NodeList<'mcx>,
     paramids: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<()> {
     for node in list {
-        finalize_primnode(run, node, paramids)?;
+        finalize_primnode(run, root, node, paramids)?;
     }
     Ok(())
 }
 
 struct FinalizePrimnode<'a, 'mcx> {
     run: &'a PlannerRun<'mcx>,
+    root: &'a types_pathnodes::PlannerInfo<'mcx>,
     paramids: &'a mut types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
@@ -2005,10 +2027,9 @@ impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizePrimnode<'a, 'mcx> {
             // The Aggref becomes an InitPlan output Param in setrefs; account
             // for that Param here (C's find_minmax_agg_replacement_param wart).
             if let Some(prm) =
-                crate::setrefs::find_minmax_agg_replacement_param(self.run, node)
+                crate::setrefs::find_minmax_agg_replacement_param(self.root, node)
             {
                 let paramid = self
-                    .run
                     .root
                     .expr_node(prm)
                     .as_param()
@@ -2044,10 +2065,11 @@ impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizePrimnode<'a, 'mcx> {
 
 fn finalize_primnode<'mcx>(
     run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     node: Node<'mcx>,
     paramids: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<()> {
-    FinalizePrimnode { run, paramids }.visit(node)?;
+    FinalizePrimnode { run, root, paramids }.visit(node)?;
     Ok(())
 }
 

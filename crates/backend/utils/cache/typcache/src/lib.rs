@@ -971,6 +971,12 @@ pub fn init_seams() {
     typcache_seams::at_eosubxact_type_cache::set(AtEOSubXact_TypeCache);
     typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
+    typcache_seams::type_cache_cmp_proc::set(|type_id| {
+        Ok(lookup_type_cache(type_id, TYPECACHE_CMP_PROC)?.cmp_proc())
+    });
+    typcache_seams::type_cache_hash_proc::set(|type_id| {
+        Ok(lookup_type_cache(type_id, TYPECACHE_HASH_PROC)?.hash_proc())
+    });
 }
 
 // C: equalRowTypes (attname/atttypid/atttypmod/natts).

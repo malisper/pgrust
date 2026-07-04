@@ -313,11 +313,10 @@ fn transformSetOperationTree<'mcx>(
             Some(&mut ltargetlist),
         )?;
 
+        // The non-recursive term's outputs become the containing CTE's result
+        // columns; only at the topmost setop of the CTE.
         if isTopLevel && recursive {
-            panic!(
-                "transformSetOperationTree (analyze.c): determineRecursiveColTypes \
-                 (WITH RECURSIVE set-op) unported — unit backend-parser-analyze"
-            );
+            determineRecursiveColTypes(mcx, pstate, larg, &ltargetlist)?;
         }
 
         let mut rtargetlist = NodeList::nil();
@@ -439,6 +438,41 @@ fn transformSetOperationTree<'mcx>(
             },
         )
     }
+}
+
+fn determineRecursiveColTypes<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    larg: Node<'mcx>,
+    nrtargetlist: &NodeList<'mcx>,
+) -> PgResult<()> {
+    let mut node = larg;
+    while let Some(op) = node.as_set_operation_stmt() {
+        node = op.larg.expect("set-op node has larg");
+    }
+    let leftmostRTI = node.as_range_tbl_ref().expect("set-op leaf is a RangeTblRef").rtindex;
+    let leftmostQuery = pstate
+        .p_rtable
+        .nth(leftmostRTI as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable cell")
+        .subquery
+        .expect("set-op leaf RTE has a subquery");
+
+    let mut targetList = NodeList::nil();
+    let mut next_resno: AttrNumber = 1;
+    for (nrtle_node, lefttle_node) in nrtargetlist.iter().zip(leftmostQuery.targetList.iter()) {
+        let nrtle = nrtle_node.as_target_entry().expect("tlist cell");
+        let lefttle = lefttle_node.as_target_entry().expect("tlist cell");
+        debug_assert!(!lefttle.resjunk);
+        let colName = lefttle.resname.expect("non-junk tlist entry has resname");
+        let tle = Node::mk_target_entry(mcx, nrtle.expr, next_resno, Some(colName), false)?;
+        next_resno += 1;
+        targetList.lappend(mcx, tle)?;
+    }
+
+    let parent_cte = pstate.p_parent_cte.expect("recursive set-op has a parent CTE");
+    crate::parse_cte::analyzeCTETargetList(mcx, pstate, parent_cte, &targetList)
 }
 
 // C reaches leaves through parse_sub_analyze; SelectStmt children are borrows

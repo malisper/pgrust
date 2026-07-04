@@ -17,7 +17,7 @@ use crate::parsenodes::{
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
+    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
     RangeVar, RelabelType, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
 };
@@ -73,6 +73,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_CollateClause => cmp!(as_collate_clause),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
+        NodeTag::T_CurrentOfExpr => cmp!(as_current_of_expr),
         NodeTag::T_FromExpr => cmp!(as_from_expr),
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
@@ -527,6 +528,14 @@ impl NodeEqual for TargetEntry<'_> {
 impl NodeEqual for RangeTblRef {
     fn node_equal(&self, b: &Self) -> bool {
         self.rtindex == b.rtindex
+    }
+}
+
+impl NodeEqual for CurrentOfExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.cvarno == b.cvarno
+            && self.cursor_name == b.cursor_name
+            && self.cursor_param == b.cursor_param
     }
 }
 
