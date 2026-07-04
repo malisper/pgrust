@@ -7504,6 +7504,7 @@ dependencies = [
  "catalog_namespace",
  "catalog_storage",
  "catalog_storage_seams",
+ "catcache_seams",
  "clog",
  "combocid",
  "commit_ts_seams",
