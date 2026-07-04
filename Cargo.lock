@@ -3594,6 +3594,7 @@ dependencies = [
  "sequence_seams",
  "stringinfo",
  "syscache_seams",
+ "trigfuncs",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -6049,6 +6050,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_trigger",
+ "types_trigger_call",
  "types_tuple",
  "varsup",
  "waitevent_seams",
@@ -9033,17 +9035,21 @@ dependencies = [
  "cache_syscache",
  "datum",
  "fmgr_seams",
+ "guc",
  "heapam",
+ "init_small",
  "lsyscache",
  "mcx",
  "miscinit",
  "ri_triggers_seams",
+ "snapmgr",
  "spi",
  "superuser",
  "table",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_guc",
  "types_rel",
  "types_snapshot",
  "types_trigger",
@@ -10480,6 +10486,7 @@ dependencies = [
  "rewrite_define",
  "rewrite_handler",
  "rewrite_manip",
+ "ri_triggers_seams",
  "snapmgr",
  "superuser",
  "syscache_seams",
@@ -10718,32 +10725,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "trigfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
+]
+
+[[package]]
 name = "trigger"
 version = "0.0.0"
 dependencies = [
  "catalog",
  "catalog_indexing",
+ "catalog_namespace",
  "datum",
+ "dependency_seams",
+ "elog_seams",
  "fmgr_seams",
  "genam",
  "heapam",
  "heaptuple",
  "init_small",
  "inval",
+ "lmgr",
+ "lsyscache",
+ "mbutils",
  "mcx",
  "miscinit",
+ "nodes_core",
+ "outfuncs",
+ "parse_clause",
+ "parse_collate",
+ "parse_relation",
+ "parser_small1",
+ "pg_constraint",
  "pg_depend",
+ "rel_vocab",
  "relcache",
  "ri_triggers_seams",
+ "snapmgr",
+ "superuser",
  "table",
  "trigger_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_scan",
  "types_snapshot",
  "types_trigger",
+ "types_trigger_call",
  "types_tuple",
+ "vars",
  "xact",
 ]
 
@@ -11250,6 +11290,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_trigger_call"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_trigger",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_tuple"
 version = "0.1.0"
 dependencies = [
@@ -11399,6 +11451,7 @@ dependencies = [
  "tcop_dest",
  "transam_xlog",
  "transam_xlog_seams",
+ "trigger",
  "twophase_seams",
  "typecmds",
  "types_core",
