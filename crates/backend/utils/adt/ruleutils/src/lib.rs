@@ -524,7 +524,13 @@ pub fn pg_get_indexdef_columns_keys_only(
     indexrelid: Oid,
 ) -> PgResult<Option<String>> {
     pg_get_indexdef_worker_extended(
-        mcx, indexrelid, 0, true, true, PRETTYFLAG_INDENT, false,
+        mcx,
+        indexrelid,
+        0,
+        true,
+        true,
+        PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA,
+        false,
     )
 }
 
