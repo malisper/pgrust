@@ -171,17 +171,21 @@ enum JspGinPath {
     Hash(u32),
 }
 
-struct TreeNode<'m> {
+// Tree nodes hold (start, len) into the extractor's args pool; a nested
+// PgVec would be droppy and barred from the arena helpers.
+struct TreeNode {
     kind: u8,
     entry: Datum,
-    args: PgVec<'m, u32>,
+    args_start: u32,
+    args_len: u32,
 }
 
 struct JspExtractor<'m> {
     mcx: Mcx<'m>,
     lax: bool,
     path_items: PgVec<'m, JspPathItem>,
-    nodes: PgVec<'m, TreeNode<'m>>,
+    nodes: PgVec<'m, TreeNode>,
+    args_pool: PgVec<'m, u32>,
 }
 
 impl<'m> JspExtractor<'m> {
@@ -189,7 +193,8 @@ impl<'m> JspExtractor<'m> {
         self.nodes.push(TreeNode {
             kind: JSP_GIN_ENTRY,
             entry,
-            args: mcx::vec_new_in(self.mcx),
+            args_start: 0,
+            args_len: 0,
         });
         (self.nodes.len() - 1) as u32
     }
@@ -199,20 +204,22 @@ impl<'m> JspExtractor<'m> {
         Ok(self.entry_node(d))
     }
 
-    fn expr_node(&mut self, kind: u8, args: PgVec<'m, u32>) -> u32 {
+    fn expr_node(&mut self, kind: u8, args: &[u32]) -> u32 {
+        let start = self.args_pool.len() as u32;
+        for &a in args {
+            self.args_pool.push(a);
+        }
         self.nodes.push(TreeNode {
             kind,
             entry: Datum::null(),
-            args,
+            args_start: start,
+            args_len: args.len() as u32,
         });
         (self.nodes.len() - 1) as u32
     }
 
     fn expr_node_binary(&mut self, kind: u8, a: u32, b: u32) -> PgResult<u32> {
-        let mut args: PgVec<'m, u32> = mcx::vec_with_capacity_in(self.mcx, 2)?;
-        args.push(a);
-        args.push(b);
-        Ok(self.expr_node(kind, args))
+        Ok(self.expr_node(kind, &[a, b]))
     }
 
     /// jsonb_ops__add_path_item / jsonb_path_ops__add_path_item.
@@ -356,7 +363,7 @@ impl<'m> JspExtractor<'m> {
         match nodes.len() {
             0 => Ok(None),
             1 => Ok(Some(nodes[0])),
-            _ => Ok(Some(self.expr_node(JSP_GIN_AND, nodes))),
+            _ => Ok(Some(self.expr_node(JSP_GIN_AND, nodes.as_slice()))),
         }
     }
 
@@ -441,12 +448,13 @@ impl<'m> JspExtractor<'m> {
                 entries.push(n.entry);
             }
             _ => {
+                let (start, len) = (n.args_start as usize, n.args_len as usize);
                 ops.push(JspGinOp {
                     kind: n.kind,
-                    val: n.args.len() as u32,
+                    val: n.args_len,
                 });
-                for i in 0..n.args.len() {
-                    self.emit(self.nodes[node as usize].args[i], entries, ops)?;
+                for i in start..start + len {
+                    self.emit(self.args_pool[i], entries, ops)?;
                 }
             }
         }
@@ -477,6 +485,7 @@ pub fn extract_jsp_query<'m>(
         lax: header & JSONPATH_LAX != 0,
         path_items: mcx::vec_new_in(mcx),
         nodes: mcx::vec_new_in(mcx),
+        args_pool: mcx::vec_new_in(mcx),
     };
     let path = if path_ops {
         JspGinPath::Hash(0)
