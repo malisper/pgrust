@@ -236,8 +236,8 @@ fn exclusive_guard_blocks_readers() {
 
 #[test]
 fn stress_increment_no_lost_updates() {
-    const THREADS: usize = 8;
-    const OPS: u64 = 2000;
+    const THREADS: usize = if cfg!(miri) { 3 } else { 8 };
+    const OPS: u64 = if cfg!(miri) { 60 } else { 2000 };
     const KEYS: u64 = 64;
 
     let t = std::sync::Arc::new(new_table());
@@ -278,8 +278,8 @@ fn stress_increment_no_lost_updates() {
 
 #[test]
 fn stress_insert_delete_churn() {
-    const THREADS: usize = 8;
-    const OPS: usize = 4000;
+    const THREADS: usize = if cfg!(miri) { 3 } else { 8 };
+    const OPS: usize = if cfg!(miri) { 60 } else { 4000 };
     const KEYS: usize = 128;
 
     let t = std::sync::Arc::new(new_table());
@@ -338,8 +338,8 @@ fn stress_insert_delete_churn() {
 
 #[test]
 fn stress_grow_under_concurrency() {
-    const THREADS: u64 = 8;
-    const PER_THREAD: u64 = 2048;
+    const THREADS: u64 = if cfg!(miri) { 3 } else { 8 };
+    const PER_THREAD: u64 = if cfg!(miri) { 80 } else { 2048 };
 
     let t = std::sync::Arc::new(new_table());
     let handles: Vec<_> = (0..THREADS)
