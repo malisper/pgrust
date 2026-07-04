@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 auth_seams = { path = "../auth_seams" }
+be_secure = { path = "../be_secure" }
 backend_startup = { path = "../../tcop/backend_startup" }
 elog = { path = "../../utils/error/elog" }
 hba = { path = "../hba" }
@@ -39,4 +40,3 @@ pqcomm_seams = { path = "../pqcomm_seams" }
 types_dest = { path = "../../../_support/types/types_dest" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
-be_secure = { path = "../be_secure" }
