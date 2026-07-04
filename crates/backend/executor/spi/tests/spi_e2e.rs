@@ -384,6 +384,10 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
     indexcmds_seams::get_default_opclass::set(|_typid, _am| Ok(0));
+    if !guc_tables::vars::cpu_operator_cost.installed() {
+        guc_tables::vars::cpu_operator_cost
+            .install(guc_tables::GucVarAccessors { get: || 0.0025, set: |_| {} });
+    }
     syscache_seams::syscache_hash_value_typeoid::set(|typid| {
         Ok(typid.wrapping_mul(0x9e37_79b1))
     });
