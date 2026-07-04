@@ -185,6 +185,7 @@ pub struct WindowAggStateData<'mcx> {
     evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     trans_init: PgVec<'mcx, NullableDatum>,
     trans_typlen: PgVec<'mcx, i16>,
+    trans_byval: PgVec<'mcx, bool>,
     default_final: PgVec<'mcx, DefaultFinal>,
     agg_node: Option<NonNull<AggStateNode>>,
     _pergroup: PgVec<'mcx, AggPerGroup>,
@@ -793,6 +794,7 @@ pub fn exec_init_window_agg<'mcx>(
         evaltrans,
         trans_init,
         trans_typlen,
+        trans_byval,
         default_final,
         agg_node,
         _pergroup: pergroup,
@@ -2601,11 +2603,26 @@ impl<'mcx> WindowAggStateData<'mcx> {
             let mut an = self.agg_node.expect("aggs imply agg_node");
             // SAFETY: sole access path to the node during the reset.
             unsafe { an.as_mut() }.reset();
-            for (aggno, init) in self.trans_init.iter().enumerate() {
+            for aggno in 0..self.trans_init.len() {
+                let init = self.trans_init[aggno];
+                // C initialize_aggregate: by-ref initvals datumCopy into the
+                // aggcontext (transfns mutate the transvalue in place).
+                let value = if !init.isnull && !self.trans_byval[aggno] {
+                    // SAFETY: node-lifetime initval datum; agg_node is live.
+                    unsafe {
+                        ::execexpr::agg_datum_copy(
+                            an.as_ref().aggcontext(),
+                            init.value,
+                            self.trans_typlen[aggno],
+                        )?
+                    }
+                } else {
+                    init.value
+                };
                 // SAFETY: aggno < the pergroup array's once-allocated length.
                 unsafe {
                     self.pergroup_base.as_ptr().add(aggno).write(AggPerGroup {
-                        trans_value: init.value,
+                        trans_value: value,
                         trans_value_is_null: init.isnull,
                         no_trans_value: init.isnull,
                     });
@@ -2723,16 +2740,31 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // initialize_windowaggregate (framed lane): a private (moving-agg)
     // aggcontext resets here; init values live in query memory, so no
     // datumCopy (nothing frees them — C copies to survive its pfree).
-    fn initialize_windowaggregate(&mut self, aggno: usize) {
+    fn initialize_windowaggregate(&mut self, aggno: usize) -> PgResult<()> {
         let pa = &mut self.peragg[aggno];
         if pa.private_ctx {
             // SAFETY: sole access path to the per-agg node during the reset.
             unsafe { pa.agg_state.as_mut() }.reset();
         }
-        pa.trans_value = pa.init_value;
+        // C datumCopy's a by-ref initval into the aggcontext: the transfns
+        // mutate the transvalue in place (float8_accum's agg leg).
+        pa.trans_value = if pa.trans_byval || pa.init_value.isnull {
+            pa.init_value
+        } else {
+            // SAFETY: shared read of the per-agg context handle.
+            let ctx = unsafe { pa.agg_state.as_ref() }.aggcontext();
+            NullableDatum {
+                // SAFETY: non-null by-ref initval datum, live for the node.
+                value: unsafe {
+                    ::execexpr::agg_datum_copy(ctx, pa.init_value.value, pa.trans_typlen)?
+                },
+                isnull: false,
+            }
+        };
         pa.trans_count = 0;
         pa.int_sum = Int8TransState::default();
         pa.result_value = NullableDatum::null();
+        Ok(())
     }
 
     fn eval_agg_args(
@@ -2869,7 +2901,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             panic!("aggregate transition value is NULL before inverse transition");
         }
         if self.peragg[aggno].trans_count == 1 {
-            self.initialize_windowaggregate(aggno);
+            self.initialize_windowaggregate(aggno)?;
             return Ok(true);
         }
 
@@ -3047,7 +3079,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
         for aggno in 0..numaggs {
             if self.peragg[aggno].restart {
-                self.initialize_windowaggregate(aggno);
+                self.initialize_windowaggregate(aggno)?;
             } else if !self.peragg[aggno].result_value.isnull {
                 self.peragg[aggno].result_value = NullableDatum::null();
             }
@@ -3381,7 +3413,7 @@ mcx::forget_safe_struct!(
         argstates, kernel, finalfn },
     WindowAggStateData<'_> { plan, frameOptions, ps_ExprContext, tmpcontext,
         ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
-        trans_init, trans_typlen, agg_node, _pergroup, pergroup_base,
+        trans_init, trans_typlen, trans_byval, agg_node, _pergroup, pergroup_base,
         peragg_wfuncno, agg_saved,
         agg_readptr, agg_seekpos, agg_markpos, agg_mark_active,
         agg_values_base, agg_nulls_base, numaggs, currentpos, frameheadpos,
