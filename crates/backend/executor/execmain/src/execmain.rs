@@ -487,14 +487,14 @@ pub(crate) fn init_plan<'mcx>(
     if operation == CmdType::CMD_SELECT {
         // A parallel worker's junk columns must reach the leader: C clears
         // resjunk on a plan copy in ExecSerializePlan; the shared plan tree
-        // is immutable here, so the filter is suppressed instead.
-        let junk_filter_needed = !parallel::IsParallelWorker()
-            && plan.targetlist.iter().any(|tle_node| {
-                tle_node
-                    .as_target_entry()
-                    .expect("targetlist entry is a TargetEntry")
-                    .resjunk
-            });
+        // is immutable here, so the filter is suppressed instead. The TLS
+        // read hides behind the resjunk scan (junk tlists are the rare case).
+        let junk_filter_needed = plan.targetlist.iter().any(|tle_node| {
+            tle_node
+                .as_target_entry()
+                .expect("targetlist entry is a TargetEntry")
+                .resjunk
+        }) && !parallel::IsParallelWorker();
         if junk_filter_needed {
             let slot = data
                 .estate
