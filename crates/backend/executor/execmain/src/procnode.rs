@@ -1042,6 +1042,7 @@ fn agg_arm<'mcx>(
                 ss,
                 estate,
                 fused_soa_prefix(agg, ss).unwrap_or(0),
+                false,
             );
             let outer_slot = ss.ss.ss_ScanTupleSlot;
             let src = SeqScanBatchSource { ss, outer_slot };

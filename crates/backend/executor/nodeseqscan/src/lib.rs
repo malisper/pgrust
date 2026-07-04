@@ -54,6 +54,8 @@ struct BatchSoa<'mcx> {
     soa: ::exectuples::SoaBatch<'mcx>,
     // Bitmap-able kernel qual (QualScanVarCmpConst on a prefix column).
     qual_armed: bool,
+    // Scan-node drive: deform the qual column only; survivors deform lazily.
+    qual_only: bool,
     qual_col: u16,
     qual_cmp: ::execexpr::CmpOp,
     qual_konst: ::datum::Datum,
@@ -171,13 +173,14 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     prefix: i32,
+    qual_only: bool,
 ) {
     if prefix <= 0 {
         node.batch_soa = None;
         return;
     }
     if let Some(b) = &node.batch_soa {
-        if b.plan.ncols() as i32 == prefix {
+        if b.plan.ncols() as i32 == prefix && b.qual_only == qual_only {
             return;
         }
     }
@@ -205,6 +208,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
                 plan,
                 qual_armed: qual.is_some(),
+                qual_only: qual_only && qual.is_some(),
                 qual_col: qual.map_or(0, |(a, _, _)| a),
                 qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
                 qual_konst: qual.map_or(::datum::Datum::null(), |(_, _, k)| k),
@@ -230,7 +234,8 @@ pub fn seq_scan_next_pagebatch<'mcx>(
     if n > 0 {
         if let Some(b) = batch_soa.as_mut() {
             let b = &mut **b;
-            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa);
+            let qual_col_only = (b.qual_only && b.qual_armed).then_some(b.qual_col);
+            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
             if b.qual_armed {
                 ::execexpr::qual_bitmap_cmp_const(
                     b.qual_cmp,
@@ -300,7 +305,9 @@ pub fn seq_scan_batch_store<'mcx>(
     let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
     ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
     if let Some(b) = node.batch_soa.as_ref() {
-        ::exectuples::soa_store_prefix(slot, &b.soa, i);
+        if !b.qual_only {
+            ::exectuples::soa_store_prefix(slot, &b.soa, i);
+        }
     }
 }
 
@@ -366,7 +373,7 @@ fn scan_batch_probe<'mcx>(
     if !::tableam::table_scan_supports_pagebatch(node.ss.ss_currentScanDesc.as_ref().unwrap()) {
         return Ok(false);
     }
-    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1);
+    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1, true);
     if node.batch_soa.as_deref().is_some_and(|b| b.qual_armed) {
         node.scan_batch = ScanBatchMode::On;
         return Ok(true);
@@ -552,6 +559,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed },
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_col, qual_cmp, qual_konst, sel, nwords, cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, qual_col, qual_cmp, qual_konst, sel, nwords,
+        cur_word, cur_bits,
     },
 );

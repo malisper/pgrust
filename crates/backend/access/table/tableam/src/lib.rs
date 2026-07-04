@@ -888,9 +888,10 @@ pub fn table_scan_batch_deform<'mcx>(
     scan: &mut TableScanDesc<'mcx>,
     plan: &::exectuples::SoaDeformPlan<'_>,
     soa: &mut ::exectuples::SoaBatch<'_>,
+    qual_col_only: Option<u16>,
 ) {
     match scan {
-        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa),
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa, qual_col_only),
     }
 }
 

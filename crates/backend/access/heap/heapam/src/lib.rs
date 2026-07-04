@@ -973,6 +973,7 @@ pub fn heap_batch_deform_soa<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     plan: &exectuples::SoaDeformPlan<'_>,
     soa: &mut exectuples::SoaBatch<'_>,
+    qual_col_only: Option<u16>,
 ) {
     let n = scan.rs_ntuples;
     debug_assert!(!scan.rs_cpage.is_null() || n == 0);
@@ -1002,7 +1003,10 @@ pub fn heap_batch_deform_soa<'mcx>(
                 relid,
             )
         };
-        exectuples::soa_deform_tuple(soa, plan, atts, i, &tuple);
+        match qual_col_only {
+            None => exectuples::soa_deform_tuple(soa, plan, atts, i, &tuple),
+            Some(c) => exectuples::soa_deform_tuple_qual_col(soa, plan, atts, i, &tuple, c),
+        }
     }
 }
 
