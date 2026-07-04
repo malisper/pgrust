@@ -285,6 +285,9 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
         NodeTag::T_RelabelType => {
             pull_window_input_vars(node.as_relabel_type().unwrap().arg, out)
         }
+        NodeTag::T_FieldSelect => {
+            pull_window_input_vars(node.as_field_select().unwrap().arg, out)
+        }
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
             for a in sr.refupperindexpr.iter().flatten() {
