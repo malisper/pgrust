@@ -22,6 +22,7 @@ table = { path = "../../access/table/table" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
+aclchk_seams = { path = "../aclchk_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 varlena = { path = "../../utils/adt/varlena" }
 format_type = { path = "../../utils/adt/format_type" }
