@@ -105,8 +105,8 @@ fn at_add_foreign_key_constraint<'mcx>(
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
 ) -> PgResult<Option<FkValidateItem<'mcx>>> {
-    if fkconstraint.old_pktable_oid != InvalidOid || !fkconstraint.old_conpfeqop.is_nil() {
-        unported("old_pktable_oid / old_conpfeqop (re-add lane)");
+    if !fkconstraint.old_conpfeqop.is_nil() {
+        unported("old_conpfeqop revalidation skip (TryReuseForeignKey)");
     }
     if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
         unported("PERIOD (temporal FK)");
@@ -118,16 +118,22 @@ fn at_add_foreign_key_constraint<'mcx>(
         unported("NOT ENFORCED");
     }
 
-    let pktable = fkconstraint.pktable.expect("FK constraint without pktable");
-    let pkrv = rel_vocab::RangeVar {
-        catalogname: pktable.catalogname,
-        schemaname: pktable.schemaname,
-        relname: pktable.relname.expect("RangeVar.relname"),
-        inh: pktable.inh,
-        relpersistence: pktable.relpersistence,
-        location: pktable.location,
+    // A re-added constraint targets the pktable by OID: concurrent activity
+    // could have made the deparsed name resolve differently.
+    let pkrel = if fkconstraint.old_pktable_oid != InvalidOid {
+        table::table_open(mcx, fkconstraint.old_pktable_oid, ShareRowExclusiveLock)?
+    } else {
+        let pktable = fkconstraint.pktable.expect("FK constraint without pktable");
+        let pkrv = rel_vocab::RangeVar {
+            catalogname: pktable.catalogname,
+            schemaname: pktable.schemaname,
+            relname: pktable.relname.expect("RangeVar.relname"),
+            inh: pktable.inh,
+            relpersistence: pktable.relpersistence,
+            location: pktable.location,
+        };
+        table::table_openrv(mcx, &pkrv, ShareRowExclusiveLock)?
     };
-    let pkrel = table::table_openrv(mcx, &pkrv, ShareRowExclusiveLock)?;
 
     if pkrel.rd_rel.relkind != RELKIND_RELATION {
         let e = err(

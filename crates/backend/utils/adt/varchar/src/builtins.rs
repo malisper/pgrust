@@ -318,8 +318,46 @@ macro_rules! fc_unported {
     )*};
 }
 
+// varchar_support (varchar.c): SupportRequestSimplify only — widening (or
+// unconstraining) a varchar typmod becomes a RelabelType, no rewrite.
+pub fn fc_varchar_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("varchar_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let old_typmod = nodes_core::expr_typmod(source);
+    let new_typmod = c.constvalue.as_i32();
+    let old_max = old_typmod - VARHDRSZ as i32;
+    let new_max = new_typmod - VARHDRSZ as i32;
+    if new_typmod < 0 || (old_typmod >= 0 && old_max <= new_max) {
+        let mcx = req.mcx.expect("varchar_support: request carries an mcx");
+        let ret = nodes_core::relabel_to_typmod(mcx, source, new_typmod)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
+    Ok(Datum::from_usize(0))
+}
+
 fc_unported! {
-    fc_varchar_support: "varchar_support" => "prosupport simplify lane, like_support precedent";
     fc_bpchar_sortsupport: "bpchar_sortsupport" => "SortSupport substrate, varlena bttextsortsupport lane";
     fc_btbpchar_pattern_sortsupport: "btbpchar_pattern_sortsupport" => "SortSupport substrate, varlena bttextsortsupport lane";
 }

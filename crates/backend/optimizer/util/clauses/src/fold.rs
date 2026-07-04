@@ -1204,7 +1204,7 @@ fn simplify_function<'mcx>(
     }
     let eff_args = new_args.as_ref().unwrap_or(args);
 
-    let newexpr = evaluate_function(
+    let mut newexpr = evaluate_function(
         cx,
         funcid,
         result_type,
@@ -1231,16 +1231,18 @@ fn simplify_function<'mcx>(
                 location: -1,
             },
         )?;
-        let mut req = types_nodes::supportnodes::SupportRequestSimplify::new(Some(fcall));
+        let mut req =
+            types_nodes::supportnodes::SupportRequestSimplify::new(Some(fcall), Some(cx.mcx));
         let addr = core::ptr::from_mut(&mut req) as usize;
         let result =
             fmgr_core::oid_function_call1_coll(shape.prosupport, 0, Datum::from_usize(addr))?;
         if result.as_usize() != 0 {
-            panic!(
-                "simplify_function deferred: prosupport {} produced a SupportRequestSimplify \
-                 rewrite for funcid {funcid}; result plumbing unported",
-                shape.prosupport
-            );
+            // SAFETY: prosupport simplify contract — the rewrite is a sealed
+            // node the callee allocated in the request's mcx.
+            let node = unsafe {
+                Node::from_raw(core::ptr::NonNull::new_unchecked(result.as_usize() as *mut ()))
+            };
+            newexpr = Some(ece_mutator(node, cx)?.unwrap_or(node));
         }
     }
     let newexpr = match newexpr {

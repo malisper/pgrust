@@ -1030,8 +1030,11 @@ fn ATRewriteTable<'mcx>(
         (AttrNumber, bool, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>),
     > = PgVec::new_in(mcx);
     for nv in tab.newvals.iter() {
-        let state = execexpr::exec_init_expr(mcx, Some(nv.expr), execexpr::ParamBind::NONE)?
+        let mut state = execexpr::exec_init_expr(mcx, Some(nv.expr), execexpr::ParamBind::NONE)?
             .expect("transform expr");
+        // By-ref transform results land in the statement arena (C resets a
+        // per-tuple context each row; watch memory on huge rewrites).
+        state.arm_result_mcx(mcx);
         newval_states.push((nv.attnum, nv.is_generated, state));
     }
 
@@ -1383,6 +1386,7 @@ fn ATExecAddColumn<'mcx>(
         {
             let mut state = execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
                 .expect("non-nil default expression");
+            state.arm_result_mcx(mcx);
             let mut slots =
                 execexpr::EvalSlots { scan: None, inner: None, outer: None };
             let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;

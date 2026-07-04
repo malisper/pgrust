@@ -19,11 +19,13 @@ pub struct SupportRequestRows<'mcx> {
 pub struct SupportRequestSimplify<'mcx> {
     tag: NodeTag,
     pub fcall: Option<Node<'mcx>>,
+    // Stands in for C's root->planner_cxt: a rewrite must allocate somewhere.
+    pub mcx: Option<::mcx::Mcx<'mcx>>,
 }
 
 impl<'mcx> SupportRequestSimplify<'mcx> {
-    pub fn new(fcall: Option<Node<'mcx>>) -> Self {
-        SupportRequestSimplify { tag: NodeTag::T_SupportRequestSimplify, fcall }
+    pub fn new(fcall: Option<Node<'mcx>>, mcx: Option<::mcx::Mcx<'mcx>>) -> Self {
+        SupportRequestSimplify { tag: NodeTag::T_SupportRequestSimplify, fcall, mcx }
     }
 }
 
