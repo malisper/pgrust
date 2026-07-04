@@ -61,10 +61,11 @@ fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
     f(&mut FAKE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-fn page_bytes(block: usize) -> [u8; BLCKSZ] {
+// 8-aligned copy: PageRef reads (lsn) require page alignment.
+fn page_bytes(block: usize) -> TestPage {
     let addr = with_fake(|f| f.pages[block]);
     // SAFETY: leaked test page, always live.
-    unsafe { *(addr as *const [u8; BLCKSZ]) }
+    TestPage(unsafe { *(addr as *const [u8; BLCKSZ]) })
 }
 
 fn install_seams() {
@@ -542,10 +543,10 @@ fn btree_split_wal_roundtrip() {
     let left = page_bytes(1);
     let right = page_bytes(2);
     let root = page_bytes(3);
-    let left_ref = unsafe { PageRef::from_raw(NonNull::new(left.as_ptr().cast_mut()).unwrap()) };
-    let right_ref = unsafe { PageRef::from_raw(NonNull::new(right.as_ptr().cast_mut()).unwrap()) };
-    let last_lsn = right_ref.lsn().max(root.as_ptr() as u64 * 0 + {
-        let r = unsafe { PageRef::from_raw(NonNull::new(root.as_ptr().cast_mut()).unwrap()) };
+    let left_ref = unsafe { PageRef::from_raw(NonNull::new(left.0.as_ptr().cast_mut()).unwrap()) };
+    let right_ref = unsafe { PageRef::from_raw(NonNull::new(right.0.as_ptr().cast_mut()).unwrap()) };
+    let last_lsn = right_ref.lsn().max(root.0.as_ptr() as u64 * 0 + {
+        let r = unsafe { PageRef::from_raw(NonNull::new(root.0.as_ptr().cast_mut()).unwrap()) };
         r.lsn()
     });
     transam_xlog::XLogFlush(last_lsn).unwrap();
@@ -620,8 +621,8 @@ fn btree_split_wal_roundtrip() {
 
     // block 1 data restores the right page image byte-for-byte.
     let ritems = reader.XLogRecGetBlockData(1).unwrap();
-    let restored = restore_page(ritems, &right, split_lsn);
-    assert_eq!(restored[..], right[..], "restored right page image differs");
+    let restored = restore_page(ritems, &right.0, split_lsn);
+    assert_eq!(restored[..], right.0[..], "restored right page image differs");
 
     // final record: NEWROOT for the root split; its item stream restores the
     // new root page image.
@@ -633,8 +634,8 @@ fn btree_split_wal_roundtrip() {
     assert_eq!(u32::from_ne_bytes(main[0..4].try_into().unwrap()), 3); // rootblk
     assert_eq!(u32::from_ne_bytes(main[4..8].try_into().unwrap()), 1); // level
     let rootitems = reader.XLogRecGetBlockData(0).unwrap();
-    let restored_root = restore_page(rootitems, &root, root_lsn);
-    assert_eq!(restored_root[..], root[..], "restored root page image differs");
+    let restored_root = restore_page(rootitems, &root.0, root_lsn);
+    assert_eq!(restored_root[..], root.0[..], "restored root page image differs");
     let md = reader.XLogRecGetBlockData(2).unwrap();
     assert_eq!(u32::from_ne_bytes(md[4..8].try_into().unwrap()), 3); // meta root
     assert_eq!(u32::from_ne_bytes(md[8..12].try_into().unwrap()), 1); // meta level
