@@ -366,7 +366,7 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
             if nulls[i] {
                 continue;
             }
-            let v = ::types_fmgr::function_call1_coll(&mut ams.proc, 0, d)?;
+            let v = crate::io::call1_armed(&mut ams.proc, mcx, d)?;
             // SAFETY: out fns return NUL-terminated cstrings.
             let cs = unsafe {
                 core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)

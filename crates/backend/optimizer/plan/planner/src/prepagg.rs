@@ -94,6 +94,9 @@ fn preprocess_aggrefs_walker<'mcx>(
         NodeTag::T_RelabelType => {
             preprocess_aggrefs_walker(run, node.as_relabel_type().unwrap().arg)
         }
+        NodeTag::T_FieldSelect => {
+            preprocess_aggrefs_walker(run, node.as_field_select().unwrap().arg)
+        }
         NodeTag::T_CoerceViaIO => {
             preprocess_aggrefs_walker(run, node.as_coerce_via_io().unwrap().arg)
         }

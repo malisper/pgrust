@@ -13,6 +13,16 @@ use ::types_fmgr::{
 };
 
 use crate::construct::{construct_empty_array, construct_md_array, deconstruct_array};
+// C OutputFunctionCall arms CurrentMemoryContext implicitly; the local-frame
+// helper must arm explicitly for out fns that allocate (record_out).
+pub(crate) fn call1_armed(
+    flinfo: &mut ::types_fmgr::FmgrInfo,
+    mcx: ::mcx::Mcx<'_>,
+    arg: ::datum::Datum,
+) -> ::types_error::PgResult<::datum::Datum> {
+    ::types_fmgr::function_call1_coll_in(flinfo, ::types_core::InvalidOid, mcx, arg)
+}
+
 use crate::foundation::*;
 use ::arrayutils::{array_check_bounds, array_get_n_items};
 
