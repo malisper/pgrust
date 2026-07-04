@@ -290,7 +290,10 @@ where
         match node.hj_JoinState {
             HJ_BUILD_HASHTABLE => {
                 debug_assert!(hash_state.table.is_none());
-                hash_state.table = Some(::nodehash::exec_hash_table_create(hash_state, estate)?);
+                let want_filter = !node.hj_fill_outer
+                    && node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_some();
+                hash_state.table =
+                    Some(::nodehash::exec_hash_table_create(hash_state, estate, want_filter)?);
                 // MultiExecHash provides its own instrumentation (the Hash
                 // node has no ExecProcNode wrapper).
                 let instr = node.hash_instr.map(|ix| ix as usize);
