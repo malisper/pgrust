@@ -2215,13 +2215,6 @@ pub(crate) fn copy_expr<'mcx>(
         // C copyObject + IncrementVarSublevelsUp(newnode, sublevels_up, 0):
         // the out/read round trip is the deep copy, and the in-place level
         // shift is safe on it (exclusive tree).
-        NodeTag::T_CoerceToDomain => {
-            let c = node.as_coerce_to_domain().expect("CoerceToDomain");
-            Node::mk(
-                mcx,
-                pn::CoerceToDomain { arg: copy_expr(mcx, c.arg, levels_delta)?, ..*c },
-            )
-        }
         NodeTag::T_SubLink | NodeTag::T_PlaceHolderVar => {
             let copy = rewrite_manip::copy_node(mcx, node)?;
             if levels_delta > 0 {
