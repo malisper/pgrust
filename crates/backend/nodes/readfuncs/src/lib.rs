@@ -932,35 +932,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Ok(b.seal())
     }
 
-    fn read_sql_value_function(&mut self) -> PgResult<Node<'mcx>> {
-        use types_nodes::primnodes::{SQLValueFunction, SQLValueFunctionOp as Op};
-        let op = match self.read_u32("op") {
-            0 => Op::SVFOP_CURRENT_DATE,
-            1 => Op::SVFOP_CURRENT_TIME,
-            2 => Op::SVFOP_CURRENT_TIME_N,
-            3 => Op::SVFOP_CURRENT_TIMESTAMP,
-            4 => Op::SVFOP_CURRENT_TIMESTAMP_N,
-            5 => Op::SVFOP_LOCALTIME,
-            6 => Op::SVFOP_LOCALTIME_N,
-            7 => Op::SVFOP_LOCALTIMESTAMP,
-            8 => Op::SVFOP_LOCALTIMESTAMP_N,
-            9 => Op::SVFOP_CURRENT_ROLE,
-            10 => Op::SVFOP_CURRENT_USER,
-            11 => Op::SVFOP_USER,
-            12 => Op::SVFOP_SESSION_USER,
-            13 => Op::SVFOP_CURRENT_CATALOG,
-            14 => Op::SVFOP_CURRENT_SCHEMA,
-            other => panic!("_readSQLValueFunction (readfuncs.c): bad op {other}"),
-        };
-        let svf = SQLValueFunction {
-            op,
-            r#type: self.read_u32("type"),
-            typmod: self.read_i32("typmod"),
-            location: self.read_location("location"),
-        };
-        Node::mk(self.mcx, svf)
-    }
-
     fn read_coerce_via_io(&mut self) -> PgResult<Node<'mcx>> {
         let arg = self.read_node("arg")?.expect("CoerceViaIO has an arg");
         let c = types_nodes::primnodes::CoerceViaIO {

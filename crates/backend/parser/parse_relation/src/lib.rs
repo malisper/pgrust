@@ -9,6 +9,7 @@ use parser_small1::{
     parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
 };
 use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
+use types_core::catalog::{RECORDARRAYOID, RECORDOID};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN,
     ERRCODE_DUPLICATE_ALIAS, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_UNDEFINED_COLUMN,
@@ -996,7 +997,7 @@ pub fn addRangeTableEntryForValues<'mcx>(
             p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
             p_varnosyn: rtindex as Index,
             p_varattnosyn: varattno as AttrNumber + 1,
-            p_dontexpand: false,
+            p_dontexpand: levelsup > 0 && varattno >= numcolumns - n_dontexpand_columns,
         });
     }
     let nsitem = ParseNamespaceItem {
@@ -1268,7 +1269,6 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     inFromCl: bool,
 ) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
     let cte = cte_node.as_common_table_expr().expect("CTE reference");
-    debug_assert!(cte.search_clause.is_none() && cte.cycle_clause.is_none());
 
     // Self-reference iff the CTE's analysis isn't completed yet. The C
     // no-RETURNING check is dead: DML CTEs are loud upstream.
@@ -1292,6 +1292,36 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     if numcols < numaliases {
         return Err(too_many_aliases(refname, numcols, numaliases));
     }
+    let mut coltypes = cte.ctecoltypes.clone_in(mcx)?;
+    let mut coltypmods = cte.ctecoltypmods.clone_in(mcx)?;
+    let mut colcollations = cte.ctecolcollations.clone_in(mcx)?;
+    // The SEARCH/CYCLE output columns exist on the RTE before the rewriter
+    // adds them to the CTE itself; inside the CTE they are star-invisible.
+    let mut n_dontexpand_columns = 0usize;
+    if let Some(sc) = cte.search_clause.map(|n| n.as_cte_search_clause().expect("search clause")) {
+        eref_colnames
+            .lappend(mcx, Node::mk_string(mcx, sc.search_seq_column.expect("SET column"))?)?;
+        coltypes.lappend(
+            mcx,
+            if sc.search_breadth_first { RECORDOID } else { RECORDARRAYOID },
+        )?;
+        coltypmods.lappend(mcx, -1)?;
+        colcollations.lappend(mcx, InvalidOid)?;
+        n_dontexpand_columns += 1;
+    }
+    if let Some(cc) = cte.cycle_clause.map(|n| n.as_cte_cycle_clause().expect("cycle clause")) {
+        eref_colnames
+            .lappend(mcx, Node::mk_string(mcx, cc.cycle_mark_column.expect("SET column"))?)?;
+        coltypes.lappend(mcx, cc.cycle_mark_type)?;
+        coltypmods.lappend(mcx, cc.cycle_mark_typmod)?;
+        colcollations.lappend(mcx, cc.cycle_mark_collation)?;
+        eref_colnames
+            .lappend(mcx, Node::mk_string(mcx, cc.cycle_path_column.expect("USING column"))?)?;
+        coltypes.lappend(mcx, RECORDARRAYOID)?;
+        coltypmods.lappend(mcx, -1)?;
+        colcollations.lappend(mcx, InvalidOid)?;
+        n_dontexpand_columns += 2;
+    }
     let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
 
     let rte = RangeTblEntry {
@@ -1299,9 +1329,9 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         ctename: cte.ctename,
         ctelevelsup: levelsup,
         self_reference,
-        coltypes: cte.ctecoltypes.clone_in(mcx)?,
-        coltypmods: cte.ctecoltypmods.clone_in(mcx)?,
-        colcollations: cte.ctecolcollations.clone_in(mcx)?,
+        coltypes,
+        coltypmods,
+        colcollations,
         alias,
         eref: Some(eref),
         lateral: false,

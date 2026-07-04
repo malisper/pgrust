@@ -502,18 +502,31 @@ fn markTargetListOrigin<'mcx>(
             }
         }
         RTEKind::RTE_CTE => {
-            // search/cycle extra columns are dead here (loud in the grammar);
-            // a self-reference has no analyzed subquery to copy up from.
+            // A self-reference has no analyzed subquery to copy up from.
             if attnum != 0 && !rte.self_reference {
                 let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
-                let tl = &cte_node
-                    .as_common_table_expr()
-                    .expect("ctenamespace cell")
+                let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
+                let tl = &cte
                     .ctequery
                     .expect("analyzed CTE")
                     .as_query()
                     .expect("analyzed CTE is a Query")
                     .targetList;
+                // The RTE carries the search/cycle columns but the subquery
+                // does not yet; skip origin lookups for those.
+                let mut extra_cols: i16 = 0;
+                if cte.search_clause.is_some() {
+                    extra_cols += 1;
+                }
+                if cte.cycle_clause.is_some() {
+                    extra_cols += 2;
+                }
+                if extra_cols > 0
+                    && attnum > tl.len() as i16
+                    && attnum <= tl.len() as i16 + extra_cols
+                {
+                    return Ok(());
+                }
                 let ste = tl
                     .iter()
                     .map(|n| n.as_target_entry().expect("tlist cell"))

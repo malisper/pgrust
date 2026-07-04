@@ -1,5 +1,5 @@
-// parse_cte.c: WITH and WITH RECURSIVE analysis; SEARCH/CYCLE clauses and
-// data-modifying CTEs are loud panics naming their lanes.
+// parse_cte.c: WITH and WITH RECURSIVE analysis, SEARCH/CYCLE included;
+// data-modifying CTEs are loud panics naming their lane.
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
