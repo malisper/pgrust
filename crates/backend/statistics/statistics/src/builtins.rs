@@ -1,19 +1,128 @@
-//! fmgr wrappers for the extended-statistics type I/O + inspection SRF
-//! (mvdistinct.c pg_ndistinct_out, dependencies.c pg_dependencies_out,
-//! mcv.c pg_stats_ext_mcvlist_items).
+//! Type I/O for pg_ndistinct/pg_dependencies/pg_mcv_list plus the
+//! pg_stats_ext_mcvlist_items inspection SRF
+//! (mvdistinct.c/dependencies.c/mcv.c).
 
+use core::fmt::Write;
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidOid, Oid, BOOLOID, TEXTOID};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
-fn cstring_out(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let mut v = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
-    mcx::vec_append_bytes(&mut v, s.as_bytes())?;
-    mcx::vec_append_bytes(&mut v, &[0])?;
-    Ok(types_fmgr::cstring_result(v))
+#[cold]
+#[inline(never)]
+fn no_flinfo(name: &str) -> ! {
+    panic!("{name}: result needs a resolved FmgrInfo's scratch")
+}
+
+// C pallocs each result per call; the resolved FmgrInfo owns retained scratch
+// (ruleutils builtins precedent). The Datum aliases it until the next call
+// through the same FmgrInfo.
+struct OutBuf(Vec<u8>);
+
+fn cstring_result(flinfo: Option<&mut FmgrInfo>, name: &'static str, s: &str) -> Datum {
+    let Some(flinfo) = flinfo else { no_flinfo(name) };
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(OutBuf(Vec::new()));
+    }
+    let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
+    buf.clear();
+    buf.reserve(s.len() + 1);
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(0);
+    Datum::from_usize(buf.as_ptr() as usize)
+}
+
+fn cannot_accept(typname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("cannot accept a value of type {typname}"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+pub fn fc_pg_ndistinct_in(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Err(cannot_accept("pg_ndistinct"))
+}
+
+pub fn fc_pg_ndistinct_recv(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Err(cannot_accept("pg_ndistinct"))
+}
+
+pub fn fc_pg_ndistinct_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_ndistinct_out");
+    // SAFETY: arg 0 is a live bytea datum.
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let nd = crate::mvdistinct::statext_ndistinct_deserialize(ctx.mcx(), v.data())?;
+    let mut s = String::from("{");
+    for (i, item) in nd.items.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        for (j, a) in item.attributes.iter().enumerate() {
+            s.push_str(if j == 0 { "\"" } else { ", " });
+            let _ = write!(s, "{a}");
+        }
+        let _ = write!(s, "\": {}", item.ndistinct as i32);
+    }
+    s.push('}');
+    Ok(cstring_result(flinfo, "pg_ndistinct_out", &s))
+}
+
+pub fn fc_pg_dependencies_in(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Err(cannot_accept("pg_dependencies"))
+}
+
+pub fn fc_pg_dependencies_recv(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Err(cannot_accept("pg_dependencies"))
+}
+
+pub fn fc_pg_dependencies_out(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_dependencies_out");
+    // SAFETY: arg 0 is a live bytea datum.
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let deps = crate::dependencies::statext_dependencies_deserialize(ctx.mcx(), v.data())?;
+    let mut s = String::from("{");
+    for (i, dep) in deps.deps.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push('"');
+        let n = dep.attributes.len();
+        for (j, a) in dep.attributes.iter().enumerate() {
+            if j == n - 1 {
+                s.push_str(" => ");
+            } else if j > 0 {
+                s.push_str(", ");
+            }
+            let _ = write!(s, "{a}");
+        }
+        let _ = write!(s, "\": {:.6}", dep.degree);
+    }
+    s.push('}');
+    Ok(cstring_result(flinfo, "pg_dependencies_out", &s))
+}
+
+pub fn fc_pg_mcv_list_in(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Err(cannot_accept("pg_mcv_list"))
+}
+
+pub fn fc_pg_mcv_list_recv(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Err(cannot_accept("pg_mcv_list"))
 }
 
 // PG_GETARG_BYTEA_P: detoasted, short headers expanded to the 4-byte form.
@@ -27,51 +136,6 @@ unsafe fn bytea_body<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
     }
 }
 
-fn fc_pg_ndistinct_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: strict fn; arg 0 is a non-null pg_ndistinct varlena.
-    let body = unsafe { bytea_body(fcinfo, 0)? };
-    let nd = crate::mvdistinct::statext_ndistinct_deserialize(fcinfo.result_mcx(), body)?;
-    let mut out = String::from("{");
-    for (i, item) in nd.items.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        for (j, &attnum) in item.attributes.iter().enumerate() {
-            out.push_str(if j == 0 { "\"" } else { ", " });
-            out.push_str(&attnum.to_string());
-        }
-        out.push_str("\": ");
-        out.push_str(&(item.ndistinct as i32).to_string());
-    }
-    out.push('}');
-    cstring_out(fcinfo, &out)
-}
-
-fn fc_pg_dependencies_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: strict fn; arg 0 is a non-null pg_dependencies varlena.
-    let body = unsafe { bytea_body(fcinfo, 0)? };
-    let deps = crate::dependencies::statext_dependencies_deserialize(fcinfo.result_mcx(), body)?;
-    let mut out = String::from("{");
-    for (i, dep) in deps.deps.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push('"');
-        let n = dep.attributes.len();
-        for (j, &attnum) in dep.attributes.iter().enumerate() {
-            if j == n - 1 {
-                out.push_str(" => ");
-            } else if j > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&attnum.to_string());
-        }
-        out.push_str(&format!("\": {:.6}", dep.degree));
-    }
-    out.push('}');
-    cstring_out(fcinfo, &out)
-}
-
 fn output_datum_text(mcx: Mcx<'_>, typid: Oid, value: Datum) -> PgResult<Datum> {
     let (typoutput, _isvarlena) = lsyscache::typ::getTypeOutputInfo(typid)?;
     let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
@@ -82,10 +146,7 @@ fn output_datum_text(mcx: Mcx<'_>, typid: Oid, value: Datum) -> PgResult<Datum> 
     Ok(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, s.to_bytes())?))
 }
 
-fn fc_pg_mcv_list_items(
-    flinfo: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
+fn fc_pg_mcv_list_items(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_mcv_list_items: resolved FmgrInfo required");
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
@@ -145,51 +206,26 @@ fn fc_pg_mcv_list_items(
     Ok(srf.finish(fcinfo))
 }
 
-#[cold]
-fn cannot_accept(typname: &'static str) -> Box<types_error::PgError> {
-    Box::new(
-        types_error::PgError::error(format!("cannot accept a value of type {typname}"))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
+const fn b(foid: types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
-macro_rules! fc_reject {
-    ($($fname:ident: $typname:literal;)*) => {$(
-        fn $fname(_f: Option<&mut FmgrInfo>, _fc: &mut Fcinfo) -> PgResult<Datum> {
-            Err(cannot_accept($typname))
-        }
-    )*};
+const fn bs(foid: types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
-fc_reject! {
-    fc_pg_ndistinct_in: "pg_ndistinct";
-    fc_pg_ndistinct_recv: "pg_ndistinct";
-    fc_pg_dependencies_in: "pg_dependencies";
-    fc_pg_dependencies_recv: "pg_dependencies";
-    fc_pg_mcv_list_in: "pg_mcv_list";
-    fc_pg_mcv_list_recv: "pg_mcv_list";
-}
-
-const fn b(foid: Oid, name: &'static str, nargs: i16, retset: bool, func: PGFunction) -> FmgrBuiltin {
-    FmgrBuiltin { foid, name, nargs, strict: true, retset, func }
-}
-
-pub static STATISTICS_BUILTINS: &[FmgrBuiltin] = &[
-    b(3355, "pg_ndistinct_in", 1, false, fc_pg_ndistinct_in),
-    b(3356, "pg_ndistinct_out", 1, false, fc_pg_ndistinct_out),
-    b(3357, "pg_ndistinct_recv", 1, false, fc_pg_ndistinct_recv),
-    b(3358, "pg_ndistinct_send", 1, false, varlena::builtins::fc_byteasend),
-    b(3404, "pg_dependencies_in", 1, false, fc_pg_dependencies_in),
-    b(3405, "pg_dependencies_out", 1, false, fc_pg_dependencies_out),
-    b(3406, "pg_dependencies_recv", 1, false, fc_pg_dependencies_recv),
-    b(3407, "pg_dependencies_send", 1, false, varlena::builtins::fc_byteasend),
-    b(3427, "pg_stats_ext_mcvlist_items", 1, true, fc_pg_mcv_list_items),
-    b(5018, "pg_mcv_list_in", 1, false, fc_pg_mcv_list_in),
-    b(5019, "pg_mcv_list_out", 1, false, varlena::builtins::fc_byteaout),
-    b(5020, "pg_mcv_list_recv", 1, false, fc_pg_mcv_list_recv),
-    b(5021, "pg_mcv_list_send", 1, false, varlena::builtins::fc_byteasend),
+pub const STATISTICS_BUILTINS: &[FmgrBuiltin] = &[
+    b(3355, "pg_ndistinct_in", 1, fc_pg_ndistinct_in),
+    b(3356, "pg_ndistinct_out", 1, fc_pg_ndistinct_out),
+    b(3357, "pg_ndistinct_recv", 1, fc_pg_ndistinct_recv),
+    b(3358, "pg_ndistinct_send", 1, varlena::builtins::fc_byteasend),
+    b(3404, "pg_dependencies_in", 1, fc_pg_dependencies_in),
+    b(3405, "pg_dependencies_out", 1, fc_pg_dependencies_out),
+    b(3406, "pg_dependencies_recv", 1, fc_pg_dependencies_recv),
+    b(3407, "pg_dependencies_send", 1, varlena::builtins::fc_byteasend),
+    bs(3427, "pg_stats_ext_mcvlist_items", 1, fc_pg_mcv_list_items),
+    b(5018, "pg_mcv_list_in", 1, fc_pg_mcv_list_in),
+    b(5019, "pg_mcv_list_out", 1, varlena::builtins::fc_byteaout),
+    b(5020, "pg_mcv_list_recv", 1, fc_pg_mcv_list_recv),
+    b(5021, "pg_mcv_list_send", 1, varlena::builtins::fc_byteasend),
 ];
-
-pub fn register_builtins() {
-    fmgr_core::register_late_builtins(STATISTICS_BUILTINS);
-}

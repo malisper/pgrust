@@ -35,7 +35,6 @@ readfuncs = { path = "../../nodes/readfuncs" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 execexpr = { path = "../../executor/execexpr" }
 exectuples = { path = "../../executor/exectuples" }
-fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 varlena = { path = "../../utils/adt/varlena" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
