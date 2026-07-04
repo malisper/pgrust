@@ -9,6 +9,7 @@ name = "parse_expr"
 path = "src/lib.rs"
 
 [dependencies]
+adt_xml = { path = "../../utils/adt/xml" }
 analyze_seams = { path = "../analyze_seams" }
 coerce = { path = "../coerce" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }

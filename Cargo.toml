@@ -156,6 +156,7 @@ members = [
     "crates/backend/executor/execindexing",
     "crates/backend/executor/nodemodifytable",
     "crates/backend/executor/nodefunctionscan",
+    "crates/backend/executor/nodetablefuncscan",
     "crates/backend/executor/nodevaluesscan",
     "crates/backend/executor/nodeseqscan",
     "crates/backend/executor/nodetidscan",

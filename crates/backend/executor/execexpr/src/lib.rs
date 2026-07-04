@@ -18,6 +18,7 @@ mod arrayops;
 mod compile;
 pub mod domain;
 mod interp;
+mod xmlops;
 mod steps;
 #[cfg(test)]
 mod tests;

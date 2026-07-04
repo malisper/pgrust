@@ -962,6 +962,8 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_TargetEntry
         | NodeTag::T_FromExpr
         | NodeTag::T_SubLink
+        | NodeTag::T_XmlExpr
+        | NodeTag::T_TableFunc
         | NodeTag::T_List => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }

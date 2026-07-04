@@ -1296,6 +1296,98 @@ where
                 },
             )?))
         }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            let named_args = mutate_list(mcx, &x.named_args, m)?;
+            let args = mutate_list(mcx, &x.args, m)?;
+            if named_args.is_none() && args.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::XmlExpr {
+                    op: x.op,
+                    name: x.name,
+                    named_args: match named_args {
+                        Some(l) => l,
+                        None => x.named_args.clone_in(mcx)?,
+                    },
+                    arg_names: x.arg_names.clone_in(mcx)?,
+                    args: match args {
+                        Some(l) => l,
+                        None => x.args.clone_in(mcx)?,
+                    },
+                    xmloption: x.xmloption,
+                    indent: x.indent,
+                    r#type: x.r#type,
+                    typmod: x.typmod,
+                    location: x.location,
+                },
+            )?))
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            let ns_uris = mutate_list(mcx, &tf.ns_uris, m)?;
+            let docexpr = match tf.docexpr {
+                Some(d) => m(d)?.map(Some),
+                None => None,
+            };
+            let rowexpr = match tf.rowexpr {
+                Some(r) => m(r)?.map(Some),
+                None => None,
+            };
+            let colexprs = mutate_opt_list(mcx, &tf.colexprs, m)?;
+            let coldefexprs = mutate_opt_list(mcx, &tf.coldefexprs, m)?;
+            let colvalexprs = mutate_list(mcx, &tf.colvalexprs, m)?;
+            let passingvalexprs = mutate_list(mcx, &tf.passingvalexprs, m)?;
+            if ns_uris.is_none()
+                && docexpr.is_none()
+                && rowexpr.is_none()
+                && colexprs.is_none()
+                && coldefexprs.is_none()
+                && colvalexprs.is_none()
+                && passingvalexprs.is_none()
+            {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::TableFunc {
+                    functype: tf.functype,
+                    ns_uris: match ns_uris {
+                        Some(l) => l,
+                        None => tf.ns_uris.clone_in(mcx)?,
+                    },
+                    ns_names: tf.ns_names.clone_in(mcx)?,
+                    docexpr: docexpr.unwrap_or(tf.docexpr),
+                    rowexpr: rowexpr.unwrap_or(tf.rowexpr),
+                    colnames: tf.colnames.clone_in(mcx)?,
+                    coltypes: tf.coltypes.clone_in(mcx)?,
+                    coltypmods: tf.coltypmods.clone_in(mcx)?,
+                    colcollations: tf.colcollations.clone_in(mcx)?,
+                    colexprs: match colexprs {
+                        Some(l) => l,
+                        None => tf.colexprs.clone_in(mcx)?,
+                    },
+                    coldefexprs: match coldefexprs {
+                        Some(l) => l,
+                        None => tf.coldefexprs.clone_in(mcx)?,
+                    },
+                    colvalexprs: match colvalexprs {
+                        Some(l) => l,
+                        None => tf.colvalexprs.clone_in(mcx)?,
+                    },
+                    passingvalexprs: match passingvalexprs {
+                        Some(l) => l,
+                        None => tf.passingvalexprs.clone_in(mcx)?,
+                    },
+                    notnulls: tf.notnulls.clone_in(mcx)?,
+                    plan: tf.plan,
+                    ordinalitycol: tf.ordinalitycol,
+                    location: tf.location,
+                },
+            )?))
+        }
         other => deferred("expression_tree_mutator", other),
     }
 }

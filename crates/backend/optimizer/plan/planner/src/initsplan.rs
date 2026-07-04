@@ -320,6 +320,10 @@ fn extract_lateral_references<'mcx>(
                 vars.concat(mcx, &vars::pull_vars_of_level(mcx, l, 0)?)?;
             }
         }
+        RTEKind::RTE_TABLEFUNC => {
+            let tf = rte.tablefunc.expect("TABLEFUNC RTE has tablefunc");
+            vars = vars::pull_vars_of_level(mcx, tf, 0)?;
+        }
         other => panic!("extract_lateral_references (initsplan.c): {other:?} lateral RTE"),
     }
     if vars.is_nil() {

@@ -274,6 +274,31 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // No C case: both fall to C's expression_tree_walker default.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter().chain(x.args.iter()) {
+                cost_qual_eval_walker(a, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            for a in tf.ns_uris.iter().chain(tf.colvalexprs.iter()).chain(tf.passingvalexprs.iter())
+            {
+                cost_qual_eval_walker(a, cost)?;
+            }
+            for a in tf.colexprs.iter().chain(tf.coldefexprs.iter()).flatten() {
+                cost_qual_eval_walker(a, cost)?;
+            }
+            if let Some(d) = tf.docexpr {
+                cost_qual_eval_walker(d, cost)?;
+            }
+            if let Some(r) = tf.rowexpr {
+                cost_qual_eval_walker(r, cost)?;
+            }
+            Ok(())
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -507,6 +532,54 @@ pub fn set_values_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResu
     );
     run.root.rel_mut(rel).tuples = run.rte(rti).values_lists.len() as f64;
     set_baserel_size_estimates(run, rel)
+}
+
+// set_tablefunc_size_estimates (costsize.c): whole-table estimate is a
+// hardwired 100 rows.
+pub fn set_tablefunc_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    run.root.rel_mut(rel).tuples = 100.0;
+    set_baserel_size_estimates(run, rel)
+}
+
+// cost_tablefuncscan (costsize.c); tuplestore spill costs unmodeled, as C.
+pub fn cost_tablefuncscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_TABLEFUNC);
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
+
+    let mut startup_cost = 0.0;
+    let mut exprcost = QualCost::default();
+    if let Some(tf) = run.rte(relid as usize).tablefunc {
+        cost_qual_eval_walker(tf, &mut exprcost)?;
+    }
+    startup_cost += exprcost.startup + exprcost.per_tuple;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut run_cost = cpu_per_tuple * tuples;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
 }
 
 // cost_valuesscan (costsize.c): one cpu_operator_cost per list evaluation.

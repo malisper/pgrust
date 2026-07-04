@@ -340,6 +340,9 @@ fn create_scan_plan<'mcx>(
         t if t == crate::pathnode::tag16(NodeTag::T_FunctionScan) => {
             create_functionscan_plan(run, best_path, tlist, scan_clauses)?
         }
+        t if t == crate::pathnode::tag16(NodeTag::T_TableFuncScan) => {
+            create_tablefuncscan_plan(run, best_path, tlist, scan_clauses)?
+        }
         t if t == crate::pathnode::tag16(NodeTag::T_ValuesScan) => {
             create_valuesscan_plan(run, best_path, tlist, scan_clauses)?
         }
@@ -713,6 +716,38 @@ fn create_functionscan_plan<'mcx>(
     plan.scan.scanrelid = scan_relid;
     plan.functions = functions;
     plan.funcordinality = funcordinality;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_tablefuncscan_plan (createplan.c).
+fn create_tablefuncscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_TABLEFUNC);
+    let mut tablefunc = rte.tablefunc.expect("TABLEFUNC RTE has tablefunc");
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        tablefunc = replace_nestloop_params(run, tablefunc)?;
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::TableFuncScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.tablefunc = Some(tablefunc);
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }

@@ -665,6 +665,12 @@ fn run_program<'mcx>(
                     write_out(*out, value, isnull);
                 }
             }
+            Step::XmlExprEval { state, out } => {
+                // SAFETY: compile-allocated state, live for the program.
+                let st = unsafe { state.as_ref() };
+                let (value, isnull) = crate::xmlops::eval_xml_expr(st)?;
+                write_out(*out, value, isnull);
+            }
             Step::MinMax { call, slots, nelems, least, out } => {
                 let mut value = Datum::null();
                 let mut isnull = true;

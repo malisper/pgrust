@@ -995,6 +995,121 @@ pub fn addRangeTableEntryForValues<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
+// C addRangeTableEntryForTableFunc (parse_relation.c); XMLTABLE only here.
+pub fn addRangeTableEntryForTableFunc<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    tf_node: Node<'mcx>,
+    alias: Option<&'mcx Alias<'mcx>>,
+    lateral: bool,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let tf = tf_node.as_table_func().expect("TableFunc node");
+    let ncolumns = tf.colnames.len();
+    if ncolumns > types_tuple::htup::MaxTupleAttributeNumber as usize {
+        return Err(too_many_tablefunc_columns(pstate, tf.location));
+    }
+    debug_assert_eq!(tf.coltypes.len(), ncolumns);
+    debug_assert_eq!(tf.coltypmods.len(), ncolumns);
+    debug_assert_eq!(tf.colcollations.len(), ncolumns);
+
+    let refname = alias.and_then(|a| a.aliasname).unwrap_or("xmltable");
+    let mut eref_colnames = match alias {
+        Some(a) => a.colnames.clone_in(mcx)?,
+        None => NodeList::nil(),
+    };
+    let numaliases = eref_colnames.len();
+    for i in numaliases..ncolumns {
+        eref_colnames.lappend(mcx, tf.colnames.nth(i))?;
+    }
+    if numaliases > ncolumns {
+        return Err(tablefunc_too_many_aliases(ncolumns, numaliases));
+    }
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some(refname), colnames: eref_colnames })?
+        .seal_ref();
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_TABLEFUNC,
+        tablefunc: Some(tf_node),
+        coltypes: tf.coltypes.clone_in(mcx)?,
+        coltypmods: tf.coltypmods.clone_in(mcx)?,
+        colcollations: tf.colcollations.clone_in(mcx)?,
+        alias,
+        eref: Some(eref),
+        lateral,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, ncolumns)?;
+    for varattno in 0..ncolumns {
+        nscolumns.push(ParseNamespaceColumn {
+            p_varno: rtindex as Index,
+            p_varattno: varattno as AttrNumber + 1,
+            p_vartype: rte.coltypes.nth(varattno),
+            p_vartypmod: rte.coltypmods.nth(varattno),
+            p_varcollid: rte.colcollations.nth(varattno),
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: rtindex as Index,
+            p_varattnosyn: varattno as AttrNumber + 1,
+            p_dontexpand: false,
+        });
+    }
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_tablefunc_columns(
+    pstate: &ParseState<'_, '_>,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg(format!(
+                "functions in FROM can return at most {} columns",
+                types_tuple::htup::MaxTupleAttributeNumber
+            ))
+            .errposition(parser_small1::parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForTableFunc")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn tablefunc_too_many_aliases(available: usize, specified: usize) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(format!(
+                "XMLTABLE function has {available} columns available but {specified} \
+                 columns specified"
+            ))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForTableFunc")),
+    )
+}
+
 /// C addRangeTableEntryForSubquery; the caller passes one
 /// `(resname, exprType, exprTypmod, exprCollation)` tuple per non-junk
 /// tlist entry (the nodeFuncs slice lives in parse_expr).
@@ -1441,6 +1556,38 @@ pub fn expandRTE<'mcx>(
             location,
             include_dropped,
         ),
+        // C shares this leg across TABLEFUNC/VALUES/CTE/ENR (coltypes lists +
+        // eref colnames); only TABLEFUNC arrives here today.
+        RTEKind::RTE_TABLEFUNC => {
+            let mut colnames = NodeList::nil();
+            let mut colvars = NodeList::nil();
+            let eref = rte.eref.expect("tablefunc RTE has eref");
+            for varattno in 0..rte.coltypes.len() {
+                let coltype = rte.coltypes.nth(varattno);
+                debug_assert!(coltype != InvalidOid, "tablefunc RTEs have no dropped cols");
+                colnames.lappend(mcx, eref.colnames.nth(varattno))?;
+                colvars.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        Var {
+                            varno: rtindex,
+                            varattno: varattno as AttrNumber + 1,
+                            vartype: coltype,
+                            vartypmod: rte.coltypmods.nth(varattno),
+                            varcollid: rte.colcollations.nth(varattno),
+                            varnullingrels: types_nodes::Bitmapset::empty(),
+                            varlevelsup: sublevels_up as Index,
+                            varreturningtype: returning_type,
+                            varnosyn: rtindex as Index,
+                            varattnosyn: varattno as AttrNumber + 1,
+                            location,
+                        },
+                    )?,
+                )?;
+            }
+            Ok((colnames, colvars))
+        }
         other => panic!(
             "expandRTE (parse_relation.c): arm for {other:?} unported — \
              unit backend-parser-relation"

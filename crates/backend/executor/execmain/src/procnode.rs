@@ -39,6 +39,7 @@ pub enum PlanStateNode<'mcx> {
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
+    TableFuncScan(PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>),
     CteScan(PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
     TidScan(::nodetidscan::TidScanState<'mcx>),
@@ -226,6 +227,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TidRangeScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
+            PlanStateNode::TableFuncScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::CteScan(cs) => Some(cs.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
             PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
@@ -280,6 +282,7 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .expect("ProjectSetState without a result type")),
             PlanStateNode::SeqScan(_)
             | PlanStateNode::FunctionScan(_)
+            | PlanStateNode::TableFuncScan(_)
             | PlanStateNode::ValuesScan(_)
             | PlanStateNode::CteScan(_)
             | PlanStateNode::IndexScan(_)
@@ -367,6 +370,15 @@ pub fn exec_init_node<'mcx>(
                 eflags,
             )?;
             PlanStateNode::FunctionScan(::mcx::alloc_in(mcx, state)?)
+        }
+        NodeTag::T_TableFuncScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodetablefuncscan::exec_init_table_func_scan(
+                mcx,
+                node.as_table_func_scan().unwrap(),
+                estate,
+            )?;
+            PlanStateNode::TableFuncScan(::mcx::alloc_in(mcx, state)?)
         }
         NodeTag::T_ValuesScan => {
             let mcx = estate.es_query_cxt;
@@ -930,7 +942,6 @@ pub fn exec_init_node<'mcx>(
         tag => unported_nodes!(tag, {
             T_MergeAppend => "nodeMergeAppend.c",
             T_SampleScan => "nodeSamplescan.c",
-            T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
             T_ForeignScan => "nodeForeignscan.c",
@@ -990,6 +1001,7 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::SeqScan(ss) => Some(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
+        PlanStateNode::TableFuncScan(ts) => Some(&mut ts.ss),
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
@@ -1016,6 +1028,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
+        PlanStateNode::TableFuncScan(ts) => table_func_scan_arm(ts, estate),
         PlanStateNode::CteScan(cs) => cte_scan_arm(cs, estate),
         PlanStateNode::IndexScan(is) => index_scan_arm(is, estate),
         PlanStateNode::TidScan(ts) => tid_scan_arm(ts, estate),
@@ -1077,6 +1090,14 @@ fn function_scan_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     ::nodefunctionscan::exec_function_scan(fs, estate)
+}
+
+#[inline(never)]
+fn table_func_scan_arm<'mcx>(
+    ts: &mut PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetablefuncscan::exec_table_func_scan(ts, estate)
 }
 
 #[inline(never)]
@@ -1725,6 +1746,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
+        PlanStateNode::TableFuncScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
         PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
@@ -1830,6 +1852,7 @@ pub fn planstate_instr_extra<'mcx>(
         | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::IndexScan(_)
@@ -1901,6 +1924,10 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::ValuesScan(vs) => {
             ::nodevaluesscan::exec_end_values_scan(vs);
+            Ok(())
+        }
+        PlanStateNode::TableFuncScan(ts) => {
+            ::nodetablefuncscan::exec_end_table_func_scan(ts);
             Ok(())
         }
         PlanStateNode::CteScan(cs) => {
@@ -2025,6 +2052,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::WorkTableScan(_)
@@ -2287,7 +2315,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 );
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
-        Result(x), SeqScan(x), FunctionScan(x), ValuesScan(x), CteScan(x),
+        Result(x), SeqScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
         IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),

@@ -20,6 +20,8 @@ pub const EXPRKIND_RTFUNC_LATERAL: i32 = 3;
 pub const EXPRKIND_VALUES: i32 = 4;
 pub const EXPRKIND_VALUES_LATERAL: i32 = 5;
 pub const EXPRKIND_LIMIT: i32 = 6;
+pub const EXPRKIND_TABLEFUNC: i32 = 8;
+pub const EXPRKIND_TABLEFUNC_LATERAL: i32 = 9;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
@@ -165,7 +167,16 @@ pub fn subquery_planner<'mcx>(
                 };
             }
             RTEKind::RTE_TABLEFUNC => {
-                panic!("preprocess_function_rtes (prepjointree.c): {:?}; M2 lane", rte.rtekind)
+                let kind =
+                    if rte.lateral { EXPRKIND_TABLEFUNC_LATERAL } else { EXPRKIND_TABLEFUNC };
+                let tf =
+                    preprocess_expression(run, rte.tablefunc, kind, parse.hasSubLinks)?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.tablefunc = tf
+                    })
+                };
             }
             RTEKind::RTE_CTE => {
                 // A self-reference is only legal under a recursive-union level

@@ -30,6 +30,7 @@ execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
 execgrouping = { path = "../execgrouping" }
 nodefunctionscan = { path = "../nodefunctionscan" }
+nodetablefuncscan = { path = "../nodetablefuncscan" }
 nodevaluesscan = { path = "../nodevaluesscan" }
 nodectescan = { path = "../nodectescan" }
 noderecursiveunion = { path = "../noderecursiveunion" }

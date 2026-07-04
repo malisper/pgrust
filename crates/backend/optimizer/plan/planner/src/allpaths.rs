@@ -112,6 +112,9 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
         RTEKind::RTE_VALUES => {
             crate::costsize::set_values_size_estimates(run, rel)?;
         }
+        RTEKind::RTE_TABLEFUNC => {
+            crate::costsize::set_tablefunc_size_estimates(run, rel)?;
+        }
         RTEKind::RTE_SUBQUERY => {
             set_subquery_pathlist(run, rel, rti)?;
         }
@@ -390,6 +393,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
             RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
             RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
             RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
+            RTEKind::RTE_TABLEFUNC => set_tablefunc_pathlist(run, rel)?,
             RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
             RTEKind::RTE_CTE => {} // fully handled during set_rel_size
             RTEKind::RTE_RESULT => set_result_pathlist(run, rel)?,
@@ -667,6 +671,13 @@ fn set_values_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     add_path(run, rel, path);
     Ok(())
 }
+// set_tablefunc_pathlist (allpaths.c).
+fn set_tablefunc_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_tablefuncscan_path(run, rel, &required_outer)?;
+    add_path(run, rel, path);
+    Ok(())
+}
 
 fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     crate::indxpath::check_index_predicates(run, rel)?;
@@ -685,7 +696,10 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             }
             debug_assert!(rte.tablesample.is_none());
         }
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_SUBQUERY => {
+        RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_SUBQUERY => {
             // C tests is_parallel_safe over the funcexprs/values_lists (and
             // security_barrier for subqueries); parallel plans are loud on
             // this lane, so the flag stays conservatively false.

@@ -207,6 +207,7 @@ pub enum Step {
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
     JumpIfNull { jumpdone: u32, out: OutRef },
     ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    XmlExprEval { state: NonNull<crate::xmlops::XmlExprState>, out: OutRef },
     SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
     SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
