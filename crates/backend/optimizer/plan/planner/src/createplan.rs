@@ -336,7 +336,7 @@ fn create_scan_plan<'mcx>(
         physical
     } else {
         let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
-        build_path_tlist(run, target_id)?
+        build_path_tlist(run, target_id, best_path)?
     };
 
     let plan = match pathtype {
@@ -424,7 +424,7 @@ fn create_gating_plan<'mcx>(
         _ => Some(plan),
     };
     let target_id = run.root.path(path_id).base().pathtarget_id.unwrap();
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     let mut gplan = Node::build::<ResultPlan<'mcx>>(mcx)?;
     gplan.plan.targetlist = tlist;
@@ -1491,7 +1491,7 @@ fn create_projection_plan<'mcx>(
     if !is_projection_capable_pathtype(run.root.path(subpath_id).base().pathtype) {
         // Result arm (projection-incapable subplan, e.g. Append).
         let subplan = create_plan_recurse(run, subpath_id, 0)?;
-        let tlist = build_path_tlist(run, target_id)?;
+        let tlist = build_path_tlist(run, target_id, path_id)?;
         if !tlist_same_exprs(&tlist, &subplan.as_plan().expect("plan node").targetlist) {
             let mut plan = Node::build::<ResultPlan<'mcx>>(run.mcx)?;
             plan.plan.targetlist = tlist;
@@ -1516,7 +1516,7 @@ fn create_projection_plan<'mcx>(
     }
 
     let subplan = create_plan_recurse(run, subpath_id, CP_IGNORE_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let width = run.root.pathtarget(target_id).width;
 
     // C scribbles the new tlist and label costs onto the just-built subplan.
@@ -1548,7 +1548,7 @@ fn create_project_set_plan<'mcx>(
         _ => unreachable!(),
     };
     let subplan = create_plan_recurse(run, subpath_id, 0)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let mut plan = Node::build::<types_nodes::plannodes::ProjectSet>(run.mcx)?;
     plan.plan.targetlist = tlist;
     plan.plan.lefttree = Some(subplan);
@@ -1738,7 +1738,7 @@ fn create_group_result_plan<'mcx>(
         ),
         _ => unreachable!(),
     };
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let width = run.root.pathtarget(target_id).width;
 
     // order_qual_clauses over bare clauses: stable sort by per-tuple cost
@@ -1791,7 +1791,7 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     // Agg can project, so no need to be picky about the child tlist, but the
     // grouping columns must be available (CP_LABEL_TLIST).
     let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     // extract_grouping_cols/ops/collations (tlist.c) against the subplan tlist.
     let group_clause = match run.root.path(path_id) {
@@ -1869,7 +1869,7 @@ fn create_unique_plan<'mcx>(
         "create_unique_plan (createplan.c): UNIQUE_PATH_SORT arm unported"
     );
 
-    let mut newtlist = build_path_tlist(run, target_id)?;
+    let mut newtlist = build_path_tlist(run, target_id, path_id)?;
     let mut newitems = false;
     for &uid in uniq_expr_ids.iter() {
         let uniqexpr = *run.root.expr_node(uid);
@@ -1940,7 +1940,7 @@ fn create_unique_plan<'mcx>(
     let num_cols = uniq_expr_ids.len();
     let rows = run.root.path(path_id).base().rows;
     let mut plan = Node::build::<Agg>(mcx)?;
-    plan.plan.targetlist = build_path_tlist(run, target_id)?;
+    plan.plan.targetlist = build_path_tlist(run, target_id, path_id)?;
     plan.plan.qual = NodeList::nil();
     plan.plan.lefttree = Some(subplan);
     plan.aggstrategy = types_pathnodes::AGG_HASHED;
@@ -2016,7 +2016,7 @@ fn create_minmaxagg_plan<'mcx>(
         )?;
     }
 
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let qual_list = order_bare_qual_clauses(run, &qual_ids)?;
 
     let mut plan = Node::build::<ResultPlan>(mcx)?;
@@ -2228,7 +2228,7 @@ fn create_groupingsets_plan<'mcx>(
     let rollup = &rollups[0];
     let top_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
     let (ops, colls) = grouping_arrays(run, &rollup.groupClause)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let mut qual = NodeList::nil();
     for &q in qual_ids.iter() {
         qual.lappend(mcx, *run.root.expr_node(q))?;
@@ -2272,7 +2272,7 @@ fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> P
     // WindowAgg spools its input into a tuplestore: request a small tlist,
     // with grouping columns labeled.
     let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST | CP_SMALL_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     let wc = wc_node.as_window_clause().expect("WindowClause");
     let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
@@ -2457,14 +2457,22 @@ fn clamp_cardinality_to_long(x: f64) -> i64 {
     }
 }
 
-// build_path_tlist; parameterized paths can't reach here.
-fn build_path_tlist<'mcx>(run: &mut PlannerRun<'mcx>, target_id: PtId) -> PgResult<NodeList<'mcx>> {
+// build_path_tlist (createplan.c).
+fn build_path_tlist<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    target_id: PtId,
+    path_id: PathId,
+) -> PgResult<NodeList<'mcx>> {
     let mcx = run.mcx;
+    let has_param = run.root.path(path_id).base().param_info.is_some();
     let n = run.root.pathtarget(target_id).exprs.len();
     let mut tlist = NodeList::nil();
     for i in 0..n {
         let target = run.root.pathtarget(target_id);
         let expr = *run.root.expr_node(target.exprs[i]);
+        // Parameterized path: lateral references become nestloop Params.
+        let expr = if has_param { replace_nestloop_params(run, expr)? } else { expr };
+        let target = run.root.pathtarget(target_id);
         let ressortgroupref = target.sortgrouprefs.get(i).copied().unwrap_or(0);
         let tle = Node::mk(
             mcx,
@@ -2975,7 +2983,7 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
         }
     }
 
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     // NestLoop can project, so no need to be picky about child tlists.
     let outer_plan = create_plan_recurse(run, outer_path, 0)?;
 
@@ -3030,11 +3038,11 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
 // otherclauses is NIL for inner joins.
 fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (outer_path, inner_path, jointype, inner_unique, restrict, hash_rinfos, target_id, num_batches) =
+    let (has_param, outer_path, inner_path, jointype, inner_unique, restrict, hash_rinfos, target_id, num_batches) =
         match run.root.path(path_id) {
             PathNode::HashPath(hp) => {
-                debug_assert!(hp.jpath.path.param_info.is_none());
                 (
+                    hp.jpath.path.param_info.is_some(),
                     hp.jpath.outerjoinpath.expect("hashjoin outer path"),
                     hp.jpath.innerjoinpath.expect("hashjoin inner path"),
                     hp.jpath.jointype,
@@ -3050,7 +3058,7 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
                 other.base().pathtype
             ),
         };
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let outer_flags = if num_batches > 1 { CP_SMALL_TLIST } else { 0 };
     let outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
     let inner_plan = create_plan_recurse(run, inner_path, CP_SMALL_TLIST)?;
@@ -3068,6 +3076,17 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     // hashclauses (plain OpExpr form) removed from joinclauses (no double eval).
     let hashclauses_actual = get_actual_clauses(run, &hash_rinfos);
     let joinclauses = list_difference(mcx, &joinclauses, &hashclauses_actual);
+
+    // Parameterized path: outer-relation Vars become nestloop Params (there
+    // are none in the hashclauses).
+    let (joinclauses, otherclauses) = if has_param {
+        (
+            replace_nestloop_params_list(run, &joinclauses)?,
+            replace_nestloop_params_list(run, &otherclauses)?,
+        )
+    } else {
+        (joinclauses, otherclauses)
+    };
 
     // Rearrange so the outer variable is on the left, per outer rel relids.
     let outer_relids =
@@ -3300,9 +3319,9 @@ fn create_mergejoin_plan<'mcx>(
         materialize_inner,
         outer_presorted_keys,
         target_id,
+        has_param,
     ) = match run.root.path(path_id) {
         PathNode::MergePath(mp) => {
-            debug_assert!(mp.jpath.path.param_info.is_none());
             (
                 mp.jpath.outerjoinpath.expect("mergejoin outer path"),
                 mp.jpath.innerjoinpath.expect("mergejoin inner path"),
@@ -3316,6 +3335,7 @@ fn create_mergejoin_plan<'mcx>(
                 mp.materialize_inner,
                 mp.outer_presorted_keys,
                 mp.jpath.path.pathtarget_id.unwrap(),
+                mp.jpath.path.param_info.is_some(),
             )
         }
         other => panic!(
@@ -3325,7 +3345,7 @@ fn create_mergejoin_plan<'mcx>(
     };
     debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let outer_flags = if outersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
     let inner_flags = if innersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
     let mut outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
@@ -3344,6 +3364,17 @@ fn create_mergejoin_plan<'mcx>(
     // NB: mergeclauses keep RestrictInfo order (never reordered by cost).
     let merge_actual = get_actual_clauses(run, &merge_rinfos);
     let joinclauses = list_difference(mcx, &joinclauses, &merge_actual);
+
+    // Parameterized path: outer-relation Vars become nestloop Params (there
+    // are none in the mergeclauses).
+    let (joinclauses, otherclauses) = if has_param {
+        (
+            replace_nestloop_params_list(run, &joinclauses)?,
+            replace_nestloop_params_list(run, &otherclauses)?,
+        )
+    } else {
+        (joinclauses, otherclauses)
+    };
 
     let outer_relids = crate::relnode::relids_copy(
         mcx,
@@ -3536,7 +3567,7 @@ fn create_append_plan<'mcx>(
             ),
             _ => unreachable!(),
         };
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     if subpaths.is_empty() {
         // Dummy rel: a Result plan with a constant-FALSE gating qual.
@@ -3671,7 +3702,7 @@ fn create_merge_append_plan<'mcx>(
             ),
             _ => unreachable!(),
         };
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     let relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel_id).relids);
     let node_cols = prepare_sort_from_pathkeys(run, &tlist, &pathkeys, &relids, None)?;
 
@@ -3741,7 +3772,7 @@ fn create_setop_plan<'mcx>(
             ),
             _ => unreachable!(),
         };
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     // SetOp doesn't project: tlist requirements pass through, and the
     // grouping columns must be labeled.
     let leftplan = create_plan_recurse(run, leftpath, flags | CP_LABEL_TLIST)?;
@@ -3811,7 +3842,7 @@ fn create_recursiveunion_plan<'mcx>(
     // Both children must produce the same tlist.
     let leftplan = create_plan_recurse(run, leftpath, CP_EXACT_TLIST)?;
     let rightplan = create_plan_recurse(run, rightpath, CP_EXACT_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     let mut dup_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
     let mut dup_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
