@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 use localtime::{pg_tz_acceptable, tzload, tzparse, PgTz, TzLoadError, TzState, TZ_STRLEN_MAX};
 use mcx::{Mcx, MemoryContext, PgHashMap};
+use pgstrcasecmp::pg_toupper;
 use types_core::primitive::MAXPGPATH;
 use types_error::{PgError, PgResult, ERROR, LOG};
 
@@ -158,15 +159,6 @@ struct TzCache {
 
 thread_local! {
     static TIMEZONE_CACHE: RefCell<Option<TzCache>> = const { RefCell::new(None) };
-}
-
-#[inline]
-fn pg_toupper(b: u8) -> u8 {
-    if b.is_ascii_lowercase() {
-        b - b'a' + b'A'
-    } else {
-        b
-    }
 }
 
 #[cold]

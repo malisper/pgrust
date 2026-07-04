@@ -1,6 +1,5 @@
-//! shell_archive.c. The ArchiveModuleCallbacks indirection is the pgarch-side
-//! ArchiveModule enum (shell is the only in-core provider); check_configured
-//! returns the errdetail instead of the C arch_module_check_errdetail global.
+//! shell_archive.c. ArchiveModuleCallbacks is pgarch's ArchiveModule enum
+//! (shell is the only in-core provider); check_configured returns errdetail text.
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
@@ -8,10 +7,7 @@
 use elog::{elog, ereport};
 use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG3, FATAL, LOG};
 
-pub mod percentrepl;
-pub mod wait_error;
-
-pub use percentrepl::replace_percent_placeholders;
+use percentrepl::replace_percent_placeholders;
 
 const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_ARCHIVE_COMMAND: u32 = PG_WAIT_IPC + 2;

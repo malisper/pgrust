@@ -182,16 +182,12 @@ pub fn visibilitymap_count(rel: &RelationData<'_>) -> PgResult<(BlockNumber, Blo
         let map = unsafe {
             core::slice::from_raw_parts(page.as_ptr().add(CONTENTS_OFF), MAPSIZE as usize)
         };
-        nvisible += pg_popcount_masked(map, VISIBLE_MASK8);
-        nfrozen += pg_popcount_masked(map, FROZEN_MASK8);
+        nvisible += pg_bitutils::pg_popcount_masked(map, VISIBLE_MASK8);
+        nfrozen += pg_bitutils::pg_popcount_masked(map, FROZEN_MASK8);
         pin.release();
         mapBlock += 1;
     }
     Ok((nvisible as BlockNumber, nfrozen as BlockNumber))
-}
-
-fn pg_popcount_masked(buf: &[u8], mask: u8) -> u64 {
-    buf.iter().map(|&b| (b & mask).count_ones() as u64).sum()
 }
 
 // XLogHintBitIsNeeded() (xlog.h).

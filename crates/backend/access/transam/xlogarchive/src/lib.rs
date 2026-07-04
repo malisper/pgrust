@@ -2,15 +2,14 @@
 //! ExecuteRecoveryCommand, KeepFileRestoredFromArchive) are callable but have
 //! no in-tree caller yet (recovery core owns them); Windows-only arms and
 //! walsender wakeups (walsender unported: no walsender thread can exist, so
-//! the wakeups are exact no-ops) are absent. BuildRestoreCommand (C home
-//! src/common/archive.c) is hosted here until that unit lands.
+//! the wakeups are exact no-ops) are absent. BuildRestoreCommand is re-exported
+//! from the `archive` crate (C home src/common/archive.c).
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
 use elog::ereport;
 use init_small::globals as g;
-use shell_archive::wait_error;
 use transam_xlog::{
     IsTLHistoryFileName, StatusFilePath, XLByteToSeg, XLogArchivingActive, XLogArchivingAlways,
     XLogFileName, GetRecoveryState, RECOVERY_STATE_ARCHIVE, XLOGDIR,
@@ -35,22 +34,7 @@ fn io_errno(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(0)
 }
 
-pub fn BuildRestoreCommand(
-    restore_command: &str,
-    xlogpath: &str,
-    xlogfname: &str,
-    last_restart_point_fname: &str,
-) -> PgResult<String> {
-    shell_archive::replace_percent_placeholders(
-        restore_command,
-        "restore_command",
-        &[
-            ('f', Some(xlogfname)),
-            ('r', Some(last_restart_point_fname)),
-            ('p', Some(xlogpath)),
-        ],
-    )
-}
+pub use archive::BuildRestoreCommand;
 
 pub fn RestoreArchivedFile(
     xlogfname: &str,
@@ -180,7 +164,7 @@ pub fn ExecuteRecoveryCommand(
     let restart_seg_no = XLByteToSeg(restart_redo_ptr, wal_segsz);
     let last_restart_point_fname = XLogFileName(restart_tli, restart_seg_no, wal_segsz);
 
-    let xlog_recovery_cmd = shell_archive::replace_percent_placeholders(
+    let xlog_recovery_cmd = percentrepl::replace_percent_placeholders(
         command,
         command_name,
         &[('r', Some(&last_restart_point_fname))],

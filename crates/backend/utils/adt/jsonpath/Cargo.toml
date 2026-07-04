@@ -15,6 +15,7 @@ datum = { path = "../../../../_support/types/datum" }
 mbutils = { path = "../../mb/mbutils" }
 mcx = { path = "../../../../_support/mcx" }
 numutils = { path = "../numutils" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
 pqformat = { path = "../../../libpq/pqformat" }
 regex_core = { path = "../../../regex/regex_core" }
 stack_depth = { path = "../../misc/stack_depth" }

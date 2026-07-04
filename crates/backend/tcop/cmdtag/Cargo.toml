@@ -8,3 +8,4 @@ publish.workspace = true
 types_core = { path = "../../../_support/types/types_core" }
 types_portal = { path = "../../../_support/types/portal" }
 numutils = { path = "../../utils/adt/numutils" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }

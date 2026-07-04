@@ -1,7 +1,6 @@
 use std::cell::Cell;
 
-use crate::percentrepl::replace_percent_placeholders;
-use crate::wait_error;
+use percentrepl::replace_percent_placeholders;
 
 #[test]
 fn percent_placeholders_substitution() {

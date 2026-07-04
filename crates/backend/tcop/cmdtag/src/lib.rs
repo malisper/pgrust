@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 
 use ::numutils::pg_ulltoa_n;
+use ::pgstrcasecmp::pg_strcasecmp;
 use ::types_core::CommandTag;
 use ::types_portal::{QueryCompletion, CMDTAG_INSERT, CMDTAG_UNKNOWN, COMPLETION_TAG_BUFSIZE};
 
@@ -257,29 +258,6 @@ pub fn command_tag_event_trigger_ok(commandTag: CommandTag) -> bool {
 
 pub fn command_tag_table_rewrite_ok(commandTag: CommandTag) -> bool {
     row(commandTag).table_rewrite_ok
-}
-
-// pg_strcasecmp (port/pgstrcasecmp.c), ASCII downcasing branch; the locale
-// tolower() branch for high-bit bytes is dropped (tag names are pure ASCII,
-// so high-bit input can never compare equal and ordering is unaffected in
-// the C locale the backend tables assume).
-fn pg_strcasecmp(s1: &[u8], s2: &[u8]) -> i32 {
-    let mut i = 0;
-    loop {
-        let ch1 = s1.get(i).copied().unwrap_or(0);
-        let ch2 = s2.get(i).copied().unwrap_or(0);
-        if ch1 != ch2 {
-            let l1 = if ch1.is_ascii_uppercase() { ch1 + 32 } else { ch1 };
-            let l2 = if ch2.is_ascii_uppercase() { ch2 + 32 } else { ch2 };
-            if l1 != l2 {
-                return l1 as i32 - l2 as i32;
-            }
-        }
-        if ch1 == 0 {
-            return 0;
-        }
-        i += 1;
-    }
 }
 
 pub fn GetCommandTagEnum(commandname: &[u8]) -> CommandTag {
