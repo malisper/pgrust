@@ -35,7 +35,10 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 commands_analyze_seams = { path = "../commands_analyze_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
@@ -86,7 +89,6 @@ inval = { path = "../../utils/cache/inval" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
-lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
 logical_seams = { path = "../../replication/logical_seams" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
@@ -118,7 +120,6 @@ snapbuild_seams = { path = "../../replication/snapbuild_seams" }
 spi_seams = { path = "../../executor/spi_seams" }
 subtrans = { path = "../../access/transam/subtrans" }
 syncrep_seams = { path = "../../replication/syncrep_seams" }
-syscache_seams = { path = "../../utils/cache/syscache_seams" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
 tablecmds_seams = { path = "../tablecmds_seams" }

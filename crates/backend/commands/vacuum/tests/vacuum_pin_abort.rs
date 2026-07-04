@@ -279,6 +279,19 @@ fn install_xact_periphery_seams() {
     aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
     aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
     lmgr_seams::check_relation_locked_by_me::set(|_, _, _| true);
+    syscache_seams::lookup_pg_class_ls_shape::set(|_relid| {
+        Ok(Some(syscache_seams::PgClassLsShape {
+            relnamespace: 2200,
+            reltype: 0,
+            relam: 2,
+            reltablespace: 0,
+            relnatts: 2,
+            relkind: b'r' as i8,
+            relpersistence: b'p' as i8,
+            relispartition: false,
+            relhassubclass: false,
+        }))
+    });
     namespace_seams::range_var_get_relid::set(|_mcx, rv, _lockmode, missing_ok| {
         if rv.relname == "t" {
             Ok(REL_OID)

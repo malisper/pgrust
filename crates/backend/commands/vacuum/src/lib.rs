@@ -1,7 +1,7 @@
-//! vacuum.c lazy lane: ExecVacuum -> vacuum -> vacuum_rel for named tables
-//! plus the TOAST recursion. FULL/ANALYZE/FREEZE/parallel/database-wide arms
-//! are loud named panics; pg_class relstats + datfrozenxid updates are recorded gaps
-//! (heap inplace-update lane unported).
+//! vacuum.c: ExecVacuum -> vacuum -> vacuum_rel for named tables with
+//! partition/inheritance expansion plus the TOAST recursion. parallel and
+//! database-wide/database-stats arms are loud named panics;
+//! vac_update_datfrozenxid is a recorded gap.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -22,11 +22,16 @@ use ::types_core::xact::{
     TransactionIdPrecedesOrEquals,
 };
 use ::types_core::{BlockNumber, InvalidOid, MultiXactId, Oid};
-use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR, WARNING};
+use ::types_error::{
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_TABLE, ERROR, WARNING,
+};
 use ::types_nodes::parsenodes::VacuumStmt;
 use ::types_nodes::NodeList;
 use ::types_rel::lock::{AccessShareLock, NoLock, ShareUpdateExclusiveLock};
-use ::types_rel::pg_class::{RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE};
+use ::types_rel::pg_class::{
+    RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
+};
 use ::types_rel::{Relation, RelationData, LOCKMODE};
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 
@@ -83,6 +88,8 @@ pub fn ExecVacuum<'mcx>(
     let mut analyze = false;
     let mut freeze = false;
     let mut disable_page_skipping = false;
+    let mut process_main = true;
+    let mut process_toast = true;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
@@ -101,7 +108,16 @@ pub fn ExecVacuum<'mcx>(
                 };
             }
             "full" => full = explain::defGetBoolean(opt)?,
-            "freeze" => freeze = explain::defGetBoolean(opt)?,
+            "freeze" => {
+                freeze = explain::defGetBoolean(opt)?;
+                // Silent no-freeze is worse than loud: vacuumlazy never passes
+                // HEAP_PAGE_PRUNE_FREEZE (pruneheap freeze lane unported), so
+                // FREEZE would run as a plain vacuum and diverge on
+                // relallfrozen/relfrozenxid.
+                if freeze {
+                    unported("ExecVacuum FREEZE: heap_page_prune_and_freeze freeze lane (pruneheap)");
+                }
+            }
             "disable_page_skipping" => {
                 disable_page_skipping = explain::defGetBoolean(opt)?
             }
@@ -112,12 +128,10 @@ pub fn ExecVacuum<'mcx>(
                     VacOptValue::Disabled
                 };
             }
-            name @ ("process_main" | "process_toast" | "parallel"
-            | "buffer_usage_limit" | "skip_database_stats" | "only_database_stats") => {
-                if explain::defGetBoolean(opt).unwrap_or(true) {
-                    unported_option(name);
-                }
-            }
+            "process_main" => process_main = explain::defGetBoolean(opt)?,
+            "process_toast" => process_toast = explain::defGetBoolean(opt)?,
+            name @ ("parallel" | "buffer_usage_limit" | "skip_database_stats"
+            | "only_database_stats") => unported_option(name),
             name => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_SYNTAX_ERROR)
@@ -133,8 +147,8 @@ pub fn ExecVacuum<'mcx>(
     }
 
     params.options = VACOPT_VACUUM
-        | VACOPT_PROCESS_MAIN
-        | VACOPT_PROCESS_TOAST
+        | (if process_main { VACOPT_PROCESS_MAIN } else { 0 })
+        | (if process_toast { VACOPT_PROCESS_TOAST } else { 0 })
         | (if verbose { VACOPT_VERBOSE } else { 0 })
         | (if skip_locked { VACOPT_SKIP_LOCKED } else { 0 })
         | (if freeze { VACOPT_FREEZE } else { 0 })
@@ -146,6 +160,14 @@ pub fn ExecVacuum<'mcx>(
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")
+            .into_error()
+            .into());
+    }
+
+    if full && !process_toast {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("PROCESS_TOAST required with VACUUM FULL")
             .into_error()
             .into());
     }
@@ -187,11 +209,7 @@ pub fn vacuum<'mcx>(
         unported("get_all_vacuum_rels (database-wide VACUUM)");
     }
 
-    // expand_vacuum_rel minimal: named-table lookup under AccessShareLock,
-    // held until the pre-pass transaction commits below (C shape). The
-    // partitioned-table expansion and permission pre-filter are unported.
-    let mut relids: ::mcx::PgVec<'_, (Oid, &'mcx NodeList<'mcx>)> =
-        ::mcx::PgVec::with_capacity_in(relations.len(), mcx);
+    let mut vacrels: ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>> = ::mcx::PgVec::new_in(mcx);
     for vrel_node in relations.iter() {
         let vrel = vrel_node
             .as_vacuum_relation()
@@ -203,26 +221,7 @@ pub fn vacuum<'mcx>(
                 .into_error()
                 .into());
         }
-        if vrel.oid != InvalidOid {
-            relids.push((vrel.oid, &vrel.va_cols));
-            continue;
-        }
-        let rv = vrel
-            .relation
-            .and_then(|n| n.as_range_var())
-            .expect("VacuumRelation.relation is RangeVar");
-        let rv = rel_vocab::RangeVar {
-            catalogname: rv.catalogname,
-            schemaname: rv.schemaname,
-            relname: rv.relname.expect("RangeVar.relname"),
-            inh: rv.inh,
-            relpersistence: rv.relpersistence,
-            location: rv.location,
-        };
-        relids.push((
-            namespace_seams::range_var_get_relid::call(mcx, &rv, AccessShareLock, false)?,
-            &vrel.va_cols,
-        ));
+        expand_vacuum_rel(mcx, vrel, params.options, &mut vacrels)?;
     }
 
     if snapmgr::ActiveSnapshotSet() {
@@ -235,9 +234,9 @@ pub fn vacuum<'mcx>(
     // catch_unwind = C's PG_FINALLY: panics become ERRORs at the tcop
     // boundary and the session survives, so in_vacuum must reset here too.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
-        for &(relid, va_cols) in relids.iter() {
+        for vrel in vacrels.iter() {
             let params_copy = *params;
-            if !vacuum_rel(mcx, relid, &params_copy, bstrategy.clone())? {
+            if !vacuum_rel(mcx, vrel.oid, vrel.relname, &params_copy, bstrategy.clone())? {
                 VACUUM_FAILSAFE_ACTIVE.set(false);
                 continue;
             }
@@ -248,12 +247,14 @@ pub fn vacuum<'mcx>(
                 snapmgr::PushActiveSnapshot(&snapshot)?;
                 commands_analyze_seams::analyze_rel::call(
                     mcx,
-                    relid,
-                    va_cols,
+                    vrel.oid,
+                    vrel.relname,
+                    vrel.va_cols,
                     params.options,
                     false,
                 )?;
                 snapmgr::PopActiveSnapshot()?;
+                xact::CommandCounterIncrement()?;
                 xact::CommitTransactionCommand()?;
             }
         }
@@ -274,9 +275,77 @@ pub fn vacuum<'mcx>(
     Ok(())
 }
 
+pub struct ExpandedVacRel<'mcx> {
+    pub oid: Oid,
+    pub relname: Option<&'mcx str>,
+    pub va_cols: &'mcx NodeList<'mcx>,
+}
+
+/// expand_vacuum_rel (vacuum.c): resolve the named table and, unless ONLY,
+/// append its partitions/inheritance children. The transient AccessShareLock
+/// is released before return, C-exact. vacuum_is_permitted_for_relation is
+/// skipped (single-user milestone).
+pub fn expand_vacuum_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    vrel: &'mcx types_nodes::parsenodes::VacuumRelation<'mcx>,
+    options: u32,
+    vacrels: &mut ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>>,
+) -> PgResult<()> {
+    if vrel.oid != InvalidOid {
+        vacrels.push(ExpandedVacRel { oid: vrel.oid, relname: None, va_cols: &vrel.va_cols });
+        return Ok(());
+    }
+    let rv = vrel
+        .relation
+        .and_then(|n| n.as_range_var())
+        .expect("VacuumRelation.relation is RangeVar");
+    let relname = rv.relname.expect("RangeVar.relname");
+    // RVR_SKIP_LOCKED elided: single-backend, the lock is always available.
+    let relid = namespace_seams::range_var_get_relid::call(
+        mcx,
+        &rel_vocab::RangeVar {
+            catalogname: rv.catalogname,
+            schemaname: rv.schemaname,
+            relname,
+            inh: rv.inh,
+            relpersistence: rv.relpersistence,
+            location: rv.location,
+        },
+        AccessShareLock,
+        false,
+    )?;
+    let class_shape = syscache_seams::lookup_pg_class_ls_shape::call(relid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+
+    vacrels.push(ExpandedVacRel { oid: relid, relname: Some(relname), va_cols: &vrel.va_cols });
+
+    let include_children = rv.inh;
+    let is_partitioned_table =
+        class_shape.relkind as u8 == types_rel::pg_class::RELKIND_PARTITIONED_TABLE;
+    if options & VACOPT_VACUUM != 0 && is_partitioned_table && !include_children {
+        ereport(WARNING)
+            .errmsg(format!(
+                "VACUUM ONLY of partitioned table \"{relname}\" has no effect"
+            ))
+            .finish(loc("expand_vacuum_rel"))?;
+    }
+
+    if include_children {
+        for &part_oid in pg_inherits::find_all_inheritors(mcx, relid, NoLock)?.iter() {
+            if part_oid == relid {
+                continue;
+            }
+            vacrels.push(ExpandedVacRel { oid: part_oid, relname: None, va_cols: &vrel.va_cols });
+        }
+    }
+    lmgr_seams::unlock_relation_oid::call(relid, AccessShareLock)?;
+    Ok(())
+}
+
 fn vacuum_rel<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
+    relname: Option<&str>,
     params: &VacuumParams,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<bool> {
@@ -292,7 +361,13 @@ fn vacuum_rel<'mcx>(
     } else {
         ShareUpdateExclusiveLock
     };
-    let rel = match vacuum_open_relation(mcx, relid, params.options, lmode)? {
+    let rel = match vacuum_open_relation(
+        mcx,
+        relid,
+        relname,
+        params.options & !VACOPT_ANALYZE,
+        lmode,
+    )? {
         Some(rel) => rel,
         None => {
             snapmgr::PopActiveSnapshot()?;
@@ -303,7 +378,7 @@ fn vacuum_rel<'mcx>(
 
     if !matches!(
         rel.rd_rel.relkind,
-        RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE
+        RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE | RELKIND_PARTITIONED_TABLE
     ) {
         ereport(WARNING)
             .errmsg(format!(
@@ -315,6 +390,15 @@ fn vacuum_rel<'mcx>(
         snapmgr::PopActiveSnapshot()?;
         xact::CommitTransactionCommand()?;
         return Ok(false);
+    }
+
+    // Partitioned tables have no storage; the useful work is on the child
+    // partitions queued separately. Returning true lets ANALYZE proceed.
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        rel.close(lmode)?;
+        snapmgr::PopActiveSnapshot()?;
+        xact::CommitTransactionCommand()?;
+        return Ok(true);
     }
 
     // C divergence (recorded): LockRelationIdForSession is skipped — no toast
@@ -384,31 +468,49 @@ fn vacuum_rel<'mcx>(
         let mut toast_params = params;
         toast_params.options |= VACOPT_PROCESS_MAIN;
         toast_params.toast_parent = relid;
-        vacuum_rel(mcx, toast_relid, &toast_params, bstrategy)?;
+        vacuum_rel(mcx, toast_relid, None, &toast_params, bstrategy)?;
     }
 
     Ok(true)
 }
 
-fn vacuum_open_relation<'mcx>(
+/// vacuum_open_relation (vacuum.c); commands_analyze enters with
+/// options & !VACOPT_VACUUM. `relname` None = the caller wants the skip
+/// silent (expanded partitions, toast recursion), C's NULL RangeVar.
+pub fn vacuum_open_relation<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
+    relname: Option<&str>,
     options: u32,
     lmode: LOCKMODE,
 ) -> PgResult<Option<Relation<'mcx>>> {
-    debug_assert!(options & VACOPT_VACUUM != 0);
-    if options & VACOPT_SKIP_LOCKED != 0 {
-        unported("vacuum_open_relation: SKIP_LOCKED (ConditionalLockRelationOid)");
+    debug_assert!(options & (VACOPT_VACUUM | VACOPT_ANALYZE) != 0);
+    let mut rel_lock = true;
+    let rel = if options & VACOPT_SKIP_LOCKED == 0 {
+        relation::try_relation_open(mcx, relid, lmode)?
+    } else if lmgr_seams::conditional_lock_relation_oid::call(relid, lmode)? {
+        relation::try_relation_open(mcx, relid, NoLock)?
+    } else {
+        rel_lock = false;
+        None
+    };
+    if rel.is_some() {
+        return Ok(rel);
     }
-    let rel = relation::try_relation_open(mcx, relid, lmode)?;
-    if rel.is_none() {
-        ereport(WARNING)
-            .errmsg(format!(
-                "skipping vacuum of relation {relid} --- relation no longer exists"
-            ))
-            .finish(loc("vacuum_open_relation"))?;
-    }
-    Ok(rel)
+    let Some(relname) = relname else {
+        return Ok(None);
+    };
+    let verb = if options & VACOPT_VACUUM != 0 { "vacuum" } else { "analyze" };
+    let (code, why) = if rel_lock {
+        (ERRCODE_UNDEFINED_TABLE, "relation no longer exists")
+    } else {
+        (ERRCODE_LOCK_NOT_AVAILABLE, "lock not available")
+    };
+    ereport(WARNING)
+        .errcode(code)
+        .errmsg(format!("skipping {verb} of \"{relname}\" --- {why}"))
+        .finish(loc("vacuum_open_relation"))?;
+    Ok(None)
 }
 
 /// Returns (aggressive, cutoffs).

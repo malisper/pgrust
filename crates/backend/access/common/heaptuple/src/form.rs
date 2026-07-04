@@ -84,6 +84,41 @@ pub fn heap_form_tuple<'mcx>(
     }
 }
 
+/// execute_attr_map_tuple (tupconvert.c): remap `tuple` from `indesc`'s
+/// rowtype to `outdesc`'s via attmap[out-1] = in attno (0 = null). C
+/// preallocates the datum arrays in its TupleConversionMap; per-call vecs are
+/// the cold inheritance-conversion lane only.
+pub fn execute_attr_map_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+    attmap: &[i16],
+) -> PgResult<HeapTuple<'mcx>> {
+    let in_natts = indesc.natts as usize;
+    let out_natts = outdesc.natts as usize;
+    debug_assert!(attmap.len() == out_natts);
+
+    let mut invalues = vec_with_capacity_in(mcx, in_natts)?;
+    let mut innulls = vec_with_capacity_in(mcx, in_natts)?;
+    invalues.extend(core::iter::repeat(Datum::null()).take(in_natts));
+    innulls.extend(core::iter::repeat(true).take(in_natts));
+    heap_deform_tuple(tuple, indesc, &mut invalues, &mut innulls);
+
+    let mut outvalues = vec_with_capacity_in(mcx, out_natts)?;
+    let mut outnulls = vec_with_capacity_in(mcx, out_natts)?;
+    for &m in attmap {
+        if m > 0 {
+            outvalues.push(invalues[m as usize - 1]);
+            outnulls.push(innulls[m as usize - 1]);
+        } else {
+            outvalues.push(Datum::null());
+            outnulls.push(true);
+        }
+    }
+    heap_form_tuple(mcx, outdesc, &outvalues, &outnulls)
+}
+
 /// `extra` MAXALIGN'd bytes precede the tuple, zeroed (tuplestore/hashjoin metadata).
 pub fn heap_form_minimal_tuple<'mcx>(
     mcx: Mcx<'mcx>,
