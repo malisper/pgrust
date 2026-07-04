@@ -933,6 +933,17 @@ pub fn table_scan_batch_deform<'mcx>(
     }
 }
 
+/// Stage the staged page batch's varlena sort-key column per `plan`.
+pub fn table_scan_batch_stage_varkey<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaVarKeyPlan,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_stage_varkey(h, plan, soa),
+    }
+}
+
 /// Store tuple `i` of the staged page batch into `slot`.
 #[inline(always)]
 pub fn table_scan_batch_store_slot<'mcx>(

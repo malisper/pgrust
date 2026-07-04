@@ -688,3 +688,86 @@ fn soa_batch_deform_matches_lazy_deform() {
     assert!(!soa_store_prefix(&mut slot, &soa, 0));
     exec_clear_tuple(&mut slot, mcx);
 }
+
+// Varkey staging parity: staged pointer/null must equal slot_getattr of the
+// key attribute for every lane (fixed-prefix probe, walk past varlenas,
+// nulls, packed headers) and narrow tuples must take the fallback bit.
+#[test]
+fn soa_stage_varkey_matches_slot_getattr() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // int4, int2, int8, text, text: key col 3 has a fixed prefix; key col 4
+    // walks past the col-3 varlena.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(3, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+            col(4, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(5, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+        ],
+    );
+    assert!(SoaVarKeyPlan::try_new(&desc.compact_attrs, 0).is_none(), "fixed key col");
+    assert!(SoaVarKeyPlan::try_new(&desc.compact_attrs, 5).is_none(), "out of range");
+    let short = text_varlena("k");
+    let long = text_varlena(&"x".repeat(200));
+    let rows: [([Datum; 5], [bool; 5]); 5] = [
+        (
+            [Datum::from_i32(7), Datum::from_i16(-3), Datum::from_i64(1), text_datum(&short), text_datum(&long)],
+            [false, false, false, false, false],
+        ),
+        (
+            [Datum::from_i32(1), Datum::from_i16(2), Datum::from_i64(3), text_datum(&long), text_datum(&short)],
+            [false, false, false, false, false],
+        ),
+        (
+            [Datum::from_i32(0), Datum::null(), Datum::from_i64(-1), text_datum(&short), text_datum(&short)],
+            [false, true, false, false, false],
+        ),
+        (
+            [Datum::from_i32(5), Datum::from_i16(6), Datum::from_i64(7), Datum::null(), text_datum(&long)],
+            [false, false, false, true, false],
+        ),
+        (
+            [Datum::null(), Datum::from_i16(8), Datum::null(), text_datum(&long), Datum::null()],
+            [true, false, true, false, true],
+        ),
+    ];
+    let mut tuples = Vec::new();
+    for (values, isnull) in &rows {
+        tuples.push(heap_form_tuple(mcx, &desc, values, isnull).unwrap());
+    }
+    for key in [3usize, 4usize] {
+        let plan = SoaVarKeyPlan::try_new(&desc.compact_attrs, key).unwrap();
+        let mut soa = SoaBatch::new_in(mcx, 1);
+        soa.begin(tuples.len() as u32);
+        for (i, t) in tuples.iter().enumerate() {
+            soa_stage_varkey(&mut soa, &plan, &desc.compact_attrs, i as u32, t);
+        }
+        for (i, (values, isnull)) in rows.iter().enumerate() {
+            assert!(!soa.is_fallback(i as u32), "key {key} row {i}");
+            let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+            let t = heap_form_tuple(mcx, &desc, values, isnull).unwrap();
+            exec_store_heap_tuple_owned(&mut slot, mcx, t);
+            let mut wn = false;
+            let w = slot_getattr(&mut slot, key as i32 + 1, &mut wn);
+            assert_eq!(soa.col_isnull(0)[i], wn, "key {key} row {i}");
+            if !wn {
+                assert_eq!(
+                    datum_text_bytes(soa.col_values(0)[i]),
+                    datum_text_bytes(w),
+                    "key {key} row {i}"
+                );
+            }
+            exec_clear_tuple(&mut slot, mcx);
+        }
+        // Narrow tuple: key attribute absent, fallback bit set.
+        let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+        let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();
+        soa.begin(1);
+        soa_stage_varkey(&mut soa, &plan, &desc.compact_attrs, 0, &nt);
+        assert!(soa.is_fallback(0), "key {key} narrow");
+    }
+}

@@ -6,7 +6,9 @@ use ::mcx::{Mcx, PgVec};
 use ::types_core::AttrNumber;
 use ::types_slot::{SlotData, TTS_FLAG_SLOW};
 use ::types_storage::bufpage::MaxHeapTuplesPerPage;
-use ::types_tuple::tupmacs::{att_isnull, att_nominal_alignby, fetch_att};
+use ::types_tuple::tupmacs::{
+    att_addlength_pointer, att_isnull, att_nominal_alignby, att_pointer_alignby, fetch_att,
+};
 use ::types_tuple::{CompactAttribute, HeapTupleData, SizeofHeapTupleHeader};
 
 pub const SOA_MAX_ROWS: usize = MaxHeapTuplesPerPage;
@@ -44,6 +46,11 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     #[inline]
     pub fn ncols(&self) -> u16 {
         self.ncols
+    }
+
+    /// Placeholder for varkey-mode batches; the varkey pass never reads it.
+    pub fn unused(mcx: Mcx<'mcx>) -> SoaDeformPlan<'mcx> {
+        SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx) }
     }
 }
 
@@ -113,6 +120,119 @@ impl<'mcx> SoaBatch<'mcx> {
     #[inline]
     pub fn col_isnull(&self, c: usize) -> &[bool] {
         &self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
+    }
+}
+
+/// Varlena sort-key column plan: stage per-row pointers to one `attlen == -1`
+/// column (the fused-sort direct key feed; fixed-width keys use SoaDeformPlan).
+#[derive(Clone, Copy)]
+pub struct SoaVarKeyPlan {
+    key: u16,
+    // Alignment-probe start when every preceding attr is fixed-width.
+    fixed_start: Option<u32>,
+    key_alignby: u8,
+}
+
+impl SoaVarKeyPlan {
+    pub fn try_new(atts: &[CompactAttribute], key: usize) -> Option<SoaVarKeyPlan> {
+        if key >= atts.len() || key >= u16::MAX as usize || atts[key].attlen != -1 {
+            return None;
+        }
+        if atts[..key].iter().any(|a| a.attlen == -2) {
+            return None;
+        }
+        let mut off = 0usize;
+        let mut fixed = true;
+        for att in &atts[..key] {
+            if att.attlen <= 0 {
+                fixed = false;
+                break;
+            }
+            off = att_nominal_alignby(off, att.attalignby);
+            off += att.attlen as usize;
+        }
+        Some(SoaVarKeyPlan {
+            key: key as u16,
+            fixed_start: fixed.then_some(off as u32),
+            key_alignby: atts[key].attalignby,
+        })
+    }
+}
+
+/// Stage row `i`'s key pointer into column 0 of `soa`; narrow tuples get the
+/// fallback bit (lazy emit path). Value/null identical to slot deform of the
+/// key attribute — same page pointer, same null-bitmap semantics.
+#[inline(always)]
+pub fn soa_stage_varkey(
+    soa: &mut SoaBatch<'_>,
+    plan: &SoaVarKeyPlan,
+    atts: &[CompactAttribute],
+    i: u32,
+    tuple: &HeapTupleData<'_>,
+) {
+    let idx = i as usize;
+    debug_assert!(soa.ncols >= 1 && idx < SOA_MAX_ROWS);
+    if (tuple.t_data().natts() as usize) <= plan.key as usize {
+        soa.fallback[idx / 64] |= 1u64 << (idx % 64);
+        return;
+    }
+    if !tuple.has_nulls() {
+        if let Some(start) = plan.fixed_start {
+            let tp = tuple.getstruct();
+            // SAFETY: null-free tuple with natts > key: the fixed prefix ends
+            // at `start` and the key varlena's first byte is readable there.
+            unsafe {
+                let off =
+                    att_pointer_alignby(start as usize, plan.key_alignby, -1, tp.add(start as usize));
+                *soa.values.get_unchecked_mut(idx) = Datum::from_usize(tp.add(off) as usize);
+                *soa.isnull.get_unchecked_mut(idx) = false;
+            }
+            return;
+        }
+    }
+    soa_stage_varkey_walk(soa, plan, atts, idx, tuple);
+}
+
+#[inline(never)]
+fn soa_stage_varkey_walk(
+    soa: &mut SoaBatch<'_>,
+    plan: &SoaVarKeyPlan,
+    atts: &[CompactAttribute],
+    idx: usize,
+    tuple: &HeapTupleData<'_>,
+) {
+    let tp = tuple.getstruct();
+    let hasnulls = tuple.has_nulls();
+    // SAFETY: in-bounds offset within the image (t_len >= header).
+    let bp = unsafe { tuple.header_ptr().add(SizeofHeapTupleHeader) };
+    let key = plan.key as usize;
+    let mut off = 0usize;
+    for c in 0..=key {
+        // SAFETY: c <= key < natts (checked by the caller); the walk visits
+        // attributes present in the tuple, as deform_internal's slow lane.
+        unsafe {
+            if hasnulls && att_isnull(c, bp) {
+                if c == key {
+                    soa.values[idx] = Datum::null();
+                    soa.isnull[idx] = true;
+                    return;
+                }
+                continue;
+            }
+            let att = atts.get_unchecked(c);
+            let attlen = att.attlen as i32;
+            if attlen == -1 {
+                off = att_pointer_alignby(off, att.attalignby, -1, tp.add(off));
+            } else {
+                off = att_nominal_alignby(off, att.attalignby);
+            }
+            if c == key {
+                soa.values[idx] = Datum::from_usize(tp.add(off) as usize);
+                soa.isnull[idx] = false;
+                return;
+            }
+            off = att_addlength_pointer(off, attlen, tp.add(off));
+        }
     }
 }
 
