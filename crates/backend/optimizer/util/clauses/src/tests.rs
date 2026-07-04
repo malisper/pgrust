@@ -346,8 +346,8 @@ fn parallel_hazard_over_query() {
     q2.targetList = NodeList::make1(mcx, te2).unwrap();
     q2.jointree = Some(jointree);
     assert_eq!(max_parallel_hazard(&q2).unwrap(), PROPARALLEL_RESTRICTED);
-    assert!(is_parallel_safe(PROPARALLEL_SAFE, true, &[], restricted).unwrap());
-    assert!(!is_parallel_safe(PROPARALLEL_RESTRICTED, false, &[], restricted).unwrap());
+    assert!(is_parallel_safe(PROPARALLEL_SAFE, true, Vec::new(), restricted).unwrap());
+    assert!(!is_parallel_safe(PROPARALLEL_RESTRICTED, false, Vec::new(), restricted).unwrap());
 }
 
 #[test]

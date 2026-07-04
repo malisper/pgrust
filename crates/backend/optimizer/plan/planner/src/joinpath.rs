@@ -315,7 +315,9 @@ fn sort_inner_and_outer<'mcx>(
     {
         return Ok(());
     }
-    debug_assert!(run.root.rel(outerrel).partial_pathlist.is_empty());
+    // DIVERGENCE: C also builds partial merge-join paths from the outer
+    // rel's partial_pathlist (consider_parallel_mergejoin); partial join
+    // paths are a follow-up lane, so parallel plans stop below joins here.
     if jointype == types_pathnodes::JOIN_UNIQUE_OUTER {
         outer_path = crate::pathnode::create_unique_path(run, outerrel, outer_path, sjinfo)?
             .expect("unique-ify was proven possible");
@@ -693,7 +695,8 @@ fn match_unsorted_outer<'mcx>(
             )?;
         }
     }
-    debug_assert!(run.root.rel(outerrel).partial_pathlist.is_empty());
+    // DIVERGENCE: C's consider_parallel_nestloop / partial hash joins over
+    // outerrel->partial_pathlist are a follow-up lane (see above).
     Ok(())
 }
 

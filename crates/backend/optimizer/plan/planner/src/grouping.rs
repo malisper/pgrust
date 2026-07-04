@@ -855,7 +855,10 @@ fn create_grouping_paths<'mcx>(
     )?;
     let grouped_rel =
         make_grouping_rel(run, input_rel, grouping_target, target_parallel_safe, parse.havingQual)?;
-    debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());
+    // DIVERGENCE: partial aggregation (create_partial_grouping_paths /
+    // Finalize+Partial Aggregate shapes) is a follow-up lane; the input
+    // rel's partial paths are ignored here, matching C's can_partial_agg
+    // = false arm. C plans that pick partial agg will diverge.
 
     // is_degenerate_grouping: HAVING with no aggs and no GROUP BY.
     if (run.root.hasHavingQual || !parse.groupingSets.is_nil())
@@ -1751,7 +1754,85 @@ fn create_ordered_paths<'mcx>(
         };
         crate::pathnode::add_path(run, ordered_rel, sorted_path);
     }
-    debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());
+    // generate_gather_paths made a plain Gather and order-preserving Gather
+    // Merges already; what remains is sorting a partial path (fully or
+    // incrementally) and putting a Gather Merge on top.
+    if run.root.rel(ordered_rel).consider_parallel
+        && !run.root.sort_pathkeys.is_empty()
+        && !run.root.rel(input_rel).partial_pathlist.is_empty()
+    {
+        let cheapest_partial_path = run.root.rel(input_rel).partial_pathlist[0];
+        let partials =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).partial_pathlist);
+        for &input_path in partials.iter() {
+            let (is_sorted, presorted_keys) = crate::pathkeys::pathkeys_count_contained_in(
+                &run.root.sort_pathkeys,
+                &run.root.path(input_path).base().pathkeys,
+            );
+            if is_sorted {
+                continue;
+            }
+            if input_path != cheapest_partial_path
+                && (presorted_keys == 0 || !crate::gucs::enable_incremental_sort())
+            {
+                continue;
+            }
+            let sort_pathkeys =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys);
+            let sorted_path = if presorted_keys == 0 || !crate::gucs::enable_incremental_sort() {
+                crate::pathnode::create_sort_path(
+                    run,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys,
+                    limit_tuples,
+                )
+            } else {
+                crate::pathnode::create_incremental_sort_path(
+                    run,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys,
+                    presorted_keys,
+                    limit_tuples,
+                )?
+            };
+            let (total_groups, sorted_target) = {
+                let sb = run.root.path(sorted_path).base();
+                (
+                    ::costsize::compute_gather_rows(sb.rows, sb.parallel_workers),
+                    sb.pathtarget_id,
+                )
+            };
+            let gm_keys = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys);
+            let sorted_path = crate::pathnode::create_gather_merge_path(
+                run,
+                ordered_rel,
+                sorted_path,
+                sorted_target,
+                gm_keys,
+                Some(total_groups),
+            );
+
+            let sorted_target = run
+                .root
+                .path(sorted_path)
+                .base()
+                .pathtarget_id
+                .expect("gather merge path has a pathtarget");
+            let sorted_path = if !crate::pathnode::exprs_same(
+                run,
+                &run.root.pathtarget(sorted_target).exprs,
+                &run.root.pathtarget(target).exprs,
+            ) {
+                crate::pathnode::apply_projection_to_path(run, ordered_rel, sorted_path, target)?
+            } else {
+                sorted_path
+            };
+            crate::pathnode::add_path(run, ordered_rel, sorted_path);
+        }
+    }
+
     assert!(!run.root.rel(ordered_rel).pathlist.is_empty(), "failed to generate ORDER BY paths");
     Ok(ordered_rel)
 }
@@ -1922,18 +2003,24 @@ fn apply_scanjoin_target_to_paths<'mcx>(
             && !crate::joinrels::is_dummy_rel(&run.root, rel_id)
     };
 
+    // Partitioned rels: drop the whole-rel paths and rebuild from retargeted
+    // child paths below (C keeps neither; the below-Append target is never
+    // costlier). The main pathlist goes first: the stanza below must still
+    // see the old partial paths.
+    if rel_is_partitioned {
+        run.root.rel_mut(rel_id).pathlist = mcx::PgVec::new_in(run.mcx);
+    }
+
     if !scanjoin_target_parallel_safe {
-        // generate_useful_gather_paths is a no-op with no partial paths.
-        debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
+        // Workers can't compute this target: last chance to use the partial
+        // paths, emitting the current reltarget under a Gather.
+        crate::allpaths::generate_useful_gather_paths(run, rel_id, false)?;
+        run.root.rel_mut(rel_id).partial_pathlist = mcx::PgVec::new_in(run.mcx);
         run.root.rel_mut(rel_id).consider_parallel = false;
     }
 
-    // Partitioned rels: drop the whole-rel paths and rebuild from retargeted
-    // child paths below (C keeps neither; the below-Append target is never
-    // costlier).
     if rel_is_partitioned {
-        run.root.rel_mut(rel_id).pathlist = mcx::PgVec::new_in(run.mcx);
-        debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
+        run.root.rel_mut(rel_id).partial_pathlist = mcx::PgVec::new_in(run.mcx);
     }
 
     let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).pathlist);
@@ -1958,7 +2045,28 @@ fn apply_scanjoin_target_to_paths<'mcx>(
             run.root.rel_mut(rel_id).pathlist[i] = new_id;
         }
     }
-    debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
+    let partials = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).partial_pathlist);
+    for (i, path_id) in partials.iter().enumerate() {
+        debug_assert!(run.root.path(*path_id).base().param_info.is_none());
+        if tlist_same_exprs {
+            let sortgrouprefs = crate::relnode::pgvec_clone_shallow(
+                run.mcx,
+                &run.root.pathtarget(scanjoin_target).sortgrouprefs,
+            );
+            let pt = run.root.path(*path_id).base().pathtarget_id.unwrap();
+            run.root.pathtarget_mut(pt).sortgrouprefs = sortgrouprefs;
+        } else {
+            let newpath = create_projection_path(
+                run,
+                rel_id,
+                *path_id,
+                scanjoin_target,
+                scanjoin_target_parallel_safe,
+            );
+            let new_id = run.root.alloc_path(newpath);
+            run.root.rel_mut(rel_id).partial_pathlist[i] = new_id;
+        }
+    }
     crate::srf::adjust_paths_for_srfs(
         run,
         rel_id,
@@ -2013,6 +2121,18 @@ fn apply_scanjoin_target_to_paths<'mcx>(
             }
         }
         crate::allpaths::add_paths_to_append_rel(run, rel_id, &live_children)?;
+    }
+
+    // Gather/Gather Merge over the retargeted partial paths — only for the
+    // parallel-safe non-child rel, after all paths and before set_cheapest.
+    let is_other_rel = matches!(
+        run.root.rel(rel_id).reloptkind,
+        types_pathnodes::RELOPT_OTHER_MEMBER_REL
+            | types_pathnodes::RELOPT_OTHER_JOINREL
+            | types_pathnodes::RELOPT_OTHER_UPPER_REL
+    );
+    if run.root.rel(rel_id).consider_parallel && !is_other_rel {
+        crate::allpaths::generate_useful_gather_paths(run, rel_id, false)?;
     }
 
     // Reassess the cheapest paths now that costs may have changed.

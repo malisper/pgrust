@@ -289,8 +289,62 @@ pub fn standard_planner<'mcx>(
     {
         top_plan = crate::subselect::materialize_finished_plan(mcx, top_plan)?;
     }
-    if run.glob.parallel_mode_needed {
-        panic!("standard_planner (planner.c): debug_parallel_query Gather; M3 parallel lane");
+    // debug_parallel_query test wrap: a single-copy Gather over the whole
+    // plan. Under =regress with initPlans present the wrap is skipped (moving
+    // the initPlans to the Gather would change EXPLAIN output; C skips too).
+    if gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF
+        && top_plan.as_plan().expect("plan node").parallel_safe
+        && (top_plan.as_plan().expect("plan node").initPlan.is_nil()
+            || gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_REGRESS)
+    {
+        let (tlist, init_plan, startup_cost, total_cost, plan_rows, plan_width) = {
+            let tp = top_plan.as_plan().expect("plan node");
+            (
+                tp.targetlist.clone_in(mcx)?,
+                tp.initPlan.clone_in(mcx)?,
+                tp.startup_cost,
+                tp.total_cost,
+                tp.plan_rows,
+                tp.plan_width,
+            )
+        };
+        let mut gather = Node::build::<types_nodes::plannodes::Gather>(mcx)?;
+        gather.plan.targetlist = tlist;
+        gather.plan.qual = NodeList::nil();
+        gather.plan.lefttree = Some(top_plan);
+        gather.num_workers = 1;
+        gather.single_copy = true;
+        gather.invisible =
+            gucs::debug_parallel_query() == guc_tables::consts::DEBUG_PARALLEL_REGRESS;
+        // This Gather has no parallel-aware descendants to signal.
+        gather.rescan_param = -1;
+        gather.plan.startup_cost = startup_cost + ::costsize::gucs::parallel_setup_cost();
+        gather.plan.total_cost = total_cost
+            + ::costsize::gucs::parallel_setup_cost()
+            + ::costsize::gucs::parallel_tuple_cost() * plan_rows;
+        gather.plan.plan_rows = plan_rows;
+        gather.plan.plan_width = plan_width;
+        gather.plan.parallel_aware = false;
+        gather.plan.parallel_safe = false;
+        // Transfer initPlans; SS_compute_initplan_cost's total leaves the
+        // child (the Gather's costs above already include it).
+        let mut initplan_cost = 0.0;
+        for sp_node in &init_plan {
+            let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+            initplan_cost += sp.startup_cost + sp.per_call_cost;
+        }
+        gather.plan.initPlan = init_plan;
+        // SAFETY: exclusive plan-tree ownership (the tree was just built).
+        unsafe {
+            top_plan.with_plan_mut(|c| {
+                c.initPlan = NodeList::nil();
+                c.startup_cost -= initplan_cost;
+                c.total_cost -= initplan_cost;
+            })
+        }
+        .expect("plan node");
+        run.glob.parallel_mode_needed = true;
+        top_plan = gather.seal();
     }
     if !run.glob.param_exec_types.is_nil() {
         // C: subplans are finalized before the main plan (they set the params
@@ -377,9 +431,8 @@ pub fn standard_planner<'mcx>(
     })
 }
 
-// IsParallelWorker(): no parallel-worker backends exist yet (bgworker lane).
 fn is_parallel_worker() -> bool {
-    false
+    parallel_seams::is_parallel_worker::call()
 }
 
 pub(crate) use clauses::{is_parallel_safe_exprs, is_parallel_safe_opt};

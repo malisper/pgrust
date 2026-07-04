@@ -160,7 +160,6 @@ pub fn adjust_paths_for_srfs<'mcx>(
     if targets.len() == 1 {
         return Ok(());
     }
-    debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
     let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).pathlist);
     for (i, path_id) in paths.iter().enumerate() {
         debug_assert!(run.root.path(*path_id).base().param_info.is_none());
@@ -177,6 +176,24 @@ pub fn adjust_paths_for_srfs<'mcx>(
             };
         }
         run.root.rel_mut(rel_id).pathlist[i] = newpath;
+    }
+    // Likewise for partial paths (C's second loop; same treatment).
+    let partials =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).partial_pathlist);
+    for (i, path_id) in partials.iter().enumerate() {
+        let mut newpath = *path_id;
+        for (lvl, &target) in targets.iter().enumerate().skip(1) {
+            newpath = if targets_contain_srfs[lvl] {
+                let p = crate::pathnode::create_set_projection_path(run, rel_id, newpath, target)?;
+                run.root.alloc_path(p)
+            } else {
+                panic!(
+                    "adjust_paths_for_srfs (planner.c): SRF-free upper level \
+                     (apply_projection_to_path leg) unreachable on the depth-1 slice"
+                );
+            };
+        }
+        run.root.rel_mut(rel_id).partial_pathlist[i] = newpath;
     }
     Ok(())
 }

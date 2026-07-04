@@ -39,6 +39,27 @@ pub use walker::{
     range_table_walker, walk_list, walk_opt, NodeWalker,
 };
 
+// is_parallel_safe (clauses.c): the init-plan output Params of this level
+// and every ancestor level are safe to reference.
+fn collect_safe_param_ids(run: &types_pathnodes::run::PlannerRun<'_>) -> Vec<i32> {
+    let mut safe: Vec<i32> = Vec::new();
+    for root in run
+        .suspended_roots
+        .iter()
+        .map(|s| &s.root)
+        .chain(core::iter::once(&run.root))
+    {
+        for &ipid in root.init_plans.iter() {
+            let sp = root
+                .expr_node(ipid)
+                .as_sub_plan()
+                .expect("init_plans holds SubPlan nodes");
+            safe.extend(sp.setParam.iter());
+        }
+    }
+    safe
+}
+
 // is_parallel_safe (clauses.c) over a PathTarget's exprs; C passes the List*.
 pub fn is_parallel_safe_exprs(run: &types_pathnodes::run::PlannerRun<'_>, target: types_pathnodes::PtId) -> types_error::PgResult<bool> {
     if run.glob.max_parallel_hazard == b's' as i8 && run.glob.param_exec_types.is_nil() {
@@ -55,7 +76,7 @@ pub fn is_parallel_safe_exprs(run: &types_pathnodes::run::PlannerRun<'_>, target
     crate::is_parallel_safe(
         run.glob.max_parallel_hazard,
         run.glob.param_exec_types.is_nil(),
-        &[],
+        collect_safe_param_ids(run),
         node,
     )
 }
@@ -70,7 +91,7 @@ pub fn is_parallel_safe_opt(
         Some(n) => crate::is_parallel_safe(
             run.glob.max_parallel_hazard,
             run.glob.param_exec_types.is_nil(),
-            &[],
+            collect_safe_param_ids(run),
             n,
         ),
     }
