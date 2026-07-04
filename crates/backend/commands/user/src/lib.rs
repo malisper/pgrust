@@ -509,21 +509,28 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
 
     let mut _shadow_pass_text = None;
     match password {
-        Some(p) if p.is_empty() => {
-            notice("empty string is not a valid password, clearing password".into(), "CreateRole")?;
-            new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
-        }
+        // CVE-2017-7546 arm: a supplied verifier OF the empty string also clears.
         Some(p) => {
-            let shadow_pass = crypt::encrypt_password(
-                mcx,
-                crypt::PasswordType::from_guc(password_encryption()),
-                role,
-                p,
-            )?;
-            let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
-            new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
-                Datum::from_usize(t.as_bytes().as_ptr() as usize);
-            _shadow_pass_text = Some(t);
+            if p.is_empty()
+                || crypt::plain_crypt_verify(mcx, role, p, "", &mut None)? == crypt::STATUS_OK
+            {
+                notice(
+                    "empty string is not a valid password, clearing password".into(),
+                    "CreateRole",
+                )?;
+                new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+            } else {
+                let shadow_pass = crypt::encrypt_password(
+                    mcx,
+                    crypt::PasswordType::from_guc(password_encryption()),
+                    role,
+                    p,
+                )?;
+                let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
+                new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
+                    Datum::from_usize(t.as_bytes().as_ptr() as usize);
+                _shadow_pass_text = Some(t);
+            }
         }
         None => new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true,
     }
@@ -823,23 +830,31 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
 
     let mut _shadow_pass_text = None;
     match password {
-        Some(p) if p.is_empty() => {
-            notice("empty string is not a valid password, clearing password".into(), "AlterRole")?;
-            new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
-            new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
-        }
+        // CVE-2017-7546 arm: a supplied verifier OF the empty string also clears.
         Some(p) => {
-            let shadow_pass = crypt::encrypt_password(
-                mcx,
-                crypt::PasswordType::from_guc(password_encryption()),
-                &rolename,
-                p,
-            )?;
-            let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
-            new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
-                Datum::from_usize(t.as_bytes().as_ptr() as usize);
-            new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
-            _shadow_pass_text = Some(t);
+            if p.is_empty()
+                || crypt::plain_crypt_verify(mcx, &rolename, p, "", &mut None)?
+                    == crypt::STATUS_OK
+            {
+                notice(
+                    "empty string is not a valid password, clearing password".into(),
+                    "AlterRole",
+                )?;
+                new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+                new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+            } else {
+                let shadow_pass = crypt::encrypt_password(
+                    mcx,
+                    crypt::PasswordType::from_guc(password_encryption()),
+                    &rolename,
+                    p,
+                )?;
+                let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
+                new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
+                    Datum::from_usize(t.as_bytes().as_ptr() as usize);
+                new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+                _shadow_pass_text = Some(t);
+            }
         }
         None => {}
     }
