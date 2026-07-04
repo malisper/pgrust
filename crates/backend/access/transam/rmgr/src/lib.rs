@@ -133,7 +133,6 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
 }
 
 unported_redo! {
-    gin_redo => "backend-access-gin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     generic_redo => "backend-access-transam-generic-xlog";
