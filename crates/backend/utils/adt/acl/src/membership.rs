@@ -299,6 +299,27 @@ pub fn get_role_oid(rolname: &str, missing_ok: bool) -> PgResult<Oid> {
     Ok(oid)
 }
 
+// get_language_oid (proclang.c); hosted here until a proclang crate exists.
+pub fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid> {
+    const ANUM_PG_LANGUAGE_OID: i32 = 1;
+    let oid = GetSysCacheOid(
+        cache_syscache::cacheinfo::LANGNAME,
+        ANUM_PG_LANGUAGE_OID,
+        SysCacheKey::Str(langname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?;
+    if oid == InvalidOid && !missing_ok {
+        return Err(
+            PgError::new(ERROR, format!("language \"{langname}\" does not exist"))
+                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)
+                .into(),
+        );
+    }
+    Ok(oid)
+}
+
 #[cfg(test)]
 pub(crate) fn seed_membership_cache(rtype_idx: usize, roleid: Oid, roles: Vec<Oid>) {
     CACHE.with(|c| {

@@ -383,6 +383,233 @@ fn fc_has_table_privilege_id_id(
     table_priv_check_ext(roleid, tableoid, mode)
 }
 
+const DATABASE_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "CREATE", value: crate::ACL_CREATE },
+    PrivMapEntry { name: "CREATE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "TEMPORARY", value: crate::ACL_CREATE_TEMP },
+    PrivMapEntry {
+        name: "TEMPORARY WITH GRANT OPTION",
+        value: acl_grant_option_for(crate::ACL_CREATE_TEMP),
+    },
+    PrivMapEntry { name: "TEMP", value: crate::ACL_CREATE_TEMP },
+    PrivMapEntry { name: "TEMP WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE_TEMP) },
+    PrivMapEntry { name: "CONNECT", value: crate::ACL_CONNECT },
+    PrivMapEntry { name: "CONNECT WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CONNECT) },
+];
+
+const FUNCTION_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "EXECUTE", value: crate::ACL_EXECUTE },
+    PrivMapEntry { name: "EXECUTE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_EXECUTE) },
+];
+
+const USAGE_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "USAGE", value: crate::ACL_USAGE },
+    PrivMapEntry { name: "USAGE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_USAGE) },
+];
+
+const SCHEMA_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "CREATE", value: crate::ACL_CREATE },
+    PrivMapEntry { name: "CREATE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_CREATE) },
+    PrivMapEntry { name: "USAGE", value: crate::ACL_USAGE },
+    PrivMapEntry { name: "USAGE WITH GRANT OPTION", value: acl_grant_option_for(crate::ACL_USAGE) },
+];
+
+const LARGEOBJECT_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "SELECT", value: ACL_SELECT },
+    PrivMapEntry { name: "SELECT WITH GRANT OPTION", value: acl_grant_option_for(ACL_SELECT) },
+    PrivMapEntry { name: "UPDATE", value: ACL_UPDATE },
+    PrivMapEntry { name: "UPDATE WITH GRANT OPTION", value: acl_grant_option_for(ACL_UPDATE) },
+];
+
+fn object_priv_check(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> PgResult<Datum> {
+    let r = aclchk_seams::object_aclcheck::call(classid, objectid, roleid, mode)?;
+    Ok(Datum::from_bool(r == ACLCHECK_OK))
+}
+
+fn object_priv_check_ext(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> PgResult<Datum> {
+    let (r, is_missing) = aclchk_seams::object_aclcheck_ext::call(classid, objectid, roleid, mode)?;
+    if is_missing {
+        return Ok(Datum::null());
+    }
+    Ok(Datum::from_bool(r == ACLCHECK_OK))
+}
+
+fn convert_database_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
+    dbcommands_seams::get_database_oid::call(fcinfo.result_mcx(), arg_text_str(fcinfo, i)?, false)
+}
+
+fn convert_schema_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
+    catalog_namespace::get_namespace_oid(arg_text_str(fcinfo, i)?, false)
+}
+
+fn convert_language_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
+    crate::get_language_oid(arg_text_str(fcinfo, i)?, false)
+}
+
+fn convert_function_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
+    let s = arg_text_str(fcinfo, i)?;
+    let oid = adt_regproc::regprocedurein(fcinfo.result_mcx(), s, None)?.unwrap_or(0);
+    if oid == 0 {
+        return Err(Box::new(
+            PgError::error(format!("function \"{s}\" does not exist"))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION),
+        ));
+    }
+    Ok(oid)
+}
+
+fn convert_type_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
+    let s = arg_text_str(fcinfo, i)?;
+    let oid = adt_regproc::regtypein(fcinfo.result_mcx(), s, None)?.unwrap_or(0);
+    if oid == 0 {
+        return Err(Box::new(
+            PgError::error(format!("type \"{s}\" does not exist"))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    Ok(oid)
+}
+
+macro_rules! has_priv_family {
+    ($classid:expr, $map:expr, $convert:ident,
+     $nn:ident, $ni:ident, $in_:ident, $ii:ident, $n:ident, $i:ident) => {
+        fn $nn(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+            let objoid = $convert(fcinfo, 1)?;
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            object_priv_check($classid, objoid, roleid, mode)
+        }
+        fn $ni(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+            let objoid = fcinfo.arg_oid(1);
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            object_priv_check_ext($classid, objoid, roleid, mode)
+        }
+        fn $in_(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = fcinfo.arg_oid(0);
+            let objoid = $convert(fcinfo, 1)?;
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            object_priv_check($classid, objoid, roleid, mode)
+        }
+        fn $ii(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = fcinfo.arg_oid(0);
+            let objoid = fcinfo.arg_oid(1);
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            object_priv_check_ext($classid, objoid, roleid, mode)
+        }
+        fn $n(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = miscinit_seams::get_user_id::call();
+            let objoid = $convert(fcinfo, 0)?;
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, $map)?;
+            object_priv_check($classid, objoid, roleid, mode)
+        }
+        fn $i(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let roleid = miscinit_seams::get_user_id::call();
+            let objoid = fcinfo.arg_oid(0);
+            let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, $map)?;
+            object_priv_check_ext($classid, objoid, roleid, mode)
+        }
+    };
+}
+
+has_priv_family!(
+    types_core::catalog::DATABASE_RELATION_ID,
+    DATABASE_PRIV_MAP,
+    convert_database_name,
+    fc_has_database_privilege_name_name,
+    fc_has_database_privilege_name_id,
+    fc_has_database_privilege_id_name,
+    fc_has_database_privilege_id_id,
+    fc_has_database_privilege_name,
+    fc_has_database_privilege_id
+);
+
+has_priv_family!(
+    types_core::catalog::PROCEDURE_RELATION_ID,
+    FUNCTION_PRIV_MAP,
+    convert_function_name,
+    fc_has_function_privilege_name_name,
+    fc_has_function_privilege_name_id,
+    fc_has_function_privilege_id_name,
+    fc_has_function_privilege_id_id,
+    fc_has_function_privilege_name,
+    fc_has_function_privilege_id
+);
+
+has_priv_family!(
+    types_core::catalog::LANGUAGE_RELATION_ID,
+    USAGE_PRIV_MAP,
+    convert_language_name,
+    fc_has_language_privilege_name_name,
+    fc_has_language_privilege_name_id,
+    fc_has_language_privilege_id_name,
+    fc_has_language_privilege_id_id,
+    fc_has_language_privilege_name,
+    fc_has_language_privilege_id
+);
+
+has_priv_family!(
+    types_core::catalog::NAMESPACE_RELATION_ID,
+    SCHEMA_PRIV_MAP,
+    convert_schema_name,
+    fc_has_schema_privilege_name_name,
+    fc_has_schema_privilege_name_id,
+    fc_has_schema_privilege_id_name,
+    fc_has_schema_privilege_id_id,
+    fc_has_schema_privilege_name,
+    fc_has_schema_privilege_id
+);
+
+has_priv_family!(
+    types_core::catalog::TYPE_RELATION_ID,
+    USAGE_PRIV_MAP,
+    convert_type_name,
+    fc_has_type_privilege_name_name,
+    fc_has_type_privilege_name_id,
+    fc_has_type_privilege_id_name,
+    fc_has_type_privilege_id_id,
+    fc_has_type_privilege_name,
+    fc_has_type_privilege_id
+);
+
+fn lo_priv_result(roleid: Oid, lobj: Oid, mode: u64) -> PgResult<Datum> {
+    let (result, is_missing) = aclchk_seams::has_lo_priv_byid::call(roleid, lobj, mode)?;
+    if is_missing {
+        return Ok(Datum::null());
+    }
+    Ok(Datum::from_bool(result))
+}
+
+fn fc_has_largeobject_privilege_name_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let lobj = fcinfo.arg_oid(1);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
+    lo_priv_result(roleid, lobj, mode)
+}
+
+fn fc_has_largeobject_privilege_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let lobj = fcinfo.arg_oid(0);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, LARGEOBJECT_PRIV_MAP)?;
+    lo_priv_result(roleid, lobj, mode)
+}
+
+fn fc_has_largeobject_privilege_id_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let lobj = fcinfo.arg_oid(1);
+    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
+    lo_priv_result(roleid, lobj, mode)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -410,5 +637,38 @@ pub const ACL_BUILTINS: &[FmgrBuiltin] = &[
     b(1925, "has_table_privilege_id_id", 3, fc_has_table_privilege_id_id),
     b(1926, "has_table_privilege_name", 2, fc_has_table_privilege_name),
     b(1927, "has_table_privilege_id", 2, fc_has_table_privilege_id),
+    b(2250, "has_database_privilege_name_name", 3, fc_has_database_privilege_name_name),
+    b(2251, "has_database_privilege_name_id", 3, fc_has_database_privilege_name_id),
+    b(2252, "has_database_privilege_id_name", 3, fc_has_database_privilege_id_name),
+    b(2253, "has_database_privilege_id_id", 3, fc_has_database_privilege_id_id),
+    b(2254, "has_database_privilege_name", 2, fc_has_database_privilege_name),
+    b(2255, "has_database_privilege_id", 2, fc_has_database_privilege_id),
+    b(2256, "has_function_privilege_name_name", 3, fc_has_function_privilege_name_name),
+    b(2257, "has_function_privilege_name_id", 3, fc_has_function_privilege_name_id),
+    b(2258, "has_function_privilege_id_name", 3, fc_has_function_privilege_id_name),
+    b(2259, "has_function_privilege_id_id", 3, fc_has_function_privilege_id_id),
+    b(2260, "has_function_privilege_name", 2, fc_has_function_privilege_name),
+    b(2261, "has_function_privilege_id", 2, fc_has_function_privilege_id),
+    b(2262, "has_language_privilege_name_name", 3, fc_has_language_privilege_name_name),
+    b(2263, "has_language_privilege_name_id", 3, fc_has_language_privilege_name_id),
+    b(2264, "has_language_privilege_id_name", 3, fc_has_language_privilege_id_name),
+    b(2265, "has_language_privilege_id_id", 3, fc_has_language_privilege_id_id),
+    b(2266, "has_language_privilege_name", 2, fc_has_language_privilege_name),
+    b(2267, "has_language_privilege_id", 2, fc_has_language_privilege_id),
+    b(2268, "has_schema_privilege_name_name", 3, fc_has_schema_privilege_name_name),
+    b(2269, "has_schema_privilege_name_id", 3, fc_has_schema_privilege_name_id),
+    b(2270, "has_schema_privilege_id_name", 3, fc_has_schema_privilege_id_name),
+    b(2271, "has_schema_privilege_id_id", 3, fc_has_schema_privilege_id_id),
+    b(2272, "has_schema_privilege_name", 2, fc_has_schema_privilege_name),
+    b(2273, "has_schema_privilege_id", 2, fc_has_schema_privilege_id),
+    b(3138, "has_type_privilege_name_name", 3, fc_has_type_privilege_name_name),
+    b(3139, "has_type_privilege_name_id", 3, fc_has_type_privilege_name_id),
+    b(3140, "has_type_privilege_id_name", 3, fc_has_type_privilege_id_name),
+    b(3141, "has_type_privilege_id_id", 3, fc_has_type_privilege_id_id),
+    b(3142, "has_type_privilege_name", 2, fc_has_type_privilege_name),
+    b(3143, "has_type_privilege_id", 2, fc_has_type_privilege_id),
+    b(6348, "has_largeobject_privilege_name_id", 3, fc_has_largeobject_privilege_name_id),
+    b(6349, "has_largeobject_privilege_id", 2, fc_has_largeobject_privilege_id),
+    b(6350, "has_largeobject_privilege_id_id", 3, fc_has_largeobject_privilege_id_id),
     b(3943, "acldefault_sql", 2, fc_acldefault_sql),
 ];

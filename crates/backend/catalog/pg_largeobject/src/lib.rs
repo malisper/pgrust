@@ -29,7 +29,7 @@ pub const Natts_pg_largeobject_metadata: usize = 3;
 
 pub type Snapshot = Rc<SnapshotData<'static>>;
 
-fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyData {
+pub fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
     key.sk_strategy = BTEqualStrategyNumber;

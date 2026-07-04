@@ -1566,6 +1566,11 @@ fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+pub fn init_seams() {
+    parse_utilcmd_seams::LookupTypeNameOid::set(LookupTypeNameOid);
+    parse_utilcmd_seams::parseTypeString::set(parseTypeString);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
