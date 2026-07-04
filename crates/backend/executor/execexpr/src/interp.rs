@@ -1183,7 +1183,7 @@ fn run_program<'mcx>(
                 if nd.isnull || other.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(call)?;
+                    let (value, isnull) = invoke2(call)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -1197,7 +1197,7 @@ fn run_program<'mcx>(
                 if r1.isnull || other.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(call2)?;
+                    let (value, isnull) = invoke2(call2)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -1578,9 +1578,22 @@ fn eval_array_expr(
     Ok((Datum::from_usize(img.leak().as_ptr() as usize), false))
 }
 
+// invoke() for the fused steps' slim carrier; nargs is the constant 2.
+#[inline(always)]
+fn invoke2(call: &crate::steps::Call2) -> PgResult<(Datum, bool)> {
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
+    // during the call.
+    let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
+    let fn_addr = flinfo.fn_addr;
+    let fcinfo = unsafe { fcinfo_mut(call.fcinfo, 2) };
+    fcinfo.isnull = false;
+    let d = fn_addr(Some(flinfo), fcinfo)?;
+    Ok((d, fcinfo.isnull))
+}
+
 // The FuncExprStrict2 arm body, shared by the fused superinstructions.
 #[inline(always)]
-fn strict2_eval(call: &FuncCall) -> PgResult<NullableDatum> {
+fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
     // SAFETY: args 0/1 of the call's live fcinfo image.
     let (a0, a1) = unsafe {
         (
@@ -1591,7 +1604,7 @@ fn strict2_eval(call: &FuncCall) -> PgResult<NullableDatum> {
     if a0.isnull || a1.isnull {
         return Ok(NullableDatum::null());
     }
-    let (value, isnull) = invoke(call)?;
+    let (value, isnull) = invoke2(call)?;
     Ok(NullableDatum { value, isnull })
 }
 
