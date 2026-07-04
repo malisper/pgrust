@@ -508,9 +508,23 @@ pub fn index_create<'mcx>(
         ));
     }
     for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
-        // TEXT/VARCHAR/BPCHAR_BTREE_PATTERN_OPS_OID (pg_opclass.dat).
-        if collationIds[i] != InvalidOid && matches!(opclassIds[i], 4217 | 4218 | 4219) {
-            unported("index_create: pattern_ops nondeterministic-collation check");
+        // TEXT/VARCHAR/BPCHAR_BTREE_PATTERN_OPS_OID (pg_opclass.dat; names
+        // are pinned catalog rows, so the CLAOID probe C does is a constant).
+        if collationIds[i] != InvalidOid
+            && matches!(opclassIds[i], 4217 | 4218 | 4219)
+            && !lsyscache::get_collation_isdeterministic(collationIds[i])?
+        {
+            let opcname = match opclassIds[i] {
+                4217 => "text_pattern_ops",
+                4218 => "varchar_pattern_ops",
+                _ => "bpchar_pattern_ops",
+            };
+            return Err(err(
+                format!(
+                    "nondeterministic collations are not supported for operator class \"{opcname}\""
+                ),
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
     }
 
