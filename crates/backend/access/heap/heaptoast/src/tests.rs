@@ -188,7 +188,6 @@ fn install_seams() {
         });
         freespace_seams::record_page_with_free_space::set(|_, _, _| Ok(()));
         xloginsert_seams::xlog_insert_record::set(|_, _, _, _, _| Ok(0x1000));
-        transam_xlog_seams::xlog_standby_info_active::set(|| false);
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_| false);
         catalog_seams::get_new_oid_with_index::set(|_mcx, _rel, _idx, _col| {
@@ -203,6 +202,7 @@ fn install_seams() {
         relation_seams::relation_open::set(|mcx, relid, _lockmode| Ok(fixture_rel(mcx, relid)));
 
     });
+    test_boot::boot_wal("heaptoast");
     ensure_active_snapshot();
 }
 

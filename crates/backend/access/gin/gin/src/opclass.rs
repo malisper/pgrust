@@ -11,10 +11,17 @@ use ::types_tuple::varatt;
 
 pub(crate) const F_GIN_COMPARE_JSONB: ::types_core::Oid = 3480;
 pub(crate) const F_GIN_EXTRACT_JSONB: ::types_core::Oid = 3482;
+pub(crate) const F_GIN_EXTRACT_JSONB_PATH: ::types_core::Oid = 3485;
+pub(crate) const F_BTINT4CMP: ::types_core::Oid = 351;
 
 /// Detoasted varlena payload of a datum (header stripped). External and
 /// compressed images take the detoast path; inline images are borrowed.
 pub(crate) fn detoast_payload<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+    Ok(&detoast_image(mcx, d)?[4..])
+}
+
+/// Detoasted flat 4-byte-header image of a varlena datum.
+pub(crate) fn detoast_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena datum, readable through its header.
     unsafe {
@@ -22,7 +29,7 @@ pub(crate) fn detoast_payload<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> 
             let raw = core::slice::from_raw_parts(p, varatt::varsize_any(p));
             let flat = detoast::detoast_attr(mcx, raw)?;
             debug_assert!(flat.len() >= 4);
-            let out = core::slice::from_raw_parts(flat.as_ptr().add(4), flat.len() - 4);
+            let out = core::slice::from_raw_parts(flat.as_ptr(), flat.len());
             core::mem::forget(flat);
             Ok(out)
         } else if varatt::varatt_is_1b(p) {
@@ -32,16 +39,18 @@ pub(crate) fn detoast_payload<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> 
                 p.add(varatt::VARHDRSZ_SHORT),
                 varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
             );
-            let mut buf: ::mcx::PgVec<'m, u8> = mcx::vec_with_capacity_in(mcx, src.len())?;
+            let total = 4 + src.len();
+            let mut buf: ::mcx::PgVec<'m, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+            ::mcx::vec_append_bytes(
+                &mut buf,
+                &varatt::set_varsize_4b_word(total as u32).to_ne_bytes(),
+            )?;
             ::mcx::vec_append_bytes(&mut buf, src)?;
             let out = core::slice::from_raw_parts(buf.as_ptr(), buf.len());
             core::mem::forget(buf);
             Ok(out)
         } else {
-            Ok(core::slice::from_raw_parts(
-                p.add(4),
-                varatt::varsize_4b(p) - 4,
-            ))
+            Ok(core::slice::from_raw_parts(p, varatt::varsize_4b(p)))
         }
     }
 }
@@ -71,6 +80,15 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
         GinOpclass::JsonbOps => {
             ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
         }
+        GinOpclass::JsonbPathOps => {
+            // btint4cmp over uint32 path hashes stored via UInt32GetDatum.
+            let (x, y) = (a.as_usize() as u32 as i32, b.as_usize() as u32 as i32);
+            if x < y {
+                -1
+            } else {
+                (x > y) as i32
+            }
+        }
     }
 }
 
@@ -85,21 +103,27 @@ pub(crate) fn extract_value<'m>(
             let payload = detoast_payload(mcx, value)?;
             ::adt_jsonb::gin::gin_extract_jsonb(mcx, payload)
         }
+        GinOpclass::JsonbPathOps => {
+            let payload = detoast_payload(mcx, value)?;
+            ::adt_jsonb::gin::gin_extract_jsonb_path(mcx, payload)
+        }
     }
 }
 
-/// extractQueryFn: returns (query key datums, searchMode). The closed set
-/// yields no null flags, no partial matches, no extra_data.
+/// extractQueryFn: returns (query key datums, searchMode, jsonpath ops). The
+/// closed set yields no null flags and no partial matches; C's extra_data is
+/// the flattened jsonpath ops.
 pub(crate) fn extract_query<'m>(
     mcx: Mcx<'m>,
     state: &GinState,
     query: Datum,
     strategy: StrategyNumber,
-) -> PgResult<(PgVec<'m, Datum>, i32)> {
+) -> PgResult<(PgVec<'m, Datum>, i32, PgVec<'m, JspGinOp>)> {
+    let image = detoast_image(mcx, query)?;
     match state.opclass {
-        GinOpclass::JsonbOps => {
-            let payload = detoast_payload(mcx, query)?;
-            ::adt_jsonb::gin::gin_extract_jsonb_query(mcx, payload, strategy)
+        GinOpclass::JsonbOps => ::adt_jsonb::gin::gin_extract_jsonb_query(mcx, image, strategy),
+        GinOpclass::JsonbPathOps => {
+            ::adt_jsonb::gin::gin_extract_jsonb_query_path(mcx, image, strategy)
         }
     }
 }
@@ -113,11 +137,15 @@ pub(crate) fn consistent(
     nkeys: usize,
     _query_values: &[Datum],
     _query_categories: &[GinNullCategory],
+    jsp_ops: &[JspGinOp],
     recheck: &mut bool,
 ) -> bool {
     match state.opclass {
         GinOpclass::JsonbOps => {
-            ::adt_jsonb::gin::gin_consistent_jsonb(check, strategy, nkeys, recheck)
+            ::adt_jsonb::gin::gin_consistent_jsonb(check, strategy, nkeys, recheck, jsp_ops)
+        }
+        GinOpclass::JsonbPathOps => {
+            ::adt_jsonb::gin::gin_consistent_jsonb_path(check, strategy, nkeys, recheck, jsp_ops)
         }
     }
 }
@@ -131,10 +159,14 @@ pub(crate) fn tri_consistent(
     nkeys: usize,
     _query_values: &[Datum],
     _query_categories: &[GinNullCategory],
+    jsp_ops: &[JspGinOp],
 ) -> GinTernaryValue {
     match state.opclass {
         GinOpclass::JsonbOps => {
-            ::adt_jsonb::gin::gin_triconsistent_jsonb(check, strategy, nkeys)
+            ::adt_jsonb::gin::gin_triconsistent_jsonb(check, strategy, nkeys, jsp_ops)
+        }
+        GinOpclass::JsonbPathOps => {
+            ::adt_jsonb::gin::gin_triconsistent_jsonb_path(check, strategy, nkeys, jsp_ops)
         }
     }
 }
@@ -160,6 +192,7 @@ pub fn gincost_extract_query(
     let state = GinState {
         opclass: match extract {
             3483 => GinOpclass::JsonbOps,
+            3486 => GinOpclass::JsonbPathOps,
             other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
         },
         support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
@@ -168,6 +201,6 @@ pub fn gincost_extract_query(
         key_len: -1,
     };
     let scratch = ::mcx::MemoryContext::new_bump("gincost extract scratch");
-    let (entries, mode) = extract_query(scratch.mcx(), &state, query, strategy)?;
+    let (entries, mode, _ops) = extract_query(scratch.mcx(), &state, query, strategy)?;
     Ok((entries.len() as i32, mode))
 }

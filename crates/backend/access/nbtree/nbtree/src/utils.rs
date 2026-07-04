@@ -364,13 +364,12 @@ unsafe fn bt_advance_array_keys(
         let mut least_sign_ikey = so.numberOfKeys - 1;
         let mut continuescan = true;
         debug_assert!(so.keyData[sktrig as usize].sk_flags & SK_SEARCHARRAY != 0);
-        if !bt_check_compare(
+        if !bt_check_compare::<false>(
             rel,
             so,
             dir,
             tuple,
             tupnatts,
-            false,
             false,
             &mut continuescan,
             &mut least_sign_ikey,
@@ -533,13 +532,12 @@ unsafe fn bt_advance_array_keys(
         let mut continuescan = true;
         debug_assert!(all_required_satisfied);
 
-        if bt_check_compare(
+        if bt_check_compare::<false>(
             rel,
             so,
             dir,
             tuple,
             tupnatts,
-            false,
             !sktrig_required,
             &mut continuescan,
             &mut nsktrig,
@@ -642,13 +640,16 @@ unsafe fn bt_advance_array_keys(
 /// _bt_checkkeys. `tupnatts` is the tuple's own attribute count (may be less
 /// than the key count for a truncated high key).
 ///
+/// ARRAY_KEYS is a const generic so the numArrayKeys==0 instantiation folds
+/// the array-advance tail dead and stays inlinable in the readpage loop —
+/// the runtime-bool form cost the plain range lane ~4% instr.
+///
 /// # Safety
 /// `tuple` points at a live index tuple on a page pinned+locked by caller.
-pub(crate) unsafe fn bt_checkkeys(
+pub(crate) unsafe fn bt_checkkeys<const ARRAY_KEYS: bool>(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     pstate: &mut BtReadPageState<'_>,
-    array_keys: bool,
     tuple: ITup,
     tupnatts: i32,
     frame: &mut OrderProcFrame,
@@ -656,23 +657,22 @@ pub(crate) unsafe fn bt_checkkeys(
     let dir = so.currPos.dir;
     let mut ikey = pstate.startikey;
     debug_assert!(!so.needPrimScan && !so.scanBehind && !so.oppositeDirCheck);
-    debug_assert!(array_keys || so.numArrayKeys == 0);
-    debug_assert!(!pstate.forcenonrequired || array_keys);
+    debug_assert!(ARRAY_KEYS || so.numArrayKeys == 0);
+    debug_assert!(!pstate.forcenonrequired || ARRAY_KEYS);
 
-    let res = bt_check_compare(
+    let res = bt_check_compare::<ARRAY_KEYS>(
         rel,
         so,
         dir,
         tuple,
         tupnatts,
-        array_keys,
         pstate.forcenonrequired,
         &mut pstate.continuescan,
         &mut ikey,
         frame,
     )?;
 
-    if !array_keys || pstate.continuescan {
+    if !ARRAY_KEYS || pstate.continuescan {
         return Ok(res);
     }
 
@@ -745,13 +745,12 @@ unsafe fn bt_oppodir_checkkeys(
     let mut continuescan = true;
     debug_assert!(so.numArrayKeys > 0);
 
-    bt_check_compare(
+    bt_check_compare::<false>(
         rel,
         so,
         flipped,
         finaltup,
         nfinaltupatts,
-        false,
         false,
         &mut continuescan,
         &mut ikey,
@@ -764,18 +763,20 @@ unsafe fn bt_oppodir_checkkeys(
     Ok(true)
 }
 
-/// _bt_check_compare.
+/// _bt_check_compare. ADVANCE_NONREQUIRED is const so the numArrayKeys==0
+/// instantiation folds the array-advance arm dead and inlines into
+/// bt_checkkeys::<false>'s readpage-loop copy (see bt_checkkeys).
 ///
 /// # Safety
 /// As [`bt_checkkeys`].
 #[allow(clippy::too_many_arguments)]
-unsafe fn bt_check_compare(
+#[inline(always)]
+unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     dir: ScanDirection,
     tuple: ITup,
     tupnatts: i32,
-    advancenonrequired: bool,
     forcenonrequired: bool,
     continuescan: &mut bool,
     ikey: &mut i32,
@@ -855,7 +856,7 @@ unsafe fn bt_check_compare(
         if !frame.test(key, datum, arg)? {
             if required_same_dir {
                 *continuescan = false;
-            } else if advancenonrequired
+            } else if ADVANCE_NONREQUIRED
                 && key.sk_strategy == BTEqualStrategyNumber
                 && key.sk_flags & SK_SEARCHARRAY != 0
             {

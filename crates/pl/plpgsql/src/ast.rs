@@ -43,6 +43,17 @@ pub struct PlExpr {
     pub target_param: Dno,
 }
 
+pub const PROMISE_NONE: i32 = 0;
+pub const PROMISE_TG_NAME: i32 = 1;
+pub const PROMISE_TG_WHEN: i32 = 2;
+pub const PROMISE_TG_LEVEL: i32 = 3;
+pub const PROMISE_TG_OP: i32 = 4;
+pub const PROMISE_TG_RELID: i32 = 5;
+pub const PROMISE_TG_TABLE_NAME: i32 = 6;
+pub const PROMISE_TG_TABLE_SCHEMA: i32 = 7;
+pub const PROMISE_TG_NARGS: i32 = 8;
+pub const PROMISE_TG_ARGV: i32 = 9;
+
 #[derive(Debug)]
 pub struct PlVar {
     pub dno: Dno,
@@ -52,6 +63,7 @@ pub struct PlVar {
     pub isconst: bool,
     pub notnull: bool,
     pub default_val: Option<PlExpr>,
+    pub promise: i32,
 }
 
 #[derive(Debug)]
@@ -216,6 +228,35 @@ pub enum PlStmt {
         is_stacked: bool,
         items: Vec<GetDiagItem>,
     },
+    DynExecute {
+        lineno: i32,
+        query: PlExpr,
+        into: bool,
+        strict: bool,
+        target: Dno,
+        params: Vec<PlExpr>,
+    },
+}
+
+/// PLpgSQL_condition; sqlerrstate 0 is OTHERS.
+#[derive(Debug)]
+pub struct PlCondition {
+    pub sqlerrstate: types_error::SqlState,
+    pub condname: String,
+}
+
+#[derive(Debug)]
+pub struct PlException {
+    pub lineno: i32,
+    pub conditions: Vec<PlCondition>,
+    pub action: Vec<PlStmt>,
+}
+
+#[derive(Debug)]
+pub struct ExceptionBlock {
+    pub sqlstate_varno: Dno,
+    pub sqlerrm_varno: Dno,
+    pub exc_list: Vec<PlException>,
 }
 
 pub const PLPGSQL_RAISEOPTION_ERRCODE: i32 = 0;
@@ -241,6 +282,7 @@ pub struct PlBlock {
     pub body: Vec<PlStmt>,
     /// dnos of block-local variables to initialize on entry.
     pub initvarnos: Vec<Dno>,
+    pub exceptions: Option<ExceptionBlock>,
 }
 
 pub fn stmt_lineno(s: &PlStmt) -> i32 {
@@ -258,7 +300,8 @@ pub fn stmt_lineno(s: &PlStmt) -> i32 {
         | PlStmt::Assert { lineno, .. }
         | PlStmt::ExecSql { lineno, .. }
         | PlStmt::Perform { lineno, .. }
-        | PlStmt::GetDiag { lineno, .. } => *lineno,
+        | PlStmt::GetDiag { lineno, .. }
+        | PlStmt::DynExecute { lineno, .. } => *lineno,
     }
 }
 
@@ -281,6 +324,7 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
         PlStmt::Perform { .. } => "PERFORM",
         PlStmt::GetDiag { is_stacked: false, .. } => "GET DIAGNOSTICS",
         PlStmt::GetDiag { is_stacked: true, .. } => "GET STACKED DIAGNOSTICS",
+        PlStmt::DynExecute { .. } => "EXECUTE",
     }
 }
 
@@ -302,6 +346,9 @@ pub struct PlFunction {
     pub fn_prokind: i8,
     pub fn_nargs: i16,
     pub fn_argvarnos: Vec<Dno>,
+    pub fn_is_trigger: bool,
+    pub new_varno: Dno,
+    pub old_varno: Dno,
     pub found_varno: Dno,
     pub datums: Vec<PlDatum>,
     pub ns: Vec<NsItem>,

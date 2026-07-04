@@ -201,6 +201,19 @@ pub fn fc_hashint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_i32() as u32)))
 }
 
+pub fn fc_hashchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_char() as i32 as u32)))
+}
+
+pub fn fc_hashcharextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, seed] = fcinfo.args_n::<2>();
+    Ok(Datum::from_u64(::hashfn::hash_bytes_uint32_extended(
+        a.value.as_char() as i32 as u32,
+        seed.value.as_i64() as u64,
+    )))
+}
+
 fc2! {
     fc_int4eq th_int4eq: int4eq(as_i32, as_i32) -> from_bool;
     fc_int4ne th_int4ne: int4ne(as_i32, as_i32) -> from_bool;
@@ -429,7 +442,9 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(1253, "int2abs", 1, fc_int2abs),
     b(5044, "int4gcd", 2, fc_int4gcd),
     b(5046, "int4lcm", 2, fc_int4lcm),
+    b(446, "hashcharextended", 2, fc_hashcharextended),
     b(450, "hashint4", 1, fc_hashint4),
+    b(454, "hashchar", 1, fc_hashchar),
     b(768, "int4larger", 2, fc_int4larger),
     b(769, "int4smaller", 2, fc_int4smaller),
     b(770, "int2larger", 2, fc_int2larger),

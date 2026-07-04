@@ -62,6 +62,8 @@ pub enum PlanStateNode<'mcx> {
     SubqueryScan(PgBox<'mcx, SubqueryScanNode<'mcx>>),
     SetOp(PgBox<'mcx, SetOpNode<'mcx>>),
     Memoize(PgBox<'mcx, MemoizeNode<'mcx>>),
+    RecursiveUnion(PgBox<'mcx, RecursiveUnionNode<'mcx>>),
+    WorkTableScan(PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -93,6 +95,13 @@ impl<'mcx> ::execscan::ScanNode<'mcx> for SubqueryScanNode<'mcx> {
         self.ss.ss_ScanTupleSlot = id;
         Ok(true)
     }
+}
+
+// Both children live here; noderecursiveunion drives them via RuChild.
+pub struct RecursiveUnionNode<'mcx> {
+    pub state: ::noderecursiveunion::RecursiveUnionState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+    pub inner: PlanStateNode<'mcx>,
 }
 
 // Both children live here (nodesort/nodeagg precedent; fetch closures).
@@ -236,6 +245,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(_) => None,
             PlanStateNode::SubqueryScan(s) => Some(s.ss.ps_ExprContext),
             PlanStateNode::SetOp(s) => Some(s.state.ps_ExprContext),
+            // Divergence: C's RU has no ExprContext, only the tempContext here.
+            PlanStateNode::RecursiveUnion(ru) => ru.state.ps_ExprContext,
+            PlanStateNode::WorkTableScan(wts) => Some(wts.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_)
@@ -272,7 +284,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::LockRows(_)
             | PlanStateNode::BitmapHeapScan(_)
             | PlanStateNode::Append(_)
-            | PlanStateNode::SubqueryScan(_) => crate::exec_type_from_tl(&plan.targetlist),
+            | PlanStateNode::SubqueryScan(_)
+            | PlanStateNode::RecursiveUnion(_)
+            | PlanStateNode::WorkTableScan(_) => crate::exec_type_from_tl(&plan.targetlist),
             // The tlist is NIL (empty type) without RETURNING, else the first
             // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
@@ -816,6 +830,49 @@ pub fn exec_init_node<'mcx>(
                 ::nodesetop::exec_init_set_op(so_plan, estate, eflags, &outer_desc, result_desc)?;
             PlanStateNode::SetOp(::mcx::alloc_in(mcx, SetOpNode { state, outer, inner })?)
         }
+        NodeTag::T_RecursiveUnion => {
+            let mcx = estate.es_query_cxt;
+            let ru_plan = node.as_recursive_union().unwrap();
+            let result_desc = crate::exec_type_from_tl(&ru_plan.plan.targetlist)?;
+            // C order: the wtParam entry is published before child init.
+            ::noderecursiveunion::exec_init_recursive_union_shared(ru_plan, estate, result_desc);
+            let outer = exec_init_node(ru_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitRecursiveUnion (nodeRecursiveunion.c): RecursiveUnion \
+                         without an outer plan"
+                    )
+                });
+            let inner = exec_init_node(ru_plan.plan.righttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitRecursiveUnion (nodeRecursiveunion.c): RecursiveUnion \
+                         without an inner plan"
+                    )
+                });
+            let outer_desc = outer
+                .exec_get_result_type(ru_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let state = ::noderecursiveunion::exec_init_recursive_union(
+                ru_plan,
+                estate,
+                eflags,
+                &outer_desc,
+            )?;
+            PlanStateNode::RecursiveUnion(::mcx::alloc_in(
+                mcx,
+                RecursiveUnionNode { state, outer, inner },
+            )?)
+        }
+        NodeTag::T_WorkTableScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodeworktablescan::exec_init_work_table_scan(
+                mcx,
+                node.as_work_table_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::WorkTableScan(::mcx::alloc_in(mcx, state)?)
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -848,14 +905,12 @@ pub fn exec_init_node<'mcx>(
         }
         tag => unported_nodes!(tag, {
             T_MergeAppend => "nodeMergeAppend.c",
-            T_RecursiveUnion => "nodeRecursiveunion.c",
             T_SampleScan => "nodeSamplescan.c",
             T_TidScan => "nodeTidscan.c",
             T_TidRangeScan => "nodeTidrangescan.c",
             T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
-            T_WorkTableScan => "nodeWorktablescan.c",
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
@@ -914,6 +969,7 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
+        PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
         PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
@@ -958,6 +1014,8 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Append(a) => append_arm(a, estate),
         PlanStateNode::SubqueryScan(s) => subquery_scan_arm(s, estate),
         PlanStateNode::SetOp(s) => set_op_arm(s, estate),
+        PlanStateNode::RecursiveUnion(ru) => recursive_union_arm(ru, estate),
+        PlanStateNode::WorkTableScan(wts) => work_table_scan_arm(wts, estate),
         PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
         PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
@@ -1259,6 +1317,23 @@ fn set_op_arm<'mcx>(
 }
 
 #[inline(never)]
+fn recursive_union_arm<'mcx>(
+    ru: &mut PgBox<'mcx, RecursiveUnionNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let RecursiveUnionNode { state, outer, inner } = &mut **ru;
+    ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
+}
+
+#[inline(never)]
+fn work_table_scan_arm<'mcx>(
+    wts: &mut PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeworktablescan::exec_work_table_scan(wts, estate)
+}
+
+#[inline(never)]
 fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let NestLoopNode { state, outer, inner } = nl;
     ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
@@ -1448,6 +1523,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
+        PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
         PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
         PlanStateNode::IndexOnlyScan(ios) => end_scan(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
@@ -1456,6 +1532,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
         | PlanStateNode::SetOp(_)
+        | PlanStateNode::RecursiveUnion(_)
         | PlanStateNode::IncrementalSort(_)
         | PlanStateNode::Agg(_)
         | PlanStateNode::BitmapIndexScan(_)
@@ -1538,9 +1615,14 @@ pub fn planstate_instr_extra<'mcx>(
         }
         PlanStateNode::SubqueryScan(s) => walk!(&mut *s.subplan),
         PlanStateNode::SetOp(s) => walk!(&mut s.outer, &mut s.inner),
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            walk!(&mut ru.outer, &mut ru.inner)
+        }
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
-        PlanStateNode::Result(_)
+        PlanStateNode::WorkTableScan(_)
+        | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::ValuesScan(_)
@@ -1688,6 +1770,13 @@ fn exec_end_node_inner<'mcx>(
             Ok(())
         }
         PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
+        PlanStateNode::WorkTableScan(_) => Ok(()),
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            ::noderecursiveunion::exec_end_recursive_union(&mut ru.state, estate);
+            exec_end_node(&mut ru.outer, estate)?;
+            exec_end_node(&mut ru.inner, estate)
+        }
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
             ::nodesetop::exec_end_set_op(&mut s.state);
@@ -1729,9 +1818,15 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
+        | PlanStateNode::WorkTableScan(_)
         | PlanStateNode::IndexScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            exec_shutdown_node(&mut ru.outer, estate);
+            exec_shutdown_node(&mut ru.inner, estate);
+        }
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer, estate),
         PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer, estate),
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer, estate),
@@ -1853,6 +1948,21 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
     }
 }
 
+impl<'mcx> ::noderecursiveunion::RuChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan_with_chg(
+        &mut self,
+        plan: ::types_nodes::Node<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        crate::execami::exec_re_scan_with_chg(self, plan, estate, chg)
+    }
+}
+
 impl<'mcx> ::nodememoize::MemoizeChild<'mcx> for PlanStateNode<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
         exec_proc_node(self, estate)
@@ -1955,6 +2065,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     AppendNode<'_> { state, substates },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
+    RecursiveUnionNode<'_> { state, outer, inner },
     LockRowsNode<'_> { state, outer, epq },
     LimitNode<'_> { state, outer },
     UniqueNode<'_> { state, outer },
@@ -1970,6 +2081,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
-        MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x), Instrumented(x),
+        MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),
+        RecursiveUnion(x), WorkTableScan(x), Instrumented(x),
     },
 );

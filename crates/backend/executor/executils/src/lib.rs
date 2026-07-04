@@ -94,6 +94,14 @@ pub struct CteShared {
     pub fills: u32,
 }
 
+/// C's RecursiveUnionState tables + result rowtype, hoisted to the estate
+/// keyed by wtParam (the C es_param_exec_vals rustate alias, owned).
+pub struct WorkTableShared {
+    pub working_table: ::tuplestore::Tuplestore,
+    pub intermediate_table: ::tuplestore::Tuplestore,
+    pub desc: Rc<TupleDescData<'static>>,
+}
+
 /// C ExecEvalParamExec's pending-initplan arm, hoisted to the owning node.
 pub fn exec_eval_param_exec_params(
     estate: &mut EStateData<'_>,
@@ -413,6 +421,7 @@ pub struct EStateData<'mcx> {
         PgVec<'mcx, (core::ptr::NonNull<()>, unsafe fn(core::ptr::NonNull<()>))>,
     /// cteParam -> shared CTE state; the leader installs, followers replay.
     pub es_cte_shared: PgVec<'mcx, Option<CteShared>>,
+    pub es_worktable_shared: PgVec<'mcx, Option<WorkTableShared>>,
     pub es_cte_proc_hook: Option<CteProcHook>,
     pub es_auxmodifytables: PgVec<'mcx, ModifyTableP3>,
     es_per_tuple_exprcontext: Option<EcxtId>,
@@ -492,6 +501,7 @@ impl<'mcx> EStateData<'mcx> {
             es_subplan_eval_hook: None,
             es_subplan_expr_states: PgVec::new_in(mcx),
             es_cte_shared: PgVec::new_in(mcx),
+            es_worktable_shared: PgVec::new_in(mcx),
             es_cte_proc_hook: None,
             es_auxmodifytables: PgVec::new_in(mcx),
             es_per_tuple_exprcontext: None,
@@ -680,6 +690,13 @@ impl<'mcx> EStateData<'mcx> {
         &mut self.es_cte_shared[param]
     }
 
+    pub fn worktable_shared_slot(&mut self, param: usize) -> &mut Option<WorkTableShared> {
+        while self.es_worktable_shared.len() <= param {
+            self.es_worktable_shared.push(None);
+        }
+        &mut self.es_worktable_shared[param]
+    }
+
     /// (subplan rows pulled, tuplestore rows) for the cteParam — the
     /// materialize-once proof reads fills == tuples == |CTE result|.
     pub fn cte_fill_probe(&self, param: usize) -> Option<(u32, i64)> {
@@ -833,6 +850,9 @@ impl<'mcx> EStateData<'mcx> {
         for slot in self.es_cte_shared.iter_mut() {
             *slot = None;
         }
+        for slot in self.es_worktable_shared.iter_mut() {
+            *slot = None;
+        }
         self.es_aux_contexts.clear();
     }
 
@@ -845,6 +865,7 @@ impl<'mcx> EStateData<'mcx> {
             && self.es_relations.iter().all(Option::is_none)
             && self.es_exprcontexts.iter().all(Option::is_none)
             && self.es_cte_shared.iter().all(Option::is_none)
+            && self.es_worktable_shared.iter().all(Option::is_none)
             && self.es_aux_contexts.is_empty()
             && self.es_subplan_expr_states.is_empty()
             && self
@@ -891,7 +912,8 @@ mcx::forget_safe_struct!(
         es_parallel_workers_launched, es_jit_flags, es_epq, es_epq_active,
         es_rowmarks;
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
-        es_tupleTable, es_exprcontexts, es_cte_shared, es_aux_contexts,
+        es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
+        es_aux_contexts,
         es_direction, es_part_prune_infos,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_agg_instrumentation,

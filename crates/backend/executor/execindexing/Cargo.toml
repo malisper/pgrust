@@ -37,6 +37,7 @@ clauses = { path = "../../optimizer/util/clauses" }
 execexpr = { path = "../execexpr" }
 
 [dev-dependencies]
+test_boot = { path = "../../../_support/test_boot" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 nodeindexscan = { path = "../nodeindexscan" }
 types_scan = { path = "../../../_support/types/types_scan" }
