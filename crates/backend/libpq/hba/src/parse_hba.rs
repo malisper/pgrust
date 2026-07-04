@@ -16,7 +16,7 @@ use crate::{report_config, token_is_keyword, TokenizedAuthLine};
 
 // Build flags of this tree: no SSL / GSS / SSPI / PAM / BSD / LDAP.
 pub(crate) const fn use_ssl() -> bool {
-    false
+    true
 }
 pub(crate) const fn enable_gss() -> bool {
     false
@@ -99,11 +99,17 @@ pub fn parse_hba_line(
         if b.get(4) == Some(&b's') {
             parsedline.conntype = ctHostSSL;
             // Log a warning if SSL support is not active.
-            if !use_ssl() {
-                let msg =
-                    "hostssl record cannot match because SSL is not supported by this build"
-                        .to_string();
-                report_config(elevel, 1384, "parse_hba_line", msg.clone(), None, line_num, &file_name)?;
+            if use_ssl() && !guc_tables::vars::EnableSSL.read() {
+                let msg = "hostssl record cannot match because SSL is disabled".to_string();
+                report_config(
+                    elevel,
+                    1384,
+                    "parse_hba_line",
+                    msg.clone(),
+                    Some("Set \"ssl = on\" in postgresql.conf."),
+                    line_num,
+                    &file_name,
+                )?;
                 tok_line.err_msg = Some(msg);
             }
         } else if b.get(4) == Some(&b'g') {
