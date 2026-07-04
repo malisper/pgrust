@@ -158,6 +158,8 @@ members = [
     "crates/backend/executor/nodefunctionscan",
     "crates/backend/executor/nodevaluesscan",
     "crates/backend/executor/nodeseqscan",
+    "crates/backend/executor/nodetidscan",
+    "crates/backend/executor/nodetidrangescan",
     "crates/backend/executor/nodeindexscan",
     "crates/backend/executor/nodebitmapindexscan",
     "crates/backend/executor/nodectescan",

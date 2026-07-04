@@ -382,6 +382,13 @@ pub(crate) fn clause_selectivity_node<'mcx>(
                 sjinfo,
             )
         }
+        // CURRENT OF selects at most one row of its table.
+        NodeTag::T_CurrentOfExpr => {
+            let cvarno = clause.as_current_of_expr().unwrap().cvarno;
+            let crel_id = crate::relnode::find_base_rel(&run.root, cvarno as i32);
+            let tuples = run.root.rel(crel_id).tuples;
+            Ok(if tuples > 0.0 { 1.0 / tuples } else { 0.5 })
+        }
         // C's catch-all default: no way to estimate, use 0.5.
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
         // C's final else: boolvarsel.

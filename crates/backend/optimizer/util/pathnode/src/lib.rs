@@ -101,6 +101,9 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SeqScan) => true,
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
+        t if t == tag16(NodeTag::T_TidScan) => true,
+        t if t == tag16(NodeTag::T_TidRangeScan) => true,
+        t if t == tag16(NodeTag::T_BitmapHeapScan) => true,
         t if t == tag16(NodeTag::T_CteScan) => true,
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
@@ -916,6 +919,24 @@ pub fn create_tidscan_path<'mcx>(
         .root
         .alloc_path(PathNode::TidPath(types_pathnodes::TidPath { path, tidquals }));
     costsize::cost_tidscan(run, id, rel_id, &quals)?;
+    Ok(id)
+}
+
+// create_tidrangescan_path (pathnode.c); required_outer is empty on this lane.
+pub fn create_tidrangescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    tidrangequals: PgVec<'mcx, RinfoId>,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_TidRangePath, NodeTag::T_TidRangeScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &tidrangequals);
+    let id = run.root.alloc_path(PathNode::TidRangePath(types_pathnodes::TidRangePath {
+        path,
+        tidrangequals,
+    }));
+    costsize::cost_tidrangescan(run, id, rel_id, &quals)?;
     Ok(id)
 }
 

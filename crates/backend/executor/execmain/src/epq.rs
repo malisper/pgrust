@@ -96,6 +96,8 @@ fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
         NodeTag::T_SeqScan
+            | NodeTag::T_TidScan
+            | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
             | NodeTag::T_IndexOnlyScan
             | NodeTag::T_BitmapHeapScan
