@@ -98,7 +98,7 @@ pub fn fc_pg_input_is_valid(
     Ok(Datum::from_bool(ok))
 }
 
-fn text_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum> {
+pub(crate) fn text_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum> {
     let len = datum::varlena::VARHDRSZ + payload.len();
     let mut buf: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, len)?;
     // SAFETY: single reserve above; header + payload fit exactly.
@@ -119,7 +119,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum> {
 
 #[cold]
 #[inline(never)]
-fn not_row_type() -> Box<PgError> {
+pub(crate) fn not_row_type() -> Box<PgError> {
     Box::new(PgError::error("return type must be a row type"))
 }
 

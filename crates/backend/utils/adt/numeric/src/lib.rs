@@ -8,6 +8,7 @@ pub mod io;
 pub mod math;
 pub mod ops;
 pub mod random;
+pub mod series;
 pub mod sortsupport;
 pub mod var;
 

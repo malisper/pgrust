@@ -481,6 +481,46 @@ pub fn fc_unistr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(varlena_result(crate::unistr(mcx, a.data())?))
 }
 
+pub fn fc_bytea_int2(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i16(crate::bytea::bytea_int2(v.data())?))
+}
+
+pub fn fc_bytea_int4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i32(crate::bytea::bytea_int4(v.data())?))
+}
+
+pub fn fc_bytea_int8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i64(crate::bytea::bytea_int8(v.data())?))
+}
+
+pub fn fc_int2_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::int_bytea(mcx, &fcinfo.arg_i16(0).to_be_bytes())?))
+}
+
+pub fn fc_int4_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::int_bytea(mcx, &fcinfo.arg_i32(0).to_be_bytes())?))
+}
+
+pub fn fc_int8_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::int_bytea(mcx, &fcinfo.arg_i64(0).to_be_bytes())?))
+}
+
+pub fn fc_bytea_reverse(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_reverse(mcx, v.data())?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -527,6 +567,13 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(722, "byteaSetByte", 3, fc_bytea_set_byte),
     b(723, "byteaGetBit", 2, fc_bytea_get_bit),
     b(724, "byteaSetBit", 3, fc_bytea_set_bit),
+    b(6367, "int2_bytea", 1, fc_int2_bytea),
+    b(6368, "int4_bytea", 1, fc_int4_bytea),
+    b(6369, "int8_bytea", 1, fc_int8_bytea),
+    b(6370, "bytea_int2", 1, fc_bytea_int2),
+    b(6371, "bytea_int4", 1, fc_bytea_int4),
+    b(6372, "bytea_int8", 1, fc_bytea_int8),
+    b(6382, "bytea_reverse", 1, fc_bytea_reverse),
     b(740, "text_lt", 2, fc_text_lt),
     b(849, "textpos", 2, fc_textpos),
     b(868, "strpos", 2, fc_textpos),

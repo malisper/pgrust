@@ -7,7 +7,8 @@ use crate::var::{
     var_to_int32, var_to_int64, NumericImage, NumericVar, CONST_ONE, CONST_ZERO,
 };
 use crate::{
-    division_by_zero_error, numeric_can_be_short, Num, DEC_DIGITS, NUMERIC_DSCALE_MASK,
+    division_by_zero_error, numeric_can_be_short, Num, NumericDigit, DEC_DIGITS,
+    NUMERIC_DSCALE_MASK,
     NUMERIC_DSCALE_MAX, NUMERIC_INF_SIGN_MASK, NUMERIC_NEG, NUMERIC_POS,
     NUMERIC_SHORT_DSCALE_MASK, NUMERIC_SHORT_DSCALE_SHIFT, NUMERIC_SHORT_SIGN_MASK,
     NUMERIC_WEIGHT_MAX, VARHDRSZ,
@@ -917,5 +918,146 @@ pub fn numeric_trim_scale(num: Num<'_>) -> PgResult<NumericImage> {
     }
     let mut result = NumericVar::from_view(num.view());
     result.dscale = get_min_scale(&result);
+    make_result(result.view())
+}
+
+// hash_numeric hashes the live digit span only (leading/trailing zeros and
+// dscale excluded: equal numerics with different scales must hash equal).
+fn live_digit_span(num: Num<'_>) -> Option<(&[NumericDigit], i32)> {
+    let digits = num.digits();
+    let mut weight = num.weight();
+    let mut start = 0usize;
+    while start < digits.len() && digits[start] == 0 {
+        start += 1;
+        weight -= 1;
+    }
+    if start == digits.len() {
+        return None;
+    }
+    let mut end = digits.len();
+    while digits[end - 1] == 0 {
+        end -= 1;
+    }
+    Some((&digits[start..end], weight))
+}
+
+#[inline]
+fn digit_bytes(d: &[NumericDigit]) -> &[u8] {
+    // SAFETY: i16 -> u8 reinterpret of a live slice; alignment only loosens.
+    unsafe { core::slice::from_raw_parts(d.as_ptr().cast::<u8>(), d.len() * 2) }
+}
+
+pub fn hash_numeric(key: Num<'_>) -> u32 {
+    if key.is_special() {
+        return 0;
+    }
+    match live_digit_span(key) {
+        None => u32::MAX,
+        Some((live, weight)) => ::hashfn::hash_bytes(digit_bytes(live)) ^ (weight as u32),
+    }
+}
+
+pub fn hash_numeric_extended(key: Num<'_>, seed: u64) -> u64 {
+    if key.is_special() {
+        return seed;
+    }
+    match live_digit_span(key) {
+        None => seed.wrapping_sub(1),
+        Some((live, weight)) => {
+            ::hashfn::hash_bytes_extended(digit_bytes(live), seed) ^ (weight as i64 as u64)
+        }
+    }
+}
+
+pub fn in_range_numeric_numeric(
+    val: Num<'_>,
+    base: Num<'_>,
+    offset: Num<'_>,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
+    if offset.is_nan() || offset.is_ninf() || offset.sign() == NUMERIC_NEG {
+        return Err(PgError::error(
+            "invalid preceding or following size in window function",
+        )
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE)
+        .into());
+    }
+    // NaN sorts after non-NaN (cf cmp_numerics); the offset cannot change that.
+    let result = if val.is_nan() {
+        if base.is_nan() {
+            true
+        } else {
+            !less
+        }
+    } else if base.is_nan() {
+        less
+    } else if offset.is_special() {
+        debug_assert!(offset.is_pinf());
+        if if sub { base.is_pinf() } else { base.is_ninf() } {
+            // base +/- offset would be NaN: true for any val, per C.
+            true
+        } else if sub {
+            if less {
+                val.is_ninf()
+            } else {
+                true
+            }
+        } else if less {
+            true
+        } else {
+            val.is_pinf()
+        }
+    } else if val.is_special() {
+        if val.is_pinf() {
+            if base.is_pinf() {
+                true
+            } else {
+                !less
+            }
+        } else if base.is_ninf() {
+            true
+        } else {
+            less
+        }
+    } else if base.is_special() {
+        if base.is_ninf() {
+            !less
+        } else {
+            less
+        }
+    } else {
+        let mut sum = NumericVar::new();
+        if sub {
+            sub_var(base.view(), offset.view(), &mut sum);
+        } else {
+            add_var(base.view(), offset.view(), &mut sum);
+        }
+        if less {
+            cmp_var(val.view(), sum.view()) <= 0
+        } else {
+            cmp_var(val.view(), sum.view()) >= 0
+        }
+    };
+    Ok(result)
+}
+
+pub fn numeric_sign(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_nan() {
+        return Ok(NumericImage::nan());
+    }
+    match numeric_sign_internal(num) {
+        0 => make_result(CONST_ZERO),
+        1 => make_result(CONST_ONE),
+        _ => make_result(crate::var::CONST_MINUS_ONE),
+    }
+}
+
+pub fn numeric_inc(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+    let mut result = NumericVar::new();
+    add_var(num.view(), CONST_ONE, &mut result);
     make_result(result.view())
 }

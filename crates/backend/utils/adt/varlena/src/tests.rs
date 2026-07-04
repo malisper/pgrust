@@ -871,3 +871,40 @@ fn text_to_array_arms() {
         Some(vec![s("a"), None])
     );
 }
+
+#[test]
+fn bytea_int_conversions() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    assert_eq!(bytea::bytea_int2(&[]).unwrap(), 0);
+    assert_eq!(bytea::bytea_int2(&[0x12]).unwrap(), 0x12);
+    assert_eq!(bytea::bytea_int2(&[0x80, 0x00]).unwrap(), i16::MIN);
+    assert_eq!(bytea::bytea_int2(&[0xff, 0xff]).unwrap(), -1);
+    let err = bytea::bytea_int2(&[1, 2, 3]).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    assert_eq!(err.message(), "smallint out of range");
+
+    assert_eq!(bytea::bytea_int4(&[0xde, 0xad, 0xbe, 0xef]).unwrap(), -559038737);
+    let err = bytea::bytea_int4(&[0; 5]).unwrap_err();
+    assert_eq!(err.message(), "integer out of range");
+
+    assert_eq!(bytea::bytea_int8(&[0xff; 8]).unwrap(), -1);
+    let err = bytea::bytea_int8(&[0; 9]).unwrap_err();
+    assert_eq!(err.message(), "bigint out of range");
+
+    let v = bytea::int_bytea(mcx, &0x1234i16.to_be_bytes()).unwrap();
+    assert_eq!(v.data(), &[0x12, 0x34]);
+    assert_eq!(bytea::bytea_int2(v.data()).unwrap(), 0x1234);
+    let v = bytea::int_bytea(mcx, &(-1i64).to_be_bytes()).unwrap();
+    assert_eq!(v.data(), &[0xff; 8]);
+}
+
+#[test]
+fn bytea_reverse_cases() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(bytea::bytea_reverse(mcx, b"abc").unwrap().data(), b"cba");
+    assert_eq!(bytea::bytea_reverse(mcx, b"").unwrap().data(), b"");
+    assert_eq!(bytea::bytea_reverse(mcx, b"x").unwrap().data(), b"x");
+}

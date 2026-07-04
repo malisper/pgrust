@@ -454,3 +454,51 @@ pub fn bytea_set_bit<'mcx>(
     };
     Ok(Varlena::from_image(image))
 }
+
+#[cold]
+#[inline(never)]
+fn int_out_of_range(type_name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{type_name} out of range"))
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+    )
+}
+
+// bytea_int2/4/8: big-endian fold of at most size_of bytes.
+fn bytea_uint_be(v: &[u8], width: usize, type_name: &str) -> PgResult<u64> {
+    if v.len() > width {
+        return Err(int_out_of_range(type_name));
+    }
+    let mut result: u64 = 0;
+    for &b in v {
+        result = (result << 8) | b as u64;
+    }
+    Ok(result)
+}
+
+pub fn bytea_int2(v: &[u8]) -> PgResult<i16> {
+    Ok(bytea_uint_be(v, 2, "smallint")? as u16 as i16)
+}
+
+pub fn bytea_int4(v: &[u8]) -> PgResult<i32> {
+    Ok(bytea_uint_be(v, 4, "integer")? as u32 as i32)
+}
+
+pub fn bytea_int8(v: &[u8]) -> PgResult<i64> {
+    Ok(bytea_uint_be(v, 8, "bigint")? as i64)
+}
+
+// int2/4/8_bytea alias intNsend: the big-endian byte image.
+pub fn int_bytea<'mcx>(mcx: Mcx<'mcx>, be_bytes: &[u8]) -> PgResult<Varlena<'mcx>> {
+    let mut image = image_with_header(mcx, be_bytes.len())?;
+    mcx::vec_append_bytes(&mut image, be_bytes)?;
+    Ok(Varlena::from_image(image))
+}
+
+pub fn bytea_reverse<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<Varlena<'mcx>> {
+    let mut image = image_with_header(mcx, v.len())?;
+    for &b in v.iter().rev() {
+        image.push(b);
+    }
+    Ok(Varlena::from_image(image))
+}

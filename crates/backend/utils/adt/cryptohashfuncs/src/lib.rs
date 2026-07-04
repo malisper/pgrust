@@ -51,6 +51,20 @@ pub fn fc_sha512_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     sha_common(fcinfo, |d| pg_sha2::sha512(d).to_vec())
 }
 
+// pg_crc.c's SQL builtins ride here (the crc32c crate owns the kernels).
+pub fn fc_crc32_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena; strict fn.
+    let input = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i64(crc32c::traditional_crc32(input.data()) as i64))
+}
+
+pub fn fc_crc32c_bytea(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena; strict fn.
+    let input = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, input.data()));
+    Ok(Datum::from_i64(crc as i64))
+}
+
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs: 1, strict: true, retset: false, func }
 }
@@ -62,4 +76,6 @@ pub const CRYPTOHASH_BUILTINS: &[FmgrBuiltin] = &[
     b(3420, "sha256_bytea", fc_sha256_bytea),
     b(3421, "sha384_bytea", fc_sha384_bytea),
     b(3422, "sha512_bytea", fc_sha512_bytea),
+    b(6364, "crc32_bytea", fc_crc32_bytea),
+    b(6365, "crc32c_bytea", fc_crc32c_bytea),
 ];

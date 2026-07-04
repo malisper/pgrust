@@ -9,7 +9,6 @@ name = "adt_numeric"
 path = "src/lib.rs"
 
 [dependencies]
-hashfn = { path = "../../../../common/hashfn" }
 arrayfuncs = { path = "../arrayfuncs" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 adt_float = { path = "../float" }
@@ -18,8 +17,11 @@ init_small = { path = "../../init/init_small" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
+hashfn = { path = "../../../../common/hashfn" }
 hyperloglog = { path = "../../../lib/hyperloglog" }
 pg_prng = { path = "../../../../common/pg_prng" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 mcx = { path = "../../../../_support/mcx" }
