@@ -16,6 +16,9 @@ latch_seams = { path = "../../storage/ipc/latch_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 pqcomm = { path = "../pqcomm" }
 be_secure_seams = { path = "../be_secure_seams" }
+be_secure_openssl = { path = "../be_secure_openssl" }
+elog = { path = "../../utils/error/elog" }
+types_core = { path = "../../../_support/types/types_core" }
 libc = "0.2"
 
 [dev-dependencies]
@@ -28,7 +31,6 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
 pqcomm_seams = { path = "../pqcomm_seams" }
 stringinfo = { path = "../../../_support/types/stringinfo" }
-types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }

@@ -54,6 +54,22 @@ pub mod log_connections {
     }
 }
 
+// bool LoadedSSL: set by the postmaster (secure_initialize), read by every
+// backend thread.
+pub mod loaded_ssl {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static LOADED_SSL: AtomicBool = AtomicBool::new(false);
+
+    pub fn get() -> bool {
+        LOADED_SSL.load(Ordering::Relaxed)
+    }
+
+    pub fn set(v: bool) {
+        LOADED_SSL.store(v, Ordering::Relaxed);
+    }
+}
+
 pub mod trace_connection_negotiation {
     use super::TRACE_CONNECTION_NEGOTIATION;
 

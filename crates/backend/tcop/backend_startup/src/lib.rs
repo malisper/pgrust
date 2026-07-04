@@ -3,8 +3,9 @@
 //! (cancel requests and SSL/GSS negotiation included), rejects on database
 //! state, builds the ps title, and hands off to PostgresMain.
 //!
-//! Build shape matches a `!USE_SSL && !ENABLE_GSS` C build: direct-SSL and
-//! negotiation requests take the reject/'N' arms. The auth surface
+//! Build shape matches a `USE_SSL && !ENABLE_GSS` C build: direct-SSL and
+//! SSLRequest negotiation run the real handshake (be_secure/be_secure_openssl);
+//! GSS requests take the reject/'N' arms. The auth surface
 //! (ClientAuthentication and everything behind it) is not this unit; it stays
 //! behind loud seams in InitPostgres. Thread model: the per-child SIGTERM /
 //! SIGQUIT process handlers of the fork build are postmaster-signal design
@@ -30,7 +31,7 @@ mod globals;
 #[cfg(test)]
 mod tests;
 
-pub use globals::{conn_timing, log_connections, trace_connection_negotiation};
+pub use globals::{conn_timing, loaded_ssl, log_connections, trace_connection_negotiation};
 
 pub const MAX_STARTUP_PACKET_LENGTH: i32 = 10000;
 pub const NAMEDATALEN: usize = 64;
@@ -263,8 +264,10 @@ fn build_ps_title() {
     ps_status_seams::set_ps_display::call("initializing");
 }
 
-// ProcessSSLStartup: without USE_SSL, 0x16 lands on the C `reject:` label.
+// ProcessSSLStartup: 0x16 is a TLS handshake first byte (direct SSL).
 fn process_ssl_startup() -> PgResult<i32> {
+    debug_assert!(!init_small::globals::WithMyProcPort(|p| p.ssl_in_use));
+
     pqcomm::pq_startmsgread()?;
     let firstbyte = pqcomm::pq_peekbyte()?;
     pqcomm::pq_endmsgread();
@@ -275,12 +278,41 @@ fn process_ssl_startup() -> PgResult<i32> {
     if firstbyte != 0x16 {
         return Ok(STATUS_OK);
     }
+
+    let reject = |line: i32| -> PgResult<i32> {
+        if trace_connection_negotiation::get() {
+            ereport(LOG)
+                .errmsg("direct SSL connection rejected")
+                .finish(loc(line, "ProcessSSLStartup"))?;
+        }
+        Ok(STATUS_ERROR)
+    };
+
+    let laddr = init_small::globals::WithMyProcPort(|p| p.laddr);
+    if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX {
+        return reject(468);
+    }
+
+    if be_secure::secure_open_server()? == -1 {
+        // secure_open_server sent an appropriate TLS alert already.
+        return reject(468);
+    }
+    debug_assert!(init_small::globals::WithMyProcPort(|p| p.ssl_in_use));
+
+    if !init_small::globals::WithMyProcPort(|p| p.alpn_used) {
+        ereport(COMMERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("received direct SSL connection request without ALPN protocol negotiation extension")
+            .finish(loc(455, "ProcessSSLStartup"))?;
+        return reject(468);
+    }
+
     if trace_connection_negotiation::get() {
         ereport(LOG)
-            .errmsg("direct SSL connection rejected")
-            .finish(loc(468, "ProcessSSLStartup"))?;
+            .errmsg("direct SSL connection accepted")
+            .finish(loc(461, "ProcessSSLStartup"))?;
     }
-    Ok(STATUS_ERROR)
+    Ok(STATUS_OK)
 }
 
 // ProcessStartupPacket: the SSL/GSS recursion is real, depth-bounded as in C.
@@ -331,13 +363,31 @@ fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgRes
     }
 
     if proto == NEGOTIATE_SSL_CODE && !ssl_done {
-        // No USE_SSL in this build: SSLok = 'N'.
+        // No SSL when disabled or on Unix sockets; also no SSL negotiation if
+        // we already have a direct SSL connection.
+        let (laddr, ssl_in_use) =
+            init_small::globals::WithMyProcPort(|p| (p.laddr, p.ssl_in_use));
+        let ssl_ok = if !loaded_ssl::get()
+            || ip::sockaddr_family(&laddr) == libc::AF_UNIX
+            || ssl_in_use
+        {
+            b'N'
+        } else {
+            b'S'
+        };
         if trace_connection_negotiation::get() {
             ereport(LOG)
-                .errmsg("SSLRequest rejected")
+                .errmsg(if ssl_ok == b'S' {
+                    "SSLRequest accepted"
+                } else {
+                    "SSLRequest rejected"
+                })
                 .finish(loc(600, "ProcessStartupPacket"))?;
         }
-        if !write_negotiation_byte(b'N', "SSL")? {
+        if !write_negotiation_byte(ssl_ok, "SSL")? {
+            return Ok(STATUS_ERROR);
+        }
+        if ssl_ok == b'S' && be_secure::secure_open_server()? == -1 {
             return Ok(STATUS_ERROR);
         }
         if pqcomm::pq_buffer_remaining_data() > 0 {
@@ -348,7 +398,7 @@ fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgRes
                 .finish(loc(627, "ProcessStartupPacket"))
                 .map(|()| STATUS_ERROR);
         }
-        return process_startup_packet(mcx, true, false);
+        return process_startup_packet(mcx, true, ssl_ok == b'S');
     } else if proto == NEGOTIATE_GSS_CODE && !gss_done {
         // No ENABLE_GSS in this build: GSSok = 'N'.
         if trace_connection_negotiation::get() {

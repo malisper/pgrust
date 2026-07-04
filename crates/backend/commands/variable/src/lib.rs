@@ -781,15 +781,11 @@ pub fn check_default_with_oids(
 }
 
 pub fn check_ssl(
-    newval: &mut bool,
+    _newval: &mut bool,
     _extra: &mut Option<GucHookExtra>,
     _source: GucSource,
 ) -> PgResult<bool> {
-    // Build without USE_SSL.
-    if *newval {
-        GUC_check_errmsg("SSL is not supported by this build");
-        return Ok(false);
-    }
+    // USE_SSL build (be_secure_openssl).
     Ok(true)
 }
 

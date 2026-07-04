@@ -296,6 +296,66 @@ fn install_guc_tables_owned_vars() {
         get: backing::EnableSSL,
         set: backing::set_EnableSSL,
     });
+    vars::SSLPreferServerCiphers.install(GucVarAccessors {
+        get: backing::SSLPreferServerCiphers,
+        set: backing::set_SSLPreferServerCiphers,
+    });
+    vars::ssl_passphrase_command_supports_reload.install(GucVarAccessors {
+        get: backing::ssl_passphrase_command_supports_reload,
+        set: backing::set_ssl_passphrase_command_supports_reload,
+    });
+    vars::ssl_min_protocol_version.install(GucVarAccessors {
+        get: backing::ssl_min_protocol_version,
+        set: backing::set_ssl_min_protocol_version,
+    });
+    vars::ssl_max_protocol_version.install(GucVarAccessors {
+        get: backing::ssl_max_protocol_version,
+        set: backing::set_ssl_max_protocol_version,
+    });
+    vars::ssl_library.install(GucVarAccessors {
+        get: backing::ssl_library,
+        set: backing::set_ssl_library,
+    });
+    vars::ssl_cert_file.install(GucVarAccessors {
+        get: backing::ssl_cert_file,
+        set: backing::set_ssl_cert_file,
+    });
+    vars::ssl_key_file.install(GucVarAccessors {
+        get: backing::ssl_key_file,
+        set: backing::set_ssl_key_file,
+    });
+    vars::ssl_ca_file.install(GucVarAccessors {
+        get: backing::ssl_ca_file,
+        set: backing::set_ssl_ca_file,
+    });
+    vars::ssl_crl_file.install(GucVarAccessors {
+        get: backing::ssl_crl_file,
+        set: backing::set_ssl_crl_file,
+    });
+    vars::ssl_crl_dir.install(GucVarAccessors {
+        get: backing::ssl_crl_dir,
+        set: backing::set_ssl_crl_dir,
+    });
+    vars::ssl_dh_params_file.install(GucVarAccessors {
+        get: backing::ssl_dh_params_file,
+        set: backing::set_ssl_dh_params_file,
+    });
+    vars::ssl_passphrase_command.install(GucVarAccessors {
+        get: backing::ssl_passphrase_command,
+        set: backing::set_ssl_passphrase_command,
+    });
+    vars::SSLCipherSuites.install(GucVarAccessors {
+        get: backing::SSLCipherSuites,
+        set: backing::set_SSLCipherSuites,
+    });
+    vars::SSLCipherList.install(GucVarAccessors {
+        get: backing::SSLCipherList,
+        set: backing::set_SSLCipherList,
+    });
+    vars::SSLECDHCurve.install(GucVarAccessors {
+        get: backing::SSLECDHCurve,
+        set: backing::set_SSLECDHCurve,
+    });
     vars::restart_after_crash.install(GucVarAccessors {
         get: backing::restart_after_crash,
         set: backing::set_restart_after_crash,

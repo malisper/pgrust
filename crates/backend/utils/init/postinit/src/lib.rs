@@ -120,8 +120,15 @@ fn build_auth_logmsg() -> String {
             s.push_str(" application_name=");
             s.push_str(app);
         }
-        // USE_SSL/ENABLE_GSS fragments: not this build (backend_startup rejects
-        // direct-SSL/GSS negotiation, port.ssl_in_use is never set).
+        if port.ssl_in_use {
+            s.push_str(&format!(
+                " SSL enabled (protocol={}, cipher={}, bits={})",
+                be_secure::be_tls_get_version().unwrap_or_default(),
+                be_secure::be_tls_get_cipher().unwrap_or_default(),
+                be_secure::be_tls_get_cipher_bits()
+            ));
+        }
+        // ENABLE_GSS fragment: not this build.
         s
     })
 }

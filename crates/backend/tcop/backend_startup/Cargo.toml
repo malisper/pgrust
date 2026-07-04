@@ -37,6 +37,7 @@ postgres_seams = { path = "../postgres_seams" }
 string_seams = { path = "../../../common/string_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+be_secure = { path = "../../libpq/be_secure" }
 be_secure_seams = { path = "../../libpq/be_secure_seams" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 libc = "0.2"
