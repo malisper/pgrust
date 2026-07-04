@@ -169,7 +169,7 @@ pub fn RefreshMatViewByOid<'mcx>(
             );
             return Err(elog::ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg(format!("cannot refresh materialized view {qualified} concurrently"))
+                .errmsg(format!("cannot refresh materialized view \"{qualified}\" concurrently"))
                 .errhint(
                     "Create a unique index with no WHERE clause on one or more columns \
                      of the materialized view.",
@@ -359,8 +359,14 @@ fn refresh_matview_datafill<'mcx>(
     Ok(processed)
 }
 
+// _SPI_error_callback (spi.c) shape, attached at this call site: SPI has no
+// error-context stack; plpgsql attaches its own copy the same way.
 fn spi_exec_expect(query: &str, expected: i32) -> PgResult<()> {
-    if spi::SPI_exec(query, 0)? != expected {
+    if spi::SPI_exec(query, 0).map_err(|mut e| {
+        e.add_context_line(format!("SQL statement \"{query}\""));
+        e
+    })? != expected
+    {
         return Err(internal(format!("SPI_exec failed: {query}")));
     }
     Ok(())
@@ -404,7 +410,11 @@ fn refresh_by_match_merge<'mcx>(
          AND newdata2.ctid OPERATOR(pg_catalog.<>) \
          newdata.ctid)"
     );
-    if spi::SPI_execute(&dupcheck, false, 1)? != spi::SPI_OK_SELECT {
+    if spi::SPI_execute(&dupcheck, false, 1).map_err(|mut e| {
+        e.add_context_line(format!("SQL statement \"{dupcheck}\""));
+        e
+    })? != spi::SPI_OK_SELECT
+    {
         return Err(internal(format!("SPI_exec failed: {dupcheck}")));
     }
     if spi::SPI_processed() > 0 {
