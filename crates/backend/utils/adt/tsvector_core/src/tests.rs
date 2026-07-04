@@ -44,7 +44,7 @@ fn tsvector_io_matrix() {
     assert_eq!(roundtrip("'w':4A,3B,2C,1D,5 a:8"), "'a':8 'w':1,2C,3B,4A,5");
     assert_eq!(
         roundtrip("base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3"),
-        "'base':7 'hidden':6 'rebel':1 'spaceship':2,33A,34B,35C 'strike':3"
+        "'base':7 'hidden':6 'rebel':1 'spaceship':2,33A,34B,35C,36 'strike':3"
     );
     assert_eq!(parse_err("'' '1' '2'"), "syntax error in tsvector: \"'' '1' '2'\"");
     assert_eq!(roundtrip("foo"), "'foo'");
