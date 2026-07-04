@@ -177,9 +177,6 @@ pub struct TuplesortData<'m> {
     bound: i32,
     avail_mem: i64,
     allowed_mem: i64,
-    // C tupleMem: per-tuple memory alone, so dumptuples can return exactly
-    // the tuple share when it resets tuplecontext.
-    tuple_mem: i64,
     // Largest count below which a tuplen==0 put provably takes the pure
     // store-and-return path (no grow, no bounded transition, no lackmem);
     // 0 whenever status != Initial. u32 so the fast-path load cannot be
@@ -192,11 +189,7 @@ pub struct TuplesortData<'m> {
     markpos_offset: usize,
     markpos_eof: bool,
     max_space: i64,
-    is_max_space_disk: bool,
     max_space_status: TupSortStatus,
-    // Some from the first spill on (C tapeset != NULL); Boxed so the
-    // in-memory hot fields keep their cache-line footprint.
-    tapes: Option<Box<tape::TapeState<'m>>>,
     sort_keys: PgVec<'m, SortSupport>,
     only_key: bool,
     have_datum1: bool,
@@ -211,6 +204,13 @@ pub struct TuplesortData<'m> {
     variant: SortVariant,
     // Unique violation recorded mid-sort, surfaced by performsort.
     unique_violation: Cell<Option<Box<PgError>>>,
+    // Spill-only tail (declared last: the in-memory hot fields above keep
+    // their pre-spill cache-line footprint). tuple_mem is C's tupleMem —
+    // per-tuple memory alone so dumptuples can return exactly the tuple
+    // share; tapes is Some from the first spill on (C tapeset != NULL).
+    tuple_mem: i64,
+    is_max_space_disk: bool,
+    tapes: Option<Box<tape::TapeState<'m>>>,
 }
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
