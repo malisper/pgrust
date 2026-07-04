@@ -1,6 +1,5 @@
-//! rowtypes.c: record I/O (text + binary), the record comparison family, and
-//! record hashing. The record_image family stays loud through the canonical
-//! fmgr table.
+//! rowtypes.c: record I/O (text + binary), the record comparison family
+//! (typcache-proc and byte-image), and record hashing.
 #![no_std]
 extern crate alloc;
 
@@ -304,6 +303,8 @@ pub const ROWTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(2985, "record_le", 2, fc_record_le),
     b(2986, "record_ge", 2, fc_record_ge),
     b(2987, "btrecordcmp", 2, fc_btrecordcmp),
+    b(3181, "record_image_eq", 2, fc_record_image_eq),
+    b(3187, "btrecordimagecmp", 2, fc_btrecordimagecmp),
     b(6192, "hash_record", 1, fc_hash_record),
     b(6193, "hash_record_extended", 2, fc_hash_record_extended),
     b(6375, "record_larger", 2, fc_record_larger),
@@ -638,6 +639,238 @@ pub fn fc_record_larger(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 pub fn fc_record_smaller(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let c = record_cmp(flinfo, fcinfo)?;
     Ok(fcinfo.arg(if c < 0 { 0 } else { 1 }))
+}
+
+// record_image_cmp/btrecordimagecmp (rowtypes.c). Byval columns compare as
+// full Datum words, varlena as raw payloads with shorter-sorts-first — C's
+// exact image order. C memoizes RecordCompareData in fn_extra; the image
+// comparison reads only tupdesc attbyval/attlen, so there is nothing to
+// memoize here.
+pub fn fc_btrecordimagecmp(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    ::stack_depth::check_stack_depth()?;
+    let mcx = fcinfo.result_mcx();
+    let r1 = deform_record(mcx, fcinfo, 0)?;
+    let r2 = deform_record(mcx, fcinfo, 1)?;
+    let (n1, n2) = (r1.values.len(), r2.values.len());
+
+    let mut result: i32 = 0;
+    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
+    while i1 < n1 || i2 < n2 {
+        if i1 < n1 && r1.tupdesc.attrs[i1].attisdropped {
+            i1 += 1;
+            continue;
+        }
+        if i2 < n2 && r2.tupdesc.attrs[i2].attisdropped {
+            i2 += 1;
+            continue;
+        }
+        if i1 >= n1 || i2 >= n2 {
+            break;
+        }
+        let att1 = &r1.tupdesc.attrs[i1];
+        let att2 = &r2.tupdesc.attrs[i2];
+        if att1.atttypid != att2.atttypid {
+            return Err(dissimilar_columns(att1.atttypid, att2.atttypid, j));
+        }
+        if !r1.nulls[i1] || !r2.nulls[i2] {
+            if r1.nulls[i1] {
+                result = 1;
+                break;
+            }
+            if r2.nulls[i2] {
+                result = -1;
+                break;
+            }
+            let cmp =
+                datum_image_cmp(mcx, r1.values[i1], r2.values[i2], att1.attbyval, att1.attlen)?;
+            if cmp != 0 {
+                result = cmp;
+                break;
+            }
+        }
+        i1 += 1;
+        i2 += 1;
+        j += 1;
+    }
+
+    if result == 0 && (i1 != n1 || i2 != n2) {
+        return Err(column_count_mismatch());
+    }
+    Ok(Datum::from_i32(result))
+}
+
+fn datum_image_cmp<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    a: Datum,
+    b: Datum,
+    attbyval: bool,
+    attlen: i16,
+) -> PgResult<i32> {
+    if attbyval {
+        let (x, y) = (a.as_usize() as u64, b.as_usize() as u64);
+        return Ok(if x == y {
+            0
+        } else if x < y {
+            -1
+        } else {
+            1
+        });
+    }
+    let pa = a.as_usize() as *const u8;
+    let pb = b.as_usize() as *const u8;
+    if attlen > 0 {
+        // SAFETY: by-ref fixed-length datums of attlen bytes.
+        let (sa, sb) = unsafe {
+            (
+                core::slice::from_raw_parts(pa, attlen as usize),
+                core::slice::from_raw_parts(pb, attlen as usize),
+            )
+        };
+        return Ok(match sa.cmp(sb) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        });
+    }
+    if attlen == -1 {
+        // SAFETY: live varlena datums; detoast_attr bounds the payloads.
+        let (ra, rb) = unsafe {
+            let ta = ::types_tuple::varatt::varsize_any(pa);
+            let tb = ::types_tuple::varatt::varsize_any(pb);
+            (
+                ::detoast_seams::detoast_attr::call(mcx, core::slice::from_raw_parts(pa, ta))?,
+                ::detoast_seams::detoast_attr::call(mcx, core::slice::from_raw_parts(pb, tb))?,
+            )
+        };
+        let (da, db) = (varlena_payload(&ra), varlena_payload(&rb));
+        let n = core::cmp::min(da.len(), db.len());
+        let cmp = da[..n].cmp(&db[..n]);
+        return Ok(match cmp {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Greater => 1,
+            core::cmp::Ordering::Equal => {
+                if da.len() == db.len() {
+                    0
+                } else if da.len() < db.len() {
+                    -1
+                } else {
+                    1
+                }
+            }
+        });
+    }
+    debug_assert!(attlen == -2);
+    Ok(match cstring_bytes(a).cmp(cstring_bytes(b)) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+// record_image_eq (rowtypes.c:1595) with C's datum_image_eq semantics.
+pub fn fc_record_image_eq(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    ::stack_depth::check_stack_depth()?;
+    let mcx = fcinfo.result_mcx();
+    let r1 = deform_record(mcx, fcinfo, 0)?;
+    let r2 = deform_record(mcx, fcinfo, 1)?;
+    let (n1, n2) = (r1.values.len(), r2.values.len());
+
+    let mut result = true;
+    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
+    while i1 < n1 || i2 < n2 {
+        if i1 < n1 && r1.tupdesc.attrs[i1].attisdropped {
+            i1 += 1;
+            continue;
+        }
+        if i2 < n2 && r2.tupdesc.attrs[i2].attisdropped {
+            i2 += 1;
+            continue;
+        }
+        if i1 >= n1 || i2 >= n2 {
+            break;
+        }
+        let att1 = &r1.tupdesc.attrs[i1];
+        let att2 = &r2.tupdesc.attrs[i2];
+        if att1.atttypid != att2.atttypid {
+            return Err(dissimilar_columns(att1.atttypid, att2.atttypid, j));
+        }
+        if !r1.nulls[i1] || !r2.nulls[i2] {
+            if r1.nulls[i1] || r2.nulls[i2] {
+                result = false;
+                break;
+            }
+            result =
+                datum_image_eq(mcx, r1.values[i1], r2.values[i2], att1.attbyval, att1.attlen)?;
+            if !result {
+                break;
+            }
+        }
+        i1 += 1;
+        i2 += 1;
+        j += 1;
+    }
+
+    if result && (i1 != n1 || i2 != n2) {
+        return Err(column_count_mismatch());
+    }
+    Ok(Datum::from_bool(result))
+}
+
+// datum_image_eq (datum.c): binary-image equality; varlena payloads compare
+// post-detoast, header form ignored.
+fn datum_image_eq<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    a: Datum,
+    b: Datum,
+    attbyval: bool,
+    attlen: i16,
+) -> PgResult<bool> {
+    if attbyval {
+        let (x, y) = (a.as_usize() as u64, b.as_usize() as u64);
+        return Ok(match attlen {
+            1 => x as u8 == y as u8,
+            2 => x as u16 == y as u16,
+            4 => x as u32 == y as u32,
+            _ => x == y,
+        });
+    }
+    let pa = a.as_usize() as *const u8;
+    let pb = b.as_usize() as *const u8;
+    if attlen > 0 {
+        // SAFETY: by-ref fixed-length datums of attlen bytes.
+        return Ok(unsafe {
+            core::slice::from_raw_parts(pa, attlen as usize)
+                == core::slice::from_raw_parts(pb, attlen as usize)
+        });
+    }
+    if attlen == -1 {
+        // SAFETY: live varlena datums; detoast_attr bounds the payloads.
+        let (ra, rb) = unsafe {
+            let ta = ::types_tuple::varatt::varsize_any(pa);
+            let tb = ::types_tuple::varatt::varsize_any(pb);
+            (
+                ::detoast_seams::detoast_attr::call(mcx, core::slice::from_raw_parts(pa, ta))?,
+                ::detoast_seams::detoast_attr::call(mcx, core::slice::from_raw_parts(pb, tb))?,
+            )
+        };
+        return Ok(varlena_payload(&ra) == varlena_payload(&rb));
+    }
+    debug_assert!(attlen == -2);
+    Ok(cstring_bytes(a) == cstring_bytes(b))
+}
+
+fn varlena_payload(rec: &[u8]) -> &[u8] {
+    if rec[0] & 0x01 != 0 {
+        &rec[1..]
+    } else {
+        &rec[4..]
+    }
 }
 
 // C RecordIOData input side: per-column in procs + typioparam.
