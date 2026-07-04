@@ -170,6 +170,56 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("SeqScan node");
             }
         }
+        NodeTag::T_TidScan => {
+            let s = plan.as_tid_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let tq = fix_scan_list(run, &s.tidquals, rtoffset, 1.0)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || tq.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::TidScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(v) = tq {
+                            p.tidquals = v;
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TidScan node");
+            }
+        }
+        NodeTag::T_TidRangeScan => {
+            let s = plan.as_tid_range_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let tq = fix_scan_list(run, &s.tidrangequals, rtoffset, 1.0)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || tq.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::TidRangeScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(v) = tq {
+                            p.tidrangequals = v;
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("TidRangeScan node");
+            }
+        }
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -1516,6 +1566,12 @@ fn fix_scan_expr_mutator<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     match node.node_tag() {
+        NodeTag::T_CurrentOfExpr => {
+            let c = node.as_current_of_expr().unwrap();
+            let mut new = *c;
+            new.cvarno = (new.cvarno as i32 + rtoffset) as u32;
+            Ok(Node::mk(mcx, new)?)
+        }
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
             debug_assert!(var.varlevelsup == 0);
@@ -1986,6 +2042,8 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_Param => Ok(()),
         // fix_expr_common has nothing to record for a SQLValueFunction.
         NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(()),
+        // fix_expr_common ignores CurrentOfExpr; rtoffset==0 leaves cvarno.
+        NodeTag::T_CurrentOfExpr => Ok(()),
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
         }

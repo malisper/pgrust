@@ -48,10 +48,38 @@ pub type NodeTagValue = u16;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JoinSearchPrivate {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bitmapset<'mcx> {
-    pub words: PgVec<'mcx, u64>,
+// One-word sets carry the word inline: one arena allocation, like C's
+// single-palloc bms. Small(w) is exactly a len-1 word vec; representation is
+// deterministic by word count, so slice-equality semantics are unchanged.
+#[derive(Clone, Debug)]
+pub enum Bitmapset<'mcx> {
+    Small(u64),
+    Big(PgVec<'mcx, u64>),
 }
+
+impl<'mcx> Bitmapset<'mcx> {
+    #[inline]
+    pub fn word_slice(&self) -> &[u64] {
+        match self {
+            Bitmapset::Small(w) => core::slice::from_ref(w),
+            Bitmapset::Big(v) => v.as_slice(),
+        }
+    }
+    #[inline]
+    pub fn word_slice_mut(&mut self) -> &mut [u64] {
+        match self {
+            Bitmapset::Small(w) => core::slice::from_mut(w),
+            Bitmapset::Big(v) => v.as_mut_slice(),
+        }
+    }
+}
+
+impl PartialEq for Bitmapset<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.word_slice() == other.word_slice()
+    }
+}
+impl Eq for Bitmapset<'_> {}
 
 /// `Bitmapset *`; the empty set is `None` (planner convention).
 pub type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
@@ -645,7 +673,7 @@ pub struct TidPath<'mcx> {
 #[derive(Clone, Debug)]
 pub struct TidRangePath<'mcx> {
     pub path: Path<'mcx>,
-    pub tidrangequals: PgVec<'mcx, NodeId>,
+    pub tidrangequals: PgVec<'mcx, RinfoId>,
 }
 
 #[derive(Clone, Debug)]
@@ -2168,7 +2196,6 @@ mcx::forget_safe_nodrop!(
 );
 
 mcx::forget_safe_struct!(
-    Bitmapset<'_> { words },
     DerivesHash<'_> { size, sizemask, members, grow_threshold, data },
     PartitionBoundInfoData<'_> { strategy, ndatums, nindexes, null_index, default_index, indexes, datums, kind, interleaved_parts },
     JoinDomain<'_> { jd_relids },
@@ -2248,6 +2275,7 @@ mcx::forget_safe_struct!(
 mcx::forget_safe_tuple!(Subroot<'_>(inner));
 
 mcx::forget_safe_enum!(
+    Bitmapset<'_> { Small(x), Big(x) },
     JoinlistNode<'_> { Rel(x), Sub(x) },
     DatumImage<'_> { ByVal(x), Bytes(x) },
     ArenaNode<'_> { Reserved, Expr(x), TargetEntry(x), ForeignKey(x),

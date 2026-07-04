@@ -304,9 +304,8 @@ fn add_eq_member<'mcx>(
     datatype: u32,
 ) -> EmId {
     let mcx = run.mcx;
-    let relids_for_ec = relids_copy(mcx, &relids);
+    let joined = relids_union(mcx, &run.root.ec(ec).ec_relids, &relids);
     let em = make_eq_member(run, ec, expr, relids, jdomain, datatype);
-    let joined = relids_union(mcx, &run.root.ec(ec).ec_relids, &relids_for_ec);
     let e = run.root.ec_mut(ec);
     e.ec_members.push(em);
     e.ec_relids = joined;
@@ -474,9 +473,8 @@ pub fn generate_base_implied_equalities(run: &mut PlannerRun<'_>) -> PgResult<()
                 continue;
             };
             debug_assert_eq!(run.root.rel(rel_id).reloptkind, RELOPT_BASEREL);
-            let updated = relids_add_member(mcx, &run.root.rel(rel_id).eclass_indexes, ec.0);
             let rel = run.root.rel_mut(rel_id);
-            rel.eclass_indexes = updated;
+            crate::relnode::relids_add_member_mut(mcx, &mut rel.eclass_indexes, ec.0);
             if can_generate_joinclause {
                 rel.has_eclass_joins = true;
             }

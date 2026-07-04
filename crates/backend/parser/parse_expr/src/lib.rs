@@ -116,6 +116,7 @@ pub fn transformExprRecurse<'mcx>(
             },
         ),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
+        NodeTag::T_CurrentOfExpr => transformCurrentOfExpr(pstate, expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
         NodeTag::T_SetToDefault => Err(default_not_allowed(
             pstate,
@@ -127,6 +128,25 @@ pub fn transformExprRecurse<'mcx>(
              parser units)"
         ),
     }
+}
+
+// transformCurrentOfExpr (parse_expr.c). C's REFCURSOR-param columnref-hook
+// substitution is structurally absent: PreColumnRefHook is a closed set with
+// no Param-returning member (plpgsql lane), so cursor_name always stays.
+fn transformCurrentOfExpr<'mcx>(
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let rtindex = pstate
+        .p_target_nsitem
+        .expect("CURRENT OF only at top level of UPDATE/DELETE")
+        .p_rtindex;
+    // SAFETY: freshly built raw-parse node; single mutator, tag matches.
+    unsafe {
+        expr.with_mut::<types_nodes::CurrentOfExpr, _>(|c| c.cvarno = rtindex as types_core::Index)
+            .expect("T_CurrentOfExpr node");
+    }
+    Ok(expr)
 }
 
 fn transformAExprOp<'mcx>(

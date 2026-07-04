@@ -34,7 +34,42 @@ pub fn heap_scan_bitmap_next_tuple<'mcx>(
         }
     }
 
-    let targoffset = scan.rs_vistuples[scan.rs_cindex as usize];
+    let i = scan.rs_cindex;
+    heap_scan_bitmap_batch_store(mcx, scan, i, slot);
+    Ok(true)
+}
+
+/// Fused-drive support: advance to the next page with visible tuples and
+/// return the staged count (rs_vistuples[0..n], visibility resolved at
+/// staging); 0 = bitmap exhausted.
+pub fn heap_scan_bitmap_next_pagebatch<'mcx>(
+    scan: &mut HeapScanDescData<'mcx>,
+    tbm: &TIDBitmap<'_>,
+    iterator: &mut TbmIterator,
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<u32> {
+    loop {
+        if !bitmap_next_block(scan, tbm, iterator, recheck, lossy_pages, exact_pages)? {
+            return Ok(0);
+        }
+        if scan.rs_ntuples > 0 {
+            return Ok(scan.rs_ntuples);
+        }
+    }
+}
+
+/// Store staged tuple `i` of the current bitmap page into `slot`.
+#[inline(always)]
+pub fn heap_scan_bitmap_batch_store<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut HeapScanDescData<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    debug_assert!(i < scan.rs_ntuples);
+    let targoffset = scan.rs_vistuples[i as usize];
     let block = scan.rs_cblock;
     let rd_id = scan.rs_base.rs_rd.rd_id;
     let pin = scan.rs_cbuf.as_ref().expect("bitmap scan positioned without a buffer");
@@ -50,8 +85,7 @@ pub fn heap_scan_bitmap_next_tuple<'mcx>(
 
     store_ctup_into_slot(mcx, scan, slot);
 
-    scan.rs_cindex += 1;
-    Ok(true)
+    scan.rs_cindex = i + 1;
 }
 
 fn bitmap_next_block(

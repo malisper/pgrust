@@ -581,7 +581,14 @@ pub fn RenameConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid, newname: &str) ->
     if contypid != InvalidOid
         && ConstraintNameIsUsed(mcx, ConstraintCategory::Domain, contypid, newname)?
     {
-        panic!("unported: RenameConstraintById domain constraints");
+        let typname = format_type::format_type_be(contypid)?;
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("constraint \"{newname}\" for domain {typname} already exists"),
+            )
+            .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
     }
     let natts = desc.natts as usize;
     let newbuf = name_arg(mcx, newname)?;
@@ -605,6 +612,155 @@ pub fn RenameConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid, newname: &str) ->
 pub enum ConstraintCategory {
     Relation,
     Domain,
+}
+
+// findDomainNotNullConstraint (pg_constraint.c): the validated NOTNULL row's
+// oid (C returns the copied tuple; callers use only the oid).
+pub fn findDomainNotNullConstraint<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<Oid>> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    // C keys only contypid (index column 2); the conrelid=0 prefix key is
+    // added here so the scan stays a plain prefix scan (skip scan unported) —
+    // domain constraints always carry conrelid=0, identical row set.
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let mut found = None;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let get = |anum: AttrNumber| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_constraint columns under its descriptor.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        if get(Anum_pg_constraint_contype).as_i8() as u8 != CONSTRAINT_NOTNULL {
+            continue;
+        }
+        if !get(Anum_pg_constraint_convalidated).as_bool() {
+            continue;
+        }
+        found = Some(get(Anum_pg_constraint_oid).as_oid());
+        break;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(found)
+}
+
+// get_domain_constraint_oid (pg_constraint.c).
+pub fn get_domain_constraint_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+    conname: &str,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let cname = name_arg(mcx, conname)?;
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
+        eq_key(Anum_pg_constraint_conname, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let con_oid = match genam::systable_getnext(mcx, &mut scan)? {
+        Some(tup) => {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_constraint oid column under its descriptor.
+            unsafe {
+                types_tuple::heap_getattr(tup, Anum_pg_constraint_oid as i32, desc, &mut isnull)
+            }
+            .as_oid()
+        }
+        None => InvalidOid,
+    };
+    genam::systable_endscan(mcx, scan)?;
+    if con_oid == InvalidOid && !missing_ok {
+        let typname = format_type::format_type_be(typid)?;
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("constraint \"{conname}\" for domain {typname} does not exist"),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    con_rel.close(AccessShareLock)?;
+    Ok(con_oid)
+}
+
+// AlterConstraintNamespaces (pg_constraint.c); objs_moved carries the
+// caller's ObjectAddresses dedup set.
+pub fn AlterConstraintNamespaces<'mcx>(
+    mcx: Mcx<'mcx>,
+    owner_id: Oid,
+    old_nsp_id: Oid,
+    new_nsp_id: Oid,
+    is_type: bool,
+    objs_moved: &mut PgVec<'mcx, ObjectAddress>,
+) -> PgResult<()> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let (relid, typid) = if is_type { (InvalidOid, owner_id) } else { (owner_id, InvalidOid) };
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let natts = desc.natts as usize;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let get = |anum: AttrNumber| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_constraint columns under its descriptor.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        let con_oid = get(Anum_pg_constraint_oid).as_oid();
+        let thisobj = ObjectAddress::set(CONSTRAINT_RELATION_ID, con_oid);
+        if objs_moved.iter().any(|a| a.classId == thisobj.classId && a.objectId == thisobj.objectId)
+        {
+            continue;
+        }
+        if get(Anum_pg_constraint_connamespace).as_oid() == old_nsp_id && old_nsp_id != new_nsp_id
+        {
+            let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[(Anum_pg_constraint_connamespace - 1) as usize] = Datum::from_oid(new_nsp_id);
+            replace[(Anum_pg_constraint_connamespace - 1) as usize] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            let otid = tup.t_self;
+            catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+        }
+        objs_moved.push(thisobj);
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(RowExclusiveLock)
 }
 
 pub fn ConstraintNameIsUsed<'mcx>(

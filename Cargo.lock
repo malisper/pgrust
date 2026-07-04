@@ -3380,11 +3380,14 @@ dependencies = [
  "nodeseqscan",
  "nodesetop",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodevaluesscan",
  "nodewindowagg",
  "nodeworktablescan",
  "pgstat_seams",
+ "portalmem",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -5370,10 +5373,12 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "readfuncs",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_pathnodes",
  "types_tuple",
 ]
@@ -6458,6 +6463,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodetidrangescan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodetidscan"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "detoast",
+ "execexpr",
+ "execmain_seams",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodeunique"
 version = "0.1.0"
 dependencies = [
@@ -7183,6 +7227,7 @@ dependencies = [
  "catalog_indexing",
  "datum",
  "fmgr_seams",
+ "format_type",
  "genam",
  "heaptuple",
  "mcx",
@@ -9849,6 +9894,8 @@ dependencies = [
  "nodenestloop",
  "nodeseqscan",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodewindowagg",
  "opclasscmds",
@@ -11553,13 +11600,21 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "adt_acl",
+ "catalog_dependency",
+ "catalog_indexing",
  "catalog_namespace",
+ "clauses",
  "coerce",
  "datum",
  "elog",
+ "elog_seams",
+ "execexpr",
+ "exectuples",
  "fmgr_seams",
  "format_type",
  "genam",
+ "heaptuple",
+ "inval",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -11570,17 +11625,26 @@ dependencies = [
  "parse_utilcmd",
  "parser_small1",
  "pg_constraint",
+ "pg_depend",
  "pg_enum",
+ "pg_shdepend",
  "pg_type",
+ "readfuncs",
+ "relation_seams",
+ "ruleutils",
+ "snapmgr",
  "superuser",
  "syscache_seams",
  "table",
+ "tableam",
+ "tablecmds",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
  "vars",
  "xact",
 ]

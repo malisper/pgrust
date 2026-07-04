@@ -165,7 +165,7 @@ pub fn multirangesel<'mcx>(
     ) {
         let mut c2 = multirange_sel_ctx(vardata.vartype)?;
         if c.consttype == c2.rngtypid {
-            let range: &[u8] = varlena_image(c.constvalue);
+            let range: &[u8] = crate::selfuncs::varlena_image_any(mcx, c.constvalue)?;
             let mut ranges: mcx::PgVec<'_, &[u8]> = mcx::vec_with_capacity_in(mcx, 1)?;
             ranges.push(range);
             let mr = adt_multirangetypes::make_multirange(
@@ -188,7 +188,7 @@ pub fn multirangesel<'mcx>(
         // Var is the elem/range: punt to the default estimate (C does too).
     } else if c.consttype == vardata.vartype {
         ctx = Some(multirange_sel_ctx(vardata.vartype)?);
-        constmultirange = Some(varlena_image(c.constvalue));
+        constmultirange = Some(crate::selfuncs::varlena_image_any(mcx, c.constvalue)?);
     }
 
     let selec = match constmultirange {
