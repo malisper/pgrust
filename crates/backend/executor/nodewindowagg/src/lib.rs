@@ -15,12 +15,12 @@ use ::execexpr::{
     AggPerGroup, AggTransSpec, EvalSlots, ExprState, WinBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, MemoryContext, PgBox, PgVec};
 use ::tuplestore::Tuplestore;
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
-use ::types_core::{Oid, INT8OID};
+use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
-use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+use ::types_fmgr::{AggStateNode, FmgrInfo, LocalFcinfo};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::WindowAgg;
@@ -110,6 +110,17 @@ struct Int8TransState {
     sum: i64,
 }
 
+// Default-lane finalize carrier (the trans program is compiled; only the
+// finalize step stays interpreted).
+struct DefaultFinal {
+    finalfn: Option<FmgrInfo>,
+    num_final_args: u16,
+    agg_collation: Oid,
+    resulttype_len: i16,
+    resulttype_byval: bool,
+    trans_typlen: i16,
+}
+
 enum AggKernel {
     Generic { transfn: FmgrInfo },
     MovingByVal { transfn: FmgrInfo, invtransfn: FmgrInfo },
@@ -125,6 +136,14 @@ struct PerAggData<'mcx> {
     kernel: AggKernel,
     fn_strict: bool,
     has_inverse: bool,
+    finalfn: Option<FmgrInfo>,
+    num_final_args: u16,
+    resulttype_len: i16,
+    resulttype_byval: bool,
+    trans_typlen: i16,
+    trans_byval: bool,
+    agg_state: NonNull<AggStateNode>,
+    private_ctx: bool,
     argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     init_value: NullableDatum,
     trans_value: NullableDatum,
@@ -165,6 +184,9 @@ pub struct WindowAggStateData<'mcx> {
     perfunc: PgVec<'mcx, PerFuncData<'mcx>>,
     evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     trans_init: PgVec<'mcx, NullableDatum>,
+    trans_typlen: PgVec<'mcx, i16>,
+    default_final: PgVec<'mcx, DefaultFinal>,
+    agg_node: Option<NonNull<AggStateNode>>,
     _pergroup: PgVec<'mcx, AggPerGroup>,
     pergroup_base: NonNull<AggPerGroup>,
     peragg_wfuncno: PgVec<'mcx, u16>,
@@ -277,57 +299,47 @@ fn moving_transfn_returned_null() -> Box<PgError> {
     )
 }
 
-// GetAggInitVal (nodeWindowAgg.c keeps its own copy, as nodeAgg.c does);
-// only the int8 arm is live (count/sum transtypes).
-fn get_agg_init_val(text: &str, transtype: Oid) -> PgResult<Datum> {
-    if transtype != INT8OID {
-        panic!(
-            "GetAggInitVal (nodeWindowAgg.c): typinput dispatch for transtype {transtype} \
-             not ported"
-        );
+// GetAggInitVal (nodeWindowAgg.c keeps its own copy, as nodeAgg.c does):
+// initval text through the transtype's typinput; by-ref results copy into mcx
+// (C's per-query palloc).
+fn get_agg_init_val(mcx: ::mcx::Mcx<'_>, text: &str, transtype: Oid) -> PgResult<Datum> {
+    let (typinput, typioparam) = lsyscache::getTypeInputInfo(transtype)?;
+    let mut flinfo = fmgr_core::fmgr_info(typinput)?;
+    let cstr = std::ffi::CString::new(text).expect("agginitval text contains an interior NUL");
+    let d = ::types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)?;
+    let (typlen, typbyval) = lsyscache::get_typlenbyval(transtype)?;
+    if typbyval {
+        Ok(d)
+    } else {
+        // SAFETY: non-null by-ref in-function result, live until flinfo drops.
+        unsafe { ::execexpr::agg_datum_copy(mcx, d, typlen) }
     }
-    Ok(Datum::from_i64(::adt_int8::int8in(text, None)?))
 }
 
-// datumCopy (datum.c) for by-ref frame offsets; -1 is VARSIZE_ANY (short
-// headers included), expanded/toast-pointer sources are loud.
+fn make_agg_state_node<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    ctx: MemoryContext,
+) -> PgResult<NonNull<AggStateNode>> {
+    let layout = core::alloc::Layout::new::<AggStateNode>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<AggStateNode> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(AggStateNode::new(ctx)) };
+    // The node's MemoryContext is droppy inside a no-drop arena: the query
+    // context's reset callback is its destructor (docs/no-drop.md guard rule).
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
+}
+
+// datumCopy (datum.c) for by-ref frame offsets.
 fn datum_copy<'mcx>(mcx: ::mcx::Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
-    let p = value.as_usize() as *const u8;
-    if p.is_null() {
+    if (value.as_usize() as *const u8).is_null() {
         return Ok(Datum::null());
     }
-    let size = match typlen {
-        -1 => {
-            // SAFETY: non-null by-ref varlena datum, readable for its
-            // header-declared size.
-            unsafe {
-                let b0 = *p;
-                if b0 == 0x01 {
-                    panic!("datum_copy (nodeWindowAgg.c): toast-pointer frame offset unported");
-                } else if b0 & 0x01 != 0 {
-                    (b0 as usize >> 1) & 0x7F
-                } else {
-                    datum::VarlenaRef::from_ptr(p).varsize()
-                }
-            }
-        }
-        -2 => {
-            let mut n = 0usize;
-            // SAFETY: non-null NUL-terminated cstring datum.
-            while unsafe { *p.add(n) } != 0 {
-                n += 1;
-            }
-            n + 1
-        }
-        l => {
-            debug_assert!(l > 0);
-            l as usize
-        }
-    };
-    // SAFETY: `size` bytes readable per the arms above.
-    let src = unsafe { core::slice::from_raw_parts(p, size) };
-    let out = ::mcx::slice_in(mcx, src)?;
-    Ok(Datum::from_usize(out.leak().as_ptr() as usize))
+    // SAFETY: non-null by-ref datum readable for its full size.
+    unsafe { ::execexpr::agg_datum_copy(mcx, value, typlen) }
 }
 
 fn collect_window_funcs<'mcx>(
@@ -479,8 +491,18 @@ pub fn exec_init_window_agg<'mcx>(
     let mut trans_fnoid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_collid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_typlen: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    let mut trans_byval: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    let mut default_final: PgVec<'mcx, DefaultFinal> = PgVec::new_in(mcx);
     let mut peragg_wfuncno: PgVec<'mcx, u16> = PgVec::new_in(mcx);
     let mut peragg: PgVec<'mcx, PerAggData<'mcx>> = PgVec::new_in(mcx);
+    let mut agg_node: Option<NonNull<AggStateNode>> = None;
+    for &(_, wfunc) in wfuncs.iter() {
+        if wfunc.winagg {
+            agg_node =
+                Some(make_agg_state_node(mcx, mcx.context().new_child_bump("WindowAgg Aggregates"))?);
+            break;
+        }
+    }
 
     for (wfuncno, &(wnode, wfunc)) in wfuncs.iter().enumerate() {
         if wfunc.winref != node.winref {
@@ -516,6 +538,8 @@ pub fn exec_init_window_agg<'mcx>(
                     &mut trans_fnoid,
                     &mut trans_collid,
                     &mut trans_typlen,
+                    &mut trans_byval,
+                    &mut default_final,
                 )?;
             } else {
                 peragg.push(initialize_peragg_framed(
@@ -524,6 +548,7 @@ pub fn exec_init_window_agg<'mcx>(
                     frameOptions,
                     wfuncno as u16,
                     params,
+                    agg_node.expect("winagg implies agg_node"),
                 )?);
                 agg_specs_args.push(NodeList::nil());
             }
@@ -620,13 +645,14 @@ pub fn exec_init_window_agg<'mcx>(
                 pergroup: pg,
                 ordered: None,
                 cur_agg: None,
-                transtype_byval: true,
+                transtype_byval: trans_byval[aggno],
                 transtype_len: trans_typlen[aggno],
             });
         }
-        // C arms fcinfo->context with the WindowAggState; None makes a
-        // context-reading transfn fail loud (non-aggregate-context error).
-        Some(exec_build_agg_trans(mcx, &specs, None, params)?)
+        // C arms fcinfo->context with the WindowAggState; the AggStateNode
+        // stands in (AggCheckCallContext accepts both).
+        let fm = unsafe { agg_node.expect("aggs imply agg_node").as_mut() }.fm_node_ptr();
+        Some(exec_build_agg_trans(mcx, &specs, fm, params)?)
     } else {
         None
     };
@@ -720,6 +746,9 @@ pub fn exec_init_window_agg<'mcx>(
         perfunc,
         evaltrans,
         trans_init,
+        trans_typlen,
+        default_final,
+        agg_node,
         _pergroup: pergroup,
         pergroup_base,
         peragg_wfuncno,
@@ -790,8 +819,9 @@ fn build_eq<'mcx>(
     Ok(Some(exec_build_grouping_equal(mcx, desc, desc, col_idx, &eqfuncoids, collations)?))
 }
 
-// initialize_peragg (nodeWindowAgg.c), byval no-finalfn default-frame slice
-// (nodeAgg precedent); invtransfn ignored: the frame head cannot move.
+// initialize_peragg (nodeWindowAgg.c), default-frame slice (nodeAgg
+// precedent); invtransfn ignored: the frame head cannot move.
+#[allow(clippy::too_many_arguments)]
 fn initialize_peragg_default<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     wfunc: &'mcx WindowFunc<'mcx>,
@@ -800,6 +830,8 @@ fn initialize_peragg_default<'mcx>(
     trans_fnoid: &mut PgVec<'mcx, Oid>,
     trans_collid: &mut PgVec<'mcx, Oid>,
     trans_typlen: &mut PgVec<'mcx, i16>,
+    trans_byval: &mut PgVec<'mcx, bool>,
+    default_final: &mut PgVec<'mcx, DefaultFinal>,
 ) -> PgResult<()> {
     let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
@@ -810,26 +842,29 @@ fn initialize_peragg_default<'mcx>(
             shape.aggkind
         );
     }
-    if shape.aggfinalfn != 0 {
-        panic!(
-            "finalize_windowaggregate (nodeWindowAgg.c): finalfn {} arm not ported",
-            shape.aggfinalfn
-        );
-    }
     let transtype = shape.aggtranstype;
     let (translen, byval) = lsyscache::get_typlenbyval(transtype)?;
     trans_typlen.push(translen);
-    if !byval {
-        panic!(
-            "advance_windowaggregate (nodeWindowAgg.c): by-ref transtype {transtype} \
-             not ported"
-        );
-    }
+    trans_byval.push(byval);
+    let finalfn =
+        if shape.aggfinalfn != 0 { Some(fmgr_core::fmgr_info(shape.aggfinalfn)?) } else { None };
+    let num_final_args = if shape.aggfinalextra { wfunc.args.len() as u16 + 1 } else { 1 };
+    let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;
+    default_final.push(DefaultFinal {
+        finalfn,
+        num_final_args,
+        agg_collation: wfunc.inputcollid,
+        resulttype_len,
+        resulttype_byval,
+        trans_typlen: translen,
+    });
     let initval = syscache_seams::pg_aggregate_agginitval::call(mcx, wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
     trans_init.push(match initval {
         None => NullableDatum::null(),
-        Some(text) => NullableDatum { value: get_agg_init_val(&text, transtype)?, isnull: false },
+        Some(text) => {
+            NullableDatum { value: get_agg_init_val(mcx, &text, transtype)?, isnull: false }
+        }
     });
     trans_fnoid.push(shape.aggtransfn);
     trans_collid.push(wfunc.inputcollid);
@@ -854,6 +889,7 @@ fn initialize_peragg_framed<'mcx>(
     frame_options: i32,
     wfuncno: u16,
     params: ::execexpr::ParamBind<'mcx>,
+    shared_agg_state: NonNull<AggStateNode>,
 ) -> PgResult<PerAggData<'mcx>> {
     let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
@@ -881,18 +917,27 @@ fn initialize_peragg_framed<'mcx>(
     } else {
         !volatile
     };
-    let (transfn_oid, invtransfn_oid, finalfn_oid, finalmodify, aggtranstype, minit) =
+    let (transfn_oid, invtransfn_oid, finalfn_oid, finalextra, finalmodify, aggtranstype, minit) =
         if use_ma_code {
             (
                 shape.aggmtransfn,
                 shape.aggminvtransfn,
                 shape.aggmfinalfn,
+                shape.aggmfinalextra,
                 shape.aggmfinalmodify,
                 shape.aggmtranstype,
                 true,
             )
         } else {
-            (shape.aggtransfn, 0, shape.aggfinalfn, shape.aggfinalmodify, shape.aggtranstype, false)
+            (
+                shape.aggtransfn,
+                0,
+                shape.aggfinalfn,
+                shape.aggfinalextra,
+                shape.aggfinalmodify,
+                shape.aggtranstype,
+                false,
+            )
         };
     if finalmodify != AGGMODIFY_READ_ONLY {
         panic!(
@@ -908,9 +953,11 @@ fn initialize_peragg_framed<'mcx>(
     }
     .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
 
+    let (trans_typlen, trans_byval) = lsyscache::get_typlenbyval(aggtranstype)?;
     let kernel;
     let fn_strict;
     let init_value;
+    let mut finalfn = None;
     let mut has_inverse = invtransfn_oid != 0;
     match (transfn_oid, invtransfn_oid) {
         (F_INT2_AVG_ACCUM, F_INT2_AVG_ACCUM_INV) | (F_INT4_AVG_ACCUM, F_INT4_AVG_ACCUM_INV) => {
@@ -929,24 +976,14 @@ fn initialize_peragg_framed<'mcx>(
         }
         (t, 0) => {
             if finalfn_oid != 0 {
-                panic!(
-                    "finalize_windowaggregate (nodeWindowAgg.c): finalfn {finalfn_oid} arm \
-                     not ported"
-                );
-            }
-            let (_len, byval) = lsyscache::get_typlenbyval(aggtranstype)?;
-            if !byval {
-                panic!(
-                    "advance_windowaggregate (nodeWindowAgg.c): by-ref transtype \
-                     {aggtranstype} not ported"
-                );
+                finalfn = Some(fmgr_core::fmgr_info(finalfn_oid)?);
             }
             let transfn = fmgr_core::fmgr_info(t)?;
             fn_strict = transfn.fn_strict;
             kernel = AggKernel::Generic { transfn };
             init_value = match initval {
                 Some(ref text) => NullableDatum {
-                    value: get_agg_init_val(text.as_str(), aggtranstype)?,
+                    value: get_agg_init_val(mcx, text.as_str(), aggtranstype)?,
                     isnull: false,
                 },
                 None => NullableDatum::null(),
@@ -954,17 +991,7 @@ fn initialize_peragg_framed<'mcx>(
         }
         (t, inv) => {
             if finalfn_oid != 0 {
-                panic!(
-                    "finalize_windowaggregate (nodeWindowAgg.c): moving finalfn \
-                     {finalfn_oid} arm not ported"
-                );
-            }
-            let (_len, byval) = lsyscache::get_typlenbyval(aggtranstype)?;
-            if !byval {
-                panic!(
-                    "advance_windowaggregate_base (nodeWindowAgg.c): by-ref moving \
-                     transtype {aggtranstype} not ported"
-                );
+                finalfn = Some(fmgr_core::fmgr_info(finalfn_oid)?);
             }
             let transfn = fmgr_core::fmgr_info(t)?;
             let invtransfn = fmgr_core::fmgr_info(inv)?;
@@ -979,13 +1006,22 @@ fn initialize_peragg_framed<'mcx>(
             kernel = AggKernel::MovingByVal { transfn, invtransfn };
             init_value = match initval {
                 Some(ref text) => NullableDatum {
-                    value: get_agg_init_val(text.as_str(), aggtranstype)?,
+                    value: get_agg_init_val(mcx, text.as_str(), aggtranstype)?,
                     isnull: false,
                 },
                 None => NullableDatum::null(),
             };
         }
     }
+    let num_final_args = if finalextra { wfunc.args.len() as u16 + 1 } else { 1 };
+    let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;
+    // C gives each moving aggregate a private aggcontext (independent restart
+    // resets); non-moving aggregates share winstate->aggcontext.
+    let (agg_state, private_ctx) = if use_ma_code {
+        (make_agg_state_node(mcx, mcx.context().new_child_bump("WindowAgg Per Agg"))?, true)
+    } else {
+        (shared_agg_state, false)
+    };
     // C's IsBinaryCoercible guard for strict transfn + NULL initval; only the
     // equal-types case is ported.
     if fn_strict && init_value.isnull {
@@ -1006,6 +1042,14 @@ fn initialize_peragg_framed<'mcx>(
         kernel,
         fn_strict,
         has_inverse,
+        finalfn,
+        num_final_args,
+        resulttype_len,
+        resulttype_byval,
+        trans_typlen,
+        trans_byval,
+        agg_state,
+        private_ctx,
         argstates: build_argstates(mcx, &wfunc.args, params)?,
         init_value,
         trans_value: init_value,
@@ -2430,6 +2474,11 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
 
         if self.currentpos == 0 {
+            // C resets the aggcontext via the restart path; internal states
+            // and saved by-ref results from the previous partition die here.
+            let mut an = self.agg_node.expect("aggs imply agg_node");
+            // SAFETY: sole access path to the node during the reset.
+            unsafe { an.as_mut() }.reset();
             for (aggno, init) in self.trans_init.iter().enumerate() {
                 // SAFETY: aggno < the pergroup array's once-allocated length.
                 unsafe {
@@ -2485,22 +2534,79 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.agg_row_valid = false;
         }
 
-        // finalize (no finalfn in the live set) + save for frame reuse; all
-        // result types byval, so the save is a plain copy.
+        // finalize + save for frame reuse; by-ref saves copy into the
+        // aggcontext (C's datumCopy — the per-tuple result memory resets
+        // before the next row's projection).
+        let per_tuple = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
+        let mut an = self.agg_node.expect("aggs imply agg_node");
+        // SAFETY: the node outlives the loop; no other path touches it here.
+        let agg_fm = unsafe { an.as_mut() }.fm_node_ptr();
+        // SAFETY: shared read of the node's context handle.
+        let agg_mcx = unsafe { an.as_ref() }.aggcontext();
         for aggno in 0..self.numaggs {
             let wfuncno = self.peragg_wfuncno[aggno] as usize;
             // SAFETY: as the initialize loop above.
             let pg = unsafe { *self.pergroup_base.as_ptr().add(aggno) };
-            let result = NullableDatum { value: pg.trans_value, isnull: pg.trans_value_is_null };
-            self.agg_saved[aggno] = result;
+            let df = &mut self.default_final[aggno];
+            let trans_value = if !pg.trans_value_is_null && df.trans_typlen == -1 {
+                // SAFETY: a non-null by-ref transvalue points at a live image.
+                unsafe {
+                    datum::expandeddatum::make_expanded_object_read_only_internal(pg.trans_value)
+                }
+            } else {
+                pg.trans_value
+            };
+            let result = match df.finalfn.as_mut() {
+                None => {
+                    NullableDatum { value: trans_value, isnull: pg.trans_value_is_null }
+                }
+                Some(flinfo) => {
+                    let mut fcinfo = LocalFcinfo::<4>::fresh(df.agg_collation);
+                    assert!(df.num_final_args <= 4, "finalfn arg count");
+                    fcinfo.nargs = df.num_final_args as i16;
+                    fcinfo.context = agg_fm;
+                    // SAFETY: the per-tuple context outlives this call.
+                    unsafe { fcinfo.set_result_mcx(per_tuple) };
+                    fcinfo.args[0] =
+                        NullableDatum { value: trans_value, isnull: pg.trans_value_is_null };
+                    for i in 1..df.num_final_args as usize {
+                        fcinfo.args[i] = NullableDatum::null();
+                    }
+                    let anynull = pg.trans_value_is_null || df.num_final_args > 1;
+                    if flinfo.fn_strict && anynull {
+                        NullableDatum::null()
+                    } else {
+                        let v = flinfo.invoke(&mut fcinfo)?;
+                        NullableDatum { value: v, isnull: fcinfo.isnull }
+                    }
+                }
+            };
+            let saved = if !result.isnull && !df.resulttype_byval {
+                // SAFETY: non-null by-ref finalfn result, live this call.
+                NullableDatum {
+                    value: unsafe {
+                        ::execexpr::agg_datum_copy(agg_mcx, result.value, df.resulttype_len)?
+                    },
+                    isnull: false,
+                }
+            } else {
+                result
+            };
+            self.agg_saved[aggno] = saved;
             self.write_agg_result(wfuncno, result);
         }
         Ok(())
     }
 
-    // initialize_windowaggregate (framed lane).
+    // initialize_windowaggregate (framed lane): a private (moving-agg)
+    // aggcontext resets here; init values live in query memory, so no
+    // datumCopy (nothing frees them — C copies to survive its pfree).
     fn initialize_windowaggregate(&mut self, aggno: usize) {
         let pa = &mut self.peragg[aggno];
+        if pa.private_ctx {
+            // SAFETY: sole access path to the per-agg node during the reset.
+            unsafe { pa.agg_state.as_mut() }.reset();
+        }
         pa.trans_value = pa.init_value;
         pa.trans_count = 0;
         pa.int_sum = Int8TransState::default();
@@ -2548,7 +2654,21 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 }
             }
             if pa.trans_count == 0 && pa.trans_value.isnull {
-                pa.trans_value = args[0];
+                // C's ExecAggInitGroup shape: the first input becomes the
+                // transvalue, datumCopy'd into the aggcontext when by-ref.
+                pa.trans_value = if !args[0].isnull && !pa.trans_byval {
+                    // SAFETY: shared read of the per-agg context handle.
+                    let ctx = unsafe { pa.agg_state.as_ref() }.aggcontext();
+                    NullableDatum {
+                        // SAFETY: non-null by-ref arg datum, live this call.
+                        value: unsafe {
+                            ::execexpr::agg_datum_copy(ctx, args[0].value, pa.trans_typlen)?
+                        },
+                        isnull: false,
+                    }
+                } else {
+                    args[0]
+                };
                 pa.trans_count = 1;
                 return Ok(());
             }
@@ -2572,11 +2692,21 @@ impl<'mcx> WindowAggStateData<'mcx> {
             AggKernel::Generic { transfn } | AggKernel::MovingByVal { transfn, .. } => {
                 let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
+                fcinfo.context = Some(pa.agg_state.cast());
                 fcinfo.args[0] = pa.trans_value;
                 fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
-                let newval = transfn.invoke(&mut fcinfo)?;
+                let mut newval = transfn.invoke(&mut fcinfo)?;
                 if fcinfo.isnull && pa.has_inverse {
                     return Err(moving_transfn_returned_null());
+                }
+                if !pa.trans_byval
+                    && !fcinfo.isnull
+                    && newval.as_usize() != pa.trans_value.value.as_usize()
+                {
+                    // SAFETY: shared read of the per-agg context handle.
+                    let ctx = unsafe { pa.agg_state.as_ref() }.aggcontext();
+                    // SAFETY: non-null by-ref transfn result, live this call.
+                    newval = unsafe { ::execexpr::agg_datum_copy(ctx, newval, pa.trans_typlen)? };
                 }
                 pa.trans_count += 1;
                 pa.trans_value = NullableDatum { value: newval, isnull: fcinfo.isnull };
@@ -2624,11 +2754,18 @@ impl<'mcx> WindowAggStateData<'mcx> {
             AggKernel::MovingByVal { invtransfn, .. } => {
                 let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
+                fcinfo.context = Some(pa.agg_state.cast());
                 fcinfo.args[0] = pa.trans_value;
                 fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
-                let newval = invtransfn.invoke(&mut fcinfo)?;
+                let mut newval = invtransfn.invoke(&mut fcinfo)?;
                 if fcinfo.isnull {
                     return Ok(false);
+                }
+                if !pa.trans_byval && newval.as_usize() != pa.trans_value.value.as_usize() {
+                    // SAFETY: shared read of the per-agg context handle.
+                    let ctx = unsafe { pa.agg_state.as_ref() }.aggcontext();
+                    // SAFETY: non-null by-ref invtransfn result, live this call.
+                    newval = unsafe { ::execexpr::agg_datum_copy(ctx, newval, pa.trans_typlen)? };
                 }
                 pa.trans_count -= 1;
                 pa.trans_value = NullableDatum { value: newval, isnull: false };
@@ -2638,10 +2775,17 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(true)
     }
 
-    // finalize_windowaggregate: int2int4_sum kernel or bare transValue.
-    fn finalize_windowaggregate(&self, aggno: usize) -> NullableDatum {
-        let pa = &self.peragg[aggno];
-        match &pa.kernel {
+    // finalize_windowaggregate: int2int4_sum kernel, fmgr finalfn, or the
+    // bare transValue. finalfn results land in per-tuple memory (nodeAgg
+    // precedent); the caller copies by-ref results into the aggcontext.
+    fn finalize_windowaggregate(
+        &mut self,
+        estate: &EStateData<'mcx>,
+        aggno: usize,
+    ) -> PgResult<NullableDatum> {
+        let per_tuple = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
+        let pa = &mut self.peragg[aggno];
+        Ok(match &pa.kernel {
             AggKernel::MovingIntSum { .. } => {
                 if pa.int_sum.count == 0 {
                     NullableDatum::null()
@@ -2649,8 +2793,43 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     NullableDatum::value(Datum::from_i64(pa.int_sum.sum))
                 }
             }
-            _ => pa.trans_value,
-        }
+            _ => {
+                let trans_value = if !pa.trans_value.isnull && pa.trans_typlen == -1 {
+                    // SAFETY: a non-null by-ref transvalue points at a live
+                    // image (C MakeExpandedObjectReadOnly).
+                    unsafe {
+                        datum::expandeddatum::make_expanded_object_read_only_internal(
+                            pa.trans_value.value,
+                        )
+                    }
+                } else {
+                    pa.trans_value.value
+                };
+                match pa.finalfn.as_mut() {
+                    None => NullableDatum { value: trans_value, isnull: pa.trans_value.isnull },
+                    Some(flinfo) => {
+                        assert!(pa.num_final_args <= 4, "finalfn arg count");
+                        let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
+                        fcinfo.nargs = pa.num_final_args as i16;
+                        fcinfo.context = Some(pa.agg_state.cast());
+                        // SAFETY: the per-tuple context outlives this call.
+                        unsafe { fcinfo.set_result_mcx(per_tuple) };
+                        fcinfo.args[0] =
+                            NullableDatum { value: trans_value, isnull: pa.trans_value.isnull };
+                        for i in 1..pa.num_final_args as usize {
+                            fcinfo.args[i] = NullableDatum::null();
+                        }
+                        let anynull = pa.trans_value.isnull || pa.num_final_args > 1;
+                        if flinfo.fn_strict && anynull {
+                            NullableDatum::null()
+                        } else {
+                            let v = flinfo.invoke(&mut fcinfo)?;
+                            NullableDatum { value: v, isnull: fcinfo.isnull }
+                        }
+                    }
+                }
+            }
+        })
     }
 
     // eval_windowaggregates (nodeWindowAgg.c), framed lane: full restart /
@@ -2722,6 +2901,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.set_agg_mark_position(self.frameheadpos);
         }
 
+        // C resets the shared aggcontext when anything restarts (shared-ctx
+        // aggregates provably restart together); private contexts reset in
+        // initialize_windowaggregate.
+        if numaggs_restart > 0 {
+            let mut an = self.agg_node.expect("aggs imply agg_node");
+            // SAFETY: sole access path to the node during the reset.
+            unsafe { an.as_mut() }.reset();
+        }
         for aggno in 0..numaggs {
             if self.peragg[aggno].restart {
                 self.initialize_windowaggregate(aggno);
@@ -2773,8 +2960,22 @@ impl<'mcx> WindowAggStateData<'mcx> {
         debug_assert!(aggregatedupto_nonrestarted <= self.aggregatedupto);
 
         for aggno in 0..numaggs {
-            let result = self.finalize_windowaggregate(aggno);
-            self.peragg[aggno].result_value = result;
+            let result = self.finalize_windowaggregate(estate, aggno)?;
+            let pa = &self.peragg[aggno];
+            let saved = if !result.isnull && !pa.resulttype_byval {
+                // SAFETY: shared read of the per-agg context handle.
+                let ctx = unsafe { pa.agg_state.as_ref() }.aggcontext();
+                NullableDatum {
+                    // SAFETY: non-null by-ref finalfn result, live this call.
+                    value: unsafe {
+                        ::execexpr::agg_datum_copy(ctx, result.value, pa.resulttype_len)?
+                    },
+                    isnull: false,
+                }
+            } else {
+                result
+            };
+            self.peragg[aggno].result_value = saved;
             let wfuncno = self.peragg[aggno].wfuncno as usize;
             self.write_agg_result(wfuncno, result);
         }
@@ -2973,6 +3174,7 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
     }
     for pa in node.peragg.iter_mut() {
         pa.argstates.clear();
+        pa.finalfn = None;
         match &mut pa.kernel {
             AggKernel::Generic { transfn } => transfn.fn_extra = None,
             AggKernel::MovingByVal { transfn, invtransfn } => {
@@ -2981,6 +3183,9 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
             }
             AggKernel::MovingIntSum { .. } => {}
         }
+    }
+    for df in node.default_final.iter_mut() {
+        df.finalfn = None;
     }
     for slot in [
         &mut node.scan_slot,
@@ -3034,11 +3239,14 @@ mcx::forget_safe_struct!(
     PerFuncData<'_> { kind, wfuncno, readptr, seekpos, markpos, rank, ntile,
         rows_per_bucket, boundary, remainder, arg1_stable; argstates },
     PerAggData<'_> { wfuncno, num_arguments, win_collation, fn_strict,
-        has_inverse, init_value, trans_value, trans_count, int_sum,
-        result_value, restart; argstates, kernel },
+        has_inverse, num_final_args, resulttype_len, resulttype_byval,
+        trans_typlen, trans_byval, agg_state, private_ctx, init_value,
+        trans_value, trans_count, int_sum, result_value, restart;
+        argstates, kernel, finalfn },
     WindowAggStateData<'_> { plan, frameOptions, ps_ExprContext, tmpcontext,
         ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
-        trans_init, _pergroup, pergroup_base, peragg_wfuncno, agg_saved,
+        trans_init, trans_typlen, agg_node, _pergroup, pergroup_base,
+        peragg_wfuncno, agg_saved,
         agg_readptr, agg_seekpos, agg_markpos, agg_mark_active,
         agg_values_base, agg_nulls_base, numaggs, currentpos, frameheadpos,
         frametailpos, framehead_valid, frametail_valid, framehead_ptr,
@@ -3052,5 +3260,6 @@ mcx::forget_safe_struct!(
         ps_ResultTupleDesc, proj, part_eq, ord_eq, buffer, scan_slot,
         first_part_slot, agg_row_slot, temp_slot_1, temp_slot_2,
         framehead_slot, frametail_slot, evaltrans, start_offset_state,
-        end_offset_state, start_in_range, end_in_range, runcondition, qual },
+        end_offset_state, start_in_range, end_in_range, runcondition, qual,
+        default_final },
 );
