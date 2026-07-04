@@ -1801,11 +1801,40 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, root, rcq, &mut paramids)?;
             }
         }
+        // Agg skips C's AGG_HASHED aggParams scan: no executor consumer yet.
         NodeTag::T_SeqScan
         | NodeTag::T_Sort
         | NodeTag::T_IncrementalSort
         | NodeTag::T_Agg
-        | NodeTag::T_Material => {}
+        | NodeTag::T_Material
+        | NodeTag::T_SetOp
+        | NodeTag::T_ProjectSet => {}
+        NodeTag::T_Append => {
+            for sub in &plan.as_append().unwrap().appendplans {
+                let child = finalize_plan(run, root, sub, &valid)?;
+                paramids.add_members(mcx, &child)?;
+            }
+        }
+        NodeTag::T_WindowAgg => {
+            let wa = plan.as_window_agg().unwrap();
+            if let Some(off) = wa.startOffset {
+                finalize_primnode(run, root, off, &mut paramids)?;
+            }
+            if let Some(off) = wa.endOffset {
+                finalize_primnode(run, root, off, &mut paramids)?;
+            }
+        }
+        NodeTag::T_TidScan => {
+            finalize_primnode_list(run, root, &plan.as_tid_scan().unwrap().tidquals, &mut paramids)?;
+        }
+        NodeTag::T_TidRangeScan => {
+            finalize_primnode_list(
+                run,
+                root,
+                &plan.as_tid_range_scan().unwrap().tidrangequals,
+                &mut paramids,
+            )?;
+        }
         NodeTag::T_Memoize => {
             finalize_primnode_list(run, root, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
         }
