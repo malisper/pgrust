@@ -122,6 +122,13 @@ pub fn fc_nameout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     })
 }
 
+// C name_text (name.c): cstring_to_text(NameStr(*s)) — bytes up to NUL.
+pub fn fc_name_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = arg_name(fcinfo, 0);
+    let t = varlena::cstring_to_text(fcinfo.result_mcx(), a.name_str())?;
+    Ok(types_fmgr::varlena_result(t))
+}
+
 pub fn fc_current_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let n = crate::current_user(fcinfo.result_mcx())?;
     byref_result(fcinfo.result_mcx(), &n.data)
@@ -216,6 +223,7 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(252, "textnename", 2, fc_textnename),
     b(253, "bttextnamecmp", 2, fc_bttextnamecmp),
     b(359, "btnamecmp", 2, fc_btnamecmp),
+    b(406, "name_text", 1, fc_name_text),
     b(447, "hashnameextended", 2, fc_hashnameextended),
     b(455, "hashname", 1, fc_hashname),
     b(655, "namelt", 2, fc_namelt),

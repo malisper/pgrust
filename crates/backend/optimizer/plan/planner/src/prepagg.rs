@@ -361,8 +361,9 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
     Ok(())
 }
 
-// GetAggInitVal (prepagg.c): initval text through the transtype's typinput;
-// by-ref values land in the planner context (C's CurrentMemoryContext).
+// GetAggInitVal (prepagg.c): initval text through the transtype's typinput.
+// In-function by-ref results ride the resolved carrier's scratch (dead once
+// flinfo drops); C's palloc'd result is modeled by the datumCopy into mcx.
 fn get_agg_init_val(
     mcx: mcx::Mcx<'_>,
     text: &str,
@@ -372,7 +373,14 @@ fn get_agg_init_val(
     let mut flinfo = fmgr_core::fmgr_info(typinput)?;
     let cstr = std::ffi::CString::new(text)
         .expect("agginitval text contains an interior NUL");
-    types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)
+    let d = types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)?;
+    let (typlen, typbyval) = lsyscache::get_typlenbyval(transtype)?;
+    if typbyval {
+        Ok(d)
+    } else {
+        // SAFETY: non-null by-ref in-function result, live until flinfo drops.
+        unsafe { execexpr::agg_datum_copy(mcx, d, typlen) }
+    }
 }
 
 // Returns (aggno, agginfo NodeId) of an identical previous aggregate, and
