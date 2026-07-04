@@ -518,6 +518,19 @@ pub struct DistinctExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `typedef OpExpr NullIfExpr` (primnodes.h); the tag is the only difference.
+#[derive(Default)]
+pub struct NullIfExpr<'mcx> {
+    pub opno: Oid,
+    pub opfuncid: Oid,
+    pub opresulttype: Oid,
+    pub opretset: bool,
+    pub opcollid: Oid,
+    pub inputcollid: Oid,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct CaseExpr<'mcx> {
     pub casetype: Oid,
@@ -861,6 +874,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BooleanTest<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for DistinctExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_DistinctExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NullIfExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NullIfExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CaseExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_CaseExpr;
 }
@@ -1182,6 +1198,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_distinct_expr(self) -> Option<&'mcx DistinctExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_null_if_expr(self) -> Option<&'mcx NullIfExpr<'mcx>> {
         self.as_variant()
     }
 

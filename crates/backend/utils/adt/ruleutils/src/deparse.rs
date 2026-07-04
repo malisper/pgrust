@@ -39,6 +39,7 @@ pub(crate) struct DeparseContext<'mcx> {
     pub colnames_visible: bool,
     pub in_group_by: bool,
     pub var_in_order_by: bool,
+    pub appendparents: types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'mcx> DeparseContext<'mcx> {
@@ -57,6 +58,7 @@ impl<'mcx> DeparseContext<'mcx> {
             colnames_visible: true,
             in_group_by: false,
             var_in_order_by: false,
+            appendparents: types_nodes::bitmapset::Bitmapset::empty(),
         }
     }
 
@@ -303,6 +305,51 @@ pub(crate) fn get_rule_expr<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_NullIfExpr => {
+            let n = node.as_null_if_expr().unwrap();
+            ctx.buf.push_str("NULLIF(");
+            let mut first = true;
+            for a in n.args.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(a, ctx, true)?;
+            }
+            ctx.buf.push(')');
+            Ok(())
+        }
+        NodeTag::T_InferenceElem => {
+            let ie = node.as_inference_elem().unwrap();
+            let expr = ie.expr.expect("InferenceElem.expr");
+            let save_varprefix = ctx.varprefix;
+            ctx.varprefix = false;
+            let mut need_parens = expr.node_tag() != NodeTag::T_Var;
+            if let Some(f) = expr.as_func_expr() {
+                if f.funcformat == CoercionForm::COERCE_EXPLICIT_CALL {
+                    need_parens = false;
+                }
+            }
+            if need_parens {
+                ctx.buf.push('(');
+            }
+            get_rule_expr(expr, ctx, false)?;
+            if need_parens {
+                ctx.buf.push(')');
+            }
+            ctx.varprefix = save_varprefix;
+            if ie.infercollid != InvalidOid {
+                let collname = crate::generate_collation_name(ctx.mcx, ie.infercollid)?;
+                ctx.buf.push_str(&format!(" COLLATE {collname}"));
+            }
+            if ie.inferopclass != InvalidOid {
+                let input_type = lsyscache::get_opclass_input_type(ie.inferopclass)?;
+                let mut opc = String::new();
+                crate::get_opclass_name(ctx.mcx, ie.inferopclass, input_type, &mut opc)?;
+                ctx.buf.push_str(&opc);
+            }
+            Ok(())
+        }
         NodeTag::T_BooleanTest => {
             let btest = node.as_boolean_test().unwrap();
             if !ctx.pretty_paren() {
@@ -365,9 +412,14 @@ pub(crate) fn get_rule_expr<'mcx>(
                 ctx.buf.push(')');
             }
             if sbsref.refassgnexpr.is_some() {
-                gap("get_rule_expr", "SubscriptingRef store (processIndirection)");
+                // Not legal SQL (container[subscripts] := rhs); C reaches it
+                // only when EXPLAIN prints an UPDATE plan targetlist.
+                let refassgnexpr = query::process_indirection(node, ctx)?;
+                ctx.buf.push_str(" := ");
+                get_rule_expr(refassgnexpr, ctx, showimplicit)?;
+            } else {
+                print_subscripts(sbsref, ctx)?;
             }
-            print_subscripts(sbsref, ctx)?;
             Ok(())
         }
         NodeTag::T_SubPlan => {
@@ -641,6 +693,38 @@ pub(crate) fn get_variable<'mcx>(
         crate::plan::get_variable_special(node, ctx)?;
         return Ok(None);
     }
+    let (mut varno, mut varattno) = (varno, varattno);
+    if !ctx.appendparents.is_empty() {
+        if let Some(appendrels) = &dpns.appendrels {
+            let mut pvarno = varno;
+            let mut pvarattno = varattno;
+            let mut appinfo = appendrels[pvarno];
+            let mut found = false;
+            // Map up to inheritance parents only, not UNION ALL appendrels.
+            while let Some(ai) = appinfo {
+                if dpns.rtable[ai.parent_relid as usize - 1].rtekind != RTEKind::RTE_RELATION {
+                    break;
+                }
+                found = false;
+                if pvarattno > 0 {
+                    if pvarattno as i32 > ai.num_child_cols {
+                        break;
+                    }
+                    pvarattno = ai.parent_colnos[pvarattno as usize - 1];
+                    if pvarattno == 0 {
+                        break;
+                    }
+                }
+                pvarno = ai.parent_relid as usize;
+                found = true;
+                appinfo = appendrels[pvarno];
+            }
+            if found && ctx.appendparents.is_member(pvarno as i32) {
+                varno = pvarno;
+                varattno = pvarattno;
+            }
+        }
+    }
     let rte: &RangeTblEntry<'_> = dpns.rtable[varno - 1];
     let mut refname = match var.varreturningtype {
         VarReturningType::VAR_RETURNING_OLD => {
@@ -804,7 +888,7 @@ fn get_parameter<'mcx>(param: &Param, ctx: &mut DeparseContext<'mcx>) -> PgResul
     }
 }
 
-fn print_subscripts<'mcx>(
+pub(crate) fn print_subscripts<'mcx>(
     sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
@@ -1344,7 +1428,7 @@ fn get_case_expr<'mcx>(caseexpr: &CaseExpr<'mcx>, ctx: &mut DeparseContext<'mcx>
     Ok(())
 }
 
-fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
+pub(crate) fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
     match node.node_tag() {
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
@@ -1372,9 +1456,6 @@ fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
 }
 
 fn get_array_expr<'mcx>(arrayexpr: &ArrayExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
-    if arrayexpr.multidims {
-        gap("get_rule_expr", "multidimensional ARRAY[] deparse");
-    }
     ctx.buf.push_str("ARRAY[");
     let mut first = true;
     for e in arrayexpr.elements.iter() {
@@ -1524,7 +1605,13 @@ fn get_sublink_expr<'mcx>(sublink: &SubLink<'mcx>, ctx: &mut DeparseContext<'mcx
             let op = opname.as_deref().expect("ALL sublink has a testexpr operator");
             ctx.buf.push_str(&format!(" {op} ALL "));
         }
-        SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => need_paren = false,
+        SubLinkType::ROWCOMPARE_SUBLINK => {
+            let op = opname.as_deref().expect("ROWCOMPARE sublink has a testexpr operator");
+            ctx.buf.push_str(&format!(" {op} "));
+        }
+        SubLinkType::EXPR_SUBLINK
+        | SubLinkType::MULTIEXPR_SUBLINK
+        | SubLinkType::ARRAY_SUBLINK => need_paren = false,
         other => gap("get_sublink_expr", &format!("{other:?} deparse")),
     }
 

@@ -16,9 +16,21 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
     let mcx = run.mcx;
     let rtoffset = run.glob.finalrtable.len() as i32;
     add_rtes_to_flat_rtable(run)?;
-    // glob.append_relations stays NIL: C copies rtoffset-adjusted
-    // AppendRelInfos here (setrefs.c) but its consumers (ruleutils appendrel
-    // deparse, execParallel) are unported -- populate when either lands.
+    for appinfo in run.root.append_rel_list.iter() {
+        let node = Node::mk(
+            mcx,
+            types_nodes::plannodes::AppendRelInfo {
+                parent_relid: appinfo.parent_relid + rtoffset as u32,
+                child_relid: appinfo.child_relid + rtoffset as u32,
+                parent_reltype: appinfo.parent_reltype,
+                child_reltype: appinfo.child_reltype,
+                num_child_cols: appinfo.num_child_cols,
+                parent_colnos: mcx::slice_borrow_in(mcx, &appinfo.parent_colnos)?,
+                parent_reloid: appinfo.parent_reloid,
+            },
+        )?;
+        run.glob.append_relations.lappend(mcx, node)?;
+    }
     // Flat PlanRowMark copies, RT indexes adjusted, rowmarkId untouched.
     for i in 0..run.root.rowMarks.len() {
         let mut rc = *run.rowmark(run.root.rowMarks[i]);

@@ -74,6 +74,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
         NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
+        NodeTag::T_NullIfExpr => cmp!(as_null_if_expr),
         NodeTag::T_CollateClause => cmp!(as_collate_clause),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
