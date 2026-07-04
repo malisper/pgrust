@@ -1,6 +1,7 @@
-// pl_exec.c, phase-1 subset. Statement set: block (no exceptions), assign,
+// pl_exec.c. Statement set: block (incl. EXCEPTION sections), assign,
 // if, loop/while/fori/fors, exit/continue, return, raise, assert, execsql
-// (incl. INTO [STRICT]), perform, getdiag(row_count). Expressions ride SPI
+// (incl. INTO [STRICT]), dynexecute, perform, getdiag(row_count).
+// Expressions ride SPI
 // plans (saved; plancache invalidation is loud per repo discipline) with the
 // simple-expression fast path over execexpr.
 //
@@ -39,6 +40,7 @@ pub const RC_CONTINUE: i32 = 3;
 
 const BOOLOID: Oid = 16;
 const INT8OID: Oid = 20;
+const TEXTOID: Oid = 25;
 const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
 const VOIDOID: Oid = 2278;
@@ -80,6 +82,7 @@ pub struct RecDesc {
     pub dropped: Vec<bool>,
 }
 
+#[derive(Clone)]
 pub struct RecValue {
     pub desc: RecDesc,
     pub values: Vec<Datum>,
@@ -141,6 +144,9 @@ pub struct Estate<'a> {
     pub retval: Datum,
     pub retisnull: bool,
     pub rettype: Oid,
+    /// RETURN of a record variable (trigger tuple return protocol).
+    pub ret_rec: Option<RecValue>,
+    pub cur_error: Option<Box<PgError>>,
     pub eval_processed: u64,
     eval_tuptable: Option<TuptabHandle>,
     pub exitlabel: Option<String>,
@@ -226,6 +232,8 @@ impl<'a> Estate<'a> {
             retval: Datum::null(),
             retisnull: true,
             rettype: types_core::InvalidOid,
+            ret_rec: None,
+            cur_error: None,
             eval_processed: 0,
             eval_tuptable: None,
             exitlabel: None,
@@ -278,8 +286,12 @@ impl<'a> Estate<'a> {
         self.eval_ctx.reset();
     }
 
+    pub(crate) fn datum_mcx(&self) -> Mcx<'static> {
+        self.datum_ctx.mcx()
+    }
+
     // datumCopy into the invocation context (by-ref survives statements).
-    fn copy_to_datum_ctx(&self, value: Datum, isnull: bool, typlen: i16, typbyval: bool) -> PgResult<Datum> {
+    pub(crate) fn copy_to_datum_ctx(&self, value: Datum, isnull: bool, typlen: i16, typbyval: bool) -> PgResult<Datum> {
         if isnull || typbyval {
             return Ok(value);
         }
@@ -957,7 +969,9 @@ impl<'a> Estate<'a> {
 
     pub fn exec_toplevel_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
         self.err_stmt = Some((block.lineno, "statement block"));
-        self.exec_stmt_block(block)
+        let rc = self.exec_stmt_block(block)?;
+        self.err_stmt = None;
+        Ok(rc)
     }
 
     fn exec_stmts(&mut self, stmts: &'a [PlStmt]) -> PgResult<i32> {
@@ -1050,6 +1064,9 @@ impl<'a> Estate<'a> {
                 self.exec_eval_cleanup();
                 Ok(RC_OK)
             }
+            PlStmt::DynExecute { query, into, strict, target, params, .. } => {
+                self.exec_stmt_dynexecute(query, *into, *strict, *target, params)
+            }
             PlStmt::GetDiag { items, .. } => {
                 for item in items {
                     debug_assert_eq!(item.kind, GETDIAG_ROW_COUNT);
@@ -1124,10 +1141,157 @@ impl<'a> Estate<'a> {
             }
         }
         self.err_text = None;
-        self.exec_stmts(&block.body)
+
+        let rc = if let Some(exc) = &block.exceptions {
+            self.exec_block_with_exceptions(block, exc)?
+        } else {
+            self.exec_stmts(&block.body)?
+        };
+        self.err_text = None;
+
+        // C's block rc handling: CONTINUE never matches a block; EXIT matches
+        // only on a label match.
+        match rc {
+            RC_OK | RC_RETURN | RC_CONTINUE => Ok(rc),
+            RC_EXIT => {
+                if self.exitlabel.is_some()
+                    && block.label.as_deref() == self.exitlabel.as_deref()
+                {
+                    self.exitlabel = None;
+                    Ok(RC_OK)
+                } else {
+                    Ok(RC_EXIT)
+                }
+            }
+            _ => unreachable!("bad rc"),
+        }
+    }
+
+    // exec_stmt_block's exception arm: body under an internal subtransaction;
+    // on error, roll the subxact back and run the first matching handler.
+    fn exec_block_with_exceptions(
+        &mut self,
+        block: &'a PlBlock,
+        exc: &'a ExceptionBlock,
+    ) -> PgResult<i32> {
+        let save_owner = resowner::CurrentResourceOwner();
+        self.err_text = Some("during statement block entry");
+        xact::BeginInternalSubTransaction(None)?;
+        self.err_text = None;
+
+        // Loud panics unwind without a PgResult; the subtransaction must
+        // still die with the unwind or a later ROLLBACK walks a stack with a
+        // leaked SUBINPROGRESS over a block-less top (C's PG_CATCH cannot be
+        // bypassed this way).
+        let body_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.exec_stmts(&block.body)
+        })) {
+            Ok(r) => r,
+            Err(payload) => {
+                let _ = xact::RollbackAndReleaseCurrentSubTransaction();
+                resowner::SetCurrentResourceOwner(save_owner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+
+        // C's PG_TRY extends over the return-value transfer and the subxact
+        // release; errors there reach the same handlers.
+        let attempt = body_result.and_then(|rc| {
+            self.err_text = Some("during statement block exit");
+            // The return value must survive subxact exit (C datumTransfer
+            // out of the subxact eval_econtext).
+            if rc == RC_RETURN && !self.retisnull && self.ret_rec.is_none()
+                && OidIsValid(self.rettype)
+            {
+                let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(self.rettype)?;
+                self.retval = self.copy_to_datum_ctx(self.retval, false, typlen, typbyval)?;
+            }
+            xact::ReleaseCurrentSubTransaction()?;
+            resowner::SetCurrentResourceOwner(save_owner);
+            self.err_text = None;
+            Ok(rc)
+        });
+
+        match attempt {
+            Ok(rc) => Ok(rc),
+            Err(e) => {
+                // Only ERROR is catchable; FATAL/PANIC never longjmp in C
+                // (the backend exits) — release the subxact and propagate.
+                if e.level > ERROR {
+                    let _ = xact::RollbackAndReleaseCurrentSubTransaction();
+                    resowner::SetCurrentResourceOwner(save_owner);
+                    return Err(e);
+                }
+                // Bake this frame's context with the throw-time stmt/text
+                // before the cleanup markers overwrite them (C's callback ran
+                // at errfinish).
+                let edata = attach_frame_context_at_catch(e, self);
+                self.err_text = Some("during exception cleanup");
+                xact::RollbackAndReleaseCurrentSubTransaction()?;
+                resowner::SetCurrentResourceOwner(save_owner);
+                // The subxact abort freed tuple tables made inside it
+                // (AtEOSubXact_SPI); drop the handle without a second free.
+                self.eval_tuptable = None;
+                self.eval_ctx.reset();
+
+                let matched = exc
+                    .exc_list
+                    .iter()
+                    .find(|x| exception_matches_conditions(&edata, &x.conditions));
+                match matched {
+                    Some(exception) => {
+                        let ss = unpack_sql_state(edata.sqlstate);
+                        self.assign_text_var(exc.sqlstate_varno, &ss)?;
+                        let msg = edata.message.clone();
+                        self.assign_text_var(exc.sqlerrm_varno, &msg)?;
+                        let save = self.cur_error.replace(edata);
+                        self.err_text = None;
+                        let rc = self.exec_stmts(&exception.action)?;
+                        self.cur_error = save;
+                        Ok(rc)
+                    }
+                    None => Err(edata),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn assign_text_var(&mut self, dno: Dno, s: &str) -> PgResult<()> {
+        let v = varlena::cstring_to_text(self.datum_ctx.mcx(), s.as_bytes())?;
+        self.set_var(dno, fmgr::varlena_result(v), false);
+        Ok(())
     }
 
     fn exec_assign_expr(&mut self, target: Dno, expr: &PlExpr) -> PgResult<()> {
+        // C's plan prepare resolves the recfield target via make_datum_param
+        // -> exec_get_datum_type, which errors positionless under the SPI
+        // context callback; mirror that before planning.
+        if let PlDatum::RecField(f) = &self.func.datums[target as usize] {
+            if self.recfield_type(f)?.is_none() {
+                let recname = match &self.func.datums[f.recparentno as usize] {
+                    PlDatum::Rec(r) => r.refname.clone(),
+                    _ => String::new(),
+                };
+                let err = if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(Some(_)))
+                {
+                    exec_err(
+                        types_error::ERRCODE_UNDEFINED_COLUMN,
+                        format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
+                    )
+                } else {
+                    Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                            .errmsg(format!("record \"{recname}\" is not assigned yet"))
+                            .errdetail(
+                                "The tuple structure of a not-yet-assigned record is indeterminate.",
+                            )
+                            .into_error(),
+                    )
+                };
+                return Err(spi_ctx_err(err, &expr.query, expr.parse_mode));
+            }
+        }
         self.ensure_plan(expr, 0)?;
         let (value, isnull, valtype, valtypmod) = self.exec_eval_expr(expr)?;
         self.exec_assign_value(target, value, isnull, valtype, valtypmod)?;
@@ -1168,8 +1332,54 @@ impl<'a> Estate<'a> {
                 self.set_var(target, stored, isnull);
                 Ok(())
             }
-            PlDatum::RecField(_) | PlDatum::Rec(_) | PlDatum::Row(_) => panic!(
-                "exec_assign_value (pl_exec.c): assignment to record/row targets \
+            PlDatum::RecField(f) => {
+                let recno = f.recparentno;
+                let want = f.fieldname.to_ascii_lowercase();
+                let recname = match &self.func.datums[recno as usize] {
+                    PlDatum::Rec(r) => r.refname.clone(),
+                    _ => String::new(),
+                };
+                let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
+                    return Err(Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                            .errmsg(format!("record \"{recname}\" is not assigned yet"))
+                            .errdetail(
+                                "The tuple structure of a not-yet-assigned record is indeterminate.",
+                            )
+                            .into_error(),
+                    ));
+                };
+                let mut found: Option<(usize, Oid, i32, i16, bool)> = None;
+                for (i, n) in rv.desc.names.iter().enumerate() {
+                    if !rv.desc.dropped[i] && *n == want {
+                        found = Some((
+                            i,
+                            rv.desc.types[i],
+                            rv.desc.typmods[i],
+                            rv.desc.typlens[i],
+                            rv.desc.typbyvals[i],
+                        ));
+                        break;
+                    }
+                }
+                let Some((i, ftype, ftypmod, flen, fbyval)) = found else {
+                    return Err(exec_err(
+                        types_error::ERRCODE_UNDEFINED_COLUMN,
+                        format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
+                    ));
+                };
+                let newvalue =
+                    self.exec_cast_value(value, &mut isnull, valtype, valtypmod, ftype, ftypmod)?;
+                let stored = self.copy_to_datum_ctx(newvalue, isnull, flen, fbyval)?;
+                if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
+                    rv.values[i] = stored;
+                    rv.nulls[i] = isnull;
+                }
+                Ok(())
+            }
+            PlDatum::Rec(_) | PlDatum::Row(_) => panic!(
+                "exec_assign_value (pl_exec.c): whole record/row assignment targets \
                  unported — unit backend-pl-plpgsql-exec"
             ),
         }
@@ -1475,9 +1685,28 @@ impl<'a> Estate<'a> {
                     self.retval = value;
                     self.retisnull = isnull;
                     self.rettype = v.datatype.typoid;
+                    if self.func.fn_retistuple && !self.retisnull {
+                        return Err(exec_err(
+                            types_error::ERRCODE_DATATYPE_MISMATCH,
+                            "cannot return non-composite value from function returning composite type"
+                                .to_string(),
+                        ));
+                    }
                 }
-                PlDatum::Rec(_) | PlDatum::Row(_) => panic!(
-                    "exec_stmt_return (pl_exec.c): returning record/row variables \
+                PlDatum::Rec(_) => match &self.datums[retvarno as usize] {
+                    DatumVal::Rec(Some(rv)) => {
+                        self.ret_rec = Some(rv.clone());
+                        self.retisnull = false;
+                        self.rettype = RECORDOID;
+                    }
+                    _ => {
+                        self.ret_rec = None;
+                        self.retisnull = true;
+                        self.rettype = types_core::InvalidOid;
+                    }
+                },
+                PlDatum::Row(_) => panic!(
+                    "exec_stmt_return (pl_exec.c): returning row variables \
                      unported — unit backend-pl-plpgsql-exec"
                 ),
                 _ => panic!("plpgsql: bad retvarno"),
@@ -1489,6 +1718,16 @@ impl<'a> Estate<'a> {
             self.retval = value;
             self.retisnull = isnull;
             self.rettype = rettype;
+            if self.func.fn_retistuple
+                && !isnull
+                && !lsyscache::typ::type_is_rowtype(rettype)?
+            {
+                return Err(exec_err(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    "cannot return non-composite value from function returning composite type"
+                        .to_string(),
+                ));
+            }
             // No exec_eval_cleanup: the value must survive to function exit
             // (nothing runs after RC_RETURN).
             return Ok(());
@@ -1506,6 +1745,10 @@ impl<'a> Estate<'a> {
         };
 
         if condname.is_none() && message.is_none() && options.is_empty() {
+            // Bare RAISE: re-throw the active handler's error unchanged.
+            if let Some(err) = &self.cur_error {
+                return Err(err.clone());
+            }
             return Err(Box::new(
                 elog::ereport(ERROR)
                     .errcode(types_error::ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER)
@@ -1837,6 +2080,143 @@ impl<'a> Estate<'a> {
 
         Ok(RC_OK)
     }
+
+    // exec_stmt_dynexecute: one-shot SPI execution of a computed query string
+    // with USING params; INTO [STRICT] mirrors execsql's destination rules.
+    fn exec_stmt_dynexecute(
+        &mut self,
+        query: &PlExpr,
+        into: bool,
+        strict: bool,
+        target: Dno,
+        params: &[PlExpr],
+    ) -> PgResult<i32> {
+        let (qv, isnull, restype, _m) = self.exec_eval_expr(query)?;
+        if isnull {
+            return Err(exec_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                "query string argument of EXECUTE is null".to_string(),
+            ));
+        }
+        let querystr = self.convert_value_to_string(qv, restype)?;
+        self.exec_eval_cleanup();
+
+        // exec_eval_using_params: unknown-typed params become text; by-ref
+        // values are copied so they survive per-param cleanup.
+        let n = params.len();
+        let mut ptypes = Vec::with_capacity(n);
+        let mut pvalues = Vec::with_capacity(n);
+        let mut pnulls = Vec::with_capacity(n);
+        for p in params {
+            self.ensure_plan(p, CURSOR_OPT_PARALLEL_OK)?;
+            let (mut v, isnull, mut t, _m) = self.exec_eval_expr(p)?;
+            if t == UNKNOWNOID {
+                t = TEXTOID;
+                if !isnull {
+                    // SAFETY: unknown-typed datums carry C-string representation.
+                    let s = unsafe {
+                        core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)
+                    };
+                    let tv = varlena::cstring_to_text(self.datum_ctx.mcx(), s.to_bytes())?;
+                    v = fmgr::varlena_result(tv);
+                }
+            } else if !isnull {
+                let (tl, tbv) = lsyscache::typ::get_typlenbyval(t)?;
+                v = self.copy_to_datum_ctx(v, isnull, tl, tbv)?;
+            }
+            ptypes.push(t);
+            pvalues.push(v);
+            pnulls.push(isnull);
+            self.exec_eval_cleanup();
+        }
+
+        let rc = spi::SPI_execute_extended(&querystr, &ptypes, &pvalues, &pnulls, self.readonly_func)
+            .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
+
+        match rc {
+            spi::SPI_OK_SELECT
+            | spi::SPI_OK_INSERT
+            | spi::SPI_OK_UPDATE
+            | spi::SPI_OK_DELETE
+            | spi::SPI_OK_MERGE
+            | spi::SPI_OK_INSERT_RETURNING
+            | spi::SPI_OK_UPDATE_RETURNING
+            | spi::SPI_OK_DELETE_RETURNING
+            | spi::SPI_OK_MERGE_RETURNING
+            | spi::SPI_OK_UTILITY
+            | spi::SPI_OK_REWRITTEN
+            | 0 => {}
+            spi::SPI_OK_SELINTO => {
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("EXECUTE of SELECT ... INTO is not implemented")
+                        .errhint(
+                            "You might want to use EXECUTE ... INTO or EXECUTE CREATE TABLE ... AS instead.",
+                        )
+                        .into_error(),
+                ));
+            }
+            spi::SPI_ERROR_COPY => {
+                return Err(exec_err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "cannot COPY to/from client in PL/pgSQL".to_string(),
+                ));
+            }
+            spi::SPI_ERROR_TRANSACTION => {
+                return Err(exec_err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "EXECUTE of transaction commands is not implemented".to_string(),
+                ));
+            }
+            other => panic!(
+                "SPI_execute_extended failed executing query \"{querystr}\": rc {other}"
+            ),
+        }
+
+        self.eval_processed = spi::SPI_processed();
+
+        if into {
+            let Some(tuptab) = spi::SPI_tuptable() else {
+                return Err(exec_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    "INTO used with a command that cannot return data".to_string(),
+                ));
+            };
+            let n = spi::SPI_processed();
+            if n == 0 {
+                if strict {
+                    let _ = spi::SPI_freetuptable(tuptab);
+                    return Err(Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_NO_DATA_FOUND)
+                            .errmsg("query returned no rows")
+                            .into_error(),
+                    ));
+                }
+                self.move_row_null(target, tuptab)?;
+                let _ = spi::SPI_freetuptable(tuptab);
+            } else {
+                if n > 1 && strict {
+                    let _ = spi::SPI_freetuptable(tuptab);
+                    return Err(Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
+                            .errmsg("query returned more than one row")
+                            .into_error(),
+                    ));
+                }
+                self.move_row_from_tuptable(target, tuptab, 0)?;
+                let _ = spi::SPI_freetuptable(tuptab);
+            }
+            self.exec_eval_cleanup();
+        } else if let Some(tuptab) = spi::SPI_tuptable() {
+            // Historically EXECUTE without INTO discards any result rows.
+            let _ = spi::SPI_freetuptable(tuptab);
+        }
+
+        Ok(RC_OK)
+    }
 }
 
 // plpgsql_recognize_err_condition(allow_sqlstate=true) returning the state.
@@ -1864,6 +2244,85 @@ fn unpack_sql_state(code: SqlState) -> String {
     String::from_utf8_lossy(&types_error::unpack_sqlstate(code)).into_owned()
 }
 
+// exception_matches_conditions: OTHERS (state 0) matches everything except
+// query_canceled and assert_failure; category codes match their class.
+fn exception_matches_conditions(e: &PgError, conds: &[PlCondition]) -> bool {
+    for c in conds {
+        let cs = c.sqlerrstate;
+        if cs.0 == 0 {
+            if e.sqlstate != types_error::ERRCODE_QUERY_CANCELED
+                && e.sqlstate != types_error::ERRCODE_ASSERT_FAILURE
+            {
+                return true;
+            }
+        } else if e.sqlstate == cs
+            || (types_error::errcode_is_category(cs)
+                && types_error::errcode_to_category(e.sqlstate) == cs)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// C bakes every live frame's context line at errfinish; this port attaches a
+// frame's line at the first boundary the error crosses in that frame (catch
+// site or frame exit). plpgsql_context_attached tracks "already attached for
+// the current innermost frame"; frame exit clears it so outer frames attach.
+#[cold]
+pub(crate) fn attach_frame_context_at_catch(
+    e: Box<types_error::PgError>,
+    estate: &Estate<'_>,
+) -> Box<types_error::PgError> {
+    if e.plpgsql_context_attached {
+        return e;
+    }
+    let mut e = attach_frame_line(e, estate);
+    e.plpgsql_context_attached = true;
+    e
+}
+
+#[cold]
+pub(crate) fn attach_frame_context_at_exit(
+    mut e: Box<types_error::PgError>,
+    estate: &Estate<'_>,
+) -> Box<types_error::PgError> {
+    if e.plpgsql_context_attached {
+        e.plpgsql_context_attached = false;
+        return e;
+    }
+    attach_frame_line(e, estate)
+}
+
+#[cold]
+fn attach_frame_line(
+    mut e: Box<types_error::PgError>,
+    estate: &Estate<'_>,
+) -> Box<types_error::PgError> {
+    let sig = &estate.func.fn_signature;
+    let line = if let Some(t) = estate.err_text {
+        match estate.err_stmt {
+            Some((lineno, _)) if lineno > 0 => {
+                format!("PL/pgSQL function {sig} line {lineno} {t}")
+            }
+            _ => format!("PL/pgSQL function {sig} {t}"),
+        }
+    } else if let Some((lineno, typename)) = estate.err_stmt {
+        if lineno > 0 {
+            format!("PL/pgSQL function {sig} line {lineno} at {typename}")
+        } else {
+            format!("PL/pgSQL function {sig}")
+        }
+    } else {
+        format!("PL/pgSQL function {sig}")
+    };
+    match e.context.take() {
+        Some(prev) => e.context = Some(format!("{prev}\n{line}")),
+        None => e.context = Some(line),
+    }
+    e
+}
+
 fn set_raise_fields(
     e: &mut PgError,
     column: Option<String>,
@@ -1872,8 +2331,9 @@ fn set_raise_fields(
     table: Option<String>,
     schema: Option<String>,
 ) {
-    let _ = (e, column, constraint, datatype, table, schema);
-    // PG_DIAG_* generic fields: types_error carries no slots for them yet;
-    // RAISE ... USING COLUMN/CONSTRAINT/DATATYPE/TABLE/SCHEMA values are
-    // accepted but not transported (divergence recorded in notes).
+    e.column_name = column;
+    e.constraint_name = constraint;
+    e.datatype_name = datatype;
+    e.table_name = table;
+    e.schema_name = schema;
 }

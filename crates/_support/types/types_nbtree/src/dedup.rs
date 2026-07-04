@@ -1,6 +1,5 @@
-//! BTDedupStateData (nbtree.h): the interval state machine shared by
-//! _bt_dedup_pass (crate nbtree) and btree_xlog_dedup redo (crate
-//! nbtree_xlog). Raw tuple images; callers hold the buffer pin + lock.
+//! BTDedupStateData (nbtree.h) shared by _bt_dedup_pass (nbtree), _bt_load
+//! dedup (nbtsort), btree_xlog_dedup redo (nbtree_xlog). Raw tuple images.
 
 use crate::page::BTMaxItemSize;
 use crate::vacuum::BTDedupInterval;
@@ -175,30 +174,7 @@ impl BTDedupState {
             }
             spacesaving = 0;
         } else {
-            // _bt_form_posting into owned scratch (C pallocs the final image)
-            let keysize = self.basetupsize;
-            debug_assert!(keysize == maxalign(keysize));
-            debug_assert!(self.nhtids > 1 && self.nhtids <= u16::MAX as usize);
-            let newsize = maxalign(keysize + self.nhtids * IPD_SIZE);
-            debug_assert!(newsize <= INDEX_SIZE_MASK as usize && newsize <= self.maxpostingsize);
-
-            core::ptr::copy_nonoverlapping(self.base, self.scratch.as_mut_ptr(), keysize);
-            let info = (t_info(self.scratch.as_ptr()) & !INDEX_SIZE_MASK)
-                | newsize as u16
-                | INDEX_ALT_TID_MASK;
-            self.scratch[6..8].copy_from_slice(&info.to_ne_bytes());
-            // BTreeTupleSetPosting: alt TID = (postingoffset blkid, nhtids|BT_IS_POSTING)
-            self.scratch[0..2].copy_from_slice(&((keysize >> 16) as u16).to_ne_bytes());
-            self.scratch[2..4].copy_from_slice(&((keysize & 0xffff) as u16).to_ne_bytes());
-            self.scratch[4..6]
-                .copy_from_slice(&(self.nhtids as u16 | BT_IS_POSTING).to_ne_bytes());
-            core::ptr::copy_nonoverlapping(
-                self.htids.as_ptr().cast::<u8>(),
-                self.scratch.as_mut_ptr().add(keysize),
-                self.nhtids * IPD_SIZE,
-            );
-            // palloc0 parity: MAXALIGN pad after the TID array is zero
-            self.scratch[keysize + self.nhtids * IPD_SIZE..newsize].fill(0);
+            let newsize = self.form_posting_scratch();
 
             self.intervals[self.nintervals].nitems = self.nitems as u16;
 
@@ -216,6 +192,57 @@ impl BTDedupState {
         self.phystupsize = 0;
 
         Ok(spacesaving)
+    }
+
+    // _bt_form_posting into owned scratch (C pallocs the final image)
+    unsafe fn form_posting_scratch(&mut self) -> Size {
+        let keysize = self.basetupsize;
+        debug_assert!(keysize == maxalign(keysize));
+        debug_assert!(self.nhtids > 1 && self.nhtids <= u16::MAX as usize);
+        let newsize = maxalign(keysize + self.nhtids * IPD_SIZE);
+        debug_assert!(newsize <= INDEX_SIZE_MASK as usize && newsize <= self.maxpostingsize);
+
+        core::ptr::copy_nonoverlapping(self.base, self.scratch.as_mut_ptr(), keysize);
+        let info = (t_info(self.scratch.as_ptr()) & !INDEX_SIZE_MASK)
+            | newsize as u16
+            | INDEX_ALT_TID_MASK;
+        self.scratch[6..8].copy_from_slice(&info.to_ne_bytes());
+        // BTreeTupleSetPosting: alt TID = (postingoffset blkid, nhtids|BT_IS_POSTING)
+        self.scratch[0..2].copy_from_slice(&((keysize >> 16) as u16).to_ne_bytes());
+        self.scratch[2..4].copy_from_slice(&((keysize & 0xffff) as u16).to_ne_bytes());
+        self.scratch[4..6]
+            .copy_from_slice(&(self.nhtids as u16 | BT_IS_POSTING).to_ne_bytes());
+        core::ptr::copy_nonoverlapping(
+            self.htids.as_ptr().cast::<u8>(),
+            self.scratch.as_mut_ptr().add(keysize),
+            self.nhtids * IPD_SIZE,
+        );
+        // palloc0 parity: MAXALIGN pad after the TID array is zero
+        self.scratch[keysize + self.nhtids * IPD_SIZE..newsize].fill(0);
+        newsize
+    }
+
+    /// _bt_sort_dedup_finish_pending forming leg: None = single item (caller adds base);
+    /// Some((ptr, size, truncextra)) lives in scratch until the next start_pending.
+    /// # Safety
+    /// `self.base` still live.
+    pub unsafe fn sort_finish_pending(&mut self) -> Option<(*const u8, usize, Size)> {
+        debug_assert!(self.nitems > 0);
+        debug_assert!(self.nitems <= self.nhtids);
+
+        let out = if self.nitems == 1 {
+            None
+        } else {
+            let newsize = self.form_posting_scratch();
+            Some((self.scratch.as_ptr(), newsize, newsize - self.basetupsize))
+        };
+
+        self.nmaxitems = 0;
+        self.nhtids = 0;
+        self.nitems = 0;
+        self.phystupsize = 0;
+
+        out
     }
 
     pub fn intervals_bytes(&self) -> &[u8] {

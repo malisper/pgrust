@@ -58,8 +58,8 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
             name,
             setting.context(),
             setting.group(),
-            None,
-            None,
+            setting.short_desc(),
+            setting.long_desc(),
             setting.flags(),
             vartype,
         )

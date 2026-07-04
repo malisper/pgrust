@@ -766,10 +766,9 @@ pub fn index_create<'mcx>(
     Ok((indexRelationId, constraintId))
 }
 
-// index_constraint_create (index.c), non-deferrable lane; the pg_index
-// update arm is unreachable (mark-as-primary was set at insert).
+// index_constraint_create (index.c), non-deferrable lane.
 #[allow(clippy::too_many_arguments)]
-fn index_constraint_create<'mcx>(
+pub fn index_constraint_create<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelationId: Oid,
@@ -781,14 +780,23 @@ fn index_constraint_create<'mcx>(
     allow_system_table_mods: bool,
 ) -> PgResult<Oid> {
     let namespaceId = heapRelation.rd_rel.relnamespace;
-    debug_assert!(
-        constr_flags
-            & (INDEX_CONSTR_CREATE_DEFERRABLE
-                | INDEX_CONSTR_CREATE_INIT_DEFERRED
-                | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS
-                | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
-            == 0
-    );
+    if constr_flags
+        & (INDEX_CONSTR_CREATE_DEFERRABLE
+            | INDEX_CONSTR_CREATE_INIT_DEFERRED
+            | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
+        != 0
+    {
+        unported("index_constraint_create: deferrable/temporal constraint flags");
+    }
+    if constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            RELATION_RELATION_ID,
+            indexRelationId,
+            RELATION_RELATION_ID,
+            pg_depend::DependencyType::Auto,
+        )?;
+    }
     if !allow_system_table_mods
         && catalog::IsSystemRelation(heapRelation)
         && !miscinit_seams::is_bootstrap_processing_mode::call()
@@ -838,6 +846,43 @@ fn index_constraint_create<'mcx>(
             &tbl,
             pg_depend::DependencyType::PartitionSec,
         )?;
+    }
+
+    // Deferrable was rejected above, so only the mark-as-primary arm of the
+    // UPDATE_INDEX block is live.
+    if constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX != 0
+        && constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY != 0
+    {
+        let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
+        let key = oid_scankey(1, indexRelationId);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {indexRelationId}"));
+        let desc = pg_index.descr();
+        let isprimary = getattr(tup, Anum_pg_index_indisprimary, desc).as_bool();
+        if !isprimary {
+            let natts = desc.natts as usize;
+            let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[Anum_pg_index_indisprimary - 1] = Datum::from_bool(true);
+            replace[Anum_pg_index_indisprimary - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            let otid = tup.t_self;
+            genam::systable_endscan(mcx, scan)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &otid, &mut newtup)?;
+            // Marking an existing index primary must flush the parent
+            // table's relcache entry (replication behavior depends on it).
+            inval::invalidate::CacheInvalidateRelcacheByRelid(heapRelation.rd_id)?;
+        } else {
+            genam::systable_endscan(mcx, scan)?;
+        }
+        pg_index.close(RowExclusiveLock)?;
     }
     Ok(con_oid)
 }

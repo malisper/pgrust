@@ -33,6 +33,7 @@ parser_seams = { path = "../../backend/parser/parser_seams" }
 parser_small1 = { path = "../../backend/parser/parser_small1" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+resowner = { path = "../../backend/utils/resowner/resowner" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 spi = { path = "../../backend/executor/spi" }
@@ -43,3 +44,8 @@ types_portal = { path = "../../_support/types/portal" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 wchar = { path = "../../common/wchar" }
 xact = { path = "../../backend/access/transam/xact" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+types_trigger = { path = "../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../_support/types/types_trigger_call" }
+varlena = { path = "../../backend/utils/adt/varlena" }

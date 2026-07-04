@@ -32,7 +32,6 @@ pub use ExplainFormat::*;
 pub use ExplainSerializeOption::*;
 
 // Omitted vs C's ExplainState: grouping_stack (non-text formats are loud),
-// deparse_cxt/printed_subplans (ruleutils + SubPlan lanes are loud),
 // workers_state (ANALYZE is loud), extension_state (no extension options
 // registered in this build; ApplyExtensionExplainOption always misses).
 pub struct ExplainState<'mcx> {
@@ -60,6 +59,7 @@ pub struct ExplainState<'mcx> {
     pub hide_workers: bool,
     /// plan_ids already displayed (C printed_subplans).
     pub printed_subplans: types_nodes::bitmapset::Bitmapset<'mcx>,
+    pub deparse_cxt: Option<ruleutils::PlanDeparse<'mcx>>,
 }
 
 pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
@@ -85,6 +85,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         rtable_size: 0,
         rtable_names: PgVec::new_in(mcx),
         hide_workers: false,
+        deparse_cxt: None,
     })
 }
 
