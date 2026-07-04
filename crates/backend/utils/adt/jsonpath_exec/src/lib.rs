@@ -2642,7 +2642,7 @@ fn json_item_from_datum<'mcx>(
             Ok(JbV::Numeric(leak_numeric(mcx, &img)?))
         }
         FLOAT4OID => {
-            let img = adt_numeric::float8_numeric(val.as_f32() as f64)?;
+            let img = adt_numeric::float4_numeric(val.as_f32())?;
             Ok(JbV::Numeric(leak_numeric(mcx, &img)?))
         }
         FLOAT8OID => {

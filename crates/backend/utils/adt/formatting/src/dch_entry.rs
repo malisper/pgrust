@@ -484,7 +484,8 @@ pub fn do_to_timestamp<'mcx>(
     }
 
     if fmask != 0 {
-        let e = ValidateDate(fmask, false, false, false, tm);
+        // AD/BC already applied above (C passes isjulian=true).
+        let e = ValidateDate(fmask, true, false, false, tm);
         if e != 0 {
             dterr(DTERR_FIELD_OVERFLOW, date_txt, escontext.as_deref_mut())?;
             return Ok(false);
