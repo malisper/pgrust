@@ -1,8 +1,8 @@
-// copy.c/copyto.c/copyfrom.c/copyfromparse.c — text + CSV formats, file and
-// wire STDIN/STDOUT variants; column defaults, the DEFAULT marker and
-// FROM ... WHERE live. Loud (named): binary format, COPY (query), PROGRAM,
-// ON_ERROR ignore, FREEZE, HEADER match, volatile defaults/WHERE, generated
-// columns, RLS rewrite. Option parsing (ProcessCopyOptions) is full-parity.
+// copy.c/copyto.c/copyfrom.c/copyfromparse.c — text, CSV and binary formats,
+// file and wire STDIN/STDOUT variants; column defaults, the DEFAULT marker and
+// FROM ... WHERE live. Loud (named): COPY (query), PROGRAM, HEADER match,
+// volatile defaults/WHERE, RLS rewrite. Option parsing (ProcessCopyOptions)
+// is full-parity.
 #![allow(non_snake_case)]
 
 use mcx::{vec_from_elem_in, Mcx, PgVec};

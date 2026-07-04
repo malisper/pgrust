@@ -41,6 +41,7 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) line_buf: PgVec<'mcx, u8>,
     pub(crate) line_buf_valid: bool,
     pub(crate) attribute_buf: PgVec<'mcx, u8>,
+    pub(crate) binary_attr_buf: StringInfo<'mcx>,
     pub(crate) raw_fields: PgVec<'mcx, i32>,
     pub(crate) max_fields: usize,
     pub(crate) eol_type: EolType,
@@ -91,9 +92,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
     source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
     let opts = ProcessCopyOptions(true, options, source_text)?;
-    if opts.binary {
-        unported("FORMAT binary (text-only lane)");
-    }
     if opts.convert_selectively {
         unported("convert_selectively (file_fdw-only option)");
     }
@@ -152,7 +150,11 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let mut attnames: PgVec<'mcx, NameData> = PgVec::new_in(mcx);
     for &attnum in attnumlist.iter() {
         let att = tup_desc.attr(attnum as usize - 1);
-        let (func_oid, typioparam) = lsyscache::typ::getTypeInputInfo(att.atttypid)?;
+        let (func_oid, typioparam) = if opts.binary {
+            lsyscache::typ::getTypeBinaryInputInfo(att.atttypid)?
+        } else {
+            lsyscache::typ::getTypeInputInfo(att.atttypid)?
+        };
         in_functions.push(fmgr_core::fmgr_info(func_oid)?);
         typioparams.push(typioparam);
         atttypmods.push(att.atttypmod);
@@ -223,13 +225,14 @@ pub fn BeginCopyFrom<'mcx, 's>(
             if elog::config::where_to_send_output() != CommandDest::Remote {
                 unported("FROM STDIN outside a remote session (stdin file arm)");
             }
-            receive_copy_begin(mcx, attnumlist.len())?
+            receive_copy_begin(mcx, attnumlist.len(), opts.binary)?
         }
     };
 
     let max_fields = attnumlist.len();
     let opts_on_error = opts.on_error;
-    Ok(CopyFromState {
+    let is_binary = opts.binary;
+    let mut cstate = CopyFromState {
         opts,
         src,
         raw_buf: vec_from_elem_in(mcx, 0u8, RAW_BUF_SIZE + 1),
@@ -244,6 +247,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
         line_buf: PgVec::new_in(mcx),
         line_buf_valid: false,
         attribute_buf: PgVec::new_in(mcx),
+        binary_attr_buf: StringInfo::new_in(mcx)?,
         raw_fields: PgVec::new_in(mcx),
         max_fields,
         eol_type: EolType::Unknown,
@@ -270,17 +274,26 @@ pub fn BeginCopyFrom<'mcx, 's>(
             .then(|| Box::new(types_fmgr::ErrorSaveNode::new(false))),
         num_errors: 0,
         bytes_processed: 0,
-    })
+    };
+    if is_binary {
+        cstate.receive_copy_binary_header()?;
+    }
+    Ok(cstate)
 }
 
 // ReceiveCopyBegin (copyfromparse.c): CopyInResponse, then flush so the
 // frontend knows it can send.
-fn receive_copy_begin<'mcx, 's>(mcx: Mcx<'mcx>, natts: usize) -> PgResult<CopySrc<'mcx, 's>> {
+fn receive_copy_begin<'mcx, 's>(
+    mcx: Mcx<'mcx>,
+    natts: usize,
+    binary: bool,
+) -> PgResult<CopySrc<'mcx, 's>> {
+    let format: u16 = if binary { 1 } else { 0 };
     let mut buf = pqformat::pq_beginmessage(mcx, b'G')?;
-    pqformat::pq_sendbyte(&mut buf, 0)?;
+    pqformat::pq_sendbyte(&mut buf, format as u8)?;
     pqformat::pq_sendint16(&mut buf, natts as u16)?;
     for _ in 0..natts {
-        pqformat::pq_sendint16(&mut buf, 0)?;
+        pqformat::pq_sendint16(&mut buf, format)?;
     }
     pqformat::pq_endmessage(buf)?;
     let msgbuf = StringInfo::new_in(mcx)?;
@@ -778,6 +791,17 @@ fn copy_from_error_context(
 ) -> Box<PgError> {
     let relname = rel.name();
     let lineno = cstate.cur_lineno;
+    if cstate.opts.binary {
+        // C's binary arm: the raw data is not usefully displayable.
+        let ctx = match cstate.cur_attidx {
+            Some(m) => {
+                let attname = cstate.attname(m);
+                format!("COPY {relname}, line {lineno}, column {attname}")
+            }
+            None => format!("COPY {relname}, line {lineno}"),
+        };
+        return Box::new(e.add_context(ctx));
+    }
     let ctx = match cstate.cur_attidx {
         Some(m) => {
             let attname = cstate.attname(m);
