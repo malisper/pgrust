@@ -217,8 +217,14 @@ pub fn vacuum<'mcx>(
     // transaction block); ANALYZE statements go through commands_analyze.
     if params.options & VACOPT_VACUUM != 0 {
         xact::PreventInTransactionBlock(is_top_level, "VACUUM")?;
-    } else if xact::IsInTransactionBlock(is_top_level) {
-        unported("vacuum: ANALYZE inside a transaction block (use_own_xacts=false)");
+    } else {
+        debug_assert!(
+            miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker,
+            "ANALYZE-only vacuum() caller must be the autovacuum worker"
+        );
+        if xact::IsInTransactionBlock(is_top_level) {
+            unported("vacuum: ANALYZE inside a transaction block (use_own_xacts=false)");
+        }
     }
 
     if IN_VACUUM.get() {
@@ -267,11 +273,9 @@ pub fn vacuum<'mcx>(
             if params.options & VACOPT_VACUUM != 0 {
                 let params_copy = *params;
                 if !vacuum_rel(mcx, vrel.oid, vrel.relname, &params_copy, bstrategy.clone())? {
-                    VACUUM_FAILSAFE_ACTIVE.set(false);
                     continue;
                 }
             }
-            VACUUM_FAILSAFE_ACTIVE.set(false);
             if params.options & VACOPT_ANALYZE != 0 {
                 xact::StartTransactionCommand()?;
                 let snapshot = snapmgr::GetTransactionSnapshot()?;
@@ -288,6 +292,8 @@ pub fn vacuum<'mcx>(
                 xact::CommandCounterIncrement()?;
                 xact::CommitTransactionCommand()?;
             }
+            // Reset before vacuuming the next relation (C loop tail).
+            VACUUM_FAILSAFE_ACTIVE.set(false);
         }
         Ok(())
     }));

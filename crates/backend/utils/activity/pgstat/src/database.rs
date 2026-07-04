@@ -190,9 +190,8 @@ pub fn pgstat_report_autovac(dboid: Oid) {
         dboid,
         objid: 0,
     };
-    let ts = timestamp_seams::get_current_timestamp::call();
     crate::shmem::update_database_entry(key, |dbentry| {
-        dbentry.last_autovac_time = ts;
+        dbentry.last_autovac_time = timestamp_seams::get_current_timestamp::call();
     });
 }
 

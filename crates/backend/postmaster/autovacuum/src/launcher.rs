@@ -339,29 +339,34 @@ fn AutoVacLauncherShutdown() -> ! {
 }
 
 fn launcher_determine_sleep(canlaunch: bool, recursing: bool) -> PgResult<i64> {
-    let mut nap_ms: i64;
+    let (mut secs, mut usecs): (i64, i32);
     if !canlaunch {
-        nap_ms = autovacuum_naptime() as i64 * 1000;
+        secs = autovacuum_naptime() as i64;
+        usecs = 0;
     } else if let Some(next_worker) =
         DATABASE_LIST.with_borrow(|l| l.last().map(|d| d.adl_next_worker))
     {
         let current_time = adt_timestamp::GetCurrentTimestamp();
-        let (secs, usecs) = adt_timestamp::TimestampDifference(current_time, next_worker);
-        nap_ms = secs * 1000 + (usecs / 1000) as i64;
+        (secs, usecs) = adt_timestamp::TimestampDifference(current_time, next_worker);
     } else {
-        nap_ms = autovacuum_naptime() as i64 * 1000;
+        secs = autovacuum_naptime() as i64;
+        usecs = 0;
     }
 
     // Exactly zero means an entry in the past: redistribute and retry once.
-    if nap_ms == 0 && !recursing {
+    if secs == 0 && usecs == 0 && !recursing {
         rebuild_database_list(InvalidOid)?;
         return launcher_determine_sleep(canlaunch, true);
     }
 
-    if nap_ms <= MIN_AUTOVAC_SLEEPTIME_MS {
-        nap_ms = MIN_AUTOVAC_SLEEPTIME_MS;
+    if secs <= 0 && (usecs as i64) <= MIN_AUTOVAC_SLEEPTIME_MS * 1000 {
+        secs = 0;
+        usecs = (MIN_AUTOVAC_SLEEPTIME_MS * 1000) as i32;
     }
-    Ok(nap_ms.min(MAX_AUTOVAC_SLEEPTIME_SECS * 1000))
+    if secs > MAX_AUTOVAC_SLEEPTIME_SECS {
+        secs = MAX_AUTOVAC_SLEEPTIME_SECS;
+    }
+    Ok(secs * 1000 + (usecs / 1000) as i64)
 }
 
 fn rebuild_database_list(newdb: Oid) -> PgResult<()> {

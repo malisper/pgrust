@@ -172,6 +172,11 @@ fn worker_body() -> PgResult<()> {
         miscinit::SetProcessingMode(ProcessingMode::NormalProcessing);
         elog::elog(DEBUG1, "autovacuum: processing database")?;
 
+        let post_auth_delay = guc_tables::vars::PostAuthDelay.read();
+        if post_auth_delay > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(post_auth_delay as u64));
+        }
+
         RECENT_XID.set(varsup::ReadNextTransactionId()?);
         RECENT_MULTI.set(ReadNextMultiXactId()?);
 
@@ -316,7 +321,6 @@ struct AutovacTable {
     at_storage_param_vac_cost_delay: f64,
     at_storage_param_vac_cost_limit: i32,
     at_dobalance: bool,
-    at_relname: String,
     at_nspname: Oid,
 }
 
@@ -495,8 +499,10 @@ pub fn do_autovacuum() -> PgResult<()> {
         xact::StartTransactionCommand()?;
     }
 
-    let bstrategy: BufferAccessStrategy =
-        bufmgr_seams::get_access_strategy::call(BufferAccessStrategyType::BasVacuum);
+    let bstrategy: BufferAccessStrategy = bufmgr::GetAccessStrategyWithSize(
+        BufferAccessStrategyType::BasVacuum,
+        g::VacuumBufferUsageLimit(),
+    );
 
     let mut did_vacuum = false;
     let mut found_concurrent_worker = false;
@@ -575,12 +581,15 @@ pub fn do_autovacuum() -> PgResult<()> {
         }
         VacuumUpdateCosts()?;
 
+        // Refetch names just before vacuuming; a rel dropped since the recheck
+        // is skipped (C's `goto deleted`, no did_vacuum).
+        let relname = fetch_av_class_row(tmcx, tab.at_relid)?.map(|r| r.relname);
         let nspname = syscache_seams::pg_namespace_nspname::call(tab.at_nspname)?
             .map(|n| String::from_utf8_lossy(n.name_str()).into_owned());
         let datname = dbcommands_seams::get_database_name::call(g::MyDatabaseId())?;
 
-        if let (Some(nspname), Some(datname)) = (nspname, datname) {
-            autovac_report_activity(&tab, &nspname);
+        if let (Some(relname), Some(nspname), Some(datname)) = (relname, nspname, datname) {
+            autovac_report_activity(&tab, &nspname, &relname);
             match autovacuum_do_vac_analyze(tmcx, &tab, bstrategy.clone()) {
                 Ok(()) => {
                     g::SetQueryCancelPending(false);
@@ -593,13 +602,10 @@ pub fn do_autovacuum() -> PgResult<()> {
                     } else {
                         "automatic analyze of table"
                     };
-                    err.add_context_line(format!(
-                        "{what} \"{datname}.{nspname}.{}\"",
-                        tab.at_relname
-                    ));
+                    err.add_context_line(format!("{what} \"{datname}.{nspname}.{relname}\""));
                     elog::emit_error_report_for(&err);
-                    elog::FlushErrorState();
                     xact::AbortOutOfAnyTransaction()?;
+                    elog::FlushErrorState();
                     xact::StartTransactionCommand()?;
                     g::ResumeInterrupts();
                 }
@@ -668,7 +674,7 @@ fn autovacuum_do_vac_analyze(
     commands_vacuum::vacuum(mcx, &rel_list, &tab.at_params, bstrategy, true)
 }
 
-fn autovac_report_activity(tab: &AutovacTable, nspname: &str) {
+fn autovac_report_activity(tab: &AutovacTable, nspname: &str, relname: &str) {
     const MAX_AUTOVAC_ACTIV_LEN: usize = 64 * 2 + 56;
     let mut activity = if tab.at_params.options & VACOPT_VACUUM != 0 {
         if tab.at_params.options & VACOPT_ANALYZE != 0 {
@@ -682,7 +688,7 @@ fn autovac_report_activity(tab: &AutovacTable, nspname: &str) {
     let suffix = format!(
         " {}.{}{}",
         nspname,
-        tab.at_relname,
+        relname,
         if tab.at_params.is_wraparound { " (to prevent wraparound)" } else { "" }
     );
     let room = (MAX_AUTOVAC_ACTIV_LEN - 1).saturating_sub(activity.len());
@@ -784,7 +790,6 @@ fn table_recheck_autovac(
         at_storage_param_vac_cost_limit: av.map(|a| a.vacuum_cost_limit).unwrap_or(0),
         at_storage_param_vac_cost_delay: av.map(|a| a.vacuum_cost_delay).unwrap_or(-1.0),
         at_dobalance: !av.is_some_and(|a| a.vacuum_cost_limit > 0 || a.vacuum_cost_delay >= 0.0),
-        at_relname: row.relname,
         at_nspname: row.relnamespace,
     }))
 }
