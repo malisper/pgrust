@@ -90,9 +90,11 @@ pub fn query_planner<'mcx>(
 
     crate::initsplan::create_lateral_join_info(run)?;
 
-    // match_foreign_keys_to_quals / extract_restriction_or_clauses /
-    // row identity vars: all no-ops with no fkeys and no OR clauses.
+    // match_foreign_keys_to_quals / row identity vars: structural no-ops
+    // with no fkeys.
     debug_assert!(run.root.fkey_list.is_empty());
+
+    crate::orclauses::extract_restriction_or_clauses(run)?;
 
     crate::inherit::add_other_rels_to_query(run)?;
 

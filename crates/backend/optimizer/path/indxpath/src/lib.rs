@@ -123,7 +123,7 @@ pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> P
 }
 
 // join_clause_is_movable_to (restrictinfo.c).
-fn join_clause_is_movable_to(run: &PlannerRun<'_>, rid: RinfoId, rel: RelId) -> bool {
+pub fn join_clause_is_movable_to(run: &PlannerRun<'_>, rid: RinfoId, rel: RelId) -> bool {
     let rinfo = run.root.rinfo(rid);
     let baserel = run.root.rel(rel);
     if !relids_is_member(baserel.relid as i32, &rinfo.clause_relids) {

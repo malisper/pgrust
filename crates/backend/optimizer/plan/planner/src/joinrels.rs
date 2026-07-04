@@ -85,20 +85,14 @@ fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()>
     let ones = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
 
     for (i, &old_rel) in prev.iter().enumerate() {
-        let has_clauses = !run.root.rel(old_rel).joininfo.is_empty()
+        if !run.root.rel(old_rel).joininfo.is_empty()
             || run.root.rel(old_rel).has_eclass_joins
-            || has_join_restriction(run, old_rel);
-        let others: &[RelId] = if level == 2 { &ones[i + 1..] } else { &ones[..] };
-        for &other_rel in others {
-            if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids) {
-                continue;
-            }
-            if !has_clauses
-                || have_relevant_joinclause(run, old_rel, other_rel)
-                || have_join_order_restriction(run, old_rel, other_rel)
-            {
-                make_join_rel(run, old_rel, other_rel)?;
-            }
+            || has_join_restriction(run, old_rel)
+        {
+            let first_rel = if level == 2 { i + 1 } else { 0 };
+            make_rels_by_clause_joins(run, old_rel, &ones, first_rel)?;
+        } else {
+            make_rels_by_clauseless_joins(run, old_rel, &ones)?;
         }
     }
 
@@ -124,7 +118,7 @@ fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()>
                     continue;
                 }
                 if have_relevant_joinclause(run, old_rel, new_rel)
-                    || have_join_order_restriction(run, old_rel, new_rel)
+                    || have_join_order_restriction(run, old_rel, new_rel)?
                 {
                     make_join_rel(run, old_rel, new_rel)?;
                 }
@@ -135,12 +129,50 @@ fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()>
     // Last-ditch: Cartesian products against the initial rels.
     if run.root.join_rel_level[level].is_empty() {
         for &old_rel in prev.iter() {
-            for &other_rel in ones.iter() {
-                if !relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids)
-                {
-                    make_join_rel(run, old_rel, other_rel)?;
-                }
-            }
+            make_rels_by_clauseless_joins(run, old_rel, &ones)?;
+        }
+        // With special joins or lateral refs some levels can legally be
+        // empty; a workable bushy plan appears at a higher level.
+        if run.root.join_rel_level[level].is_empty()
+            && run.root.join_info_list.is_empty()
+            && !run.root.hasLateralRTEs
+        {
+            panic!("failed to build any {level}-way joins");
+        }
+    }
+    Ok(())
+}
+
+fn make_rels_by_clause_joins(
+    run: &mut PlannerRun<'_>,
+    old_rel: RelId,
+    other_rels: &[RelId],
+    first_rel: usize,
+) -> PgResult<()> {
+    for &other_rel in &other_rels[first_rel..] {
+        if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids) {
+            continue;
+        }
+        if have_relevant_joinclause(run, old_rel, other_rel)
+            || have_join_order_restriction(run, old_rel, other_rel)?
+        {
+            make_join_rel(run, old_rel, other_rel)?;
+        }
+    }
+    Ok(())
+}
+
+// make_rels_by_clauseless_joins (joinrels.c): iterates the full initial-rels
+// list, so at level 2 a clauseless pair is attempted in both directions
+// (make_join_rel dedupes the joinrel; repeated path population matches C).
+fn make_rels_by_clauseless_joins(
+    run: &mut PlannerRun<'_>,
+    old_rel: RelId,
+    other_rels: &[RelId],
+) -> PgResult<()> {
+    for &other_rel in other_rels {
+        if !relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids) {
+            make_join_rel(run, old_rel, other_rel)?;
         }
     }
     Ok(())
@@ -154,7 +186,19 @@ fn has_join_restriction(run: &PlannerRun<'_>, rel: RelId) -> bool {
         return true;
     }
     let relids = &run.root.rel(rel).relids;
+    for &phid in run.root.placeholder_list.iter() {
+        let phinfo = run.root.phinfo(phid);
+        if relids_is_subset(relids, &phinfo.ph_eval_at)
+            && !relids_equal(relids, &phinfo.ph_eval_at)
+        {
+            return true;
+        }
+    }
     run.root.join_info_list.iter().any(|sj| {
+        // Full joins' ordering is preserved by other mechanisms.
+        if sj.jointype == types_pathnodes::JOIN_FULL {
+            return false;
+        }
         if relids_is_subset(&sj.min_lefthand, relids) && relids_is_subset(&sj.min_righthand, relids)
         {
             return false;
@@ -163,24 +207,73 @@ fn has_join_restriction(run: &PlannerRun<'_>, rel: RelId) -> bool {
     })
 }
 
-// have_join_order_restriction (joinrels.c); the has_legal_joinclause veto is
-// dead at exactly two baserels (the only partner is the pair itself, and a
-// relevant joinclause short-circuits before this check).
-fn have_join_order_restriction(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> bool {
+// have_join_order_restriction (joinrels.c).
+fn have_join_order_restriction(
+    run: &mut PlannerRun<'_>,
+    rel1: RelId,
+    rel2: RelId,
+) -> PgResult<bool> {
     // A direct lateral reference either way makes the pair worth attempting.
     if relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).direct_lateral_relids)
         || relids_overlap(&run.root.rel(rel2).relids, &run.root.rel(rel1).direct_lateral_relids)
     {
-        return true;
+        return Ok(true);
     }
-    let r1 = &run.root.rel(rel1).relids;
-    let r2 = &run.root.rel(rel2).relids;
-    run.root.join_info_list.iter().any(|sj| {
-        (relids_is_subset(&sj.min_lefthand, r1) && relids_is_subset(&sj.min_righthand, r2))
+    // Likewise when both rels are needed to compute some PlaceHolderVar.
+    for &phid in run.root.placeholder_list.iter() {
+        let phinfo = run.root.phinfo(phid);
+        if relids_is_subset(&run.root.rel(rel1).relids, &phinfo.ph_eval_at)
+            && relids_is_subset(&run.root.rel(rel2).relids, &phinfo.ph_eval_at)
+        {
+            return Ok(true);
+        }
+    }
+    let mut result = false;
+    for i in 0..run.root.join_info_list.len() {
+        let sj = &run.root.join_info_list[i];
+        if sj.jointype == types_pathnodes::JOIN_FULL {
+            continue;
+        }
+        let r1 = &run.root.rel(rel1).relids;
+        let r2 = &run.root.rel(rel2).relids;
+        if (relids_is_subset(&sj.min_lefthand, r1) && relids_is_subset(&sj.min_righthand, r2))
             || (relids_is_subset(&sj.min_lefthand, r2) && relids_is_subset(&sj.min_righthand, r1))
             || (relids_overlap(&sj.min_righthand, r1) && relids_overlap(&sj.min_righthand, r2))
             || (relids_overlap(&sj.min_lefthand, r1) && relids_overlap(&sj.min_lefthand, r2))
-    })
+        {
+            result = true;
+            break;
+        }
+    }
+    // Clauseless bushy joins are put off as long as either input can legally
+    // join by clause; without this veto a high join-order restriction
+    // explodes the search inside its LHS/RHS.
+    if result && (has_legal_joinclause(run, rel1)? || has_legal_joinclause(run, rel2)?) {
+        result = false;
+    }
+    Ok(result)
+}
+
+// has_legal_joinclause (joinrels.c): probes single initial rels only — a
+// heuristic, so an occasional wrong "false" only costs planning time.
+fn has_legal_joinclause(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<bool> {
+    let others = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.initial_rels);
+    for &rel2 in others.iter() {
+        if relids_overlap(&run.root.rel(rel).relids, &run.root.rel(rel2).relids) {
+            continue;
+        }
+        if have_relevant_joinclause(run, rel, rel2) {
+            let joinrelids = relids_union(
+                run.mcx,
+                &run.root.rel(rel).relids,
+                &run.root.rel(rel2).relids,
+            );
+            if join_is_legal(run, rel, rel2, &joinrelids)?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> bool {
