@@ -3,6 +3,8 @@
 // xlogreader; page bytes vs the C reference TU (bench/cref/heap_page_ref.c);
 // visibility through the real heapam_visibility (committed visible, aborted
 // invisible). One process-global test: the WAL rig owns cwd and shmem.
+// Not miri-runnable: XLogFileInit does real segment file I/O.
+#![cfg(not(miri))]
 use std::cell::Cell;
 use std::ptr::NonNull;
 use std::rc::Rc;
