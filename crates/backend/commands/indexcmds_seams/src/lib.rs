@@ -6,6 +6,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // ResolveOpClass (indexcmds.c) for tablecmds' ComputePartitionAttrs;
+    // seam because indexcmds depends on tablecmds.
+    pub fn resolve_opclass<'mcx>(
+        opclass: &types_nodes::NodeList<'mcx>,
+        attr_type: Oid,
+        access_method_name: &str,
+        access_method_id: Oid,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // DefineIndex (indexcmds.c) for tablecmds' ATExecAddIndex; indexcmds
     // depends on tablecmds, so the ALTER edge is a seam.
     pub fn define_index_for_alter<'mcx>(

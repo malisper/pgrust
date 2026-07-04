@@ -252,7 +252,7 @@ pub(crate) fn compute_partition_key<'mcx>(
             }
             oc
         } else {
-            unported("named operator classes in partition keys (ResolveOpClass)");
+            indexcmds_seams::resolve_opclass::call(&pelem.opclass, atttype, am_name, am_oid)?
         };
         info.partopclass.push(opclass);
     }
