@@ -100,9 +100,20 @@ pub const PENDING_IO_ZERO: PgStat_PendingIO = PgStat_PendingIO {
 static SHARED_IO: Mutex<PgStat_IO> = Mutex::new(IO_STATS_ZERO);
 
 thread_local! {
-    static PENDING_IO_STATS: RefCell<PgStat_PendingIO> = const { RefCell::new(PENDING_IO_ZERO) };
+    // UnsafeCell, not RefCell: the per-buffer-hit count sits on the M2/M4 pin
+    // path where C pays a bare array add; every access is a leaf (no callback
+    // escapes with_pending_io).
+    static PENDING_IO_STATS: core::cell::UnsafeCell<PgStat_PendingIO> =
+        const { core::cell::UnsafeCell::new(PENDING_IO_ZERO) };
     static HAVE_IOSTATS: Cell<bool> = const { Cell::new(false) };
     static SNAPSHOT_IO: RefCell<Option<PgStat_IO>> = const { RefCell::new(None) };
+}
+
+#[inline(always)]
+fn with_pending_io<R>(f: impl FnOnce(&mut PgStat_PendingIO) -> R) -> R {
+    // SAFETY: thread-local; every caller passes a closure that neither
+    // re-enters this module nor stores the reference (single-entry leaf).
+    PENDING_IO_STATS.with(|s| f(unsafe { &mut *s.get() }))
 }
 
 pub fn pgstat_bktype_io_stats_valid(backend_io: &PgStat_BktypeIO, bktype: BackendType) -> bool {
@@ -168,8 +179,7 @@ pub fn pgstat_count_io_op(
             || pgstat_tracks_io_op(miscinit::GetMyBackendType(), io_object, io_context, io_op)
     );
 
-    PENDING_IO_STATS.with(|s| {
-        let mut pending = s.borrow_mut();
+    with_pending_io(|pending| {
         pending.counts[o][c][p] += cnt as i64;
         pending.bytes[o][c][p] += bytes;
     });
@@ -211,8 +221,8 @@ pub fn pgstat_count_io_op_time(
             }
         }
         let (o, c, p) = (io_object as usize, io_context as usize, io_op as usize);
-        PENDING_IO_STATS.with(|s| {
-            s.borrow_mut().pending_times_ns[o][c][p] += elapsed_ns;
+        with_pending_io(|pending| {
+            pending.pending_times_ns[o][c][p] += elapsed_ns;
         });
         crate::backend::pgstat_count_backend_io_op_time(io_object, io_context, io_op, elapsed_ns);
     }
@@ -254,8 +264,7 @@ pub(crate) fn pgstat_io_flush_cb(_nowait: bool) -> bool {
         return false;
     }
     let bktype = miscinit::GetMyBackendType() as usize;
-    PENDING_IO_STATS.with(|s| {
-        let mut pending = s.borrow_mut();
+    with_pending_io(|pending| {
         let mut shared = SHARED_IO.lock().unwrap();
         let dst = &mut shared.stats[bktype];
         for o in 0..IOOBJECT_NUM_TYPES {
@@ -457,5 +466,5 @@ pub fn pgstat_have_pending_io() -> bool {
 }
 
 pub fn pgstat_pending_io() -> PgStat_PendingIO {
-    PENDING_IO_STATS.with(|s| *s.borrow())
+    with_pending_io(|pending| *pending)
 }
