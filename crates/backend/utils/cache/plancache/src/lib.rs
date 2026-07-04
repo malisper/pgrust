@@ -778,9 +778,7 @@ fn build_stmt_list(
     mcx::vec_borrow_in(mcx, result?)
 }
 
-// The planner renumbers TLE resnos in place (extract_update_targetlist_colnos)
-// and rewrites MergeAction targetList/updateColnos, so those structs must be
-// private per plan; deeper subnodes stay shared (safe Rust denies edits).
+// The planner scribbles on TLE resnos and MergeAction fields — private copies.
 fn clone_tlist_in(
     mcx: Mcx<'static>,
     tlist: &types_nodes::NodeList<'static>,
