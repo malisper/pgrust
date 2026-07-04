@@ -5306,10 +5306,12 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "readfuncs",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_pathnodes",
  "types_tuple",
 ]

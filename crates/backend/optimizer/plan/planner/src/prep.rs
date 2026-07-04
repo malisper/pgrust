@@ -479,8 +479,8 @@ fn add_row_identity_columns<'mcx>(
 }
 
 // expand_insert_targetlist (preptlist.c): produce one entry per attribute in
-// attno order, NULL Consts for unassigned columns. Domain columns need
-// coerce_null_to_domain's CoerceToDomain wrapper — loud.
+// attno order, NULL Consts for unassigned columns. Domain columns get
+// coerce_null_to_domain's CoerceToDomain wrapper.
 fn expand_insert_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: &NodeList<'mcx>,
@@ -519,22 +519,19 @@ fn expand_insert_targetlist<'mcx>(
                         att.attbyval,
                     )?
                 } else if !att.attisdropped {
-                    if lsyscache::typ::getBaseType(att.atttypid)? != att.atttypid {
-                        panic!(
-                            "expand_insert_targetlist (preptlist.c): \
-                             coerce_null_to_domain (CoerceToDomain wrapper); M4 domain lane"
-                        );
-                    }
-                    Node::mk_const(
+                    let e = coerce::coerce_null_to_domain(
                         mcx,
                         att.atttypid,
                         att.atttypmod,
                         att.attcollation,
                         att.attlen as i32,
-                        datum::Datum::null(),
-                        true,
                         att.attbyval,
-                    )?
+                    )?;
+                    if e.node_tag() == NodeTag::T_Const {
+                        e
+                    } else {
+                        clauses::eval_const_expressions(mcx, e)?
+                    }
                 } else {
                     Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::null(), true, true)?
                 };
