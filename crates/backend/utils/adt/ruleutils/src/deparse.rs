@@ -257,6 +257,16 @@ pub(crate) fn get_rule_expr<'mcx>(
                 get_coercion_expr(ioc.arg, ctx, ioc.resulttype, -1, node)
             }
         }
+        NodeTag::T_CurrentOfExpr => {
+            let cexpr = node.as_current_of_expr().unwrap();
+            match cexpr.cursor_name {
+                Some(name) => ctx
+                    .buf
+                    .push_str(&format!("CURRENT OF {}", quote_identifier(name))),
+                None => ctx.buf.push_str(&format!("CURRENT OF ${}", cexpr.cursor_param)),
+            }
+            Ok(())
+        }
         NodeTag::T_CaseExpr => get_case_expr(node.as_case_expr().unwrap(), ctx),
         NodeTag::T_CaseTestExpr => {
             ctx.buf.push_str("CASE_TEST_EXPR");
@@ -674,7 +684,19 @@ pub(crate) fn get_variable<'mcx>(
                 .unwrap_or_else(|| "?dropped?column?".to_string()),
         )
     } else {
-        gap("get_variable", "system column deparse");
+        // get_rte_attribute_name -> get_attname: fixed system-column names.
+        Some(
+            match attnum {
+                -1 => "ctid",
+                -2 => "xmin",
+                -3 => "cmin",
+                -4 => "xmax",
+                -5 => "cmax",
+                -6 => "tableoid",
+                _ => gap("get_variable", "unknown system attnum"),
+            }
+            .to_string(),
+        )
     };
 
     let mut need_prefix = ctx.varprefix

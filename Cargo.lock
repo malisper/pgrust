@@ -3355,11 +3355,14 @@ dependencies = [
  "nodeseqscan",
  "nodesetop",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodevaluesscan",
  "nodewindowagg",
  "nodeworktablescan",
  "pgstat_seams",
+ "portalmem",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -6427,6 +6430,45 @@ dependencies = [
  "types_nodes",
  "types_scan",
  "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodetidrangescan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodetidscan"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "detoast",
+ "execexpr",
+ "execmain_seams",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
@@ -9821,6 +9863,8 @@ dependencies = [
  "nodenestloop",
  "nodeseqscan",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodewindowagg",
  "opclasscmds",

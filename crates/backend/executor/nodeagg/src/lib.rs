@@ -1440,6 +1440,12 @@ pub trait AggBatchSource<'mcx> {
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
     fn outer_slot(&self) -> ExecSlotId;
     fn has_qual(&self) -> bool;
+    /// True only when `next_batch` counts VISIBLE, qual-passing rows (the
+    /// storeless drain never calls `fetch_tuple`). Sources resolving
+    /// visibility or quals at fetch time must return false.
+    fn storeless_ok(&self) -> bool {
+        !self.has_qual()
+    }
 }
 
 /// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
@@ -1487,7 +1493,7 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
     }
     initialize_aggregates(node)?;
 
-    let storeless = !src.has_qual()
+    let storeless = src.storeless_ok()
         && matches!(
             node.evaltrans.as_deref().unwrap().kernel(),
             ::execexpr::Kernel::AggTransByVal { .. }

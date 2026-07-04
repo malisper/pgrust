@@ -257,6 +257,8 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
         }
         NodeTag::T_CoerceToDomainValue => Ok(()),
+        // C's default arm: a childless leaf, no cost.
+        NodeTag::T_CurrentOfExpr => Ok(()),
         // C's default arm: COALESCE/GREATEST/LEAST are free, children charged.
         NodeTag::T_CoalesceExpr => {
             for arg in &node.as_coalesce_expr().unwrap().args {
@@ -1056,6 +1058,72 @@ pub fn cost_tidscan(
     startup_cost += target.cost.startup;
     run_cost += target.cost.per_tuple * path_rows;
 
+    let p = run.root.path_mut(path_id).base_mut();
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// cost_tidrangescan (costsize.c); param_info is loud upstream.
+pub fn cost_tidrangescan(
+    run: &mut PlannerRun<'_>,
+    path_id: PathId,
+    rel: RelId,
+    tidrangequals: &[RinfoId],
+) -> PgResult<()> {
+    let (relid, rtekind, reltablespace, base_rows, base_pages, base_tuples) = {
+        let baserel = run.root.rel(rel);
+        (
+            baserel.relid,
+            baserel.rtekind,
+            baserel.reltablespace,
+            baserel.rows,
+            baserel.pages,
+            baserel.tuples,
+        )
+    };
+    debug_assert!(relid > 0 && rtekind == RTE_RELATION);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_tidrangescan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    run.root.path_mut(path_id).base_mut().rows = base_rows;
+
+    let mut quals: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
+    quals.extend(tidrangequals.iter().copied());
+    let selectivity = planner_seams::clauselist_selectivity::call(
+        run,
+        &quals,
+        relid as i32,
+        types_pathnodes::JOIN_INNER,
+        None,
+    )?;
+    let mut pages = (selectivity * base_pages as f64).ceil();
+    if pages <= 0.0 {
+        pages = 1.0;
+    }
+    // First page is a random seek, the rest sequential reads; kept costlier
+    // than the equivalent seqscan on purpose (C's NOTE).
+    let ntuples = selectivity * base_tuples;
+    let nseqpages = pages - 1.0;
+
+    let tid_qual_cost = cost_qual_eval(run, &quals)?;
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let mut run_cost = spc_random_page_cost + spc_seq_page_cost * nseqpages;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
+    // TID quals are assumed a subset of the qpquals (C's XXX note).
+    let mut startup_cost = qpqual_cost.startup + tid_qual_cost.per_tuple;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple - tid_qual_cost.per_tuple;
+    run_cost += cpu_per_tuple * ntuples;
+
+    let path_rows = run.root.path(path_id).base().rows;
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * path_rows;
+
+    debug_assert!(gucs::enable_tidscan());
     let p = run.root.path_mut(path_id).base_mut();
     p.disabled_nodes = 0;
     p.startup_cost = startup_cost;

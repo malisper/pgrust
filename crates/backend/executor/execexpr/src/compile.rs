@@ -1305,13 +1305,41 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
             let nt = node.as_null_test().unwrap();
-            if nt.argisrow {
-                unported("EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL");
-            }
             init_expr_rec(nt.arg.expect("NullTest.arg"), state, mcx, out, agg, params, sub)?;
-            let step = match nt.nulltesttype {
-                NullTestType::IS_NULL => Step::NullTestIsNull { out },
-                NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
+            let step = if nt.argisrow {
+                use crate::steps::RowNullState;
+                let rn_layout = core::alloc::Layout::new::<RowNullState>();
+                let rn: NonNull<RowNullState> =
+                    mcx.allocate(rn_layout).map_err(|_| mcx.oom(rn_layout.size()))?.cast();
+                // SAFETY: fresh exact-layout allocation; the compile mcx
+                // outlives every eval of this step, so the 'static restamp
+                // never escapes it.
+                unsafe {
+                    rn.as_ptr().write(RowNullState {
+                        tup_type: ::types_core::InvalidOid,
+                        tup_typmod: -1,
+                        desc: None,
+                        mcx: core::mem::transmute::<Mcx<'mcx>, Mcx<'static>>(mcx),
+                    })
+                };
+                let frame_ix = state.frames.len() as u32;
+                let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+                state
+                    .frames
+                    .try_reserve(1)
+                    .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+                state.frames.push(frame);
+                match nt.nulltesttype {
+                    NullTestType::IS_NULL => Step::NullTestRowIsNull { rn, frame: frame_ix, out },
+                    NullTestType::IS_NOT_NULL => {
+                        Step::NullTestRowIsNotNull { rn, frame: frame_ix, out }
+                    }
+                }
+            } else {
+                match nt.nulltesttype {
+                    NullTestType::IS_NULL => Step::NullTestIsNull { out },
+                    NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
+                }
             };
             push_step(state, mcx, step)
         }
