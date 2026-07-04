@@ -42,6 +42,9 @@ SELECT JSON_ARRAY(1, NULL, 2 NULL ON NULL RETURNING jsonb);
 SELECT JSON_ARRAY('{"a":1}'::json, '[2]'::jsonb);
 SELECT JSON_ARRAY(JSON_ARRAY(1,2), JSON_OBJECT('a': 3));
 -- JSON_ARRAY(query)
+SELECT a FROM (SELECT generate_series(1, 3)) q(a);
+SELECT json_agg(a) FROM (SELECT generate_series(1, 3)) q(a);
+SELECT (SELECT json_agg(a) FROM (SELECT generate_series(1, 3)) q(a));
 SELECT JSON_ARRAY(SELECT generate_series(1, 3));
 SELECT JSON_ARRAY(SELECT generate_series(1, 3) RETURNING jsonb);
 -- JSON() / JSON_SCALAR / JSON_SERIALIZE

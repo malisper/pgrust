@@ -338,6 +338,27 @@ pub fn fc_jsonb_object_agg_transfn(
     jsonb_object_agg_transfn_worker(flinfo, fcinfo, false, false)
 }
 
+pub fn fc_jsonb_object_agg_strict_transfn(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    jsonb_object_agg_transfn_worker(flinfo, fcinfo, true, false)
+}
+
+pub fn fc_jsonb_object_agg_unique_transfn(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    jsonb_object_agg_transfn_worker(flinfo, fcinfo, false, true)
+}
+
+pub fn fc_jsonb_object_agg_unique_strict_transfn(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    jsonb_object_agg_transfn_worker(flinfo, fcinfo, true, true)
+}
+
 pub fn fc_jsonb_object_agg_finalfn(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
