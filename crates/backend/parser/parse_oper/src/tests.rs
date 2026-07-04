@@ -41,6 +41,7 @@ fn install_fixture() {
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
             Ok((opno == INT4_PLUS_OP).then_some(PgOperatorShape {
+                oprnamespace: 11,
                 oprleft: INT4OID,
                 oprright: INT4OID,
                 oprresult: INT4OID,

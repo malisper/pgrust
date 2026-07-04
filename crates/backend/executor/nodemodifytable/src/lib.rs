@@ -530,7 +530,7 @@ fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_nam
     0
 }
 
-// CheckValidResultRel (execMain.c), plain-table arm.
+// CheckValidResultRel (execMain.c), plain-table + view + matview arms.
 fn check_valid_result_rel(
     rel: &Relation<'_>,
     operation: CmdType,
@@ -553,6 +553,18 @@ fn check_valid_result_rel(
         };
         if !has_instead {
             return Err(error_view_not_updatable(rel, operation));
+        }
+        return Ok(());
+    }
+    if rel.rd_rel.relkind == types_rel::RELKIND_MATVIEW {
+        if !matview_seams::matview_maintenance_is_enabled::call() {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot change materialized view \"{}\"",
+                    String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                ))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+            ));
         }
         return Ok(());
     }

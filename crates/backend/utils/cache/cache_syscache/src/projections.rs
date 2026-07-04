@@ -881,6 +881,7 @@ fn lookup_pg_operator_shape(opno: Oid) -> PgResult<Option<syscache_seams::PgOper
     };
     let t = tuple.tuple();
     let shape = syscache_seams::PgOperatorShape {
+        oprnamespace: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRNAMESPACE).as_oid(),
         oprleft: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRLEFT).as_oid(),
         oprright: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRRIGHT).as_oid(),
         oprresult: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRRESULT).as_oid(),

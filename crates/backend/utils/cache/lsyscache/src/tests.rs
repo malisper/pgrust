@@ -181,6 +181,7 @@ fn install() {
         s::lookup_pg_operator_shape::set(|opno| {
             Ok(match opno {
                 INT4_EQ => Some(PgOperatorShape {
+                oprnamespace: 11,
                     oprleft: INT4OID,
                     oprright: INT4OID,
                     oprresult: BOOLOID,
@@ -193,6 +194,7 @@ fn install() {
                     oprcanhash: true,
                 }),
                 INT4_LT => Some(PgOperatorShape {
+                oprnamespace: 11,
                     oprleft: INT4OID,
                     oprright: INT4OID,
                     oprresult: BOOLOID,

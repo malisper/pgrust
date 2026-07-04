@@ -27,6 +27,7 @@ commands_cluster = { path = "../cluster" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+fd = { path = "../../storage/file/fd" }
 elog = { path = "../../utils/error/elog" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
@@ -50,3 +51,7 @@ tableam = { path = "../../access/table/tableam" }
 tablecmds_seams = { path = "../tablecmds_seams" }
 tcop_dest = { path = "../../tcop/dest" }
 xact = { path = "../../access/transam/xact" }
+spi = { path = "../../executor/spi" }
+indexam = { path = "../../access/index/indexam" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }

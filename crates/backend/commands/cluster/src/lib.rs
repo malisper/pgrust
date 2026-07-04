@@ -56,14 +56,18 @@ pub fn make_new_heap<'mcx>(
     lockmode: LOCKMODE,
 ) -> PgResult<Oid> {
     let old_heap = table::table_open(mcx, old_heap_oid, lockmode)?;
-    if persistence == types_core::RELPERSISTENCE_TEMP {
-        unported("make_new_heap temp-namespace lookup");
-    }
     // rd_options reloptions are not copied by our heap_create_with_catalog.
     if old_heap.rd_options.is_some() {
         unported("make_new_heap: reloptions copy");
     }
-    let namespaceid = old_heap.rd_rel.relnamespace;
+    // C threads the tablespace in from the caller (matview CONCURRENTLY:
+    // GetDefaultTablespace(TEMP); ALTER TABLE rewrite: new or old tablespace);
+    // only the namespace switches on persistence.
+    let namespaceid = if persistence == types_core::RELPERSISTENCE_TEMP {
+        catalog_namespace::GetTempTableNamespace(mcx)?
+    } else {
+        old_heap.rd_rel.relnamespace
+    };
     let new_heap_name = format!("pg_temp_{old_heap_oid}");
 
     let oid_new_heap = catalog_heap::heap_create_with_catalog(

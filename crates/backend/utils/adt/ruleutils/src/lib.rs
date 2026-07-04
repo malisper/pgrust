@@ -145,6 +145,49 @@ pub fn quote_qualified_identifier(qualifier: Option<&str>, ident: &str) -> Strin
     }
 }
 
+pub fn generate_operator_clause(
+    mcx: Mcx<'_>,
+    buf: &mut String,
+    leftop: &str,
+    leftoptype: Oid,
+    opoid: Oid,
+    rightop: &str,
+    rightoptype: Oid,
+) -> PgResult<()> {
+    use core::fmt::Write;
+    let shape = syscache_seams::lookup_pg_operator_shape::call(opoid)?
+        .ok_or_else(|| cache_lookup_failed("operator", opoid))?;
+    let oprname = syscache_seams::pg_operator_oprname::call(opoid)?
+        .ok_or_else(|| cache_lookup_failed("operator", opoid))?;
+    let oprname = String::from_utf8_lossy(oprname.name_str()).into_owned();
+    let nspname = lsyscache::get_namespace_name(mcx, shape.oprnamespace)?
+        .ok_or_else(|| cache_lookup_failed("namespace", shape.oprnamespace))?;
+
+    buf.push_str(leftop);
+    if leftoptype != shape.oprleft {
+        add_cast_to(mcx, buf, shape.oprleft)?;
+    }
+    write!(buf, " OPERATOR({}.", quote_identifier(nspname.as_str())).expect("String write");
+    buf.push_str(&oprname);
+    write!(buf, ") {rightop}").expect("String write");
+    if rightoptype != shape.oprright {
+        add_cast_to(mcx, buf, shape.oprright)?;
+    }
+    Ok(())
+}
+
+fn add_cast_to(mcx: Mcx<'_>, buf: &mut String, typid: Oid) -> PgResult<()> {
+    use core::fmt::Write;
+    let (typname, typnamespace) = syscache_seams::pg_type_name_namespace::call(typid)?
+        .ok_or_else(|| cache_lookup_failed("type", typid))?;
+    let typname = String::from_utf8_lossy(typname.name_str()).into_owned();
+    let nspname = namespace_name_or_temp(mcx, typnamespace)?
+        .ok_or_else(|| cache_lookup_failed("namespace", typnamespace))?;
+    write!(buf, "::{}.{}", quote_identifier(&nspname), quote_identifier(&typname))
+        .expect("String write");
+    Ok(())
+}
+
 pub(crate) fn namespace_name_or_temp(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
     if catalog_namespace::isTempNamespace(nspid) {
         return Ok(Some("pg_temp".into()));

@@ -1026,8 +1026,12 @@ fn slow_switch<'mcx>(
                 .expect("RefreshMatViewStmt");
             collect_gap("REFRESH MATERIALIZED VIEW");
             event_trigger::EventTriggerInhibitCommandCollection();
-            let res =
-                commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut());
+            let res = matview_seams::exec_refresh_mat_view::call(
+                mcx,
+                stmt,
+                source_text,
+                qc.as_deref_mut(),
+            );
             event_trigger::EventTriggerUndoInhibitCommandCollection();
             res?;
             Ok(None)

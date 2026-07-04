@@ -47,3 +47,28 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn transientrel_shutdown<'mcx>(state: &mut TransientRelState<'mcx>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn matview_maintenance_is_enabled() -> bool
+);
+
+seam_core::seam!(
+    pub fn exec_refresh_mat_view<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &types_nodes::rawnodes::RefreshMatViewStmt<'mcx>,
+        query_string: &str,
+        qc: Option<&mut types_portal::QueryCompletion>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn refresh_mat_view_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        matview_oid: Oid,
+        is_create: bool,
+        skip_data: bool,
+        concurrent: bool,
+        query_string: &str,
+        qc: Option<&mut types_portal::QueryCompletion>,
+    ) -> PgResult<()>
+);
