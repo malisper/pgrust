@@ -2114,36 +2114,46 @@ impl<'m> TuplesortData<'m> {
         }
     }
 
+    /// Hot leg = TSS_SORTEDINMEM (one predicted-true status compare); the
+    /// tape arms live out of line so the in-memory get keeps its pre-spill
+    /// inlining and code size.
+    #[inline]
     fn gettuple_common(&mut self, forward: bool) -> PgResult<Option<SortTuple>> {
-        match self.status {
-            TupSortStatus::SortedInMem => {
-                debug_assert!(forward || self.sortopt & TUPLESORT_RANDOMACCESS != 0);
-                if forward {
-                    if self.current < self.memtuples.len() {
-                        let stup = self.memtuples[self.current];
-                        self.current += 1;
-                        return Ok(Some(stup));
-                    }
-                    self.eof_reached = true;
-                    if self.bounded && self.current >= self.bound as usize {
-                        return Err(too_many_bounded());
-                    }
-                    Ok(None)
+        if self.status == TupSortStatus::SortedInMem {
+            debug_assert!(forward || self.sortopt & TUPLESORT_RANDOMACCESS != 0);
+            if forward {
+                if self.current < self.memtuples.len() {
+                    let stup = self.memtuples[self.current];
+                    self.current += 1;
+                    return Ok(Some(stup));
+                }
+                self.eof_reached = true;
+                if self.bounded && self.current >= self.bound as usize {
+                    return Err(too_many_bounded());
+                }
+                Ok(None)
+            } else {
+                if self.current == 0 {
+                    return Ok(None);
+                }
+                if self.eof_reached {
+                    self.eof_reached = false;
                 } else {
+                    self.current -= 1;
                     if self.current == 0 {
                         return Ok(None);
                     }
-                    if self.eof_reached {
-                        self.eof_reached = false;
-                    } else {
-                        self.current -= 1;
-                        if self.current == 0 {
-                            return Ok(None);
-                        }
-                    }
-                    Ok(Some(self.memtuples[self.current - 1]))
                 }
+                Ok(Some(self.memtuples[self.current - 1]))
             }
+        } else {
+            self.gettuple_tape(forward)
+        }
+    }
+
+    #[inline(never)]
+    fn gettuple_tape(&mut self, forward: bool) -> PgResult<Option<SortTuple>> {
+        match self.status {
             TupSortStatus::SortedOnTape => self.gettuple_ontape(forward),
             TupSortStatus::FinalMerge => {
                 debug_assert!(forward);
