@@ -102,6 +102,7 @@ pub fn exec_init_gather<'mcx>(
 
 fn gather_startup<'mcx>(
     node: &mut GatherState<'mcx>,
+    outer: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let gather = node.plan;
@@ -110,13 +111,14 @@ fn gather_startup<'mcx>(
             None => {
                 node.pei = Some(exec_init_parallel_plan(
                     gather.plan.lefttree.expect("Gather without an outer plan"),
+                    outer,
                     estate,
                     &gather.initParam,
                     gather.num_workers,
                     node.tuples_needed,
                 )?)
             }
-            Some(pei) => exec_parallel_reinitialize(estate, pei, &gather.initParam)?,
+            Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gather.initParam)?,
         }
         let pei = node.pei.as_mut().expect("just initialized");
         parallel::LaunchParallelWorkers(pei.pcxt)?;
@@ -149,7 +151,7 @@ pub fn exec_gather<'mcx>(
     crate::cfi()?;
 
     if !node.initialized {
-        gather_startup(node, estate)?;
+        gather_startup(node, outer, estate)?;
     }
 
     let ecxt = node.ps.ps_ExprContext.expect("GatherState without ExprContext");

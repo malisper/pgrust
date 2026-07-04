@@ -1,6 +1,5 @@
 // nodeSeqscan.c. ExecProcNode dispatch is the variant enum resolved once at
-// init (C installs one of five function pointers). Parallel-scan entries
-// loud-panic pending DSM/shm_toc.
+// init (C installs one of five function pointers).
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -10,7 +9,9 @@ use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgVec};
 use ::tableam::{
-    table_beginscan, table_endscan, table_rescan, table_scan_getnextslot, table_slot_callbacks,
+    table_beginscan, table_beginscan_parallel, table_endscan, table_parallelscan_initialize,
+    table_parallelscan_reinitialize, table_rescan, table_scan_getnextslot, table_slot_callbacks,
+    ParallelTableScanDescShared,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nodes::plannodes::SeqScan;
@@ -30,8 +31,8 @@ pub enum SeqScanVariant {
     WithQual,
     WithProject,
     WithQualProject,
-    // Plain scan carrying a hashjoin-pushed Bloom filter over its key
-    // column (pure filter, false positives only); reverts to Plain on disarm.
+    // Hashjoin-pushed Bloom filter over the scan's key column (pure filter,
+    // false positives only); reverts to Plain on disarm.
     PlainBloom,
     Epq,
 }
@@ -39,6 +40,10 @@ pub enum SeqScanVariant {
 pub struct SeqScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     variant: SeqScanVariant,
+    plan_node_id: i32,
+    parallel_aware: bool,
+    // Keeps the scan desc's NonNull target alive for the scan's lifetime.
+    parallel: Option<std::sync::Arc<ParallelTableScanDescShared>>,
     // Boxed: PlanStateNode carries a 1024-byte size assert.
     batch_soa: Option<::mcx::PgBox<'mcx, BatchSoa<'mcx>>>,
     scan_batch: ScanBatchMode,
@@ -46,9 +51,8 @@ pub struct SeqScanState<'mcx> {
     bloom: Option<::mcx::PgBox<'mcx, BloomScan<'mcx>>>,
 }
 
-// Hashjoin Bloom pushdown state: key-column-only SoA deform of each staged
-// page, selection bits from the filter; survivors store like the per-row
-// path (no prefix publish — slot state identical to table_scan_getnextslot).
+// Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
+// selection bits from the filter; survivors store like the per-row path.
 struct BloomScan<'mcx> {
     filter: std::rc::Rc<::nodehash::ProbeBloom<'mcx>>,
     plan: ::exectuples::SoaDeformPlan<'mcx>,
@@ -146,6 +150,18 @@ impl BatchSoa<'_> {
 impl<'mcx> SeqScanState<'mcx> {
     pub fn variant(&self) -> SeqScanVariant {
         self.variant
+    }
+
+    pub fn plan_node_id(&self) -> i32 {
+        self.plan_node_id
+    }
+
+    pub fn parallel_aware(&self) -> bool {
+        self.parallel_aware
+    }
+
+    pub fn release_parallel(&mut self) {
+        self.parallel = None;
     }
 }
 
@@ -281,10 +297,9 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     });
 }
 
-/// Arm the fused-sort direct key feed: outer column 0 of the scan's output
-/// must be exactly one scan Var (bare single-column scan, or a single
-/// `JustAssignVar` projection) whose column the fixed-width SoA plan covers,
-/// with no qual. False leaves the per-row emit path armed and untouched.
+/// Arm the fused-sort direct key feed: output column 0 must be exactly one
+/// scan Var (bare single-column scan or a lone `JustAssignVar` projection)
+/// the fixed-width SoA plan covers, no qual. False leaves the per-row path.
 pub fn seq_scan_sortkey_direct<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -415,8 +430,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
 }
 
 /// Store row `i` of the staged batch and apply the scan qual; false =
-/// filtered out (bitmap-armed batches test the selection bit instead of
-/// evaluating the kernel per row).
+/// filtered (bitmap-armed batches test the selection bit, not the kernel).
 #[inline(always)]
 pub fn seq_scan_batch_fetch<'mcx>(
     node: &mut SeqScanState<'mcx>,
@@ -800,6 +814,9 @@ pub fn exec_init_seq_scan_rel<'mcx>(
     Ok(SeqScanState {
         ss,
         variant,
+        plan_node_id: node.scan.plan.plan_node_id,
+        parallel_aware: node.scan.plan.parallel_aware,
+        parallel: None,
         batch_soa: None,
         scan_batch: ScanBatchMode::Unknown,
         batch_allowed: false,
@@ -813,6 +830,7 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
+    node.parallel = None;
     Ok(())
 }
 
@@ -835,29 +853,59 @@ pub fn exec_rescan_seq_scan<'mcx>(
     Ok(())
 }
 
-pub fn exec_seq_scan_estimate(_node: &mut SeqScanState<'_>) -> ! {
-    panic!("nodeseqscan: ExecSeqScanEstimate pending parallel DSM/shm_toc")
+/// `ExecSeqScanEstimate`: no DSM thread-native (docs/parallel-query-design.md).
+pub fn exec_seq_scan_estimate(_node: &mut SeqScanState<'_>) {}
+
+/// `ExecSeqScanInitializeDSM`.
+pub fn exec_seq_scan_initialize_dsm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<std::sync::Arc<ParallelTableScanDescShared>> {
+    let mcx = estate.es_query_cxt;
+    let mut shared = std::sync::Arc::new(ParallelTableScanDescShared::default());
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    table_parallelscan_initialize(
+        rel,
+        std::sync::Arc::get_mut(&mut shared).expect("freshly created shared descriptor"),
+        &estate.es_snapshot,
+    )?;
+    debug_assert!(node.ss.ss_currentScanDesc.is_none());
+    node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.parallel = Some(std::sync::Arc::clone(&shared));
+    Ok(shared)
 }
 
-pub fn exec_seq_scan_initialize_dsm(_node: &mut SeqScanState<'_>) -> ! {
-    panic!("nodeseqscan: ExecSeqScanInitializeDSM pending parallel DSM/shm_toc")
+/// `ExecSeqScanReInitializeDSM`.
+pub fn exec_seq_scan_reinitialize_dsm(node: &mut SeqScanState<'_>) {
+    let shared = node.parallel.as_ref().expect("parallel seqscan was initialized");
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    table_parallelscan_reinitialize(rel, &shared.pscan);
 }
 
-pub fn exec_seq_scan_reinitialize_dsm(_node: &mut SeqScanState<'_>) -> ! {
-    panic!("nodeseqscan: ExecSeqScanReInitializeDSM pending parallel DSM/shm_toc")
-}
-
-pub fn exec_seq_scan_initialize_worker(_node: &mut SeqScanState<'_>) -> ! {
-    panic!("nodeseqscan: ExecSeqScanInitializeWorker pending parallel DSM/shm_toc")
+/// `ExecSeqScanInitializeWorker`.
+pub fn exec_seq_scan_initialize_worker<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    shared: std::sync::Arc<ParallelTableScanDescShared>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    debug_assert!(node.ss.ss_currentScanDesc.is_none());
+    node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.parallel = Some(shared);
+    Ok(())
 }
 
 mcx::forget_safe_nodrop!(SeqScanVariant);
 
 mcx::forget_safe_nodrop!(ScanBatchMode);
 
-// bloom exempt: its Rc is released in exec_end_seq_scan (and on disarm).
+// bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
-    SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed; bloom },
+    SeqScanState<'_> {
+        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed;
+        bloom, parallel
+    },
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, qual_col,
         qual_cmp, qual_konst, sel, nwords, cur_word, cur_bits,

@@ -2433,7 +2433,10 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             end_base(&mut ps.ps);
             crate::nodeprojectset::release_project_set(ps);
         }
-        PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
+        PlanStateNode::SeqScan(ss) => {
+            end_scan(&mut ss.ss);
+            ss.release_parallel();
+        }
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => {
             ::nodevaluesscan::exec_end_values_scan(vs);
