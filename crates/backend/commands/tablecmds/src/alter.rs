@@ -1208,7 +1208,8 @@ fn ATExecSetExpression<'mcx>(
 
     if rewrite {
         let rel2 = table::table_open(mcx, rel.rd_id, NoLock)?;
-        let defval = rewrite_handler::build_column_default(mcx, &rel2, attnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, &rel2, attnum as usize)?
+            .expect("generated column has a generation expression");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         rel2.close(NoLock)?;
         tab.newvals.push(NewColumnValue { attnum, expr: defval, is_generated: true });

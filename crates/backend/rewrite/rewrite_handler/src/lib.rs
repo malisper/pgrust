@@ -744,7 +744,15 @@ pub fn build_generation_expression<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
     debug_assert!(att.attgenerated != 0);
-    let defexpr = build_column_default(mcx, rel, attrno)?;
+    let defexpr = match build_column_default(mcx, rel, attrno)? {
+        Some(e) => e,
+        None => {
+            let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+            return Err(Box::new(PgError::error(format!(
+                "no generation expression found for column number {attrno} of table \"{relname}\""
+            ))));
+        }
+    };
     let attcollid = att.attcollation;
     if attcollid != InvalidOid && attcollid != nodes_core::node_funcs::expr_collation(defexpr) {
         return Node::mk(
