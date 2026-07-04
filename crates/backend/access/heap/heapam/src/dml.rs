@@ -380,7 +380,6 @@ pub fn heap_multi_insert<'mcx>(
 
     debug_assert!(options & crate::hio::HEAP_INSERT_NO_LOGICAL == 0);
     let xid = xact_seams::get_current_transaction_id::call()?;
-    std::eprintln!("TOASTPROBE mi xid={} rel={}", xid, relation.rd_id);
     let needwal = relation_needs_wal(relation);
     let save_free_space =
         relation.get_target_page_free_space(crate::hio::HEAP_DEFAULT_FILLFACTOR) as usize;
@@ -415,14 +414,19 @@ pub fn heap_multi_insert<'mcx>(
                     let ht = t.as_tuple_mut();
                     // SAFETY: image owned by toast_ctx, kept alive in
                     // toast_ctxs past the last use (page_tuple model).
-                    unsafe {
+                    let erased = unsafe {
                         HeapTupleData::from_raw_parts(
                             ht.header_ptr().cast_mut(),
                             ht.t_len,
                             ht.t_self,
                             ht.t_tableOid,
                         )
-                    }
+                    };
+                    // Dropping t is heap_freetuple: the aset free-list header
+                    // would overwrite t_choice before placement. The image is
+                    // bulk-freed with toast_ctx (C: dies with caller context).
+                    core::mem::forget(t);
+                    erased
                 })
             };
             match erased {
@@ -482,15 +486,6 @@ pub fn heap_multi_insert<'mcx>(
         )?;
         starting_with_empty_page = pin.page().max_offset_number() == 0;
 
-        std::eprintln!(
-            "TOASTPROBE mi place[{}]: len={} xmin={} infomask={:#x} rel={} tid_after={:?}",
-            ndone,
-            heaptuples[ndone].t_len,
-            heaptuples[ndone].t_data().xmin_raw(),
-            heaptuples[ndone].t_data().t_infomask,
-            relation.rd_id,
-            heaptuples[ndone].t_self
-        );
         RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone], false)?;
         let mut nthispage = 1usize;
         while ndone + nthispage < ntuples {
@@ -499,16 +494,6 @@ pub fn heap_multi_insert<'mcx>(
             if pin.page().heap_free_space() < need {
                 break;
             }
-            let i = ndone + nthispage;
-            std::eprintln!(
-                "TOASTPROBE mi place[{}]: len={} xmin={} infomask={:#x} rel={} tid_after={:?}",
-                i,
-                heaptuples[i].t_len,
-                heaptuples[i].t_data().xmin_raw(),
-                heaptuples[i].t_data().t_infomask,
-                relation.rd_id,
-                heaptuples[i].t_self
-            );
             RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone + nthispage], false)?;
             nthispage += 1;
         }
