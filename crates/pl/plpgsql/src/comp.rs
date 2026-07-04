@@ -257,6 +257,9 @@ impl CompState {
             notnull: false,
             default_val: None,
             promise: PROMISE_NONE,
+            cursor_explicit_expr: None,
+            cursor_explicit_argrow: -1,
+            cursor_options: 0,
         }));
         if add2namespace {
             self.ns_additem(NsType::Var, dno, refname);
