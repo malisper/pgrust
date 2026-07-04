@@ -54,6 +54,137 @@ pub fn fc_col_description(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     description_result(fcinfo, objoid, RELATION_RELATION_ID, attnum)
 }
 
+// xlogfuncs.c WAL-name trio (2850/2851/6213): pure segment math over
+// XLogSegNo (xlog_internal.h macros) + the live insert timeline.
+
+const XLOG_FNAME_LEN: usize = 24;
+
+fn xlog_segments_per_xlog_id(seg_size: u64) -> u64 {
+    0x1_0000_0000 / seg_size
+}
+
+fn xlog_file_name(tli: u32, segno: u64, seg_size: u64) -> [u8; XLOG_FNAME_LEN] {
+    let segs = xlog_segments_per_xlog_id(seg_size);
+    let mut out = [0u8; XLOG_FNAME_LEN];
+    let mut put = |off: usize, v: u32| {
+        for (i, b) in format!("{v:08X}").bytes().enumerate() {
+            out[off + i] = b;
+        }
+    };
+    put(0, tli);
+    put(8, (segno / segs) as u32);
+    put(16, (segno % segs) as u32);
+    out
+}
+
+fn is_xlog_file_name(name: &[u8]) -> bool {
+    name.len() == XLOG_FNAME_LEN
+        && name.iter().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
+}
+
+fn xlog_from_file_name(name: &[u8], seg_size: u64) -> (u32, u64) {
+    let hex = |r: core::ops::Range<usize>| {
+        u32::from_str_radix(core::str::from_utf8(&name[r]).unwrap(), 16).unwrap()
+    };
+    let tli = hex(0..8);
+    let log = hex(8..16) as u64;
+    let seg = hex(16..24) as u64;
+    (tli, log * xlog_segments_per_xlog_id(seg_size) + seg)
+}
+
+#[cold]
+#[inline(never)]
+fn recovery_in_progress_err(fname: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error("recovery is in progress")
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(format!("{fname} cannot be executed during recovery.")),
+    )
+}
+
+pub fn fc_pg_walfile_name(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let lsn = fcinfo.arg(0).as_u64();
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("pg_walfile_name()"));
+    }
+    let seg_size = transam_xlog::wal_segment_size() as u64;
+    let name = xlog_file_name(transam_xlog::ctl::GetWALInsertionTimeLine(), lsn / seg_size, seg_size);
+    crate::text_datum(fcinfo.result_mcx(), &name)
+}
+
+fn composite_result(
+    flinfo: &FmgrInfo,
+    fcinfo: &mut Fcinfo,
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(crate::not_row_type());
+    }
+    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, values, isnull)?;
+    let d = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+    Ok(d)
+}
+
+pub fn fc_pg_walfile_name_offset(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_walfile_name_offset: NULL flinfo");
+    let lsn = fcinfo.arg(0).as_u64();
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("pg_walfile_name_offset()"));
+    }
+    let seg_size = transam_xlog::wal_segment_size() as u64;
+    let name = xlog_file_name(transam_xlog::ctl::GetWALInsertionTimeLine(), lsn / seg_size, seg_size);
+    let values = [
+        crate::text_datum(fcinfo.result_mcx(), &name)?,
+        Datum::from_u32((lsn % seg_size) as u32),
+    ];
+    composite_result(flinfo, fcinfo, &values, &[false, false])
+}
+
+pub fn fc_pg_split_walfile_name(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_split_walfile_name: NULL flinfo");
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let fname = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let data = fname.data();
+    let mut upper = [0u8; XLOG_FNAME_LEN];
+    let sized = data.len() == XLOG_FNAME_LEN;
+    if sized {
+        for (d, b) in upper.iter_mut().zip(data) {
+            *d = b.to_ascii_uppercase();
+        }
+    }
+    if !sized || !is_xlog_file_name(&upper) {
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "invalid WAL file name \"{}\"",
+                String::from_utf8_lossy(data)
+            ))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let seg_size = transam_xlog::wal_segment_size() as u64;
+    let (tli, segno) = xlog_from_file_name(&upper, seg_size);
+
+    let mcx = fcinfo.result_mcx();
+    let num = adt_numeric::io::numeric_in(&segno.to_string(), -1, None)?
+        .expect("decimal u64 is valid numeric input");
+    let values = [
+        byref_result(mcx, num.as_bytes())?,
+        Datum::from_i64(tli as i64),
+    ];
+    composite_result(flinfo, fcinfo, &values, &[false, false])
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -178,6 +309,9 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(1215, "obj_description", 2, fc_obj_description),
     b(1597, "PG_encoding_to_char", 1, fc_pg_encoding_to_char),
     b(1216, "col_description", 2, fc_col_description),
+    b(2850, "pg_walfile_name_offset", 1, fc_pg_walfile_name_offset),
+    b(2851, "pg_walfile_name", 1, fc_pg_walfile_name),
+    b(6213, "pg_split_walfile_name", 1, fc_pg_split_walfile_name),
     FmgrBuiltin {
         foid: 1686,
         name: "pg_get_keywords",

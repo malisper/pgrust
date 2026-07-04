@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+crc32c = { path = "../../../../port/crc32c" }
 datum = { path = "../../../../_support/types/datum" }
 pg_md5 = { path = "../../../../common/md5" }
 pg_sha2 = { path = "../../../../common/sha2" }

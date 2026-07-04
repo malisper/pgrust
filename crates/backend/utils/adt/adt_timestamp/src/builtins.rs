@@ -3,14 +3,14 @@
 //! finite, timestamp[tz] +/- interval, timestamp_mi, timestamp[tz]_bin
 //! 6177/6178) live in adt_date's table; this file adds only the rows
 //! adt_date lacks (typmod I/O, part/trunc, age, izone, make_interval,
-//! overlaps_timestamp 1304/2041, date_add/date_subtract 6221/6223). Not
-//! registrable (established precedents): interval aggregates (agg frame),
-//! generate_series_timestamp[tz] 938/939/6274 (SRF frame),
-//! float8_timestamptz 1158 / timestamptz_float8 (float lane), timestamp
-//! typmodin/typmodout 2905-2908, timestamp_support / interval_support /
-//! timestamp_sortsupport 3137 / skipsupport (planner nodes), to_timestamp
-//! 1778, pg_postmaster_start_time/pg_conf_load_time (backend globals),
-//! timestamptz_pl/mi_interval_at_zone 6449-6452.
+//! overlaps_timestamp 1304/2041, date_add/date_subtract 6221/6223,
+//! generate_series_timestamp[tz][_at_zone] 938/939/6274 + prosupport 6354,
+//! float8_timestamptz 1158). Not registrable (established precedents):
+//! interval aggregates (agg frame), timestamptz_float8 (float lane),
+//! timestamp typmodin/typmodout 2905-2908, timestamp_support /
+//! interval_support / timestamp_sortsupport 3137 / skipsupport (planner
+//! nodes), to_timestamp 1778, pg_postmaster_start_time/pg_conf_load_time
+//! (backend globals), timestamptz_pl/mi_interval_at_zone 6449-6452.
 
 use ::datum::{Datum, Varlena, VarlenaRef};
 use ::types_core::{Oid, CSTRINGOID};
@@ -543,8 +543,190 @@ pub fn fc_overlaps_timestamp(
     overlaps_common(fcinfo, |fc, i, j| fc.arg_i64(i) > fc.arg_i64(j))
 }
 
+#[cold]
+#[inline(never)]
+fn step_size_err(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE))
+}
+
+struct GenSeriesTimestamp {
+    current: i64,
+    finish: i64,
+    step: Interval,
+    step_sign: i32,
+    attimezone: Option<&'static adt_datetime::tz::PgTz>,
+    tz_aware: bool,
+}
+
+impl GenSeriesTimestamp {
+    fn new(
+        current: i64,
+        finish: i64,
+        step: Interval,
+        attimezone: Option<&'static adt_datetime::tz::PgTz>,
+        tz_aware: bool,
+    ) -> PgResult<Self> {
+        let step_sign = crate::interval::interval_sign(&step);
+        if step_sign == 0 {
+            return Err(step_size_err("step size cannot equal zero"));
+        }
+        if step.is_nobegin() || step.is_noend() {
+            return Err(step_size_err("step size cannot be infinite"));
+        }
+        Ok(GenSeriesTimestamp { current, finish, step, step_sign, attimezone, tz_aware })
+    }
+
+    fn next(&mut self) -> PgResult<Option<i64>> {
+        let result = self.current;
+        let more = if self.step_sign > 0 {
+            crate::timestamp_cmp_internal(result, self.finish) <= 0
+        } else {
+            crate::timestamp_cmp_internal(result, self.finish) >= 0
+        };
+        if !more {
+            return Ok(None);
+        }
+        self.current = if self.tz_aware {
+            crate::interval::timestamptz_pl_interval_internal(self.current, &self.step, self.attimezone)?
+        } else {
+            crate::interval::timestamp_pl_interval(self.current, &self.step)?
+        };
+        Ok(Some(result))
+    }
+}
+
+fn generate_series_common(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    tz_aware: bool,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("generate_series_timestamp: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let start = fcinfo.arg_i64(0);
+        let finish = fcinfo.arg_i64(1);
+        let step = arg_interval(fcinfo, 2);
+        let attimezone = if tz_aware && fcinfo.nargs() == 4 {
+            // SAFETY: strict fn - arg 3 is a non-null text varlena.
+            let zone = unsafe { fcinfo.arg_varlena_packed(3)? };
+            Some(crate::lookup_timezone(zone.data())?)
+        } else {
+            None
+        };
+        let state = GenSeriesTimestamp::new(start, finish, step, attimezone, tz_aware)?;
+        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(state));
+    }
+    let next = funcapi::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("generate_series_timestamp: user_fctx set at first call")
+        .downcast_mut::<GenSeriesTimestamp>()
+        .expect("generate_series_timestamp: user_fctx is GenSeriesTimestamp")
+        .next()?;
+    match next {
+        Some(v) => Ok(funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i64(v))),
+        None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+pub fn fc_generate_series_timestamp(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    generate_series_common(flinfo, fcinfo, false)
+}
+
+pub fn fc_generate_series_timestamptz(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    generate_series_common(flinfo, fcinfo, true)
+}
+
+fn interval_from_const_datum(d: Datum) -> Interval {
+    // SAFETY: an interval Const's constvalue points at a live 16-byte
+    // interval payload owned by the plan tree.
+    unsafe {
+        let p = d.as_usize() as *const u8;
+        Interval {
+            time: (p as *const i64).read_unaligned(),
+            day: (p.add(8) as *const i32).read_unaligned(),
+            month: (p.add(12) as *const i32).read_unaligned(),
+        }
+    }
+}
+
+fn interval_to_microseconds(i: &Interval) -> f64 {
+    ((i.month as f64) * adt_datetime::consts::DAYS_PER_MONTH as f64 + i.day as f64)
+        * adt_datetime::consts::USECS_PER_DAY as f64
+        + i.time as f64
+}
+
+// generate_series_timestamp_support (OID 6354): SupportRequestRows over
+// all-Const args; anything else returns NULL so callers fall back (the int4
+// support precedent - planner-folded exprs are read as Consts directly).
+pub fn fc_generate_series_timestamp_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *mut ();
+    // SAFETY: prosupport contract - the internal arg points at a live
+    // tag-first support-request node exclusively owned by this call.
+    let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let args = match req.node.and_then(|n| n.as_func_expr()) {
+        Some(fe) => &fe.args,
+        None => return Ok(Datum::from_usize(0)),
+    };
+    let mut consts = [Datum::null(); 3];
+    for (i, arg) in args.iter().enumerate().take(3) {
+        match arg.as_const() {
+            Some(c) if c.constisnull => {
+                req.rows = 0.0;
+                return Ok(Datum::from_usize(p as usize));
+            }
+            Some(c) => consts[i] = c.constvalue,
+            None => return Ok(Datum::from_usize(0)),
+        }
+    }
+    if args.iter().count() < 3 {
+        return Ok(Datum::from_usize(0));
+    }
+    let start = consts[0].as_i64();
+    let finish = consts[1].as_i64();
+    let step = interval_from_const_datum(consts[2]);
+
+    if crate::TIMESTAMP_NOT_FINITE(start)
+        || crate::TIMESTAMP_NOT_FINITE(finish)
+        || finish.checked_sub(start).is_none()
+    {
+        return Ok(Datum::from_usize(0));
+    }
+    let idiff = crate::interval::timestamp_mi(finish, start)?;
+    let dstep = interval_to_microseconds(&step);
+    if dstep == 0.0 {
+        return Ok(Datum::from_usize(0));
+    }
+    let ddiff = interval_to_microseconds(&idiff);
+    req.rows = (ddiff / dstep + 1.0).floor();
+    Ok(Datum::from_usize(p as usize))
+}
+
+pub fn fc_float8_timestamptz(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(crate::float8_timestamptz(fcinfo.arg_f64(0))?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
+}
+
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
 const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -556,6 +738,11 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // rows are the timestamptz operators sharing the timestamp prosrc).
 pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     b(274, "timeofday", 0, fc_timeofday),
+    srf(938, "generate_series_timestamp", 3, fc_generate_series_timestamp),
+    srf(939, "generate_series_timestamptz", 3, fc_generate_series_timestamptz),
+    srf(6274, "generate_series_timestamptz_at_zone", 4, fc_generate_series_timestamptz),
+    b(6354, "generate_series_timestamp_support", 1, fc_generate_series_timestamp_support),
+    b(1158, "float8_timestamptz", 1, fc_float8_timestamptz),
     b(1150, "timestamptz_in", 3, fc_timestamptz_in),
     b(1151, "timestamptz_out", 1, fc_timestamptz_out),
     b(1152, "timestamp_eq", 2, fc_timestamp_eq),
