@@ -31,6 +31,7 @@ cache_syscache = { path = "../../utils/cache/cache_syscache" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 
 [dev-dependencies]
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 transam_seams = { path = "../../access/transam/transam_seams" }
 lock = { path = "../../storage/lmgr/lock" }
 logical_worker_seams = { path = "../../replication/logical_worker_seams" }

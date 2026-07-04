@@ -84,7 +84,12 @@ fn rebuild_memo(memo: &mut DomainMemo, mcx: Mcx<'static>) -> PgResult<()> {
 }
 
 /// typcache_seams::domain_check_input target (domains.c domain_check_input).
-pub fn domain_check_input(value: Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
+pub fn domain_check_input(
+    value: Datum,
+    isnull: bool,
+    domain_type: Oid,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<()> {
     let present = with_state(|st| st.memos.contains_key(&domain_type));
     if !present {
         let cref = typcache::DomainConstraintRef::init(domain_type)?;
@@ -109,7 +114,7 @@ pub fn domain_check_input(value: Datum, isnull: bool, domain_type: Oid) -> PgRes
     // may re-enter this engine for a different domain (map growth would move
     // entries). Ownership round-trips instead of a raw pointer.
     let mut memo = with_state(|st| st.memos.remove(&domain_type)).unwrap();
-    let result = run_checks(&mut memo, value, isnull, domain_type);
+    let result = run_checks(&mut memo, value, isnull, domain_type, escontext);
     with_state(|st| st.memos.insert(domain_type, memo));
     result
 }
@@ -119,13 +124,18 @@ fn run_checks(
     value: Datum,
     isnull: bool,
     domain_type: Oid,
+    mut escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<()> {
     let mut check_ix = 0;
     for con in memo.cref.constraints() {
         match con.constrainttype {
             typcache::DomConstraintType::NotNull => {
                 if isnull {
-                    return Err(domain_not_null_violation(domain_type));
+                    return ::types_error::ereturn(
+                        escontext.as_deref_mut(),
+                        (),
+                        *domain_not_null_violation(domain_type),
+                    );
                 }
             }
             typcache::DomConstraintType::Check => {
@@ -146,7 +156,11 @@ fn run_checks(
                 let r = exec_eval_expr(&mut check.state, &mut EvalSlots::default())?;
                 // C ExecCheck: NULL is not a failure.
                 if !r.isnull && !r.value.as_bool() {
-                    return Err(domain_check_violation(domain_type, check.name));
+                    return ::types_error::ereturn(
+                        escontext.as_deref_mut(),
+                        (),
+                        *domain_check_violation(domain_type, check.name),
+                    );
                 }
             }
         }

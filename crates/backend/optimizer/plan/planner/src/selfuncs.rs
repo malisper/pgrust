@@ -14,8 +14,8 @@ use crate::gucs;
 use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
-pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
+pub use types_pathnodes::DEFAULT_INEQ_SEL;
+pub use types_pathnodes::DEFAULT_NUM_DISTINCT;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
 const SELF_ITEM_POINTER_ATTRIBUTE_NUMBER: i16 = -1;
@@ -688,12 +688,65 @@ fn convert_to_scalar(
             let hi = convert_network_to_scalar(hibound, boundstypid)?;
             Some((v, lo, hi))
         }
+        TIMESTAMPOID | TIMESTAMPTZOID | DATEOID | INTERVALOID | TIMEOID | TIMETZOID => {
+            let v = convert_timevalue_to_scalar(value, valuetypid)?;
+            let lo = convert_timevalue_to_scalar(lobound, boundstypid)?;
+            let hi = convert_timevalue_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
+        }
         _ => {
             let v = convert_numeric_to_scalar(value, valuetypid)?;
             let lo = convert_numeric_to_scalar(lobound, boundstypid)?;
             let hi = convert_numeric_to_scalar(hibound, boundstypid)?;
             Some((v, lo, hi))
         }
+    }
+}
+
+const TIMESTAMPOID: Oid = 1114;
+const TIMESTAMPTZOID: Oid = 1184;
+const DATEOID: Oid = 1082;
+const INTERVALOID: Oid = 1186;
+const TIMEOID: Oid = 1083;
+const TIMETZOID: Oid = 1266;
+
+// convert_timevalue_to_scalar (selfuncs.c).
+fn convert_timevalue_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const USECS_PER_DAY: f64 = 86_400_000_000.0;
+    match typid {
+        TIMESTAMPOID | TIMESTAMPTZOID | TIMEOID => Some(value.as_i64() as f64),
+        DATEOID => {
+            let d = value.as_i32();
+            Some(if d == i32::MIN {
+                -f64::MAX
+            } else if d == i32::MAX {
+                f64::MAX
+            } else {
+                d as f64 * USECS_PER_DAY
+            })
+        }
+        INTERVALOID => {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: by-ref 16-byte interval datum {time i64, day i32, month i32}.
+            let (time, day, month) = unsafe {
+                (
+                    p.cast::<i64>().read_unaligned(),
+                    p.add(8).cast::<i32>().read_unaligned(),
+                    p.add(12).cast::<i32>().read_unaligned(),
+                )
+            };
+            Some(time as f64 + day as f64 * USECS_PER_DAY
+                + month as f64 * ((365.25 / 12.0) * USECS_PER_DAY))
+        }
+        TIMETZOID => {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: by-ref 12-byte timetz datum {time i64, zone i32}.
+            let (time, zone) = unsafe {
+                (p.cast::<i64>().read_unaligned(), p.add(8).cast::<i32>().read_unaligned())
+            };
+            Some(time as f64 + zone as f64 * 1_000_000.0)
+        }
+        _ => None,
     }
 }
 
@@ -820,6 +873,7 @@ fn convert_one_string_to_scalar(value: &[u8], rangelo: i32, rangehi: i32) -> f64
 }
 
 fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const NUMERICOID: Oid = 1700;
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
     const INT8OID: Oid = 20;
@@ -841,6 +895,14 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
         FLOAT8OID => Some(value.as_f64()),
         OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
         | REGTYPEOID => Some(value.as_u32() as f64),
+        NUMERICOID => {
+            // SAFETY: by-ref numeric datum; stats-array elements and consts
+            // carry 4-byte headers (construct_array canonicalizes short forms).
+            let v = unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8) };
+            Some(adt_numeric::numeric_float8_no_overflow(adt_numeric::Num::from_payload(
+                v.data(),
+            )))
+        }
         _ => None,
     }
 }
@@ -1012,8 +1074,15 @@ fn examine_simple_variable<'mcx>(
     let rte = run.rte(varno as usize);
     match rte.rtekind {
         RTEKind::RTE_RELATION => {}
-        // C falls through with no stats for these RTE kinds.
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_JOIN => return Ok(None),
+        // C falls through with no stats for these RTE kinds. For SUBQUERY/CTE
+        // the drill into rel->subroot targetlists is unported — no stats is
+        // C's own fallback whenever that drill fails, so estimates only
+        // differ where the sub-SELECT output is itself a plain column.
+        RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_JOIN
+        | RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_CTE => return Ok(None),
         other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
     syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
@@ -1133,13 +1202,7 @@ pub(crate) fn var_eq_const<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-pub struct AmCostEstimate {
-    pub index_startup_cost: f64,
-    pub index_total_cost: f64,
-    pub index_selectivity: f64,
-    pub index_correlation: f64,
-    pub index_pages: f64,
-}
+pub use planner_seams::AmCostEstimate;
 
 // amcostestimate dispatch: closed set over the committed index AMs (rule 4).
 pub fn amcostestimate(
@@ -1284,6 +1347,37 @@ struct GenericCosts {
 }
 
 // genericcostestimate (selfuncs.c); num_sa_scans arrives preset (no SAOP).
+// add_predicate_to_index_quals (selfuncs.c): AND the partial-index predicate
+// (as fresh RestrictInfos) into a qual list for selectivity purposes.
+fn add_predicate_to_index_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: types_pathnodes::PathId,
+    index_quals: &[RinfoId],
+) -> PgResult<mcx::PgVec<'mcx, RinfoId>> {
+    let mcx = run.mcx;
+    let indpred = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        ip.indexinfo.as_ref().expect("indexinfo set").indpred.clone()
+    };
+    let mut result: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
+    if !indpred.is_empty() {
+        let mut qual_nodes: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        for &rid in index_quals {
+            qual_nodes.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        for &pid in indpred.iter() {
+            let pred = *run.root.expr_node(pid);
+            if !crate::predtest::predicate_implied_by(mcx, &[pred], &qual_nodes, false)? {
+                result.push(crate::initsplan::make_restrictinfo(
+                    run, pred, true, false, false, false, 0, None, None, None,
+                )?);
+            }
+        }
+    }
+    result.extend(index_quals.iter().copied());
+    Ok(result)
+}
+
 fn genericcostestimate(
     run: &mut PlannerRun<'_>,
     path_id: types_pathnodes::PathId,
@@ -1306,13 +1400,13 @@ fn genericcostestimate(
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
     let index_rel_tuples = run.root.rel(index_rel).tuples;
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
     debug_assert!(costs.num_sa_scans >= 1.0);
     let num_sa_scans = costs.num_sa_scans;
 
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,
@@ -1629,9 +1723,11 @@ fn btcostestimate(
                     break 'buildquals;
                 }
                 if !index_skip_quals.is_empty() {
+                    let partial_skip_quals =
+                        add_predicate_to_index_quals(run, path_id, &index_skip_quals)?;
                     let ndistinctfrac = crate::clausesel::clauselist_selectivity(
                         run,
-                        &index_skip_quals,
+                        &partial_skip_quals,
                         index_rel_relid,
                         JOIN_INNER,
                         None,
@@ -1695,9 +1791,10 @@ fn btcostestimate(
     {
         1.0
     } else {
+        let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_bound_quals)?;
         let btree_selectivity = crate::clausesel::clauselist_selectivity(
             run,
-            &index_bound_quals,
+            &selectivity_quals,
             index_rel_relid,
             JOIN_INNER,
             None,
@@ -1794,6 +1891,17 @@ pub fn estimate_num_groups<'mcx>(
     estimate_num_groups_pgset(run, group_exprs, input_rows, None)
 }
 
+/// C's non-NULL `estinfo` form: also reports SELFLAG_USED_DEFAULT.
+pub fn estimate_num_groups_estinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+) -> PgResult<(f64, bool)> {
+    let mut used_default = false;
+    let n = estimate_num_groups_core(run, group_exprs, input_rows, None, Some(&mut used_default))?;
+    Ok((n, used_default))
+}
+
 /// C's `pgset` form: a grouping set given as 0-based indexes into
 /// `group_exprs`; exprs outside the set are skipped.
 pub fn estimate_num_groups_pgset<'mcx>(
@@ -1801,6 +1909,16 @@ pub fn estimate_num_groups_pgset<'mcx>(
     group_exprs: &[(NodeId, Node<'mcx>)],
     input_rows: f64,
     pgset: Option<&[i32]>,
+) -> PgResult<f64> {
+    estimate_num_groups_core(run, group_exprs, input_rows, pgset, None)
+}
+
+fn estimate_num_groups_core<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+    pgset: Option<&[i32]>,
+    mut estinfo_used_default: Option<&mut bool>,
 ) -> PgResult<f64> {
     let input_rows = crate::costsize::clamp_row_est(input_rows);
     if group_exprs.is_empty() || pgset.is_some_and(|s| s.is_empty()) {
@@ -1811,6 +1929,7 @@ pub fn estimate_num_groups_pgset<'mcx>(
         var: NodeId,
         rel: RelId,
         ndistinct: f64,
+        isdefault: bool,
     }
     let mcx = run.mcx;
     let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
@@ -1828,7 +1947,11 @@ pub fn estimate_num_groups_pgset<'mcx>(
         }
         // C's expression leg: no expression stats, so decompose to the
         // contained Vars (a Var-free volatile expr keeps every row distinct).
-        let vars_here = vars::pull_var_clause(mcx, node, 0)?;
+        let vars_here = vars::pull_var_clause(
+            mcx,
+            node,
+            vars::PVC_RECURSE_AGGREGATES | vars::PVC_RECURSE_WINDOWFUNCS | vars::PVC_RECURSE_PLACEHOLDERS,
+        )?;
         if vars_here.is_nil() {
             if clauses::contain_volatile_functions(node)? {
                 return Ok(input_rows);
@@ -1849,11 +1972,12 @@ pub fn estimate_num_groups_pgset<'mcx>(
             continue;
         }
         let vardata = examine_variable(run, id, node, 0)?;
-        let (ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
+        let (ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
         varinfos.push(GroupVarInfo {
             var: id,
             rel: vardata.rel.expect("grouping Var has a base rel"),
             ndistinct,
+            isdefault,
         });
     }
     if varinfos.is_empty() {
@@ -1908,6 +2032,11 @@ pub fn estimate_num_groups_pgset<'mcx>(
                 relmaxndistinct = vi.ndistinct;
             }
             relvarcount += 1;
+            if vi.isdefault {
+                if let Some(flag) = estinfo_used_default.as_deref_mut() {
+                    *flag = true;
+                }
+            }
         }
         let (rel_tuples, rel_rows) = {
             let rel = run.root.rel(rel_id);
@@ -2812,7 +2941,6 @@ fn gincostestimate(
     let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamily0, opcintype0) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
-        debug_assert!(index.indpred.is_empty());
         (
             get_quals_from_indexclauses(run, path_id),
             index.pages,
@@ -2862,10 +2990,10 @@ fn gincostestimate(
         num_entries = 1.0;
     }
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,

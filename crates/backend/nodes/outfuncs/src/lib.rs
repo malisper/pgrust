@@ -1,8 +1,8 @@
 //! outfuncs.c nodeToString for the node sets stored in pg_attrdef.adbin /
-//! pg_constraint.conbin (DEFAULT/CHECK corpus) and pg_rewrite.ev_action
-//! (view SELECT-rule Query trees). Every other node tag is a loud panic
-//! naming the C writer. Output is byte-compatible with C 18.3 nodeToString
-//! (write_location_fields=false: every location renders as -1).
+//! pg_constraint.conbin (DEFAULT/CHECK corpus), pg_trigger.tgqual, and
+//! pg_rewrite.ev_action (view SELECT-rule Query trees). Every other node tag
+//! is a loud panic naming the C writer. Output is byte-compatible with C 18.3
+//! nodeToString (write_location_fields=false: every location renders as -1).
 
 #![allow(non_snake_case)]
 
@@ -16,8 +16,8 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    Const, FromExpr, FuncExpr, JoinExpr, OpExpr, RangeTblRef, RelabelType, SubLink, TargetEntry,
-    Var,
+    Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
+    ScalarArrayOpExpr, SubLink, TargetEntry, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
@@ -52,6 +52,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_BoolExpr => {
             out_bool_expr(out, node.as_variant::<BoolExpr>().expect("BoolExpr"))?
         }
+        NodeTag::T_NullTest => {
+            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        }
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
@@ -71,6 +74,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
+            out,
+            node.as_variant::<ScalarArrayOpExpr>().expect("ScalarArrayOpExpr"),
+        )?,
         NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
             out,
             node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),
@@ -124,7 +131,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         ),
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
-        NodeTag::T_List => out_list(out, node.as_list().expect("List"))?,
         NodeTag::T_IntList => out_int_list(out, node.as_int_list().expect("IntList")),
         NodeTag::T_OidList => out_oid_list(out, node.as_oid_list().expect("OidList")),
         NodeTag::T_String => out_string_node(out, node.as_string().expect("String").sval),
@@ -299,6 +305,18 @@ fn out_bool_expr(out: &mut PgString<'_>, b: &BoolExpr<'_>) -> PgResult<()> {
     };
     w!(out, "{{BOOLEXPR :boolop {opstr} :args ");
     out_list(out, &b.args)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
+    w!(out, "{{NULLTEST :arg ");
+    match n.arg {
+        Some(arg) => out_node(out, arg)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
+    out_bool(out, n.argisrow);
     w!(out, " :location -1}}");
     Ok(())
 }
@@ -761,6 +779,19 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     out_list(out, &s.operName)?;
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_scalar_array_op_expr(out: &mut PgString<'_>, s: &ScalarArrayOpExpr<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{SCALARARRAYOPEXPR :opno {} :opfuncid {} :hashfuncid {} :negfuncid {} :useOr ",
+        s.opno, s.opfuncid, s.hashfuncid, s.negfuncid
+    );
+    out_bool(out, s.useOr);
+    w!(out, " :inputcollid {} :args ", s.inputcollid);
+    out_list(out, &s.args)?;
     w!(out, " :location -1}}");
     Ok(())
 }

@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod parse_cte;
+mod parse_merge;
 mod set_op;
 mod rules;
 pub use rules::transformRuleStmt;
@@ -36,6 +37,7 @@ pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
     analyze_seams::parse_analyze_sql_fn::set(parse_analyze_sql_fn);
     analyze_seams::parse_analyze_varparams::set(parse_analyze_varparams);
+    analyze_seams::parse_analyze_plpgsql::set(parse_analyze_plpgsql);
     analyze_seams::analyze_requires_snapshot::set(analyze_requires_snapshot);
     analyze_seams::parse_sub_analyze::set(parse_sub_analyze);
 }
@@ -84,6 +86,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
     fname: &'a str,
     argtypes: &'a [Oid],
     argnames: &'a [&'a str],
+    input_collation: Oid,
     query_env: QueryEnvHandle,
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = make_parsestate(mcx, None);
@@ -91,7 +94,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
 
     parser_small1::setup_parse_sql_fn_parameters(
         &mut pstate,
-        parser_small1::SqlFnParamState { fname, argtypes, argnames },
+        parser_small1::SqlFnParamState { fname, argtypes, argnames, input_collation },
     );
 
     if !query_env.is_null() {
@@ -173,6 +176,40 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
         out.push(t);
     }
     Ok((query, out))
+}
+
+pub fn parse_analyze_plpgsql<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &'a RawStmt<'mcx>,
+    source_text: &'a str,
+    hooks: &'a parser_small1::PlpgsqlHookState<'a>,
+    query_env: QueryEnvHandle,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+    pstate.p_ref_hook_state = parser_small1::ParseRefHookState::PlpgsqlParams(*hooks);
+
+    if !query_env.is_null() {
+        panic!(
+            "parse_analyze_plpgsql (analyze.c): QueryEnvHandle resolution unported \
+             (SPI/trigger transition tables) — unit backend-parser-analyze"
+        );
+    }
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    if is_query_id_enabled() {
+        panic!(
+            "parse_analyze_plpgsql (analyze.c): JumbleQuery (queryjumble.c) unported \
+             — compute_query_id is on"
+        );
+    }
+
+    free_parsestate(pstate)?;
+
+    backend_status::pgstat_report_query_id(query.queryId, false);
+
+    Ok(query)
 }
 
 // C `IsQueryIdEnabled` (queryjumble.h); the AUTO arm reads `query_id_enabled`,
@@ -290,9 +327,13 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
         NodeTag::T_CreateTableAsStmt => {
             transformCreateTableAsStmt(mcx, pstate, parse_tree)?
         }
-        t @ (NodeTag::T_MergeStmt
-        | NodeTag::T_ReturnStmt
-        | NodeTag::T_PLAssignStmt
+        NodeTag::T_PLAssignStmt => {
+            transformPLAssignStmt(mcx, pstate, parse_tree.as_pl_assign_stmt().unwrap())?
+        }
+        NodeTag::T_MergeStmt => {
+            parse_merge::transformMergeStmt(mcx, pstate, parse_tree.as_merge_stmt().unwrap())?
+        }
+        t @ (NodeTag::T_ReturnStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
              unit backend-parser-analyze"
@@ -555,6 +596,262 @@ pub fn stmt_requires_parse_analysis(parse_tree: &RawStmt<'_>) -> bool {
 
 pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
     stmt_requires_parse_analysis(parse_tree)
+}
+
+// transformPLAssignStmt (analyze.c). Unported louds: indirection beyond the
+// dotted-name prefix (transformAssignmentIndirection / SubscriptingRef) and
+// DISTINCT ON.
+fn transformPLAssignStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    stmt: &types_nodes::PLAssignStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERRCODE_SYNTAX_ERROR, ERROR};
+    use types_nodes::primnodes::TargetEntry;
+
+    let sstmt = stmt
+        .val
+        .expect("PLAssignStmt.val")
+        .as_select_stmt()
+        .expect("PLAssignStmt.val is a SelectStmt");
+
+    let mut fields = types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, stmt.name)?)?;
+    let mut nnames = stmt.nnames;
+    let mut rest = 0usize;
+    for ind in &stmt.indirection {
+        if nnames > 1 {
+            if ind.as_string().is_none() {
+                return Err(Box::new(types_error::PgError::error(
+                    "invalid name count in PLAssignStmt".to_string(),
+                )));
+            }
+            fields.lappend(mcx, ind)?;
+            nnames -= 1;
+        } else {
+            rest += 1;
+        }
+    }
+    if rest > 0 {
+        panic!(
+            "transformPLAssignStmt (analyze.c): transformAssignmentIndirection \
+             (subscripted/field assignment target) unported — unit backend-parser-analyze"
+        );
+    }
+
+    let cref = Node::mk_column_ref(mcx, fields, stmt.location)?;
+    let target =
+        parse_expr::transformExpr(mcx, pstate, cref, ParseExprKind::EXPR_KIND_UPDATE_TARGET)?;
+    let targettype = parse_expr::expr_type(target);
+    let targettypmod = parse_expr::expr_typmod(target);
+
+    let mut qry = Query::default();
+    qry.commandType = CmdType::CMD_SELECT;
+    pstate.p_is_insert = false;
+
+    if !sstmt.lockingClause.is_nil() {
+        pstate.p_locking_clause = sstmt.lockingClause.clone_in(mcx)?;
+    }
+    if !sstmt.windowClause.is_nil() {
+        pstate.p_windowdefs = sstmt.windowClause.clone_in(mcx)?;
+    }
+
+    transformFromClause(mcx, pstate, &sstmt.fromClause)?;
+
+    let mut tlist = transformTargetList(
+        mcx,
+        pstate,
+        &sstmt.targetList,
+        ParseExprKind::EXPR_KIND_SELECT_TARGET,
+    )?;
+
+    if tlist.len() != 1 {
+        let n = tlist.len();
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg_plural(
+                    format!("assignment source returned {n} column"),
+                    format!("assignment source returned {n} columns"),
+                    n as u64,
+                )
+                .into_error()
+                .with_error_location(ErrorLocation::new("analyze.c", 0, "transformPLAssignStmt")),
+        ));
+    }
+
+    let tle = tlist.first().expect("one tlist entry");
+    let type_id = {
+        let te = tle.as_variant::<TargetEntry>().expect("TargetEntry");
+        parse_expr::expr_type(te.expr)
+    };
+
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_UPDATE_TARGET;
+
+    let composite = |t: Oid| -> PgResult<bool> {
+        Ok(t == types_core::catalog::RECORDOID
+            || types_core::OidIsValid(lsyscache::typ::get_typ_typrelid(t)?))
+    };
+    if targettype != type_id && composite(targettype)? && composite(type_id)? {
+        // C hack: inconsistent composite types pass through as-is; the
+        // PL/pgSQL executor converts its own way.
+    } else {
+        let orig_expr = tle.as_variant::<TargetEntry>().expect("TargetEntry").expr;
+        let coerced = coerce::coerce_to_target_type(
+            mcx,
+            pstate,
+            orig_expr,
+            type_id,
+            targettype,
+            targettypmod,
+            coerce::CoercionContext::COERCION_PLPGSQL,
+            types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        match coerced {
+            Some(newexpr) => {
+                // SAFETY: parser-owned tree; no derived refs live.
+                unsafe {
+                    tle.with_mut::<TargetEntry, _>(|te| te.expr = newexpr)
+                        .expect("TargetEntry");
+                }
+            }
+            None => {
+                let tname = format_type::format_type_be(targettype)?;
+                let ename = format_type::format_type_be(type_id)?;
+                let name = stmt.name;
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(ERRCODE_DATATYPE_MISMATCH)
+                        .errmsg(format!(
+                            "variable \"{name}\" is of type {tname} but expression is of type {ename}"
+                        ))
+                        .errhint("You will need to rewrite or cast the expression.")
+                        .errposition(parser_small1::parser_errposition(
+                            pstate,
+                            parse_expr::expr_location(orig_expr),
+                            mbutils::GetDatabaseEncoding(),
+                        ))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new(
+                            "analyze.c",
+                            0,
+                            "transformPLAssignStmt",
+                        )),
+                ));
+            }
+        }
+    }
+
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_NONE;
+
+    qry.targetList = tlist;
+
+    let qual = transformWhereClause(
+        mcx,
+        pstate,
+        sstmt.whereClause,
+        ParseExprKind::EXPR_KIND_WHERE,
+        "WHERE",
+    )?;
+
+    qry.havingQual = transformWhereClause(
+        mcx,
+        pstate,
+        sstmt.havingClause,
+        ParseExprKind::EXPR_KIND_HAVING,
+        "HAVING",
+    )?;
+
+    qry.sortClause = transformSortClause(
+        mcx,
+        pstate,
+        &sstmt.sortClause,
+        &mut qry.targetList,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )?;
+
+    qry.groupClause = transformGroupClause(
+        mcx,
+        pstate,
+        &sstmt.groupClause,
+        &mut qry.groupingSets,
+        &mut qry.targetList,
+        &qry.sortClause,
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )?;
+    qry.groupDistinct = sstmt.groupDistinct;
+
+    match &sstmt.distinctClause {
+        types_nodes::rawnodes::DistinctClause::None => {
+            qry.hasDistinctOn = false;
+        }
+        types_nodes::rawnodes::DistinctClause::All => {
+            qry.distinctClause = parse_clause::transformDistinctClause(
+                mcx,
+                pstate,
+                &mut qry.targetList,
+                &qry.sortClause,
+                false,
+            )?;
+            qry.hasDistinctOn = false;
+        }
+        types_nodes::rawnodes::DistinctClause::On(_) => panic!(
+            "transformPLAssignStmt (analyze.c): transformDistinctOnClause (DISTINCT ON) \
+             unported — unit backend-parser-clause"
+        ),
+    }
+
+    qry.limitOffset = transformLimitClause(
+        mcx,
+        pstate,
+        sstmt.limitOffset,
+        ParseExprKind::EXPR_KIND_OFFSET,
+        "OFFSET",
+        sstmt.limitOption,
+    )?;
+    qry.limitCount = transformLimitClause(
+        mcx,
+        pstate,
+        sstmt.limitCount,
+        ParseExprKind::EXPR_KIND_LIMIT,
+        "LIMIT",
+        sstmt.limitOption,
+    )?;
+    qry.limitOption = sstmt.limitOption;
+
+    let windowdefs = mem::take(&mut pstate.p_windowdefs);
+    qry.windowClause = transformWindowDefinitions(mcx, pstate, &windowdefs, &mut qry.targetList)?;
+
+    qry.rtable = mem::take(&mut pstate.p_rtable);
+    qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
+    qry.jointree = Some(
+        Node::mk_mut(mcx, FromExpr { fromlist: mem::take(&mut pstate.p_joinlist), quals: qual })?
+            .seal_ref(),
+    );
+
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+    qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
+    qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
+    qry.hasAggs = pstate.p_hasAggs;
+
+    for lc_node in &sstmt.lockingClause {
+        let lc = lc_node.as_locking_clause().expect("lockingClause cell");
+        transformLockingClause(mcx, pstate, &mut qry, lc, false)?;
+    }
+
+    assign_query_collations(mcx, pstate, &qry)?;
+
+    if pstate.p_hasAggs
+        || !qry.groupClause.is_nil()
+        || !qry.groupingSets.is_nil()
+        || qry.havingQual.is_some()
+    {
+        parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
+    }
+
+    Ok(qry)
 }
 
 fn transformSelectStmt<'mcx>(
@@ -1430,7 +1727,7 @@ fn transformUpdateStmt<'mcx>(
 
 // C transformUpdateTargetList (analyze.c): resnos become the target attribute
 // numbers; resjunk entries renumber past the relation's column count.
-fn transformUpdateTargetList<'mcx>(
+pub(crate) fn transformUpdateTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     orig_tlist: &types_nodes::NodeList<'mcx>,
@@ -1544,7 +1841,7 @@ fn undefined_update_column(
 
 // C transformInsertRow (analyze.c). strip_indirection is inert: FieldStore/
 // SubscriptingRef construction panics upstream (transformAssignedExpr).
-fn transformInsertRow<'mcx>(
+pub(crate) fn transformInsertRow<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     exprlist: types_nodes::NodeList<'mcx>,
@@ -1640,7 +1937,7 @@ fn insert_row_length_error(
 // list (PG18 OLD/NEW aliases) is loud, and instead of adding old/new namespace
 // items we panic when a RETURNING expression would resolve through one; the
 // Query alias fields still get C's "old"/"new" defaults when unmasked.
-fn transformReturningClause<'mcx>(
+pub(crate) fn transformReturningClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     qry: &mut Query<'mcx>,
@@ -1741,7 +2038,7 @@ fn returning_no_columns(
 // The INSERT arm's stand-in for C's addNSItemToQuery(p_target_nsitem, ...):
 // p_target_nsitem is a shared borrow here, so the namespace entry is a fresh
 // copy with the visibility flags C would have scribbled in place.
-fn returning_target_nsitem<'mcx>(
+pub(crate) fn returning_target_nsitem<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
 ) -> PgResult<&'mcx mut parser_small1::ParseNamespaceItem<'mcx>> {

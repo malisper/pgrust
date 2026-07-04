@@ -59,6 +59,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // bool XactReadOnly (xact.c global).
+    pub fn xact_read_only() -> bool
+);
+
+seam_core::seam!(
+    // bool XactDeferrable (xact.c global).
+    pub fn xact_deferrable() -> bool
+);
+
+seam_core::seam!(
+    pub fn is_sub_transaction() -> bool
+);
+
+seam_core::seam!(
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
 

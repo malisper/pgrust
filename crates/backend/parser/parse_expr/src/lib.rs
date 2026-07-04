@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod subscripts;
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +17,7 @@ pub use nodes_core::node_funcs::{
     expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
     expr_typmod,
 };
+pub use subscripts::{subscript_handler_for, transformContainerSubscripts, SubscriptHandler};
 
 std::thread_local! {
     static TRANSFORM_NULL_EQUALS: Cell<bool> = const { Cell::new(false) };
@@ -97,6 +99,10 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_MinMaxExpr => transformMinMaxExpr(mcx, pstate, expr),
         NodeTag::T_SQLValueFunction => transformSQLValueFunction(mcx, expr),
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
+        NodeTag::T_A_Indirection => transformIndirection(mcx, pstate, expr),
+        NodeTag::T_A_ArrayExpr => {
+            transformArrayExpr(mcx, pstate, expr.as_a_array_expr().unwrap(), 0, 0, -1)
+        }
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
@@ -154,12 +160,24 @@ fn transformAExprOp<'mcx>(
     }
 
     if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
-        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_SubLink)
+        && rexpr.is_some_and(|n| {
+            n.as_sub_link()
+                .is_some_and(|s| s.subLinkType == types_nodes::SubLinkType::EXPR_SUBLINK)
+        })
     {
-        panic!(
-            "transformAExprOp (parse_expr.c): ROW() op (SELECT...) ROWCOMPARE sublink \
-             unported — unit backend-parser-expr"
-        );
+        let s = rexpr.expect("checked above").as_sub_link().expect("checked above");
+        let converted = Node::mk(
+            mcx,
+            types_nodes::SubLink {
+                subLinkType: types_nodes::SubLinkType::ROWCOMPARE_SUBLINK,
+                subLinkId: s.subLinkId,
+                testexpr: lexpr,
+                operName: a.name.clone_in(mcx)?,
+                subselect: s.subselect,
+                location: a.location,
+            },
+        )?;
+        return transformExprRecurse(mcx, pstate, converted);
     }
     if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
         && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
@@ -364,6 +382,227 @@ fn transformAExprIn<'mcx>(
     Ok(result.expect("IN list is never empty"))
 }
 
+// transformIndirection (parse_expr.c): adjacent A_Indices merge into one
+// SubscriptingRef; field selection (String) needs FieldSelect — loud.
+fn transformIndirection<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let ind = expr.as_a_indirection().unwrap();
+    let mut result = transformExprRecurse(mcx, pstate, ind.arg.expect("A_Indirection.arg"))?;
+    let mut subscripts: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+
+    for n in ind.indirection.iter() {
+        match n.node_tag() {
+            NodeTag::T_A_Indices => subscripts.lappend(mcx, n)?,
+            NodeTag::T_A_Star => {
+                return Err(row_expansion_error(pstate, expr_location(result)));
+            }
+            _ => panic!(
+                "transformIndirection (parse_expr.c): field selection \
+                 (ParseFuncOrColumn over composite) unported — misc2 rowtypes lane"
+            ),
+        }
+    }
+    if !subscripts.is_nil() {
+        result = transformContainerSubscripts(
+            mcx,
+            pstate,
+            result,
+            expr_type(result),
+            expr_typmod(result),
+            &subscripts,
+            false,
+        )?;
+    }
+    Ok(result)
+}
+
+#[cold]
+fn row_expansion_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("row expansion via \"*\" is not supported here".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformIndirection")),
+    )
+}
+
+// transformArrayExpr (parse_expr.c). array_type == InvalidOid means "infer a
+// common element type"; a valid array_type (cast push-down) coerces hard.
+fn transformArrayExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &types_nodes::A_ArrayExpr<'mcx>,
+    mut array_type: types_core::Oid,
+    mut element_type: types_core::Oid,
+    typmod: i32,
+) -> PgResult<Node<'mcx>> {
+    use types_core::{InvalidOid, OidIsValid, INT2VECTOROID, OIDVECTOROID};
+
+    let mut newelems: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    let mut multidims = false;
+
+    for e in a.elements.iter() {
+        let newe;
+        if e.node_tag() == NodeTag::T_A_ArrayExpr {
+            newe = transformArrayExpr(
+                mcx,
+                pstate,
+                e.as_a_array_expr().unwrap(),
+                array_type,
+                element_type,
+                typmod,
+            )?;
+            multidims = true;
+        } else {
+            newe = transformExprRecurse(mcx, pstate, e)?;
+            if !multidims {
+                let newetype = expr_type(newe);
+                if newetype != INT2VECTOROID
+                    && newetype != OIDVECTOROID
+                    && OidIsValid(lsyscache::typ::get_element_type(newetype)?)
+                {
+                    multidims = true;
+                }
+            }
+        }
+        newelems.lappend(mcx, newe)?;
+    }
+
+    let coerce_type_id;
+    let coerce_hard;
+    if OidIsValid(array_type) {
+        debug_assert!(OidIsValid(element_type));
+        coerce_type_id = if multidims { array_type } else { element_type };
+        coerce_hard = true;
+    } else {
+        if newelems.is_nil() {
+            return Err(empty_array_error(pstate, a.location));
+        }
+        let mut pairs: Vec<(types_core::Oid, i32)> = Vec::with_capacity(newelems.len());
+        for e in newelems.iter() {
+            pairs.push((expr_type(e), expr_location(e)));
+        }
+        coerce_type_id = coerce::select_common_type(pstate, &pairs, Some("ARRAY"))?;
+        if multidims {
+            array_type = coerce_type_id;
+            element_type = lsyscache::typ::get_element_type(array_type)?;
+            if !OidIsValid(element_type) {
+                return Err(array_elem_type_error(pstate, array_type, a.location, false));
+            }
+        } else {
+            element_type = coerce_type_id;
+            array_type = lsyscache::typ::get_array_type(element_type)?;
+            if !OidIsValid(array_type) {
+                return Err(array_elem_type_error(pstate, element_type, a.location, true));
+            }
+        }
+        coerce_hard = false;
+    }
+
+    let mut newcoercedelems: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    for e in newelems.iter() {
+        let etype = expr_type(e);
+        let newe = if coerce_hard {
+            coerce::coerce_to_target_type(
+                mcx,
+                pstate,
+                e,
+                etype,
+                coerce_type_id,
+                typmod,
+                coerce::COERCION_EXPLICIT,
+                types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+                -1,
+            )?
+            .ok_or_else(|| cannot_cast_error(pstate, etype, coerce_type_id, -1, e))?
+        } else {
+            coerce::coerce_to_common_type(
+                mcx,
+                pstate,
+                e,
+                etype,
+                expr_location(e),
+                coerce_type_id,
+                "ARRAY",
+            )?
+        };
+        newcoercedelems.lappend(mcx, newe)?;
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::ArrayExpr {
+            array_typeid: array_type,
+            array_collid: types_core::InvalidOid,
+            element_typeid: element_type,
+            elements: newcoercedelems,
+            multidims,
+            list_start: a.list_start,
+            list_end: a.list_end,
+            location: a.location,
+        },
+    )
+}
+
+#[cold]
+fn empty_array_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_INDETERMINATE_DATATYPE, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INDETERMINATE_DATATYPE)
+            .errmsg("cannot determine type of empty array".to_string())
+            .errhint(
+                "Explicitly cast to the desired type, for example ARRAY[]::integer[]."
+                    .to_string(),
+            )
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+    )
+}
+
+#[cold]
+fn array_elem_type_error(
+    pstate: &ParseState<'_, '_>,
+    typ: types_core::Oid,
+    location: i32,
+    missing_array: bool,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_OBJECT, ERROR};
+    let t = format_type::format_type_be(typ).unwrap_or_else(|_| typ.to_string());
+    let msg = if missing_array {
+        format!("could not find array type for data type {t}")
+    } else {
+        format!("could not find element type for data type {t}")
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(msg)
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+    )
+}
+
 fn transformNullTest<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -404,13 +643,26 @@ fn transformTypeCast<'mcx>(
     let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
 
     let arg = tc.arg.expect("TypeCast.arg");
-    if arg.node_tag() == NodeTag::T_A_ArrayExpr {
-        panic!(
-            "transformTypeCast (parse_expr.c): A_ArrayExpr arm (transformArrayExpr with \
-             pushed-down element type) unported — unit backend-parser-expr"
-        );
-    }
-    let arg = transformExprRecurse(mcx, pstate, arg)?;
+    let arg = if arg.node_tag() == NodeTag::T_A_ArrayExpr {
+        let mut target_base_typmod = target_typmod;
+        let target_base_type =
+            lsyscache::typ::getBaseTypeAndTypmod(target_type, &mut target_base_typmod)?;
+        let element_type = lsyscache::typ::get_element_type(target_base_type)?;
+        if types_core::OidIsValid(element_type) {
+            transformArrayExpr(
+                mcx,
+                pstate,
+                arg.as_a_array_expr().unwrap(),
+                target_base_type,
+                element_type,
+                target_base_typmod,
+            )?
+        } else {
+            transformExprRecurse(mcx, pstate, arg)?
+        }
+    } else {
+        transformExprRecurse(mcx, pstate, arg)?
+    };
 
     let input_type = expr_type(arg);
     if input_type == types_core::InvalidOid {
@@ -1124,10 +1376,12 @@ fn transformSQLValueFunction<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResult
         Op::SVFOP_LOCALTIMESTAMP_N => {
             (TIMESTAMPOID, anytimestamp_typmod_check(false, svf.typmod)?)
         }
-        other => panic!(
-            "transformSQLValueFunction (parse_expr.c): name-returning op {other:?} unported \
-             (grammar arms 2149-2155 are louds) — unit backend-parser-expr"
-        ),
+        Op::SVFOP_CURRENT_ROLE
+        | Op::SVFOP_CURRENT_USER
+        | Op::SVFOP_USER
+        | Op::SVFOP_SESSION_USER
+        | Op::SVFOP_CURRENT_CATALOG
+        | Op::SVFOP_CURRENT_SCHEMA => (types_core::catalog::NAMEOID, -1),
     };
     Node::mk(
         mcx,
@@ -1303,6 +1557,7 @@ fn transformColumnRef<'mcx>(
     expr: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     use parser_small1::ParseExprKind::*;
+    use types_error::{ErrorLocation, ERROR};
     let cref = expr.as_column_ref().unwrap();
 
     debug_assert!(pstate.p_expr_kind != EXPR_KIND_NONE);
@@ -1322,6 +1577,17 @@ fn transformColumnRef<'mcx>(
 
     let field_str = |n: Node<'mcx>| n.as_string().map(|s| s.sval);
     let fields = cref.fields.as_slice();
+
+    // plpgsql_pre_column_ref (pl_exec.c): variable takes precedence.
+    let plpgsql_hooks: Option<parser_small1::PlpgsqlHookState<'_>> =
+        pstate.p_ref_hook_state.as_plpgsql_params().copied();
+    if let Some(st) = &plpgsql_hooks {
+        if st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable {
+            if let Some(p) = plpgsql_column_ref(mcx, pstate, st, fields, cref.location, false)? {
+                return Ok(p);
+            }
+        }
+    }
 
     let mut nspname: Option<&str> = None;
     let mut relname: Option<&str> = None;
@@ -1418,6 +1684,53 @@ fn transformColumnRef<'mcx>(
         ),
     };
 
+    // plpgsql_post_column_ref (pl_exec.c): runs whether or not the core
+    // resolved, to raise the variable-vs-column ambiguity error.
+    if let Some(st) = &plpgsql_hooks {
+        let skip = st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable
+            || (node.is_some()
+                && st.resolve_option == parser_small1::PlpgsqlResolveOption::Column);
+        if !skip {
+            if let Some(p) = plpgsql_column_ref(
+                mcx,
+                pstate,
+                st,
+                fields,
+                cref.location,
+                node.is_none(),
+            )? {
+                if node.is_some() {
+                    let mut name = String::new();
+                    for (i, f) in fields.iter().enumerate() {
+                        if i > 0 {
+                            name.push('.');
+                        }
+                        name.push_str(field_str(*f).unwrap_or("*"));
+                    }
+                    return Err(elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_AMBIGUOUS_COLUMN)
+                        .errmsg(format!("column reference \"{name}\" is ambiguous"))
+                        .errdetail(
+                            "It could refer to either a PL/pgSQL variable or a table column.",
+                        )
+                        .errposition(parser_small1::parser_errposition(
+                            pstate,
+                            cref.location,
+                            mbutils::GetDatabaseEncoding(),
+                        ))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new(
+                            "pl_exec.c",
+                            0,
+                            "plpgsql_post_column_ref",
+                        ))
+                        .into());
+                }
+                return Ok(p);
+            }
+        }
+    }
+
     match node {
         Some(node) => Ok(node),
         None => {
@@ -1449,6 +1762,37 @@ fn transformColumnRef<'mcx>(
     }
 }
 
+
+// resolve_column_ref marshal: ColumnRef fields to &str names (an A_Star
+// field means the reference cannot be a plpgsql name).
+fn plpgsql_column_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    st: &parser_small1::PlpgsqlHookState<'_>,
+    fields: &[Node<'mcx>],
+    location: types_core::ParseLoc,
+    error_if_no_field: bool,
+) -> PgResult<Option<Node<'mcx>>> {
+    let mut names: [&str; 3] = [""; 3];
+    if fields.is_empty() || fields.len() > 3 {
+        return Ok(None);
+    }
+    for (i, f) in fields.iter().enumerate() {
+        match f.as_string() {
+            Some(s) => names[i] = s.sval,
+            None => return Ok(None),
+        }
+    }
+    parser_small1::plpgsql_resolve_column_ref(
+        mcx,
+        pstate,
+        st,
+        &names[..fields.len()],
+        location,
+        error_if_no_field,
+        mbutils::GetDatabaseEncoding(),
+    )
+}
 
 // C sql_fn_post_column_ref (executor/functions.c): resolve unmatched column
 // references against SQL-function parameter names. Runs only after normal
@@ -1509,7 +1853,7 @@ fn sql_fn_post_column_ref<'mcx>(
              selection (ParseFuncOrColumn on a Param) unported"
         );
     }
-    Ok(Some(parser_small1::sql_fn_make_param(mcx, paramno, ptype, location)?))
+    Ok(Some(parser_small1::sql_fn_make_param(mcx, state, paramno, ptype, location)?))
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -1560,6 +1904,9 @@ fn transformParamRef<'mcx>(
         }
         ParseRefHookState::SqlFnParams(_) => {
             parser_small1::sql_fn_paramref_hook(mcx, pstate, pref, encoding)
+        }
+        ParseRefHookState::PlpgsqlParams(_) => {
+            parser_small1::plpgsql_paramref_hook(mcx, pstate, pref, encoding)
         }
         ParseRefHookState::None => Err(no_parameter_error(pstate, pref, encoding)),
     }
@@ -1712,7 +2059,7 @@ fn transformSubLink<'mcx>(
 
     let (testexpr, oper_name) = match sublink.subLinkType {
         SubLinkType::EXISTS_SUBLINK => (None, types_nodes::NodeList::nil()),
-        SubLinkType::EXPR_SUBLINK => {
+        SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
             let nonjunk = qtree
                 .targetList
                 .iter()
@@ -1723,7 +2070,7 @@ fn transformSubLink<'mcx>(
             }
             (None, types_nodes::NodeList::nil())
         }
-        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
+        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
             let oper_name = if sublink.operName.is_nil() {
                 types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?
             } else {
@@ -1732,24 +2079,21 @@ fn transformSubLink<'mcx>(
             let lefthand = transformExprRecurse(
                 mcx,
                 pstate,
-                sublink.testexpr.expect("ANY/ALL sublink carries a testexpr"),
+                sublink.testexpr.expect("ANY/ALL/ROWCOMPARE sublink carries a testexpr"),
             )?;
-            if lefthand.node_tag() == NodeTag::T_RowExpr {
-                panic!(
-                    "transformSubLink (parse_expr.c): RowExpr lefthand (multi-column \
-                     row comparison) unported — unit backend-parser-expr"
-                );
-            }
-            let mut right_param = None;
-            let mut right_count = 0usize;
+            let left_list = match lefthand.as_row_expr() {
+                Some(r) => r.args.clone_in(mcx)?,
+                None => types_nodes::NodeList::make1(mcx, lefthand)?,
+            };
+            let mut right_list = types_nodes::NodeList::nil();
             for te_node in &qtree.targetList {
                 let tent = te_node.as_target_entry().expect("tlist entry");
                 if tent.resjunk {
                     continue;
                 }
-                right_count += 1;
-                if right_param.is_none() {
-                    right_param = Some(Node::mk(
+                right_list.lappend(
+                    mcx,
+                    Node::mk(
                         mcx,
                         types_nodes::Param {
                             paramkind: types_nodes::ParamKind::PARAM_SUBLINK,
@@ -1759,30 +2103,36 @@ fn transformSubLink<'mcx>(
                             paramcollid: expr_collation(tent.expr),
                             location: -1,
                         },
-                    )?);
-                }
+                    )?,
+                )?;
             }
-            if right_count > 1 {
+            if left_list.len() < right_list.len() {
                 return Err(column_count_mismatch(
                     pstate,
                     "subquery has too many columns",
                     sublink.location,
                 ));
             }
-            let Some(rarg) = right_param else {
+            if left_list.len() > right_list.len() {
                 return Err(column_count_mismatch(
                     pstate,
                     "subquery has too few columns",
                     sublink.location,
                 ));
-            };
-            let test =
-                make_row_comparison_op(mcx, pstate, &oper_name, lefthand, rarg, sublink.location)?;
+            }
+            let test = make_row_comparison_op_lists(
+                mcx,
+                pstate,
+                &oper_name,
+                &left_list,
+                &right_list,
+                sublink.location,
+            )?;
             (Some(test), oper_name)
         }
         other => panic!(
-            "transformSubLink (parse_expr.c): {other:?} arm (ROWCOMPARE/MULTIEXPR/\
-             ARRAY) unported — unit backend-parser-expr"
+            "transformSubLink (parse_expr.c): {other:?} arm (MULTIEXPR/CTE) \
+             unported — unit backend-parser-expr"
         ),
     };
 

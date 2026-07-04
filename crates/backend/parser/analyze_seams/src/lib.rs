@@ -25,6 +25,7 @@ seam_core::seam!(
         fname: &'a str,
         argtypes: &'a [Oid],
         argnames: &'a [&'a str],
+        input_collation: Oid,
         query_env: QueryEnvHandle,
     ) -> PgResult<Query<'mcx>>
 );
@@ -39,6 +40,18 @@ seam_core::seam!(
         param_types: &'a [Oid],
         query_env: QueryEnvHandle,
     ) -> PgResult<(Query<'mcx>, mcx::PgVec<'mcx, Oid>)>
+);
+
+seam_core::seam!(
+    // plpgsql_parser_setup (pl_exec.c): flattened var-resolution hook state
+    // (pre/post columnref + paramref hooks, data-driven).
+    pub fn parse_analyze_plpgsql<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        parse_tree: &'a RawStmt<'mcx>,
+        source_text: &'a str,
+        hooks: &'a parser_small1::PlpgsqlHookState<'a>,
+        query_env: QueryEnvHandle,
+    ) -> PgResult<Query<'mcx>>
 );
 
 seam_core::seam!(

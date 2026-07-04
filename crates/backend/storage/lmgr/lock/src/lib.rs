@@ -5,6 +5,7 @@ mod acquire;
 mod fastpath;
 mod locallock;
 mod shared;
+mod twophase;
 mod waitqueue;
 
 #[cfg(test)]
@@ -180,14 +181,10 @@ fn my_procno() -> ProcNumber {
     lmgr_proc::MyProc().expect("lock manager entered without a PGPROC")
 }
 
-// 2PC lock transfer is phase 2.
-pub fn AtPrepare_Locks() -> PgResult<()> {
-    panic!("lock.c AtPrepare_Locks: 2PC lock transfer not ported")
-}
-
-pub fn PostPrepare_Locks(_xid: types_core::TransactionId) -> PgResult<()> {
-    panic!("lock.c PostPrepare_Locks: 2PC lock transfer not ported")
-}
+pub use twophase::{
+    lock_twophase_postabort, lock_twophase_postcommit, lock_twophase_recover,
+    lock_twophase_standby_recover, AtPrepare_Locks, PostPrepare_Locks,
+};
 
 pub fn init_seams() {
     use lock_seams as s;

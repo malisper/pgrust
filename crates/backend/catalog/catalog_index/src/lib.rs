@@ -91,6 +91,73 @@ fn getattr(
     d
 }
 
+const Anum_pg_index_indisprimary: usize = 7;
+
+// index_check_primary_key (index.c); NULLS NOT DISTINCT indexes are
+// unreachable here (USING INDEX is loud upstream).
+pub fn index_check_primary_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRel: &Relation<'mcx>,
+    indexInfo: &IndexInfo<'mcx>,
+    is_alter_table: bool,
+) -> PgResult<()> {
+    if (is_alter_table || heapRel.rd_rel.relispartition) && relationHasPrimaryKey(mcx, heapRel)? {
+        return Err(err(
+            format!(
+                "multiple primary keys for table \"{}\" are not allowed",
+                heapRel.name()
+            ),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    if indexInfo.ii_NullsNotDistinct {
+        return Err(err(
+            "primary keys cannot use NULLS NOT DISTINCT indexes".into(),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
+        let attnum = indexInfo.ii_IndexAttrNumbers[i];
+        if attnum == 0 {
+            return Err(err(
+                "primary keys cannot be expressions".into(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        if attnum < 0 {
+            continue;
+        }
+        let att = heapRel.rd_att.attr(attnum as usize - 1);
+        if !att.attnotnull {
+            let colname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            return Err(err(
+                format!("primary key column \"{colname}\" is not marked NOT NULL"),
+                types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn relationHasPrimaryKey<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
+    let indexes = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
+    for &indexoid in indexes.iter() {
+        let pg_index = table::table_open(mcx, INDEX_RELATION_ID, types_rel::AccessShareLock)?;
+        let key = oid_scankey(1, indexoid);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        let isprimary = getattr(tup, Anum_pg_index_indisprimary, pg_index.descr()).as_bool();
+        genam::systable_endscan(mcx, scan)?;
+        pg_index.close(types_rel::AccessShareLock)?;
+        if isprimary {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ConstructTupleDescriptor (index.c).
 fn ConstructTupleDescriptor<'mcx>(
     mcx: Mcx<'mcx>,
@@ -360,10 +427,12 @@ pub struct IndexCreateExtra {
     pub constr_flags: u16,
     pub allow_system_table_mods: bool,
     pub is_internal: bool,
+    pub parent_index_relid: Oid,
+    pub parent_constraint_id: Oid,
 }
 
-// index_create; parentIndexRelid/parentConstraintId/relFileNumber/
-// opclassOptions/stattargets/reloptions fixed at their toast-lane values.
+// index_create; relFileNumber/opclassOptions/stattargets/reloptions fixed at
+// their toast-lane values. Returns (index oid, constraint oid or InvalidOid).
 #[allow(clippy::too_many_arguments)]
 pub fn index_create<'mcx>(
     mcx: Mcx<'mcx>,
@@ -378,22 +447,27 @@ pub fn index_create<'mcx>(
     opclassIds: &[Oid],
     coloptions: &[i16],
     extra: &IndexCreateExtra,
-) -> PgResult<Oid> {
+) -> PgResult<(Oid, Oid)> {
     let heapRelationId = heapRelation.rd_id;
     let concurrent = extra.flags & INDEX_CREATE_CONCURRENT != 0;
     let invalid = extra.flags & INDEX_CREATE_INVALID != 0;
     let isprimary = extra.flags & INDEX_CREATE_IS_PRIMARY != 0;
+    let partitioned = extra.flags & INDEX_CREATE_PARTITIONED != 0;
+    let skip_build = extra.flags & INDEX_CREATE_SKIP_BUILD != 0;
+    let parentIndexRelid = extra.parent_index_relid;
 
-    if extra.flags
-        & (INDEX_CREATE_SKIP_BUILD
-            | INDEX_CREATE_CONCURRENT
-            | INDEX_CREATE_IF_NOT_EXISTS
-            | INDEX_CREATE_PARTITIONED
-            | INDEX_CREATE_INVALID)
-        != 0
-    {
-        unported("index_create: concurrent/partitioned/skip-build flags");
+    if extra.flags & (INDEX_CREATE_CONCURRENT | INDEX_CREATE_IF_NOT_EXISTS) != 0 {
+        unported("index_create: concurrent/if-not-exists flags");
     }
+    assert!(!partitioned || skip_build, "partitioned indexes must never be built");
+    if skip_build && !partitioned {
+        unported("index_create: skip-build outside the partitioned lane");
+    }
+    assert!(
+        extra.constr_flags == 0 || extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0,
+        "constr_flags without INDEX_CREATE_ADD_CONSTRAINT"
+    );
+    let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_INDEX } else { RELKIND_INDEX };
     if extra.constr_flags
         & (INDEX_CONSTR_CREATE_DEFERRABLE
             | INDEX_CONSTR_CREATE_INIT_DEFERRED
@@ -447,6 +521,23 @@ pub fn index_create<'mcx>(
         ));
     }
 
+    if extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0
+        && pg_constraint::ConstraintNameIsUsed(
+            mcx,
+            pg_constraint::ConstraintCategory::Relation,
+            heapRelationId,
+            indexRelationName,
+        )?
+    {
+        return Err(err(
+            format!(
+                "constraint \"{indexRelationName}\" for relation \"{}\" already exists",
+                heapRelation.name()
+            ),
+            types_error::ERRCODE_DUPLICATE_OBJECT,
+        ));
+    }
+
     let mut indexTupDesc = ConstructTupleDescriptor(
         mcx,
         heapRelation,
@@ -480,7 +571,7 @@ pub fn index_create<'mcx>(
         types_core::InvalidRelFileNumber,
         accessMethodId,
         &indexTupDesc,
-        RELKIND_INDEX,
+        relkind,
         relpersistence,
         extra.allow_system_table_mods,
     )?;
@@ -491,7 +582,7 @@ pub fn index_create<'mcx>(
     let mut form = indexRelation.rd_rel.clone();
     form.relowner = heapRelation.rd_rel.relowner;
     form.relam = accessMethodId;
-    form.relispartition = false;
+    form.relispartition = parentIndexRelid != InvalidOid;
     catalog_heap::InsertPgClassTuple(
         mcx,
         &pg_class,
@@ -535,6 +626,13 @@ pub fn index_create<'mcx>(
 
     inval::invalidate::CacheInvalidateRelcache(heapRelation)?;
 
+    if parentIndexRelid != InvalidOid {
+        pg_inherits::StoreSingleInheritance(mcx, indexRelationId, parentIndexRelid, 1)?;
+        lmgr::LockRelationOid(parentIndexRelid, types_rel::ShareUpdateExclusiveLock)?;
+        tablecmds_seams::set_relation_has_subclass::call(mcx, parentIndexRelid, true)?;
+    }
+
+    let mut constraintId = InvalidOid;
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
         let myself = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, indexRelationId);
         if extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0 {
@@ -545,10 +643,11 @@ pub fn index_create<'mcx>(
             } else {
                 unported("index_create: EXCLUDE constraint type");
             };
-            index_constraint_create(
+            constraintId = index_constraint_create(
                 mcx,
                 heapRelation,
                 indexRelationId,
+                extra.parent_constraint_id,
                 indexInfo,
                 indexRelationName,
                 constraint_type,
@@ -576,6 +675,24 @@ pub fn index_create<'mcx>(
                 &myself,
                 &mut addrs,
                 pg_depend::DependencyType::Auto,
+            )?;
+        }
+
+        // Partition deps are in addition to, not instead of, the ones above.
+        if parentIndexRelid != InvalidOid {
+            let parent = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, parentIndexRelid);
+            pg_depend::recordDependencyOn(
+                mcx,
+                &myself,
+                &parent,
+                pg_depend::DependencyType::PartitionPri,
+            )?;
+            let heap = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, heapRelationId);
+            pg_depend::recordDependencyOn(
+                mcx,
+                &myself,
+                &heap,
+                pg_depend::DependencyType::PartitionSec,
             )?;
         }
 
@@ -629,6 +746,15 @@ pub fn index_create<'mcx>(
 
     xact::CommandCounterIncrement()?;
 
+    if skip_build {
+        // The heap must still be marked as indexed; the caller fills the
+        // index later (partitioned indexes never are).
+        index_update_stats(mcx, heapRelation, true, -1.0)?;
+        xact::CommandCounterIncrement()?;
+        drop(indexRelation);
+        return Ok((indexRelationId, constraintId));
+    }
+
     // The relcache entry was rebuilt from the catalogs at CCI; reopen to get
     // the index-access fields (C keeps the same pointer, rebuilt in place).
     drop(indexRelation);
@@ -637,15 +763,17 @@ pub fn index_create<'mcx>(
     index_build(mcx, heapRelation, &indexRelation, indexInfo, false)?;
 
     indexam::index_close(indexRelation, NoLock)?;
-    Ok(indexRelationId)
+    Ok((indexRelationId, constraintId))
 }
 
-// index_constraint_create (index.c), non-deferrable non-partition lane; the
-// pg_index update arm is unreachable (mark-as-primary was set at insert).
+// index_constraint_create (index.c), non-deferrable lane; the pg_index
+// update arm is unreachable (mark-as-primary was set at insert).
+#[allow(clippy::too_many_arguments)]
 fn index_constraint_create<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelationId: Oid,
+    parentConstraintId: Oid,
     indexInfo: &IndexInfo<'mcx>,
     constraintName: &str,
     constraintType: u8,
@@ -680,12 +808,37 @@ fn index_constraint_create<'mcx>(
     entry.conkey = &indexInfo.ii_IndexAttrNumbers[..indexInfo.ii_NumIndexAttrs as usize];
     entry.n_keys = indexInfo.ii_NumIndexKeyAttrs as usize;
     entry.index_relid = indexRelationId;
-    entry.is_no_inherit = true;
+    if parentConstraintId != InvalidOid {
+        entry.parent_constr_id = parentConstraintId;
+        entry.is_local = false;
+        entry.inhcount = 1;
+        entry.is_no_inherit = false;
+    } else {
+        entry.is_no_inherit = true;
+    }
     let con_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
 
     let myself = pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, con_oid);
     let idxaddr = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, indexRelationId);
     pg_depend::recordDependencyOn(mcx, &idxaddr, &myself, pg_depend::DependencyType::Internal)?;
+
+    if parentConstraintId != InvalidOid {
+        let parent =
+            pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, parentConstraintId);
+        pg_depend::recordDependencyOn(
+            mcx,
+            &myself,
+            &parent,
+            pg_depend::DependencyType::PartitionPri,
+        )?;
+        let tbl = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, heapRelation.rd_id);
+        pg_depend::recordDependencyOn(
+            mcx,
+            &myself,
+            &tbl,
+            pg_depend::DependencyType::PartitionSec,
+        )?;
+    }
     Ok(con_oid)
 }
 
@@ -870,6 +1023,82 @@ fn index_update_stats<'mcx>(
     }
 
     pg_class.close(RowExclusiveLock)
+}
+
+// CompareIndexInfo (index.c); AM identity and per-key collation/opfamily come
+// from the two open index relations, attmap maps rel2's table attnos to
+// rel1's (build_attrmap_by_name shape).
+pub fn CompareIndexInfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    info1: &IndexInfo<'mcx>,
+    info2: &IndexInfo<'mcx>,
+    rel1: &Relation<'_>,
+    rel2: &Relation<'_>,
+    attmap: &[AttrNumber],
+) -> PgResult<bool> {
+    if info1.ii_Unique != info2.ii_Unique
+        || info1.ii_NullsNotDistinct != info2.ii_NullsNotDistinct
+        || rel1.rd_rel.relam != rel2.rd_rel.relam
+        || info1.ii_NumIndexAttrs != info2.ii_NumIndexAttrs
+        || info1.ii_NumIndexKeyAttrs != info2.ii_NumIndexKeyAttrs
+    {
+        return Ok(false);
+    }
+    for i in 0..info1.ii_NumIndexAttrs as usize {
+        if (attmap.len() as i32) < info2.ii_IndexAttrNumbers[i] as i32 {
+            panic!("incorrect attribute map");
+        }
+        if !(info1.ii_IndexAttrNumbers[i] == 0 && info2.ii_IndexAttrNumbers[i] == 0) {
+            if info1.ii_IndexAttrNumbers[i] == 0 || info2.ii_IndexAttrNumbers[i] == 0 {
+                return Ok(false);
+            }
+            if attmap[info2.ii_IndexAttrNumbers[i] as usize - 1]
+                != info1.ii_IndexAttrNumbers[i]
+            {
+                return Ok(false);
+            }
+        }
+        if i >= info1.ii_NumIndexKeyAttrs as usize {
+            continue;
+        }
+        if rel1.rd_indcollation[i] != rel2.rd_indcollation[i]
+            || rel1.rd_opfamily[i] != rel2.rd_opfamily[i]
+        {
+            return Ok(false);
+        }
+    }
+
+    let map_list_equal = |l1: &types_nodes::NodeList<'mcx>,
+                          l2: &types_nodes::NodeList<'mcx>|
+     -> PgResult<bool> {
+        if l1.is_nil() != l2.is_nil() {
+            return Ok(false);
+        }
+        if l1.is_nil() {
+            return Ok(true);
+        }
+        if l1.len() != l2.len() {
+            return Ok(false);
+        }
+        for (e1, e2) in l1.iter().zip(l2.iter()) {
+            let (mapped, found_whole_row) =
+                rewrite_manip::map_variable_attnos(mcx, e2, 1, 0, attmap)?;
+            if found_whole_row || !types_nodes::equal::equal(e1, mapped) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if !map_list_equal(&info1.ii_Expressions, &info2.ii_Expressions)? {
+        return Ok(false);
+    }
+    if !map_list_equal(&info1.ii_Predicate, &info2.ii_Predicate)? {
+        return Ok(false);
+    }
+    // C ends with `ii_ExclusionOps != NULL -> false`; the trimmed IndexInfo
+    // has no exclusion fields and BuildIndexInfo panics on indisexclusion,
+    // so both inputs are exclusion-free here. Revisit with the EXCLUDE lane.
+    Ok(true)
 }
 
 fn ResetReindexState(nest_level: i32) {
