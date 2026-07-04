@@ -2058,11 +2058,6 @@ fn init_json_constructor<'mcx>(
     Ok(())
 }
 
-fn alloc_array<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
-    let layout = core::alloc::Layout::array::<T>(n).expect("scratch layout");
-    Ok(mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast())
-}
-
 // C ExecInitCoerceToDomain (execExpr.c:3524): constraints baked at compile
 // (post-v10 shape); NOTNULL reads the arg's own out, CHECK evaluates into a
 // shared compile-allocated slot with CoerceToDomainValue reading domainval.
