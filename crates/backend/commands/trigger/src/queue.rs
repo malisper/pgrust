@@ -196,13 +196,12 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
     found
 }
 
-// afterTriggerInvokeEvents (trigger.c); returns all_fired.
-fn invoke_events<'mcx>(
-    mcx: Mcx<'mcx>,
-    sel: EvList,
-    firing_id: CommandId,
-    delete_ok: bool,
-) -> PgResult<bool> {
+// afterTriggerInvokeEvents (trigger.c); returns all_fired. Owns the
+// per-tuple scratch (C's AfterTriggerTupleContext) so the empty-queue
+// mark_events loop in every caller never pays a context create/destroy.
+fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult<bool> {
+    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
+    let mcx = scratch.mcx();
     let mut i = 0;
     loop {
         // Borrow per event: firing re-enters the queue (RI SPI queries,
@@ -260,8 +259,6 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
         QUERY_DEPTH.with(|c| c.set(depth - 1));
         return Ok(());
     }
-    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
-    let mcx = scratch.mcx();
     loop {
         if !mark_events(EvList::Query(d), true, true) {
             break;
@@ -271,7 +268,7 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(mcx, EvList::Query(d), firing_id, false)? {
+        if invoke_events(EvList::Query(d), firing_id, false)? {
             break;
         }
     }
@@ -286,13 +283,14 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
 
 pub fn AfterTriggerFireDeferred() -> PgResult<()> {
     debug_assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
-    let snap_pushed = XACT_EVENTS.with(|s| !s.borrow().is_empty());
-    if snap_pushed {
+    // Empty queue: mark_events cannot find work; C's loop body never runs.
+    if XACT_EVENTS.with(|s| s.borrow().is_empty()) {
+        return Ok(());
+    }
+    {
         let snap = snapmgr::GetTransactionSnapshot()?;
         snapmgr::PushActiveSnapshot(&snap)?;
     }
-    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
-    let mcx = scratch.mcx();
     loop {
         if !mark_events(EvList::Xact, false, false) {
             break;
@@ -302,13 +300,11 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(mcx, EvList::Xact, firing_id, true)? {
+        if invoke_events(EvList::Xact, firing_id, true)? {
             break;
         }
     }
-    if snap_pushed {
-        snapmgr::PopActiveSnapshot()?;
-    }
+    snapmgr::PopActiveSnapshot()?;
     Ok(())
 }
 
@@ -409,8 +405,6 @@ pub(crate) fn with_con_state<R>(f: impl FnOnce(&mut SetConstraintState) -> R) ->
 
 // The SET CONSTRAINTS ... IMMEDIATE retroactive firing loop (state.rs).
 pub(crate) fn fire_now_immediate() -> PgResult<()> {
-    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
-    let mcx = scratch.mcx();
     let mut snapshot_set = false;
     loop {
         if !mark_events(EvList::Xact, true, false) {
@@ -426,7 +420,7 @@ pub(crate) fn fire_now_immediate() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(mcx, EvList::Xact, firing_id, !xact::IsSubTransaction())? {
+        if invoke_events(EvList::Xact, firing_id, !xact::IsSubTransaction())? {
             break;
         }
     }
