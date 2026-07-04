@@ -386,6 +386,28 @@ fn tle<'mcx>(node: Node<'mcx>) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx
         .unwrap_or_else(|| panic!("expected TargetEntry, got tag {:?}", node.node_tag()))
 }
 
+/// `ExecTypeFromExprList` (execTuples.c): bare exprs, unnamed columns.
+pub fn exec_type_from_expr_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    exprs: &NodeList<'_>,
+) -> PgResult<Rc<TupleDescData<'mcx>>> {
+    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, exprs.len() as i32)?;
+    let mut cur_resno: i16 = 1;
+    for e in exprs.iter() {
+        tupdesc::TupleDescInitEntry(
+            &mut desc,
+            cur_resno,
+            None,
+            execexpr::expr_type(e),
+            expr_typmod(e),
+            0,
+        )?;
+        tupdesc::TupleDescInitEntryCollation(&mut desc, cur_resno, expr_collation(e));
+        cur_resno += 1;
+    }
+    Ok(Rc::new(desc))
+}
+
 fn exec_type_from_tl_internal<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: &NodeList<'_>,

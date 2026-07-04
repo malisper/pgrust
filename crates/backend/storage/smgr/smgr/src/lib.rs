@@ -761,6 +761,14 @@ pub fn smgrnblocks_h(h: SmgrHandle, forknum: ForkNumber) -> PgResult<BlockNumber
     })
 }
 
+pub fn smgrgettargblock_h(h: SmgrHandle) -> BlockNumber {
+    with_handle(h, |r, _| r.smgr_targblock)
+}
+
+pub fn smgrsettargblock_h(h: SmgrHandle, targblock: BlockNumber) {
+    with_handle(h, |r, _| r.smgr_targblock = targblock);
+}
+
 pub fn smgrclose_h(h: SmgrHandle) -> PgResult<()> {
     let key = with_handle(h, |r, _| r.smgr_rlocator);
     smgrrelease(key)
@@ -826,6 +834,11 @@ pub fn init_seams() {
             };
             r.smgr_cached_nblocks[forknum as usize] = result;
             Ok(result)
+        })?
+    });
+    smgr_seams::smgr_prefetch::set(|rlocator, forknum, blocknum, nblocks| {
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdprefetch(rlocator, &mut r.md, forknum, blocknum, nblocks),
         })?
     });
     smgr_seams::smgr_read::set(|rlocator, forknum, blocknum, buffer| {

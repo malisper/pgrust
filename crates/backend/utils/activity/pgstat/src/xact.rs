@@ -113,15 +113,14 @@ fn AtEOSubXact_PgStat_DroppedStats(
 
 pub fn AtPrepare_PgStat() -> PgResult<()> {
     pending::with_state(|st| {
-        if let Some(top) = st.xact_stack.last() {
-            debug_assert_eq!(top.nest_level, 1);
-            // AtPrepare_PgStat_Relations writes TwoPhasePgStatRecords
-            if !top.first.is_empty() {
-                panic!("AtPrepare_PgStat: RegisterTwoPhaseRecord (twophase.c) unported");
-            }
-        }
-    });
-    Ok(())
+        let Some(top) = st.xact_stack.pop() else {
+            return Ok(());
+        };
+        debug_assert_eq!(top.nest_level, 1);
+        let r = relation::AtPrepare_PgStat_Relations(st, &top);
+        st.xact_stack.push(top);
+        r
+    })
 }
 
 pub fn PostPrepare_PgStat() {

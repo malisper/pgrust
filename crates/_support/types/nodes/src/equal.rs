@@ -12,13 +12,14 @@ use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
     CommonTableExpr, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
     GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
-    WithClause,
+    WithCheckOption, WithClause,
 };
+use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
     DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
     RangeVar, RelabelType, RowExpr,
-    ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
+    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
@@ -56,10 +57,12 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
+        NodeTag::T_SQLValueFunction => cmp!(as_sql_value_function),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
+        NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
         NodeTag::T_CollateExpr => cmp!(as_collate_expr),
@@ -74,6 +77,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
         NodeTag::T_WithClause => cmp!(as_with_clause),
+        NodeTag::T_WithCheckOption => cmp!(as_with_check_option),
         NodeTag::T_CommonTableExpr => cmp!(as_common_table_expr),
         NodeTag::T_RTEPermissionInfo => cmp!(as_rte_permission_info),
         NodeTag::T_SortGroupClause => {
@@ -378,6 +382,17 @@ impl NodeEqual for OpExpr<'_> {
     }
 }
 
+impl NodeEqual for OptNodeList<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.len() == b.len()
+            && self.iter().zip(b.iter()).all(|(x, y)| match (x, y) {
+                (None, None) => true,
+                (Some(x), Some(y)) => equal(x, y),
+                _ => false,
+            })
+    }
+}
+
 impl NodeEqual for ScalarArrayOpExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         // C: zero opfuncid/hashfuncid/negfuncid (not yet looked up) match any.
@@ -398,6 +413,28 @@ impl NodeEqual for ArrayExpr<'_> {
             && self.element_typeid == b.element_typeid
             && self.elements.node_equal(&b.elements)
             && self.multidims == b.multidims
+    }
+}
+
+impl NodeEqual for SubscriptingRef<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.refcontainertype == b.refcontainertype
+            && self.refelemtype == b.refelemtype
+            && self.refrestype == b.refrestype
+            && self.reftypmod == b.reftypmod
+            && self.refcollid == b.refcollid
+            && self.refupperindexpr.node_equal(&b.refupperindexpr)
+            && self.reflowerindexpr.node_equal(&b.reflowerindexpr)
+            && equal_opt_pair(self.refexpr, b.refexpr)
+            && equal_opt_pair(self.refassgnexpr, b.refassgnexpr)
+    }
+}
+
+fn equal_opt_pair(a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => equal(a, b),
+        _ => false,
     }
 }
 
@@ -427,6 +464,12 @@ impl NodeEqual for CoerceViaIO<'_> {
         equal(self.arg, b.arg)
             && self.resulttype == b.resulttype
             && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for SQLValueFunction {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op && self.r#type == b.r#type && self.typmod == b.typmod
     }
 }
 
@@ -569,6 +612,16 @@ impl NodeEqual for RangeTblEntry<'_> {
             && self.lateral == b.lateral
             && self.inFromCl == b.inFromCl
             && self.securityQuals.node_equal(&b.securityQuals)
+    }
+}
+
+impl NodeEqual for WithCheckOption<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.kind == b.kind
+            && self.relname == b.relname
+            && self.polname == b.polname
+            && equal_opt(self.qual, b.qual)
+            && self.cascaded == b.cascaded
     }
 }
 

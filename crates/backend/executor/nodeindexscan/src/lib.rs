@@ -25,7 +25,7 @@ use ::types_nodes::plannodes::IndexScan;
 use ::types_nodes::NodeTag;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::{
-    ScanKeyData, StrategyNumber, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL,
+    ScanKeyData, StrategyNumber, SK_ISNULL, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
 
@@ -99,7 +99,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
             let scandesc = unsafe { self.iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
             let found = index_getnext_slot(mcx, scandesc, direction, estate.slot_mut(slot_id))?;
             if estate.es_instrument != 0 {
-                let n = scandesc.xs_pgstat_index_scans;
+                let n = scandesc.xs_nsearches;
                 estate.instr_set_index_nsearches(self.iss_PlanNodeId, n);
             }
             if !found {
@@ -277,7 +277,47 @@ pub fn exec_index_build_scan_keys<'mcx>(
         let op = match clause.node_tag() {
             NodeTag::T_OpExpr => clause.as_op_expr().unwrap(),
             NodeTag::T_RowCompareExpr => scankey_case_unported("RowCompareExpr"),
-            NodeTag::T_ScalarArrayOpExpr => scankey_case_unported("ScalarArrayOpExpr"),
+            NodeTag::T_ScalarArrayOpExpr => {
+                let saop = clause.as_scalar_array_op_expr().unwrap();
+                debug_assert!(saop.useOr);
+                if !::indexam::IndexAmKind::from_relam(index.rd_rel.relam).amsearcharray() {
+                    scankey_case_unported("ScalarArrayOpExpr on a non-amsearcharray AM");
+                }
+                let leftop = saop.args.nth(0);
+                if leftop.node_tag() == NodeTag::T_RelabelType {
+                    scankey_case_unported("RelabelType-wrapped index key");
+                }
+                let var = leftop
+                    .as_var()
+                    .filter(|v| v.varno == INDEX_VAR)
+                    .unwrap_or_else(|| panic!("indexqual doesn't have key on left side"));
+                let varattno = var.varattno;
+                if varattno < 1 || varattno as i32 > indnkeyatts {
+                    panic!("bogus index qualification");
+                }
+                let opfamily = index.rd_opfamily[varattno as usize - 1];
+                let (op_strategy, _op_lefttype, op_righttype) =
+                    lsyscache::get_op_opfamily_properties(saop.opno, opfamily, false)?;
+
+                let mut rightop = saop.args.nth(1);
+                if rightop.node_tag() == NodeTag::T_RelabelType {
+                    rightop = rightop.as_relabel_type().unwrap().arg;
+                }
+                let Some(con) = rightop.as_const() else {
+                    scankey_case_unported("runtime array key (non-Const array value)");
+                };
+
+                let mut key = ScanKeyData::empty();
+                key.sk_flags = SK_SEARCHARRAY | if con.constisnull { SK_ISNULL } else { 0 };
+                key.sk_attno = varattno;
+                key.sk_strategy = op_strategy as StrategyNumber;
+                key.sk_subtype = op_righttype;
+                key.sk_collation = saop.inputcollid;
+                fmgr_core::fmgr_info_into(saop.opfuncid, &mut key.sk_func)?;
+                key.sk_argument = con.constvalue;
+                scan_keys.push(key);
+                continue;
+            }
             NodeTag::T_NullTest => {
                 let nt = clause.as_null_test().unwrap();
                 let var = nt
@@ -422,6 +462,11 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
     scan_keys: &mut [ScanKeyData],
 ) -> PgResult<()> {
     for rk in runtime_keys.iter_mut() {
+        // ExecEvalParamExec pending-initplan arm, hoisted per repo convention.
+        let deps = rk.key_expr.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
         // SAFETY: the per-tuple context object outlives the plan (reset-only).
         unsafe {
             rk.key_expr

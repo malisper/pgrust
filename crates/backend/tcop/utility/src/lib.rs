@@ -19,7 +19,7 @@ pub use classify::{
 pub use commandtag::CreateCommandTag;
 pub use dispatch::{standard_ProcessUtility, ProcessUtility};
 pub use loglevel::GetCommandLogLevel;
-pub use returns::{UtilityReturnsTuples, UtilityTupleDescriptor};
+pub use returns::{UtilityContainsQuery, UtilityReturnsTuples, UtilityTupleDescriptor};
 pub use xact::{PreventCommandIfParallelMode, PreventCommandIfReadOnly};
 
 pub fn init_seams() {
@@ -28,6 +28,7 @@ pub fn init_seams() {
     utility_seams::utility_returns_tuples::set(UtilityReturnsTuples);
     utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
     utility_seams::process_utility::set(ProcessUtility);
+    utility_seams::utility_contains_query::set(UtilityContainsQuery);
 }
 
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {

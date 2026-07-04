@@ -1156,24 +1156,66 @@ pub fn AtEOXact_MultiXact() {
     cache_clear();
 }
 
+pub const TWOPHASE_RM_MULTIXACT_ID: u8 = 3;
+
 pub fn AtPrepare_MultiXact() -> PgResult<()> {
-    if MultiXactIdIsValid(oldest_member(my_slot())) {
-        panic!(
-            "unported callee reached from multixact.c AtPrepare_MultiXact: \
-             RegisterTwoPhaseRecord (twophase.c) — land backend-access-transam-twophase"
-        );
+    let my_oldest_member = oldest_member(my_slot());
+    if MultiXactIdIsValid(my_oldest_member) {
+        twophase_seams::register_two_phase_record::call(
+            TWOPHASE_RM_MULTIXACT_ID,
+            0,
+            &my_oldest_member.to_ne_bytes(),
+        )?;
     }
     Ok(())
 }
 
-pub fn PostPrepare_MultiXact(_xid: TransactionId) {
-    if MultiXactIdIsValid(oldest_member(my_slot())) {
-        panic!(
-            "unported callee reached from multixact.c PostPrepare_MultiXact: \
-             TwoPhaseGetDummyProcNumber (twophase.c) — land backend-access-transam-twophase"
-        );
+pub fn PostPrepare_MultiXact(xid: TransactionId) {
+    let my_oldest_member = oldest_member(my_slot());
+    if MultiXactIdIsValid(my_oldest_member) {
+        let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)
+            .expect("PostPrepare_MultiXact: dummy proc");
+        // Lock so others see both changes, not just the reset of our slot
+        // (multixact.c).
+        LWLockAcquire(MultiXactGenLock(), LW_EXCLUSIVE, globals::MyProcNumber())
+            .expect("PostPrepare_MultiXact: MultiXactGenLock");
+        set_oldest_member(dummy as usize, my_oldest_member);
+        set_oldest_member(my_slot(), InvalidMultiXactId);
+        LWLockRelease(MultiXactGenLock()).expect("PostPrepare_MultiXact: unlock");
     }
+    set_oldest_visible(my_slot(), InvalidMultiXactId);
     cache_clear();
+}
+
+pub fn multixact_twophase_recover(
+    xid: TransactionId,
+    _info: u16,
+    recdata: &[u8],
+) -> PgResult<()> {
+    let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)?;
+    assert_eq!(recdata.len(), 4);
+    let oldest_member = MultiXactId::from_ne_bytes(recdata.try_into().unwrap());
+    set_oldest_member(dummy as usize, oldest_member);
+    Ok(())
+}
+
+pub fn multixact_twophase_postcommit(
+    xid: TransactionId,
+    _info: u16,
+    recdata: &[u8],
+) -> PgResult<()> {
+    let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, true)?;
+    assert_eq!(recdata.len(), 4);
+    set_oldest_member(dummy as usize, InvalidMultiXactId);
+    Ok(())
+}
+
+pub fn multixact_twophase_postabort(
+    xid: TransactionId,
+    info: u16,
+    recdata: &[u8],
+) -> PgResult<()> {
+    multixact_twophase_postcommit(xid, info, recdata)
 }
 
 fn MultiXactOffsetBuffers() -> i32 {

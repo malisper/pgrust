@@ -13,7 +13,7 @@ use types_pathnodes::{
 use costsize::{clamp_width_est, cost_qual_eval_node, gucs, JoinCostWorkspace};
 use types_pathnodes::run::PlannerRun;
 use types_pathnodes::{
-    compare_pathkeys, HashPath, JoinPath, MaterialPath, MergePath, NestPath,
+    compare_pathkeys, HashPath, JoinPath, MaterialPath, MemoizePath, MergePath, NestPath,
     PathKeysComparison, RinfoId, SemiAntiJoinFactors, SpecialJoinInfo,
 };
 
@@ -106,6 +106,14 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
         t if t == tag16(NodeTag::T_SetOp) => false,
+        t if t == tag16(NodeTag::T_Sort) => false,
+        t if t == tag16(NodeTag::T_IncrementalSort) => false,
+        t if t == tag16(NodeTag::T_Unique) => false,
+        t if t == tag16(NodeTag::T_LockRows) => false,
+        t if t == tag16(NodeTag::T_Limit) => false,
+        t if t == tag16(NodeTag::T_Material) => false,
+        t if t == tag16(NodeTag::T_Memoize) => false,
+        t if t == tag16(NodeTag::T_RecursiveUnion) => false,
         t if t == tag16(NodeTag::T_Append) => false,
         t if t == tag16(NodeTag::T_MergeAppend) => false,
         t if t == tag16(NodeTag::T_ProjectSet) => false,
@@ -233,8 +241,10 @@ pub fn create_set_projection_path<'mcx>(
     }))
 }
 
-// create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
-// arm: no WCO/rowmarks/MERGE lists (loud upstream), rows = 0.
+// create_modifytable_path (pathnode.c), single-relation arm: no rowmarks
+// (loud upstream), rows = 0. merge_join_condition is Some for CMD_MERGE with
+// the per-rel condition inside (None = C's NULL condition).
+#[allow(clippy::too_many_arguments)]
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -244,8 +254,11 @@ pub fn create_modifytable_path<'mcx>(
     // (operation is stored as the C CmdType value; types_pathnodes uses u32)
     result_relation: u32,
     update_colnos: Option<PgVec<'mcx, i16>>,
+    with_check_options: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
     returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
     onconflict: Option<types_pathnodes::NodeId>,
+    merge_action_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
+    merge_join_condition: Option<Option<types_pathnodes::NodeId>>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -284,7 +297,14 @@ pub fn create_modifytable_path<'mcx>(
             }
             None => PgVec::new_in(run.mcx),
         },
-        withCheckOptionLists: PgVec::new_in(run.mcx),
+        withCheckOptionLists: match with_check_options {
+            Some(wcos) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(wcos);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
         returningLists: match returning_list {
             Some(rlist) => {
                 let mut lists = PgVec::new_in(run.mcx);
@@ -296,8 +316,22 @@ pub fn create_modifytable_path<'mcx>(
         rowMarks: PgVec::new_in(run.mcx),
         onconflict,
         epqParam: 0,
-        mergeActionLists: PgVec::new_in(run.mcx),
-        mergeJoinConditions: PgVec::new_in(run.mcx),
+        mergeActionLists: match merge_action_list {
+            Some(actions) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(actions);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
+        mergeJoinConditions: match merge_join_condition {
+            Some(cond) => {
+                let mut conds = PgVec::new_in(run.mcx);
+                conds.push(cond);
+                conds
+            }
+            None => PgVec::new_in(run.mcx),
+        },
     })
 }
 
@@ -1168,8 +1202,7 @@ pub fn create_agg_path<'mcx>(
     Ok(id)
 }
 
-// create_groupingsets_path (pathnode.c); hashed/AGG_MIXED rollups are loud
-// upstream, so the is_hashed cost legs are unreachable panics.
+// create_groupingsets_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_groupingsets_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1191,14 +1224,13 @@ pub fn create_groupingsets_path<'mcx>(
         && rollups[0].groupClause.is_empty()
     {
         types_pathnodes::AGG_PLAIN
+    } else if aggstrategy == types_pathnodes::AGG_MIXED && rollups.len() == 1 {
+        types_pathnodes::AGG_HASHED
     } else {
         aggstrategy
     };
-    debug_assert!(
-        aggstrategy == types_pathnodes::AGG_SORTED || aggstrategy == types_pathnodes::AGG_PLAIN,
-        "create_groupingsets_path (pathnode.c): hashed/AGG_MIXED strategy; grouping-sets lane"
-    );
     debug_assert!(aggstrategy != types_pathnodes::AGG_PLAIN || rollups.len() == 1);
+    debug_assert!(aggstrategy != types_pathnodes::AGG_MIXED || rollups.len() > 1);
 
     let pathkeys = if aggstrategy == types_pathnodes::AGG_SORTED && rollups.len() == 1 {
         types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.group_pathkeys)
@@ -1252,10 +1284,6 @@ pub fn create_groupingsets_path<'mcx>(
             ),
             _ => unreachable!(),
         };
-        assert!(
-            !is_hashed,
-            "create_groupingsets_path (pathnode.c): hashed rollup; grouping-sets lane"
-        );
         if is_first {
             let (rows, disabled, startup, total) = costsize::cost_agg_shape(
                 run,
@@ -1276,11 +1304,40 @@ pub fn create_groupingsets_path<'mcx>(
             p.startup_cost = startup;
             p.total_cost = total;
             is_first = false;
-            is_first_sort = false;
+            if !is_hashed {
+                is_first_sort = false;
+            }
+        } else if is_hashed || is_first_sort {
+            // Aggregation only; input cost is not re-charged (hashed rollups
+            // and the first sorted rollup consume the shared input).
+            let (agg_rows, agg_disabled, _agg_startup, agg_total) =
+                costsize::cost_agg_shape(
+                    run,
+                    if is_hashed {
+                        types_pathnodes::AGG_HASHED
+                    } else {
+                        types_pathnodes::AGG_SORTED
+                    },
+                    agg_costs,
+                    num_group_cols,
+                    num_groups,
+                    &quals,
+                    0,
+                    0.0,
+                    0.0,
+                    sub_rows,
+                    sub_width,
+                )?;
+            if !is_hashed {
+                is_first_sort = false;
+            }
+            let p = run.root.path_mut(id).base_mut();
+            p.disabled_nodes += agg_disabled;
+            p.total_cost += agg_total;
+            p.rows += agg_rows;
         } else {
-            // Later rollups sort the subpath themselves; input cost is not
-            // re-charged.
-            debug_assert!(!is_first_sort);
+            // Later sorted rollups sort the subpath themselves; input cost is
+            // not re-charged.
             let (sort_disabled, sort_startup, sort_total) = costsize::cost_sort_shape(
                 0,
                 0.0,
@@ -1290,7 +1347,6 @@ pub fn create_groupingsets_path<'mcx>(
                 init_small::globals::work_mem(),
                 -1.0,
             );
-            let _ = sort_startup;
             let (agg_rows, agg_disabled, _agg_startup, agg_total) =
                 costsize::cost_agg_shape(
                     run,
@@ -2341,6 +2397,57 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
             path,
             subpath: Some(subpath),
         }))
+}
+
+// create_memoize_path (pathnode.c).
+#[allow(clippy::too_many_arguments)]
+pub fn create_memoize_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    subpath: PathId,
+    param_exprs: PgVec<'mcx, types_pathnodes::NodeId>,
+    hash_operators: PgVec<'mcx, u32>,
+    singlerow: bool,
+    binary_mode: bool,
+    calls: f64,
+) -> PathId {
+    let mcx = run.mcx;
+    let sub = run.root.path(subpath).base();
+    debug_assert!(sub.parent == rel);
+    debug_assert!(gucs::enable_memoize());
+    let param_info = sub
+        .param_info
+        .as_ref()
+        .map(|pi| mcx::box_new_in(mcx, types_pathnodes::ParamPathInfo::clone(pi)));
+    let pathkeys = types_pathnodes::relids::pgvec_clone_shallow(mcx, &sub.pathkeys);
+
+    let path = Path {
+        type_: tag16(NodeTag::T_MemoizePath),
+        pathtype: tag16(NodeTag::T_Memoize),
+        parent: rel,
+        pathtarget_id: run.root.rel(rel).pathtarget_id,
+        param_info,
+        parallel_aware: false,
+        parallel_safe: run.root.rel(rel).consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: sub.rows,
+        disabled_nodes: sub.disabled_nodes,
+        // The rescan costing is cost_memoize_rescan's job; creation charges
+        // only the first entry's caching.
+        startup_cost: sub.startup_cost + gucs::cpu_tuple_cost(),
+        total_cost: sub.total_cost + gucs::cpu_tuple_cost(),
+        pathkeys,
+    };
+    run.root.alloc_path(types_pathnodes::PathNode::MemoizePath(MemoizePath {
+        path,
+        subpath: Some(subpath),
+        hash_operators,
+        param_exprs,
+        singlerow,
+        binary_mode,
+        calls: costsize::clamp_row_est(calls),
+        est_entries: 0,
+    }))
 }
 
 // create_nestloop_path (pathnode.c).

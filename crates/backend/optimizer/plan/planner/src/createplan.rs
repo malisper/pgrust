@@ -65,15 +65,13 @@ fn create_plan_recurse<'mcx>(
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
         PathNode::IncrementalSortPath(_) => create_incremental_sort_plan(run, path_id, flags),
         PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
+        PathNode::MemoizePath(_) => create_memoize_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::LockRowsPath(_) => create_lockrows_plan(run, path_id, flags),
-        PathNode::UniquePath(_) => panic!(
-            "create_unique_plan (createplan.c): unique-ified semijoin won the cost \
-             competition; unique-plan lane unported"
-        ),
+        PathNode::UniquePath(_) => create_unique_plan(run, path_id, flags),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
             "create_plan_recurse (createplan.c): pathtype {}; M2 plan lane",
@@ -404,7 +402,9 @@ fn create_gating_plan<'mcx>(
     Ok(gplan.seal())
 }
 
-// order_qual_clauses (createplan.c): stable sort by ascending eval cost.
+// order_qual_clauses (createplan.c): stable sort (C insertion sort) by
+// security_level then eval cost; a cheap (<10x cpu_operator_cost) leakproof
+// qual is demoted to level 0 so it can run ahead of pricier low-level quals.
 fn order_qual_clauses<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clauses: &[RinfoId],
@@ -412,10 +412,16 @@ fn order_qual_clauses<'mcx>(
     let mut items: mcx::PgVec<'_, (RinfoId, f64, u32)> = mcx::PgVec::new_in(run.mcx);
     items.reserve(clauses.len());
     for &rid in clauses {
-        debug_assert!(run.root.rinfo(rid).security_level == 0);
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         let cost = crate::costsize::cost_qual_eval_node(clause)?;
-        items.push((rid, cost.per_tuple, run.root.rinfo(rid).security_level));
+        let r = run.root.rinfo(rid);
+        let security_level =
+            if r.leakproof && cost.per_tuple < 10.0 * crate::gucs::cpu_operator_cost() {
+                0
+            } else {
+                r.security_level
+            };
+        items.push((rid, cost.per_tuple, security_level));
     }
     if items.len() > 1 {
         items.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.partial_cmp(&b.1).unwrap()));
@@ -1108,6 +1114,24 @@ fn fix_indexqual_clause<'mcx>(
                 },
             )
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let saop = clause.as_scalar_array_op_expr().unwrap();
+            debug_assert!(saop.args.len() == 2);
+            let fixed_arg = fix_indexqual_operand(run, index, indexcol, saop.args.nth(0))?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ScalarArrayOpExpr {
+                    opno: saop.opno,
+                    opfuncid: saop.opfuncid,
+                    hashfuncid: saop.hashfuncid,
+                    negfuncid: saop.negfuncid,
+                    useOr: saop.useOr,
+                    inputcollid: saop.inputcollid,
+                    args: NodeList::make2(mcx, fixed_arg, saop.args.nth(1))?,
+                    location: saop.location,
+                },
+            )
+        }
         NodeTag::T_NullTest => {
             let nt = clause.as_null_test().unwrap();
             let fixed_arg =
@@ -1281,11 +1305,7 @@ fn create_modifytable_plan<'mcx>(
     let mcx = run.mcx;
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(
-            p.withCheckOptionLists.is_empty()
-                && p.rowMarks.is_empty()
-                && p.mergeActionLists.is_empty()
-        );
+        debug_assert!(p.rowMarks.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1302,7 +1322,8 @@ fn create_modifytable_plan<'mcx>(
         x if x == CmdType::CMD_INSERT as u32 => CmdType::CMD_INSERT,
         x if x == CmdType::CMD_UPDATE as u32 => CmdType::CMD_UPDATE,
         x if x == CmdType::CMD_DELETE as u32 => CmdType::CMD_DELETE,
-        other => panic!("make_modifytable (createplan.c): operation {other}; M4 MERGE lane"),
+        x if x == CmdType::CMD_MERGE as u32 => CmdType::CMD_MERGE,
+        other => panic!("make_modifytable (createplan.c): operation {other} unported"),
     };
 
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
@@ -1318,6 +1339,25 @@ fn create_modifytable_plan<'mcx>(
                 il.lappend(mcx, c as i32)?;
             }
             lists.lappend(mcx, Node::mk_int_list(mcx, il)?)?;
+        }
+        lists
+    };
+
+    let with_check_option_lists = {
+        let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+        debug_assert!(p.withCheckOptionLists.len() <= 1);
+        let mut ids: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+            mcx::PgVec::new_in(mcx);
+        for wlist in p.withCheckOptionLists.iter() {
+            ids.push(crate::relnode::pgvec_clone_shallow(mcx, wlist));
+        }
+        let mut lists = types_nodes::list::NodeList::nil();
+        for wlist in ids.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in wlist.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            lists.lappend(mcx, Node::mk_list(mcx, nl)?)?;
         }
         lists
     };
@@ -1345,6 +1385,7 @@ fn create_modifytable_plan<'mcx>(
     plan.plan.lefttree = Some(subplan);
     plan.operation = operation;
     plan.updateColnosLists = update_colnos_lists;
+    plan.withCheckOptionLists = with_check_option_lists;
     plan.returningLists = returning_lists;
     plan.canSetTag = can_set_tag;
     plan.nominalRelation = nominal;
@@ -1377,6 +1418,44 @@ fn create_modifytable_plan<'mcx>(
         plan.arbiterIndexes = crate::plancat::infer_arbiter_indexes(run, oc)?;
         plan.exclRelRTI = oc.exclRelIndex as u32;
         plan.exclRelTlist = oc.exclRelTlist.clone_in(mcx)?;
+    }
+    {
+        let (action_lists, join_conds) = {
+            let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+            debug_assert!(p.mergeActionLists.len() <= 1);
+            let mut lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for al in p.mergeActionLists.iter() {
+                lists.push(crate::relnode::pgvec_clone_shallow(mcx, al));
+            }
+            let mut conds: mcx::PgVec<'mcx, Option<types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for &c in p.mergeJoinConditions.iter() {
+                conds.push(c);
+            }
+            (lists, conds)
+        };
+        let mut mal = types_nodes::list::NodeList::nil();
+        for al in action_lists.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in al.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            mal.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        plan.mergeActionLists = mal;
+        let mut mjc = types_nodes::list::NodeList::nil();
+        for &c in join_conds.iter() {
+            // A None condition (no BY SOURCE actions) rides as an empty
+            // implicit-AND list: ExecQual over it is constant true, matching
+            // C's NULL-condition semantics.
+            let cell = match c {
+                Some(id) => *run.root.expr_node(id),
+                None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+            };
+            mjc.lappend(mcx, cell)?;
+        }
+        plan.mergeJoinConditions = mjc;
     }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
@@ -1501,6 +1580,120 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     Ok(plan.seal())
 }
 
+
+// create_unique_plan (createplan.c), HASH arm; UNIQUE_PATH_SORT is loud.
+fn create_unique_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, umethod, in_operators, uniq_expr_ids, target_id, parallel_safe) =
+        match run.root.path(path_id) {
+            PathNode::UniquePath(up) => (
+                up.subpath.expect("UniquePath has a subpath"),
+                up.umethod,
+                crate::relnode::pgvec_clone_shallow(mcx, &up.in_operators),
+                crate::relnode::pgvec_clone_shallow(mcx, &up.uniq_exprs),
+                up.path.pathtarget_id.unwrap(),
+                up.path.parallel_safe,
+            ),
+            _ => unreachable!(),
+        };
+    let mut subplan = create_plan_recurse(run, subpath_id, flags)?;
+    if umethod == types_pathnodes::UNIQUE_PATH_NOOP {
+        return Ok(subplan);
+    }
+    assert!(
+        umethod == types_pathnodes::UNIQUE_PATH_HASH,
+        "create_unique_plan (createplan.c): UNIQUE_PATH_SORT arm unported"
+    );
+
+    let mut newtlist = build_path_tlist(run, target_id)?;
+    let mut newitems = false;
+    for &uid in uniq_expr_ids.iter() {
+        let uniqexpr = *run.root.expr_node(uid);
+        let found = newtlist
+            .iter()
+            .any(|n| types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, uniqexpr));
+        if !found {
+            let resno = newtlist.len() as i16 + 1;
+            newtlist.lappend(mcx, Node::mk_target_entry(mcx, uniqexpr, resno, None, false)?)?;
+            newitems = true;
+        }
+    }
+    if newitems {
+        // change_plan_targetlist (createplan.c).
+        if !crate::pathnode::is_projection_capable_pathtype(subplan.node_tag() as u16) {
+            let sub = subplan.as_plan().expect("plan node");
+            let mut result = Node::build::<ResultPlan>(mcx)?;
+            result.plan.targetlist = newtlist.clone_in(mcx)?;
+            result.plan.qual = NodeList::nil();
+            result.plan.lefttree = Some(subplan);
+            result.plan.disabled_nodes = sub.disabled_nodes;
+            result.plan.startup_cost = sub.startup_cost;
+            result.plan.total_cost = sub.total_cost;
+            result.plan.plan_rows = sub.plan_rows;
+            result.plan.plan_width = sub.plan_width;
+            result.plan.parallel_aware = false;
+            result.plan.parallel_safe = parallel_safe;
+            subplan = result.seal();
+        } else {
+            // SAFETY: subplan was freshly built by create_plan_recurse; no
+            // reference derived from its tlist is live across this write.
+            unsafe {
+                subplan.with_plan_mut(|p| {
+                    p.targetlist = newtlist;
+                    p.parallel_safe = parallel_safe;
+                })
+            }
+            .expect("plan node");
+        }
+    }
+
+    let subplan_tlist =
+        NodeList::from_slice(mcx, subplan.as_plan().expect("plan node").targetlist.as_slice())?;
+    let mut grp_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut grp_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    for &uid in uniq_expr_ids.iter() {
+        let uniqexpr = *run.root.expr_node(uid);
+        let tle = subplan_tlist
+            .iter()
+            .find(|n| {
+                types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, uniqexpr)
+            })
+            .unwrap_or_else(|| panic!("failed to find unique expression in subplan tlist"))
+            .as_target_entry()
+            .unwrap();
+        grp_col_idx.push(tle.resno);
+        grp_collations.push(expr_collation(tle.expr));
+    }
+    let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    for &in_oper in in_operators.iter() {
+        let (_, eq_oper) = lsyscache::get_compatible_hash_operators(in_oper)?
+            .unwrap_or_else(|| {
+                panic!("could not find compatible hash operator for operator {in_oper}")
+            });
+        grp_operators.push(eq_oper);
+    }
+
+    let num_cols = uniq_expr_ids.len();
+    let rows = run.root.path(path_id).base().rows;
+    let mut plan = Node::build::<Agg>(mcx)?;
+    plan.plan.targetlist = build_path_tlist(run, target_id)?;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.aggstrategy = types_pathnodes::AGG_HASHED;
+    plan.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+    plan.numCols = num_cols as i32;
+    plan.grpColIdx = mcx::vec_borrow_in(mcx, grp_col_idx)?;
+    plan.grpOperators = mcx::vec_borrow_in(mcx, grp_operators)?;
+    plan.grpCollations = mcx::vec_borrow_in(mcx, grp_collations)?;
+    plan.numGroups = clamp_cardinality_to_long(rows);
+    plan.transitionSpace = 0;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
 
 // create_minmaxagg_plan (createplan.c/planagg.c): one InitPlan per agg, then
 // a Param-fed Result.
@@ -1720,16 +1913,25 @@ fn create_groupingsets_plan<'mcx>(
 
     let mut chain = NodeList::nil();
     if rollups.len() > 1 {
-        debug_assert!(!rollups[0].is_hashed);
+        let mut is_first_sort = rollups[0].is_hashed;
         for rollup in rollups[1..].iter() {
-            assert!(
-                !rollup.is_hashed,
-                "create_groupingsets_plan (createplan.c): hashed rollup; grouping-sets lane"
-            );
             let new_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
-            let sort_plan =
-                make_sort_from_groupcols(run, &rollup.groupClause, &new_grp_col_idx, subplan)?;
-            let strat = if rollup.gsets[0].is_empty() {
+            let sort_plan = if !rollup.is_hashed && !is_first_sort {
+                Some(make_sort_from_groupcols(
+                    run,
+                    &rollup.groupClause,
+                    &new_grp_col_idx,
+                    subplan,
+                )?)
+            } else {
+                None
+            };
+            if !rollup.is_hashed {
+                is_first_sort = false;
+            }
+            let strat = if rollup.is_hashed {
+                types_pathnodes::AGG_HASHED
+            } else if rollup.gsets[0].is_empty() {
                 types_pathnodes::AGG_PLAIN
             } else {
                 types_pathnodes::AGG_SORTED
@@ -1738,7 +1940,7 @@ fn create_groupingsets_plan<'mcx>(
             let mut agg = Node::build::<Agg>(mcx)?;
             agg.plan.targetlist = NodeList::nil();
             agg.plan.qual = NodeList::nil();
-            agg.plan.lefttree = Some(sort_plan);
+            agg.plan.lefttree = sort_plan;
             agg.aggstrategy = strat;
             agg.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
             agg.numCols = rollup.gsets[0].len() as i32;
@@ -1750,13 +1952,15 @@ fn create_groupingsets_plan<'mcx>(
             agg.transitionSpace = transition_space;
             // C strips the vestigial Sort after make_agg.
             // SAFETY: sort_plan was freshly built above; no other handle.
-            unsafe {
-                sort_plan.with_plan_mut(|p| {
-                    p.targetlist = NodeList::nil();
-                    p.lefttree = None;
-                })
+            if let Some(sp) = sort_plan {
+                unsafe {
+                    sp.with_plan_mut(|p| {
+                        p.targetlist = NodeList::nil();
+                        p.lefttree = None;
+                    })
+                }
+                .expect("Sort embeds a Plan base");
             }
-            .expect("Sort embeds a Plan base");
             chain.lappend(mcx, agg.seal())?;
         }
     }
@@ -2336,6 +2540,84 @@ fn create_material_plan<'mcx>(
     plan.plan.righttree = None;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
+}
+
+// create_memoize_plan + make_memoize (createplan.c).
+fn create_memoize_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath, hash_ops, param_expr_ids, singlerow, binary_mode, est_entries) =
+        match run.root.path(path_id) {
+            PathNode::MemoizePath(mp) => (
+                mp.subpath.expect("Memoize subpath"),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.hash_operators),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.param_exprs),
+                mp.singlerow,
+                mp.binary_mode,
+                mp.est_entries,
+            ),
+            other => {
+                panic!("create_memoize_plan (createplan.c): pathtype {}", other.base().pathtype)
+            }
+        };
+    let subplan = create_plan_recurse(run, subpath, flags | CP_SMALL_TLIST)?;
+
+    let mut param_exprs = NodeList::nil();
+    for &e in param_expr_ids.iter() {
+        let node = *run.root.expr_node(e);
+        param_exprs.lappend(mcx, replace_nestloop_params(run, node)?)?;
+    }
+    let nkeys = param_exprs.len();
+    debug_assert!(nkeys > 0 && hash_ops.len() == nkeys);
+
+    let mut collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for e in &param_exprs {
+        collations.push(crate::pathkeys::expr_collation(e));
+    }
+    let mut keyparamids = types_nodes::bitmapset::Bitmapset::empty();
+    for e in &param_exprs {
+        pull_paramids(run.mcx, e, &mut keyparamids)?;
+    }
+
+    let mut tlist = NodeList::nil();
+    for te in subplan.as_plan().expect("subplan").targetlist.iter() {
+        tlist.lappend(mcx, te)?;
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Memoize>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.plan.righttree = None;
+    plan.numKeys = nkeys as i32;
+    plan.hashOperators = mcx::slice_borrow_in(mcx, &hash_ops)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
+    plan.param_exprs = param_exprs;
+    plan.singlerow = singlerow;
+    plan.binary_mode = binary_mode;
+    plan.est_entries = est_entries;
+    plan.keyparamids = keyparamids;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// pull_paramids (createplan.c) over the replaced (plan-side) exprs.
+fn pull_paramids<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    out: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    if let Some(p) = node.as_param() {
+        out.add_member(mcx, p.paramid)?;
+        return Ok(());
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        pull_paramids(mcx, n, out)?;
+        Ok(None)
+    })?;
+    Ok(())
 }
 
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {

@@ -44,6 +44,7 @@ xact = { path = "../../access/transam/xact" }
 elog = { path = "../../utils/error/elog" }
 
 [dev-dependencies]
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

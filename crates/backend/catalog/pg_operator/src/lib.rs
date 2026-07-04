@@ -638,7 +638,7 @@ pub fn makeOperatorDependencies(
 
     if isUpdate {
         catalog_dependency::deleteDependencyRecordsFor(mcx, myself.classId, myself.objectId, true)?;
-        catalog_dependency::deleteSharedDependencyRecordsFor(
+        pg_shdepend::deleteSharedDependencyRecordsFor(
             mcx,
             myself.classId,
             myself.objectId,
@@ -671,7 +671,7 @@ pub fn makeOperatorDependencies(
         DependencyType::Normal,
     )?;
 
-    pg_depend::recordDependencyOnOwner(OPERATOR_RELATION_ID, oper.oid, oper.oprowner);
+    pg_depend::recordDependencyOnOwner(mcx, OPERATOR_RELATION_ID, oper.oid, oper.oprowner)?;
 
     // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION unported.
     let _ = makeExtensionDep;

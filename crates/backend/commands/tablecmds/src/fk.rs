@@ -1,9 +1,9 @@
 // ATExecAddConstraint FK slice (tablecmds.c): ATAddForeignKeyConstraint +
 // addFkConstraint/addFkRecurseReferenced/addFkRecurseReferencing +
-// createForeignKey{Action,Check}Triggers, plain-table MATCH SIMPLE
-// NO ACTION/RESTRICT lane. LOUD: CASCADE/SET NULL/SET DEFAULT actions,
-// MATCH FULL/PARTIAL, PERIOD, partitioned rels, NOT ENFORCED, validation
-// scans (skip_validation=false), old_conpfeqop re-add lane.
+// createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint,
+// plain-table MATCH SIMPLE lane, all ON DELETE/UPDATE actions. LOUD:
+// MATCH FULL/PARTIAL, PERIOD, partitioned rels, NOT ENFORCED,
+// DEFERRABLE/INITIALLY DEFERRED, old_conpfeqop re-add lane.
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_MAX_KEYS};
@@ -13,7 +13,8 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::rawnodes::{
-    Constraint, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT, FKCONSTR_MATCH_SIMPLE,
+    Constraint, FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
+    FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_SIMPLE,
 };
 use types_nodes::NodeList;
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
@@ -23,8 +24,14 @@ use types_trigger::{TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_ROW,
 
 const F_RI_FKEY_CHECK_INS: Oid = 1644;
 const F_RI_FKEY_CHECK_UPD: Oid = 1645;
+const F_RI_FKEY_CASCADE_DEL: Oid = 1646;
+const F_RI_FKEY_CASCADE_UPD: Oid = 1647;
 const F_RI_FKEY_RESTRICT_DEL: Oid = 1648;
 const F_RI_FKEY_RESTRICT_UPD: Oid = 1649;
+const F_RI_FKEY_SETNULL_DEL: Oid = 1650;
+const F_RI_FKEY_SETNULL_UPD: Oid = 1651;
+const F_RI_FKEY_SETDEFAULT_DEL: Oid = 1652;
+const F_RI_FKEY_SETDEFAULT_UPD: Oid = 1653;
 const F_RI_FKEY_NOACTION_DEL: Oid = 1654;
 const F_RI_FKEY_NOACTION_UPD: Oid = 1655;
 
@@ -43,11 +50,19 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// NewConstraint CONSTR_FOREIGN fields (tablecmds.c), for the Phase-3 pass.
+pub(crate) struct FkValidateItem<'mcx> {
+    pub conname: &'mcx str,
+    pub refrelid: Oid,
+    pub refindid: Oid,
+    pub conid: Oid,
+}
+
 pub(crate) fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     constraint: &Constraint<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<FkValidateItem<'mcx>>> {
     use types_nodes::rawnodes::ConstrType;
     match constraint.contype {
         ConstrType::CONSTR_FOREIGN => {}
@@ -89,7 +104,7 @@ fn at_add_foreign_key_constraint<'mcx>(
     rel: &Relation<'mcx>,
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
-) -> PgResult<()> {
+) -> PgResult<Option<FkValidateItem<'mcx>>> {
     if fkconstraint.old_pktable_oid != InvalidOid || !fkconstraint.old_conpfeqop.is_nil() {
         unported("old_pktable_oid / old_conpfeqop (re-add lane)");
     }
@@ -99,28 +114,9 @@ fn at_add_foreign_key_constraint<'mcx>(
     if fkconstraint.fk_matchtype != FKCONSTR_MATCH_SIMPLE {
         unported("MATCH FULL/PARTIAL (fk_matchtype beyond simple)");
     }
-    if !matches!(
-        fkconstraint.fk_upd_action,
-        FKCONSTR_ACTION_NOACTION | FKCONSTR_ACTION_RESTRICT
-    ) || !matches!(
-        fkconstraint.fk_del_action,
-        FKCONSTR_ACTION_NOACTION | FKCONSTR_ACTION_RESTRICT
-    ) {
-        unported("ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT actions");
-    }
-    if !fkconstraint.fk_del_set_cols.is_nil() {
-        unported("ON DELETE SET ... (column list)");
-    }
-    if fkconstraint.deferrable || fkconstraint.initdeferred {
-        unported("DEFERRABLE/INITIALLY DEFERRED");
-    }
     if !fkconstraint.is_enforced {
         unported("NOT ENFORCED");
     }
-    if !fkconstraint.skip_validation {
-        unported("FK validation scan (RI_Initial_Check / ATRewriteTables phase 3)");
-    }
-    debug_assert!(fkconstraint.initially_valid);
 
     let pktable = fkconstraint.pktable.expect("FK constraint without pktable");
     let pkrv = rel_vocab::RangeVar {
@@ -169,6 +165,22 @@ fn at_add_foreign_key_constraint<'mcx>(
         Some(&mut fkcolloid),
     )?;
 
+    let mut fkdelsetcols = [0i16; INDEX_MAX_KEYS as usize];
+    let numfkdelsetcols = transform_column_name_list(
+        rel,
+        &fkconstraint.fk_del_set_cols,
+        &mut fkdelsetcols,
+        None,
+        None,
+    )?;
+    let numfkdelsetcols = validate_fk_on_delete_set_columns(
+        numfks,
+        &fkattnum,
+        numfkdelsetcols,
+        &mut fkdelsetcols,
+        &fkconstraint.fk_del_set_cols,
+    )?;
+
     let mut pkattnum = [0i16; INDEX_MAX_KEYS as usize];
     let mut pktypoid = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut pkcolloid = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -207,9 +219,43 @@ fn at_add_foreign_key_constraint<'mcx>(
     }
 
     for i in 0..numfks {
-        let att = rel.rd_att.attr(fkattnum[i] as usize - 1);
-        if att.attgenerated != 0 {
-            unported("FK over generated columns");
+        let attgenerated = rel.rd_att.attr(fkattnum[i] as usize - 1).attgenerated;
+        if attgenerated != 0 {
+            // SQL-standard restrictions on UPDATE/DELETE actions.
+            if fkconstraint.fk_upd_action == FKCONSTR_ACTION_SETNULL
+                || fkconstraint.fk_upd_action == FKCONSTR_ACTION_SETDEFAULT
+                || fkconstraint.fk_upd_action == FKCONSTR_ACTION_CASCADE
+            {
+                let e = err(
+                    "invalid ON UPDATE action for foreign key constraint containing \
+                     generated column"
+                        .into(),
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                );
+                pkrel.close(NoLock)?;
+                return Err(e);
+            }
+            if fkconstraint.fk_del_action == FKCONSTR_ACTION_SETNULL
+                || fkconstraint.fk_del_action == FKCONSTR_ACTION_SETDEFAULT
+            {
+                let e = err(
+                    "invalid ON DELETE action for foreign key constraint containing \
+                     generated column"
+                        .into(),
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                );
+                pkrel.close(NoLock)?;
+                return Err(e);
+            }
+        }
+        if attgenerated == b'v' as i8 {
+            let e = err(
+                "foreign key constraints on virtual generated columns are not supported"
+                    .into(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            );
+            pkrel.close(NoLock)?;
+            return Err(e);
         }
     }
 
@@ -319,13 +365,118 @@ fn at_add_foreign_key_constraint<'mcx>(
         &pfeqoperators,
         &ppeqoperators,
         &ffeqoperators,
+        &fkdelsetcols[..numfkdelsetcols],
     )?;
 
     create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
-    create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, constr_oid, index_oid)?;
+    create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
+
+    let validate = if !fkconstraint.skip_validation && fkconstraint.is_enforced {
+        debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
+        Some(FkValidateItem {
+            conname: str_in(mcx, conname)?,
+            refrelid: pkrel.rd_id,
+            refindid: index_oid,
+            conid: constr_oid,
+        })
+    } else {
+        None
+    };
 
     pkrel.close(NoLock)?;
-    Ok(())
+    Ok(validate)
+}
+
+// validateFkOnDeleteSetColumns (tablecmds.c); dedups in place.
+fn validate_fk_on_delete_set_columns(
+    numfks: usize,
+    fkattnums: &[i16],
+    numfksetcols: usize,
+    fksetcolsattnums: &mut [i16],
+    fksetcols: &NodeList<'_>,
+) -> PgResult<usize> {
+    let mut numcolsout = 0usize;
+    for i in 0..numfksetcols {
+        let setcol_attnum = fksetcolsattnums[i];
+        if !fkattnums[..numfks].contains(&setcol_attnum) {
+            let col = fksetcols.nth(i).as_string().expect("set col String").sval;
+            return Err(err(
+                format!(
+                    "column \"{col}\" referenced in ON DELETE SET action must be part of foreign key"
+                ),
+                types_error::ERRCODE_INVALID_COLUMN_REFERENCE,
+            ));
+        }
+        if !fksetcolsattnums[..numcolsout].contains(&setcol_attnum) {
+            fksetcolsattnums[numcolsout] = setcol_attnum;
+            numcolsout += 1;
+        }
+    }
+    Ok(numcolsout)
+}
+
+// validateForeignKeyConstraint (tablecmds.c): Phase-3 whole-table check.
+pub(crate) fn validate_foreign_key_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    item: &FkValidateItem<'mcx>,
+) -> PgResult<()> {
+    let pkrel = table::table_open(mcx, item.refrelid, types_rel::RowShareLock)?;
+
+    let trig = types_trigger::Trigger {
+        tgoid: InvalidOid,
+        tgname: mcx::PgString::from_str_in(item.conname, mcx)?,
+        tgfoid: InvalidOid,
+        tgtype: 0,
+        tgenabled: types_trigger::TRIGGER_FIRES_ON_ORIGIN,
+        tgisinternal: true,
+        tgisclone: false,
+        tgconstrrelid: pkrel.rd_id,
+        tgconstrindid: item.refindid,
+        tgconstraint: item.conid,
+        tgdeferrable: false,
+        tginitdeferred: false,
+        tgnargs: 0,
+        tgnattr: 0,
+        tgattr: mcx::PgVec::new_in(mcx),
+        tgargs: mcx::PgVec::new_in(mcx),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    };
+
+    if ri_triggers_seams::ri_initial_check::call(mcx, &trig, rel, &pkrel)? {
+        return pkrel.close(types_rel::NoLock);
+    }
+
+    let snap = snapmgr::GetLatestSnapshot()?;
+    let snap = snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot");
+    let mut scan = tableam::table_beginscan(
+        mcx,
+        rel,
+        Some(snap.clone()),
+        0,
+        mcx::PgVec::new_in(mcx),
+    )?;
+    {
+        let tableam::TableScanDesc::Heap(hscan) = &mut scan;
+        while let Some(tup) = heapam::heap_getnext(
+            hscan,
+            types_scan::ScanDirection::ForwardScanDirection,
+        )? {
+            let data = ri_triggers_seams::RiTriggerData {
+                tg_event: types_trigger::TRIGGER_EVENT_INSERT | types_trigger::TRIGGER_EVENT_ROW,
+                tg_relation: rel,
+                tg_trigtuple: tup,
+                tg_newtuple: None,
+                tg_trigger: &trig,
+            };
+            ri_triggers_seams::ri_fkey_trigger::call(mcx, F_RI_FKEY_CHECK_INS, &data)?;
+        }
+    }
+    tableam::table_endscan(scan)?;
+    snapmgr::UnregisterSnapshot(Some(&snap));
+    pkrel.close(types_rel::NoLock)
 }
 
 // transformColumnNameList (tablecmds.c) over the open relation's descriptor
@@ -568,6 +719,7 @@ fn add_fk_constraint<'mcx>(
     pfeqoperators: &[Oid],
     ppeqoperators: &[Oid],
     ffeqoperators: &[Oid],
+    fkdelsetcols: &[i16],
 ) -> PgResult<Oid> {
     let conname_storage;
     let conname = if constraint_name_is_used(mcx, rel.rd_id, conname)? {
@@ -596,6 +748,7 @@ fn add_fk_constraint<'mcx>(
     entry.pf_eq_op = &pfeqoperators[..numfks];
     entry.pp_eq_op = &ppeqoperators[..numfks];
     entry.ff_eq_op = &ffeqoperators[..numfks];
+    entry.fk_del_set_cols = fkdelsetcols;
     entry.fk_upd_type = fkconstraint.fk_upd_action;
     entry.fk_del_type = fkconstraint.fk_del_action;
     entry.fk_match_type = fkconstraint.fk_matchtype;
@@ -620,7 +773,10 @@ fn create_foreign_key_action_triggers<'mcx>(
     let del_func = match fkconstraint.fk_del_action {
         FKCONSTR_ACTION_NOACTION => F_RI_FKEY_NOACTION_DEL,
         FKCONSTR_ACTION_RESTRICT => F_RI_FKEY_RESTRICT_DEL,
-        other => unported(&format!("FK action {other:?}")),
+        FKCONSTR_ACTION_CASCADE => F_RI_FKEY_CASCADE_DEL,
+        FKCONSTR_ACTION_SETNULL => F_RI_FKEY_SETNULL_DEL,
+        FKCONSTR_ACTION_SETDEFAULT => F_RI_FKEY_SETDEFAULT_DEL,
+        other => panic!("unrecognized FK action type: {other:?}"),
     };
     trigger::CreateTriggerInternal(
         mcx,
@@ -632,13 +788,20 @@ fn create_foreign_key_action_triggers<'mcx>(
             index_oid,
             funcoid: del_func,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_DELETE,
+            deferrable: fkconstraint.deferrable
+                && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
+            initdeferred: fkconstraint.initdeferred
+                && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
         },
     )?;
     xact::CommandCounterIncrement()?;
     let upd_func = match fkconstraint.fk_upd_action {
         FKCONSTR_ACTION_NOACTION => F_RI_FKEY_NOACTION_UPD,
         FKCONSTR_ACTION_RESTRICT => F_RI_FKEY_RESTRICT_UPD,
-        other => unported(&format!("FK action {other:?}")),
+        FKCONSTR_ACTION_CASCADE => F_RI_FKEY_CASCADE_UPD,
+        FKCONSTR_ACTION_SETNULL => F_RI_FKEY_SETNULL_UPD,
+        FKCONSTR_ACTION_SETDEFAULT => F_RI_FKEY_SETDEFAULT_UPD,
+        other => panic!("unrecognized FK action type: {other:?}"),
     };
     trigger::CreateTriggerInternal(
         mcx,
@@ -650,6 +813,10 @@ fn create_foreign_key_action_triggers<'mcx>(
             index_oid,
             funcoid: upd_func,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            deferrable: fkconstraint.deferrable
+                && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
+            initdeferred: fkconstraint.initdeferred
+                && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
         },
     )?;
     Ok(())
@@ -661,6 +828,7 @@ fn create_foreign_key_check_triggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
     ref_rel_oid: Oid,
+    fkconstraint: &Constraint<'_>,
     constraint_oid: Oid,
     index_oid: Oid,
 ) -> PgResult<()> {
@@ -674,6 +842,8 @@ fn create_foreign_key_check_triggers<'mcx>(
             index_oid,
             funcoid: F_RI_FKEY_CHECK_INS,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_INSERT,
+            deferrable: fkconstraint.deferrable,
+            initdeferred: fkconstraint.initdeferred,
         },
     )?;
     xact::CommandCounterIncrement()?;
@@ -687,6 +857,8 @@ fn create_foreign_key_check_triggers<'mcx>(
             index_oid,
             funcoid: F_RI_FKEY_CHECK_UPD,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            deferrable: fkconstraint.deferrable,
+            initdeferred: fkconstraint.initdeferred,
         },
     )?;
     xact::CommandCounterIncrement()?;

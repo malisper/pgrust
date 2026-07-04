@@ -32,6 +32,9 @@ use ::types_resowner::{
 
 pub use ::types_core::CommandTag;
 
+mod funcs;
+pub use funcs::{fc_pg_cursor, PORTALMEM_BUILTINS};
+
 #[cfg(test)]
 mod tests;
 
@@ -189,9 +192,13 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
         debug_assert!(!m.index.contains_key(&key), "duplicate portal name");
         let name_copy = PgString::from_str_in(key.as_str(), mcx)?;
         // Parked contexts are already reset (PortalDrop): reuse is a pop, as
-        // C's context_freelists hit in AllocSetContextCreate.
+        // C's context_freelists hit in AllocSetContextCreate (which also
+        // overwrites the name on reuse).
         let portal_context = match m.free_contexts.pop() {
-            Some(ctx) => ctx,
+            Some(ctx) => {
+                ctx.set_name("PortalContext");
+                ctx
+            }
             None => PgBox::new_in(m.top.new_child("PortalContext"), mcx),
         };
         if !name_copy.is_empty() {
@@ -328,16 +335,22 @@ fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
 }
 
 pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
-    let top = mgr("PortalCreateHoldStore", |m| m.top)?;
+    let (top, pooled) = mgr("PortalCreateHoldStore", |m| (m.top, m.free_contexts.pop()))?;
     let random_access = {
         let mut p = portal.borrow_mut();
         debug_assert!(p.holdContext.is_none());
         debug_assert!(p.holdStore.is_null());
         debug_assert!(p.holdSnapshot.is_none());
         // NOT a child of portalContext: the store must survive the source
-        // transaction.
-        let hold = top.new_child("PortalHoldContext");
-        p.holdContext = Some(PgBox::new_in(hold, top.mcx()));
+        // transaction. Pool reuse = C's context_freelists hit.
+        let hold = match pooled {
+            Some(ctx) => {
+                ctx.set_name("PortalHoldContext");
+                ctx
+            }
+            None => PgBox::new_in(top.new_child("PortalHoldContext"), top.mcx()),
+        };
+        p.holdContext = Some(hold);
         (p.cursorOptions & CURSOR_OPT_SCROLL) != 0
     };
     let store = tuplestore_hold_seams::tuplestore_begin_heap_hold::call(random_access)?;
@@ -501,26 +514,29 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         tuplestore_hold_seams::tuplestore_end::call(hold_store);
     }
 
-    let ctx = {
+    let (ctx, hold_ctx) = {
         let mut p = portal.borrow_mut();
         p.tupDesc = None; // may live in portalContext/holdContext: free before the arenas
-        p.holdContext = None;
-        p.portalContext.take()
+        (p.portalContext.take(), p.holdContext.take())
     };
-    // Park the empty context whole (C's AllocSetDelete -> context_freelists):
+    // Park empty contexts whole (C's AllocSetDelete -> context_freelists):
     // reset runs outside the manager borrow (reset callbacks are user code).
     // A context with live (leaked-in) allocations takes the full destroy path.
-    let parked_ctx = ctx.and_then(|mut cb| {
-        if cb.used() == 0 {
-            cb.reset();
-            cb.set_ident(None);
-            Some(cb)
-        } else {
-            None
-        }
-    });
+    let park = |cb: Option<PgBox<'static, MemoryContext>>| {
+        cb.and_then(|mut cb| {
+            if cb.used() == 0 {
+                cb.reset();
+                cb.set_ident(None);
+                Some(cb)
+            } else {
+                None
+            }
+        })
+    };
+    let parked_ctx = park(ctx);
+    let parked_hold = park(hold_ctx);
     with_mgr(|m| {
-        if let Some(cb) = parked_ctx {
+        for cb in [parked_ctx, parked_hold].into_iter().flatten() {
             if m.free_contexts.len() < PORTAL_POOL_MAX {
                 m.free_contexts.push(cb);
             }

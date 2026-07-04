@@ -25,6 +25,7 @@ seam_core::seam!(
         fname: &'a str,
         argtypes: &'a [Oid],
         argnames: &'a [&'a str],
+        input_collation: Oid,
         query_env: QueryEnvHandle,
     ) -> PgResult<Query<'mcx>>
 );

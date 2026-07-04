@@ -332,6 +332,9 @@ fn install_type_fixture() {
                 // 481 = int8(int4), the pg_cast int4->int8 coercion function;
                 // 144 = int4ne.
                 177 | 147 | 481 | 65 | 144 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: match funcid {
                         147 | 65 | 144 => BOOLOID,
@@ -349,6 +352,9 @@ fn install_type_fixture() {
                     proleakproof: false,
                 }),
                 2803 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: 20,
                     provariadic: InvalidOid,
@@ -364,6 +370,9 @@ fn install_type_fixture() {
                 // sum(int4) 2108 / sum(int8) 2107; row_number/rank/dense_rank
                 // 3100-3102.
                 2107 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: 1700,
                     provariadic: InvalidOid,
@@ -377,6 +386,9 @@ fn install_type_fixture() {
                     proleakproof: false,
                 }),
                 2108 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: 20,
                     provariadic: InvalidOid,
@@ -390,6 +402,9 @@ fn install_type_fixture() {
                     proleakproof: false,
                 }),
                 3100 | 3101 | 3102 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: 20,
                     provariadic: InvalidOid,

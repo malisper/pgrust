@@ -109,6 +109,17 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
+    // element table (and its hash FuncCall) lives in state.saop_tables.
+    HashedScalarArrayOp {
+        call: FuncCall,
+        inclause: bool,
+        typlen: i16,
+        typbyval: bool,
+        typalign: u8,
+        table: u32,
+        out: OutRef,
+    },
     // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
@@ -190,18 +201,40 @@ pub enum Step {
     DomainNotNull { resulttype: Oid, out: OutRef },
     // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
+    JumpIfNull { jumpdone: u32, out: OutRef },
+    ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
+    SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
+    SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
+    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
     NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
-    // timetz: compile-allocated 12-byte TimeTz image, rewritten per eval —
-    // valid until the next eval, the window C's per-tuple context reset gives.
+    // scratch: compile-allocated by-ref result image (12-byte TimeTz or
+    // 64-byte NameData), rewritten per eval — valid until the next eval, the
+    // window C's per-tuple context reset gives.
     SqlValueFunction {
         op: ::types_nodes::primnodes::SQLValueFunctionOp,
         typmod: i32,
-        timetz: NonNull<u8>,
+        scratch: NonNull<u8>,
         out: OutRef,
     },
+    // Ready-time fused pairs (fuse_program): the two source steps back-to-back.
+    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
+    FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinct { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    NotDistinctQual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarAggTransByValIndirect {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: Call2,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -248,6 +281,20 @@ pub struct IoCoerceCalls {
     pub in_strict: bool,
 }
 
+// FuncCall minus frame/nargs (a constant 2): keeps fused steps inside 64B.
+#[derive(Clone, Copy, Debug)]
+pub struct Call2 {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+impl From<FuncCall> for Call2 {
+    fn from(c: FuncCall) -> Call2 {
+        debug_assert!(c.nargs == 2);
+        Call2 { fcinfo: c.fcinfo, flinfo: c.flinfo }
+    }
+}
+
 // Resolved once at compile; fn_addr rides in the FmgrInfo header line —
 // a copy here would push ScalarArrayOp/MinMax steps past the 64B budget.
 #[derive(Clone, Copy, Debug)]
@@ -264,6 +311,16 @@ impl FuncCall {
         // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
         unsafe { self.flinfo.as_ref() }.fn_addr
     }
+}
+
+// C ScalarArrayOpExprHashTable: lazily built on first eval, per-query
+// lifetime; buckets keyed by the element type's hash-fn result, dedup and
+// probe through the step's equality FuncCall.
+pub(crate) struct SaopTable<'mcx> {
+    pub(crate) hashcall: FuncCall,
+    pub(crate) built: bool,
+    pub(crate) has_nulls: bool,
+    pub(crate) map: ::mcx::PgFxHashMap<'mcx, u32, PgVec<'mcx, Datum>>,
 }
 
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image
@@ -536,6 +593,7 @@ pub enum SlotSrc {
 pub struct ExprState<'mcx> {
     pub(crate) steps: PgVec<'mcx, Step>,
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
+    pub(crate) saop_tables: PgVec<'mcx, SaopTable<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
@@ -548,6 +606,8 @@ pub struct ExprState<'mcx> {
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
     // C ExprState.innermost_domainval/innermost_domainnull: compile-time only.
     pub(crate) innermost_domain: Option<OutRef>,
+    // resmcx fields of allocating array-op step states, armed with frames.
+    pub(crate) alloc_mcx_slots: PgVec<'mcx, NonNull<crate::arrayops::ResMcx>>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -569,12 +629,14 @@ impl<'mcx> ExprState<'mcx> {
             p.write(ExprState {
                 steps,
                 frames: PgVec::new_in(mcx),
+                saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
                 resnd,
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
                 innermost_domain: None,
+                alloc_mcx_slots: PgVec::new_in(mcx),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -620,6 +682,11 @@ impl<'mcx> ExprState<'mcx> {
             // outlives every call through the frame.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
         }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field,
+            // live for 'mcx; the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
+        }
     }
 
     /// Lifetime-erased [`Self::arm_result_mcx`] (nodeAgg tmpcontext).
@@ -629,6 +696,11 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: frame image live for 'mcx, sole reference; the caller
             // guarantees the armed context outlives every call.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field;
+            // the caller guarantees the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
         }
     }
 
@@ -642,6 +714,9 @@ impl<'mcx> ExprState<'mcx> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn force_program_kernel(&mut self) {
-        self.kernel = Kernel::Program;
+        if !matches!(self.kernel, Kernel::Program) {
+            self.kernel = Kernel::Program;
+            crate::compile::fuse_program(self);
+        }
     }
 }

@@ -22,6 +22,14 @@ mod ssup;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) mod testhooks {
+    thread_local! {
+        pub static MKSORT_DISABLE: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+}
+
 pub use abbrev::AbbrevState;
 pub use ssup::{
     apply_sort_comparator, comparator_for_index_col, comparator_for_opfamily,
@@ -39,6 +47,8 @@ pub const TUPLESORT_RANDOMACCESS: i32 = 1 << 0;
 pub const TUPLESORT_ALLOWBOUNDED: i32 = 1 << 1;
 
 const INITIAL_MEMTUPSIZE: usize = 1024;
+// Below this the tie-fallback snapshot + segment bookkeeping never pay.
+const MKSORT_MIN: usize = 128;
 
 #[inline(always)]
 pub(crate) fn cfi() -> PgResult<()> {
@@ -234,6 +244,24 @@ impl CmpCtx<'_> {
         self.comparetup_tiebreak(a, b)
     }
 
+    /// comparetup_spec minus the datum1 null branches; caller proved the run
+    /// isnull1-free, so results (and tie order) are identical.
+    #[inline(always)]
+    fn comparetup_spec_notnull(&self, cmp: SortComparator, a: &SortTuple, b: &SortTuple) -> i32 {
+        debug_assert!(!a.isnull1 && !b.isnull1);
+        // SAFETY: as comparetup_spec.
+        let key0 = unsafe { self.keys.get_unchecked(0) };
+        let c = ssup::apply_cmp_in(cmp, a.datum1, b.datum1, key0.ssup_collation, self.mcx);
+        let compare = if key0.ssup_reverse { -c } else { c };
+        if compare != 0 {
+            return compare;
+        }
+        if self.only_key {
+            return 0;
+        }
+        self.comparetup_tiebreak(a, b)
+    }
+
     /// `comparetup_heap_tiebreak` / `comparetup_datum_tiebreak`: when abbrev
     /// is armed the leading key re-compares the ORIGINALS (datum1 words are
     /// abbreviations) via `ApplySortAbbrevFullComparator`; no-abbrev datum
@@ -406,7 +434,10 @@ macro_rules! ctx {
 /// compares monomorphized (no per-compare variant/shim ladder). M1-hot arms
 /// first. One `$body` instantiation per arm = C's ST_DEFINE cost shape.
 macro_rules! dispatch_cmp {
-    ($ctx:expr, |$cmp:ident| $body:expr) => {{
+    ($ctx:expr, |$cmp:ident| $body:expr) => {
+        dispatch_cmp!(@via comparetup_spec, $ctx, |$cmp| $body)
+    };
+    (@via $meth:ident, $ctx:expr, |$cmp:ident| $body:expr) => {{
         let __c = &$ctx;
         match __c.variant {
             SortVariant::IndexHash { high_mask, low_mask, max_buckets, .. } => {
@@ -420,55 +451,55 @@ macro_rules! dispatch_cmp {
             _ => match unsafe { __c.keys.get_unchecked(0) }.comparator {
                 SortComparator::Unsigned => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Unsigned, a, b)
+                        __c.$meth(SortComparator::Unsigned, a, b)
                     };
                     $body
                 }
                 SortComparator::SignedI64 => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::SignedI64, a, b)
+                        __c.$meth(SortComparator::SignedI64, a, b)
                     };
                     $body
                 }
                 SortComparator::Int32 => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Int32, a, b)
+                        __c.$meth(SortComparator::Int32, a, b)
                     };
                     $body
                 }
                 SortComparator::Int16 => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Int16, a, b)
+                        __c.$meth(SortComparator::Int16, a, b)
                     };
                     $body
                 }
                 SortComparator::Uint32 => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Uint32, a, b)
+                        __c.$meth(SortComparator::Uint32, a, b)
                     };
                     $body
                 }
                 SortComparator::TextC => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::TextC, a, b)
+                        __c.$meth(SortComparator::TextC, a, b)
                     };
                     $body
                 }
                 SortComparator::Interval => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Interval, a, b)
+                        __c.$meth(SortComparator::Interval, a, b)
                     };
                     $body
                 }
                 SortComparator::NameC => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::NameC, a, b)
+                        __c.$meth(SortComparator::NameC, a, b)
                     };
                     $body
                 }
                 SortComparator::BpcharC => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::BpcharC, a, b)
+                        __c.$meth(SortComparator::BpcharC, a, b)
                     };
                     $body
                 }
@@ -479,13 +510,13 @@ macro_rules! dispatch_cmp {
                 }
                 SortComparator::Uuid => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Uuid, a, b)
+                        __c.$meth(SortComparator::Uuid, a, b)
                     };
                     $body
                 }
                 SortComparator::Network => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
-                        __c.comparetup_spec(SortComparator::Network, a, b)
+                        __c.$meth(SortComparator::Network, a, b)
                     };
                     $body
                 }
@@ -1265,9 +1296,41 @@ fn datum_put_slow<'m>(
     val: Datum,
     is_null: bool,
 ) -> PgResult<(*mut SortTuple, *mut SortTuple)> {
-    datum_put_flush(st, next);
     let datum1 = if is_null { Datum::null() } else { val };
-    st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
+    // Bounded: window permanently empty, len pinned at bound — flush is a
+    // no-op and the discard leg runs inline (C's one-comparetup-per-put
+    // shape). Caller is putdatum_batch: byval Datum asserted, abbrev
+    // disarmed by set_bound ⇒ datum1 decides alone, no image to free.
+    if st.status == TupSortStatus::Bounded {
+        // SAFETY: TSS_BOUNDED holds exactly `bound` >= 1 tuples; Datum
+        // variant carries a sort key (begin_datum asserts).
+        let (heap_top, key0) = unsafe {
+            (*st.memtuples.get_unchecked(0), st.sort_keys.get_unchecked(0))
+        };
+        debug_assert!(st.abbrev.is_none());
+        debug_assert!(matches!(st.variant, SortVariant::Datum { byref_typlen: 0 }));
+        let compare = ssup::apply_sort_comparator_as_in(
+            key0.comparator,
+            st.mcx,
+            datum1,
+            is_null,
+            heap_top.datum1,
+            heap_top.isnull1,
+            key0,
+        );
+        if compare <= 0 {
+            cfi()?;
+        } else {
+            st.puttuple_bounded_replace(SortTuple {
+                tuple: core::ptr::null_mut(),
+                datum1,
+                isnull1: is_null,
+            })?;
+        }
+    } else {
+        datum_put_flush(st, next);
+        st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
+    }
     Ok(datum_put_window(st))
 }
 
@@ -1315,14 +1378,16 @@ impl<'m> TuplesortData<'m> {
         isnull1: bool,
         tuplen: i64,
     ) -> PgResult<()> {
-        if self.abbrev.is_some() && !isnull1 {
-            // C: converter never sees NULLs (datum1 keeps the zeroed word).
-            datum1 = self.abbrev_datum1(datum1);
-        }
         self.avail_mem -= tuplen;
 
         match self.status {
             TupSortStatus::Initial => {
+                // Abbrev can only be armed in Initial: set_bound disarms it
+                // before any put (C parity), so Bounded never pays this check.
+                if self.abbrev.is_some() && !isnull1 {
+                    // C: converter never sees NULLs (datum1 keeps the zeroed word).
+                    datum1 = self.abbrev_datum1(datum1);
+                }
                 if self.memtuples.len() >= self.memtuples.capacity() - 1 {
                     self.grow_memtuples();
                     debug_assert!(self.memtuples.len() < self.memtuples.capacity());
@@ -1354,6 +1419,7 @@ impl<'m> TuplesortData<'m> {
                 external_sort_unported();
             }
             TupSortStatus::Bounded => {
+                debug_assert!(self.abbrev.is_none());
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
@@ -1363,6 +1429,9 @@ impl<'m> TuplesortData<'m> {
     /// `tuplesort_puttuple_common` useAbbrev arm: convert unless
     /// `consider_abort_common` fires, in which case datum1 representation is
     /// restored across every already-stored memtuple (REMOVEABBREV).
+    /// Out of line: inlined it doubled puttuple_full on no-abbrev lanes
+    /// (m3 sort_limit +22 instr/row, jobs -1783120589/-1783120595).
+    #[inline(never)]
     fn abbrev_datum1(&mut self, original: Datum) -> Datum {
         if !self.consider_abort_common() {
             // SAFETY: variant putters pass live non-null datums of the armed
@@ -1448,9 +1517,25 @@ impl<'m> TuplesortData<'m> {
         // SAFETY: TSS_BOUNDED invariant — memtuples holds exactly `bound` >= 1
         // tuples from make_bounded_heap on.
         let heap_top = unsafe { *self.memtuples.get_unchecked(0) };
-        let compare = {
-            let ctx = ctx!(self);
-            dispatch_cmp!(ctx, |cmp| cmp(&tuple, &heap_top))
+        // datum1 decides alone when only_key, or Datum with abbrev disarmed
+        // (set_bound; tiebreak 0) — result-identical minus the per-put CmpCtx/
+        // dispatch ladder (docs/optimizations/orderby.md); generic arm outlined.
+        let compare = if self.only_key || matches!(self.variant, SortVariant::Datum { .. }) {
+            debug_assert!(self.abbrev.is_none());
+            // SAFETY: non-IndexHash variants carry >=1 key (begin_* asserts);
+            // IndexHash sorts are never bounded.
+            let key0 = unsafe { self.sort_keys.get_unchecked(0) };
+            ssup::apply_sort_comparator_as_in(
+                key0.comparator,
+                self.mcx,
+                tuple.datum1,
+                tuple.isnull1,
+                heap_top.datum1,
+                heap_top.isnull1,
+                key0,
+            )
+        } else {
+            self.bounded_cmp_generic(&tuple, &heap_top)
         };
         if compare <= 0 {
             self.free_sort_tuple(&tuple);
@@ -1458,6 +1543,12 @@ impl<'m> TuplesortData<'m> {
         } else {
             self.puttuple_bounded_replace(tuple)
         }
+    }
+
+    #[inline(never)]
+    fn bounded_cmp_generic(&self, a: &SortTuple, b: &SortTuple) -> i32 {
+        let ctx = ctx!(self);
+        dispatch_cmp!(ctx, |cmp| cmp(a, b))
     }
 
     #[inline(never)]
@@ -1539,26 +1630,145 @@ impl<'m> TuplesortData<'m> {
             return Ok(());
         }
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
-        let result = {
-            let ctx = ctx!(self);
-            if self.have_datum1 || matches!(self.variant, SortVariant::IndexHash { .. }) {
-                dispatch_cmp!(ctx, |cmp| qsort_tuple(&mut tuples, cmp))
-            } else if self.only_key {
-                qsort_tuple(&mut tuples, |a, b| {
-                    ssup::apply_sort_comparator_in(
-                        ctx.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &ctx.keys[0],
-                    )
-                })
-            } else {
-                qsort_tuple(&mut tuples, |a, b| ctx.comparetup(a, b))
-            }
-        };
+        let result = self.sort_memtuples_inner(&mut tuples);
         self.memtuples = tuples;
         result?;
         if let Some(err) = self.unique_violation.take() {
             return Err(err);
         }
         Ok(())
+    }
+
+    fn sort_memtuples_inner(&self, tuples: &mut [SortTuple]) -> PgResult<()> {
+        let ctx = ctx!(self);
+        if self.have_datum1 || matches!(self.variant, SortVariant::IndexHash { .. }) {
+            if self.mksort_applies(tuples.len()) {
+                return self.mksort_heap(tuples);
+            }
+            if matches!(self.variant, SortVariant::IndexHash { .. })
+                || tuples.iter().any(|t| t.isnull1)
+            {
+                dispatch_cmp!(ctx, |cmp| qsort_tuple(tuples, cmp))
+            } else {
+                dispatch_cmp!(@via comparetup_spec_notnull, ctx, |cmp| qsort_tuple(tuples, cmp))
+            }
+        } else if self.only_key {
+            qsort_tuple(tuples, |a, b| {
+                ssup::apply_sort_comparator_in(
+                    ctx.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &ctx.keys[0],
+                )
+            })
+        } else {
+            qsort_tuple(tuples, |a, b| ctx.comparetup(a, b))
+        }
+    }
+
+    fn mksort_applies(&self, n: usize) -> bool {
+        #[cfg(test)]
+        if testhooks::MKSORT_DISABLE.with(|c| c.get()) {
+            return false;
+        }
+        matches!(self.variant, SortVariant::Heap { .. })
+            && self.have_datum1
+            && self.sort_keys.len() >= 2
+            && n >= MKSORT_MIN
+    }
+
+    /// Bentley-Sedgewick multi-key sort: leading key alone first, recurse per
+    /// equal-key segment. Tie invariant: a full-key-unique input has a unique
+    /// sorted permutation (== pg_qsort's); any full-key duplicate ends
+    /// adjacent in its last-key segment, is detected there, and the pre-sort
+    /// array is restored and re-sorted on the exact pg_qsort path — C tie
+    /// order holds unconditionally.
+    fn mksort_heap(&self, tuples: &mut [SortTuple]) -> PgResult<()> {
+        let mut scratch: PgVec<'_, SortTuple> = PgVec::new_in(self.mcx);
+        scratch.extend_from_slice(tuples);
+        let ctx0 = CmpCtx {
+            mcx: self.mcx,
+            keys: &self.sort_keys[..1],
+            // begin_common's rule: abbrev-equal words need the full tiebreak.
+            only_key: self.abbrev.is_none(),
+            abbrev: &self.abbrev,
+            variant: &self.variant,
+            unique_violation: &self.unique_violation,
+        };
+        let tied = if tuples.iter().any(|t| t.isnull1) {
+            dispatch_cmp!(ctx0, |cmp| self.mksort_level0(tuples, cmp))?
+        } else {
+            dispatch_cmp!(@via comparetup_spec_notnull, ctx0, |cmp| self
+                .mksort_level0(tuples, cmp))?
+        };
+        if tied {
+            tuples.copy_from_slice(&scratch);
+            let ctx = ctx!(self);
+            if tuples.iter().any(|t| t.isnull1) {
+                dispatch_cmp!(ctx, |cmp| qsort_tuple(tuples, cmp))?;
+            } else {
+                dispatch_cmp!(@via comparetup_spec_notnull, ctx, |cmp| qsort_tuple(tuples, cmp))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn mksort_level0(
+        &self,
+        tuples: &mut [SortTuple],
+        cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+    ) -> PgResult<bool> {
+        qsort_tuple(tuples, cmp)?;
+        let n = tuples.len();
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && cmp(&tuples[i], &tuples[j]) == 0 {
+                j += 1;
+            }
+            if j - i > 1 && self.mksort_tail(&mut tuples[i..j], 1)? {
+                return Ok(true);
+            }
+            i = j;
+            cfi()?;
+        }
+        Ok(false)
+    }
+
+    /// Sort one equal-on-keys[..k] segment by key k, recursing into its own
+    /// equal runs; true = a full-key duplicate pair exists (all keys equal).
+    fn mksort_tail(&self, seg: &mut [SortTuple], k: usize) -> PgResult<bool> {
+        let SortVariant::Heap { tup_desc } = &self.variant else {
+            unreachable!("mksort_applies gates on Heap")
+        };
+        let key = &self.sort_keys[k];
+        let attno = key.ssup_attno as i32;
+        let mcx = self.mcx;
+        let cmpk = move |a: &SortTuple, b: &SortTuple| {
+            let (mut n1, mut n2) = (false, false);
+            // SAFETY: heap-variant SortTuples always carry a live minimal
+            // tuple copied under this descriptor.
+            let (d1, d2) = unsafe {
+                (
+                    minimal_getattr(a.tuple, attno, tup_desc, &mut n1),
+                    minimal_getattr(b.tuple, attno, tup_desc, &mut n2),
+                )
+            };
+            ssup::apply_sort_comparator_in(mcx, d1, n1, d2, n2, key)
+        };
+        qsort_tuple(seg, cmpk)?;
+        let last = k + 1 == self.sort_keys.len();
+        let n = seg.len();
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && cmpk(&seg[i], &seg[j]) == 0 {
+                j += 1;
+            }
+            if j - i > 1 && (last || self.mksort_tail(&mut seg[i..j], k + 1)?) {
+                return Ok(true);
+            }
+            i = j;
+            cfi()?;
+        }
+        Ok(false)
     }
 
     #[inline(never)]

@@ -586,6 +586,68 @@ fn cluster_reindex_rule_numbers_match_tables() {
 }
 
 #[test]
+fn role_stmt_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (147, "CreateRoleStmt", 1166),
+        (151, "OptRoleList", 1189),
+        (153, "AlterOptRoleList", 1194),
+        (155, "AlterOptRoleElem", 1199),
+        (156, "AlterOptRoleElem", 1204),
+        (157, "AlterOptRoleElem", 1208),
+        (158, "AlterOptRoleElem", 1218),
+        (159, "AlterOptRoleElem", 1226),
+        (160, "AlterOptRoleElem", 1230),
+        (161, "AlterOptRoleElem", 1234),
+        (162, "AlterOptRoleElem", 1239),
+        (163, "AlterOptRoleElem", 1243),
+        (165, "CreateOptRoleElem", 1293),
+        (166, "CreateOptRoleElem", 1297),
+        (167, "CreateOptRoleElem", 1301),
+        (168, "CreateOptRoleElem", 1305),
+        (169, "CreateOptRoleElem", 1309),
+        (170, "CreateUserStmt", 1323),
+        (171, "AlterRoleStmt", 1342),
+        (172, "AlterRoleStmt", 1351),
+        (175, "AlterRoleSetStmt", 1368),
+        (176, "AlterRoleSetStmt", 1377),
+        (177, "AlterRoleSetStmt", 1386),
+        (178, "AlterRoleSetStmt", 1395),
+        (179, "DropRoleStmt", 1417),
+        (180, "DropRoleStmt", 1425),
+        (181, "DropRoleStmt", 1433),
+        (182, "DropRoleStmt", 1441),
+        (183, "DropRoleStmt", 1449),
+        (184, "DropRoleStmt", 1457),
+        (185, "CreateGroupStmt", 1475),
+        (186, "AlterGroupStmt", 1494),
+        (187, "add_drop", 1506),
+        (188, "add_drop", 1507),
+        (217, "set_rest_more", 1754),
+        (256, "SetResetClause", 1956),
+        (916, "DropOwnedStmt", 6886),
+        (917, "ReassignOwnedStmt", 6897),
+        (1073, "GrantRoleStmt", 8012),
+        (1074, "GrantRoleStmt", 8023),
+        (1075, "RevokeRoleStmt", 8037),
+        (1076, "RevokeRoleStmt", 8049),
+        (1077, "grant_role_opt_list", 8067),
+        (1078, "grant_role_opt_list", 8068),
+        (1079, "grant_role_opt", 8072),
+        (1080, "grant_role_opt_value", 8079),
+        (1081, "grant_role_opt_value", 8080),
+        (1082, "grant_role_opt_value", 8081),
+        (2457, "RoleId", 17461),
+        (2462, "role_list", 17544),
+        (2463, "role_list", 17546),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
 fn cluster_statement_forms() {
     use types_nodes::parsenodes::{ClusterStmt, ReindexObjectType, ReindexStmt};
     let list = parse("CLUSTER t USING idx");
@@ -1649,4 +1711,124 @@ fn alter_table_enable_disable_rule() {
         assert_eq!(cmd.subtype, subtype, "{sql}");
         assert_eq!(cmd.name, Some(name), "{sql}");
     }
+}
+
+#[test]
+fn drop_function_shapes() {
+    use types_nodes::parsenodes::{DropBehavior, ObjectType};
+    let list = parse("DROP FUNCTION f(int, text), s.g() CASCADE");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_FUNCTION);
+    assert!(!d.missing_ok);
+    assert_eq!(d.behavior, DropBehavior::DROP_CASCADE);
+    assert_eq!(d.objects.len(), 2);
+    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert!(!f.args_unspecified);
+    assert_eq!(f.objname.len(), 1);
+    assert_eq!(f.objname.nth(0).as_string().unwrap().sval, "f");
+    assert_eq!(f.objargs.len(), 2);
+    assert_eq!(f.objfuncargs.len(), 2);
+    let g = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(g.objname.len(), 2);
+    assert_eq!(g.objargs.len(), 0);
+    assert!(!g.args_unspecified);
+
+    let list = parse("DROP FUNCTION IF EXISTS f");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert!(d.missing_ok);
+    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert!(f.args_unspecified);
+    assert_eq!(f.objargs.len(), 0);
+
+    let list = parse("DROP PROCEDURE p(OUT a int, INOUT b text, VARIADIC c int)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_PROCEDURE);
+    let p = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(p.objfuncargs.len(), 3);
+    assert_eq!(p.objargs.len(), 2);
+
+    let list = parse("DROP AGGREGATE agg(int), agg2(*)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_AGGREGATE);
+    let a = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(a.objargs.len(), 1);
+    let a2 = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(a2.objargs.len(), 0);
+    assert!(!a2.args_unspecified);
+}
+
+#[test]
+fn comment_on_function_shape() {
+    use types_nodes::parsenodes::ObjectType;
+    let list = parse("COMMENT ON FUNCTION s.f(int) IS 'c'");
+    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    assert_eq!(c.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(c.comment, Some("c"));
+    let f = c.object.unwrap().as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(f.objname.len(), 2);
+    assert_eq!(f.objargs.len(), 1);
+
+    let list = parse("COMMENT ON AGGREGATE agg(text) IS NULL");
+    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    assert_eq!(c.objtype, ObjectType::OBJECT_AGGREGATE);
+    assert_eq!(c.comment, None);
+}
+
+#[test]
+fn alter_function_shapes() {
+    use types_nodes::parsenodes::ObjectType;
+    let list = parse("ALTER FUNCTION f(int) STRICT IMMUTABLE RESTRICT");
+    let a = only_stmt(&list).stmt.unwrap().as_alter_function_stmt().expect("AlterFunctionStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(a.actions.len(), 2);
+    assert_eq!(a.func.unwrap().objargs.len(), 1);
+
+    let list = parse("ALTER FUNCTION f(int) RENAME TO g");
+    let r = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::RenameStmt>()
+        .expect("RenameStmt");
+    assert_eq!(r.renameType, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(r.newname, Some("g"));
+    assert!(r.object.unwrap().as_object_with_args().is_some());
+
+    let list = parse("ALTER ROUTINE r(int) OWNER TO alice");
+    let o = only_stmt(&list).stmt.unwrap().as_alter_owner_stmt().expect("AlterOwnerStmt");
+    assert_eq!(o.objectType, ObjectType::OBJECT_ROUTINE);
+    assert_eq!(o.newowner.unwrap().rolename, Some("alice"));
+    assert!(o.object.unwrap().as_object_with_args().is_some());
+}
+
+#[test]
+fn grant_on_function_shapes() {
+    use types_nodes::parsenodes::{GrantTargetType, ObjectType};
+    let list = parse("GRANT EXECUTE ON FUNCTION f(int), s.g TO u");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_OBJECT);
+    assert_eq!(g.objects.len(), 2);
+    assert!(g.objects.nth(1).as_object_with_args().unwrap().args_unspecified);
+
+    let list = parse("REVOKE ALL ON ALL PROCEDURES IN SCHEMA s FROM u");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::parsenodes::GrantStmt>()
+        .expect("GrantStmt");
+    assert!(!g.is_grant);
+    assert_eq!(g.objtype, ObjectType::OBJECT_PROCEDURE);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
+    assert_eq!(g.objects.nth(0).as_string().unwrap().sval, "s");
+}
+
+#[test]
+fn aggregate_output_args_rejected() {
+    let err = parse_err("DROP AGGREGATE a(OUT x int)");
+    assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
 }

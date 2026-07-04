@@ -55,6 +55,9 @@ struct CachedPlanSource {
     search_path: Option<SearchPathMatcher<'static>>,
     result_desc: Option<Rc<TupleDescData<'static>>>,
     gplan: Option<CachedPlanHandle>,
+    depends_on_rls: bool,
+    rewrite_role_id: Oid,
+    rewrite_row_security: bool,
     is_complete: bool,
     is_saved: bool,
     is_valid: bool,
@@ -233,6 +236,9 @@ pub fn CreateCachedPlan(
             search_path: None,
             result_desc: None,
             gplan: None,
+            depends_on_rls: false,
+            rewrite_role_id: InvalidOid,
+            rewrite_row_security: false,
             is_complete: false,
             is_saved: false,
             is_valid: false,
@@ -297,8 +303,14 @@ pub fn CompleteCachedPlan(
     let result_desc = plan_cache_compute_result_desc(source_mcx, query_list)?;
     let param_types: &'static [Oid] = mcx::slice_borrow_in(source_mcx, param_types)?;
 
+    let depends_on_rls = query_list.iter().any(|q| q.hasRowSecurity);
+    let rewrite_role_id = miscinit::GetUserId();
+    let rewrite_row_security = guc_tables::backing::row_security();
     with_source(h, |src| {
         src.query_list = query_list;
+        src.depends_on_rls = depends_on_rls;
+        src.rewrite_role_id = rewrite_role_id;
+        src.rewrite_row_security = rewrite_row_security;
         src.relation_oids = relation_oids;
         src.search_path = search_path;
         src.result_desc = result_desc;
@@ -503,12 +515,13 @@ pub fn GetCachedPlan(
             src.num_custom_plans += 1;
         });
         plan = Some(built);
-    } else {
-        with_source(h, |src| src.num_generic_plans += 1);
     }
 
     let plan = plan.expect("GetCachedPlan: no plan chosen");
     with_cache(|pc| {
+        if !customplan {
+            source_mut(pc, h).num_generic_plans += 1;
+        }
         let p = plan_mut(pc, plan);
         p.refcount += 1;
         if customplan && is_saved {
@@ -519,26 +532,48 @@ pub fn GetCachedPlan(
 }
 
 fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -> PgResult<()> {
-    let requires_reval = with_source(h, |src| src.requires_reval);
+    // One borrow per phase; the catalog probe and lock calls run outside.
+    let (requires_reval, is_valid, mut matcher) = with_source(h, |src| {
+        let take = src.requires_reval && src.is_valid;
+        (
+            src.requires_reval,
+            src.is_valid,
+            if take { src.search_path.take() } else { None },
+        )
+    });
     if !requires_reval {
-        debug_assert!(with_source(h, |src| src.is_valid));
+        debug_assert!(is_valid);
         return Ok(());
     }
 
-    if with_source(h, |src| src.is_valid) {
-        let mut matcher = with_source(h, |src| src.search_path.take());
+    if is_valid {
         let matches = match matcher.as_mut() {
             Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m)?,
             None => panic!("RevalidateCachedQuery: valid revalidatable source lost its search_path"),
         };
-        with_source(h, |src| src.search_path = matcher);
-        if !matches {
-            invalidate_source(h);
-        }
+        with_cache(|pc| {
+            let src = source_mut(pc, h);
+            src.search_path = matcher;
+            if !matches {
+                if let Some(gplan) = invalidate_source_entry(src) {
+                    plan_mut(pc, gplan).is_valid = false;
+                }
+            }
+        });
     }
 
-    if with_source(h, |src| src.is_valid) {
-        let query_list = with_source(h, |src| src.query_list);
+    // The rewrite had an RLS dependency: redo it if the role or the
+    // row_security setting changed (C plancache.c:714).
+    if with_source(h, |src| src.is_valid && src.depends_on_rls)
+        && with_source(h, |src| {
+            src.rewrite_role_id != miscinit::GetUserId()
+                || src.rewrite_row_security != guc_tables::backing::row_security()
+        })
+    {
+        invalidate_source(h);
+    }
+
+    if let Some(query_list) = with_source(h, |src| src.is_valid.then_some(src.query_list)) {
         AcquirePlannerLocks(query_list, true)?;
         if with_source(h, |src| src.is_valid) {
             return Ok(());
@@ -554,20 +589,20 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
 }
 
 fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
-    let Some(gplan) = with_source(h, |src| src.gplan) else {
-        return Ok(false);
-    };
-
     let user = miscinit::GetUserId();
-    let (mut is_valid, stmt_list) = with_cache(|pc| {
-        debug_assert!(source_mut(pc, h).is_valid);
+    let Some((gplan, mut is_valid, stmt_list)) = with_cache(|pc| {
+        let src = source_mut(pc, h);
+        debug_assert!(src.is_valid);
+        let gplan = src.gplan?;
         let plan = plan_mut(pc, gplan);
         debug_assert!(plan.refcount > 0);
         if plan.is_valid && plan.depends_on_role && plan.plan_role_id != user {
             plan.is_valid = false;
         }
-        (plan.is_valid, plan.stmt_list)
-    });
+        Some((gplan, plan.is_valid, plan.stmt_list))
+    }) else {
+        return Ok(false);
+    };
 
     if is_valid {
         AcquireExecutorLocks(stmt_list, true)?;
@@ -630,7 +665,7 @@ fn BuildCachedPlan(
         }
     };
 
-    let mut depends_on_role = false;
+    let mut depends_on_role = with_source(h, |src| src.depends_on_rls);
     let mut is_transient = false;
     for stmt in stmt_list {
         if stmt.commandType == CmdType::CMD_UTILITY {
@@ -888,10 +923,13 @@ fn cached_plan_cost(stmt_list: &[PlannedStmt<'_>], include_planner: bool) -> f64
 fn AcquirePlannerLocks(query_list: &[Query<'static>], acquire: bool) -> PgResult<()> {
     for query in query_list {
         if query.commandType == CmdType::CMD_UTILITY {
-            panic!(
-                "AcquirePlannerLocks (plancache.c): UtilityContainsQuery probe is the \
-                 EXPLAIN/CTAS/DECLARE lane"
-            );
+            let contained = query
+                .utilityStmt
+                .and_then(|s| utility_seams::utility_contains_query::call(s));
+            if let Some(q) = contained {
+                ScanQueryForLocks(q.as_query().expect("contained Query"), acquire)?;
+            }
+            continue;
         }
         ScanQueryForLocks(query, acquire)?;
     }
@@ -901,10 +939,14 @@ fn AcquirePlannerLocks(query_list: &[Query<'static>], acquire: bool) -> PgResult
 fn AcquireExecutorLocks(stmt_list: &[PlannedStmt<'static>], acquire: bool) -> PgResult<()> {
     for stmt in stmt_list {
         if stmt.commandType == CmdType::CMD_UTILITY {
-            panic!(
-                "AcquireExecutorLocks (plancache.c): UtilityContainsQuery probe is the \
-                 EXPLAIN/CTAS/DECLARE lane"
-            );
+            // C: unplanned Query inside EXPLAIN/DECLARE still needs its locks.
+            let contained = stmt
+                .utilityStmt
+                .and_then(|s| utility_seams::utility_contains_query::call(s));
+            if let Some(q) = contained {
+                ScanQueryForLocks(q.as_query().expect("contained Query"), acquire)?;
+            }
+            continue;
         }
         for rte_node in stmt.rtable.iter() {
             let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
@@ -1228,6 +1270,25 @@ pub fn CachedPlanNumParams(h: CachedPlanSourceHandle) -> usize {
 
 pub fn CachedPlanFixedResult(h: CachedPlanSourceHandle) -> bool {
     with_source(h, |src| src.fixed_result)
+}
+
+#[derive(Clone, Copy)]
+pub struct SourceExecInfo {
+    pub fixed_result: bool,
+    pub num_params: usize,
+    pub query_string: &'static str,
+    pub commandTag: CommandTag,
+}
+
+/// ExecuteQuery's per-EXECUTE field reads in one registry borrow (C reads
+/// plansource fields directly).
+pub fn CachedPlanSourceExecInfo(h: CachedPlanSourceHandle) -> SourceExecInfo {
+    with_source(h, |src| SourceExecInfo {
+        fixed_result: src.fixed_result,
+        num_params: src.param_types.len(),
+        query_string: src.query_string,
+        commandTag: src.commandTag,
+    })
 }
 
 pub fn CachedPlanGeneration(cplan: CachedPlanHandle) -> i32 {

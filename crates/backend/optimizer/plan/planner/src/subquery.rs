@@ -2,7 +2,7 @@ use mcx::alloc_leak_in;
 use types_error::PgResult;
 use types_nodes::list::NodeList;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{Query, RTEKind};
+use types_nodes::parsenodes::{Query, RTEKind, WithCheckOption};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::JoinDomain;
 
@@ -44,9 +44,7 @@ pub fn subquery_planner<'mcx>(
     if !parse.cteList.is_nil() {
         crate::cte::ss_process_ctes(run, &parse)?;
     }
-    if parse.commandType == CmdType::CMD_MERGE {
-        panic!("transform_MERGE_to_join (prepjointree.c): M2 MERGE lane");
-    }
+    crate::prepjointree::transform_MERGE_to_join(mcx, &mut parse)?;
     replace_empty_jointree(mcx, &mut parse)?;
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
@@ -57,6 +55,12 @@ pub fn subquery_planner<'mcx>(
         .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
     {
         crate::prepjointree::pull_up_subqueries(mcx, &mut parse)?;
+    }
+    if parse.rtable.iter().any(|n| {
+        let r = n.as_range_tbl_entry().expect("rtable cell");
+        r.rtekind == RTEKind::RTE_RELATION && matches!(r.relkind, b'r' | b'p')
+    }) {
+        crate::prepjointree::expand_virtual_generated_columns(mcx, &mut parse)?;
     }
 
     let mut has_outer_joins = false;
@@ -172,8 +176,28 @@ pub fn subquery_planner<'mcx>(
         if rte.lateral {
             run.root.hasLateralRTEs = true;
         }
+        // C splits this across two rtable loops (planner.c:834, :1050); no
+        // preprocessing here reads qual_security_level, so one pass is safe.
         if !rte.securityQuals.is_nil() {
-            panic!("subquery_planner (planner.c): securityQuals; M2 RLS lane");
+            run.root.qual_security_level =
+                run.root.qual_security_level.max(rte.securityQuals.len() as u32);
+            let has_sublinks = parse.hasSubLinks;
+            let mut quals = types_nodes::list::NodeList::nil();
+            for sq in &rte.securityQuals {
+                // A constant-true element preprocesses to None; keep an empty
+                // sublist so per-element security levels stay aligned.
+                let one = match preprocess_expression(run, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
+                    Some(n) => n,
+                    None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+                };
+                quals.lappend(mcx, one)?;
+            }
+            // SAFETY: as the RTE_RELATION arm above.
+            unsafe {
+                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = quals
+                })
+            };
         }
         // View perminfos flow through unchanged: ExecCheckOneRelPerms'
         // relation-level object_aclcheck arm covers relkind 'v'.
@@ -185,7 +209,23 @@ pub fn subquery_planner<'mcx>(
     let has_sublinks = parse.hasSubLinks;
     parse.targetList =
         preprocess_expression_list(run, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
-    debug_assert!(parse.withCheckOptions.is_nil());
+    if !parse.withCheckOptions.is_nil() {
+        let mut new_wcos = NodeList::nil();
+        for wco_node in &parse.withCheckOptions {
+            let wco_qual =
+                wco_node.as_with_check_option().expect("withCheckOptions cell").qual;
+            let qual = preprocess_expression(run, wco_qual, EXPRKIND_QUAL, has_sublinks)?;
+            // SAFETY: parse tree is planner-owned; no derived refs live.
+            unsafe {
+                wco_node.with_mut::<WithCheckOption, _>(|w| w.qual = qual)
+            }
+            .expect("WithCheckOption node");
+            if qual.is_some() {
+                new_wcos.lappend(run.mcx, wco_node)?;
+            }
+        }
+        parse.withCheckOptions = new_wcos;
+    }
     parse.returningList =
         preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
     preprocess_qual_conditions(run, &mut parse, has_sublinks)?;
@@ -209,9 +249,26 @@ pub fn subquery_planner<'mcx>(
         preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
     parse.limitCount =
         preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
-    if !parse.mergeActionList.is_nil() {
-        panic!("preprocess_expression (planner.c): MERGE; M4 MERGE lane");
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_tlist = preprocess_expression_list(
+            run,
+            action.targetList.clone_in(mcx)?,
+            EXPRKIND_TARGET,
+            has_sublinks,
+        )?;
+        let new_qual = preprocess_expression(run, action.qual, EXPRKIND_QUAL, has_sublinks)?;
+        // SAFETY: parse tree is planner-owned; no derived refs live.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.targetList = new_tlist;
+                a.qual = new_qual;
+            })
+        }
+        .expect("MergeAction");
     }
+    parse.mergeJoinCondition =
+        preprocess_expression(run, parse.mergeJoinCondition, EXPRKIND_QUAL, has_sublinks)?;
     if let Some(oc_node) = parse.onConflict {
         let oc = oc_node.as_on_conflict_expr().expect("onConflict is OnConflictExpr");
         for elem_node in &oc.arbiterElems {

@@ -373,7 +373,7 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     }
     let parent = pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, namespace_id);
     pg_depend::recordDependencyOn(mcx, &myself, &parent, pg_depend::DependencyType::Normal)?;
-    pg_depend::recordDependencyOnOwner(StatisticExtRelationId, statoid, stxowner);
+    pg_depend::recordDependencyOnOwner(mcx, StatisticExtRelationId, statoid, stxowner)?;
 
     if stmt.stxcomment.is_some() {
         unported("CreateStatistics: comment on statistics object");

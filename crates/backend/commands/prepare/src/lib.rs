@@ -152,15 +152,16 @@ pub fn ExecuteQuery<'mcx>(
 ) -> PgResult<()> {
     let name = stmt.name.expect("EXECUTE has a name");
     let entry = FetchPreparedStatement(name, true)?.expect("throwError returned entry");
+    let info = plancache::CachedPlanSourceExecInfo(entry.plansource);
 
-    if !plancache::CachedPlanFixedResult(entry.plansource) {
+    if !info.fixed_result {
         return Err(ereport(ERROR)
             .errmsg("EXECUTE does not support variable-result cached plans")
             .into_error()
             .into());
     }
 
-    let param_li = if plancache::CachedPlanNumParams(entry.plansource) > 0 {
+    let param_li = if info.num_params > 0 {
         EvaluateParams(mcx, &entry, name, &stmt.params, source_text)?
     } else {
         ParamListHandle::NULL
@@ -169,7 +170,6 @@ pub fn ExecuteQuery<'mcx>(
     let portal = portalmem::CreateNewPortal()?;
     portal.borrow_mut().visible = false;
 
-    let query_string = plancache::CachedPlanQueryString(entry.plansource);
     let cplan = plancache::GetCachedPlan(entry.plansource, param_li, None, QueryEnvHandle::NULL)?;
     let stmt_slice = plancache::CachedPlanStmtList(cplan);
     // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
@@ -180,8 +180,8 @@ pub fn ExecuteQuery<'mcx>(
     portalmem::PortalDefineQuery(
         &portal,
         None,
-        query_string,
-        plancache::CachedPlanCommandTag(entry.plansource),
+        info.query_string,
+        info.commandTag,
         stmts,
         cplan,
     )?;

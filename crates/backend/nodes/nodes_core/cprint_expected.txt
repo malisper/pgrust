@@ -1,0 +1,453 @@
+#ENTRY 0 FORMAT
+{CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval
+true :constisnull false :location -1 :constvalue 4 [ 42 0 0 0 0 0 0 0 ]}
+#ENTRY 0 PRETTY
+   {CONST 
+   :consttype 23 
+   :consttypmod -1 
+   :constcollid 0 
+   :constlen 4 
+   :constbyval true 
+   :constisnull false 
+   :location -1 
+   :constvalue 4 [ 42 0 0 0 0 0 0 0 ]
+   }
+#ENTRY 1 FORMAT
+{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false :opcollid 0
+:inputcollid 0 :args ({VAR :varno 1 :varattno 2 :vartype 23 :vartypmod -1
+:varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn
+1 :varattnosyn 2 :location -1} {CONST :consttype 23 :consttypmod -1
+:constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1
+:constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}
+#ENTRY 1 PRETTY
+   {OPEXPR 
+   :opno 521 
+   :opfuncid 147 
+   :opresulttype 16 
+   :opretset false 
+   :opcollid 0 
+   :inputcollid 0 
+   :args (
+      {VAR 
+      :varno 1 
+      :varattno 2 
+      :vartype 23 
+      :vartypmod -1 
+      :varcollid 0 
+      :varnullingrels (b)
+      :varlevelsup 0 
+      :varreturningtype 0 
+      :varnosyn 1 
+      :varattnosyn 2 
+      :location -1
+      }
+      {CONST 
+      :consttype 23 
+      :consttypmod -1 
+      :constcollid 0 
+      :constlen 4 
+      :constbyval true 
+      :constisnull false 
+      :location -1 
+      :constvalue 4 [ 0 0 0 0 0 0 0 0 ]
+      }
+   )
+   :location -1
+   }
+#ENTRY 2 FORMAT
+{FUNCEXPR :funcid 481 :funcresulttype 20 :funcretset false :funcvariadic false
+:funcformat 2 :funccollid 0 :inputcollid 0 :args ({CONST :consttype 23
+:consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false
+:location -1 :constvalue 4 [ 42 0 0 0 0 0 0 0 ]}) :location -1}
+#ENTRY 2 PRETTY
+   {FUNCEXPR 
+   :funcid 481 
+   :funcresulttype 20 
+   :funcretset false 
+   :funcvariadic false 
+   :funcformat 2 
+   :funccollid 0 
+   :inputcollid 0 
+   :args (
+      {CONST 
+      :consttype 23 
+      :consttypmod -1 
+      :constcollid 0 
+      :constlen 4 
+      :constbyval true 
+      :constisnull false 
+      :location -1 
+      :constvalue 4 [ 42 0 0 0 0 0 0 0 ]
+      }
+   )
+   :location -1
+   }
+#ENTRY 3 FORMAT
+{L0 :sub {L1 :sub {L2 :sub {L3 :sub {L4 :sub {L5 :sub {L6 :sub {L7 :sub {L8
+:sub {L9 :sub {L10 :sub {L11 :sub {L12 :sub {L13 :sub {L14 :sub {L15 :sub {L16
+:sub {L17 :sub {L18 :sub {L19 :sub {L20 :sub {L21 :sub {L22 :sub {L23 :sub
+{L24 :sub {LEAF :v 1}}}}}}}}}}}}}}}}}}}}}}}}}}
+#ENTRY 3 PRETTY
+   {L0 
+   :sub 
+      {L1 
+      :sub 
+         {L2 
+         :sub 
+            {L3 
+            :sub 
+               {L4 
+               :sub 
+                  {L5 
+                  :sub 
+                     {L6 
+                     :sub 
+                        {L7 
+                        :sub 
+                           {L8 
+                           :sub 
+                              {L9 
+                              :sub 
+                                 {L10 
+                                 :sub 
+                                    {L11 
+                                    :sub 
+                                       {L12 
+                                       :sub 
+                                          {L13 
+                                          :sub 
+                                             {L14 
+                                             :sub 
+                                                {L15 
+                                                :sub 
+                                                   {L16 
+                                                   :sub 
+                                                      {L17 
+                                                      :sub 
+                                                         {L18 
+                                                         :sub 
+                                                            {L19 
+                                                            :sub 
+                                                            {L20 
+                                                            :sub 
+                                                            {L21 
+                                                            :sub 
+                                                            {L22 
+                                                            :sub 
+                                                            {L23 
+                                                            :sub 
+                                                            {L24 
+                                                            :sub 
+                                                            {LEAF 
+                                                            :v 1
+                                                            }
+                                                            }
+                                                            }
+                                                            }
+                                                            }
+                                                            }
+                                                            }
+                                                         }
+                                                      }
+                                                   }
+                                                }
+                                             }
+                                          }
+                                       }
+                                    }
+                                 }
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+#ENTRY 4 FORMAT
+{X :atom
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaa :tail 1}
+#ENTRY 4 PRETTY
+   {X 
+   :atom aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+   aaaaaaaaaaaaaaaaaaaaaaaaaa 
+   :tail 1
+   }
+#ENTRY 5 FORMAT
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbb
+#ENTRY 5 PRETTY
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbb
+#ENTRY 6 FORMAT
+{Y :lists ((1 2 3) (4 5) ((6 7))) :post 9}
+#ENTRY 6 PRETTY
+   {Y 
+   :lists ((1 2 3)
+   (4 5)
+   ((6 7)))
+   :post 9
+   }
+#ENTRY 7 FORMAT
+{Z :a b:c:d :e (:f) :g h}
+#ENTRY 7 PRETTY
+   {Z 
+   :a b
+   :c
+   :d 
+   :e (
+   :f)
+   :g h
+   }
+#ENTRY 8 FORMAT
+{}
+#ENTRY 8 PRETTY
+   {
+   }
+#ENTRY 9 FORMAT
+{A :empty {} :n 2}
+#ENTRY 9 PRETTY
+   {A 
+   :empty 
+      {
+      }
+   :n 2
+   }
+#ENTRY 10 FORMAT
+{B :s  double  space :t trailing }
+#ENTRY 10 PRETTY
+   {B 
+   :s  double  space 
+   :t trailing 
+   }
+#ENTRY 11 FORMAT
+{P :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx} {Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy) :h 1}
+#ENTRY 11 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+   :h 1
+   }
+#ENTRY 12 FORMAT
+{P :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx} {Q
+:g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy) :h
+1}
+#ENTRY 12 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+   :h 1
+   }
+#ENTRY 13 FORMAT
+{P :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+{Q :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+:h 1}
+#ENTRY 13 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+   :h 1
+   }
+#ENTRY 14 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx} {Q
+:g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+:h 1}
+#ENTRY 14 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyy)
+   :h 1
+   }
+#ENTRY 15 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+{Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+:h 1}
+#ENTRY 15 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyy)
+   :h 1
+   }
+#ENTRY 16 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+{Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy)
+:h 1}
+#ENTRY 16 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyyy)
+   :h 1
+   }
+#ENTRY 17 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+{Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+) :h 1}
+#ENTRY 17 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyyyy)
+   :h 1
+   }
+#ENTRY 18 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+} {Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+y) :h 1}
+#ENTRY 18 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyyyyy)
+   :h 1
+   }
+#ENTRY 19 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+x} {Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+yy) :h 1}
+#ENTRY 19 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyyyyyy)
+   :h 1
+   }
+#ENTRY 20 FORMAT
+{P :f
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+xx} {Q :g
+(yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+yyy) :h 1}
+#ENTRY 20 PRETTY
+   {P 
+   :f xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   xxxxxxxx
+   }
+   {Q 
+   :g (yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   yyyyyyyyy)
+   :h 1
+   }
+#ENTRY 21 FORMAT
+word word word
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+tail end
+#ENTRY 21 PRETTY
+word word word zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+zzzzzzzzzzzzz tail end
+#ENTRY 22 FORMAT
+word word word
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+tail end
+#ENTRY 22 PRETTY
+word word word zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+zzzzzzzzzzzzzz tail end
+#ENTRY 23 FORMAT
+word word word
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+tail end
+#ENTRY 23 PRETTY
+word word word zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+zzzzzzzzzzzzzzz tail end
+#ENTRY 24 FORMAT
+word word word
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+z tail end
+#ENTRY 24 PRETTY
+word word word zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+zzzzzzzzzzzzzzzz tail end
+#ENTRY 25 FORMAT
+#ENTRY 25 PRETTY
+#ENTRY 26 FORMAT
+{QUERY :commandType 1 :querySource 0 :canSetTag true :utilityStmt <>
+:resultRelation 0 :hasAggs false :rtable ({RANGETBLENTRY :alias <> :eref
+{ALIAS :aliasname t1 :colnames ("a" "b")} :rtekind 0 :relid 16384 :inh true})
+:jointree {FROMEXPR :fromlist ({RANGETBLREF :rtindex 1}) :quals <>}
+:targetList ({TARGETENTRY :expr {VAR :varno 1 :varattno 1 :vartype 23} :resno
+1})}
+#ENTRY 26 PRETTY
+   {QUERY 
+   :commandType 1 
+   :querySource 0 
+   :canSetTag true 
+   :utilityStmt <> 
+   :resultRelation 0 
+   :hasAggs false 
+   :rtable (
+      {RANGETBLENTRY 
+      :alias <> 
+      :eref 
+         {ALIAS 
+         :aliasname t1 
+         :colnames ("a" "b")
+         }
+      :rtekind 0 
+      :relid 16384 
+      :inh true
+      }
+   )
+   :jointree 
+      {FROMEXPR 
+      :fromlist (
+         {RANGETBLREF 
+         :rtindex 1
+         }
+      )
+      :quals <>
+      }
+   :targetList (
+      {TARGETENTRY 
+      :expr 
+         {VAR 
+         :varno 1 
+         :varattno 1 
+         :vartype 23
+         }
+      :resno 1
+      }
+   )
+   }

@@ -77,7 +77,9 @@ pub fn end(h: TuplestoreHandle) {
             _ => None,
         }
     });
-    drop(entry);
+    if let Some(e) = entry {
+        e.store.end();
+    }
 }
 
 // The slot's own allocator IS C's tts_mcxt; ambient there, carried here.
@@ -89,6 +91,15 @@ fn slot_mcx<'mcx>(slot: &SlotData<'mcx>) -> Mcx<'mcx> {
 pub fn puttupleslot(h: TuplestoreHandle, slot: &mut SlotData<'_>) -> PgResult<()> {
     let mcx = slot_mcx(slot);
     with_store(h, |store| store.puttupleslot(slot, mcx))
+}
+
+pub fn putvalues(
+    h: TuplestoreHandle,
+    tdesc: &::types_tuple::TupleDescData<'_>,
+    values: &[::datum::Datum],
+    isnull: &[bool],
+) -> PgResult<()> {
+    with_store(h, |store| store.putvalues(tdesc, values, isnull))
 }
 
 fn begin_heap_hold(random_access: bool) -> PgResult<TuplestoreHandle> {

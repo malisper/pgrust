@@ -6,7 +6,7 @@ use adt_acl::{
     acldefault, aclmask, has_privs_of_role, AclItem, AclMaskHow, AclObjectType, ACL_DELETE,
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use cache_syscache::cacheinfo::{ATTNUM, DATABASEOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID};
+use cache_syscache::cacheinfo::{ATTNUM, AUTHOID, DATABASEOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID};
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
     SysCacheKey,
@@ -25,7 +25,9 @@ use types_nodes::parsenodes::ObjectType;
 use types_rel::{RELKIND_SEQUENCE, RELKIND_VIEW};
 
 mod grant;
-pub use grant::ExecuteGrantStmt;
+pub use grant::{get_rolespec_oid, ExecuteGrantStmt};
+mod lo;
+pub use lo::{object_ownercheck_lo, pg_largeobject_aclcheck_snapshot};
 
 pub const ACLCHECK_OK: i32 = 0;
 pub const ACLCHECK_NO_PRIV: i32 = 1;
@@ -43,6 +45,7 @@ const ANUM_PG_CLASS_RELOWNER: i32 = 6;
 const ANUM_PG_CLASS_RELKIND: i32 = 18;
 pub(crate) const ANUM_PG_CLASS_RELNATTS: i32 = 19;
 pub(crate) const ANUM_PG_CLASS_RELACL: i32 = 32;
+const ANUM_PG_AUTHID_ROLBYPASSRLS: i32 = 9;
 const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
 const ANUM_PG_ATTRIBUTE_ATTACL: i32 = 22;
 const ROLE_PG_READ_ALL_DATA: Oid = 6181;
@@ -535,9 +538,46 @@ fn objtype_noun(objtype: ObjectType) -> &'static str {
         OBJECT_TSDICTIONARY => "text search dictionary",
         OBJECT_TYPE => "type",
         OBJECT_VIEW => "view",
-        // C: "must be owner of relation %s" (NOT_OWNER only).
-        OBJECT_TRIGGER => "relation",
         other => panic!("aclcheck_error: unsupported object type: {}", other as i32),
+    }
+}
+
+// object_ownercheck (aclchk.c), pg_class arm only; other classes are loud.
+pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool> {
+    if superuser::superuser_arg(roleid)? {
+        return Ok(true);
+    }
+    let owner_id = match classid {
+        RELATION_RELATION_ID => {
+            let Some(tuple) =
+                SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(objectid)))?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for relation {objectid}"
+                ))));
+            };
+            let owner =
+                SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELOWNER)?.as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
+    };
+    has_privs_of_role(roleid, owner_id)
+}
+
+pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool> {
+    if superuser::superuser_arg(roleid)? {
+        return Ok(true);
+    }
+    match SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? {
+        Some(tuple) => {
+            let result =
+                SysCacheGetAttrNotNull(AUTHOID, &tuple, ANUM_PG_AUTHID_ROLBYPASSRLS)?.as_bool();
+            ReleaseSysCache(tuple);
+            Ok(result)
+        }
+        None => Ok(false),
     }
 }
 
@@ -551,13 +591,17 @@ pub fn aclcheck_error(aclerr: i32, objtype: ObjectType, objectname: &str) -> PgR
             ))
             .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
         )),
-        ACLCHECK_NOT_OWNER => Err(Box::new(
-            PgError::error(format!(
-                "must be owner of {} {objectname}",
-                objtype_noun(objtype)
+        ACLCHECK_NOT_OWNER => {
+            // C: ownership attaches to the relation for these object types.
+            let noun = match objtype {
+                ObjectType::OBJECT_POLICY | ObjectType::OBJECT_TRIGGER => "relation",
+                _ => objtype_noun(objtype),
+            };
+            Err(Box::new(
+                PgError::error(format!("must be owner of {noun} {objectname}"))
+                    .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
             ))
-            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
-        )),
+        }
         other => Err(Box::new(PgError::error(format!(
             "unrecognized AclResult: {other}"
         )))),

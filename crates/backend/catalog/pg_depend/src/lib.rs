@@ -1,5 +1,6 @@
 // pg_depend.c recording slice; the deletion half rides in catalog_dependency
-// (deleteOneObject's scans); pg_shdepend writes unported.
+// (deleteOneObject's scans); the pg_shdepend.c wrappers delegate to the
+// pg_shdepend crate.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -348,44 +349,119 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     Ok(count)
 }
 
-// A pinned owner records nothing; pg_shdepend writes unported → loud.
-pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
-    if !catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, owner) {
-        panic!(
-            "recordDependencyOnOwner (pg_shdepend.c): pg_shdepend recording unported \
-             (class {classId} object {objectId} owner {owner})"
-        );
-    }
+// creating_extension / CurrentExtensionObject (extension.c:79-80) are hosted
+// here, one layer below their C home: extension depends on this crate, and
+// recordDependencyOnCurrentExtension reads them per row.
+thread_local! {
+    static CREATING_EXTENSION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    static CURRENT_EXTENSION_OBJECT: core::cell::Cell<Oid> =
+        const { core::cell::Cell::new(types_core::InvalidOid) };
 }
 
-// SHARED_DEPENDENCY_ACL rows never cover PUBLIC, the owner, or pinned roles,
-// so those grants need no pg_shdepend writes; any other role is loud.
-pub fn updateAclDependencies(
+pub fn creating_extension() -> bool {
+    CREATING_EXTENSION.with(|c| c.get())
+}
+
+pub fn CurrentExtensionObject() -> Oid {
+    CURRENT_EXTENSION_OBJECT.with(|c| c.get())
+}
+
+pub fn set_creating_extension(v: bool) {
+    CREATING_EXTENSION.with(|c| c.set(v));
+}
+
+pub fn set_current_extension_object(oid: Oid) {
+    CURRENT_EXTENSION_OBJECT.with(|c| c.set(oid));
+}
+
+pub fn getExtensionOfObject<'mcx>(mcx: Mcx<'mcx>, classId: Oid, objectId: Oid) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let mut result = types_core::InvalidOid;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid()
+            == types_core::EXTENSION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
+                == DependencyType::Extension.as_char()
+        {
+            result = dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid();
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+pub fn recordDependencyOnCurrentExtension<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    is_replace: bool,
+) -> PgResult<()> {
+    debug_assert!(object.objectSubId == 0);
+
+    if !creating_extension() {
+        return Ok(());
+    }
+
+    if is_replace {
+        let oldext = getExtensionOfObject(mcx, object.classId, object.objectId)?;
+        if oldext != types_core::InvalidOid {
+            if oldext == CurrentExtensionObject() {
+                return Ok(());
+            }
+            // The 55000 report needs getObjectDescription (objectaddress lane).
+            panic!(
+                "recordDependencyOnCurrentExtension (pg_depend.c): object \
+                 {}/{} is already a member of extension {oldext}",
+                object.classId, object.objectId
+            );
+        }
+        panic!(
+            "recordDependencyOnCurrentExtension (pg_depend.c): free-standing object \
+             {}/{} replaced by extension {} (needs getObjectDescription for the 55000 report)",
+            object.classId,
+            object.objectId,
+            CurrentExtensionObject()
+        );
+    }
+
+    let extension = ObjectAddress::set(types_core::EXTENSION_RELATION_ID, CurrentExtensionObject());
+    recordDependencyOn(mcx, object, &extension, DependencyType::Extension)
+}
+
+pub fn recordDependencyOnOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    owner: Oid,
+) -> PgResult<()> {
+    pg_shdepend::recordDependencyOnOwner(mcx, classId, objectId, owner)
+}
+
+pub fn updateAclDependencies<'mcx>(
+    mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
     objsubId: i32,
     ownerId: Oid,
     oldmembers: &[Oid],
     newmembers: &[Oid],
-) {
-    let check = |roleid: Oid, other: &[Oid]| {
-        if other.contains(&roleid)
-            || roleid == ownerId
-            || catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, roleid)
-        {
-            return;
-        }
-        panic!(
-            "updateAclDependencies (pg_shdepend.c): pg_shdepend recording unported \
-             (class {classId} object {objectId} subid {objsubId} role {roleid})"
-        );
-    };
-    for &r in newmembers {
-        check(r, oldmembers);
-    }
-    for &r in oldmembers {
-        check(r, newmembers);
-    }
+) -> PgResult<()> {
+    pg_shdepend::updateAclDependencies(
+        mcx, classId, objectId, objsubId, ownerId, oldmembers, newmembers,
+    )
 }
 
 const Anum_pg_depend_classid: usize = 1;

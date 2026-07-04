@@ -200,18 +200,41 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_BitmapIndexScan => {
             let s = plan.as_bitmap_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
             debug_assert!(s.scan.plan.targetlist.is_nil() && s.scan.plan.qual.is_nil());
-            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let nr = s.scan.plan.plan_rows;
+            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
+            let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
+            if rtoffset != 0 {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::BitmapIndexScan, _>(|p| {
+                        p.scan.scanrelid += rtoffset as u32;
+                        if let Some(v) = iq { p.indexqual = v; }
+                        if let Some(v) = iqo { p.indexqualorig = v; }
+                    })
+                }
+                .expect("BitmapIndexScan node");
+            }
         }
         NodeTag::T_BitmapHeapScan => {
             let s = plan.as_bitmap_heap_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let nr = s.scan.plan.plan_rows;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, nr)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * nr)?;
+            let bqo = fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * nr)?;
+            if rtoffset != 0 {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::BitmapHeapScan, _>(|p| {
+                        p.scan.scanrelid += rtoffset as u32;
+                        if let Some(v) = tl { p.scan.plan.targetlist = v; }
+                        if let Some(v) = qual { p.scan.plan.qual = v; }
+                        if let Some(v) = bqo { p.bitmapqualorig = v; }
+                    })
+                }
+                .expect("BitmapHeapScan node");
+            }
         }
         NodeTag::T_BitmapAnd => {
             let s = plan.as_bitmap_and().unwrap();
@@ -326,6 +349,21 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             }
             set_upper_references(run, plan, rtoffset)?;
         }
+        NodeTag::T_Memoize => {
+            // The tlist is the child's (never evaluated); only the cache-key
+            // exprs need fixing.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            let m = plan.as_memoize().unwrap();
+            debug_assert!(m.plan.qual.is_nil());
+            if let Some(fixed) = fix_scan_list(run, &m.param_exprs, rtoffset, m.plan.plan_rows)? {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::Memoize, _>(|p| {
+                        p.param_exprs = fixed;
+                    });
+                }
+            }
+        }
         NodeTag::T_Sort | NodeTag::T_IncrementalSort | NodeTag::T_Unique
         | NodeTag::T_Material => {
             // Neither evaluates its tlist; fixed up for EXPLAIN only.
@@ -373,7 +411,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(m.withCheckOptionLists.is_nil() && m.mergeActionLists.is_nil());
             debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
@@ -381,13 +418,68 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             // preprocess_targetlist checked every RETURNING Var references the
             // result relation) and rtoffset is 0, so C's fix_join_expr reduces
             // to the fix_expr_common walk over unchanged Vars.
+            if !m.withCheckOptionLists.is_nil() {
+                debug_assert_eq!(m.withCheckOptionLists.len(), m.resultRelations.len());
+                for wlist_node in &m.withCheckOptionLists {
+                    let wlist = wlist_node.as_list().expect("withCheckOptionLists cell");
+                    for wco_node in wlist {
+                        let wco =
+                            wco_node.as_with_check_option().expect("WCO cell");
+                        if let Some(q) = wco.qual {
+                            let ql = q.as_list().expect("preprocessed WCO qual is a list");
+                            let fixed = fix_scan_list(run, ql, rtoffset, 1.0)?;
+                            debug_assert!(fixed.is_none());
+                        }
+                    }
+                }
+            }
             let has_returning = !m.returningLists.is_nil();
             if has_returning {
                 debug_assert_eq!(m.returningLists.len(), m.resultRelations.len());
-                for rlist_node in &m.returningLists {
-                    let rlist = rlist_node.as_list().expect("returningLists cell is a List");
-                    let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
-                    debug_assert!(fixed.is_none());
+                if m.operation == types_nodes::nodes_enums::CmdType::CMD_MERGE {
+                    // set_returning_clause_references: source-relation Vars
+                    // become OUTER_VAR over the subplan tlist (the plan slot
+                    // is the RETURNING projection's outer tuple).
+                    let subplan_tlist = &m
+                        .plan
+                        .lefttree
+                        .expect("ModifyTable has a subplan")
+                        .as_plan()
+                        .expect("plan node")
+                        .targetlist;
+                    let empty = NodeList::nil();
+                    let mut new_lists = NodeList::nil();
+                    for (rlist_node, resultrel) in
+                        m.returningLists.iter().zip(m.resultRelations.iter())
+                    {
+                        let rlist =
+                            rlist_node.as_list().expect("returningLists cell is a List");
+                        let fixed = fix_join_expr_list(
+                            run,
+                            rlist,
+                            subplan_tlist,
+                            &empty,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            resultrel,
+                            m.plan.plan_rows,
+                        )?;
+                        new_lists.lappend(run.mcx, Node::mk_list(run.mcx, fixed)?)?;
+                    }
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                            p.returningLists = new_lists;
+                        })
+                    }
+                    .expect("ModifyTable node");
+                } else {
+                    for rlist_node in &m.returningLists {
+                        let rlist =
+                            rlist_node.as_list().expect("returningLists cell is a List");
+                        let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
+                        debug_assert!(fixed.is_none());
+                    }
                 }
             }
             // The EXCLUDED pseudo-rel is a 'pseudo join' inner side: its Vars
@@ -435,6 +527,80 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
                 .expect("ModifyTable node");
             }
+            if !m.mergeActionLists.is_nil() {
+                // Source-relation Vars in the action targetlists/quals and
+                // join conditions become INNER_VAR over the subplan tlist
+                // (ecxt_innertuple = the join output); result-relation Vars
+                // pass through to read the scan slot (the old target tuple).
+                let subplan_tlist = &m
+                    .plan
+                    .lefttree
+                    .expect("ModifyTable has a subplan")
+                    .as_plan()
+                    .expect("plan node")
+                    .targetlist;
+                let empty = NodeList::nil();
+                debug_assert_eq!(m.mergeActionLists.len(), m.resultRelations.len());
+                debug_assert_eq!(m.mergeJoinConditions.len(), m.resultRelations.len());
+                let plan_rows = m.plan.plan_rows;
+                for ((mal_node, mjc_node), resultrel) in m
+                    .mergeActionLists
+                    .iter()
+                    .zip(m.mergeJoinConditions.iter())
+                    .zip(m.resultRelations.iter())
+                {
+                    let mal = mal_node.as_list().expect("mergeActionLists cell is a List");
+                    for action_node in mal {
+                        let action =
+                            action_node.as_merge_action().expect("MergeAction cell");
+                        let new_tlist = fix_join_expr_list(
+                            run,
+                            &action.targetList,
+                            &empty,
+                            subplan_tlist,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            resultrel,
+                            plan_rows,
+                        )?;
+                        let new_qual = match action.qual {
+                            None => None,
+                            Some(q) => {
+                                let ql =
+                                    q.as_list().expect("preprocessed action qual is a list");
+                                let mapped = fix_join_expr_list(
+                                    run,
+                                    ql,
+                                    &empty,
+                                    subplan_tlist,
+                                    rtoffset,
+                                    NrmMatch::Equal,
+                                    resultrel,
+                                    plan_rows,
+                                )?;
+                                Some(Node::mk_list(run.mcx, mapped)?)
+                            }
+                        };
+                        // SAFETY: exclusive plan-tree ownership (prologue note).
+                        unsafe {
+                            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(
+                                |a| {
+                                    a.targetList = new_tlist;
+                                    a.qual = new_qual;
+                                },
+                            )
+                        }
+                        .expect("MergeAction node");
+                    }
+                    let jc = mjc_node.as_list().expect("mergeJoinConditions cell is a List");
+                    if !jc.is_nil() {
+                        panic!(
+                            "set_plan_refs (setrefs.c): non-NULL MERGE join condition \
+                             (NOT MATCHED BY SOURCE) unported"
+                        );
+                    }
+                }
+            }
             for rti in m.resultRelations.iter() {
                 run.glob.result_relations.lappend(run.mcx, rti)?;
             }
@@ -442,7 +608,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 // C copyObject's the first RETURNING list into the visible
                 // tlist (EXPLAIN + the node's result slot descriptor); the
                 // cells are shared here — the executor never mutates them.
-                let first = m
+                let first = plan
+                    .as_modify_table()
+                    .unwrap()
                     .returningLists
                     .nth(0)
                     .as_list()
@@ -1194,6 +1362,47 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
 }
@@ -1542,6 +1751,47 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
             let mut args = NodeList::nil();
@@ -1820,6 +2070,22 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_CoerceViaIO => fix_scan_expr_walker(run, node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_ArrayExpr => {
             for e in &node.as_array_expr().unwrap().elements {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                fix_scan_expr_walker(run, e)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                fix_scan_expr_walker(run, e)?;
+            }
+            if let Some(e) = sr.refexpr {
+                fix_scan_expr_walker(run, e)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
                 fix_scan_expr_walker(run, e)?;
             }
             Ok(())
@@ -2420,6 +2686,57 @@ fn fix_join_expr_mutator<'mcx>(
             let chosen =
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
             fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_join_expr_mutator(
+                        run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel,
+                        num_exec,
+                    )?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_join_expr_mutator(
+                        run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel,
+                        num_exec,
+                    )?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_join_expr_mutator(
+                    run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_join_expr_mutator(
+                    run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
         }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();

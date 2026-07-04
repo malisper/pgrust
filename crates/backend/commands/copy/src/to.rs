@@ -52,6 +52,7 @@ pub fn BeginCopyTo<'mcx, 's>(
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
+    source_text: Option<&str>,
 ) -> PgResult<CopyToState<'mcx, 's>> {
     if rel.rd_rel.relkind != RELKIND_RELATION
         && !(rel.rd_rel.relkind == b'm' && rel.rd_rel.relispopulated)
@@ -59,7 +60,10 @@ pub fn BeginCopyTo<'mcx, 's>(
         return Err(cannot_copy_from_relkind(rel));
     }
 
-    let opts = ProcessCopyOptions(false, options)?;
+    let opts = ProcessCopyOptions(false, options, source_text)?;
+    if opts.binary {
+        unported("FORMAT binary (text-only lane)");
+    }
     let attnumlist = CopyGetAttnums(mcx, &rel.rd_att, rel, attnamelist)?;
     let force_quote_flags = force_flags(
         mcx,

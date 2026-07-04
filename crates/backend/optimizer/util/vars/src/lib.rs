@@ -9,7 +9,8 @@ pub mod var;
 mod tests;
 
 pub use var::{
-    contain_var_clause, contain_vars_of_level, contain_vars_returning_old_or_new,
+    contain_uplevel_vars, contain_var_clause, contain_vars_of_level,
+    contain_vars_returning_old_or_new,
     flatten_group_exprs, flatten_group_exprs_list, flatten_join_alias_vars, locate_var_of_level, pull_var_clause,
     pull_varattnos, pull_varnos, pull_varnos_of_level, pull_vars_of_level,
     PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_INCLUDE_WINDOWFUNCS,

@@ -6,13 +6,19 @@ use types_core::catalog::{
 use types_error::PgResult;
 use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
-    AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateFunctionStmt, CreateSchemaStmt,
-    DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, FunctionParameter, FunctionParameterMode, CheckPointStmt, LoadStmt, LockStmt,
-    AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
-    GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
-    RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
-    VacuumRelation, ReplicaIdentityStmt,
-    VacuumStmt, ClusterStmt, ReindexObjectType, ReindexStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    AccessPriv, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt, AlterRoleSetStmt, AlterRoleStmt,
+    AlterTableCmd, AlterTableStmt, AlterTableType,
+    CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
+    CopyStmt, CreateFunctionStmt, CreatePolicyStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
+    DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, DropBehavior,
+    DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
+    FunctionParameterMode, GrantRoleStmt, GrantStmt, GrantTargetType, GroupingSetKind,
+    ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectType, ObjectWithArgs, PrepareStmt,
+    ReassignOwnedStmt,
+    ReindexObjectType, ReindexStmt, RenameStmt, ReplicaIdentityStmt, RoleSpec, RoleSpecType,
+    RoleStmtType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
+    UnlistenStmt, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
+    VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
     REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_INDEX,
@@ -25,11 +31,13 @@ use types_nodes::primnodes::{
 };
 
 use types_nodes::rawnodes::CreateDomainStmt;
+use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
-    AlterEnumStmt, ColumnDef, Constraint, ConstrType, CreateEnumStmt, CreateSeqStmt, CreateStmt,
-    CreateTableAsStmt, IndexElem, IndexStmt, IntoClause, OnCommitAction,
+    AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
+    CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem, IndexStmt,
+    IntoClause, OnCommitAction, TriggerTransition,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
@@ -94,6 +102,15 @@ struct CasBits {
 
 static MATH_OPS: [&str; 12] =
     ["+", "-", "*", "/", "%", "^", "<", ">", "=", "<=", ">=", "<>"];
+
+// TRIGGER_TYPE bits, verified against catalog/pg_trigger.h.
+const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
+const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
+const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
+const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
+const TRIGGER_TYPE_AFTER: i16 = 0;
 
 // INTERVAL_MASK(MONTH/YEAR/DAY/HOUR/MINUTE/SECOND) and INTERVAL_FULL_RANGE,
 // values verified against datetime.h / timestamp.h.
@@ -337,10 +354,16 @@ impl<'mcx> Parser<'mcx> {
             2114 => {
                 let number = view.v(1).ival();
                 let ind = view.v(2).list();
-                if !ind.is_nil() {
-                    panic!("gram_core: A_Indirection over PARAM not ported (types_nodes gap)");
-                }
-                *yyval = YYSTYPE::Node(Some(Node::mk_param_ref(mcx, number, view.l(1))?));
+                let p = Node::mk_param_ref(mcx, number, view.l(1))?;
+                *yyval = YYSTYPE::Node(Some(if ind.is_nil() {
+                    p
+                } else {
+                    self.check_indirection(&ind)?;
+                    Node::mk(
+                        mcx,
+                        types_nodes::A_Indirection { arg: Some(p), indirection: ind },
+                    )?
+                }));
             }
             2338 | 2339 => {
                 let name = view.v(1).str_val();
@@ -940,6 +963,23 @@ impl<'mcx> Parser<'mcx> {
                 n.initially_valid = !n.skip_validation;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ConstraintElem: NOT NULL_P ColId ConstraintAttributeSpec
+            539 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_NOTNULL;
+                n.location = view.l(1);
+                n.keys = NodeList::make1(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                let cas = self.process_cas_bits(
+                    view.v(4).ival(),
+                    view.l(4),
+                    "NOT NULL",
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true },
+                )?;
+                n.skip_validation = cas.not_valid;
+                n.is_no_inherit = cas.no_inherit;
+                n.initially_valid = !n.skip_validation;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // ConstraintElem: UNIQUE opt_unique_null_treatment '(' columnList
             // opt_without_overlaps ')' opt_c_include opt_definition
             // OptConsTableSpace ConstraintAttributeSpec
@@ -1411,6 +1451,50 @@ impl<'mcx> Parser<'mcx> {
             655 => *yyval = def_elem(mcx, "restart", None, view.l(1))?,
             656 => *yyval = def_elem(mcx, "restart", view.v(3).node(), view.l(1))?,
             657 => *yyval = def_elem(mcx, "unlogged", None, view.l(1))?,
+            // CreateExtensionStmt: CREATE EXTENSION [IF NOT EXISTS] name
+            // opt_with create_extension_opt_list
+            685 | 686 => {
+                let (name_i, opts_i) = if rule == 685 { (3, 5) } else { (6, 8) };
+                let mut n = Node::build::<CreateExtensionStmt>(mcx)?;
+                n.extname = Some(view.v(name_i).str_val());
+                n.if_not_exists = rule == 686;
+                n.options = view.v(opts_i).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            687 | 694 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("extension opt item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            688 | 695 => *yyval = YYSTYPE::List(NodeList::nil()),
+            689 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "schema", Some(arg), view.l(1))?;
+            }
+            690 | 696 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "new_version", Some(arg), view.l(1))?;
+            }
+            691 => {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "CREATE EXTENSION ... FROM is no longer supported".into(),
+                        view.l(1),
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            692 => {
+                let arg = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "cascade", Some(arg), view.l(1))?;
+            }
+            // AlterExtensionStmt: ALTER EXTENSION name UPDATE alter_extension_opt_list
+            693 => {
+                let mut n = Node::build::<AlterExtensionStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1710 => {
                 let stmt = view.v(1).node().expect("select_clause");
                 let sort = view.v(2).list();
@@ -1896,6 +1980,109 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("set_target"))?;
                 *yyval = YYSTYPE::List(list);
             }
+            // MergeStmt: opt_with_clause MERGE INTO relation_expr_opt_alias
+            //            USING table_ref ON a_expr merge_when_list
+            //            returning_clause
+            1672 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::MergeStmt {
+                        withClause: view.v(1).node(),
+                        relation: view.v(4).node(),
+                        sourceRelation: view.v(6).node(),
+                        joinCondition: view.v(8).node(),
+                        mergeWhenClauses: view.v(9).list(),
+                        returningClause: view.v(10).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1673 => {
+                let t = view.v(1).node().expect("merge_when_clause");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            1674 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("merge_when_clause"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // merge_when_clause: the merge_update/merge_delete/merge_insert
+            // sub-rule built the MergeWhenClause node.
+            1675 | 1676 | 1677 => {
+                let m = view.v(4).node().expect("merge action");
+                let kind = merge_match_kind(view.v(1).ival());
+                let cond = view.v(2).node();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    m.with_mut::<types_nodes::MergeWhenClause, _>(|w| {
+                        w.matchKind = kind;
+                        w.condition = cond;
+                    })
+                }
+                .expect("merge action is MergeWhenClause");
+                *yyval = YYSTYPE::Node(Some(m));
+            }
+            1678 | 1679 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.matchKind = merge_match_kind(view.v(1).ival());
+                n.commandType = types_nodes::CmdType::CMD_NOTHING;
+                n.condition = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1680 => {
+                *yyval =
+                    YYSTYPE::Ival(types_nodes::MergeMatchKind::MERGE_WHEN_MATCHED as i32)
+            }
+            1681 => {
+                *yyval = YYSTYPE::Ival(
+                    types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as i32,
+                )
+            }
+            1682 | 1683 => {
+                *yyval = YYSTYPE::Ival(
+                    types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as i32,
+                )
+            }
+            // opt_merge_when_condition: AND a_expr | empty
+            1684 => *yyval = YYSTYPE::Node(view.v(2).node()),
+            1685 => *yyval = YYSTYPE::Node(None),
+            // merge_update: UPDATE SET set_clause_list
+            1686 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_UPDATE;
+                n.targetList = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1687 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_DELETE;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // merge_insert: values / OVERRIDING / column-list / DEFAULT VALUES
+            1688 | 1689 | 1690 | 1691 | 1692 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_INSERT;
+                match rule {
+                    1688 => n.values = view.v(2).list(),
+                    1689 => {
+                        n.r#override = override_kind(view.v(3).ival());
+                        n.values = view.v(5).list();
+                    }
+                    1690 => {
+                        n.targetList = view.v(3).list();
+                        n.values = view.v(5).list();
+                    }
+                    1691 => {
+                        n.targetList = view.v(3).list();
+                        n.r#override = override_kind(view.v(6).ival());
+                        n.values = view.v(8).list();
+                    }
+                    _ => {}
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // merge_values_clause: VALUES '(' expr_list ')'
+            1693 => *yyval = YYSTYPE::List(view.v(3).list()),
             // relation_expr_opt_alias: relation_expr [AS] ColId
             1879 | 1880 => {
                 let rv = view.v(1).node().expect("relation_expr");
@@ -2606,9 +2793,15 @@ impl<'mcx> Parser<'mcx> {
                 let e = view.v(2);
                 let ind = view.v(4).list();
                 if !ind.is_nil() {
-                    panic!("gram_core: A_Indirection over (a_expr) not ported (types_nodes gap)");
+                    let arg = e.node();
+                    self.check_indirection(&ind)?;
+                    *yyval = YYSTYPE::Node(Some(Node::mk(
+                        mcx,
+                        types_nodes::A_Indirection { arg, indirection: ind },
+                    )?));
+                } else {
+                    *yyval = e;
                 }
-                *yyval = e;
             }
             // c_expr: select_with_parens %prec UMINUS
             2118 => {
@@ -2644,10 +2837,65 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
-            2121 => panic!(
-                "gram_core: ARRAY_SUBLINK (ARRAY select_with_parens) not ported \
-                 (unit backend-parser-gram)"
-            ),
+            // c_expr: ARRAY select_with_parens
+            2121 => {
+                let subselect = view.v(2).node().expect("select_with_parens");
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::ARRAY_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: None,
+                        operName: NodeList::nil(),
+                        subselect,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // c_expr: ARRAY array_expr (point outermost A_ArrayExpr at ARRAY)
+            2122 => {
+                let n = view.v(2).node().expect("array_expr");
+                debug_assert!(n.node_tag() == types_nodes::NodeTag::T_A_ArrayExpr);
+                // SAFETY: node built by rules 2301-2303 below, exclusively ours.
+                unsafe {
+                    Node::with_mut::<types_nodes::A_ArrayExpr, ()>(n, |a| a.location = view.l(1));
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // array_expr: '[' expr_list ']' | '[' array_expr_list ']' | '[' ']'
+            2301 | 2302 => {
+                let elements = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_ArrayExpr {
+                        elements,
+                        list_start: view.l(1),
+                        list_end: view.l(3),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2303 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_ArrayExpr {
+                        elements: NodeList::nil(),
+                        list_start: view.l(1),
+                        list_end: view.l(2),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2304 => {
+                let e = view.v(1).node().expect("array_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, e)?);
+            }
+            2305 => {
+                let mut list = view.v(1).list();
+                let e = view.v(3).node().expect("array_expr");
+                list.lappend(mcx, e)?;
+                *yyval = YYSTYPE::List(list);
+            }
             // func_application: func_name '(' [args] ')' shapes.
             2126 => {
                 let funcname = view.v(1).list();
@@ -2841,9 +3089,35 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             2341 => *yyval = YYSTYPE::Node(Some(Node::mk_a_star(mcx)?)),
-            2342 | 2343 => {
-                panic!("gram_core: A_Indices subscripting not ported (types_nodes gap)")
+            1944 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // SimpleTypename ARRAY -> arrayBounds = [-1]
+            1940 => {
+                let tn = view.v(1).node().expect("SimpleTypename");
+                // SAFETY: TypeName node built by this parse, exclusively ours.
+                unsafe {
+                    let bounds = NodeList::make1(mcx, Node::mk_integer(mcx, -1)?)?;
+                    Node::with_mut::<types_nodes::TypeName, ()>(tn, |t| t.arrayBounds = bounds);
+                }
+                *yyval = YYSTYPE::Node(Some(tn));
             }
+            2342 => {
+                let uidx = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Indices { is_slice: false, lidx: None, uidx },
+                )?));
+            }
+            2343 => {
+                let lidx = view.v(2).node();
+                let uidx = view.v(4).node();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Indices { is_slice: true, lidx, uidx },
+                )?));
+            }
+            // opt_slice_bound: a_expr | empty
+            2344 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            2345 => *yyval = YYSTYPE::Node(None),
             2347 => {
                 let mut list = view.v(1).list();
                 let el = view.v(2).node().expect("indirection_el");
@@ -3418,8 +3692,9 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
-            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
-            2140..=2148 => {
+            // CURRENT_DATE .. CURRENT_SCHEMA (makeSQLValueFunction; 2152
+            // SYSTEM_USER is a makeFuncCall, not an SVFOP — stays a loud).
+            2140..=2151 | 2153..=2155 => {
                 use SQLValueFunctionOp as Op;
                 let (op, typmod) = match rule {
                     2140 => (Op::SVFOP_CURRENT_DATE, -1),
@@ -3430,7 +3705,13 @@ impl<'mcx> Parser<'mcx> {
                     2145 => (Op::SVFOP_LOCALTIME, -1),
                     2146 => (Op::SVFOP_LOCALTIME_N, view.v(3).ival()),
                     2147 => (Op::SVFOP_LOCALTIMESTAMP, -1),
-                    _ => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2148 => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2149 => (Op::SVFOP_CURRENT_ROLE, -1),
+                    2150 => (Op::SVFOP_CURRENT_USER, -1),
+                    2151 => (Op::SVFOP_SESSION_USER, -1),
+                    2153 => (Op::SVFOP_USER, -1),
+                    2154 => (Op::SVFOP_CURRENT_CATALOG, -1),
+                    _ => (Op::SVFOP_CURRENT_SCHEMA, -1),
                 };
                 let n = Node::mk(
                     mcx,
@@ -3534,6 +3815,19 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            217 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("role");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(2).str_val() })),
+                    view.l(2),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.location = view.l(2);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // set_rest_more: SESSION AUTHORIZATION NonReservedWord_or_Sconst | DEFAULT.
             218 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -3618,6 +3912,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = make_a_const(mcx, v, view.l(1))?;
             }
             248 => *yyval = view.v(2),
+            // SetResetClause: VariableResetStmt (node -> vsetstmt cast in C).
+            256 => *yyval = view.v(1),
             // reset_rest: TIME ZONE / TRANSACTION ISOLATION LEVEL / SESSION AUTHORIZATION.
             250 | 251 | 252 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -3769,6 +4065,20 @@ impl<'mcx> Parser<'mcx> {
                 n.kind = kind;
                 n.savepoint_name = Some(view.v(i).str_val());
                 n.location = view.l(i);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // TransactionStmt: PREPARE TRANSACTION / COMMIT PREPARED /
+            // ROLLBACK PREPARED, all over Sconst gids.
+            1467 | 1468 | 1469 => {
+                let kind = match rule {
+                    1467 => TransactionStmtKind::TRANS_STMT_PREPARE,
+                    1468 => TransactionStmtKind::TRANS_STMT_COMMIT_PREPARED,
+                    _ => TransactionStmtKind::TRANS_STMT_ROLLBACK_PREPARED,
+                };
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = kind;
+                n.gid = Some(view.v(3).str_val());
+                n.location = view.l(3);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1470 => {
@@ -4263,6 +4573,18 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 1295;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER POLICY [IF_P EXISTS] name ON qualified_name
+            // RENAME TO name
+            1286 | 1287 => {
+                let (sub, rv, nm) = if rule == 1286 { (3, 5, 8) } else { (5, 7, 10) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_POLICY;
+                n.relation = view.v(rv).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1287;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME
             // opt_column name TO name
             1306 | 1307 => {
@@ -4274,6 +4596,19 @@ impl<'mcx> Parser<'mcx> {
                 n.subname = Some(view.v(sub).str_val());
                 n.newname = Some(view.v(nm).str_val());
                 n.missing_ok = rule == 1307;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME
+            // CONSTRAINT name TO name
+            1312 | 1313 => {
+                let (rv, sub, nm) = if rule == 1312 { (3, 6, 8) } else { (5, 8, 10) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TABCONSTRAINT;
+                n.relationType = ObjectType::OBJECT_TABLE;
+                n.relation = view.v(rv).node().expect("relation_expr").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1313;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // opt_column: COLUMN | /*EMPTY*/
@@ -4295,6 +4630,17 @@ impl<'mcx> Parser<'mcx> {
                 n.subtype = AlterTableType::AT_DropColumn;
                 n.name = Some(view.v(3).str_val());
                 n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: [ENABLE|DISABLE|FORCE|NO FORCE] ROW LEVEL SECURITY
+            359..=362 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = match rule {
+                    359 => AlterTableType::AT_EnableRowSecurity,
+                    360 => AlterTableType::AT_DisableRowSecurity,
+                    361 => AlterTableType::AT_ForceRowSecurity,
+                    _ => AlterTableType::AT_NoForceRowSecurity,
+                };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_table_cmd: ALTER [COLUMN] col forms (execution is the
@@ -4637,8 +4983,42 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // DropStmt: DROP {object_type_any_name any_name_list |
-            // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
-            // (TYPE/DOMAIN/INDEX CONCURRENTLY/ON-name forms 922-929 stay loud).
+            // drop_type_name name_list | TYPE_P/DOMAIN_P type_name_list}
+            // [IF EXISTS] opt_drop_behavior
+            // (INDEX CONCURRENTLY/ON-name forms 922-923/928-929 stay loud).
+            924 | 926 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 924 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            925 | 927 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 925 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            965 => {
+                let t = view.v(1).node().expect("Typename");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            966 => {
+                let mut list = view.v(1).list();
+                let t = view.v(3).node().expect("Typename");
+                list.lappend(mcx, t)?;
+                *yyval = YYSTYPE::List(list);
+            }
             918 | 920 => {
                 let mut n = Node::build::<DropStmt>(mcx)?;
                 n.removeType = object_type(view.v(2).ival());
@@ -4654,6 +5034,95 @@ impl<'mcx> Parser<'mcx> {
                 n.behavior = drop_behavior(view.v(4).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
+            // ON any_name opt_drop_behavior
+            922 | 923 => {
+                let (nm, any, beh) = if rule == 922 { (3, 5, 6) } else { (5, 7, 8) };
+                let mut inner = view.v(any).list();
+                inner.lappend(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, inner)?)?;
+                n.behavior = drop_behavior(view.v(beh).ival());
+                n.missing_ok = rule == 923;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreatePolicyStmt: CREATE POLICY name ON qualified_name
+            // RowSecurityDefaultPermissive RowSecurityDefaultForCmd
+            // RowSecurityDefaultToRole RowSecurityOptionalExpr
+            // RowSecurityOptionalWithCheck
+            762 => {
+                let n = CreatePolicyStmt {
+                    policy_name: Some(view.v(3).str_val()),
+                    table: view.v(5).node().expect("qualified_name").as_variant::<RangeVar>(),
+                    cmd_name: Some(view.v(7).str_val()),
+                    permissive: view.v(6).boolean(),
+                    roles: view.v(8).list(),
+                    qual: view.v(9).node(),
+                    with_check: view.v(10).node(),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterPolicyStmt: ALTER POLICY name ON qualified_name
+            // RowSecurityOptionalToRole RowSecurityOptionalExpr
+            // RowSecurityOptionalWithCheck
+            763 => {
+                let n = AlterPolicyStmt {
+                    policy_name: Some(view.v(3).str_val()),
+                    table: view.v(5).node().expect("qualified_name").as_variant::<RangeVar>(),
+                    roles: view.v(6).list(),
+                    qual: view.v(7).node(),
+                    with_check: view.v(8).node(),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // RowSecurityOptionalExpr: USING '(' a_expr ')' | EMPTY
+            764 => *yyval = YYSTYPE::Node(view.v(3).node()),
+            765 => *yyval = YYSTYPE::Node(None),
+            // RowSecurityOptionalWithCheck: WITH CHECK '(' a_expr ')' | EMPTY
+            766 => *yyval = YYSTYPE::Node(view.v(4).node()),
+            767 => *yyval = YYSTYPE::Node(None),
+            // RowSecurityDefaultToRole: TO role_list | EMPTY -> [PUBLIC]
+            768 => *yyval = YYSTYPE::List(view.v(2).list()),
+            769 => {
+                let mut n = Node::build::<RoleSpec>(mcx)?;
+                n.roletype = RoleSpecType::ROLESPEC_PUBLIC;
+                n.location = -1;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n.seal())?);
+            }
+            // RowSecurityOptionalToRole: TO role_list | EMPTY -> NIL
+            770 => *yyval = YYSTYPE::List(view.v(2).list()),
+            771 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // RowSecurityDefaultPermissive: AS IDENT | EMPTY -> true
+            772 => {
+                let s = view.v(2).str_val();
+                let v = match s {
+                    "permissive" => true,
+                    "restrictive" => false,
+                    _ => {
+                        return Err(Box::new(
+                            (*self.errposition_error(
+                                format!("unrecognized row security option \"{s}\""),
+                                view.l(2),
+                            ))
+                            .with_hint(
+                                "Only PERMISSIVE or RESTRICTIVE policies are supported currently.",
+                            ),
+                        ))
+                    }
+                };
+                *yyval = YYSTYPE::Boolean(v);
+            }
+            773 => *yyval = YYSTYPE::Boolean(true),
+            // RowSecurityDefaultForCmd: FOR row_security_cmd | EMPTY -> "all"
+            774 => *yyval = YYSTYPE::Str(view.v(2).str_val()),
+            775 => *yyval = YYSTYPE::Str("all"),
+            // row_security_cmd
+            776 => *yyval = YYSTYPE::Str("all"),
+            777 => *yyval = YYSTYPE::Str("select"),
+            778 => *yyval = YYSTYPE::Str("insert"),
+            779 => *yyval = YYSTYPE::Str("update"),
+            780 => *yyval = YYSTYPE::Str("delete"),
             // object_type_any_name / object_type_name / drop_type_name /
             // object_type_name_on_any_name constants (943 rides DISPATCH).
             930..=942 => *yyval = YYSTYPE::Ival(OBJECT_TYPE_ANY_NAME[rule - 930] as i32),
@@ -4679,6 +5148,171 @@ impl<'mcx> Parser<'mcx> {
                 let mut list = view.v(2).list();
                 list.lcons(mcx, Node::mk_string(mcx, s)?)?;
                 *yyval = YYSTYPE::List(list);
+            }
+            // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
+            // ON any_name opt_drop_behavior
+            922 | 923 => {
+                let (nm, an, bh) = if rule == 922 { (3, 5, 6) } else { (5, 7, 8) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                let mut any_name = view.v(an).list();
+                any_name.lappend(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 923;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateTrigStmt: CREATE opt_or_replace TRIGGER name
+            // TriggerActionTime TriggerEvents ON qualified_name
+            // TriggerReferencing TriggerForSpec TriggerWhen EXECUTE ...
+            784 => {
+                let mut n = Node::build::<CreateTrigStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                n.trigname = Some(view.v(4).str_val());
+                n.relation =
+                    view.v(8).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.funcname = view.v(14).list();
+                n.args = view.v(16).list();
+                n.row = view.v(10).boolean();
+                n.timing = view.v(5).ival() as i16;
+                let (events, columns) = trigger_events(mcx, view.v(6))?;
+                n.events = events;
+                n.columns = columns;
+                n.whenClause = view.v(11).node();
+                n.transitionRels = view.v(9).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CONSTRAINT TRIGGER form (OptConstrFromTable + CAS bits)
+            785 => {
+                let mut n = Node::build::<CreateTrigStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                if n.replace {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            "CREATE OR REPLACE CONSTRAINT TRIGGER is not supported".into(),
+                            view.l(1),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                n.isconstraint = true;
+                n.trigname = Some(view.v(5).str_val());
+                n.relation =
+                    view.v(9).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.funcname = view.v(18).list();
+                n.args = view.v(20).list();
+                n.row = true;
+                n.timing = TRIGGER_TYPE_AFTER;
+                let (events, columns) = trigger_events(mcx, view.v(7))?;
+                n.events = events;
+                n.columns = columns;
+                n.whenClause = view.v(15).node();
+                let cas = self.process_cas_bits(
+                    view.v(11).ival(),
+                    view.l(11),
+                    "TRIGGER",
+                    CasTargets {
+                        deferrable: true,
+                        initdeferred: true,
+                        is_enforced: false,
+                        not_valid: false,
+                        no_inherit: false,
+                    },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                n.constrrel = view
+                    .v(10)
+                    .node()
+                    .and_then(|rv| rv.as_variant::<RangeVar>());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            786 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_BEFORE as i32),
+            787 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_AFTER as i32),
+            788 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_INSTEAD as i32),
+            790 => {
+                let (e1, c1) = trigger_events(mcx, view.v(1))?;
+                let (e2, c2) = trigger_events(mcx, view.v(3))?;
+                if e1 & e2 != 0 {
+                    return Err(self.parser_yyerror("duplicate trigger events specified"));
+                }
+                let mut cols = c1;
+                cols.concat(mcx, &c2)?;
+                *yyval = trigger_one_event(mcx, (e1 | e2) as i32, cols)?;
+            }
+            791 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_INSERT as i32, NodeList::nil())?
+            }
+            792 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_DELETE as i32, NodeList::nil())?
+            }
+            793 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_UPDATE as i32, NodeList::nil())?
+            }
+            794 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_UPDATE as i32, view.v(3).list())?
+            }
+            795 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_TRUNCATE as i32, NodeList::nil())?
+            }
+            798 => {
+                let t = view.v(1).node().expect("TriggerTransition");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            799 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("TriggerTransition"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // TriggerTransition: OldOrNew RowOrTable opt_as RelName
+            800 => {
+                let mut n = Node::build::<TriggerTransition>(mcx)?;
+                n.name = Some(view.v(4).str_val());
+                n.isNew = view.v(1).boolean();
+                n.isTable = view.v(2).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            801 | 803 => *yyval = YYSTYPE::Boolean(true),
+            802 | 804 => *yyval = YYSTYPE::Boolean(false),
+            807 => *yyval = YYSTYPE::Boolean(false),
+            810 => *yyval = YYSTYPE::Boolean(true),
+            811 => *yyval = YYSTYPE::Boolean(false),
+            816 => {
+                let a = view.v(1).node().expect("TriggerFuncArg");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, a)?);
+            }
+            817 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("TriggerFuncArg"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            819 => {
+                let s = arena_int_str(mcx, view.v(1).ival())?;
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
+            820..=822 => {
+                *yyval =
+                    YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?));
+            }
+            // ConstraintsSetStmt: SET CONSTRAINTS list mode
+            264 => {
+                let mut n = Node::build::<ConstraintsSetStmt>(mcx)?;
+                n.constraints = view.v(3).list();
+                n.deferred = view.v(4).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            265 => *yyval = YYSTYPE::List(NodeList::nil()),
+            267 => *yyval = YYSTYPE::Boolean(true),
+            268 => *yyval = YYSTYPE::Boolean(false),
+            // RenameStmt: ALTER TRIGGER name ON qualified_name RENAME TO name
+            1317 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TRIGGER;
+                n.relation =
+                    view.v(5).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // CreateSchemaStmt (AUTHORIZATION forms 189/191 and non-empty
             // element lists 193 stay unimplemented-rule louds).
@@ -4824,6 +5458,174 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
                 *yyval = YYSTYPE::List(list);
             }
+            // func_args_list / function_with_argtypes_list / aggr_args_list /
+            // aggregate_with_argtypes_list: `el | list ',' el`.
+            1134 | 1136 | 1169 | 1172 => {
+                let el = view.v(1).node().expect("list element");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1135 | 1137 | 1170 | 1173 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("list element"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1138 => {
+                let args = view.v(2).list();
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = view.v(1).list();
+                n.objargs = extract_arg_types(mcx, &args)?;
+                n.objfuncargs = args;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1139 | 1140 => {
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = NodeList::make1(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
+                n.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1141 => {
+                let name = view.v(1).str_val();
+                let mut list = view.v(2).list();
+                for e in &list {
+                    if e.as_string().is_none() {
+                        return Err(self.parser_yyerror("syntax error"));
+                    }
+                }
+                list.lcons(mcx, Node::mk_string(mcx, name)?)?;
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = list;
+                n.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1164 => {
+                let p = view.v(1).node().expect("func_arg");
+                let mode = p.as_function_parameter().expect("FunctionParameter").mode;
+                if !matches!(
+                    mode,
+                    FunctionParameterMode::FUNC_PARAM_DEFAULT
+                        | FunctionParameterMode::FUNC_PARAM_IN
+                        | FunctionParameterMode::FUNC_PARAM_VARIADIC
+                ) {
+                    return Err(self.errposition_error_code(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "aggregates cannot have output arguments".into(),
+                        view.l(1),
+                    ));
+                }
+                *yyval = YYSTYPE::Node(Some(p));
+            }
+            // aggr_args carrier: [args sublist, numdirectargs Integer];
+            // ordered-set form 1168 stays loud (makeOrderedSetArgs).
+            1165..=1167 => {
+                let sub = match rule {
+                    1165 => NodeList::nil(),
+                    1166 => view.v(2).list(),
+                    _ => view.v(4).list(),
+                };
+                let ndirect = if rule == 1167 { 0 } else { -1 };
+                let mut list = NodeList::make1(mcx, Node::mk_list(mcx, sub)?)?;
+                list.lappend(mcx, Node::mk_integer(mcx, ndirect)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // aggregate_with_argtypes: objfuncargs = linitial(aggr_args).
+            1171 => {
+                let aggr = view.v(2).list();
+                let sub = aggr.as_slice()[0];
+                // SAFETY: parser-owned carrier; no derived refs live.
+                let params = unsafe { sub.with_mut::<NodeList, _>(core::mem::take) }
+                    .expect("aggr_args sublist");
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = view.v(1).list();
+                n.objargs = extract_arg_types(mcx, &params)?;
+                n.objfuncargs = params;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1217..=1219 => {
+                let mut n = Node::build::<AlterFunctionStmt>(mcx)?;
+                n.objtype = match rule {
+                    1217 => ObjectType::OBJECT_FUNCTION,
+                    1218 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.func = view.v(3).node().and_then(|o| o.as_object_with_args());
+                n.actions = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1220 => {
+                let el = view.v(1).node().expect("common_func_opt_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1221 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("common_func_opt_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // RemoveFuncStmt / RemoveAggrStmt (operator forms 1232-1242 stay
+            // loud with the rest of DROP/ALTER OPERATOR: operator lane).
+            1224 | 1226 | 1228 | 1230 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = match rule {
+                    1224 => ObjectType::OBJECT_FUNCTION,
+                    1226 => ObjectType::OBJECT_PROCEDURE,
+                    1228 => ObjectType::OBJECT_ROUTINE,
+                    _ => ObjectType::OBJECT_AGGREGATE,
+                };
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1225 | 1227 | 1229 | 1231 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = match rule {
+                    1225 => ObjectType::OBJECT_FUNCTION,
+                    1227 => ObjectType::OBJECT_PROCEDURE,
+                    1229 => ObjectType::OBJECT_ROUTINE,
+                    _ => ObjectType::OBJECT_AGGREGATE,
+                };
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CommentStmt objwithargs forms (OPERATOR 978 stays loud).
+            976 | 977 | 982 | 983 => {
+                let mut n = Node::build::<CommentStmt>(mcx)?;
+                n.objtype = match rule {
+                    976 => ObjectType::OBJECT_AGGREGATE,
+                    977 => ObjectType::OBJECT_FUNCTION,
+                    982 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(4).node();
+                let c = view.v(6);
+                n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1274 | 1281 | 1288 | 1290 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = match rule {
+                    1274 => ObjectType::OBJECT_AGGREGATE,
+                    1281 => ObjectType::OBJECT_FUNCTION,
+                    1288 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt objwithargs forms (OPERATOR 1388 stays loud).
+            1380 | 1385 | 1391 | 1392 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = match rule {
+                    1380 => ObjectType::OBJECT_AGGREGATE,
+                    1385 => ObjectType::OBJECT_FUNCTION,
+                    1391 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // GrantStmt / RevokeStmt; privilege_target rides as a GrantStmt
             // carrier holding (targtype, objtype, objects).
             1027 => {
@@ -4908,8 +5710,31 @@ impl<'mcx> Parser<'mcx> {
                 n.cols = NodeList::nil();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // privilege_target FUNCTION/PROCEDURE/ROUTINE forms.
+            1051..=1053 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = match rule {
+                    1051 => ObjectType::OBJECT_FUNCTION,
+                    1052 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.objects = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1064..=1066 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA;
+                n.objtype = match rule {
+                    1064 => ObjectType::OBJECT_FUNCTION,
+                    1065 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.objects = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // privilege_target: [TABLE] qualified_name_list | SEQUENCE ...
-            // (other target forms 1049-1066 stay louds).
+            // (other target forms 1049-1063 stay louds).
             1046 | 1047 | 1048 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
@@ -4968,6 +5793,244 @@ impl<'mcx> Parser<'mcx> {
                     _ => RoleSpecType::ROLESPEC_SESSION_USER,
                 };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            2457 => {
+                let spec =
+                    view.v(1).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                match spec.roletype {
+                    RoleSpecType::ROLESPEC_CSTRING => {
+                        *yyval = YYSTYPE::Str(spec.rolename.expect("rolename"));
+                    }
+                    other => {
+                        let message = match other {
+                            RoleSpecType::ROLESPEC_PUBLIC => {
+                                "role name \"public\" is reserved".into()
+                            }
+                            RoleSpecType::ROLESPEC_SESSION_USER => {
+                                "SESSION_USER cannot be used as a role name here".into()
+                            }
+                            RoleSpecType::ROLESPEC_CURRENT_USER => {
+                                "CURRENT_USER cannot be used as a role name here".into()
+                            }
+                            _ => "CURRENT_ROLE cannot be used as a role name here".into(),
+                        };
+                        return Err(Box::new(
+                            (*self.errposition_error(message, view.l(1)))
+                                .with_sqlstate(types_error::ERRCODE_RESERVED_NAME),
+                        ));
+                    }
+                }
+            }
+            2462 => {
+                let r = view.v(1).node().expect("RoleSpec");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, r)?);
+            }
+            2463 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("RoleSpec"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            147 | 170 | 185 => {
+                let mut n = Node::build::<CreateRoleStmt>(mcx)?;
+                n.stmt_type = match rule {
+                    147 => RoleStmtType::ROLESTMT_ROLE,
+                    170 => RoleStmtType::ROLESTMT_USER,
+                    _ => RoleStmtType::ROLESTMT_GROUP,
+                };
+                n.role = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            151 | 153 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("role option"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            155 | 157 => {
+                let s = view.v(if rule == 157 { 3 } else { 2 }).str_val();
+                *yyval =
+                    def_elem(mcx, "password", Some(Node::mk_string(mcx, s)?), view.l(1))?;
+            }
+            156 => *yyval = def_elem(mcx, "password", None, view.l(1))?,
+            158 => {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "UNENCRYPTED PASSWORD is no longer supported".into(),
+                        view.l(1),
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_hint(
+                        "Remove UNENCRYPTED to store the password in encrypted form instead.",
+                    ),
+                ));
+            }
+            159 => {
+                let b = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "inherit", Some(b), view.l(1))?;
+            }
+            160 => {
+                let i = Node::mk(mcx, Integer { ival: view.v(3).ival() })?;
+                *yyval = def_elem(mcx, "connectionlimit", Some(i), view.l(1))?;
+            }
+            161 => {
+                let s = Node::mk_string(mcx, view.v(3).str_val())?;
+                *yyval = def_elem(mcx, "validUntil", Some(s), view.l(1))?;
+            }
+            162 => {
+                let l = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "rolemembers", Some(l), view.l(1))?;
+            }
+            163 => {
+                let name = view.v(1).str_val();
+                let loc = view.l(1);
+                let (defname, value) = match name {
+                    "superuser" => ("superuser", true),
+                    "nosuperuser" => ("superuser", false),
+                    "createrole" => ("createrole", true),
+                    "nocreaterole" => ("createrole", false),
+                    "replication" => ("isreplication", true),
+                    "noreplication" => ("isreplication", false),
+                    "createdb" => ("createdb", true),
+                    "nocreatedb" => ("createdb", false),
+                    "login" => ("canlogin", true),
+                    "nologin" => ("canlogin", false),
+                    "bypassrls" => ("bypassrls", true),
+                    "nobypassrls" => ("bypassrls", false),
+                    "noinherit" => ("inherit", false),
+                    _ => {
+                        return Err(self.errposition_error(
+                            format!("unrecognized role option \"{name}\""),
+                            loc,
+                        ));
+                    }
+                };
+                let b = Node::mk(mcx, Boolean { boolval: value })?;
+                *yyval = def_elem(mcx, defname, Some(b), loc)?;
+            }
+            165 => {
+                let i = Node::mk(mcx, Integer { ival: view.v(2).ival() })?;
+                *yyval = def_elem(mcx, "sysid", Some(i), view.l(1))?;
+            }
+            166 | 167 => {
+                let name = if rule == 166 { "adminmembers" } else { "rolemembers" };
+                let l = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, name, Some(l), view.l(1))?;
+            }
+            168 | 169 => {
+                let l = Node::mk_list(mcx, view.v(3).list())?;
+                *yyval = def_elem(mcx, "addroleto", Some(l), view.l(1))?;
+            }
+            171 | 172 => {
+                let role =
+                    view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleStmt { role, options: view.v(5).list(), action: 1 },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            175..=178 => {
+                let role = if rule == 175 || rule == 177 {
+                    Some(view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec"))
+                } else {
+                    None
+                };
+                let setstmt = view
+                    .v(5)
+                    .node()
+                    .expect("SetResetClause")
+                    .as_variable_set_stmt()
+                    .expect("VariableSetStmt");
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleSetStmt { role, database: opt_str(view.v(4)), setstmt },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            179..=184 => {
+                let missing_ok = rule % 2 == 0;
+                let mut n = Node::build::<DropRoleStmt>(mcx)?;
+                n.missing_ok = missing_ok;
+                n.roles = view.v(if missing_ok { 5 } else { 3 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            186 => {
+                let role =
+                    view.v(3).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let members = Node::mk_list(mcx, view.v(6).list())?;
+                let d = def_elem(mcx, "rolemembers", Some(members), view.l(6))?
+                    .node()
+                    .unwrap();
+                let n = Node::mk(
+                    mcx,
+                    AlterRoleStmt {
+                        role,
+                        options: NodeList::make1(mcx, d)?,
+                        action: view.v(4).ival(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            187 => *yyval = YYSTYPE::Ival(1),
+            188 => *yyval = YYSTYPE::Ival(-1),
+            916 => {
+                let mut n = Node::build::<DropOwnedStmt>(mcx)?;
+                n.roles = view.v(4).list();
+                n.behavior = drop_behavior(view.v(5).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            917 => {
+                let newrole =
+                    view.v(6).node().expect("RoleSpec").as_role_spec().expect("RoleSpec");
+                let n =
+                    Node::mk(mcx, ReassignOwnedStmt { roles: view.v(4).list(), newrole })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1073 | 1074 => {
+                let (opt, byi) =
+                    if rule == 1074 { (view.v(6).list(), 7) } else { (NodeList::nil(), 5) };
+                let mut n = Node::build::<GrantRoleStmt>(mcx)?;
+                n.is_grant = true;
+                n.granted_roles = view.v(2).list();
+                n.grantee_roles = view.v(4).list();
+                n.opt = opt;
+                n.grantor = view.v(byi).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1075 | 1076 => {
+                let mut n = Node::build::<GrantRoleStmt>(mcx)?;
+                n.is_grant = false;
+                let (pi, gi, byi, bi) = if rule == 1076 {
+                    let b = Node::mk(mcx, Boolean { boolval: false })?;
+                    let opt = def_elem(mcx, view.v(2).str_val(), Some(b), view.l(2))?
+                        .node()
+                        .unwrap();
+                    n.opt = NodeList::make1(mcx, opt)?;
+                    (5, 7, 8, 9)
+                } else {
+                    (2, 4, 5, 6)
+                };
+                n.granted_roles = view.v(pi).list();
+                n.grantee_roles = view.v(gi).list();
+                n.grantor = view.v(byi).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                n.behavior = drop_behavior(view.v(bi).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1077 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("grant_role_opt"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1078 => {
+                let d = view.v(1).node().expect("grant_role_opt");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            1079 => {
+                *yyval = def_elem(mcx, view.v(1).str_val(), view.v(2).node(), view.l(1))?;
+            }
+            1080..=1082 => {
+                let b = Node::mk(mcx, Boolean { boolval: rule != 1082 })?;
+                *yyval = YYSTYPE::Node(Some(b));
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
             969 => *yyval = YYSTYPE::Boolean(true),
@@ -5102,45 +6165,33 @@ impl<'mcx> Parser<'mcx> {
                 n.class_args = view.v(4).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1134 => {
-                let el = view.v(1).node().expect("func_arg");
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            // DropOpClassStmt / DropOpFamilyStmt: DROP OPERATOR CLASS|FAMILY
+            // [IF_P EXISTS] any_name USING name opt_drop_behavior
+            912 | 913 | 914 | 915 => {
+                let (an, nm, bh) = if rule == 912 || rule == 914 { (4, 6, 7) } else { (6, 8, 9) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule <= 913 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut any_name = view.v(an).list();
+                any_name.lcons(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 913 || rule == 915;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1135 => {
-                let mut list = view.v(1).list();
-                list.lappend(mcx, view.v(3).node().expect("func_arg"))?;
-                *yyval = YYSTYPE::List(list);
-            }
-            // function_with_argtypes: func_name func_args |
-            // type_func_name_keyword | ColId [indirection]
-            1138 => {
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                owa.objname = view.v(1).list();
-                let fargs = view.v(2).list();
-                owa.objargs = extract_arg_types(mcx, &fargs)?;
-                owa.objfuncargs = fargs;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
-            }
-            1139 | 1140 => {
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                let name = Node::mk_string(mcx, view.v(1).str_val())?;
-                owa.objname = NodeList::make1(mcx, name)?;
-                owa.args_unspecified = true;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
-            }
-            1141 => {
-                let name = view.v(1).str_val();
-                let mut list = view.v(2).list();
-                for n in &list {
-                    if n.as_string().is_none() {
-                        return Err(self.parser_yyerror("syntax error"));
-                    }
-                }
-                list.lcons(mcx, Node::mk_string(mcx, name)?)?;
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                owa.objname = list;
-                owa.args_unspecified = true;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            // RemoveOperStmt: DROP OPERATOR [IF_P EXISTS]
+            // operator_with_argtypes_list opt_drop_behavior
+            1232 | 1233 => {
+                let (ls, bh) = if rule == 1232 { (3, 4) } else { (5, 6) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = ObjectType::OBJECT_OPERATOR;
+                n.objects = view.v(ls).list();
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 1233;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // oper_argtypes: NONE arms (1236/1237) stay loud — NodeList cells
             // cannot carry C's NULL TypeName cell.
@@ -5479,7 +6530,8 @@ impl<'mcx> Parser<'mcx> {
         Ok(())
     }
 
-    // makeColumnRef; A_Indices arms unreachable (rules 2342/2343 panic).
+    // makeColumnRef: leading field selections fold into ColumnRef.fields; the
+    // first A_Indices switches the remainder into an A_Indirection wrapper.
     fn make_column_ref(
         &self,
         colname: &'mcx str,
@@ -5487,14 +6539,39 @@ impl<'mcx> Parser<'mcx> {
         location: i32,
     ) -> PgResult<Node<'mcx>> {
         let n = indirection.len();
+        let mut nfields = 0usize;
         for (i, el) in indirection.iter().enumerate() {
+            if el.node_tag() == types_nodes::NodeTag::T_A_Indices {
+                let cells = indirection.as_slice();
+                let head = NodeList::from_slice(self.mcx, &cells[..nfields])?;
+                let tail = NodeList::from_slice(self.mcx, &cells[nfields..])?;
+                self.check_indirection(&tail)?;
+                let mut fields = head;
+                fields.lcons(self.mcx, Node::mk_string(self.mcx, colname)?)?;
+                let c = Node::mk_column_ref(self.mcx, fields, location)?;
+                return Node::mk(
+                    self.mcx,
+                    types_nodes::A_Indirection { arg: Some(c), indirection: tail },
+                );
+            }
             if el.as_a_star().is_some() && i + 1 != n {
                 return Err(self.parser_yyerror("improper use of \"*\""));
             }
+            nfields += 1;
         }
         let mut fields = indirection;
         fields.lcons(self.mcx, Node::mk_string(self.mcx, colname)?)?;
         Node::mk_column_ref(self.mcx, fields, location)
+    }
+
+    // check_indirection: '*' is not allowed in subscripting contexts.
+    fn check_indirection(&self, indirection: &NodeList<'mcx>) -> PgResult<()> {
+        for el in indirection.iter() {
+            if el.as_a_star().is_some() {
+                return Err(self.parser_yyerror("improper use of \"*\""));
+            }
+        }
+        Ok(())
     }
 
     #[cold]
@@ -5774,7 +6851,13 @@ impl<'mcx> Parser<'mcx> {
             }
             out.is_enforced = true;
         }
-        if out.deferrable || out.initdeferred {
+        // Deferrable TRIGGER/FOREIGN KEY nodes parse (trigger + firing lanes
+        // own them); the deferrable unique family stays loud
+        // (unique_key_recheck unported).
+        if (out.deferrable || out.initdeferred)
+            && constr_type != "TRIGGER"
+            && constr_type != "FOREIGN KEY"
+        {
             panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
         }
         if out.not_valid {
@@ -5803,6 +6886,15 @@ impl<'mcx> Parser<'mcx> {
     }
 }
 
+fn merge_match_kind(v: i32) -> types_nodes::MergeMatchKind {
+    match v {
+        0 => types_nodes::MergeMatchKind::MERGE_WHEN_MATCHED,
+        1 => types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+        2 => types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET,
+        other => panic!("gram_core: bad MergeMatchKind {other}"),
+    }
+}
+
 fn override_kind(v: i32) -> OverridingKind {
     match v {
         1 => OverridingKind::OVERRIDING_USER_VALUE,
@@ -5818,6 +6910,24 @@ fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
     } else {
         Some(v.str_val())
     }
+}
+
+// extractArgTypes (gram.y): input-argument TypeNames only.
+fn extract_arg_types<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    params: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    for p in params {
+        let fp = p.as_function_parameter().expect("FunctionParameter");
+        if !matches!(
+            fp.mode,
+            FunctionParameterMode::FUNC_PARAM_OUT | FunctionParameterMode::FUNC_PARAM_TABLE
+        ) {
+            result.lappend(mcx, fp.argType.expect("func_arg argType"))?;
+        }
+    }
+    Ok(result)
 }
 
 fn param_mode(v: i32) -> FunctionParameterMode {
@@ -5845,26 +6955,6 @@ fn make_a_const<'mcx>(
         panic!("make_a_const: unexpected node type {:?}", v.node_tag())
     };
     Ok(YYSTYPE::Node(Some(Node::mk_a_const(mcx, Some(val), location)?)))
-}
-
-// extractArgTypes (gram.y): pull input-argument TypeNames off a
-// FunctionParameter list.
-fn extract_arg_types<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    parameters: &NodeList<'mcx>,
-) -> PgResult<NodeList<'mcx>> {
-    let mut result = NodeList::nil();
-    for n in parameters {
-        let p = n
-            .as_variant::<types_nodes::parsenodes::FunctionParameter>()
-            .expect("FunctionParameter");
-        if p.mode != FunctionParameterMode::FUNC_PARAM_OUT
-            && p.mode != FunctionParameterMode::FUNC_PARAM_TABLE
-        {
-            result.lappend(mcx, p.argType.expect("func_arg argType"))?;
-        }
-    }
-    Ok(result)
 }
 
 fn alter_table_cmd<'mcx>(
@@ -6017,6 +7107,38 @@ fn make_range_var<'mcx>(
 }
 
 // doNegateFloat: strip a leading '+'/'-' pair-wise or prepend '-'.
+// C's list_make2(makeInteger(events), columns) TriggerEvents carrier,
+// flattened to [Integer(events), columns...]; never escapes into the tree.
+fn trigger_one_event<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    events: i32,
+    columns: NodeList<'mcx>,
+) -> PgResult<YYSTYPE<'mcx>> {
+    let mut l = NodeList::make1(mcx, Node::mk_integer(mcx, events)?)?;
+    l.concat(mcx, &columns)?;
+    Ok(YYSTYPE::List(l))
+}
+
+fn trigger_events<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    v: YYSTYPE<'mcx>,
+) -> PgResult<(i16, NodeList<'mcx>)> {
+    let l = v.list();
+    let events = l.nth(0).as_integer().expect("events Integer").ival as i16;
+    let mut cols = NodeList::nil();
+    for c in l.as_slice()[1..].iter().copied() {
+        cols.lappend(mcx, c)?;
+    }
+    Ok((events, cols))
+}
+
+fn arena_int_str<'mcx>(mcx: mcx::Mcx<'mcx>, v: i32) -> PgResult<&'mcx str> {
+    use core::fmt::Write;
+    let mut s = mcx::PgString::new_in(mcx);
+    write!(s, "{v}").expect("int fmt");
+    Ok(core::str::from_utf8(s.into_bytes().leak()).expect("was ASCII"))
+}
+
 fn negate_float<'mcx>(mcx: mcx::Mcx<'mcx>, fval: &'mcx str) -> PgResult<&'mcx str> {
     let s = fval.strip_prefix('+').unwrap_or(fval);
     if let Some(stripped) = s.strip_prefix('-') {

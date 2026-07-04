@@ -53,8 +53,10 @@ EXPLAIN SELECT min(a), max(a) FROM ec_big;
 
 -- joins
 EXPLAIN SELECT count(*) FROM ec_big, ec_small WHERE ec_big.b = ec_small.x;
--- joins keep one side MCV-free (two-sided MCV eqjoinsel is a loud lane)
 EXPLAIN SELECT count(*) FROM ec_big, ec_dup WHERE ec_big.a = ec_dup.v;
+-- two-sided MCV eqjoinsel
+EXPLAIN SELECT count(*) FROM ec_dup d1, ec_dup d2 WHERE d1.v = d2.v;
+EXPLAIN SELECT count(*) FROM ec_dup d1 WHERE EXISTS (SELECT 1 FROM ec_dup d2 WHERE d1.v = d2.v);
 EXPLAIN SELECT count(*) FROM ec_small s1, ec_small s2 WHERE s1.x = s2.y;
 
 EXPLAIN SELECT count(*) FROM ec_small s1, ec_small s2;

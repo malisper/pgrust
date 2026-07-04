@@ -223,10 +223,11 @@ fn GenerateTypeDependencies<'mcx>(
         n += 1;
     }
     if !isDependentType {
-        pg_depend::recordDependencyOnOwner(TYPE_RELATION_ID, typeObjectId, p.ownerId);
+        pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, typeObjectId, p.ownerId)?;
     }
-    // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION scripts
-    // (extension.c creating_extension) are unported, so it can never fire.
+    // C: makeExtensionDep is true on every TypeCreate path (dependent types
+    // get explicit membership too); rebuild is false for fresh rows.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
     for proc in [
         p.inputProcedure,
         p.outputProcedure,
@@ -419,7 +420,7 @@ pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
     const TYPTYPE_ENUM: i8 = b'e' as i8;
     const TYPTYPE_RANGE: i8 = b'r' as i8;
     if typtype == TYPTYPE_ENUM {
-        panic!("unported: RemoveTypeById EnumValuesDelete (pg_enum.c)");
+        pg_enum::EnumValuesDelete(mcx, typeOid)?;
     }
     if typtype == TYPTYPE_RANGE {
         panic!("unported: RemoveTypeById RangeDelete (pg_range.c)");

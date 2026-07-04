@@ -298,10 +298,7 @@ fn pull_up_simple_subquery<'mcx>(
     if shared_sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
-    assert!(
-        !shared_sub.hasRowSecurity,
-        "pull_up_simple_subquery (prepjointree.c): hasRowSecurity propagation unported"
-    );
+    parse.hasRowSecurity |= shared_sub.hasRowSecurity;
     assert!(
         shared_sub.rowMarks.is_nil(),
         "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
@@ -367,6 +364,28 @@ fn pull_up_simple_subquery<'mcx>(
     })? {
         parse.returningList = l;
     }
+    // perform_pullup_replace_vars: MERGE action targetlists/quals and the
+    // join condition reference the source rel too.
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = replace_opt(mcx, action.qual, varno, &off_tlist)?;
+        let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &off_tlist)
+        })? {
+            Some(l) => l,
+            None => action.targetList.clone_in(mcx)?,
+        };
+        // SAFETY: pre-seal tree owned by this planner invocation.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.qual = new_qual;
+                a.targetList = new_tlist;
+            })
+        }
+        .expect("MergeAction");
+    }
+    parse.mergeJoinCondition =
+        replace_opt(mcx, parse.mergeJoinCondition, varno, &off_tlist)?;
 
     // pullup_replace_vars over the jointree: substitute Vars in every qual
     // and splice the offset sub-jointree in place of the RangeTblRef.
@@ -456,6 +475,15 @@ fn pull_up_simple_subquery<'mcx>(
                 };
             }
             _ => {}
+        }
+        // range_table_walker walks securityQuals for every RTE kind.
+        if !srte.securityQuals.is_nil() {
+            if let Some(l) = clauses::walker::mutate_list(mcx, &srte.securityQuals, &mut |n| {
+                offset_expr(mcx, n, rtoffset)
+            })? {
+                // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = l) };
+            }
         }
         parse.rtable.lappend(mcx, copy)?;
     }
@@ -1261,9 +1289,51 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().expect("SubscriptingRef");
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                pn::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         other => panic!(
             "copyObject (pullup_replace_vars): {other:?} copy arm unported \
-             (simple-view expression set)"
+             (simple-view expression set; SubLink needs the rewriteManip \
+             sublevel-tracking lane)"
         ),
     }
 }
@@ -1335,6 +1405,15 @@ fn reduce_outer_joins_pass1<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<
         NodeTag::T_RangeTblRef => {
             result.relids.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
         }
+        NodeTag::T_FromExpr => {
+            let f = node.as_variant::<FromExpr>().unwrap();
+            for child in &f.fromlist {
+                let sub = reduce_outer_joins_pass1(mcx, child)?;
+                result.relids.add_members(mcx, &sub.relids)?;
+                result.contains_outer |= sub.contains_outer;
+                result.sub_states.push(sub);
+            }
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().unwrap();
             if j.jointype.is_outer_join() {
@@ -1362,6 +1441,33 @@ fn reduce_outer_joins_pass2<'mcx>(
     nonnullable_rels: &types_nodes::Bitmapset<'mcx>,
     forced_null_vars: &clauses::MultiBitmapset<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    if let Some(f) = node.as_variant::<FromExpr>() {
+        let mut pass_nonnullable = clauses::find_nonnullable_rels(mcx, f.quals)?;
+        pass_nonnullable.add_members(mcx, nonnullable_rels)?;
+        let mut pass_forced = clauses::find_forced_null_vars(mcx, f.quals)?;
+        clauses::mbms_add_members(mcx, &mut pass_forced, forced_null_vars)?;
+        debug_assert_eq!(f.fromlist.len(), state1.sub_states.len());
+        let mut fromlist = NodeList::nil();
+        for (child, sub) in f.fromlist.iter().zip(state1.sub_states.iter()) {
+            if sub.contains_outer {
+                fromlist.lappend(
+                    mcx,
+                    reduce_outer_joins_pass2(
+                        mcx,
+                        parse,
+                        child,
+                        sub,
+                        inner_reduced,
+                        &pass_nonnullable,
+                        &pass_forced,
+                    )?,
+                )?;
+            } else {
+                fromlist.lappend(mcx, child)?;
+            }
+        }
+        return Node::mk(mcx, FromExpr { fromlist, quals: f.quals });
+    }
     let j = node
         .as_join_expr()
         .unwrap_or_else(|| panic!("reduce_outer_joins_pass2: reached {:?}", node.node_tag()));
@@ -1552,6 +1658,12 @@ fn remove_nulling_relids<'mcx>(
     }
     for te in &parse.returningList {
         w.visit(te)?;
+    }
+    for a in &parse.mergeActionList {
+        w.visit(a)?;
+    }
+    if let Some(jc) = parse.mergeJoinCondition {
+        w.visit(jc)?;
     }
     if let Some(h) = parse.havingQual {
         w.visit(h)?;
@@ -1906,4 +2018,356 @@ mod tests {
         let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
         assert_eq!((out_var.varno, out_var.varattno), (3, 1));
     }
+}
+
+// transform_MERGE_to_join (prepjointree.c): replace the MERGE jointree (the
+// bare source) with a join between the target and the source. WHEN NOT
+// MATCHED BY SOURCE is the loud arm: it needs the outer-target join with
+// source-var nulling marks and the executor's join-condition recheck.
+pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    use types_nodes::jointype::JoinType;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::primnodes::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
+
+    if parse.commandType != CmdType::CMD_MERGE {
+        return Ok(());
+    }
+
+    let mut have_action = [false; NUM_MERGE_MATCH_KINDS];
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        if action.commandType != CmdType::CMD_NOTHING {
+            have_action[action.matchKind as usize] = true;
+        }
+    }
+    if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize] {
+        panic!(
+            "transform_MERGE_to_join (prepjointree.c): WHEN NOT MATCHED BY SOURCE \
+             (outer-target join + add_nulling_relids + executor join-condition \
+             recheck) unported — MERGE by-source lane"
+        );
+    }
+    let jointype =
+        if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize] {
+            JoinType::JOIN_RIGHT
+        } else {
+            JoinType::JOIN_INNER
+        };
+
+    let eref = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("*MERGE*"), colnames: NodeList::nil() },
+    )?);
+    let joinrte = RangeTblEntry {
+        rtekind: RTEKind::RTE_JOIN,
+        jointype,
+        eref: Some(eref),
+        inFromCl: true,
+        ..Default::default()
+    };
+    parse.rtable.lappend(mcx, Node::mk(mcx, joinrte)?)?;
+    let joinrti = parse.rtable.len() as i32;
+
+    let jt = parse.jointree.expect("MERGE jointree is a FromExpr");
+    let rtr = Node::mk(
+        mcx,
+        types_nodes::primnodes::RangeTblRef { rtindex: parse.mergeTargetRelation },
+    )?;
+    let target = Node::mk(
+        mcx,
+        FromExpr { fromlist: NodeList::make1(mcx, rtr)?, quals: jt.quals },
+    )?;
+    assert_eq!(jt.fromlist.len(), 1, "MERGE jointree carries exactly the source");
+    let source = jt.fromlist.nth(0);
+    debug_assert!(matches!(
+        source.node_tag(),
+        NodeTag::T_RangeTblRef | NodeTag::T_JoinExpr
+    ));
+
+    let joinexpr = Node::mk(
+        mcx,
+        types_nodes::primnodes::JoinExpr {
+            jointype,
+            isNatural: false,
+            larg: target,
+            rarg: source,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: parse.mergeJoinCondition,
+            alias: None,
+            rtindex: joinrti,
+        },
+    )?;
+    parse.jointree = Some(
+        Node::mk_mut(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, joinexpr)?, quals: None },
+        )?
+        .seal_ref(),
+    );
+
+    // A non-empty targetList here means a trigger-updatable view target
+    // (add_nulling_relids over its wholerow Var) — the view lane is loud
+    // upstream in the rewriter.
+    debug_assert!(parse.targetList.is_nil());
+
+    // Without BY SOURCE actions the executor never rechecks the join
+    // condition; C drops it to save planning/execution cycles.
+    parse.mergeJoinCondition = None;
+    Ok(())
+}
+
+// expand_virtual_generated_columns (prepjointree.c:969). Replaces every Var
+// referencing a virtual generated column with its generation expression via
+// the pullup replace machinery. build_generation_expression (rewriteHandler.c)
+// is mirrored here: rewrite_handler depends on this crate, and cookDefault
+// stored a coerced tree so build_column_default's re-coercion is a no-op.
+// DIVERGENCE: C expands before pull_up_subqueries plus per pulled-up subquery
+// (prepjointree.c:1360); here one pass runs after pull-up, when every merged
+// relation RTE is in the parent rtable (pull-up never opens relations, and
+// generation expressions are immutable, so pullability is unaffected).
+// Retained RTE_SUBQUERYs expand in their own subquery_planner pass.
+pub fn expand_virtual_generated_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    let nrte = parse.rtable.len();
+    for rt_index in 1..=nrte {
+        let rte_node = parse.rtable.nth(rt_index - 1);
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind != RTEKind::RTE_RELATION || !matches!(rte.relkind, b'r' | b'p') {
+            continue;
+        }
+        let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
+        if !rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
+            table::table_close(rel, types_rel::NoLock)?;
+            continue;
+        }
+        if parse.hasSubLinks {
+            panic!(
+                "expand_virtual_generated_columns (prepjointree.c): residual SubLink \
+                 over a virtual-generated relation; sublevel replace arm unported"
+            );
+        }
+        if !parse.groupingSets.is_nil() {
+            panic!(
+                "expand_virtual_generated_columns (prepjointree.c): grouping sets \
+                 REPLACE_WRAP_ALL PlaceHolderVar arm unported"
+            );
+        }
+        if parse.onConflict.is_some() {
+            panic!(
+                "expand_virtual_generated_columns (prepjointree.c): ON CONFLICT \
+                 over a virtual-generated relation unported"
+            );
+        }
+        if !parse.withCheckOptions.is_nil() {
+            panic!(
+                "expand_virtual_generated_columns (prepjointree.c): WithCheckOptions \
+                 over a virtual-generated relation unported"
+            );
+        }
+        assert!(!rte.lateral);
+        let mut tlist = NodeList::nil();
+        for i in 0..rel.rd_att.natts as usize {
+            let att = rel.rd_att.attr(i);
+            let expr = if att.attgenerated == VIRTUAL_GEN {
+                let e = generation_expr(mcx, &rel, i + 1)?;
+                change_varno_expr(mcx, e, 1, rt_index as i32)?.unwrap_or(e)
+            } else {
+                Node::mk_var(
+                    mcx,
+                    rt_index as i32,
+                    (i + 1) as i16,
+                    att.atttypid,
+                    att.atttypmod,
+                    att.attcollation,
+                    0,
+                )?
+            };
+            tlist.lappend(mcx, Node::mk_target_entry(mcx, expr, (i + 1) as i16, None, false)?)?;
+        }
+        table::table_close(rel, types_rel::NoLock)?;
+
+        let varno = rt_index as i32;
+        if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &tlist)
+        })? {
+            parse.targetList = l;
+        }
+        parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist)?;
+        if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &tlist)
+        })? {
+            parse.returningList = l;
+        }
+        for action_node in &parse.mergeActionList {
+            let action = action_node.as_merge_action().expect("mergeActionList cell");
+            let new_qual = replace_opt(mcx, action.qual, varno, &tlist)?;
+            let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
+                replace_var_expr(mcx, n, varno, &tlist)
+            })? {
+                Some(l) => l,
+                None => action.targetList.clone_in(mcx)?,
+            };
+            // SAFETY: pre-seal tree owned by this planner invocation.
+            unsafe {
+                action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                    a.qual = new_qual;
+                    a.targetList = new_tlist;
+                })
+            }
+            .expect("MergeAction");
+        }
+        parse.mergeJoinCondition = replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist)?;
+        let jt = parse.jointree.expect("jointree is a FromExpr");
+        let mut new_fromlist = NodeList::nil();
+        for child in &jt.fromlist {
+            new_fromlist.lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, &tlist)?)?;
+        }
+        let new_quals = replace_opt(mcx, jt.quals, varno, &tlist)?;
+        parse.jointree = Some(mcx::alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: new_fromlist, quals: new_quals },
+        )?);
+    }
+    Ok(())
+}
+
+fn replace_vars_in_jointree_expand<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    varno: i32,
+    tlist: &NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => Ok(node),
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().expect("FromExpr");
+            let mut fromlist = NodeList::nil();
+            for child in &f.fromlist {
+                fromlist.lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, tlist)?)?;
+            }
+            Node::mk(
+                mcx,
+                FromExpr { fromlist, quals: replace_opt(mcx, f.quals, varno, tlist)? },
+            )
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().expect("JoinExpr");
+            Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg: replace_vars_in_jointree_expand(mcx, j.larg, varno, tlist)?,
+                    rarg: replace_vars_in_jointree_expand(mcx, j.rarg, varno, tlist)?,
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals: replace_opt(mcx, j.quals, varno, tlist)?,
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
+            )
+        }
+        other => panic!("expand_virtual_generated_columns: {other:?} jointree arm"),
+    }
+}
+
+// build_generation_expression (rewriteHandler.c:4520), adbin-direct form.
+fn generation_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    let adbin = constr
+        .defval
+        .iter()
+        .find(|d| d.adnum == attrno as i16)
+        .and_then(|d| d.adbin.as_ref())
+        .unwrap_or_else(|| {
+            panic!(
+                "no generation expression found for column number {} of table \"{}\"",
+                attrno,
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            )
+        });
+    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    if att.attcollation != 0 && att.attcollation != nodes_core::node_funcs::expr_collation(expr) {
+        return Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr {
+                arg: expr,
+                collOid: att.attcollation,
+                location: -1,
+            },
+        );
+    }
+    Ok(expr)
+}
+
+// ChangeVarNodes (rewriteManip.c) expression leg, varlevelsup-0 only.
+fn change_varno_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    from: i32,
+    to: i32,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().expect("Var");
+            if v.varlevelsup != 0 || v.varno != from {
+                return Ok(None);
+            }
+            let mut nv = offset_var(mcx, v, 0)?;
+            nv.varno = to;
+            if nv.varnosyn == from as u32 {
+                nv.varnosyn = to as u32;
+            }
+            Ok(Some(Node::mk(mcx, nv)?))
+        }
+        _ => clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+            change_varno_expr(mcx, n, from, to)
+        }),
+    }
+}
+
+// expand_generated_columns_in_expr (rewriteHandler.c:4493), planner-side copy
+// (dep cycle: rewrite_handler depends on this crate). Only Vars naming a
+// virtual generated column of rel at the given varno are replaced.
+pub fn expand_generated_columns_in_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    varno: i32,
+) -> PgResult<Node<'mcx>> {
+    const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    fn walk<'mcx>(
+        mcx: Mcx<'mcx>,
+        node: Node<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        varno: i32,
+    ) -> PgResult<Option<Node<'mcx>>> {
+        if let Some(v) = node.as_var() {
+            if v.varlevelsup != 0 || v.varno != varno {
+                return Ok(None);
+            }
+            if v.varattno == 0 {
+                panic!(
+                    "expand_generated_columns_in_expr (rewriteHandler.c): whole-row \
+                     Var over a virtual-generated relation unported"
+                );
+            }
+            if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+                return Ok(None);
+            }
+            let e = generation_expr(mcx, rel, v.varattno as usize)?;
+            return Ok(Some(change_varno_expr(mcx, e, 1, varno)?.unwrap_or(e)));
+        }
+        clauses::walker::expression_tree_mutator(mcx, node, &mut |n| walk(mcx, n, rel, varno))
+    }
+    Ok(walk(mcx, node, rel, varno)?.unwrap_or(node))
 }

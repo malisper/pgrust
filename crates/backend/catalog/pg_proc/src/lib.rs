@@ -529,10 +529,10 @@ pub fn ProcedureCreate<'mcx>(
     )?;
 
     if !is_update {
-        pg_depend::recordDependencyOnOwner(PROCEDURE_RELATION_ID, retval, a.proowner);
+        pg_depend::recordDependencyOnOwner(mcx, PROCEDURE_RELATION_ID, retval, a.proowner)?;
     }
-    // recordDependencyOnCurrentExtension / recordDependencyOnNewAcl: no-ops —
-    // CREATE EXTENSION is unported and proacl is always NULL here.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, is_update)?;
+    // recordDependencyOnNewAcl: no-op — proacl is always NULL here.
 
     rel.close(RowExclusiveLock)?;
 
@@ -647,4 +647,34 @@ fn utf8_len(b: u8) -> usize {
     } else {
         4
     }
+}
+
+// fmgr_c_validator (pg_proc.c). DIVERGENCE: CheckFunctionValidatorAccess is
+// unported (as in fmgr_sql_validator); the load runs regardless of
+// check_function_bodies, exactly as C.
+fn fc_fmgr_c_validator(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let funcoid = fcinfo.arg(0).as_oid();
+    let cx = mcx::MemoryContext::new("fmgr_c_validator");
+    let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), funcoid)?
+        .unwrap_or_else(|| panic!("null prosrc for C function {funcoid}"));
+    let probin = syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), funcoid)?
+        .unwrap_or_else(|| panic!("null probin for C function {funcoid}"));
+    dfmgr::load_external_function(&probin, &prosrc, true)?;
+    Ok(Datum::null())
+}
+
+static PG_PROC_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {
+    foid: 2247,
+    name: "fmgr_c_validator",
+    nargs: 1,
+    strict: true,
+    retset: false,
+    func: fc_fmgr_c_validator,
+}];
+
+pub fn init_seams() {
+    fmgr_core::register_late_builtins(PG_PROC_BUILTINS);
 }

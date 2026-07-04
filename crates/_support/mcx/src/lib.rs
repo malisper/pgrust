@@ -112,7 +112,7 @@ unsafe fn drop_glue_vec_elems<T>(addr: *mut u8) {
 
 // Subtree totals summed on demand (C's recursive MemoryContextMemAllocated); charge never walks ancestors.
 pub(crate) struct Acct {
-    name: &'static str,
+    name: Cell<&'static str>,
     ident: RefCell<Option<alloc::string::String>>,
     pub(crate) self_used: Cell<usize>,
     pub(crate) self_peak: Cell<usize>,
@@ -229,20 +229,24 @@ impl<T> PoolMutex<T> {
         }
     }
 
+    // Single CAS attempt, no spin: a contended pool is bypassed (caller falls
+    // through to Global/mimalloc). Spinning here collapsed the multi-backend
+    // write gate at clients > vCPU (75% of cycles in __aarch64_cas1_acq;
+    // m4mc-gate job pgrust-m4mc-gate-1783126728-37375).
     #[inline]
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+    pub(crate) fn try_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         use core::sync::atomic::Ordering;
-        while self
+        if self
             .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            return None;
         }
         // SAFETY: the flag serializes access; released below.
         let r = f(unsafe { &mut *self.val.get() });
         self.locked.store(false, Ordering::Release);
-        r
+        Some(r)
     }
 }
 
@@ -257,7 +261,7 @@ const CHILD_VEC_POOL_MAX: usize = 64;
 
 #[inline]
 fn child_vec_take() -> alloc::vec::Vec<AcctWeak> {
-    CHILD_VEC_POOL.with(|s| s.pop()).unwrap_or_default()
+    CHILD_VEC_POOL.try_with(|s| s.pop()).flatten().unwrap_or_default()
 }
 
 #[inline]
@@ -266,7 +270,7 @@ fn child_vec_give(v: alloc::vec::Vec<AcctWeak>) {
     if v.capacity() == 0 {
         return;
     }
-    CHILD_VEC_POOL.with(|s| {
+    let _ = CHILD_VEC_POOL.try_with(move |s| {
         if s.len() < CHILD_VEC_POOL_MAX {
             s.push(v);
         }
@@ -306,7 +310,7 @@ fn acct_alloc_global() -> NonNull<AcctInner> {
 
 #[inline]
 fn acct_take_from(pool: &AcctPool) -> NonNull<AcctInner> {
-    if let Some(p) = pool.with(|s| s.pop()) {
+    if let Some(Some(p)) = pool.try_with(|s| s.pop()) {
         return p;
     }
     acct_alloc_global()
@@ -314,15 +318,15 @@ fn acct_take_from(pool: &AcctPool) -> NonNull<AcctInner> {
 
 #[inline]
 fn acct_give_to(pool: &AcctPool, p: NonNull<AcctInner>) {
-    let full = pool.with(|s| {
+    let pooled = pool.try_with(|s| {
         if s.len() >= ACCT_POOL_MAX {
-            true
+            false
         } else {
             s.push(p);
-            false
+            true
         }
     });
-    if full {
+    if pooled != Some(true) {
         // SAFETY: from acct_alloc_global; `val` already dropped, nothing else owns it.
         unsafe { Global.deallocate(p.cast(), Layout::new::<AcctInner>()) };
     }
@@ -572,7 +576,7 @@ impl MemoryContext {
             p.limited_path.get() || p.limit.get() != usize::MAX
         });
         let acct = AcctRc::new(Acct {
-            name,
+            name: Cell::new(name),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),
@@ -617,7 +621,12 @@ impl MemoryContext {
     }
 
     pub fn name(&self) -> &'static str {
-        self.acct.name
+        self.acct.name.get()
+    }
+
+    /// C's AllocSetContextCreate freelist reuse overwrites context->name.
+    pub fn set_name(&self, name: &'static str) {
+        self.acct.name.set(name);
     }
 
     pub fn set_ident(&self, id: Option<&str>) {
@@ -696,7 +705,7 @@ impl MemoryContext {
                 self.acct.self_used.get(),
                 0,
                 "context {:?} reset with {} bytes still charged (leaked allocation?)",
-                self.acct.name,
+                self.acct.name.get(),
                 self.acct.self_used.get(),
             );
         }
@@ -746,7 +755,7 @@ impl MemoryContext {
 
     pub fn stats(&self) -> ContextStats {
         ContextStats {
-            name: self.acct.name,
+            name: self.acct.name.get(),
             ident: self.ident(),
             used: self.acct.self_used.get(),
             peak: self.acct.self_peak.get(),
@@ -786,7 +795,7 @@ impl MemoryContext {
                 subtree_peak = subtree_peak.saturating_add(child.subtree_peak);
             }
             TreeStats {
-                name: acct.name,
+                name: acct.name.get(),
                 ident: acct.ident.borrow().clone(),
                 used,
                 peak,
@@ -804,7 +813,7 @@ impl MemoryContext {
 
     #[cold]
     pub fn oom(&self, request: usize) -> PgError {
-        crate::oom_named(self.acct.name, request)
+        crate::oom_named(self.acct.name.get(), request)
     }
 
     pub fn is_bumpforget(&self) -> bool {
@@ -850,7 +859,7 @@ impl MemoryContext {
         debug_assert!(
             acct.self_used.get() >= n,
             "context {:?} uncharging {} with only {} charged",
-            acct.name,
+            acct.name.get(),
             n,
             acct.self_used.get(),
         );
@@ -881,7 +890,7 @@ impl Drop for MemoryContext {
 impl fmt::Debug for MemoryContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryContext")
-            .field("name", &self.acct.name)
+            .field("name", &self.acct.name.get())
             .field("used", &self.acct.self_used.get())
             .field("subtree_used", &self.acct.subtree_sum())
             .field("peak", &self.acct.self_peak.get())
@@ -950,7 +959,7 @@ impl<'mcx> Mcx<'mcx> {
 
 impl fmt::Debug for Mcx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Mcx({:?})", self.0.acct.name)
+        write!(f, "Mcx({:?})", self.0.acct.name.get())
     }
 }
 

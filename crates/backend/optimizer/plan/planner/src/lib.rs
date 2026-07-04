@@ -132,9 +132,13 @@ pub fn init_seams() {
     planner_seams::make_restrictinfo::set(crate::initsplan::make_restrictinfo);
     planner_seams::amcostestimate::set(crate::selfuncs::amcostestimate);
     planner_seams::estimate_num_groups::set(crate::selfuncs::estimate_num_groups);
+    planner_seams::estimate_num_groups_estinfo::set(crate::selfuncs::estimate_num_groups_estinfo);
     planner_seams::estimate_array_length::set(crate::selfuncs::estimate_array_length);
     planner_seams::mergejoinscansel::set(crate::selfuncs::mergejoinscansel);
     planner_seams::estimate_hash_bucket_stats::set(crate::selfuncs::estimate_hash_bucket_stats);
+    planner_seams::estimate_multivariate_bucketsize::set(
+        crate::selfuncs::estimate_multivariate_bucketsize,
+    );
     planner_seams::add_function_cost::set(crate::plancat::add_function_cost);
     planner_seams::get_function_rows::set(crate::plancat::get_function_rows);
     planner_seams::get_rel_data_width::set(crate::plancat::get_rel_data_width);
@@ -240,15 +244,12 @@ pub fn standard_planner<'mcx>(
 
     let final_rel = fetch_final_rel(&mut run);
     let best_path = get_cheapest_fractional_path(&run, final_rel, tuple_fraction);
-    let top_plan = create_plan(&mut run, best_path)?;
+    let mut top_plan = create_plan(&mut run, best_path)?;
 
     if (cursor_options & CURSOR_OPT_SCROLL) != 0
         && !execmain::exec_supports_backward_scan(Some(top_plan))
     {
-        panic!(
-            "materialize_finished_plan (createplan.c): SCROLL cursor over a \
-             non-backward plan needs a Material wrapper; M2 cursor lane"
-        );
+        top_plan = crate::subselect::materialize_finished_plan(mcx, top_plan)?;
     }
     if run.glob.parallel_mode_needed {
         panic!("standard_planner (planner.c): debug_parallel_query Gather; M3 parallel lane");

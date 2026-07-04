@@ -6,6 +6,7 @@ mod domain;
 mod index;
 mod triggers;
 mod pg_class;
+mod policies;
 mod rules;
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,7 @@ use types_tuple::{HeapTupleData, NameData, TupleDescData};
 pub fn init_seams() {
     relcache_build_seams::scan_pg_relation::set(pg_class::scan_pg_relation);
     relcache_build_seams::scan_pg_rewrite::set(rules::scan_pg_rewrite);
+    relcache_build_seams::scan_pg_policy::set(policies::scan_pg_policy);
     relcache_build_seams::relation_build_tuple_desc::set(attrs::relation_build_tuple_desc);
     relcache_build_seams::relation_init_index_access_info::set(
         index::relation_init_index_access_info,

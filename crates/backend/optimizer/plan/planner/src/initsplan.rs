@@ -115,6 +115,21 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_Param => {}
         NodeTag::T_AlternativeSubPlan => {
             for a in &node.as_alternative_sub_plan().unwrap().subplans {
@@ -236,6 +251,11 @@ pub(crate) fn add_vars_to_attr_needed<'mcx>(
 enum JtItem<'mcx> {
     Plain {
         quals: Option<Node<'mcx>>,
+        qualscope: types_pathnodes::Relids<'mcx>,
+        jdomain: usize,
+    },
+    SecQuals {
+        varno: i32,
         qualscope: types_pathnodes::Relids<'mcx>,
         jdomain: usize,
     },
@@ -496,16 +516,20 @@ pub fn deconstruct_jointree<'mcx>(
     for _ in 0..items.len() {
         lateral_pending.push(PgVec::new_in(mcx));
     }
+    let plain_security_level = run.root.qual_security_level;
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
+        // C folds these into my_quals, so make_outerjoininfo's semijoin
+        // analysis sees postponed lateral clauses too.
+        let mut pending_for_sjinfo: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pending_for_sjinfo.extend(pending.iter().copied());
         if !pending.is_empty() {
             let (qualscope, jdomain) = match &items[idx] {
-                JtItem::Plain {
-                    qualscope, jdomain, ..
+                JtItem::Plain { qualscope, jdomain, .. }
+                | JtItem::SecQuals { qualscope, jdomain, .. }
+                | JtItem::Sj { qualscope, jdomain, .. } => {
+                    (relids_copy(mcx, qualscope), *jdomain)
                 }
-                | JtItem::Sj {
-                    qualscope, jdomain, ..
-                } => (relids_copy(mcx, qualscope), *jdomain),
             };
             for clause in pending {
                 distribute_qual_to_rels(
@@ -516,6 +540,7 @@ pub fn deconstruct_jointree<'mcx>(
                     &None,
                     None,
                     jdomain,
+                    plain_security_level,
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -537,10 +562,35 @@ pub fn deconstruct_jointree<'mcx>(
                     &None,
                     None,
                     *jdomain,
+                    plain_security_level,
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
                 )?;
+            }
+            // process_security_barrier_quals (initsplan.c): each securityQuals
+            // sublist gets an ascending level; ojscope = qualscope forces
+            // Var-free quals to the rel instead of the top of the tree.
+            JtItem::SecQuals { varno, qualscope, jdomain } => {
+                let rte = run.rte(*varno as usize);
+                let mut level: u32 = 0;
+                for qualset in &rte.securityQuals {
+                    distribute_quals_to_rels(
+                        run,
+                        Some(qualset),
+                        qualscope,
+                        &relids_copy(mcx, qualscope),
+                        &None,
+                        None,
+                        *jdomain,
+                        level,
+                        None,
+                        Some((&items, idx)),
+                        &mut lateral_pending,
+                    )?;
+                    level += 1;
+                }
+                debug_assert!(level <= plain_security_level);
             }
             JtItem::Sj {
                 jointype,
@@ -552,6 +602,25 @@ pub fn deconstruct_jointree<'mcx>(
                 inner_join_rels,
                 rtindex,
             } => {
+                let sjinfo_quals = if pending_for_sjinfo.is_empty() {
+                    *quals
+                } else {
+                    let mut l = types_nodes::list::NodeList::nil();
+                    for &c in pending_for_sjinfo.iter() {
+                        l.lappend(mcx, c)?;
+                    }
+                    if let Some(q) = quals {
+                        match q.as_list() {
+                            Some(ql) => {
+                                for c in ql.iter() {
+                                    l.lappend(mcx, c)?;
+                                }
+                            }
+                            None => l.lappend(mcx, *q)?,
+                        }
+                    }
+                    Some(Node::mk_list(mcx, l)?)
+                };
                 let sjinfo = make_outerjoininfo(
                     run,
                     left_rels,
@@ -559,7 +628,7 @@ pub fn deconstruct_jointree<'mcx>(
                     inner_join_rels,
                     *jointype,
                     *rtindex,
-                    *quals,
+                    sjinfo_quals,
                 )?;
                 // Semijoins build an sjinfo but distribute their quals with
                 // ojscope = NULL and no nonnullable side (C's hybrid case).
@@ -591,6 +660,7 @@ pub fn deconstruct_jointree<'mcx>(
                     nonnullable,
                     Some(&sjinfo),
                     *jdomain,
+                    plain_security_level,
                     if postpone { Some(&mut postponed) } else { None },
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -614,6 +684,7 @@ pub fn deconstruct_jointree<'mcx>(
             sjinfo.ojrelid,
         );
         let ojscope = relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
+        let seclevel = run.root.qual_security_level;
         for clause in postponed {
             distribute_qual_to_rels(
                 run,
@@ -623,6 +694,7 @@ pub fn deconstruct_jointree<'mcx>(
                 &sjinfo.syn_lefthand,
                 Some(&sjinfo),
                 0,
+                seclevel,
                 None,
                 None,
                 &mut lateral_pending,
@@ -642,6 +714,7 @@ fn distribute_quals_to_rels<'mcx>(
     outerjoin_nonnullable: &types_pathnodes::Relids<'mcx>,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
+    security_level: u32,
     mut postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -659,6 +732,7 @@ fn distribute_quals_to_rels<'mcx>(
             outerjoin_nonnullable,
             sjinfo,
             jdomain,
+            security_level,
             postponed.as_deref_mut(),
             jt,
             lateral_pending,
@@ -682,8 +756,18 @@ fn deconstruct_recurse<'mcx>(
         NodeTag::T_RangeTblRef => {
             let varno = item.as_range_tbl_ref().unwrap().rtindex;
             let scope = relids_singleton(mcx, varno as u32);
-            run.root.join_domains[parent_domain].jd_relids =
-                relids_union(mcx, &run.root.join_domains[parent_domain].jd_relids, &scope);
+            run.root.join_domains[parent_domain].jd_relids = relids_union(
+                mcx,
+                &run.root.join_domains[parent_domain].jd_relids,
+                &scope,
+            );
+            if run.root.qual_security_level > 0 {
+                items.push(JtItem::SecQuals {
+                    varno,
+                    qualscope: relids_copy(mcx, &scope),
+                    jdomain: parent_domain,
+                });
+            }
             let mut joinlist = PgVec::new_in(mcx);
             joinlist.push(JoinlistNode::Rel(varno));
             Ok((scope, None, joinlist))
@@ -1212,6 +1296,7 @@ fn distribute_qual_to_rels<'mcx>(
     outerjoin_nonnullable: &types_pathnodes::Relids<'mcx>,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
+    security_level: u32,
     postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -1235,6 +1320,9 @@ fn distribute_qual_to_rels<'mcx>(
         for pidx in idx + 1..items.len() {
             let pscope = match &items[pidx] {
                 JtItem::Plain { qualscope, .. } | JtItem::Sj { qualscope, .. } => qualscope,
+                // C postpones onto jointree-level jtitems; SecQuals items are
+                // this port's RTE-attached extras — never a postponement target.
+                JtItem::SecQuals { .. } => continue,
             };
             if crate::relnode::relids_is_subset(&relids, pscope) {
                 lateral_pending[pidx].push(clause);
@@ -1292,7 +1380,7 @@ fn distribute_qual_to_rels<'mcx>(
         false,
         false,
         pseudoconstant,
-        0,
+        security_level,
         relids,
         None,
         relids_copy(run.mcx, outerjoin_nonnullable),
@@ -1389,9 +1477,13 @@ pub fn make_restrictinfo<'mcx>(
     // memo); the OR index path is a loud panel in indxpath.
     debug_assert!(clause.node_tag() != NodeTag::T_List);
 
-    // security_level 0 skips the leakproof probe.
-    debug_assert!(security_level == 0);
-    let leakproof = false;
+    // C skips the contain_leaked_vars probe for level-zero quals ("really,
+    // don't know") — they can never be delayed on security grounds.
+    let leakproof = if security_level > 0 {
+        !clauses::contain_leaked_vars(clause)?
+    } else {
+        false
+    };
 
     let mut left_relids: types_pathnodes::Relids<'mcx> = None;
     let mut right_relids: types_pathnodes::Relids<'mcx> = None;
@@ -1537,9 +1629,34 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     Ok(())
 }
 
+// check_memoizable (initsplan.c): the hasheqoperator fields feed
+// paraminfo_get_equal_hashops; get_memoize_path only reads them off
+// ppi_clauses (join clauses), matching C's call sites.
+fn check_memoizable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
+    if run.root.rinfo(rinfo).pseudoconstant {
+        return Ok(());
+    }
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let Some(o) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return Ok(());
+    };
+    let lefttype = crate::costsize::expr_type_typmod(o.args.nth(0)).0;
+    let righttype = crate::costsize::expr_type_typmod(o.args.nth(1)).0;
+    let flags = typcache::TYPECACHE_HASH_PROC | typcache::TYPECACHE_EQ_OPR;
+    let entry = typcache::lookup_type_cache(lefttype, flags)?;
+    if entry.hash_proc() != 0 && entry.eq_opr() != 0 {
+        run.root.rinfo_mut(rinfo).left_hasheqoperator = entry.eq_opr();
+    }
+    let entry =
+        if lefttype == righttype { entry } else { typcache::lookup_type_cache(righttype, flags)? };
+    if entry.hash_proc() != 0 && entry.eq_opr() != 0 {
+        run.root.rinfo_mut(rinfo).right_hasheqoperator = entry.eq_opr();
+    }
+    Ok(())
+}
+
 // check_hashjoinable (initsplan.c): mark the clause hashable so
-// hash_inner_and_outer can collect it. The hasheqoperator fields (SEMI/ANTI
-// unique) stay unset — the inner-join lane never reads them.
+// hash_inner_and_outer can collect it.
 fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     if run.root.rinfo(rinfo).pseudoconstant {
         return Ok(());
@@ -1557,14 +1674,14 @@ fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> 
     Ok(())
 }
 
-// distribute_restrictinfo_to_rels (initsplan.c). check_memoizable is absent
-// (Memoize lane); hasheqoperator consumers are loud there.
+// distribute_restrictinfo_to_rels (initsplan.c).
 pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     let relids = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
     if let Some(relid) = relids_singleton_member(&relids) {
         return add_base_clause_to_rel(run, relid, rinfo);
     }
     check_hashjoinable(run, rinfo)?;
+    check_memoizable(run, rinfo)?;
     // add_join_clause_to_rels (joininfo.c): one shared RestrictInfo handle
     // linked into every participating baserel's joininfo list (outer-join
     // relids have no RelOptInfo — C's find_base_rel_ignore_join skip).
@@ -1793,6 +1910,7 @@ pub(crate) fn build_implied_join_equality<'mcx>(
     )?;
     check_mergejoinable(run, rinfo)?;
     check_hashjoinable(run, rinfo)?;
+    check_memoizable(run, rinfo)?;
     Ok(rinfo)
 }
 

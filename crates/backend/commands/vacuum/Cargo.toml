@@ -46,6 +46,7 @@ genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 
 [dev-dependencies]
+indexcmds_seams = { path = "../indexcmds_seams" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 transam_seams = { path = "../../access/transam/transam_seams" }
 lock = { path = "../../storage/lmgr/lock" }

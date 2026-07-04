@@ -20,9 +20,12 @@ use types_nodes::{Node, NodeList, NodeTag};
 #[cfg(test)]
 mod tests;
 
+pub mod makefuncs;
 pub mod node_funcs;
+pub mod print;
 pub use node_funcs::{
-    expr_collation, expr_is_null_constant, expr_location, expr_type, expr_typmod,
+    expr_collation, expr_input_collation, expr_is_null_constant, expr_location, expr_type,
+    expr_typmod, relabel_to_typmod, set_opfuncid, set_sa_opfuncid,
 };
 
 pub const QTW_IGNORE_RT_SUBQUERIES: u32 = 0x01;
@@ -95,6 +98,18 @@ fn walk_from_expr<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     Ok(walk_list(&f.fromlist, w)? || walk_opt(f.quals, w)?)
 }
 
+fn walk_opt_list<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+    list: &types_nodes::OptNodeList<'mcx>,
+    w: &mut W,
+) -> PgResult<bool> {
+    for n in list.iter().flatten() {
+        if w.visit(n)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     node: Node<'mcx>,
     w: &mut W,
@@ -113,6 +128,9 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         | NodeTag::T_SortGroupClause
         | NodeTag::T_CTESearchClause
         | NodeTag::T_MergeSupportFunc => Ok(false),
+        NodeTag::T_WithCheckOption => {
+            walk_opt(node.as_with_check_option().unwrap().qual, w)
+        }
         NodeTag::T_Aggref => {
             let a = node.as_variant::<Aggref>().unwrap();
             Ok(walk_list(&a.aggdirectargs, w)?
@@ -146,6 +164,13 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_ArrayExpr => {
             let a = node.as_array_expr().unwrap();
             walk_list(&a.elements, w)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let s = node.as_subscripting_ref().unwrap();
+            Ok(walk_opt_list(&s.refupperindexpr, w)?
+                || walk_opt_list(&s.reflowerindexpr, w)?
+                || walk_opt(s.refexpr, w)?
+                || walk_opt(s.refassgnexpr, w)?)
         }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
@@ -227,6 +252,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             // C walks only ctequery (search/cycle clauses uninteresting here).
             let cte = node.as_common_table_expr().unwrap();
             walk_opt(cte.ctequery, w)
+        }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
         }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         NodeTag::T_RangeTblFunction => {
@@ -357,6 +386,27 @@ pub fn query_or_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     }
 }
 
+/// C query_or_expression_tree_mutator; the Query arm needs the generic
+/// query_tree_mutator engine (unported — rewrite_manip carries the only
+/// specialized form), so it panics loudly.
+pub fn query_or_expression_tree_mutator<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    m: &mut F,
+    _flags: u32,
+) -> PgResult<Option<Node<'mcx>>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    let _ = mcx;
+    if node.as_query().is_some() {
+        panic!(
+            "query_or_expression_tree_mutator (nodeFuncs.c): generic              query_tree_mutator engine unported — nodes-core lane"
+        );
+    }
+    m(node)
+}
+
 pub fn walk_select_stmt<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     s: &'mcx SelectStmt<'mcx>,
     w: &mut W,
@@ -426,6 +476,15 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         }
         // C: "we assume the fields contain nothing interesting".
         NodeTag::T_ColumnRef => Ok(false),
+        NodeTag::T_A_Indices => {
+            let ai = node.as_a_indices().unwrap();
+            Ok(walk_opt(ai.lidx, w)? || walk_opt(ai.uidx, w)?)
+        }
+        NodeTag::T_A_Indirection => {
+            let ind = node.as_a_indirection().unwrap();
+            Ok(walk_opt(ind.arg, w)? || walk_list(&ind.indirection, w)?)
+        }
+        NodeTag::T_A_ArrayExpr => walk_list(&node.as_a_array_expr().unwrap().elements, w),
         NodeTag::T_ResTarget => {
             let rt = node.as_res_target().unwrap();
             Ok(walk_list(&rt.indirection, w)? || walk_opt(rt.val, w)?)
@@ -458,6 +517,10 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         // C: "we assume the collname is uninteresting".
         NodeTag::T_CollateClause => walk_opt(node.as_collate_clause().unwrap().arg, w),
         NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args, w),
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),
     }
@@ -583,6 +646,26 @@ where
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_SortGroupClause => Ok(None),
+        NodeTag::T_WithCheckOption => {
+            let wco = node.as_with_check_option().unwrap();
+            let qual = match wco.qual {
+                Some(q) => m(q)?.map(Some),
+                None => None,
+            };
+            match qual {
+                None => Ok(None),
+                Some(qual) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::parsenodes::WithCheckOption {
+                        kind: wco.kind,
+                        relname: wco.relname,
+                        polname: wco.polname,
+                        qual,
+                        cascaded: wco.cascaded,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_CoerceToDomain => {
             let cd = node.as_coerce_to_domain().unwrap();
             match m(cd.arg)? {
@@ -772,6 +855,41 @@ where
                     },
                 )?)),
             }
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let upper = mutate_opt_list(mcx, &sr.refupperindexpr, m)?;
+            let lower = mutate_opt_list(mcx, &sr.reflowerindexpr, m)?;
+            let refexpr = match sr.refexpr {
+                Some(e) => m(e)?.map(Some),
+                None => None,
+            };
+            let refassgn = match sr.refassgnexpr {
+                Some(e) => m(e)?.map(Some),
+                None => None,
+            };
+            if upper.is_none() && lower.is_none() && refexpr.is_none() && refassgn.is_none() {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<types_nodes::OptNodeList<'mcx>>,
+                             old: &types_nodes::OptNodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: unchanged(upper, &sr.refupperindexpr)?,
+                    reflowerindexpr: unchanged(lower, &sr.reflowerindexpr)?,
+                    refexpr: refexpr.unwrap_or(sr.refexpr),
+                    refassgnexpr: refassgn.unwrap_or(sr.refassgnexpr),
+                },
+            )?))
         }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
@@ -1116,11 +1234,61 @@ where
                 },
             }
         }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            let new_qual = match a.qual {
+                Some(q) => m(q)?,
+                None => None,
+            };
+            let new_tl = mutate_list(mcx, &a.targetList, m)?;
+            if new_qual.is_none() && new_tl.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::MergeAction {
+                    matchKind: a.matchKind,
+                    commandType: a.commandType,
+                    r#override: a.r#override,
+                    qual: match new_qual {
+                        Some(q) => Some(q),
+                        None => a.qual,
+                    },
+                    targetList: match new_tl {
+                        Some(l) => l,
+                        None => a.targetList.clone_in(mcx)?,
+                    },
+                    updateColnos: a.updateColnos.clone_in(mcx)?,
+                },
+            )?))
+        }
         other => deferred("expression_tree_mutator", other),
     }
 }
 
 /// Element-wise mutate; allocates a new list only after the first change.
+pub fn mutate_opt_list<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    list: &types_nodes::OptNodeList<'mcx>,
+    m: &mut F,
+) -> PgResult<Option<types_nodes::OptNodeList<'mcx>>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    let mut out: Option<types_nodes::OptNodeList<'mcx>> = None;
+    for (i, n) in list.iter().enumerate() {
+        let Some(n) = n else { continue };
+        let replaced = m(n)?;
+        if replaced.is_some() && out.is_none() {
+            out = Some(list.clone_in(mcx)?);
+        }
+        if let (Some(new), Some(l)) = (replaced, out.as_mut()) {
+            l.as_mut_slice()[i] = Some(new);
+        }
+    }
+    Ok(out)
+}
+
 pub fn mutate_list<'mcx, F>(
     mcx: Mcx<'mcx>,
     list: &NodeList<'mcx>,

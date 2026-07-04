@@ -119,20 +119,40 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
         T_CopyStmt => CMDTAG_COPY,
         // AlterObjectTypeCommandTag over stmt->renameType; ported grammar
-        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table.
+        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table / OBJECT_POLICY.
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
                 .expect("RenameStmt");
             match stmt.renameType {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
-                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    CMDTAG_ALTER_TABLE
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_POLICY => CMDTAG_ALTER_POLICY,
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
         T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
-        T_AlterOwnerStmt => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_alter_owner_stmt()
+                .expect("AlterOwnerStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+            }
+        }
         T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
         // AlterObjectTypeCommandTag over stmt->objtype; the ported
         // AlterTableStmt grammar productions only emit OBJECT_TABLE.
@@ -146,14 +166,28 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             }
         }
         T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
-        T_AlterFunctionStmt => payload_gap("CreateCommandTag", "AlterFunctionStmt"),
+        T_AlterFunctionStmt => {
+            let stmt = parsetree
+                .as_alter_function_stmt()
+                .expect("AlterFunctionStmt");
+            match stmt.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                _ => CMDTAG_ALTER_FUNCTION,
+            }
+        }
         T_GrantStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::GrantStmt>()
                 .expect("GrantStmt");
             if stmt.is_grant { CMDTAG_GRANT } else { CMDTAG_REVOKE }
         }
-        T_GrantRoleStmt => payload_gap("CreateCommandTag", "GrantRoleStmt"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::GrantRoleStmt>()
+                .expect("GrantRoleStmt");
+            if stmt.is_grant { CMDTAG_GRANT_ROLE } else { CMDTAG_REVOKE_ROLE }
+        }
         T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
         T_DefineStmt => {
             use types_nodes::parsenodes::ObjectType::*;

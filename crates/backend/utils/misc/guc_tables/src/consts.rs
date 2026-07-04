@@ -143,6 +143,12 @@ pub const WAL_COMPRESSION_PGLZ: i32 = 1;
 pub const WAL_COMPRESSION_ZSTD: i32 = 3;
 pub const WAL_LEVEL_REPLICA: i32 = 1;
 pub const WAL_SYNC_METHOD_OPEN_DSYNC: i32 = 4;
+pub const WAL_SYNC_METHOD_FDATASYNC: i32 = 1;
+// xlogdefs.h DEFAULT_WAL_SYNC_METHOD (port/linux.h pins fdatasync).
+#[cfg(target_os = "linux")]
+pub const DEFAULT_WAL_SYNC_METHOD: i32 = WAL_SYNC_METHOD_FDATASYNC;
+#[cfg(not(target_os = "linux"))]
+pub const DEFAULT_WAL_SYNC_METHOD: i32 = WAL_SYNC_METHOD_OPEN_DSYNC;
 pub const WARNING: i32 = types_error::WARNING.0;
 pub const WRITEBACK_MAX_PENDING_FLUSHES: i32 = 256;
 pub const WalSegMaxSize: i32 = 1073741824;

@@ -1,0 +1,16 @@
+[package]
+name = "partitionfuncs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_rel = { path = "../../../../_support/types/rel" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+pg_inherits = { path = "../../../catalog/pg_inherits" }
+syscache_seams = { path = "../../cache/syscache_seams" }

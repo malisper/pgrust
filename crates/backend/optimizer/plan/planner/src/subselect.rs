@@ -1,9 +1,9 @@
 //! subselect.c: initplans, the pull_up_sublinks transform (prepjointree.c),
 //! and the regular SubPlan lane — make_subplan/build_subplan for correlated
-//! and testexpr-bearing EXISTS/EXPR/ANY/ALL sublinks, hashed-ANY selection,
-//! SS_replace_correlation_vars, and finalize's SubPlan legs.
-//! MULTIEXPR/ROWCOMPARE/ARRAY/CTE-expression arms and the
-//! convert_EXISTS_to_ANY AlternativeSubPlan lane are loud.
+//! and testexpr-bearing EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE sublinks,
+//! hashed-ANY selection, convert_VALUES_to_ANY, the convert_EXISTS_to_ANY
+//! AlternativeSubPlan lane, SS_replace_correlation_vars, and finalize's
+//! SubPlan legs. MULTIEXPR and CTE-expression arms are loud.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
@@ -165,7 +165,9 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
     if let Some(sl) = node.as_sub_link() {
         match sl.subLinkType {
             SubLinkType::ANY_SUBLINK => {
-                assert_no_values_to_any(sl)?;
+                if let Some(saop) = convert_values_to_any(run, sl)? {
+                    return Ok(Some(saop));
+                }
                 if let Some((rarg, quals)) =
                     convert_any_sublink_to_join(run, parse, sl, available_rels1)?
                 {
@@ -387,21 +389,101 @@ fn attach_anti_join<'mcx>(
     Ok(())
 }
 
-// convert_VALUES_to_ANY (subselect.c) is unported; keep the shape loud rather
-// than planning a different (subquery-scan) tree than C's ScalarArrayOpExpr.
-fn assert_no_values_to_any(sl: &SubLink<'_>) -> PgResult<()> {
-    let sub = sl.subselect.as_query().expect("transformed sublink holds a Query");
-    let only_values = sub.rtable.len() == 1
-        && sub
-            .rtable
-            .first()
-            .and_then(|n| n.as_range_tbl_entry())
-            .is_some_and(|r| r.rtekind == RTEKind::RTE_VALUES);
-    assert!(
-        !only_values,
-        "convert_VALUES_to_ANY (subselect.c): IN (VALUES ...) simplification unported"
-    );
-    Ok(())
+// convert_VALUES_to_ANY (subselect.c): "x = ANY (VALUES ...)" over >=2
+// all-constant single-column rows folds to a ScalarArrayOpExpr on a Const
+// array. None = not convertible.
+fn convert_values_to_any<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    sublink: &SubLink<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    let mcx = run.mcx;
+    let values = sublink.subselect.as_query().expect("transformed sublink holds a Query");
+    let Some(testexpr) = sublink.testexpr else { return Ok(None) };
+    let Some(op) = testexpr.as_op_expr() else { return Ok(None) };
+    if op.args.len() != 2
+        || values.targetList.len() > 1
+        || values.limitCount.is_some()
+        || values.limitOffset.is_some()
+        || !values.sortClause.is_nil()
+        || values.rtable.len() != 1
+    {
+        return Ok(None);
+    }
+    let rte = values
+        .rtable
+        .first()
+        .and_then(|n| n.as_range_tbl_entry())
+        .expect("rtable cell");
+    let leftop = op.args.nth(0);
+    let rightop = op.args.nth(1);
+    if rte.rtekind != RTEKind::RTE_VALUES || rte.values_lists.len() < 2 {
+        return Ok(None);
+    }
+    for elem in &rte.values_lists {
+        if clauses::contain_volatile_functions(elem)? {
+            return Ok(None);
+        }
+    }
+
+    let mut elems: mcx::PgVec<'mcx, datum::Datum> = mcx::PgVec::new_in(mcx);
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    for elem in &rte.values_lists {
+        let value = elem.as_list().expect("values row is a list").nth(0);
+        let value = convert_testexpr(mcx, rightop, &[value])?;
+        let value =
+            clauses::eval_const_expressions_with_params(mcx, value, run.glob.bound_params)?;
+        let Some(c) = value.as_const() else { return Ok(None) };
+        elems.push(c.constvalue);
+        nulls.push(c.constisnull);
+    }
+
+    let (coltype, _) = crate::costsize::expr_type_typmod(rightop);
+    let arraytype = lsyscache::get_array_type(coltype)?;
+    if arraytype == 0 {
+        return Ok(None);
+    }
+    let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(coltype)?;
+    let dims = [elems.len() as i32];
+    let lbs = [1i32];
+    let arr = arrayfuncs::construct::construct_md_array(
+        mcx,
+        &elems,
+        Some(&nulls),
+        1,
+        &dims,
+        &lbs,
+        coltype,
+        typlen as i32,
+        typbyval,
+        typalign as u8,
+    )?;
+    let arraycollid = rte.colcollations.first().unwrap_or(0);
+    let array_const = Node::mk(
+        mcx,
+        types_nodes::primnodes::Const {
+            consttype: arraytype,
+            consttypmod: -1,
+            constcollid: arraycollid,
+            constlen: -1,
+            constvalue: datum::Datum::from_usize(arr.leak().as_ptr() as usize),
+            constisnull: false,
+            constbyval: false,
+            location: -1,
+        },
+    )?;
+    Ok(Some(Node::mk(
+        mcx,
+        types_nodes::primnodes::ScalarArrayOpExpr {
+            opno: op.opno,
+            opfuncid: lsyscache::get_opcode(op.opno)?,
+            hashfuncid: 0,
+            negfuncid: 0,
+            useOr: true,
+            inputcollid: op.inputcollid,
+            args: NodeList::make2(mcx, leftop, array_const)?,
+            location: -1,
+        },
+    )?))
 }
 
 // convert_ANY_sublink_to_join (subselect.c): returns (rarg, quals) for the
@@ -423,10 +505,6 @@ fn convert_any_sublink_to_join<'mcx>(
     if !sub_ref_outer.is_subset(available_rels) {
         return Ok(None);
     }
-    assert!(
-        !use_lateral,
-        "convert_ANY_sublink_to_join (subselect.c): LATERAL semijoin; lateral lane unported"
-    );
     let upper_varnos = vars::pull_varnos(mcx, testexpr)?;
     if upper_varnos.is_empty() || !upper_varnos.is_subset(available_rels) {
         return Ok(None);
@@ -463,7 +541,7 @@ fn convert_any_sublink_to_join<'mcx>(
             subquery: Some(subselect),
             alias: Some(alias),
             eref: Some(eref),
-            lateral: false,
+            lateral: use_lateral,
             inFromCl: false,
             ..Default::default()
         },
@@ -768,7 +846,9 @@ fn make_subplan<'mcx>(
             1.0
         }
         SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => 0.5,
-        SubLinkType::EXPR_SUBLINK => 0.0,
+        SubLinkType::EXPR_SUBLINK
+        | SubLinkType::ARRAY_SUBLINK
+        | SubLinkType::ROWCOMPARE_SUBLINK => 0.0,
         other => panic!(
             "make_subplan (subselect.c): {other:?} sublink not ported"
         ),
@@ -1066,7 +1146,7 @@ fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
 
 
 
-// build_subplan (subselect.c). MULTIEXPR/ROWCOMPARE/ARRAY arms are loud.
+// build_subplan (subselect.c). The MULTIEXPR arm is loud.
 fn build_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     mut plan: Node<'mcx>,
@@ -1136,11 +1216,37 @@ fn build_subplan<'mcx>(
         splan.setParam = IntList::make1(mcx, prm.paramid)?;
         is_init_plan = true;
         result = Some(prm_node);
-    } else if matches!(
-        sub_link_type,
-        SubLinkType::ARRAY_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::MULTIEXPR_SUBLINK
-    ) {
-        panic!("build_subplan (subselect.c): {sub_link_type:?} not ported");
+    } else if splan.parParam.is_nil() && sub_link_type == SubLinkType::ARRAY_SUBLINK {
+        let te = plan
+            .as_plan()
+            .unwrap()
+            .targetlist
+            .first()
+            .expect("ARRAY subplan tlist")
+            .as_target_entry()
+            .expect("tlist entry");
+        debug_assert!(!te.resjunk);
+        debug_assert!(testexpr.is_none());
+        let (ty, tm) = crate::costsize::expr_type_typmod(te.expr);
+        let arraytype = lsyscache::get_promoted_array_type(ty)?;
+        if arraytype == 0 {
+            return Err(no_array_type(ty));
+        }
+        let (prm, prm_node) =
+            generate_new_exec_param(run, arraytype, tm, crate::pathkeys::expr_collation(te.expr))?;
+        splan.setParam = IntList::make1(mcx, prm.paramid)?;
+        is_init_plan = true;
+        result = Some(prm_node);
+    } else if splan.parParam.is_nil() && sub_link_type == SubLinkType::ROWCOMPARE_SUBLINK {
+        let te = testexpr.expect("ROWCOMPARE sublink has a testexpr");
+        let (params, param_ids) =
+            generate_subquery_params(run, &plan.as_plan().unwrap().targetlist)?;
+        result = Some(convert_testexpr(mcx, te, &params)?);
+        splan.setParam = param_ids.clone_in(mcx)?;
+        splan.paramIds = param_ids;
+        is_init_plan = true;
+    } else if sub_link_type == SubLinkType::MULTIEXPR_SUBLINK {
+        panic!("build_subplan (subselect.c): MULTIEXPR_SUBLINK not ported");
     } else {
         // Regular SubPlan: rewrite the testexpr's PARAM_SUBLINK Params into
         // fresh PARAM_EXEC output params.
@@ -1310,12 +1416,29 @@ fn hash_ok_operator(expr: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool>
 
 // materialize_finished_plan (createplan.c) + cost_material (costsize.c):
 // Material shield so repeated rescans of an uncorrelated subplan are cheap.
-fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+pub(crate) fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    // C's "horrid kluge": hoist the subplan's initPlans (and their cost
+    // delta) onto the Material node so SS_finalize_plan sees them at the top.
+    let mut initplan_cost = 0.0;
+    let mut unsafe_initplans = false;
+    // SAFETY: exclusive plan-tree ownership (clean_up_removed_plan_level
+    // precedent).
+    let init_plan = unsafe {
+        subplan.with_plan_mut(|p| {
+            for sp_node in &p.initPlan {
+                let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+                initplan_cost += sp.startup_cost + sp.per_call_cost;
+                if !sp.parallel_safe {
+                    unsafe_initplans = true;
+                }
+            }
+            p.startup_cost -= initplan_cost;
+            p.total_cost -= initplan_cost;
+            core::mem::take(&mut p.initPlan)
+        })
+    }
+    .expect("plan node");
     let sub = subplan.as_plan().expect("plan node");
-    assert!(
-        sub.initPlan.is_nil(),
-        "materialize_finished_plan (createplan.c): initPlan hoist not ported"
-    );
     let mut tlist = NodeList::nil();
     for te in &sub.targetlist {
         tlist.lappend(mcx, te)?;
@@ -1336,12 +1459,13 @@ fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgRes
         let npages = (nbytes / 8192.0).ceil();
         run_cost += crate::gucs::seq_page_cost() * npages;
     }
-    plan.plan.startup_cost = startup_cost;
-    plan.plan.total_cost = startup_cost + run_cost;
+    plan.plan.initPlan = init_plan;
+    plan.plan.startup_cost = startup_cost + initplan_cost;
+    plan.plan.total_cost = startup_cost + run_cost + initplan_cost;
     plan.plan.plan_rows = sub.plan_rows;
     plan.plan.plan_width = sub.plan_width;
     plan.plan.parallel_aware = false;
-    plan.plan.parallel_safe = sub.parallel_safe;
+    plan.plan.parallel_safe = sub.parallel_safe && !unsafe_initplans;
     Ok(plan.seal())
 }
 
@@ -1675,6 +1799,9 @@ fn finalize_plan<'mcx>(
         | NodeTag::T_IncrementalSort
         | NodeTag::T_Agg
         | NodeTag::T_Material => {}
+        NodeTag::T_Memoize => {
+            finalize_primnode_list(run, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
+        }
         // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
         NodeTag::T_CteScan => {
             let plan_id = plan.as_cte_scan().unwrap().ctePlanId;
@@ -1916,6 +2043,18 @@ fn finalize_primnode<'mcx>(
 ) -> PgResult<()> {
     FinalizePrimnode { run, paramids }.visit(node)?;
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn no_array_type(elemtype: types_core::Oid) -> Box<types_error::PgError> {
+    let tyname = format_type::format_type_be(elemtype).unwrap_or_else(|_| elemtype.to_string());
+    Box::new(
+        types_error::PgError::error(format!(
+            "could not find array type for data type {tyname}"
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {

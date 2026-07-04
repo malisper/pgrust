@@ -20,3 +20,6 @@ syscache_seams = { path = "../../utils/cache/syscache_seams" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
+genam = { path = "../../access/index/genam" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }

@@ -370,6 +370,34 @@ pub struct FunctionParameter<'mcx> {
     pub location: ParseLoc,
 }
 
+// C: objargs is the extracted input-argtype TypeName list (entries may be
+// NULL for operator NONE sides); objfuncargs keeps the full FunctionParameter
+// list; both NIL when args_unspecified.
+#[derive(Default)]
+pub struct ObjectWithArgs<'mcx> {
+    pub objname: NodeList<'mcx>,
+    pub objargs: NodeList<'mcx>,
+    pub objfuncargs: NodeList<'mcx>,
+    pub args_unspecified: bool,
+}
+
+// C: actions is a List of DefElem.
+#[derive(Default)]
+pub struct AlterFunctionStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub func: Option<&'mcx ObjectWithArgs<'mcx>>,
+    pub actions: NodeList<'mcx>,
+}
+
+// C: relation is used by the table-like forms, object by everything else.
+#[derive(Default)]
+pub struct AlterOwnerStmt<'mcx> {
+    pub objectType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub newowner: Option<&'mcx RoleSpec<'mcx>>,
+}
+
 // C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
 #[derive(Default)]
 pub struct CreateFunctionStmt<'mcx> {
@@ -776,14 +804,6 @@ pub struct CommentStmt<'mcx> {
 }
 
 #[derive(Default)]
-pub struct ObjectWithArgs<'mcx> {
-    pub objname: NodeList<'mcx>,
-    pub objargs: NodeList<'mcx>,
-    pub objfuncargs: NodeList<'mcx>,
-    pub args_unspecified: bool,
-}
-
-#[derive(Default)]
 pub struct DefineStmt<'mcx> {
     pub kind: ObjectType,
     pub oldstyle: bool,
@@ -977,6 +997,46 @@ pub struct RoleSpec<'mcx> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
+pub enum WCOKind {
+    #[default]
+    WCO_VIEW_CHECK = 0,
+    WCO_RLS_INSERT_CHECK = 1,
+    WCO_RLS_UPDATE_CHECK = 2,
+    WCO_RLS_CONFLICT_CHECK = 3,
+    WCO_RLS_MERGE_UPDATE_CHECK = 4,
+    WCO_RLS_MERGE_DELETE_CHECK = 5,
+}
+
+mcx::forget_safe_nodrop!(WCOKind);
+
+pub struct WithCheckOption<'mcx> {
+    pub kind: WCOKind,
+    pub relname: Option<&'mcx str>,
+    pub polname: Option<&'mcx str>,
+    pub qual: Option<Node<'mcx>>,
+    pub cascaded: bool,
+}
+
+pub struct CreatePolicyStmt<'mcx> {
+    pub policy_name: Option<&'mcx str>,
+    pub table: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub cmd_name: Option<&'mcx str>,
+    pub permissive: bool,
+    pub roles: NodeList<'mcx>,
+    pub qual: Option<Node<'mcx>>,
+    pub with_check: Option<Node<'mcx>>,
+}
+
+pub struct AlterPolicyStmt<'mcx> {
+    pub policy_name: Option<&'mcx str>,
+    pub table: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub roles: NodeList<'mcx>,
+    pub qual: Option<Node<'mcx>>,
+    pub with_check: Option<Node<'mcx>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum GrantTargetType {
     #[default]
     ACL_TARGET_OBJECT = 0,
@@ -1016,6 +1076,62 @@ impl Default for GrantStmt<'_> {
 pub struct AccessPriv<'mcx> {
     pub priv_name: Option<&'mcx str>,
     pub cols: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct GrantRoleStmt<'mcx> {
+    pub granted_roles: NodeList<'mcx>,
+    pub grantee_roles: NodeList<'mcx>,
+    pub is_grant: bool,
+    pub opt: NodeList<'mcx>,
+    pub grantor: Option<&'mcx RoleSpec<'mcx>>,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RoleStmtType {
+    #[default]
+    ROLESTMT_ROLE = 0,
+    ROLESTMT_USER = 1,
+    ROLESTMT_GROUP = 2,
+}
+
+#[derive(Default)]
+pub struct CreateRoleStmt<'mcx> {
+    pub stmt_type: RoleStmtType,
+    pub role: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+pub struct AlterRoleStmt<'mcx> {
+    pub role: &'mcx RoleSpec<'mcx>,
+    pub options: NodeList<'mcx>,
+    pub action: i32,
+}
+
+// C: role == NULL means ALTER ROLE ALL.
+pub struct AlterRoleSetStmt<'mcx> {
+    pub role: Option<&'mcx RoleSpec<'mcx>>,
+    pub database: Option<&'mcx str>,
+    pub setstmt: &'mcx VariableSetStmt<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropRoleStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
+pub struct DropOwnedStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub behavior: DropBehavior,
+}
+
+pub struct ReassignOwnedStmt<'mcx> {
+    pub roles: NodeList<'mcx>,
+    pub newrole: &'mcx RoleSpec<'mcx>,
 }
 
 // C: isall is redundant with name == NULL but kept for query jumbling.
@@ -1071,6 +1187,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateFunctionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateFunctionStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ObjectWithArgs<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ObjectWithArgs;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterFunctionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterFunctionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterOwnerStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterOwnerStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1082,6 +1207,27 @@ unsafe impl<'mcx> NodeVariant<'mcx> for GrantStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AccessPriv<'mcx> {
     const TAG: NodeTag = NodeTag::T_AccessPriv;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for GrantRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GrantRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterRoleSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterRoleSetStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropRoleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropRoleStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropOwnedStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropOwnedStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReassignOwnedStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReassignOwnedStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableShowStmt;
@@ -1139,9 +1285,6 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
-}
-unsafe impl<'mcx> NodeVariant<'mcx> for ObjectWithArgs<'mcx> {
-    const TAG: NodeTag = NodeTag::T_ObjectWithArgs;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DefineStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DefineStmt;
@@ -1208,6 +1351,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
 }
 unsafe impl NodeVariant<'_> for RowMarkClause {
     const TAG: NodeTag = NodeTag::T_RowMarkClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for WithCheckOption<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WithCheckOption;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatePolicyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatePolicyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterPolicyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterPolicyStmt;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -1301,6 +1453,21 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_object_with_args(self) -> Option<&'mcx ObjectWithArgs<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_function_stmt(self) -> Option<&'mcx AlterFunctionStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_owner_stmt(self) -> Option<&'mcx AlterOwnerStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_vacuum_stmt(self) -> Option<&'mcx VacuumStmt<'mcx>> {
         self.as_variant()
     }
@@ -1321,7 +1488,57 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_with_check_option(self) -> Option<&'mcx WithCheckOption<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_policy_stmt(self) -> Option<&'mcx CreatePolicyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_policy_stmt(self) -> Option<&'mcx AlterPolicyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_grant_stmt(self) -> Option<&'mcx GrantStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_grant_role_stmt(self) -> Option<&'mcx GrantRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_role_stmt(self) -> Option<&'mcx CreateRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_role_stmt(self) -> Option<&'mcx AlterRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_role_set_stmt(self) -> Option<&'mcx AlterRoleSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_drop_role_stmt(self) -> Option<&'mcx DropRoleStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_drop_owned_stmt(self) -> Option<&'mcx DropOwnedStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_reassign_owned_stmt(self) -> Option<&'mcx ReassignOwnedStmt<'mcx>> {
         self.as_variant()
     }
 

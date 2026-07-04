@@ -36,6 +36,12 @@ use types_tuple::NameData;
 
 pub mod builtins;
 
+pub fn init_seams() {
+    opclasscmds_seams::get_index_am_oid::set(get_index_am_oid);
+    opclasscmds_seams::get_opclass_oid::set(get_opclass_oid);
+    opclasscmds_seams::get_opfamily_oid::set(get_opfamily_oid);
+}
+
 const AMOP_SEARCH: i8 = b's' as i8;
 const AMOP_ORDER: i8 = b'o' as i8;
 const SHRT_MAX: i32 = 32767;
@@ -228,7 +234,7 @@ fn CreateOpFamily(
         DependencyType::Normal,
     )?;
     // dependency on owner
-    recordDependencyOnOwner(OPERATOR_FAMILY_RELATION_ID, opfamilyoid, miscinit::GetUserId());
+    recordDependencyOnOwner(mcx, OPERATOR_FAMILY_RELATION_ID, opfamilyoid, miscinit::GetUserId())?;
     // dependency on extension: no-op (CREATE EXTENSION unported)
 
     rel.close(RowExclusiveLock)?;
@@ -383,6 +389,7 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
                 }
                 let owa = item_owa(item);
                 let funcOid = parse_func::LookupFuncWithArgs(
+                    types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
                     &owa.objname,
                     &owa.objargs,
                     owa.args_unspecified,
@@ -539,7 +546,7 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
             DependencyType::Normal,
         )?;
     }
-    recordDependencyOnOwner(OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId());
+    recordDependencyOnOwner(mcx, OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId())?;
 
     rel.close(RowExclusiveLock)?;
     Ok(myself)
@@ -643,6 +650,7 @@ fn AlterOpFamilyAdd<'mcx>(
                 }
                 let owa = item_owa(item);
                 let funcOid = parse_func::LookupFuncWithArgs(
+                    types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
                     &owa.objname,
                     &owa.objargs,
                     owa.args_unspecified,

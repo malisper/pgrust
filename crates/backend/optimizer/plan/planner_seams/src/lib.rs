@@ -79,6 +79,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn estimate_num_groups_estinfo<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        group_exprs: &'a [(NodeId, Node<'mcx>)],
+        input_rows: f64,
+    ) -> PgResult<(f64, bool)>
+);
+
+seam_core::seam!(
     pub fn estimate_array_length<'a>(node: Node<'a>) -> f64
 );
 
@@ -98,6 +106,14 @@ seam_core::seam!(
         hashkey: Node<'mcx>,
         virtualbuckets: f64,
     ) -> PgResult<(f64, f64)>
+);
+
+seam_core::seam!(
+    pub fn estimate_multivariate_bucketsize<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        inner: types_pathnodes::RelId,
+        hashclauses: &'a [RinfoId],
+    ) -> PgResult<(mcx::PgVec<'mcx, RinfoId>, f64)>
 );
 
 seam_core::seam!(

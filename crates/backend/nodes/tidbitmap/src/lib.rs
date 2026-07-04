@@ -1,8 +1,12 @@
-// tidbitmap.c. Private in-memory lane; shared/parallel (dsa) iteration is a
-// loud panic. Pagetable is PgFxHashMap (C: simplehash + murmurhash32).
+// tidbitmap.c. Private + shared iteration lanes, in-process only: the shared
+// iterator state lives on the TIDBitmap (C parks it in DSA); the cross-process
+// DSA/DSM handle arm is a loud panic. Pagetable is PgFxHashMap (C: simplehash
+// + murmurhash32).
 #![no_std]
 
 extern crate alloc;
+
+use core::cell::Cell;
 
 use mcx::{Mcx, PgFxHashMap, PgVec};
 use types_core::{BlockNumber, OffsetNumber, BLCKSZ};
@@ -62,6 +66,33 @@ enum TbmStatus {
 enum TbmIterating {
     Not,
     Private,
+    Shared,
+}
+
+pub struct PtEntryArray<'mcx> {
+    pub refcount: Cell<u32>,
+    pub ptentry: PgVec<'mcx, PagetableEntry>,
+}
+
+pub struct PtIterationArray<'mcx> {
+    pub refcount: Cell<u32>,
+    pub index: PgVec<'mcx, i32>,
+}
+
+/// C TBMSharedIteratorState: lives in DSA there, on the owning TIDBitmap
+/// here. The cursor is LWLock-guarded in C; one backend = one thread, so
+/// `Cell` carries the same interleaving semantics without a lock.
+pub struct TbmSharedIteratorState<'mcx> {
+    nentries: i32,
+    maxentries: i32,
+    npages: i32,
+    nchunks: i32,
+    ptbase: Option<PtEntryArray<'mcx>>,
+    ptpages: Option<PtIterationArray<'mcx>>,
+    ptchunks: Option<PtIterationArray<'mcx>>,
+    spageptr: Cell<i32>,
+    schunkptr: Cell<i32>,
+    schunkbit: Cell<i32>,
 }
 
 pub struct TIDBitmap<'mcx> {
@@ -79,6 +110,7 @@ pub struct TIDBitmap<'mcx> {
     // is read-only once iterating, so by-value copies are equivalent).
     spages: Option<PgVec<'mcx, PagetableEntry>>,
     schunks: Option<PgVec<'mcx, PagetableEntry>>,
+    shared_state: Option<TbmSharedIteratorState<'mcx>>,
 }
 
 pub struct TbmPrivateIterator {
@@ -146,6 +178,7 @@ impl<'mcx> TIDBitmap<'mcx> {
             entry1: PagetableEntry::zeroed(0),
             spages: None,
             schunks: None,
+            shared_state: None,
         }
     }
 
@@ -480,8 +513,117 @@ impl<'mcx> TIDBitmap<'mcx> {
         Ok(TbmPrivateIterator { spageptr: 0, schunkptr: 0, schunkbit: 0 })
     }
 
-    pub fn prepare_shared_iterate(&mut self) -> ! {
-        panic!("unported: tidbitmap tbm_prepare_shared_iterate (parallel bitmap scan lane)")
+    /// `tbm_prepare_shared_iterate`: converts the pagetable into a flat entry
+    /// array plus sorted page/chunk index arrays. C returns a dsa_pointer to
+    /// state allocated in the per-query DSA; in-process the state lives on
+    /// the bitmap and a repeat prepare resets the one cursor instead of
+    /// minting an independent iteration state.
+    pub fn prepare_shared_iterate(&mut self) -> PgResult<()> {
+        debug_assert!(self.iterating != TbmIterating::Private);
+        if self.iterating == TbmIterating::Not {
+            let mut ptbase: PgVec<'mcx, PagetableEntry> =
+                mcx::vec_with_capacity_in(self.mcx, self.nentries.max(0) as usize)?;
+            let mut ptpages: Option<PtIterationArray<'mcx>> = if self.npages > 0 {
+                Some(PtIterationArray {
+                    refcount: Cell::new(0),
+                    index: mcx::vec_with_capacity_in(self.mcx, self.npages as usize)?,
+                })
+            } else {
+                None
+            };
+            let mut ptchunks: Option<PtIterationArray<'mcx>> = if self.nchunks > 0 {
+                Some(PtIterationArray {
+                    refcount: Cell::new(0),
+                    index: mcx::vec_with_capacity_in(self.mcx, self.nchunks as usize)?,
+                })
+            } else {
+                None
+            };
+            match self.status {
+                TbmStatus::Hash => {
+                    let table = self.pagetable.as_ref().expect("TBM_HASH without pagetable");
+                    for page in table.values() {
+                        let idx = ptbase.len() as i32;
+                        ptbase.push(*page);
+                        if page.ischunk {
+                            ptchunks.as_mut().expect("chunk entry without nchunks").index.push(idx);
+                        } else {
+                            ptpages.as_mut().expect("page entry without npages").index.push(idx);
+                        }
+                    }
+                }
+                TbmStatus::OnePage => {
+                    ptbase.push(self.entry1);
+                    ptpages.as_mut().expect("TBM_ONE_PAGE without npages").index.push(0);
+                }
+                TbmStatus::Empty => {}
+            }
+            debug_assert!(
+                ptpages.as_ref().map_or(0, |p| p.index.len()) == self.npages as usize
+            );
+            debug_assert!(
+                ptchunks.as_ref().map_or(0, |c| c.index.len()) == self.nchunks as usize
+            );
+            if let Some(p) = ptpages.as_mut() {
+                p.index.sort_unstable_by_key(|&i| ptbase[i as usize].blockno);
+            }
+            if let Some(c) = ptchunks.as_mut() {
+                c.index.sort_unstable_by_key(|&i| ptbase[i as usize].blockno);
+            }
+            self.shared_state = Some(TbmSharedIteratorState {
+                nentries: self.nentries,
+                maxentries: self.maxentries,
+                npages: self.npages,
+                nchunks: self.nchunks,
+                ptbase: (!ptbase.is_empty()).then_some(PtEntryArray {
+                    refcount: Cell::new(0),
+                    ptentry: ptbase,
+                }),
+                ptpages,
+                ptchunks,
+                spageptr: Cell::new(0),
+                schunkptr: Cell::new(0),
+                schunkbit: Cell::new(0),
+            });
+        } else {
+            let st = self.shared_state.as_ref().expect("TBM_ITERATING_SHARED without state");
+            st.spageptr.set(0);
+            st.schunkptr.set(0);
+            st.schunkbit.set(0);
+        }
+        let st = self.shared_state.as_ref().expect("just set");
+        // Refcounts mirror C's PTEntryArray/PTIterationArray atomics (one ref
+        // per prepare); arena lifetime means they never drive a free here.
+        if let Some(b) = st.ptbase.as_ref() {
+            b.refcount.set(b.refcount.get() + 1);
+        }
+        if let Some(p) = st.ptpages.as_ref() {
+            p.refcount.set(p.refcount.get() + 1);
+        }
+        if let Some(c) = st.ptchunks.as_ref() {
+            c.refcount.set(c.refcount.get() + 1);
+        }
+        self.iterating = TbmIterating::Shared;
+        Ok(())
+    }
+
+    /// `tbm_attach_shared_iterate`; in-process form takes the owning bitmap
+    /// where C takes (dsa, dsa_pointer).
+    pub fn attach_shared_iterate(&self) -> TbmSharedIterator {
+        debug_assert!(self.iterating == TbmIterating::Shared);
+        assert!(
+            self.shared_state.is_some(),
+            "tbm_attach_shared_iterate before tbm_prepare_shared_iterate"
+        );
+        TbmSharedIterator { _priv: () }
+    }
+
+    #[cold]
+    pub fn shared_state_dsa_handle(&self) -> ! {
+        panic!(
+            "unported: tidbitmap cross-process DSA/DSM shared-state handle \
+             (parallel bitmap scan lane)"
+        )
     }
 }
 
@@ -598,38 +740,109 @@ impl TbmPrivateIterator {
     }
 }
 
-/// Unified iterator (`TBMIterator`); only the private arm exists.
+/// C TBMSharedIterator: per-backend attach handle. The array/state pointers
+/// C caches here are resolved from the bitmap on every call instead.
+pub struct TbmSharedIterator {
+    _priv: (),
+}
+
+impl TbmSharedIterator {
+    /// `tbm_shared_iterate`; C takes istate->lock around the cursor — one
+    /// backend = one thread here, the `Cell` cursor interleaves identically.
+    pub fn next<'a>(&mut self, tbm: &'a TIDBitmap<'_>) -> Option<TbmIterateResult<'a>> {
+        debug_assert!(tbm.iterating == TbmIterating::Shared);
+        let st = tbm.shared_state.as_ref().expect("tbm_shared_iterate without shared state");
+        let ptbase: &'a [PagetableEntry] =
+            st.ptbase.as_ref().map(|b| &b.ptentry[..]).unwrap_or(&[]);
+        let idxpages: &[i32] = st.ptpages.as_ref().map(|p| &p.index[..]).unwrap_or(&[]);
+        let idxchunks: &[i32] = st.ptchunks.as_ref().map(|c| &c.index[..]).unwrap_or(&[]);
+        while st.schunkptr.get() < st.nchunks {
+            let chunk = &ptbase[idxchunks[st.schunkptr.get() as usize] as usize];
+            let mut schunkbit = st.schunkbit.get() as usize;
+            advance_schunkbit(chunk, &mut schunkbit);
+            if schunkbit < PAGES_PER_CHUNK {
+                st.schunkbit.set(schunkbit as i32);
+                break;
+            }
+            st.schunkptr.set(st.schunkptr.get() + 1);
+            st.schunkbit.set(0);
+        }
+        if st.schunkptr.get() < st.nchunks {
+            let chunk = &ptbase[idxchunks[st.schunkptr.get() as usize] as usize];
+            let chunk_blockno = chunk.blockno + st.schunkbit.get() as BlockNumber;
+            if st.spageptr.get() >= st.npages
+                || chunk_blockno < ptbase[idxpages[st.spageptr.get() as usize] as usize].blockno
+            {
+                st.schunkbit.set(st.schunkbit.get() + 1);
+                return Some(TbmIterateResult {
+                    blockno: chunk_blockno,
+                    lossy: true,
+                    recheck: true,
+                    page: None,
+                });
+            }
+        }
+        if st.spageptr.get() < st.npages {
+            let page = &ptbase[idxpages[st.spageptr.get() as usize] as usize];
+            st.spageptr.set(st.spageptr.get() + 1);
+            return Some(TbmIterateResult {
+                blockno: page.blockno,
+                lossy: false,
+                recheck: page.recheck,
+                page: Some(page),
+            });
+        }
+        None
+    }
+}
+
+/// Unified iterator (`TBMIterator`).
 pub struct TbmIterator {
     private: Option<TbmPrivateIterator>,
+    shared: Option<TbmSharedIterator>,
 }
 
 impl TbmIterator {
     pub fn empty() -> Self {
-        TbmIterator { private: None }
+        TbmIterator { private: None, shared: None }
     }
 
     pub fn private(iter: TbmPrivateIterator) -> Self {
-        TbmIterator { private: Some(iter) }
+        TbmIterator { private: Some(iter), shared: None }
+    }
+
+    pub fn shared(iter: TbmSharedIterator) -> Self {
+        TbmIterator { private: None, shared: Some(iter) }
     }
 
     pub fn exhausted(&self) -> bool {
-        self.private.is_none()
+        self.private.is_none() && self.shared.is_none()
     }
 
     pub fn end_iterate(&mut self) {
         self.private = None;
+        self.shared = None;
     }
 
     pub fn next<'a>(&mut self, tbm: &'a TIDBitmap<'_>) -> Option<TbmIterateResult<'a>> {
-        self.private.as_mut().expect("tbm_iterate on an exhausted TBMIterator").next(tbm)
+        if let Some(p) = self.private.as_mut() {
+            return p.next(tbm);
+        }
+        self.shared.as_mut().expect("tbm_iterate on an exhausted TBMIterator").next(tbm)
     }
 }
 
-mcx::forget_safe_nodrop!(TbmStatus, TbmIterating, PagetableEntry, TbmPrivateIterator, TbmIterator);
+mcx::forget_safe_nodrop!(
+    TbmStatus, TbmIterating, PagetableEntry, TbmPrivateIterator, TbmSharedIterator, TbmIterator
+);
 
 mcx::forget_safe_struct!(
     TIDBitmap<'_> { mcx, status, pagetable, nentries, maxentries, npages,
-        nchunks, iterating, lossify_start, entry1, spages, schunks },
+        nchunks, iterating, lossify_start, entry1, spages, schunks, shared_state },
+    PtEntryArray<'_> { refcount, ptentry },
+    PtIterationArray<'_> { refcount, index },
+    TbmSharedIteratorState<'_> { nentries, maxentries, npages, nchunks,
+        ptbase, ptpages, ptchunks, spageptr, schunkptr, schunkbit },
 );
 
 #[cfg(test)]

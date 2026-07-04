@@ -276,8 +276,11 @@ fn install_fake_bufmgr() {
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     catalog_seams::is_catalog_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);
@@ -371,6 +374,7 @@ fn install_proc_boot_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     sinval_seams::receive_shared_invalid_messages::set(|_, _| Ok(()));
     miscinit_seams::get_user_id::set(|| 10);

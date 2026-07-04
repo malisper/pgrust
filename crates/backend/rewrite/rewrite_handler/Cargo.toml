@@ -20,6 +20,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 rewrite_manip = { path = "../rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
+rowsecurity = { path = "../rowsecurity" }
 coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_small1 = { path = "../../parser/parser_small1" }
@@ -42,6 +43,7 @@ adt_float = { path = "../../utils/adt/float" }
 adt_bool = { path = "../../utils/adt/bool" }
 guc = { path = "../../utils/misc/guc" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
+rls_seams = { path = "../../utils/misc/rls_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
 async_seams = { path = "../../commands/async_seams" }
@@ -107,6 +109,7 @@ spi_seams = { path = "../../executor/spi_seams" }
 subtrans = { path = "../../access/transam/subtrans" }
 syncrep_seams = { path = "../../replication/syncrep_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 tablecmds_seams = { path = "../../commands/tablecmds_seams" }

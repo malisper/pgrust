@@ -104,6 +104,73 @@ pub fn fc_numerictypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     typmod_paren(fcinfo, out)
 }
 
+struct KeywordRows {
+    tuples: Vec<Vec<u8>>,
+}
+
+fn collect_keyword_rows(flinfo: &FmgrInfo, fcinfo: &Fcinfo) -> PgResult<KeywordRows> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(Box::new(types_error::PgError::error(
+            "return type must be a row type",
+        )));
+    }
+    let desc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+
+    let n = keywords::ScanKeywords.num_keywords as usize;
+    let mut tuples = Vec::with_capacity(n);
+    for i in 0..n {
+        let word = keywords::GetScanKeyword(i, &keywords::ScanKeywords).expect("index < n");
+        let (catcode, catdesc): (u8, &str) = match keywords::ScanKeywordCategories[i] {
+            keywords::KeywordCategory::Unreserved => (b'U', "unreserved"),
+            keywords::KeywordCategory::ColName => {
+                (b'C', "unreserved (cannot be function or type name)")
+            }
+            keywords::KeywordCategory::TypeFuncName => {
+                (b'T', "reserved (can be function or type name)")
+            }
+            keywords::KeywordCategory::Reserved => (b'R', "reserved"),
+        };
+        let barelabel = keywords::ScanKeywordBareLabel[i];
+        let baredesc = if barelabel { "can be bare label" } else { "requires AS" };
+        let values = [
+            varlena_result(varlena::cstring_to_text(mcx, word)?),
+            Datum::from_char(catcode as i8),
+            Datum::from_bool(barelabel),
+            varlena_result(varlena::cstring_to_text(mcx, catdesc.as_bytes())?),
+            varlena_result(varlena::cstring_to_text(mcx, baredesc.as_bytes())?),
+        ];
+        let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 5])?;
+        tuples.push(tuple.image().to_vec());
+    }
+    Ok(KeywordRows { tuples })
+}
+
+pub fn fc_pg_get_keywords(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_get_keywords: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let rows = collect_keyword_rows(flinfo, fcinfo)?;
+        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(rows));
+    }
+    let fctx = funcapi::per_MultiFuncCall(flinfo);
+    let idx = fctx.call_cntr as usize;
+    let rows = fctx
+        .user_fctx
+        .as_ref()
+        .expect("pg_get_keywords: rows set at first call")
+        .downcast_ref::<KeywordRows>()
+        .expect("pg_get_keywords: user_fctx is KeywordRows");
+    match rows.tuples.get(idx) {
+        Some(img) => {
+            let d = byref_result(fcinfo.result_mcx(), img)?;
+            Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
+        }
+        None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
 pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(89, "pgsql_version", 0, fc_version),
     b(2918, "numerictypmodout", 1, fc_numerictypmodout),
@@ -111,4 +178,12 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(1215, "obj_description", 2, fc_obj_description),
     b(1597, "PG_encoding_to_char", 1, fc_pg_encoding_to_char),
     b(1216, "col_description", 2, fc_col_description),
+    FmgrBuiltin {
+        foid: 1686,
+        name: "pg_get_keywords",
+        nargs: 0,
+        strict: true,
+        retset: true,
+        func: fc_pg_get_keywords,
+    },
 ];

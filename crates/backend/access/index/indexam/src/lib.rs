@@ -3,12 +3,16 @@
 
 pub use types_relscan::*;
 
+mod prefetch;
+
 #[cfg(test)]
 mod tests;
 
+use core::mem::MaybeUninit;
 use std::rc::Rc;
 
 use datum::Datum;
+use tableam::{BatchFetch, INDEX_FETCH_BATCH_MAX};
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{
@@ -355,6 +359,7 @@ pub fn index_rescan<'mcx>(
 
     scan.kill_prior_tuple = false; // for safety
     scan.xs_heap_continue = false;
+    scan.xs_prefetch = types_relscan::IndexPrefetchState::reset();
 
     am_rescan(scan, keys, orderbys)
 }
@@ -437,6 +442,59 @@ pub fn index_fetch_heap<'mcx>(
     scan: &mut IndexScanDescData<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    // Serve from an active same-page run first; Miss falls through with the
+    // batch invalidated.
+    let outcome = {
+        let IndexScanDescData {
+            xs_heapfetch,
+            xs_heaptid,
+            ..
+        } = scan;
+        match xs_heapfetch.as_mut() {
+            Some(heapfetch) => fetch::batch_next(mcx, heapfetch, xs_heaptid, slot),
+            None => BatchFetch::Miss,
+        }
+    };
+    if let Some(found) = batch_outcome(scan, outcome) {
+        return Ok(found);
+    }
+
+    // New heap block (or non-batch row): keep the readahead window primed.
+    prefetch::on_heap_fetch(scan)?;
+
+    // Start a run when the index holds more TIDs for this heap page. MVCC
+    // verdicts are fill-time-independent; non-MVCC keeps the per-tuple path.
+    if !scan.xs_heap_continue && scan.xs_snapshot.as_deref().is_some_and(IsMVCCSnapshot) {
+        if let IndexScanOpaque::Btree(so) = &scan.opaque {
+            let mut run: [MaybeUninit<ItemPointerData>; INDEX_FETCH_BATCH_MAX] =
+                [const { MaybeUninit::uninit() }; INDEX_FETCH_BATCH_MAX];
+            let n = nbtree::bt_peek_same_block_tids(so, &mut run[..INDEX_FETCH_BATCH_MAX - 1]);
+            if n > 0 {
+                // SAFETY: prefix written by the peek.
+                let rest = unsafe {
+                    core::slice::from_raw_parts(run.as_ptr() as *const ItemPointerData, n)
+                };
+                let outcome = {
+                    let IndexScanDescData {
+                        xs_heapfetch,
+                        xs_heaptid,
+                        xs_snapshot,
+                        ..
+                    } = scan;
+                    let heapfetch = xs_heapfetch
+                        .as_mut()
+                        .expect("index_fetch_heap: xs_heapfetch not armed (C would dereference NULL)");
+                    fetch::batch_fill(mcx, heapfetch, xs_heaptid, rest, xs_snapshot)?;
+                    fetch::batch_next(mcx, heapfetch, xs_heaptid, slot)
+                };
+                debug_assert!(!matches!(outcome, BatchFetch::Miss));
+                if let Some(found) = batch_outcome(scan, outcome) {
+                    return Ok(found);
+                }
+            }
+        }
+    }
+
     let mut all_dead = false;
 
     // Disjoint field borrows: the fetch mutates xs_heaptid/xs_heap_continue
@@ -471,6 +529,26 @@ pub fn index_fetch_heap<'mcx>(
     }
 
     Ok(found)
+}
+
+#[inline]
+fn batch_outcome(scan: &mut IndexScanDescData<'_>, outcome: BatchFetch) -> Option<bool> {
+    match outcome {
+        BatchFetch::Stored => {
+            pgstat_count_heap_fetch(scan);
+            if !scan.xactStartedInRecovery {
+                scan.kill_prior_tuple = false;
+            }
+            Some(true)
+        }
+        BatchFetch::NotVisible { all_dead } => {
+            if !scan.xactStartedInRecovery {
+                scan.kill_prior_tuple = all_dead;
+            }
+            Some(false)
+        }
+        BatchFetch::Miss => None,
+    }
 }
 
 /// True when a tuple satisfying the scan keys and snapshot landed in `slot`.
@@ -807,6 +885,37 @@ mod fetch {
         }
     }
 
+    pub fn batch_fill<'mcx>(
+        mcx: Mcx<'mcx>,
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        first_tid: &ItemPointerData,
+        rest: &[ItemPointerData],
+        snapshot: &Option<Rc<SnapshotData<'mcx>>>,
+    ) -> PgResult<()> {
+        match heapfetch {
+            IndexFetchTableData::Table(t) => {
+                tableam::table_index_fetch_batch_fill(mcx, t, first_tid, rest, snapshot)
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("batch fill on a mock table fetch"),
+        }
+    }
+
+    pub fn batch_next<'mcx>(
+        mcx: Mcx<'mcx>,
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        tid: &mut ItemPointerData,
+        slot: &mut SlotData<'mcx>,
+    ) -> BatchFetch {
+        match heapfetch {
+            IndexFetchTableData::Table(t) => {
+                tableam::table_index_fetch_batch_next(mcx, t, tid, slot)
+            }
+            #[allow(unreachable_patterns)]
+            _ => BatchFetch::Miss,
+        }
+    }
+
     // The Mock arm exists only under the relscan "mock" feature (test builds);
     // a non-test build reaching here would be a wiring bug.
     #[cfg(test)]
@@ -885,6 +994,7 @@ mod mock {
             xs_heap_continue: false,
             xs_heapfetch: None,
             xs_recheck: false,
+            xs_prefetch: types_relscan::IndexPrefetchState::reset(),
             xs_pgstat_index_tuples: 0,
             xs_pgstat_heap_fetches: 0,
             xs_pgstat_index_scans: 0,

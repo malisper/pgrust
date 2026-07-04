@@ -23,6 +23,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn ri_initial_check<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigger: &Trigger<'mcx>,
+        fk_rel: &Relation<'mcx>,
+        pk_rel: &Relation<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn ri_fkey_fk_upd_check_required<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         trigger: &Trigger<'mcx>,

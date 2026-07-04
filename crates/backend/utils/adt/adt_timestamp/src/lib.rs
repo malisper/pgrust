@@ -134,6 +134,33 @@ pub fn AdjustTimestampForTypmod(
     Ok(true)
 }
 
+/// C: `anytimestamp_typmod_check` (timestamp.c:105).
+pub fn anytimestamp_typmod_check(istz: bool, typmod: i32) -> PgResult<i32> {
+    let with_tz = if istz { " WITH TIME ZONE" } else { "" };
+    if typmod < 0 {
+        return Err(Box::new(
+            PgError::error(format!(
+                "TIMESTAMP({typmod}){with_tz} precision must not be negative"
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if typmod > MAX_TIMESTAMP_PRECISION {
+        elog::ereport(types_error::WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!(
+                "TIMESTAMP({typmod}){with_tz} precision reduced to maximum allowed, {MAX_TIMESTAMP_PRECISION}"
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "timestamp.c",
+                0,
+                "anytimestamp_typmod_check",
+            ))?;
+        return Ok(MAX_TIMESTAMP_PRECISION);
+    }
+    Ok(typmod)
+}
+
 pub fn EncodeSpecialTimestamp(dt: Timestamp, buf: &mut [u8]) -> usize {
     let s: &[u8] = if TIMESTAMP_IS_NOBEGIN(dt) {
         EARLY
