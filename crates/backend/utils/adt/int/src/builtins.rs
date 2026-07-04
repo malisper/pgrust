@@ -45,7 +45,9 @@ pub fn fc_int2out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 }
 
 pub fn fc_int2vectorin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
+    // SAFETY: the result context outlives this call frame (set_result_mcx
+    // contract); detached so isnull stays assignable on the soft-error path.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
     let num = in_arg(fcinfo);
     // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
     let esc = unsafe { fcinfo.soft_error_context() };
