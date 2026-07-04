@@ -468,7 +468,7 @@ fn named_argument_resolves_and_numbers() {
     assert_eq!(na.name, Some("x"));
     assert_eq!(na.argnumber, 0);
     assert_eq!(na.location, 13);
-    assert_eq!(na.arg.as_var().unwrap().vartype, INT4OID);
+    assert_eq!(na.arg.expect("NamedArgExpr has an arg").as_var().unwrap().vartype, INT4OID);
 }
 
 #[test]
