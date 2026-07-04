@@ -619,6 +619,360 @@ fn sql_value_function_negative_precision_is_22023() {
 }
 
 #[test]
+fn nullif_transforms_to_null_if_expr_with_first_operand_type() {
+    install_oper_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "=" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_NULLIF,
+        name,
+        Some(int_const(mcx, 1, 14)),
+        Some(int_const(mcx, 2, 17)),
+        7,
+    )
+    .unwrap();
+
+    let out = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .unwrap();
+    let n = out.as_null_if_expr().unwrap();
+    assert_eq!((n.opno, n.opfuncid), (96, 65));
+    // C retags the boolean OpExpr; the result type becomes the first operand's.
+    assert_eq!(n.opresulttype, INT4OID);
+    assert!(!n.opretset);
+    assert_eq!(n.args.len(), 2);
+    assert_eq!(n.location, 7);
+    assert_eq!(expr_type(out), INT4OID);
+}
+
+#[test]
+fn nullif_with_nonboolean_operator_is_42804() {
+    install_oper_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "+" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_NULLIF,
+        name,
+        Some(int_const(mcx, 1, 14)),
+        Some(int_const(mcx, 2, 17)),
+        7,
+    )
+    .unwrap();
+
+    let err = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "NULLIF requires = operator to yield boolean");
+}
+
+fn row_expr<'mcx>(mcx: Mcx<'mcx>, args: NodeList<'mcx>, location: i32) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::RowExpr {
+            args,
+            row_typeid: InvalidOid,
+            row_format: types_nodes::CoercionForm::COERCE_EXPLICIT_CALL,
+            colnames: NodeList::nil(),
+            location,
+        },
+    )
+    .unwrap()
+}
+
+fn multi_assign_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    source: Node<'mcx>,
+    colno: i32,
+    ncolumns: i32,
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::rawnodes::MultiAssignRef { source: Some(source), colno, ncolumns },
+    )
+    .unwrap()
+}
+
+#[test]
+fn multi_assign_ref_row_expr_source_yields_columns_in_order() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, int_const(mcx, 11, 20)).unwrap();
+    args.lappend(mcx, int_const(mcx, 22, 24)).unwrap();
+    let row = row_expr(mcx, args, 18);
+
+    let out1 = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, row, 1, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .unwrap();
+    assert_eq!(out1.as_const().unwrap().constvalue.as_i32(), 11);
+    // The transformed RowExpr parks in p_multiassign_exprs as a resjunk TLE.
+    assert_eq!(pstate.p_multiassign_exprs.len(), 1);
+    let tle = pstate.p_multiassign_exprs.nth(0).as_target_entry().unwrap();
+    assert!(tle.resjunk);
+    assert_eq!(tle.resno, 0);
+
+    let out2 = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, row, 2, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .unwrap();
+    assert_eq!(out2.as_const().unwrap().constvalue.as_i32(), 22);
+    // The last column pops the RowExpr back off the list.
+    assert_eq!(pstate.p_multiassign_exprs.len(), 0);
+}
+
+#[test]
+fn multi_assign_ref_row_keeps_set_to_default_untransformed() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, Node::mk(mcx, types_nodes::SetToDefault::default()).unwrap()).unwrap();
+    args.lappend(mcx, int_const(mcx, 5, 24)).unwrap();
+    let row = row_expr(mcx, args, 18);
+
+    let out = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, row, 1, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .unwrap();
+    assert!(out.as_set_to_default().is_some());
+}
+
+#[test]
+fn multi_assign_ref_column_count_mismatch_is_42601() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, int_const(mcx, 1, 20)).unwrap();
+    let row = row_expr(mcx, args, 18);
+
+    let err = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, row, 1, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "number of columns does not match number of values");
+}
+
+#[test]
+fn multi_assign_ref_bad_source_is_0a000() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let err = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, int_const(mcx, 1, 20), 1, 1),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        err.message(),
+        "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression"
+    );
+}
+
+fn install_sub_analyze_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        analyze_seams::parse_sub_analyze::set(|mcx, _tree, _pstate, _cte, _locked, _resolve| {
+            let mut tl = NodeList::nil();
+            for resno in 1..=2i16 {
+                let var =
+                    Node::mk_var(mcx, 1, resno, INT4OID, -1, InvalidOid, 0).unwrap();
+                tl.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::TargetEntry {
+                            expr: var,
+                            resno,
+                            resname: None,
+                            ressortgroupref: 0,
+                            resorigtbl: InvalidOid,
+                            resorigcol: 0,
+                            resjunk: false,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            Ok(types_nodes::parsenodes::Query {
+                commandType: types_nodes::CmdType::CMD_SELECT,
+                targetList: tl,
+                ..Default::default()
+            })
+        });
+    });
+}
+
+#[test]
+fn multi_assign_ref_sublink_source_yields_multiexpr_params() {
+    install_sub_analyze_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let sublink = |loc| {
+        Node::mk(
+            mcx,
+            types_nodes::SubLink {
+                subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+                subLinkId: 0,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect: int_const(mcx, 0, loc),
+                location: loc,
+            },
+        )
+        .unwrap()
+    };
+
+    let out1 = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, sublink(18), 1, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .unwrap();
+    let p1 = out1.as_param().unwrap();
+    assert_eq!(p1.paramkind, types_nodes::ParamKind::PARAM_MULTIEXPR);
+    assert_eq!(p1.paramid, (1 << 16) | 1);
+    assert_eq!(p1.paramtype, INT4OID);
+    // The relabeled MULTIEXPR SubLink parks in p_multiassign_exprs (subLinkId
+    // = its 1-based position there) and stays after the last column.
+    assert_eq!(pstate.p_multiassign_exprs.len(), 1);
+    let parked = pstate.p_multiassign_exprs.nth(0).as_target_entry().unwrap();
+    let sl = parked.expr.as_sub_link().unwrap();
+    assert_eq!(sl.subLinkType, types_nodes::SubLinkType::MULTIEXPR_SUBLINK);
+    assert_eq!(sl.subLinkId, 1);
+
+    let out2 = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, sublink(18), 2, 2),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .unwrap();
+    assert_eq!(out2.as_param().unwrap().paramid, (1 << 16) | 2);
+    assert_eq!(pstate.p_multiassign_exprs.len(), 1);
+}
+
+#[test]
+fn multi_assign_ref_sublink_column_count_mismatch_is_42601() {
+    install_sub_analyze_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: int_const(mcx, 0, 18),
+            location: 18,
+        },
+    )
+    .unwrap();
+
+    let err = transformExpr(
+        mcx,
+        &mut pstate,
+        multi_assign_ref(mcx, sublink, 1, 3),
+        ParseExprKind::EXPR_KIND_UPDATE_SOURCE,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "number of columns does not match number of values");
+}
+
+fn column_ref<'mcx>(mcx: Mcx<'mcx>, names: &[&'mcx str], location: i32) -> Node<'mcx> {
+    let mut fields = NodeList::nil();
+    for n in names {
+        fields.lappend(mcx, Node::mk(mcx, PgStr { sval: n }).unwrap()).unwrap();
+    }
+    Node::mk(mcx, types_nodes::rawnodes::ColumnRef { fields, location }).unwrap()
+}
+
+#[test]
+fn column_ref_too_many_dotted_names_is_42601() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let cref = column_ref(mcx, &["a", "b", "c", "d", "e"], 7);
+    let err = transformExpr(mcx, &mut pstate, cref, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "improper qualified name (too many dotted names): a.b.c.d.e");
+}
+
+#[test]
+fn column_ref_wrong_catalog_is_0a000() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        dbcommands_seams::get_database_name::set(|_| Ok(Some("thisdb".to_string())));
+        namespace_seams::range_var_get_relid::set(|_, _, _, _| Ok(InvalidOid));
+    });
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let cref = column_ref(mcx, &["otherdb", "ns", "rel", "col"], 7);
+    let err = transformExpr(mcx, &mut pstate, cref, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        err.message(),
+        "cross-database references are not implemented: otherdb.ns.rel.col"
+    );
+
+    // Matching catalog name proceeds to (and fails) relation lookup instead.
+    let cref = column_ref(mcx, &["thisdb", "ns", "rel", "col"], 7);
+    let err = transformExpr(mcx, &mut pstate, cref, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_ne!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+}
+
+#[test]
 fn empty_array_without_cast_errors() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

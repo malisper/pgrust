@@ -16,6 +16,8 @@ datum = { path = "../../../_support/types/datum" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 coerce = { path = "../coerce" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+init_small = { path = "../../utils/init/init_small" }
 parse_collate_seams = { path = "../parse_collate_seams" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
@@ -40,5 +42,6 @@ wchar = { path = "../../../common/wchar" }
 
 [dev-dependencies]
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -301,6 +301,13 @@ pub struct A_Indirection<'mcx> {
 }
 
 #[derive(Default)]
+pub struct MultiAssignRef<'mcx> {
+    pub source: Option<Node<'mcx>>,
+    pub colno: i32,
+    pub ncolumns: i32,
+}
+
+#[derive(Default)]
 pub struct A_ArrayExpr<'mcx> {
     pub elements: NodeList<'mcx>,
     pub list_start: ParseLoc,
@@ -926,6 +933,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for A_Indirection<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for A_ArrayExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_A_ArrayExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MultiAssignRef<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MultiAssignRef;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
     const TAG: NodeTag = NodeTag::T_SortBy;
 }
@@ -1393,6 +1403,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_a_array_expr(self) -> Option<&'mcx A_ArrayExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_multi_assign_ref(self) -> Option<&'mcx MultiAssignRef<'mcx>> {
         self.as_variant()
     }
 }

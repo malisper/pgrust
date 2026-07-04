@@ -85,10 +85,7 @@ pub fn transformExprRecurse<'mcx>(
                 A_Expr_Kind::AEXPR_OP_ANY => transformAExprOpAny(mcx, pstate, a),
                 A_Expr_Kind::AEXPR_OP_ALL => transformAExprOpAll(mcx, pstate, a),
                 A_Expr_Kind::AEXPR_IN => transformAExprIn(mcx, pstate, a),
-                other => panic!(
-                    "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (NULLIF) unported — unit backend-parser-expr"
-                ),
+                A_Expr_Kind::AEXPR_NULLIF => transformAExprNullIf(mcx, pstate, a),
             }
         }
         NodeTag::T_BooleanTest => transformBooleanTest(mcx, pstate, expr),
@@ -102,7 +99,7 @@ pub fn transformExprRecurse<'mcx>(
             .expect("node checked as NamedArgExpr");
             Ok(expr)
         }
-        NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
+        NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr, false),
         NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
         NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),
         NodeTag::T_BoolExpr => transformBoolExpr(mcx, pstate, expr),
@@ -115,6 +112,7 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_A_ArrayExpr => {
             transformArrayExpr(mcx, pstate, expr.as_a_array_expr().unwrap(), 0, 0, -1)
         }
+        NodeTag::T_MultiAssignRef => transformMultiAssignRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         // C mutates na->arg in place; sealed nodes rebuild the wrapper.
         NodeTag::T_NamedArgExpr => {
@@ -333,6 +331,91 @@ fn transformAExprOpAll<'mcx>(
     )
 }
 
+// transformAExprNullIf (parse_expr.c). C retags the OpExpr in place
+// (typedef OpExpr NullIfExpr); sealed nodes rebuild under the new tag.
+fn transformAExprNullIf<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let last_srf = pstate.p_last_srf;
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("AEXPR_NULLIF lexpr"))?;
+    let rexpr = transformExprRecurse(mcx, pstate, a.rexpr.expect("AEXPR_NULLIF rexpr"))?;
+    let result = parse_oper::make_op(
+        mcx,
+        pstate,
+        &a.name,
+        Some(lexpr),
+        Some(rexpr),
+        expr_type(lexpr),
+        expr_type(rexpr),
+        last_srf,
+        a.location,
+    )?;
+    let op = result.as_op_expr().expect("make_op yields an OpExpr");
+    if op.opresulttype != types_core::catalog::BOOLOID {
+        return Err(construct_requires_boolean_eq(pstate, "NULLIF", a.location));
+    }
+    if op.opretset {
+        return Err(construct_must_not_return_set(pstate, "NULLIF", a.location));
+    }
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::NullIfExpr {
+            opno: op.opno,
+            opfuncid: op.opfuncid,
+            opresulttype: expr_type(op.args.nth(0)),
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            args: op.args.clone_in(mcx)?,
+            location: op.location,
+        },
+    )
+}
+
+#[cold]
+fn construct_requires_boolean_eq(
+    pstate: &ParseState<'_, '_>,
+    construct: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("{construct} requires = operator to yield boolean"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformAExprNullIf")),
+    )
+}
+
+#[cold]
+fn construct_must_not_return_set(
+    pstate: &ParseState<'_, '_>,
+    construct: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("{construct} must not return a set"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformAExprNullIf")),
+    )
+}
+
 fn transformAExprIn<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -480,6 +563,7 @@ fn transformIndirection<'mcx>(
     expr: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let ind = expr.as_a_indirection().unwrap();
+    let last_srf = pstate.p_last_srf;
     let mut result = transformExprRecurse(mcx, pstate, ind.arg.expect("A_Indirection.arg"))?;
     let mut subscripts: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
     let location = expr_location(result);
@@ -512,26 +596,15 @@ fn transformIndirection<'mcx>(
                 } else {
                     None
                 };
+                let projected = match projected {
+                    Some(newresult) => Some(newresult),
+                    None => {
+                        attribute_notation_func_call(mcx, pstate, name, result, last_srf, location)?
+                    }
+                };
                 match projected {
                     Some(newresult) => result = newresult,
-                    None => {
-                        if !catalog_namespace::FuncnameGetCandidates(
-                            mcx,
-                            &[name],
-                            1,
-                            &[],
-                            false,
-                            false,
-                        )?
-                        .is_empty()
-                        {
-                            panic!(
-                                "transformIndirection (parse_expr.c): attribute-notation \
-                                 function call unported — rowtypes lane"
-                            );
-                        }
-                        return Err(unknown_attribute(pstate, result, name, location));
-                    }
+                    None => return Err(unknown_attribute(pstate, result, name, location)),
                 }
             }
         }
@@ -615,6 +688,51 @@ fn unknown_attribute(
             .into_error()
             .with_error_location(ErrorLocation::new("parse_expr.c", 0, "unknown_attribute")),
     )
+}
+
+// The ParseFuncOrColumn(fn=NULL) attribute-notation leg shared by
+// transformIndirection and transformColumnRef. C returns NULL on
+// FUNCDETAIL_NOTFOUND when fn == NULL; the ported entry raises 42883 instead,
+// so that error maps back to None and the caller reports the attribute.
+fn attribute_notation_func_call<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    name: &'mcx str,
+    arg: Node<'mcx>,
+    last_srf: Option<Node<'mcx>>,
+    location: types_core::ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    let funcname = types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, name)?)?;
+    let fargs = types_nodes::NodeList::make1(mcx, arg)?;
+    let fn_call = types_nodes::rawnodes::FuncCall {
+        funcname: types_nodes::NodeList::nil(),
+        args: types_nodes::NodeList::nil(),
+        agg_order: types_nodes::NodeList::nil(),
+        agg_filter: None,
+        over: None,
+        agg_within_group: false,
+        agg_star: false,
+        agg_distinct: false,
+        func_variadic: false,
+        funcformat: types_nodes::CoercionForm::COERCE_EXPLICIT_CALL,
+        location,
+    };
+    match parse_func::ParseFuncOrColumn(
+        mcx,
+        pstate,
+        &funcname,
+        fargs,
+        &[expr_type(arg)],
+        &fn_call,
+        None,
+        last_srf,
+        false,
+        location,
+    ) {
+        Ok(node) => Ok(Some(node)),
+        Err(e) if e.sqlstate() == types_error::ERRCODE_UNDEFINED_FUNCTION => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 // transformArrayExpr (parse_expr.c). array_type == InvalidOid means "infer a
@@ -1470,14 +1588,19 @@ fn transformRowExpr<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     expr: Node<'mcx>,
+    allow_default: bool,
 ) -> PgResult<Node<'mcx>> {
     let r = expr.as_row_expr().unwrap();
-    // C transformExpressionList(allowDefault=false): per-item transformExpr at
-    // the current p_expr_kind; the multiassign/DEFAULT legs are unreachable
-    // from the ported grammar arms.
+    // C transformExpressionList: per-item transformExpr at the current
+    // p_expr_kind; allowDefault keeps SetToDefault items untransformed
+    // (multiassign UPDATE SET (a, b) = ROW(...)).
     let mut args = types_nodes::NodeList::nil();
     for e in r.args.iter() {
-        args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
+        if allow_default && e.node_tag() == NodeTag::T_SetToDefault {
+            args.lappend(mcx, e)?;
+        } else {
+            args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
+        }
     }
     if args.len() > types_tuple::htup::MaxTupleAttributeNumber as usize {
         return Err(too_many_row_entries(pstate, r.location));
@@ -1498,6 +1621,164 @@ fn transformRowExpr<'mcx>(
             colnames,
             location: r.location,
         },
+    )
+}
+
+// transformMultiAssignRef (parse_expr.c). C mutates the raw SubLink's
+// subLinkType/subLinkId in place; sealed nodes rebuild the wrapper instead.
+fn transformMultiAssignRef<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::SubLinkType;
+
+    let maref = expr.as_multi_assign_ref().unwrap();
+    debug_assert!(pstate.p_expr_kind == parser_small1::ParseExprKind::EXPR_KIND_UPDATE_SOURCE);
+    let source = maref.source.expect("MultiAssignRef.source");
+
+    if maref.colno == 1 {
+        let tle_expr = if let Some(s) = source
+            .as_sub_link()
+            .filter(|s| s.subLinkType == SubLinkType::EXPR_SUBLINK)
+        {
+            let relabeled = Node::mk(
+                mcx,
+                types_nodes::SubLink {
+                    subLinkType: SubLinkType::MULTIEXPR_SUBLINK,
+                    subLinkId: s.subLinkId,
+                    testexpr: s.testexpr,
+                    operName: s.operName.clone_in(mcx)?,
+                    subselect: s.subselect,
+                    location: s.location,
+                },
+            )?;
+            let transformed = transformExprRecurse(mcx, pstate, relabeled)?;
+            let sl = transformed.as_sub_link().expect("transformSubLink yields a SubLink");
+            let qtree = sl.subselect.as_query().expect("SubLink.subselect is a Query");
+            let nonjunk = qtree
+                .targetList
+                .iter()
+                .filter(|te| !te.as_target_entry().expect("tlist entry").resjunk)
+                .count();
+            if nonjunk != maref.ncolumns as usize {
+                return Err(column_value_count_mismatch(pstate, sl.location));
+            }
+            // subLinkId = the SubLink's position in p_multiassign_exprs.
+            Node::mk(
+                mcx,
+                types_nodes::SubLink {
+                    subLinkType: sl.subLinkType,
+                    subLinkId: pstate.p_multiassign_exprs.len() as i32 + 1,
+                    testexpr: sl.testexpr,
+                    operName: sl.operName.clone_in(mcx)?,
+                    subselect: sl.subselect,
+                    location: sl.location,
+                },
+            )?
+        } else if source.node_tag() == NodeTag::T_RowExpr {
+            let rexpr = transformRowExpr(mcx, pstate, source, true)?;
+            let nargs = rexpr.as_row_expr().expect("transformed RowExpr").args.len();
+            if nargs != maref.ncolumns as usize {
+                return Err(column_value_count_mismatch(pstate, expr_location(rexpr)));
+            }
+            rexpr
+        } else {
+            return Err(multiassign_source_not_supported(pstate, expr_location(source)));
+        };
+        let tle = Node::mk(
+            mcx,
+            types_nodes::TargetEntry {
+                expr: tle_expr,
+                resno: 0,
+                resname: None,
+                ressortgroupref: 0,
+                resorigtbl: types_core::InvalidOid,
+                resorigcol: 0,
+                resjunk: true,
+            },
+        )?;
+        pstate.p_multiassign_exprs.lappend(mcx, tle)?;
+    }
+
+    let tle = pstate
+        .p_multiassign_exprs
+        .last()
+        .expect("transformMultiAssignRef with empty p_multiassign_exprs")
+        .as_target_entry()
+        .expect("tlist entry");
+
+    if let Some(sl) = tle.expr.as_sub_link() {
+        debug_assert!(sl.subLinkType == SubLinkType::MULTIEXPR_SUBLINK);
+        let qtree = sl.subselect.as_query().expect("SubLink.subselect is a Query");
+        let coltle = qtree
+            .targetList
+            .nth(maref.colno as usize - 1)
+            .as_target_entry()
+            .expect("tlist entry");
+        debug_assert!(!coltle.resjunk);
+        return Node::mk(
+            mcx,
+            types_nodes::Param {
+                paramkind: types_nodes::ParamKind::PARAM_MULTIEXPR,
+                paramid: (sl.subLinkId << 16) | maref.colno,
+                paramtype: expr_type(coltle.expr),
+                paramtypmod: expr_typmod(coltle.expr),
+                paramcollid: expr_collation(coltle.expr),
+                location: expr_location(coltle.expr),
+            },
+        );
+    }
+    let r = tle.expr.as_row_expr().expect("unexpected expr type in multiassign list");
+    let result = r.args.nth(maref.colno as usize - 1);
+    if maref.colno == maref.ncolumns {
+        let n = pstate.p_multiassign_exprs.len();
+        pstate.p_multiassign_exprs.truncate(n - 1);
+    }
+    Ok(result)
+}
+
+#[cold]
+fn column_value_count_mismatch(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("number of columns does not match number of values".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformMultiAssignRef")),
+    )
+}
+
+#[cold]
+fn multiassign_source_not_supported(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() \
+                 expression"
+                    .to_string(),
+            )
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformMultiAssignRef")),
     )
 }
 
@@ -2028,8 +2309,11 @@ fn transformColumnRef<'mcx>(
     let mut relname: Option<&str> = None;
     let mut colname: Option<&str> = None;
     let mut levels_up = 0;
+    let mut crerr = ColumnRefErr::NoColumn;
+    let last_srf = pstate.p_last_srf;
 
-    let node: Option<Node<'mcx>> = match fields {
+    let node: Option<Node<'mcx>> = 'resolve: {
+        match fields {
         [field1] => {
             let name = field_str(*field1).expect("single-field ColumnRef holds a String");
             colname = Some(name);
@@ -2060,10 +2344,16 @@ fn transformColumnRef<'mcx>(
             if fields.len() == 3 {
                 nspname = Some(field_str(fields[0]).expect("qualifier is a String"));
             } else if fields.len() == 4 {
-                panic!(
-                    "transformColumnRef (parse_expr.c): catalog-qualified column \
-                     reference needs get_database_name — unit backend-parser-expr"
-                );
+                // C checks the catalog name against the current database and
+                // then ignores it.
+                let catname = field_str(fields[0]).expect("catalog qualifier is a String");
+                let dbname =
+                    dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+                if dbname.as_deref() != Some(catname) {
+                    crerr = ColumnRefErr::WrongDb;
+                    break 'resolve None;
+                }
+                nspname = Some(field_str(fields[1]).expect("qualifier is a String"));
             }
             let rel = field_str(*field1).expect("relation qualifier is a String");
             relname = Some(rel);
@@ -2092,31 +2382,33 @@ fn transformColumnRef<'mcx>(
                     )? {
                         Some(node) => Some(node),
                         None => {
-                            // C tries a function call on the whole row
-                            // (attribute notation). Resolvable only when a
-                            // function of that name exists; otherwise C falls
-                            // through to errorMissingColumn.
-                            if !catalog_namespace::FuncnameGetCandidates(
-                                mcx, &[name], 1, &[], false, false,
+                            // Not a column; C tries a function call on the
+                            // whole row (attribute notation).
+                            let wholerow = transformWholeRowRef(
+                                mcx,
+                                pstate,
+                                nsitem,
+                                levels_up,
+                                cref.location,
+                            )?;
+                            attribute_notation_func_call(
+                                mcx,
+                                pstate,
+                                name,
+                                wholerow,
+                                last_srf,
+                                cref.location,
                             )?
-                            .is_empty()
-                            {
-                                panic!(
-                                    "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
-                                     whole-row attribute notation unported — \
-                                     unit backend-parser-func"
-                                );
-                            }
-                            None
                         }
                     }
                 }
             }
         }
-        _ => panic!(
-            "transformColumnRef (parse_expr.c): >4 dotted names — C raises 42601 here; \
-             arm unported with the catalog-qualified lane — unit backend-parser-expr"
-        ),
+        _ => {
+            crerr = ColumnRefErr::TooMany;
+            None
+        }
+    }
     };
 
     // plpgsql_post_column_ref (pl_exec.c): runs whether or not the core
@@ -2172,6 +2464,27 @@ fn transformColumnRef<'mcx>(
             if let Some(p) = sql_fn_post_column_ref(mcx, pstate, fields, cref.location)? {
                 return Ok(p);
             }
+            match crerr {
+                ColumnRefErr::NoColumn => {}
+                ColumnRefErr::WrongDb => {
+                    return Err(improper_qualified_name(
+                        pstate,
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "cross-database references are not implemented",
+                        fields,
+                        cref.location,
+                    ))
+                }
+                ColumnRefErr::TooMany => {
+                    return Err(improper_qualified_name(
+                        pstate,
+                        types_error::ERRCODE_SYNTAX_ERROR,
+                        "improper qualified name (too many dotted names)",
+                        fields,
+                        cref.location,
+                    ))
+                }
+            }
             if relname.is_some() && colname.is_none() {
                 let rv = Node::mk_mut(
                     mcx,
@@ -2197,6 +2510,44 @@ fn transformColumnRef<'mcx>(
     }
 }
 
+
+// C crerr (transformColumnRef): which flavor of not-found to report if no
+// hook resolves the reference.
+enum ColumnRefErr {
+    NoColumn,
+    WrongDb,
+    TooMany,
+}
+
+#[cold]
+fn improper_qualified_name(
+    pstate: &ParseState<'_, '_>,
+    code: types_error::SqlState,
+    msg: &str,
+    fields: &[Node<'_>],
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERROR};
+    let mut name = String::new();
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            name.push('.');
+        }
+        name.push_str(f.as_string().map_or("*", |s| s.sval));
+    }
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(code)
+            .errmsg(format!("{msg}: {name}"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformColumnRef")),
+    )
+}
 
 // resolve_column_ref marshal: ColumnRef fields to &str names (an A_Star
 // field means the reference cannot be a plpgsql name).
@@ -2500,6 +2851,8 @@ fn transformSubLink<'mcx>(
 
     let (testexpr, oper_name) = match sublink.subLinkType {
         SubLinkType::EXISTS_SUBLINK => (None, types_nodes::NodeList::nil()),
+        // Same as EXPR, except no restriction on number of columns.
+        SubLinkType::MULTIEXPR_SUBLINK => (None, types_nodes::NodeList::nil()),
         SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
             let nonjunk = qtree
                 .targetList
@@ -2571,10 +2924,9 @@ fn transformSubLink<'mcx>(
             )?;
             (Some(test), oper_name)
         }
-        other => panic!(
-            "transformSubLink (parse_expr.c): {other:?} arm (MULTIEXPR/CTE) \
-             unported — unit backend-parser-expr"
-        ),
+        SubLinkType::CTE_SUBLINK => {
+            unreachable!("CTE_SUBLINK is built in parse_cte, never raw-parsed")
+        }
     };
 
     Node::mk(
