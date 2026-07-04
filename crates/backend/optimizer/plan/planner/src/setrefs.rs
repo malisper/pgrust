@@ -927,7 +927,7 @@ fn fix_upper_expr<'mcx>(
             Ok(node)
         }
         NodeTag::T_Aggref => {
-            if let Some(prm) = find_minmax_agg_replacement_param(run, node) {
+            if let Some(prm) = find_minmax_agg_replacement_param(&run.root, node) {
                 return Ok(*run.root.expr_node(prm));
             }
             let a = node.as_aggref().expect("Aggref");
@@ -1550,7 +1550,7 @@ fn fix_scan_expr_mutator<'mcx>(
             Ok(node)
         }
         NodeTag::T_Aggref => {
-            let prm = find_minmax_agg_replacement_param(run, node)
+            let prm = find_minmax_agg_replacement_param(&run.root, node)
                 .expect("Aggref outside a minmax Result reaches fix_upper_expr");
             Ok(*run.root.expr_node(prm))
         }
@@ -3205,11 +3205,11 @@ fn clean_up_removed_plan_level<'mcx>(
 /// find_minmax_agg_replacement_param (setrefs.c); the returned NodeId is the
 /// InitPlan output Param in the current root's arena.
 pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
-    run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     node: Node<'mcx>,
 ) -> Option<types_pathnodes::NodeId> {
     let aggref = node.as_aggref()?;
-    if run.root.minmax_aggs.is_empty() || aggref.args.len() != 1 {
+    if root.minmax_aggs.is_empty() || aggref.args.len() != 1 {
         return None;
     }
     let cur_target = aggref
@@ -3218,10 +3218,10 @@ pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
         .as_target_entry()
         .expect("Aggref.args holds TargetEntries")
         .expr;
-    for i in 0..run.root.minmax_aggs.len() {
-        let mm = *run.root.minmax_agg_info(run.root.minmax_aggs[i]);
+    for i in 0..root.minmax_aggs.len() {
+        let mm = *root.minmax_agg_info(root.minmax_aggs[i]);
         if mm.aggfnoid == aggref.aggfnoid
-            && types_nodes::equal(*run.root.expr_node(mm.target), cur_target)
+            && types_nodes::equal(*root.expr_node(mm.target), cur_target)
         {
             return Some(mm.param);
         }
