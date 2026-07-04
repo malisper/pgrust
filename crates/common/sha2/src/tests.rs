@@ -38,6 +38,10 @@ fn sha224_nist_vectors() {
         hex(&sha224(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
         "75388b16512776cc5dba5da1fd890150b0c6455cb4f58b1952522525"
     );
+    assert_eq!(
+        hex(&sha224(&[b'a'; 1_000_000])),
+        "20794655980c91d8bbb4c1ea97618a4bf03f42581948b2ee4ee7ad67"
+    );
 }
 
 #[test]
@@ -54,6 +58,10 @@ fn sha384_nist_vectors() {
         hex(&sha384(b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")),
         "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039"
     );
+    assert_eq!(
+        hex(&sha384(&[b'a'; 1_000_000])),
+        "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985"
+    );
 }
 
 #[test]
@@ -69,6 +77,10 @@ fn sha512_nist_vectors() {
     assert_eq!(
         hex(&sha512(b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")),
         "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
+    );
+    assert_eq!(
+        hex(&sha512(&[b'a'; 1_000_000])),
+        "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b"
     );
 }
 
