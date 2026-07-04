@@ -2223,22 +2223,25 @@ pub fn final_cost_hashjoin(
 
     let virtualbuckets = numbuckets as f64 * numbatches as f64;
 
-    // No extended stats on this lane: estimate_multivariate_bucketsize is
-    // the identity (returns every hashclause) and each clause's bucketsize
-    // comes from estimate_hash_bucket_stats. A unique-ified inner is assumed
-    // perfectly hashable (C's UniquePath arm).
+    // A unique-ified inner is assumed perfectly hashable (C's UniquePath arm).
     let mut innerbucketsize = 1.0f64;
     let mut innermcvfreq = 1.0f64;
-    if inner_is_unique_path {
-        innerbucketsize = 1.0 / virtualbuckets;
-        innermcvfreq = 0.0;
-    }
     let inner_relids = run.root.rel(inner_parent).relids.clone();
     let hcls = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_hashclauses);
-    for &hcl in hcls.iter() {
-        if inner_is_unique_path {
-            break;
-        }
+    let otherclauses = if inner_is_unique_path {
+        innerbucketsize = 1.0 / virtualbuckets;
+        innermcvfreq = 0.0;
+        PgVec::new_in(run.mcx)
+    } else {
+        let (other, bs) = planner_seams::estimate_multivariate_bucketsize::call(
+            run,
+            inner_parent,
+            &hcls,
+        )?;
+        innerbucketsize = bs;
+        other
+    };
+    for &hcl in otherclauses.iter() {
         let right_is_inner = {
             let r = run.root.rinfo(hcl);
             types_pathnodes::relids::relids_is_subset(&r.right_relids, &inner_relids)

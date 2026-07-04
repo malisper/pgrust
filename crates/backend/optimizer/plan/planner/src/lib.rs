@@ -135,6 +135,9 @@ pub fn init_seams() {
     planner_seams::estimate_array_length::set(crate::selfuncs::estimate_array_length);
     planner_seams::mergejoinscansel::set(crate::selfuncs::mergejoinscansel);
     planner_seams::estimate_hash_bucket_stats::set(crate::selfuncs::estimate_hash_bucket_stats);
+    planner_seams::estimate_multivariate_bucketsize::set(
+        crate::selfuncs::estimate_multivariate_bucketsize,
+    );
     planner_seams::add_function_cost::set(crate::plancat::add_function_cost);
     planner_seams::get_function_rows::set(crate::plancat::get_function_rows);
     planner_seams::get_rel_data_width::set(crate::plancat::get_rel_data_width);
