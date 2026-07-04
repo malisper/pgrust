@@ -748,7 +748,7 @@ pub fn get_baserel_parampathinfo<'mcx>(
     required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>>> {
     use types_pathnodes::relids::{
-        relids_add_member, relids_copy, relids_equal, relids_is_empty, relids_is_subset,
+        relids_add_member, relids_copy, relids_is_empty, relids_is_subset,
         relids_overlap, relids_union,
     };
     let mcx = run.mcx;
@@ -757,11 +757,9 @@ pub fn get_baserel_parampathinfo<'mcx>(
         return Ok(None);
     }
     debug_assert!(!relids_overlap(&run.root.rel(rel_id).relids, required_outer));
-    for i in 0..run.root.rel(rel_id).ppilist.len() {
-        if relids_equal(&run.root.rel(rel_id).ppilist[i].ppi_req_outer, required_outer) {
-            let ppi = run.root.rel(rel_id).ppilist[i].clone();
-            return Ok(Some(mcx::box_new_in(mcx, ppi)));
-        }
+    if let Some(i) = find_param_path_info(run, rel_id, required_outer) {
+        let ppi = run.root.rel(rel_id).ppilist[i].clone();
+        return Ok(Some(mcx::box_new_in(mcx, ppi)));
     }
     let joinrelids = relids_union(mcx, &run.root.rel(rel_id).relids, required_outer);
     let joininfo =
@@ -812,7 +810,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
     restrict_clauses: &mut PgVec<'mcx, types_pathnodes::RinfoId>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>>> {
     use types_pathnodes::relids::{
-        relids_copy, relids_equal, relids_is_empty, relids_is_subset, relids_overlap,
+        relids_copy, relids_is_empty, relids_is_subset, relids_overlap,
         relids_union,
     };
     let mcx = run.mcx;
@@ -907,11 +905,9 @@ pub fn get_joinrel_parampathinfo<'mcx>(
     pclauses.extend(restrict_clauses.iter().copied());
     core::mem::swap(restrict_clauses, &mut pclauses);
 
-    for i in 0..run.root.rel(joinrel).ppilist.len() {
-        if relids_equal(&run.root.rel(joinrel).ppilist[i].ppi_req_outer, required_outer) {
-            let ppi = run.root.rel(joinrel).ppilist[i].clone();
-            return Ok(Some(mcx::box_new_in(mcx, ppi)));
-        }
+    if let Some(i) = find_param_path_info(run, joinrel, required_outer) {
+        let ppi = run.root.rel(joinrel).ppilist[i].clone();
+        return Ok(Some(mcx::box_new_in(mcx, ppi)));
     }
 
     let rows = costsize::get_parameterized_joinrel_size(
@@ -930,6 +926,98 @@ pub fn get_joinrel_parampathinfo<'mcx>(
     };
     run.root.rel_mut(joinrel).ppilist.push(ppi.clone());
     Ok(Some(mcx::box_new_in(mcx, ppi)))
+}
+
+// find_param_path_info (relnode.c); returns the ppilist index.
+pub fn find_param_path_info(
+    run: &PlannerRun<'_>,
+    rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'_>,
+) -> Option<usize> {
+    use types_pathnodes::relids::relids_equal;
+    run.root
+        .rel(rel_id)
+        .ppilist
+        .iter()
+        .position(|ppi| relids_equal(&ppi.ppi_req_outer, required_outer))
+}
+
+// get_appendrel_parampathinfo (relnode.c).
+pub fn get_appendrel_parampathinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    appendrel: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>> {
+    use types_pathnodes::relids::{relids_copy, relids_is_empty, relids_is_subset, relids_overlap};
+    let mcx = run.mcx;
+    debug_assert!(relids_is_subset(&run.root.rel(appendrel).lateral_relids, required_outer));
+    if relids_is_empty(required_outer) {
+        return None;
+    }
+    debug_assert!(!relids_overlap(&run.root.rel(appendrel).relids, required_outer));
+    if let Some(i) = find_param_path_info(run, appendrel, required_outer) {
+        let ppi = run.root.rel(appendrel).ppilist[i].clone();
+        return Some(mcx::box_new_in(mcx, ppi));
+    }
+    let ppi = types_pathnodes::ParamPathInfo {
+        ppi_req_outer: relids_copy(mcx, required_outer),
+        ppi_rows: 0.0,
+        ppi_clauses: PgVec::new_in(mcx),
+        ppi_serials: None,
+    };
+    run.root.rel_mut(appendrel).ppilist.push(ppi.clone());
+    Some(mcx::box_new_in(mcx, ppi))
+}
+
+// get_param_path_clause_serials (relnode.c).
+pub fn get_param_path_clause_serials<'mcx>(
+    run: &PlannerRun<'mcx>,
+    path_id: PathId,
+) -> types_pathnodes::Relids<'mcx> {
+    use types_pathnodes::relids::{relids_add_member, relids_copy, relids_intersect, relids_union};
+    let mcx = run.mcx;
+    let node = run.root.path(path_id);
+    if node.base().param_info.is_none() {
+        return None;
+    }
+    let jpath = match node {
+        PathNode::MergeAppendPath(_) => {
+            panic!("get_param_path_clause_serials (relnode.c): parameterized MergeAppend")
+        }
+        PathNode::NestPath(p) => Some(&p.jpath),
+        PathNode::MergePath(p) => Some(&p.jpath),
+        PathNode::HashPath(p) => Some(&p.jpath),
+        _ => None,
+    };
+    if let Some(jpath) = jpath {
+        let outer = jpath.outerjoinpath.expect("join path has an outer input");
+        let inner = jpath.innerjoinpath.expect("join path has an inner input");
+        let mut pserials = relids_union(
+            mcx,
+            &get_param_path_clause_serials(run, outer),
+            &get_param_path_clause_serials(run, inner),
+        );
+        for &rid in jpath.joinrestrictinfo.iter() {
+            pserials = relids_add_member(mcx, &pserials, run.root.rinfo(rid).rinfo_serial as u32);
+        }
+        return pserials;
+    }
+    if let PathNode::AppendPath(apath) = node {
+        let mut pserials: types_pathnodes::Relids<'mcx> = None;
+        for (i, &sp) in apath.subpaths.iter().enumerate() {
+            let subserials = get_param_path_clause_serials(run, sp);
+            if i == 0 {
+                pserials = relids_copy(mcx, &subserials);
+            } else {
+                pserials = relids_intersect(mcx, &pserials, &subserials);
+            }
+        }
+        return pserials;
+    }
+    relids_copy(
+        mcx,
+        &node.base().param_info.as_ref().expect("parameterized path").ppi_serials,
+    )
 }
 
 // create_seqscan_path (pathnode.c); required_outer is empty on this lane.
@@ -1603,7 +1691,7 @@ pub fn create_groupingsets_path<'mcx>(
         pathtype: tag16(NodeTag::T_Agg),
         parent: rel_id,
         pathtarget_id: Some(target_id),
-        param_info: None,
+        param_info: sub.param_info.clone(),
         parallel_aware: false,
         parallel_safe: rel.consider_parallel && sub.parallel_safe,
         parallel_workers: sub.parallel_workers,
@@ -2221,6 +2309,7 @@ pub fn create_unique_path<'mcx>(
         sub.parallel_workers,
     );
     let sub_pathkeys = types_pathnodes::relids::pgvec_clone_shallow(mcx, &sub.pathkeys);
+    let sub_param_info = sub.param_info.clone();
     let sub_width = run.root.path_pathtarget(subpath_id).width;
     let rel_rows = run.root.rel(rel_id).rows;
     let rel_rtekind = run.root.rel(rel_id).rtekind;
@@ -2230,7 +2319,7 @@ pub fn create_unique_path<'mcx>(
         pathtype: tag16(NodeTag::T_Unique),
         parent: rel_id,
         pathtarget_id: run.root.rel(rel_id).pathtarget_id,
-        param_info: None,
+        param_info: sub_param_info,
         parallel_aware: false,
         parallel_safe: run.root.rel(rel_id).consider_parallel && sub_parallel_safe,
         parallel_workers: sub_parallel_workers,
@@ -2332,7 +2421,7 @@ pub fn create_unique_path<'mcx>(
                 pathtype: path.pathtype,
                 parent: path.parent,
                 pathtarget_id: path.pathtarget_id,
-                param_info: None,
+                param_info: path.param_info.clone(),
                 parallel_aware: path.parallel_aware,
                 parallel_safe: path.parallel_safe,
                 parallel_workers: path.parallel_workers,
@@ -2994,27 +3083,28 @@ pub fn create_nestloop_path<'mcx>(
     required_outer: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<PathId> {
-    use types_pathnodes::relids::{relids_copy, relids_overlap, relids_union};
+    use types_pathnodes::relids::{relids_copy, relids_is_empty, relids_is_member, relids_overlap};
     let mcx = run.mcx;
 
-    // Clauses that get enforced at the parameterized inner scan are removed
-    // from the join's own restrict list.
+    // Clauses already enforced inside the parameterized inner path (matched by
+    // rinfo_serial) are removed from the join's own restrict list now: the
+    // list feeds this path's size and cost estimates.
     let mut restrict_vec: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
     restrict_vec.extend(restrict_clauses.iter().copied());
     let inner_req_outer = relids_copy(mcx, path_req_outer(run.root.path(inner_path).base()));
-    let outer_parent_relids = {
+    let outerrelids = {
         let r = run.root.path(outer_path).base().parent;
-        relids_copy(mcx, &run.root.rel(r).relids)
-    };
-    if relids_overlap(&inner_req_outer, &outer_parent_relids) {
-        let inner_parent_relids = {
-            let r = run.root.path(inner_path).base().parent;
+        if relids_is_empty(&run.root.rel(r).top_parent_relids) {
             relids_copy(mcx, &run.root.rel(r).relids)
-        };
-        let inner_and_outer = relids_union(mcx, &inner_parent_relids, &inner_req_outer);
+        } else {
+            relids_copy(mcx, &run.root.rel(r).top_parent_relids)
+        }
+    };
+    if relids_overlap(&inner_req_outer, &outerrelids) {
+        let enforced_serials = get_param_path_clause_serials(run, inner_path);
         let mut jclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
         for &rid in restrict_vec.iter() {
-            if !join_clause_is_movable_into(run, rid, &inner_parent_relids, &inner_and_outer) {
+            if !relids_is_member(run.root.rinfo(rid).rinfo_serial, &enforced_serials) {
                 jclauses.push(rid);
             }
         }

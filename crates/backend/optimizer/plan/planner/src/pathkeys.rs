@@ -444,6 +444,220 @@ fn partkey_is_bool_constant_for_query(
     false
 }
 
+// append_pathkeys (pathkeys.c).
+pub fn append_pathkeys<'mcx>(
+    run: &PlannerRun<'mcx>,
+    target: &mut PgVec<'mcx, PathKey>,
+    source: &[PathKey],
+) {
+    debug_assert!(!target.is_empty());
+    for &pk in source {
+        if !pathkey_is_redundant(run, pk, target) {
+            target.push(pk);
+        }
+    }
+}
+
+// get_cheapest_parallel_safe_total_inner (pathkeys.c).
+pub fn get_cheapest_parallel_safe_total_inner(
+    run: &PlannerRun<'_>,
+    paths: &[types_pathnodes::PathId],
+) -> Option<types_pathnodes::PathId> {
+    paths.iter().copied().find(|&pid| {
+        let path = run.root.path(pid).base();
+        path.parallel_safe && path.param_info.is_none()
+    })
+}
+
+pub struct SubPathKeyDesc<'mcx> {
+    pub has_volatile: bool,
+    pub sortref: u32,
+    pub members: PgVec<'mcx, (Node<'mcx>, u32)>,
+    pub opfamilies: PgVec<'mcx, u32>,
+    pub collation: u32,
+    pub pk_opfamily: u32,
+    pub pk_cmptype: i32,
+    pub pk_nulls_first: bool,
+}
+
+pub struct SubTle<'mcx> {
+    pub expr: Node<'mcx>,
+    pub resno: i32,
+    pub sortgroupref: u32,
+}
+
+// Subquery pathkeys reference the subroot's EC arena; this materializes what
+// convert_subquery_pathkeys reads from them so the conversion can run against
+// the outer root (C follows pointers across PlannerInfos instead).
+pub fn extract_subquery_pathkey_descs<'mcx>(
+    run: &PlannerRun<'mcx>,
+    subpath: types_pathnodes::PathId,
+) -> PgVec<'mcx, SubPathKeyDesc<'mcx>> {
+    let mcx = run.mcx;
+    let mut descs: PgVec<'mcx, SubPathKeyDesc<'mcx>> = PgVec::new_in(mcx);
+    for pk in run.root.path(subpath).base().pathkeys.iter() {
+        let ec_id = pk.pk_eclass.expect("canonical pathkey has an eclass");
+        let ec = run.root.ec(ec_id);
+        let mut members: PgVec<'mcx, (Node<'mcx>, u32)> = PgVec::new_in(mcx);
+        for &em_id in ec.ec_members.iter() {
+            let em = run.root.em(em_id);
+            debug_assert!(!em.em_is_child);
+            members.push((*run.root.expr_node(em.em_expr), em.em_datatype));
+        }
+        descs.push(SubPathKeyDesc {
+            has_volatile: ec.ec_has_volatile,
+            sortref: ec.ec_sortref,
+            members,
+            opfamilies: crate::relnode::pgvec_clone_shallow(mcx, &ec.ec_opfamilies),
+            collation: ec.ec_collation,
+            pk_opfamily: pk.pk_opfamily,
+            pk_cmptype: pk.pk_cmptype,
+            pk_nulls_first: pk.pk_nulls_first,
+        });
+    }
+    descs
+}
+
+// make_tlist_from_pathtarget (tlist.c) over the subpath's pathtarget, reduced
+// to what find_var_for_subquery_tle consumes (never resjunk).
+pub fn extract_subquery_tlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    subpath: types_pathnodes::PathId,
+) -> PgVec<'mcx, SubTle<'mcx>> {
+    let mcx = run.mcx;
+    let target = run.root.path_pathtarget(subpath);
+    let mut tlist: PgVec<'mcx, SubTle<'mcx>> = PgVec::new_in(mcx);
+    for (i, &eid) in target.exprs.iter().enumerate() {
+        tlist.push(SubTle {
+            expr: *run.root.expr_node(eid),
+            resno: i as i32 + 1,
+            sortgroupref: target.sortgrouprefs.get(i).copied().unwrap_or(0),
+        });
+    }
+    tlist
+}
+
+// find_var_for_subquery_tle (pathkeys.c).
+fn find_var_for_subquery_tle<'mcx>(
+    run: &PlannerRun<'mcx>,
+    rel: types_pathnodes::RelId,
+    tle: &SubTle<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    let mcx = run.mcx;
+    for &id in run.root.rel_reltarget(rel).exprs.iter() {
+        let node = *run.root.expr_node(id);
+        let Some(var) = node.as_var() else { continue };
+        debug_assert!(var.varno == run.root.rel(rel).relid);
+        if var.varattno as i32 == tle.resno {
+            let copy = types_nodes::primnodes::Var {
+                varnullingrels: var.varnullingrels.clone_in(mcx)?,
+                ..*var
+            };
+            return Ok(Some(Node::mk(mcx, copy)?));
+        }
+    }
+    Ok(None)
+}
+
+// convert_subquery_pathkeys (pathkeys.c), over extracted subroot descriptors.
+pub fn convert_subquery_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: types_pathnodes::RelId,
+    sub_pathkeys: &[SubPathKeyDesc<'mcx>],
+    subquery_tlist: &[SubTle<'mcx>],
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let mcx = run.mcx;
+    let outer_query_keys = run.root.query_pathkeys.len();
+    let rel_relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).relids);
+    let mut retval: PgVec<'mcx, PathKey> = PgVec::new_in(mcx);
+
+    for desc in sub_pathkeys {
+        let mut best_pathkey: Option<PathKey> = None;
+        if desc.has_volatile {
+            assert!(desc.sortref != 0, "volatile EquivalenceClass has no sortref");
+            let tle = subquery_tlist
+                .iter()
+                .find(|t| t.sortgroupref == desc.sortref)
+                .expect("volatile pathkey sortref has a tlist entry");
+            if let Some(outer_var) = find_var_for_subquery_tle(run, rel, tle)? {
+                debug_assert_eq!(desc.members.len(), 1);
+                let sub_datatype = desc.members[0].1;
+                if let Some(outer_ec) = crate::equivclass::get_eclass_for_sort_expr(
+                    run,
+                    outer_var,
+                    &desc.opfamilies,
+                    sub_datatype,
+                    desc.collation,
+                    0,
+                    &rel_relids,
+                    false,
+                )? {
+                    best_pathkey = Some(make_canonical_pathkey(
+                        run,
+                        outer_ec,
+                        desc.pk_opfamily,
+                        desc.pk_cmptype,
+                        desc.pk_nulls_first,
+                    ));
+                }
+            }
+        } else {
+            let mut best_score = -1i64;
+            for &(sub_expr, sub_expr_type) in desc.members.iter() {
+                for tle in subquery_tlist {
+                    let Some(outer_var) = find_var_for_subquery_tle(run, rel, tle)? else {
+                        continue;
+                    };
+                    let tle_expr = crate::equivclass::canonicalize_ec_expression(
+                        mcx,
+                        tle.expr,
+                        sub_expr_type,
+                        desc.collation,
+                    )?;
+                    if !types_nodes::equal(tle_expr, sub_expr) {
+                        continue;
+                    }
+                    let Some(outer_ec) = crate::equivclass::get_eclass_for_sort_expr(
+                        run,
+                        outer_var,
+                        &desc.opfamilies,
+                        sub_expr_type,
+                        desc.collation,
+                        0,
+                        &rel_relids,
+                        false,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let outer_pk = make_canonical_pathkey(
+                        run,
+                        outer_ec,
+                        desc.pk_opfamily,
+                        desc.pk_cmptype,
+                        desc.pk_nulls_first,
+                    );
+                    let mut score = run.root.ec(outer_ec).ec_members.len() as i64 - 1;
+                    if retval.len() < outer_query_keys
+                        && run.root.query_pathkeys[retval.len()] == outer_pk
+                    {
+                        score += 1;
+                    }
+                    if score > best_score {
+                        best_pathkey = Some(outer_pk);
+                        best_score = score;
+                    }
+                }
+            }
+        }
+        let Some(best) = best_pathkey else { break };
+        if !pathkey_is_redundant(run, best, &retval) {
+            retval.push(best);
+        }
+    }
+    Ok(retval)
+}
+
 pub fn make_canonical_pathkey(
     run: &mut PlannerRun<'_>,
     eclass: EcId,

@@ -36,6 +36,59 @@ pub fn setup_simple_rel_arrays<'mcx>(root: &mut PlannerInfo<'mcx>, nrtable: usiz
     }
 }
 
+// find_base_rel_noerr (relnode.c).
+pub fn find_base_rel_noerr(root: &PlannerInfo<'_>, relid: i32) -> Option<RelId> {
+    if (relid as u32) < root.simple_rel_array_size as u32 {
+        return root.simple_rel_array[relid as usize];
+    }
+    None
+}
+
+// find_base_rel_ignore_join (relnode.c): None for an outer-join relid.
+pub fn find_base_rel_ignore_join(run: &crate::run::PlannerRun<'_>, relid: i32) -> Option<RelId> {
+    if (relid as u32) < run.root.simple_rel_array_size as u32 {
+        if let Some(rel) = run.root.simple_rel_array[relid as usize] {
+            return Some(rel);
+        }
+        if run.root.simple_rte_array[relid as usize] != RangeTblEntryId::Invalid {
+            let rte = run.rte(relid as usize);
+            if rte.rtekind == RTEKind::RTE_JOIN
+                && rte.jointype != types_nodes::jointype::JoinType::JOIN_INNER
+            {
+                return None;
+            }
+        }
+    }
+    panic!("no relation entry for relid {relid}");
+}
+
+// find_childrel_parents (relnode.c).
+pub fn find_childrel_parents<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
+    rel: RelId,
+) -> Relids<'mcx> {
+    let mcx = run.mcx;
+    let root = &run.root;
+    debug_assert!(root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL);
+    let mut result: Relids<'mcx> = None;
+    let mut cur = rel;
+    loop {
+        let relid = root.rel(cur).relid;
+        debug_assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
+        let appinfo = root.append_rel_array[relid as usize]
+            .as_ref()
+            .expect("child rel has an AppendRelInfo");
+        let prelid = appinfo.parent_relid;
+        result = relids_add_member(mcx, &result, prelid);
+        cur = find_base_rel(root, prelid as i32);
+        if root.rel(cur).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+            break;
+        }
+    }
+    debug_assert!(root.rel(cur).reloptkind == RELOPT_BASEREL);
+    result
+}
+
 // build_simple_rel (relnode.c), parentless arm (inheritance children are the
 // M2 partition lane).
 pub fn build_simple_rel<'mcx>(

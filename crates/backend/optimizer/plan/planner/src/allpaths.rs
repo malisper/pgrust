@@ -139,8 +139,7 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
     Ok(())
 }
 
-// set_subquery_pathlist (allpaths.c): pathkeys empty
-// (convert_subquery_pathkeys unported).
+// set_subquery_pathlist (allpaths.c).
 fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
     let orig = rte.subquery.expect("RTE_SUBQUERY has a subquery");
@@ -226,7 +225,12 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     run.swap_with_rel_subroot(idx);
     let mut candidates: mcx::PgVec<
         '_,
-        (types_pathnodes::PathId, crate::pathnode::SubqueryScanInfo),
+        (
+            types_pathnodes::PathId,
+            crate::pathnode::SubqueryScanInfo,
+            mcx::PgVec<'_, crate::pathkeys::SubPathKeyDesc<'_>>,
+            mcx::PgVec<'_, crate::pathkeys::SubTle<'_>>,
+        ),
     > = mcx::PgVec::new_in(run.mcx);
     {
         let final_rel = crate::planmain::fetch_final_rel(run);
@@ -234,18 +238,24 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         let paths =
             crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(final_rel).pathlist);
         for &sp in paths.iter() {
-            candidates.push((sp, crate::prepunion::child_info(run, sp)));
+            candidates.push((
+                sp,
+                crate::prepunion::child_info(run, sp),
+                crate::pathkeys::extract_subquery_pathkey_descs(run, sp),
+                crate::pathkeys::extract_subquery_tlist(run, sp),
+            ));
         }
     }
     run.swap_with_rel_subroot(idx);
 
     for c in candidates.iter() {
+        let pathkeys = crate::pathkeys::convert_subquery_pathkeys(run, rel, &c.2, &c.3)?;
         let id = crate::pathnode::create_subqueryscan_path(
             run,
             rel,
             c.0,
             trivial_pathtarget,
-            mcx::PgVec::new_in(run.mcx),
+            pathkeys,
             &required_outer,
             &c.1,
         )?;
