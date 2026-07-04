@@ -185,6 +185,67 @@ pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trig_oid: Oid) -> PgResult<()> {
     rel.close(types_rel::NoLock)
 }
 
+// get_trigger_oid (trigger.c).
+pub fn get_trigger_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    trigname: &str,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    const TRIGGER_RELID_NAME_INDEX_ID: Oid = 2701;
+    const Anum_pg_trigger_tgrelid: AttrNumber = 2;
+    const Anum_pg_trigger_tgname: AttrNumber = 3;
+    let tgrel = table::table_open(mcx, TRIGGER_RELATION_ID, types_rel::AccessShareLock)?;
+    let namebuf = name_arg(mcx, trigname)?;
+    let mut keys = [ScanKeyData::empty(), ScanKeyData::empty()];
+    for (key, (attno, func, arg)) in keys.iter_mut().zip([
+        (Anum_pg_trigger_tgrelid, F_OIDEQ, Datum::from_oid(relid)),
+        (
+            Anum_pg_trigger_tgname,
+            types_core::fmgr::F_NAMEEQ,
+            Datum::from_usize(namebuf.as_ptr() as usize),
+        ),
+    ]) {
+        key.sk_attno = attno;
+        key.sk_strategy = BTEqualStrategyNumber;
+        key.sk_collation = types_core::C_COLLATION_OID;
+        key.sk_func = fmgr_seams::fmgr_info::call(func)
+            .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
+        key.sk_argument = arg;
+    }
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &tgrel,
+        TRIGGER_RELID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut isnull = false;
+    let oid = match genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: pg_trigger oid is a fixed NOT NULL column under its descriptor.
+        Some(tup) => unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_trigger_oid as i32, tgrel.descr(), &mut isnull)
+        }
+        .as_oid(),
+        None => InvalidOid,
+    };
+    genam::systable_endscan(mcx, scan)?;
+    tgrel.close(types_rel::AccessShareLock)?;
+    if oid == InvalidOid && !missing_ok {
+        let relname = lsyscache::relation::get_rel_name(mcx, relid)?
+            .expect("trigger lookup relation has a pg_class row");
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!("trigger \"{trigname}\" for table \"{relname}\" does not exist"),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    Ok(oid)
+}
+
 fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
     let n = NAMEDATALEN as usize;
     assert!(name.len() < n, "trigger name overflows NAMEDATALEN: {name:?}");

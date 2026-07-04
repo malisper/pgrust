@@ -837,6 +837,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "amcmds"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "analyze_seams"
 version = "0.1.0"
 dependencies = [
@@ -1652,6 +1661,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog_objectaddress"
+version = "0.0.0"
+dependencies = [
+ "adt_acl",
+ "amcmds",
+ "catalog",
+ "catalog_namespace",
+ "commands_tablespace",
+ "dbcommands",
+ "extension",
+ "format_type",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "objectaddress_seams",
+ "opclasscmds",
+ "parse_func",
+ "parse_oper",
+ "parse_utilcmd",
+ "pg_constraint",
+ "pg_depend",
+ "pg_largeobject",
+ "rel_vocab",
+ "relation",
+ "rewrite_define",
+ "sinval",
+ "superuser",
+ "syscache_seams",
+ "trigger",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "catalog_seams"
 version = "0.0.0"
 dependencies = [
@@ -2223,16 +2268,16 @@ name = "commands_comment"
 version = "0.1.0"
 dependencies = [
  "catalog_indexing",
- "catalog_namespace",
  "datum",
+ "dbcommands_seams",
+ "elog_seams",
  "fmgr_seams",
  "genam",
  "heaptuple",
  "mcx",
  "miscinit",
- "parse_relation",
- "rel_vocab",
- "superuser",
+ "objectaddress_seams",
+ "pg_class_seams",
  "table",
  "types_core",
  "types_error",
@@ -2343,11 +2388,18 @@ dependencies = [
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "fmgr_seams",
+ "genam",
  "mcx",
  "relpath",
+ "table",
  "tablespace_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -6210,6 +6262,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectaddress_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "pg_depend",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6801,8 +6866,10 @@ dependencies = [
  "catalog_indexing",
  "datum",
  "fmgr_seams",
+ "format_type",
  "genam",
  "heaptuple",
+ "lsyscache",
  "mcx",
  "nodes_core",
  "outfuncs",
@@ -9212,6 +9279,7 @@ dependencies = [
  "catalog_dependency",
  "catalog_index",
  "catalog_namespace",
+ "catalog_objectaddress",
  "catalog_storage",
  "catcache",
  "checkpointer",
@@ -10649,6 +10717,7 @@ dependencies = [
  "heaptuple",
  "init_small",
  "inval",
+ "lsyscache",
  "mcx",
  "miscinit",
  "pg_depend",

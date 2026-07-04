@@ -34,6 +34,7 @@ pub fn init_all() {
     large_object::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
+    catalog_objectaddress::init_seams();
     tablecmds::init_seams();
     commands_cluster::init_seams();
     catalog::init_seams();

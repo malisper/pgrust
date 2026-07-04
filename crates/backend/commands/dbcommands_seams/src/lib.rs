@@ -13,3 +13,11 @@ seam_core::seam!(
     // through checkpointer/transam_xlog).
     pub fn dbase_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn get_database_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        dbname: &str,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);

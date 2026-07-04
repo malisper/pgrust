@@ -1,0 +1,41 @@
+[package]
+name = "catalog_objectaddress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_objectaddress"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_nodes = { path = "../../../_support/types/nodes" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+catalog = { path = "../catalog" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+catalog_namespace = { path = "../catalog_namespace" }
+pg_depend = { path = "../pg_depend" }
+pg_constraint = { path = "../pg_constraint" }
+pg_largeobject = { path = "../pg_largeobject" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+relation = { path = "../../access/common/relation" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+sinval = { path = "../../storage/ipc/sinval" }
+superuser = { path = "../../utils/misc/superuser" }
+parse_func = { path = "../../parser/parse_func" }
+parse_oper = { path = "../../parser/parse_oper" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+amcmds = { path = "../../commands/amcmds" }
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+trigger = { path = "../../commands/trigger" }
+extension = { path = "../../commands/extension" }
+dbcommands = { path = "../../commands/dbcommands" }
+commands_tablespace = { path = "../../commands/tablespace" }
+adt_acl = { path = "../../utils/adt/acl" }
+format_type = { path = "../../utils/adt/format_type" }
