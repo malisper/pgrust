@@ -119,3 +119,30 @@ CREATE RULE r_arr_upd AS ON UPDATE TO t1 DO ALSO UPDATE arr_t SET xs[1] = new.b,
 CREATE RULE r_arr_slice AS ON UPDATE TO t1 DO ALSO UPDATE arr_t SET xs[1:2] = ARRAY[old.a, new.b] WHERE arr_t.id = old.a;
 CREATE RULE r_multiassign AS ON UPDATE TO t2 DO ALSO UPDATE t1 SET (b, e) = (SELECT new.f, old.a::int8) WHERE t1.a = old.a;
 CREATE RULE r_multi_sub AS ON UPDATE TO t2 DO ALSO UPDATE arr_t SET (xs[1], id) = (SELECT new.f, old.a) WHERE arr_t.id = old.a;
+
+CREATE TYPE comp AS (x int4, y text);
+CREATE TABLE compt (id int4, cc comp, ca comp[], CONSTRAINT compt_x_check CHECK ((cc).x > 0));
+CREATE VIEW v_fsel AS SELECT (cc).x AS cx, (compt.cc).y AS cy FROM compt;
+CREATE VIEW v_fsel_func AS SELECT (f_out(a)).c AS oc, (f_out(a)).b + 1 AS ob FROM t1;
+CREATE VIEW v_fsel_row AS SELECT (ROW(a, b)).f1 AS r1 FROM t1;
+CREATE VIEW v_fsel_sub AS SELECT (s.r).f2 AS sf FROM (SELECT ROW(a, b) AS r FROM t1) s;
+CREATE VIEW v_fsel_subvar AS SELECT (s2.r2).y AS sy FROM (SELECT cc AS r2 FROM compt) s2;
+CREATE VIEW v_fsel_subsub AS SELECT (o.r).f1 AS ff FROM (SELECT i.r FROM (SELECT ROW(a, b) AS r FROM t1) i) o;
+CREATE VIEW v_fsel_wholerow AS SELECT (s3).a AS wa FROM (SELECT a, b FROM t1) s3;
+CREATE VIEW v_fsel_cte AS WITH cw AS (SELECT ROW(a, b) AS r FROM t1) SELECT (cw.r).f2 AS cf FROM cw;
+CREATE VIEW v_fsel_ctevar AS WITH cw2 AS (SELECT ROW(a, b) AS r FROM t1), cw3 AS (SELECT cw2.r FROM cw2) SELECT (cw3.r).f1 AS cf3 FROM cw3;
+CREATE RULE r_fstore AS ON UPDATE TO t1 DO ALSO UPDATE compt SET cc.x = new.b WHERE compt.id = old.a;
+CREATE RULE r_fstore_arr AS ON UPDATE TO t1 DO ALSO UPDATE compt SET ca[1].y = new.c WHERE compt.id = old.a;
+
+CREATE TABLE xt (id int4, x xml, x2 xml, j jsonb);
+CREATE VIEW v_xmlexpr AS SELECT XMLELEMENT(NAME el, XMLATTRIBUTES(id AS ident, id + 1 AS next), 'body', x) AS xe, XMLFOREST(id, x AS ex) AS xf, XMLCONCAT(x, x2) AS xc, XMLPI(NAME "my-pi", 'v1') AS xp FROM xt;
+CREATE VIEW v_xmlexpr2 AS SELECT XMLROOT(x, VERSION '1.1', STANDALONE YES) AS xr, XMLROOT(x, VERSION NO VALUE) AS xr2, XMLPARSE(DOCUMENT ('<a>' || id::text || '</a>')) AS xpd, XMLPARSE(CONTENT 'c' PRESERVE WHITESPACE) AS xpc, XMLSERIALIZE(CONTENT x AS text) AS xs, XMLSERIALIZE(DOCUMENT x AS varchar INDENT) AS xsi, (x IS DOCUMENT) AS isd FROM xt;
+CREATE VIEW v_xmlexists AS SELECT id FROM xt WHERE XMLEXISTS('//a' PASSING x);
+CREATE VIEW v_xmltable AS SELECT xt2.* FROM xt, XMLTABLE('/root/item' PASSING x COLUMNS iid int4 PATH '@id', txt text PATH 'text()' DEFAULT 'missing', ord FOR ORDINALITY, req text PATH '@req' NOT NULL) xt2;
+CREATE VIEW v_xmltable_ns AS SELECT z.* FROM xt, XMLTABLE(XMLNAMESPACES('http://x.example' AS ex, DEFAULT 'http://d.example'), '/ex:r' PASSING x COLUMNS c1 text PATH 'ex:c1') z;
+
+CREATE VIEW v_jsonctor AS SELECT JSON_OBJECT('k1': a, 'k2': c ABSENT ON NULL WITH UNIQUE KEYS) AS jo, JSON_ARRAY(a, b NULL ON NULL) AS ja, JSON('{"x": 1}') AS jj, JSON_SCALAR(a) AS js, JSON_SERIALIZE(j) AS jser FROM t1, xt;
+CREATE VIEW v_jsonagg AS SELECT JSON_OBJECTAGG(c: a) AS joa, JSON_ARRAYAGG(b RETURNING jsonb) AS jaa FROM t1;
+CREATE VIEW v_jsonquery AS SELECT JSON_EXISTS(j, '$.a[*] ? (@ == $n)' PASSING id AS n) AS je, JSON_VALUE(j, '$.b' RETURNING int4 DEFAULT 0 ON ERROR) AS jv, JSON_QUERY(j, '$.c' WITH WRAPPER) AS jq, JSON_QUERY(j, '$.d' RETURNING text OMIT QUOTES EMPTY ARRAY ON EMPTY ERROR ON ERROR) AS jq2 FROM xt;
+CREATE VIEW v_isjson AS SELECT (c IS JSON) AS ij, (c IS JSON OBJECT WITH UNIQUE KEYS) AS ijo, (c IS NOT JSON ARRAY) AS inj, (c IS JSON SCALAR) AS ijs FROM t1;
+CREATE VIEW v_namedargs AS SELECT f_add(y => 5, x => a) AS s1, f_add(a, y => b) AS s2 FROM t1;

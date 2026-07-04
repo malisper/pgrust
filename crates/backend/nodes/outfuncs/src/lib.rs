@@ -67,6 +67,26 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_XmlExpr => {
             out_xml_expr(out, node.as_variant::<XmlExpr>().expect("XmlExpr"))?
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().expect("FieldSelect");
+            w!(out, "{{FIELDSELECT :arg ");
+            out_node(out, f.arg)?;
+            w!(
+                out,
+                " :fieldnum {} :resulttype {} :resulttypmod {} :resultcollid {}}}",
+                f.fieldnum, f.resulttype, f.resulttypmod, f.resultcollid
+            );
+        }
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().expect("FieldStore");
+            w!(out, "{{FIELDSTORE :arg ");
+            out_node(out, f.arg)?;
+            w!(out, " :newvals ");
+            out_list(out, &f.newvals)?;
+            w!(out, " :fieldnums ");
+            out_int_list(out, &f.fieldnums);
+            w!(out, " :resulttype {}}}", f.resulttype);
+        }
         NodeTag::T_TableFunc => {
             out_table_func(out, node.as_variant::<TableFunc>().expect("TableFunc"))?
         }
