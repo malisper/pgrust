@@ -273,6 +273,8 @@ pub fn movedb(mcx: Mcx<'_>, dbname: &str, tblspcname: &str) -> PgResult<()> {
         return Err(e);
     }
 
+    pgdbrel.close(types_storage::lock::NoLock)?;
+
     snapmgr::PopActiveSnapshot()?;
     xact::CommitTransactionCommand()?;
 
@@ -362,8 +364,6 @@ fn movedb_body(
     )?;
 
     xact::ForceSyncCommit();
-
-    pgdbrel.close(types_storage::lock::NoLock)?;
     Ok(())
 }
 
