@@ -1,11 +1,12 @@
-//! nbtpreprocesskeys.c: redundancy elimination + requiredness marking, with
-//! the SAOP array arms (deconstruct/sort/merge/shrink). Skip arrays (PG 18
-//! skip scan) and row compares are phase 2 — rejected loudly, never degraded.
+//! nbtpreprocesskeys.c: redundancy elimination + requiredness marking, the
+//! SAOP array arms (deconstruct/sort/merge/shrink), and skip-array generation
+//! (PG 18 skip scan). Row compares are phase 2 — rejected loudly.
 
 use ::arrayfuncs::foundation as arrfn;
 use ::datum::Datum;
 use ::fmgr_core::{fmgr_info, function_call2_coll, oid_function_call2_coll};
 use ::mcx::{Mcx, PgVec};
+use ::types_core::INDEX_MAX_KEYS;
 use ::types_error::{PgError, PgResult};
 use ::types_fmgr::FmgrInfo;
 use ::types_nbtree::{BTArrayKeyInfo, BTCommuteStrategyNumber, BTScanOpaqueData, BTORDER_PROC};
@@ -338,8 +339,50 @@ fn compare_scankey_args(
 ) -> PgResult<Option<bool>> {
     let (op, left_i, right_i) = (&keys[op], leftarg, rightarg);
     let (leftarg, rightarg) = (&keys[left_i], &keys[right_i]);
-    debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_BT_SKIP == 0);
 
+    if (leftarg.sk_flags | rightarg.sk_flags) & SK_ISNULL != 0 {
+        if (leftarg.sk_flags | rightarg.sk_flags) & SK_BT_SKIP != 0 {
+            // IS NOT NULL key vs skip array: the key is redundant once the
+            // array is known to exclude its NULL element.
+            debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_SEARCHNULL == 0);
+            debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_SEARCHNOTNULL != 0);
+            let (array_i, _) = array.expect("skip array key carries its array");
+            let arr = &mut so.arrayKeys[array_i as usize];
+            debug_assert!(arr.num_elems == -1);
+            arr.null_elem = false;
+            return Ok(Some(true));
+        }
+        return compare_scankey_args_scalar(rel, op, leftarg, rightarg);
+    }
+
+    debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_ROW_HEADER == 0);
+
+    if let Some((array_i, orderproc_i)) = array {
+        let leftarray = leftarg.sk_flags & SK_SEARCHARRAY != 0
+            && leftarg.sk_strategy == BTEqualStrategyNumber;
+        let rightarray = rightarg.sk_flags & SK_SEARCHARRAY != 0
+            && rightarg.sk_strategy == BTEqualStrategyNumber;
+        debug_assert!(!(leftarray && rightarray), "caller handles both-arrays");
+        if leftarray || rightarray {
+            let (arraysk_i, skey_i) = if leftarray { (left_i, right_i) } else { (right_i, left_i) };
+            if so.arrayKeys[array_i as usize].num_elems != -1 {
+                return bt_saoparray_shrink(rel, so, arraysk_i, skey_i, keys, array_i, orderproc_i);
+            }
+            return bt_skiparray_shrink(rel, so, &keys[skey_i], array_i);
+        }
+    }
+
+    compare_scankey_args_scalar(rel, op, leftarg, rightarg)
+}
+
+// _bt_compare_scankey_args, scalar tail: no array involvement (op may alias
+// either arg, so it's a separate borrow).
+fn compare_scankey_args_scalar(
+    rel: &Relation<'_>,
+    op: &ScanKeyData,
+    leftarg: &ScanKeyData,
+    rightarg: &ScanKeyData,
+) -> PgResult<Option<bool>> {
     if (leftarg.sk_flags | rightarg.sk_flags) & SK_ISNULL != 0 {
         let leftnull = leftarg.sk_flags & SK_ISNULL != 0;
         let rightnull = rightarg.sk_flags & SK_ISNULL != 0;
@@ -359,22 +402,6 @@ fn compare_scankey_args(
             other => panic!("unrecognized StrategyNumber: {other}"),
         };
         return Ok(Some(result));
-    }
-
-    debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_ROW_HEADER == 0);
-
-    if let Some((array_i, orderproc_i)) = array {
-        let leftarray = leftarg.sk_flags & SK_SEARCHARRAY != 0
-            && leftarg.sk_strategy == BTEqualStrategyNumber;
-        let rightarray = rightarg.sk_flags & SK_SEARCHARRAY != 0
-            && rightarg.sk_strategy == BTEqualStrategyNumber;
-        debug_assert!(!(leftarray && rightarray), "caller handles both-arrays");
-        if leftarray {
-            return bt_saoparray_shrink(rel, so, left_i, right_i, keys, array_i, orderproc_i);
-        }
-        if rightarray {
-            return bt_saoparray_shrink(rel, so, right_i, left_i, keys, array_i, orderproc_i);
-        }
     }
 
     debug_assert!(leftarg.sk_attno == rightarg.sk_attno);
@@ -517,6 +544,129 @@ fn bt_saoparray_shrink(
     Ok(Some(new_nelems > 0))
 }
 
+/// _bt_skiparray_shrink: fold the scalar inequality at `skey` into the skip
+/// array's low_compare/high_compare; Some(true) = key now redundant, None =
+/// existing bound can't be compared against it.
+fn bt_skiparray_shrink(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    skey: &ScanKeyData,
+    array_i: i32,
+) -> PgResult<Option<bool>> {
+    debug_assert!(skey.sk_flags & (SK_ISNULL | SK_ROW_HEADER) == 0);
+    let array = &mut so.arrayKeys[array_i as usize];
+    debug_assert!(array.num_elems == -1);
+    array.null_elem = false;
+
+    match skey.sk_strategy {
+        BTLessStrategyNumber | BTLessEqualStrategyNumber => {
+            if let Some(hc) = array.high_compare.as_ref() {
+                match compare_scankey_args_scalar(rel, hc, skey, hc)? {
+                    None => return Ok(None),
+                    Some(false) => return Ok(Some(true)), // keep existing bound
+                    Some(true) => {}
+                }
+            }
+            array.high_compare = Some(skey.clone());
+        }
+        BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber => {
+            if let Some(lc) = array.low_compare.as_ref() {
+                match compare_scankey_args_scalar(rel, lc, skey, lc)? {
+                    None => return Ok(None),
+                    Some(false) => return Ok(Some(true)), // keep existing bound
+                    Some(true) => {}
+                }
+            }
+            array.low_compare = Some(skey.clone());
+        }
+        other => panic!("unrecognized StrategyNumber: {other}"),
+    }
+    Ok(Some(true))
+}
+
+/// _bt_skiparray_strat_adjust: skip support turns a final > low_compare into
+/// >= (and < high_compare into <=) so MINVAL/MAXVAL descents can carry
+/// lower-order keys.
+fn bt_skiparray_strat_adjust(
+    rel: &Relation<'_>,
+    arraysk: &ScanKeyData,
+    array: &mut BTArrayKeyInfo<'_>,
+    qual_ok: &mut bool,
+) -> PgResult<()> {
+    debug_assert!(arraysk.sk_flags & SK_BT_SKIP != 0);
+    debug_assert!(array.num_elems == -1 && !array.null_elem && array.sksup.is_some());
+
+    if array
+        .high_compare
+        .as_ref()
+        .is_some_and(|k| k.sk_strategy == BTLessStrategyNumber)
+    {
+        bt_skiparray_strat_step(rel, arraysk.sk_attno as usize, array, qual_ok, false)?;
+    }
+    if array
+        .low_compare
+        .as_ref()
+        .is_some_and(|k| k.sk_strategy == BTGreaterStrategyNumber)
+    {
+        bt_skiparray_strat_step(rel, arraysk.sk_attno as usize, array, qual_ok, true)?;
+    }
+    Ok(())
+}
+
+// _bt_skiparray_strat_decrement (is_low=false) / _bt_skiparray_strat_increment
+// (is_low=true); over/underflow marks the qual unsatisfiable.
+fn bt_skiparray_strat_step(
+    rel: &Relation<'_>,
+    attno: usize,
+    array: &mut BTArrayKeyInfo<'_>,
+    qual_ok: &mut bool,
+    is_low: bool,
+) -> PgResult<()> {
+    let opfamily = rel.rd_opfamily[attno - 1];
+    let opcintype = rel.rd_opcintype[attno - 1];
+    let sksup = array.sksup.expect("caller checked");
+    let key = if is_low {
+        array.low_compare.as_mut()
+    } else {
+        array.high_compare.as_mut()
+    }
+    .expect("caller checked");
+
+    // The transformation is only safe when the operator type matches the
+    // index attribute's input opclass type (cross-type could skip matches).
+    if key.sk_subtype != opcintype && key.sk_subtype != 0 {
+        return Ok(());
+    }
+
+    let mut flow = false;
+    let new_sk_argument = if is_low {
+        (sksup.increment)(key.sk_argument, &mut flow)
+    } else {
+        (sksup.decrement)(key.sk_argument, &mut flow)
+    };
+    if flow {
+        *qual_ok = false;
+        return Ok(());
+    }
+
+    let newstrat = if is_low { BTGreaterEqualStrategyNumber } else { BTLessEqualStrategyNumber };
+    let mut lookupstrat = newstrat;
+    if key.sk_flags & SK_BT_DESC != 0 {
+        lookupstrat = BTCommuteStrategyNumber(lookupstrat);
+    }
+    let op = lsyscache::get_opfamily_member(opfamily, opcintype, opcintype, lookupstrat as i16)?;
+    if op == 0 {
+        return Ok(());
+    }
+    let cmp_proc = lsyscache::get_opcode(op)?;
+    if cmp_proc != 0 {
+        key.sk_func = fmgr_info(cmp_proc)?;
+        key.sk_argument = new_sk_argument;
+        key.sk_strategy = newstrat;
+    }
+    Ok(())
+}
+
 // _bt_binsrch_array_skey, preprocessing arm (no cur_elem_trig): first element
 // >= the search datum. sk_flags supplies DESC/NULLS_FIRST bits only.
 fn bt_binsrch_array_skey_raw(
@@ -649,6 +799,7 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
             }
             kept.push(key.clone());
         } else {
+            debug_assert!(key.sk_flags & SK_BT_SKIP == 0, "skip arrays are never unmarked");
             debug_assert!(
                 key.sk_flags & SK_ISNULL == 0
                     || key.sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0
@@ -678,9 +829,13 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// _bt_num_array_keys, SAOP arm: counts SK_SEARCHARRAY input keys; any needed
-// skip-array backfill (PG 18 skip scan) is phase 2 and panics loudly.
-fn bt_num_array_keys(input_keys: &[ScanKeyData]) -> usize {
+// _bt_num_array_keys: SAOP array count plus the skip arrays to backfill
+// (one per most-significant attribute lacking a = input key).
+fn bt_num_array_keys(
+    rel: &Relation<'_>,
+    input_keys: &[ScanKeyData],
+    skip_eq_ops: &mut [::types_core::Oid; INDEX_MAX_KEYS as usize],
+) -> PgResult<(usize, usize)> {
     let n_saop = input_keys
         .iter()
         .filter(|k| k.sk_flags & SK_SEARCHARRAY != 0)
@@ -690,10 +845,27 @@ fn bt_num_array_keys(input_keys: &[ScanKeyData]) -> usize {
     let mut attno_inkey: i16 = 1;
     let mut attno_has_equal = false;
     let mut attno_has_rowcompare = false;
+    let mut num_skip = 0usize;
+    let mut prev_num_skip = 0usize;
     for i in 0..=input_keys.len() {
-        if attno_skip < attno_inkey {
-            unported_phase2("skip scan (_bt_num_array_keys backfill arrays)");
+        while attno_skip < attno_inkey {
+            let opfamily = rel.rd_opfamily[attno_skip as usize - 1];
+            let opcintype = rel.rd_opcintype[attno_skip as usize - 1];
+            let eq_op = lsyscache::get_opfamily_member(
+                opfamily,
+                opcintype,
+                opcintype,
+                BTEqualStrategyNumber as i16,
+            )?;
+            skip_eq_ops[attno_skip as usize - 1] = eq_op;
+            if eq_op == 0 {
+                return Ok((n_saop + prev_num_skip, prev_num_skip));
+            }
+            num_skip += 1;
+            attno_skip += 1;
         }
+        prev_num_skip = num_skip;
+
         if i == input_keys.len() {
             break;
         }
@@ -702,8 +874,22 @@ fn bt_num_array_keys(input_keys: &[ScanKeyData]) -> usize {
             break;
         }
         if attno_inkey < inkey.sk_attno {
-            if !attno_has_equal {
-                unported_phase2("skip scan (_bt_num_array_keys backfill arrays)");
+            if attno_has_equal {
+                skip_eq_ops[attno_skip as usize - 1] = 0;
+            } else {
+                let opfamily = rel.rd_opfamily[attno_skip as usize - 1];
+                let opcintype = rel.rd_opcintype[attno_skip as usize - 1];
+                let eq_op = lsyscache::get_opfamily_member(
+                    opfamily,
+                    opcintype,
+                    opcintype,
+                    BTEqualStrategyNumber as i16,
+                )?;
+                skip_eq_ops[attno_skip as usize - 1] = eq_op;
+                if eq_op == 0 {
+                    break;
+                }
+                num_skip += 1;
             }
             attno_skip += 1;
             attno_inkey = inkey.sk_attno;
@@ -717,7 +903,7 @@ fn bt_num_array_keys(input_keys: &[ScanKeyData]) -> usize {
         }
     }
 
-    n_saop
+    Ok((n_saop + num_skip, num_skip))
 }
 
 /// _bt_preprocess_array_keys: deconstruct SK_SEARCHARRAY arrays, sort/dedup
@@ -729,8 +915,10 @@ fn bt_preprocess_array_keys<'mcx>(
     so: &mut BTScanOpaqueData<'mcx>,
     input_keys: &[ScanKeyData],
 ) -> PgResult<Option<PgVec<'mcx, ScanKeyData>>> {
-    let num_array_keys = bt_num_array_keys(input_keys);
-    so.skipScan = false;
+    let mut skip_eq_ops = [0 as ::types_core::Oid; INDEX_MAX_KEYS as usize];
+    let (num_array_keys, num_skip_array_keys) =
+        bt_num_array_keys(rel, input_keys, &mut skip_eq_ops)?;
+    so.skipScan = num_skip_array_keys > 0;
 
     if num_array_keys == 0 {
         return Ok(None);
@@ -738,18 +926,74 @@ fn bt_preprocess_array_keys<'mcx>(
 
     let indoption = &rel.rd_indoption;
     let mut array_key_data: PgVec<'mcx, ScanKeyData> = PgVec::new_in(mcx);
-    array_key_data.reserve(input_keys.len());
+    array_key_data.reserve(input_keys.len() + num_skip_array_keys);
     so.arrayKeys.clear();
     so.arrayKeys.reserve(num_array_keys);
     so.orderProcs.clear();
-    so.orderProcs.resize_with(input_keys.len(), FmgrInfo::unresolved);
+    so.orderProcs.resize_with(input_keys.len() + num_skip_array_keys, FmgrInfo::unresolved);
 
     let mut origarrayatt: i16 = 0;
     let mut origarraykey: i32 = -1;
     let mut origelemtype: ::types_core::Oid = 0;
     let mut frame = crate::fcframe::OrderProcFrame::new();
+    let mut num_skip_remaining = num_skip_array_keys;
+    let mut attno_skip: i16 = 1;
 
     for inkey in input_keys.iter() {
+        while num_skip_remaining > 0 && attno_skip <= inkey.sk_attno {
+            let opfamily = rel.rd_opfamily[attno_skip as usize - 1];
+            let opcintype = rel.rd_opcintype[attno_skip as usize - 1];
+            let collation = rel.rd_indcollation[attno_skip as usize - 1];
+            let eq_op = skip_eq_ops[attno_skip as usize - 1];
+
+            if eq_op == 0 {
+                // Attribute already has an = input key; copy it below instead.
+                debug_assert!(attno_skip == inkey.sk_attno);
+                attno_skip += 1;
+                break;
+            }
+
+            let cmp_proc = lsyscache::get_opcode(eq_op)?;
+            if cmp_proc == 0 {
+                return Err(Box::new(PgError::error(format!(
+                    "missing oprcode for skipping equals operator {eq_op}"
+                ))));
+            }
+
+            let skipkey = ScanKeyData {
+                sk_flags: SK_SEARCHARRAY | SK_BT_SKIP,
+                sk_attno: attno_skip,
+                sk_strategy: BTEqualStrategyNumber,
+                sk_subtype: 0,
+                sk_collation: collation,
+                sk_func: fmgr_info(cmp_proc)?,
+                sk_argument: Datum::null(),
+            };
+
+            let attr = rel.rd_att.compact_attr(attno_skip as usize - 1);
+            let reverse = (indoption[attno_skip as usize - 1] as i32) & 0x0001 != 0;
+            let (orderproc, _) = bt_setup_array_cmp(rel, &skipkey, opcintype, false)?;
+            so.orderProcs[array_key_data.len()] = orderproc;
+            so.arrayKeys.push(BTArrayKeyInfo {
+                scan_key: array_key_data.len() as i32,
+                num_elems: -1,
+                elem_values: PgVec::new_in(mcx),
+                cur_elem: -1,
+                attlen: attr.attlen,
+                attbyval: attr.attbyval,
+                null_elem: true,
+                sksup: ::skipsupport::prepare_skip_support_from_opclass(
+                    opfamily, opcintype, reverse,
+                )?,
+                low_compare: None,
+                high_compare: None,
+            });
+            array_key_data.push(skipkey);
+
+            num_skip_remaining -= 1;
+            attno_skip += 1;
+        }
+
         let mut cur = inkey.clone();
 
         if cur.sk_flags & SK_SEARCHARRAY == 0 {
@@ -881,12 +1125,14 @@ fn bt_preprocess_array_keys<'mcx>(
             attlen: 0,
             attbyval: false,
             null_elem: false,
+            sksup: None,
             low_compare: None,
             high_compare: None,
         });
         array_key_data.push(cur);
     }
 
+    debug_assert!(num_skip_remaining == 0 || !so.qual_ok);
     so.numArrayKeys = so.arrayKeys.len() as i32;
     Ok(Some(array_key_data))
 }
@@ -936,7 +1182,9 @@ fn bt_preprocess_array_keys_final(
         so.orderProcs[output_ikey] = reordered;
 
         while arrayidx < so.numArrayKeys as usize {
-            debug_assert!(so.arrayKeys[arrayidx].num_elems > 0);
+            debug_assert!(
+                so.arrayKeys[arrayidx].num_elems > 0 || so.arrayKeys[arrayidx].num_elems == -1
+            );
             if so.arrayKeys[arrayidx].scan_key == input_ikey as i32 {
                 so.arrayKeys[arrayidx].scan_key = output_ikey as i32;
 
@@ -950,6 +1198,18 @@ fn bt_preprocess_array_keys_final(
                     }
                     so.arrayKeys.remove(arrayidx);
                 } else {
+                    if so.arrayKeys[arrayidx].num_elems == -1
+                        && so.arrayKeys[arrayidx].sksup.is_some()
+                        && !so.arrayKeys[arrayidx].null_elem
+                    {
+                        let BTScanOpaqueData { keyData, arrayKeys, qual_ok, .. } = so;
+                        bt_skiparray_strat_adjust(
+                            rel,
+                            &keyData[output_ikey],
+                            &mut arrayKeys[arrayidx],
+                            qual_ok,
+                        )?;
+                    }
                     arrayidx += 1;
                 }
                 break;

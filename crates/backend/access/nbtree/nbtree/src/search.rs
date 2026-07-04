@@ -19,7 +19,7 @@ use types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber,
     SK_BT_DESC, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_NULLS_FIRST, SK_BT_PRIOR,
-    SK_BT_REQBKWD, SK_BT_REQFWD, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHNOTNULL,
+    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHNOTNULL,
 };
 use types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use types_snapshot::SnapshotData;
@@ -393,7 +393,15 @@ fn missing_support_function(
 
 enum StartKey {
     Data(usize),
+    // Skip array's low_compare (true) / high_compare (false), by array index.
+    SkipCompare(usize, bool),
     NotNull(ScanKeyData),
+}
+
+#[derive(Clone, Copy)]
+enum Chosen {
+    Idx(usize),
+    Skip(usize, bool),
 }
 
 /// _bt_first.
@@ -432,13 +440,36 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
         let mut i = 0usize;
         loop {
             if i >= keys.len() || keys[i].sk_attno != curattr {
+                let mut chosen: Option<Chosen> = bkey.map(Chosen::Idx);
                 if let Some(bk) = bkey {
                     if keys[bk].sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL) != 0 {
-                        unported_phase2("skip-array MINVAL/MAXVAL boundary keys");
+                        // Skip array at MINVAL (MAXVAL backwards): position
+                        // with its low_compare (high_compare) if it has one.
+                        let a = ctx
+                            .so
+                            .arrayKeys
+                            .iter()
+                            .position(|ar| ar.scan_key == bk as i32)
+                            .expect("sentinel key has a skip array");
+                        let low = ScanDirectionIsForward(dir);
+                        debug_assert!(if low {
+                            keys[bk].sk_flags & SK_BT_MAXVAL == 0
+                        } else {
+                            keys[bk].sk_flags & SK_BT_MINVAL == 0
+                        });
+                        let arr = &ctx.so.arrayKeys[a];
+                        let have =
+                            if low { arr.low_compare.is_some() } else { arr.high_compare.is_some() };
+                        chosen = if have { Some(Chosen::Skip(a, low)) } else { None };
+                        if !arr.null_elem {
+                            implies_nn = Some(bk);
+                        } else {
+                            debug_assert!(chosen.is_none() && implies_nn.is_none());
+                        }
                     }
                 }
 
-                if bkey.is_none() {
+                if chosen.is_none() {
                     if let Some(inn) = implies_nn {
                         let inn_flags = keys[inn].sk_flags;
                         let usable = if inn_flags & SK_BT_NULLS_FIRST != 0 {
@@ -457,31 +488,46 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                             } else {
                                 BTLessStrategyNumber
                             };
+                            strat_total = nn.sk_strategy;
                             start_keys[keysz] = Some(StartKey::NotNull(nn));
                             keysz += 1;
-                            strat_total = start_keys[keysz - 1]
-                                .as_ref()
-                                .map(|k| match k {
-                                    StartKey::NotNull(nn) => nn.sk_strategy,
-                                    StartKey::Data(_) => unreachable!(),
-                                })
-                                .expect("just written");
                             break; // NOT NULL keys use >/< strategy: done
                         }
                     }
                     break;
                 }
 
-                let bk = bkey.expect("checked above");
-                start_keys[keysz] = Some(StartKey::Data(bk));
+                let ck: &ScanKeyData = match chosen.expect("checked above") {
+                    Chosen::Idx(k) => &keys[k],
+                    Chosen::Skip(a, low) => {
+                        let arr = &ctx.so.arrayKeys[a];
+                        if low { arr.low_compare.as_ref() } else { arr.high_compare.as_ref() }
+                            .expect("checked above")
+                    }
+                };
+                start_keys[keysz] = Some(match chosen.expect("checked above") {
+                    Chosen::Idx(k) => StartKey::Data(k),
+                    Chosen::Skip(a, low) => StartKey::SkipCompare(a, low),
+                });
                 keysz += 1;
 
-                strat_total = keys[bk].sk_strategy;
+                strat_total = ck.sk_strategy;
                 if strat_total == BTGreaterStrategyNumber || strat_total == BTLessStrategyNumber {
                     break;
                 }
-                if keys[bk].sk_flags & (SK_BT_NEXT | SK_BT_PRIOR) != 0 {
-                    unported_phase2("skip-array NEXT/PRIOR sentinel keys");
+                if ck.sk_flags & (SK_BT_NEXT | SK_BT_PRIOR) != 0 {
+                    // NEXT/PRIOR sentinels never see an exact = match; force
+                    // >/< and stop adding boundary keys.
+                    debug_assert!(ck.sk_flags & SK_BT_SKIP != 0);
+                    debug_assert!(strat_total == BTEqualStrategyNumber);
+                    strat_total = if ScanDirectionIsForward(dir) {
+                        debug_assert!(ck.sk_flags & SK_BT_PRIOR == 0);
+                        BTGreaterStrategyNumber
+                    } else {
+                        debug_assert!(ck.sk_flags & SK_BT_NEXT == 0);
+                        BTLessStrategyNumber
+                    };
+                    break;
                 }
 
                 if i >= keys.len() || keys[i].sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0 {
@@ -529,6 +575,11 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
     for (i, slot) in start_keys[..keysz].iter().enumerate() {
         let bkey: &ScanKeyData = match slot.as_ref().expect("filled above") {
             StartKey::Data(idx) => &ctx.so.keyData[*idx],
+            StartKey::SkipCompare(a, low) => {
+                let arr = &ctx.so.arrayKeys[*a];
+                if *low { arr.low_compare.as_ref() } else { arr.high_compare.as_ref() }
+                    .expect("chosen skip compare exists")
+            }
             StartKey::NotNull(nn) => nn,
         };
         debug_assert!(bkey.sk_attno as usize == i + 1);

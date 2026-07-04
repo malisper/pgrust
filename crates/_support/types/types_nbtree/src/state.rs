@@ -137,9 +137,21 @@ pub fn BTScanPosInvalidate(scanpos: &mut BTScanPosData) {
     scanpos.currPage = InvalidBlockNumber;
 }
 
-// C divergence: sksup (SkipSupport) is omitted until the skipsupport substrate
-// exists; the nbtpreprocesskeys port must add it. num_elems == -1 (skip array)
-// never occurs (skip scan is phase 2, rejected in preprocessing).
+// C divergence: callbacks drop C's unused Relation arg; by-ref skip support
+// (uuid) is unimplemented, so no allocator is threaded either.
+pub type SkipSupportIncDec = fn(Datum, &mut bool) -> Datum;
+
+#[derive(Clone, Copy)]
+pub struct SkipSupportData {
+    pub low_elem: Datum,
+    pub high_elem: Datum,
+    pub decrement: SkipSupportIncDec,
+    pub increment: SkipSupportIncDec,
+}
+
+// C divergence: low_compare/high_compare are owned copies of the arrayKeyData
+// input keys rather than pointers into it (same mutability, same lifetime).
+// num_elems == -1 means skip array (elem_values stays empty).
 pub struct BTArrayKeyInfo<'mcx> {
     pub scan_key: i32,
     pub num_elems: i32,
@@ -148,8 +160,9 @@ pub struct BTArrayKeyInfo<'mcx> {
     pub attlen: i16,
     pub attbyval: bool,
     pub null_elem: bool,
-    pub low_compare: Option<&'mcx ScanKeyData>,
-    pub high_compare: Option<&'mcx ScanKeyData>,
+    pub sksup: Option<SkipSupportData>,
+    pub low_compare: Option<ScanKeyData>,
+    pub high_compare: Option<ScanKeyData>,
 }
 
 

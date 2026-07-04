@@ -1,7 +1,8 @@
-//! nbtcompare.c: btree comparison builtins for the trivial by-value types.
-//! Registrable rows are the cmp family only; the sortsupport/skipsupport
-//! rows (3129-3134, 6402-6408) stay unregistered — the sort/skip substrate
-//! is unported, so fmgr resolve of those OIDs panics loudly by design.
+//! nbtcompare.c: btree comparison builtins for the trivial by-value types,
+//! plus the skip-support increment/decrement kernels (consumed by the
+//! skipsupport crate's dispatcher, never via fmgr). sortsupport rows
+//! (3129-3134) stay unregistered — that substrate is unported, so fmgr
+//! resolve of those OIDs panics loudly by design.
 //! STRESS_SORT_INT_MIN is a C debug build option; production returns -1/+1.
 
 pub mod builtins;
@@ -68,6 +69,55 @@ pub fn btoidcmp(a: Oid, b: Oid) -> i32 {
 #[inline]
 pub fn btcharcmp(a: u8, b: u8) -> i32 {
     a as i32 - b as i32
+}
+
+macro_rules! skip_incdec {
+    ($($dec:ident, $inc:ident: $as_:ident, $from:ident, $ty:ty, $min:expr, $max:expr;)*) => {$(
+        pub fn $dec(existing: ::datum::Datum, underflow: &mut bool) -> ::datum::Datum {
+            let v: $ty = existing.$as_();
+            if v == $min {
+                *underflow = true;
+                return ::datum::Datum::null();
+            }
+            *underflow = false;
+            ::datum::Datum::$from(v - 1)
+        }
+        pub fn $inc(existing: ::datum::Datum, overflow: &mut bool) -> ::datum::Datum {
+            let v: $ty = existing.$as_();
+            if v == $max {
+                *overflow = true;
+                return ::datum::Datum::null();
+            }
+            *overflow = false;
+            ::datum::Datum::$from(v + 1)
+        }
+    )*};
+}
+
+skip_incdec! {
+    int2_decrement, int2_increment: as_i16, from_i16, i16, i16::MIN, i16::MAX;
+    int4_decrement, int4_increment: as_i32, from_i32, i32, i32::MIN, i32::MAX;
+    int8_decrement, int8_increment: as_i64, from_i64, i64, i64::MIN, i64::MAX;
+    oid_decrement, oid_increment: as_u32, from_u32, u32, 0u32, u32::MAX;
+    char_decrement, char_increment: as_u8, from_u8, u8, 0u8, u8::MAX;
+}
+
+pub fn bool_decrement(existing: ::datum::Datum, underflow: &mut bool) -> ::datum::Datum {
+    if !existing.as_bool() {
+        *underflow = true;
+        return ::datum::Datum::null();
+    }
+    *underflow = false;
+    ::datum::Datum::from_bool(false)
+}
+
+pub fn bool_increment(existing: ::datum::Datum, overflow: &mut bool) -> ::datum::Datum {
+    if existing.as_bool() {
+        *overflow = true;
+        return ::datum::Datum::null();
+    }
+    *overflow = false;
+    ::datum::Datum::from_bool(true)
 }
 
 /// check_valid_oidvector (oid.c): general oid[] casts to oidvector can

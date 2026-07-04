@@ -1,10 +1,11 @@
 //! nbtutils.c, READ side: per-tuple qual checking (_bt_checkkeys /
-//! _bt_check_compare), SAOP array-key advancement and primitive-scan
+//! _bt_check_compare), SAOP + skip array-key advancement and primitive-scan
 //! scheduling, the startikey page-level precheck, and _bt_killitems.
-//! Skip arrays and row compares are phase 2 (preprocessing rejects both).
+//! Row compares are phase 2 (preprocessing rejects them).
 
 use ::bufmgr_seams as bufmgr;
 use ::datum::Datum;
+use ::mcx::Mcx;
 use ::types_core::{AttrNumber, OffsetNumber, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_fmgr::FmgrInfo;
@@ -189,35 +190,182 @@ pub(crate) fn bt_start_array_keys(so: &mut BTScanOpaqueData<'_>, dir: ScanDirect
     so.oppositeDirCheck = false;
 }
 
-// _bt_array_set_low_or_high, SAOP arm (skip arrays are phase 2).
+// datumCopy for skip-array sk_argument. C divergence: C pfrees the previous
+// element; here superseded copies stay in the scan-lifetime arena until reset.
+fn skip_datum_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum,
+    attbyval: bool,
+    attlen: i16,
+) -> PgResult<Datum> {
+    if attbyval {
+        return Ok(value);
+    }
+    // SAFETY: by-ref skip elements point at live index-tuple attribute bytes
+    // of the attribute's declared shape for the duration of the copy.
+    unsafe {
+        let p = value.as_usize() as *const u8;
+        let len = match attlen {
+            l if l > 0 => l as usize,
+            -1 => varsize_any(p),
+            _ => {
+                let mut n = 0usize;
+                while *p.add(n) != 0 {
+                    n += 1;
+                }
+                n + 1
+            }
+        };
+        let mut v: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, len)?;
+        ::mcx::vec_append_bytes(&mut v, core::slice::from_raw_parts(p, len))?;
+        Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+    }
+}
+
+// _bt_array_set_low_or_high.
 fn bt_array_set_low_or_high(
     skey: &mut ScanKeyData,
     array: &mut BTArrayKeyInfo<'_>,
     low_not_high: bool,
 ) {
     debug_assert!(skey.sk_flags & SK_SEARCHARRAY != 0);
-    if array.num_elems == -1 {
-        unported_phase2("skip arrays (_bt_array_set_low_or_high)");
-    }
-    debug_assert!(skey.sk_flags & SK_BT_SKIP == 0);
 
-    let set_elem = if low_not_high { 0 } else { array.num_elems - 1 };
-    array.cur_elem = set_elem;
-    skey.sk_argument = array.elem_values[set_elem as usize];
+    if array.num_elems != -1 {
+        debug_assert!(skey.sk_flags & SK_BT_SKIP == 0);
+        let set_elem = if low_not_high { 0 } else { array.num_elems - 1 };
+        array.cur_elem = set_elem;
+        skey.sk_argument = array.elem_values[set_elem as usize];
+        return;
+    }
+
+    debug_assert!(skey.sk_flags & SK_BT_SKIP != 0);
+    skey.sk_argument = Datum::null();
+    skey.sk_flags &=
+        !(SK_SEARCHNULL | SK_ISNULL | SK_BT_MINVAL | SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR);
+
+    if array.null_elem && (low_not_high == (skey.sk_flags & SK_BT_NULLS_FIRST != 0)) {
+        skey.sk_flags |= SK_SEARCHNULL | SK_ISNULL;
+    } else if low_not_high {
+        skey.sk_flags |= SK_BT_MINVAL;
+    } else {
+        skey.sk_flags |= SK_BT_MAXVAL;
+    }
 }
 
-// _bt_array_increment/_bt_array_decrement, SAOP arms.
-fn bt_array_step(skey: &mut ScanKeyData, array: &mut BTArrayKeyInfo<'_>, forward: bool) -> bool {
-    if array.num_elems == -1 {
-        unported_phase2("skip arrays (_bt_array_increment/_bt_array_decrement)");
+// _bt_skiparray_set_isnull.
+fn bt_skiparray_set_isnull(skey: &mut ScanKeyData, array: &BTArrayKeyInfo<'_>) {
+    debug_assert!(skey.sk_flags & SK_BT_SKIP != 0 && skey.sk_flags & SK_SEARCHARRAY != 0);
+    debug_assert!(array.null_elem && array.low_compare.is_none() && array.high_compare.is_none());
+    skey.sk_argument = Datum::null();
+    skey.sk_flags &= !(SK_BT_MINVAL | SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR);
+    skey.sk_flags |= SK_SEARCHNULL | SK_ISNULL;
+}
+
+/// _bt_skiparray_set_element: advance the skip array to tupdatum/tupnull, or
+/// to its low/high bound when set_elem_result says the tuple is out of range.
+fn bt_skiparray_set_element<'mcx>(
+    mcx: Mcx<'mcx>,
+    skey: &mut ScanKeyData,
+    array: &mut BTArrayKeyInfo<'_>,
+    set_elem_result: i32,
+    tupdatum: Datum,
+    tupnull: bool,
+) -> PgResult<()> {
+    debug_assert!(skey.sk_flags & SK_BT_SKIP != 0 && skey.sk_flags & SK_SEARCHARRAY != 0);
+
+    if set_elem_result != 0 {
+        debug_assert!(!array.null_elem);
+        bt_array_set_low_or_high(skey, array, set_elem_result < 0);
+        return Ok(());
     }
-    let next = if forward { array.cur_elem + 1 } else { array.cur_elem - 1 };
-    if next < 0 || next >= array.num_elems {
-        return false;
+
+    if tupnull {
+        bt_skiparray_set_isnull(skey, array);
+        return Ok(());
     }
-    array.cur_elem = next;
-    skey.sk_argument = array.elem_values[next as usize];
-    true
+
+    skey.sk_flags &=
+        !(SK_SEARCHNULL | SK_ISNULL | SK_BT_MINVAL | SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR);
+    skey.sk_argument = skip_datum_copy(mcx, tupdatum, array.attbyval, array.attlen)?;
+    Ok(())
+}
+
+// _bt_array_decrement / _bt_array_increment; false = already at the first
+// (last) element for the direction.
+fn bt_array_step<'mcx>(
+    mcx: Mcx<'mcx>,
+    frame: &mut OrderProcFrame,
+    skey: &mut ScanKeyData,
+    array: &mut BTArrayKeyInfo<'_>,
+    forward: bool,
+) -> PgResult<bool> {
+    debug_assert!(skey.sk_flags & SK_SEARCHARRAY != 0);
+    debug_assert!(if forward {
+        skey.sk_flags & (SK_BT_MINVAL | SK_BT_NEXT | SK_BT_PRIOR) == 0
+    } else {
+        skey.sk_flags & (SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR) == 0
+    });
+
+    if array.num_elems != -1 {
+        debug_assert!(skey.sk_flags & (SK_BT_SKIP | SK_BT_MINVAL | SK_BT_MAXVAL) == 0);
+        let next = if forward { array.cur_elem + 1 } else { array.cur_elem - 1 };
+        if next < 0 || next >= array.num_elems {
+            return Ok(false);
+        }
+        array.cur_elem = next;
+        skey.sk_argument = array.elem_values[next as usize];
+        return Ok(true);
+    }
+
+    debug_assert!(skey.sk_flags & SK_BT_SKIP != 0);
+
+    if skey.sk_flags & (if forward { SK_BT_MAXVAL } else { SK_BT_MINVAL }) != 0 {
+        return Ok(false);
+    }
+
+    let nulls_first = skey.sk_flags & SK_BT_NULLS_FIRST != 0;
+    if skey.sk_flags & SK_ISNULL != 0 && (forward != nulls_first) {
+        return Ok(false); // NULL already sorts at this end of the range
+    }
+
+    // Without skip support, reposition via the NEXT/PRIOR sentinel instead.
+    let Some(sksup) = array.sksup else {
+        skey.sk_flags |= if forward { SK_BT_NEXT } else { SK_BT_PRIOR };
+        return Ok(true);
+    };
+
+    if skey.sk_flags & SK_ISNULL != 0 {
+        debug_assert!(forward == nulls_first);
+        skey.sk_flags &= !(SK_SEARCHNULL | SK_ISNULL);
+        let elem = if forward { sksup.low_elem } else { sksup.high_elem };
+        skey.sk_argument = skip_datum_copy(mcx, elem, array.attbyval, array.attlen)?;
+        return Ok(true);
+    }
+
+    let mut flow = false;
+    let new_sk_argument = if forward {
+        (sksup.increment)(skey.sk_argument, &mut flow)
+    } else {
+        (sksup.decrement)(skey.sk_argument, &mut flow)
+    };
+    if flow {
+        if array.null_elem && (forward != nulls_first) {
+            bt_skiparray_set_isnull(skey, array);
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    let bound = if forward { array.high_compare.as_mut() } else { array.low_compare.as_mut() };
+    if let Some(bound) = bound {
+        let arg = bound.sk_argument;
+        if !frame.test(bound, new_sk_argument, arg)? {
+            return Ok(false);
+        }
+    }
+
+    skey.sk_argument = new_sk_argument;
+    Ok(true)
 }
 
 /// _bt_advance_array_keys_increment: false = arrays exhausted (restored to
@@ -225,19 +373,90 @@ fn bt_array_step(skey: &mut ScanKeyData, array: &mut BTArrayKeyInfo<'_>, forward
 fn bt_advance_array_keys_increment(
     so: &mut BTScanOpaqueData<'_>,
     dir: ScanDirection,
-) -> bool {
+    skip_array_set: &mut bool,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
     {
         let BTScanOpaqueData { keyData, arrayKeys, .. } = &mut *so;
+        let mcx = *keyData.allocator();
         for array in arrayKeys.iter_mut().rev() {
             let skey = &mut keyData[array.scan_key as usize];
-            if bt_array_step(skey, array, ScanDirectionIsForward(dir)) {
-                return true;
+            if array.num_elems == -1 {
+                *skip_array_set = true;
+            }
+            if bt_array_step(mcx, frame, skey, array, ScanDirectionIsForward(dir))? {
+                return Ok(true);
             }
             bt_array_set_low_or_high(skey, array, ScanDirectionIsForward(dir));
         }
     }
     bt_start_array_keys(so, flip_dir(dir));
-    false
+    Ok(false)
+}
+
+/// _bt_binsrch_skiparray_skey: -1/0/1 = tupdatum below/within/above the skip
+/// array's range. `sk_flags` comes from the array's = scan key.
+fn bt_binsrch_skiparray_skey(
+    frame: &mut OrderProcFrame,
+    cur_elem_trig: bool,
+    dir: ScanDirection,
+    tupdatum: Datum,
+    tupnull: bool,
+    array: &mut BTArrayKeyInfo<'_>,
+    sk_flags: i32,
+    set_elem_result: &mut i32,
+) -> PgResult<()> {
+    debug_assert!(sk_flags & SK_BT_SKIP != 0 && sk_flags & SK_SEARCHARRAY != 0);
+    debug_assert!(sk_flags & SK_BT_REQFWD != 0);
+    debug_assert!(array.num_elems == -1);
+
+    if array.null_elem {
+        debug_assert!(array.low_compare.is_none() && array.high_compare.is_none());
+        *set_elem_result = 0;
+        return Ok(());
+    }
+
+    if tupnull {
+        *set_elem_result = if sk_flags & SK_BT_NULLS_FIRST != 0 { -1 } else { 1 };
+        return Ok(());
+    }
+
+    *set_elem_result = 0;
+    let BTArrayKeyInfo { low_compare, high_compare, .. } = array;
+    if ScanDirectionIsForward(dir) {
+        if !cur_elem_trig {
+            if let Some(k) = low_compare.as_mut() {
+                let arg = k.sk_argument;
+                if !frame.test(k, tupdatum, arg)? {
+                    *set_elem_result = -1;
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(k) = high_compare.as_mut() {
+            let arg = k.sk_argument;
+            if !frame.test(k, tupdatum, arg)? {
+                *set_elem_result = 1;
+            }
+        }
+    } else {
+        if !cur_elem_trig {
+            if let Some(k) = high_compare.as_mut() {
+                let arg = k.sk_argument;
+                if !frame.test(k, tupdatum, arg)? {
+                    *set_elem_result = 1;
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(k) = low_compare.as_mut() {
+            let arg = k.sk_argument;
+            if !frame.test(k, tupdatum, arg)? {
+                *set_elem_result = -1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// _bt_tuple_before_array_skeys: too early to advance required arrays?
@@ -265,7 +484,7 @@ unsafe fn bt_tuple_before_array_skeys(
         *sb = false;
     }
 
-    let BTScanOpaqueData { keyData, orderProcs, numberOfKeys, .. } = &mut *so;
+    let BTScanOpaqueData { keyData, orderProcs, arrayKeys, numberOfKeys, .. } = &mut *so;
     for ikey in sktrig as usize..*numberOfKeys as usize {
         let cur = &keyData[ikey];
         debug_assert!(!readpagetup || ikey == sktrig as usize);
@@ -293,18 +512,43 @@ unsafe fn bt_tuple_before_array_skeys(
         let mut tupnull = false;
         let tupdatum = index_getattr(tuple, cur.sk_attno, tupdesc, &mut tupnull);
 
-        if cur.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL) != 0 {
-            unported_phase2("skip-array sentinels (_bt_tuple_before_array_skeys)");
+        let result;
+        if cur.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL) == 0 {
+            let mut r = bt_compare_array_skey(
+                frame,
+                &mut orderProcs[ikey],
+                tupdatum,
+                tupnull,
+                cur.sk_argument,
+                cur,
+            )?;
+            if r == 0 {
+                if cur.sk_flags & SK_BT_NEXT != 0 {
+                    r = -1;
+                } else if cur.sk_flags & SK_BT_PRIOR != 0 {
+                    r = 1;
+                }
+                debug_assert!(r == 0 || cur.sk_flags & SK_BT_SKIP != 0);
+            }
+            result = r;
+        } else {
+            debug_assert!(if ScanDirectionIsForward(dir) {
+                cur.sk_flags & SK_BT_MAXVAL == 0
+            } else {
+                cur.sk_flags & SK_BT_MINVAL == 0
+            });
+            let sk_flags = cur.sk_flags;
+            let array = arrayKeys
+                .iter_mut()
+                .find(|a| a.scan_key == ikey as i32)
+                .expect("sentinel key has a skip array");
+            let mut r = 0;
+            bt_binsrch_skiparray_skey(frame, false, dir, tupdatum, tupnull, array, sk_flags, &mut r)?;
+            if r == 0 {
+                return Ok(false); // in range: time to advance the arrays
+            }
+            result = r;
         }
-        let result = bt_compare_array_skey(
-            frame,
-            &mut orderProcs[ikey],
-            tupdatum,
-            tupnull,
-            cur.sk_argument,
-            cur,
-        )?;
-        debug_assert!(cur.sk_flags & (SK_BT_NEXT | SK_BT_PRIOR) == 0);
 
         if (ScanDirectionIsForward(dir) && result < 0)
             || (ScanDirectionIsBackward(dir) && result > 0)
@@ -380,6 +624,7 @@ unsafe fn bt_advance_array_keys(
     }
 
     let mut beyond_end_advance = false;
+    let mut skip_array_advanced = false;
     let mut has_required_opposite_direction_only = false;
     let mut all_required_satisfied = true;
     let mut all_satisfied = true;
@@ -393,6 +638,7 @@ unsafe fn bt_advance_array_keys(
             scanBehind,
             ..
         } = &mut *so;
+        let mcx = *keyData.allocator();
         let mut arrayidx = 0usize;
 
         for ikey in 0..*numberOfKeys as usize {
@@ -468,17 +714,30 @@ unsafe fn bt_advance_array_keys(
             let mut set_elem: i32 = 0;
             if let Some(ai) = array_i {
                 let cur_elem_trig = sktrig_required && ikey == sktrig as usize;
-                set_elem = bt_binsrch_array_skey(
-                    frame,
-                    &mut orderProcs[ikey],
-                    cur_elem_trig,
-                    dir,
-                    tupdatum,
-                    tupnull,
-                    &arrayKeys[ai],
-                    &keyData[ikey],
-                    &mut result,
-                )?;
+                if arrayKeys[ai].num_elems == -1 {
+                    bt_binsrch_skiparray_skey(
+                        frame,
+                        cur_elem_trig,
+                        dir,
+                        tupdatum,
+                        tupnull,
+                        &mut arrayKeys[ai],
+                        sk_flags,
+                        &mut result,
+                    )?;
+                } else {
+                    set_elem = bt_binsrch_array_skey(
+                        frame,
+                        &mut orderProcs[ikey],
+                        cur_elem_trig,
+                        dir,
+                        tupdatum,
+                        tupnull,
+                        &arrayKeys[ai],
+                        &keyData[ikey],
+                        &mut result,
+                    )?;
+                }
             } else {
                 debug_assert!(required);
                 result = bt_compare_array_skey(
@@ -511,7 +770,17 @@ unsafe fn bt_advance_array_keys(
 
             if let Some(ai) = array_i {
                 let array = &mut arrayKeys[ai];
-                if array.cur_elem != set_elem {
+                if array.num_elems == -1 {
+                    bt_skiparray_set_element(
+                        mcx,
+                        &mut keyData[ikey],
+                        array,
+                        result,
+                        tupdatum,
+                        tupnull,
+                    )?;
+                    skip_array_advanced = true;
+                } else if array.cur_elem != set_elem {
                     array.cur_elem = set_elem;
                     keyData[ikey].sk_argument = array.elem_values[set_elem as usize];
                 }
@@ -519,12 +788,21 @@ unsafe fn bt_advance_array_keys(
         }
     }
 
-    if beyond_end_advance && !bt_advance_array_keys_increment(so, dir) {
+    if beyond_end_advance
+        && !bt_advance_array_keys_increment(so, dir, &mut skip_array_advanced, frame)?
+    {
         // end_toplevel_scan: whole top-level scan is done in this direction.
         let p = pstate.expect("beyond-end advancement implies sktrig_required");
         p.continuescan = false;
         so.needPrimScan = false;
         return Ok(false);
+    }
+
+    if sktrig_required && skip_array_advanced {
+        pstate
+            .as_deref_mut()
+            .expect("sktrig_required caller passes pstate")
+            .nskipadvances += 1;
     }
 
     if (sktrig_required && all_required_satisfied) || (!sktrig_required && all_satisfied) {
@@ -808,7 +1086,15 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
         }
 
         if key.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL | SK_BT_NEXT | SK_BT_PRIOR) != 0 {
-            unported_phase2("skip-array sentinel keys in _bt_check_compare");
+            debug_assert!(key.sk_flags & SK_SEARCHARRAY != 0 && key.sk_flags & SK_BT_SKIP != 0);
+            debug_assert!(required_same_dir || forcenonrequired);
+
+            if forcenonrequired {
+                let trig = *ikey;
+                return bt_advance_array_keys(rel, so, None, tuple, tupnatts, trig, false, frame);
+            }
+            *continuescan = false;
+            return Ok(false);
         }
 
         if key.sk_flags & SK_ROW_HEADER != 0 {
@@ -831,11 +1117,21 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
             }
             if required_same_dir {
                 *continuescan = false;
+            } else if key.sk_flags & SK_BT_SKIP != 0 {
+                // Nonrequired non-range skip array with a NULL element is
+                // satisfied by every possible array key.
+                debug_assert!(forcenonrequired && *ikey > 0);
+                *ikey += 1;
+                continue;
             }
             return Ok(false);
         }
 
         if is_null {
+            if forcenonrequired && key.sk_flags & SK_BT_SKIP != 0 {
+                let trig = *ikey;
+                return bt_advance_array_keys(rel, so, None, tuple, tupnatts, trig, false, frame);
+            }
             if key.sk_flags & SK_BT_NULLS_FIRST != 0 {
                 if (required_same_dir || required_opposite_dir_only)
                     && ScanDirectionIsBackward(dir)
@@ -1018,7 +1314,8 @@ pub(crate) unsafe fn bt_set_startikey(
 
     let firstchangingattnum = bt_keep_natts_fast(rel, firsttup, lasttup);
 
-    let BTScanOpaqueData { keyData, arrayKeys, orderProcs, numberOfKeys, .. } = &mut *so;
+    let BTScanOpaqueData { keyData, arrayKeys, orderProcs, numberOfKeys, skipScan, .. } =
+        &mut *so;
     let mut start_past_saop_eq = false;
     let mut arrayidx = 0usize;
     let mut startikey: i32 = 0;
@@ -1060,14 +1357,57 @@ pub(crate) unsafe fn bt_set_startikey(
         }
 
         if key.sk_flags & SK_SEARCHARRAY != 0 {
+            let ai = arrayidx;
+            debug_assert!(arrayKeys[ai].scan_key == startikey);
+            arrayidx += 1;
+            if arrayKeys[ai].num_elems == -1 {
+                debug_assert!(key.sk_flags & SK_BT_SKIP != 0);
+                if arrayKeys[ai].null_elem {
+                    // Non-range skip array is satisfied by every tuple.
+                    startikey += 1;
+                    continue;
+                }
+                if key.sk_attno as i32 > firstchangingattnum {
+                    break;
+                }
+                let sk_flags = key.sk_flags;
+                let mut firstnull = false;
+                let mut lastnull = false;
+                let firstdatum = index_getattr(firsttup, key.sk_attno, tupdesc, &mut firstnull);
+                let lastdatum = index_getattr(lasttup, key.sk_attno, tupdesc, &mut lastnull);
+                let mut result = 0;
+                bt_binsrch_skiparray_skey(
+                    frame,
+                    false,
+                    ForwardScanDirection,
+                    firstdatum,
+                    firstnull,
+                    &mut arrayKeys[ai],
+                    sk_flags,
+                    &mut result,
+                )?;
+                if result != 0 {
+                    break;
+                }
+                bt_binsrch_skiparray_skey(
+                    frame,
+                    false,
+                    ForwardScanDirection,
+                    lastdatum,
+                    lastnull,
+                    &mut arrayKeys[ai],
+                    sk_flags,
+                    &mut result,
+                )?;
+                if result != 0 {
+                    break;
+                }
+                startikey += 1;
+                continue;
+            }
             // SAOP array = key: binary search for a matching element rather
             // than relying on the key's current sk_argument.
-            let array = &arrayKeys[arrayidx];
-            debug_assert!(array.scan_key == startikey);
-            arrayidx += 1;
-            if array.num_elems == -1 {
-                unported_phase2("skip arrays (_bt_set_startikey)");
-            }
+            let array = &arrayKeys[ai];
             if key.sk_attno as i32 >= firstchangingattnum {
                 break;
             }
@@ -1113,8 +1453,7 @@ pub(crate) unsafe fn bt_set_startikey(
         startikey += 1;
     }
 
-    // skipScan is always false here (skip arrays are phase 2).
-    pstate.forcenonrequired = start_past_saop_eq;
+    pstate.forcenonrequired = start_past_saop_eq || *skipScan;
     pstate.startikey = startikey;
 
     debug_assert!(!pstate.forcenonrequired || so.numArrayKeys > 0);

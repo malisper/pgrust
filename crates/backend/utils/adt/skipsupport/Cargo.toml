@@ -1,0 +1,14 @@
+[package]
+name = "skipsupport"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_date = { path = "../adt_date" }
+datum = { path = "../../../../_support/types/datum" }
+lsyscache = { path = "../../cache/lsyscache" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
