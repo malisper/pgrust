@@ -588,28 +588,30 @@ pub fn index_concurrently_swap<'mcx>(
                         None,
                         &key,
                     )?;
-                    let mut hit = None;
+                    let mut newtup_opt = None;
                     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-                        if tup.t_self == *otid {
-                            hit = Some(tup);
-                            break;
+                        if tup.t_self != *otid {
+                            continue;
                         }
+                        let mut values: mcx::PgVec<'_, Datum> =
+                            mcx::vec_with_capacity_in(mcx, natts)?;
+                        let mut nulls: mcx::PgVec<'_, bool> =
+                            mcx::vec_with_capacity_in(mcx, natts)?;
+                        let mut replace: mcx::PgVec<'_, bool> =
+                            mcx::vec_with_capacity_in(mcx, natts)?;
+                        values.resize(natts, Datum::null());
+                        nulls.resize(natts, false);
+                        replace.resize(natts, false);
+                        values[Anum_pg_trigger_tgconstrindid as usize - 1] =
+                            Datum::from_oid(newIndexId);
+                        replace[Anum_pg_trigger_tgconstrindid as usize - 1] = true;
+                        newtup_opt = Some(heaptuple::heap_modify_tuple(
+                            mcx, tup, desc, &values, &nulls, &replace,
+                        )?);
+                        break;
                     }
-                    let tup = hit.expect("trigger tuple vanished mid-swap");
-                    let mut values: mcx::PgVec<'_, Datum> =
-                        mcx::vec_with_capacity_in(mcx, natts)?;
-                    let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-                    let mut replace: mcx::PgVec<'_, bool> =
-                        mcx::vec_with_capacity_in(mcx, natts)?;
-                    values.resize(natts, Datum::null());
-                    nulls.resize(natts, false);
-                    replace.resize(natts, false);
-                    values[Anum_pg_trigger_tgconstrindid as usize - 1] =
-                        Datum::from_oid(newIndexId);
-                    replace[Anum_pg_trigger_tgconstrindid as usize - 1] = true;
-                    let mut newtup =
-                        heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
                     genam::systable_endscan(mcx, scan)?;
+                    let mut newtup = newtup_opt.expect("trigger tuple vanished mid-swap");
                     catalog_indexing::CatalogTupleUpdate(mcx, &pg_trigger, otid, &mut newtup)?;
                 }
             }
