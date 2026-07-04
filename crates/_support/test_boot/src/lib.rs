@@ -182,6 +182,8 @@ fn install_stub_seams() {
     stub!(sinval_seams::receive_shared_invalid_messages, |_, _| Ok(()));
     stub!(xact_seams::mark_current_transaction_id_logged_if_any, || {});
     stub!(xact_seams::mark_subxact_top_xid_logged, || {});
+    stub!(xact_seams::is_in_parallel_mode, || false);
+    stub!(xact_seams::get_current_transaction_nest_level, || 1);
     stub!(timestamp_seams::get_current_timestamp, || 777_000_000);
     stub!(postgres_seams::check_for_interrupts, || Ok(()));
 }
