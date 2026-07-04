@@ -347,8 +347,14 @@ fn relation_excluded_by_constraints(
 // unported, so the marker is a zero-cost GroupResultPath whose single
 // constant-FALSE qual creates the identical Result plan.
 pub fn set_dummy_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    run.root.rel_mut(rel).rows = 0.0;
     run.root.rel_reltarget_mut(rel).width = 0;
+    add_dummy_path(run, rel)
+}
+
+// The shared body of set_dummy_rel_pathlist (allpaths.c) and mark_dummy_rel
+// (joinrels.c) — the latter leaves reltarget width alone.
+pub(crate) fn add_dummy_path(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    run.root.rel_mut(rel).rows = 0.0;
     run.root.rel_mut(rel).pathlist.clear();
     run.root.rel_mut(rel).partial_pathlist.clear();
 
@@ -407,24 +413,27 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
 }
 
 // set_append_rel_size (allpaths.c): size each live child, then aggregate.
-// Partitionwise joins and child ECs stay dead (no ECs exist on this lane).
+// Child ECs stay dead (no ECs exist on this lane).
 fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(
         run.root.rel(rel).reloptkind == RELOPT_BASEREL
             || run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
     );
-    assert!(
-        run.root.rel(rel).joininfo.is_empty(),
-        "set_append_rel_size (allpaths.c): joininfo translation \
-         (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
-    );
-    // C divergence: add_child_rel_equivalences is unported (appendrel EC
-    // lane) — child EC members only feed child parameterized index paths and
-    // MergeAppend orderings; the indexlist gate in add_paths_to_append_rel
-    // stays loud where those could change the chosen plan. Join enforcement
-    // is unaffected: the parent appendrel's members drive
-    // generate_join_implied_equalities at the join level.
+    // add_child_rel_equivalences: only feeds child index-path pathkeys and
+    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
+    // stays loud where those could change the chosen plan.
+    debug_assert!(!run.root.rel(rel).has_eclass_joins);
+
+    if crate::gucs::enable_partitionwise_join()
+        && run.root.rel(rel).reloptkind == RELOPT_BASEREL
+        && run.rte(rti).relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        let wholerow_idx = (0 - run.root.rel(rel).min_attr) as usize;
+        if crate::relnode::relids_is_empty(&run.root.rel(rel).attr_needed[wholerow_idx]) {
+            run.root.rel_mut(rel).consider_partitionwise_join = true;
+        }
+    }
 
     let mut has_live_children = false;
     let mut parent_tuples = 0.0f64;
@@ -457,10 +466,35 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
             continue;
         }
 
-        // Child reltarget = parent reltarget translated.
         let appinfo = run.root.append_rel_array[child_rti as usize]
             .clone()
             .expect("child AppendRelInfo");
+
+        // Child joininfo = parent joininfo translated, skipping quals from
+        // above outer joins that can null this rel (C's nullingrels-on-non-Var
+        // translation restriction).
+        {
+            let parent_joininfo =
+                crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel).joininfo);
+            let nulling = crate::relnode::relids_copy(mcx, &run.root.rel(rel).nulling_relids);
+            let mut childrinfos: mcx::PgVec<'_, types_pathnodes::RinfoId> =
+                mcx::PgVec::new_in(mcx);
+            for &rid in parent_joininfo.iter() {
+                if !crate::relnode::relids_overlap(
+                    &run.root.rinfo(rid).clause_relids,
+                    &nulling,
+                ) {
+                    childrinfos.push(crate::inherit::adjust_child_rinfo(
+                        run,
+                        rid,
+                        core::slice::from_ref(&appinfo),
+                    )?);
+                }
+            }
+            run.root.rel_mut(childrel).joininfo = childrinfos;
+        }
+
+        // Child reltarget = parent reltarget translated.
         let parent_exprs =
             crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel).exprs);
         let mut child_exprs: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
@@ -471,6 +505,12 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         }
         let child_target = run.rel_reltarget_id(childrel);
         run.root.pathtarget_mut(child_target).exprs = child_exprs;
+
+        // C abuses the flag on unpartitioned children to mark them valid
+        // per-partition join inputs (tlist set up above).
+        if run.root.rel(rel).consider_partitionwise_join {
+            run.root.rel_mut(childrel).consider_partitionwise_join = true;
+        }
 
         if run.glob.parallel_mode_ok && run.root.rel(rel).consider_parallel {
             set_rel_consider_parallel(run, childrel, child_rti as usize)?;
@@ -764,4 +804,46 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
 
     crate::indxpath::create_index_paths(run, rel)?;
     Ok(())
+}
+
+// generate_partitionwise_join_paths (allpaths.c).
+pub(crate) fn generate_partitionwise_join_paths(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+) -> PgResult<()> {
+    if !matches!(
+        run.root.rel(rel).reloptkind,
+        types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
+    ) {
+        return Ok(());
+    }
+    if !crate::relnode::rel_is_partitioned(&run.root, rel) {
+        return Ok(());
+    }
+    debug_assert!(run.root.rel(rel).consider_partitionwise_join);
+
+    let num_parts = run.root.rel(rel).nparts;
+    let mut live_children: mcx::PgVec<'_, RelId> = mcx::PgVec::new_in(run.mcx);
+    for cnt_parts in 0..num_parts as usize {
+        let Some(child_rel) = run.root.rel(rel).part_rels[cnt_parts] else {
+            continue; // pruned entirely, certainly dummy
+        };
+        generate_partitionwise_join_paths(run, child_rel)?;
+        if run.root.rel(child_rel).pathlist.is_empty() {
+            // No path for this child: the parent joinrel is unpartitioned.
+            run.root.rel_mut(rel).nparts = 0;
+            return Ok(());
+        }
+        set_cheapest(run, child_rel)?;
+        if crate::joinrels::is_dummy_rel(&run.root, child_rel) {
+            continue;
+        }
+        live_children.push(child_rel);
+    }
+
+    if live_children.is_empty() {
+        crate::joinrels::mark_dummy_rel(run, rel)?;
+        return Ok(());
+    }
+    add_paths_to_append_rel(run, rel, &live_children)
 }

@@ -59,6 +59,7 @@ bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_increment
 bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
 bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
 bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partition_pruning, true);
+bool_guc!(ENABLE_PARTITIONWISE_JOIN, enable_partitionwise_join, set_enable_partitionwise_join, false);
 
 pub fn install() {
     use guc_tables::GucVarAccessors;
@@ -79,6 +80,10 @@ pub fn install() {
     guc_tables::vars::enable_partition_pruning.install(GucVarAccessors {
         get: enable_partition_pruning,
         set: set_enable_partition_pruning,
+    });
+    guc_tables::vars::enable_partitionwise_join.install(GucVarAccessors {
+        get: enable_partitionwise_join,
+        set: set_enable_partitionwise_join,
     });
     guc_tables::vars::enable_tidscan
         .install(GucVarAccessors { get: enable_tidscan, set: set_enable_tidscan });

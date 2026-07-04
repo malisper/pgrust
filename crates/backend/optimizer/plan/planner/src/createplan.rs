@@ -6,7 +6,7 @@ use types_nodes::plannodes::{
 };
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
-use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RinfoId};
+use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RelId, RinfoId};
 
 use crate::pathnode::is_projection_capable_pathtype;
 use crate::run::PlannerRun;
@@ -2723,8 +2723,7 @@ fn create_lockrows_plan<'mcx>(
 }
 
 // create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
-// make_nestloop. Gating (pseudoconstant) clauses are loud upstream; the
-// reparameterize leg is dead (no appendrels).
+// make_nestloop. Gating (pseudoconstant) clauses are loud upstream.
 // create_material_plan + make_material (createplan.c): the tlist shares the
 // child's (Material never projects).
 fn create_material_plan<'mcx>(
@@ -2848,6 +2847,16 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
             ),
         };
     debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
+
+    // An inner parameterized by the topmost parent of the outer rel gets its
+    // parameterization translated to the child now (partitionwise join).
+    {
+        let outer_parent = run.root.path(outer_path).base().parent;
+        if crate::joinpath::path_param_by_parent(run, inner_path, outer_parent) {
+            reparameterize_path_by_child(run, inner_path, outer_parent)?
+                .expect("could not reparameterize a subpath");
+        }
+    }
 
     let tlist = build_path_tlist(run, target_id)?;
     // NestLoop can project, so no need to be picky about child tlists.
@@ -3666,4 +3675,333 @@ fn tlist_same_exprs(tlist1: &NodeList<'_>, tlist2: &NodeList<'_>) -> bool {
         }
     }
     true
+}
+
+fn path_needs_child_reparam(run: &PlannerRun<'_>, path: PathId, child_rel: RelId) -> bool {
+    run.root.path(path).base().param_info.is_some()
+        && crate::relnode::relids_overlap(
+            crate::pathnode::path_req_outer(run.root.path(path).base()),
+            &run.root.rel(child_rel).top_parent_relids,
+        )
+}
+
+// path_is_reparameterizable_by_child (pathnode.c), restricted to the path
+// types reparameterize_path_by_child below handles.
+pub(crate) fn path_is_reparameterizable_by_child(
+    run: &PlannerRun<'_>,
+    path: PathId,
+    child_rel: RelId,
+) -> bool {
+    if !path_needs_child_reparam(run, path, child_rel) {
+        return true;
+    }
+    match run.root.path(path) {
+        PathNode::Path(_) | PathNode::IndexPath(_) => true,
+        PathNode::BitmapHeapPath(p) => p
+            .bitmapqual
+            .is_none_or(|q| path_is_reparameterizable_by_child(run, q, child_rel)),
+        PathNode::BitmapAndPath(p) => p
+            .bitmapquals
+            .iter()
+            .all(|&q| path_is_reparameterizable_by_child(run, q, child_rel)),
+        PathNode::BitmapOrPath(p) => p
+            .bitmapquals
+            .iter()
+            .all(|&q| path_is_reparameterizable_by_child(run, q, child_rel)),
+        PathNode::NestPath(p) => {
+            path_is_reparameterizable_by_child(run, p.jpath.outerjoinpath.unwrap(), child_rel)
+                && path_is_reparameterizable_by_child(run, p.jpath.innerjoinpath.unwrap(), child_rel)
+        }
+        PathNode::MergePath(p) => {
+            path_is_reparameterizable_by_child(run, p.jpath.outerjoinpath.unwrap(), child_rel)
+                && path_is_reparameterizable_by_child(run, p.jpath.innerjoinpath.unwrap(), child_rel)
+        }
+        PathNode::HashPath(p) => {
+            path_is_reparameterizable_by_child(run, p.jpath.outerjoinpath.unwrap(), child_rel)
+                && path_is_reparameterizable_by_child(run, p.jpath.innerjoinpath.unwrap(), child_rel)
+        }
+        PathNode::AppendPath(p) => p
+            .subpaths
+            .iter()
+            .all(|&q| path_is_reparameterizable_by_child(run, q, child_rel)),
+        PathNode::MaterialPath(p) => {
+            path_is_reparameterizable_by_child(run, p.subpath.unwrap(), child_rel)
+        }
+        PathNode::MemoizePath(p) => {
+            path_is_reparameterizable_by_child(run, p.subpath.unwrap(), child_rel)
+        }
+        _ => false,
+    }
+}
+
+// reparameterize_path_by_child (pathnode.c): translate a parent-rel
+// parameterization down to the child that create_plan is building for.
+// Mutates the winning path in place (create_plan visits it exactly once).
+fn reparameterize_path_by_child<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path: PathId,
+    child_rel: RelId,
+) -> PgResult<Option<PathId>> {
+    enum Snap<'m> {
+        Scan,
+        Index {
+            indexinfo: &'m types_pathnodes::IndexOptInfo<'m>,
+            indexclauses: mcx::PgVec<'m, types_pathnodes::IndexClause<'m>>,
+        },
+        BitmapHeap(Option<PathId>),
+        BitmapList(mcx::PgVec<'m, PathId>),
+        Join {
+            outer: PathId,
+            inner: PathId,
+            restrictinfo: mcx::PgVec<'m, RinfoId>,
+            clauses: Option<mcx::PgVec<'m, RinfoId>>,
+        },
+        Append(mcx::PgVec<'m, PathId>),
+        Sub {
+            subpath: PathId,
+            param_exprs: Option<mcx::PgVec<'m, types_pathnodes::NodeId>>,
+        },
+        Unsupported,
+    }
+
+    let mcx = run.mcx;
+    if !path_needs_child_reparam(run, path, child_rel) {
+        return Ok(Some(path));
+    }
+    let top_parent = run.root.rel(child_rel).top_parent.expect("child rel has a top parent");
+
+    fn adjust_rinfos<'mcx>(
+        run: &mut PlannerRun<'mcx>,
+        rids: &[RinfoId],
+        child_rel: RelId,
+        top_parent: RelId,
+    ) -> PgResult<mcx::PgVec<'mcx, RinfoId>> {
+        let mut out: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(run.mcx);
+        for &rid in rids {
+            out.push(crate::inherit::adjust_child_rinfo_multilevel(
+                run, rid, child_rel, top_parent,
+            )?);
+        }
+        Ok(out)
+    }
+
+    let parent = run.root.path(path).base().parent;
+    let snap = match run.root.path(path) {
+        PathNode::Path(_) => Snap::Scan,
+        PathNode::IndexPath(ip) => Snap::Index {
+            indexinfo: ip.indexinfo.expect("indexinfo set"),
+            indexclauses: {
+                let mut v = mcx::PgVec::new_in(mcx);
+                for ic in ip.indexclauses.iter() {
+                    v.push(ic.clone());
+                }
+                v
+            },
+        },
+        PathNode::BitmapHeapPath(p) => Snap::BitmapHeap(p.bitmapqual),
+        PathNode::BitmapAndPath(p) => {
+            Snap::BitmapList(crate::relnode::pgvec_clone_shallow(mcx, &p.bitmapquals))
+        }
+        PathNode::BitmapOrPath(p) => {
+            Snap::BitmapList(crate::relnode::pgvec_clone_shallow(mcx, &p.bitmapquals))
+        }
+        PathNode::NestPath(p) => Snap::Join {
+            outer: p.jpath.outerjoinpath.unwrap(),
+            inner: p.jpath.innerjoinpath.unwrap(),
+            restrictinfo: crate::relnode::pgvec_clone_shallow(mcx, &p.jpath.joinrestrictinfo),
+            clauses: None,
+        },
+        PathNode::MergePath(p) => Snap::Join {
+            outer: p.jpath.outerjoinpath.unwrap(),
+            inner: p.jpath.innerjoinpath.unwrap(),
+            restrictinfo: crate::relnode::pgvec_clone_shallow(mcx, &p.jpath.joinrestrictinfo),
+            clauses: Some(crate::relnode::pgvec_clone_shallow(mcx, &p.path_mergeclauses)),
+        },
+        PathNode::HashPath(p) => Snap::Join {
+            outer: p.jpath.outerjoinpath.unwrap(),
+            inner: p.jpath.innerjoinpath.unwrap(),
+            restrictinfo: crate::relnode::pgvec_clone_shallow(mcx, &p.jpath.joinrestrictinfo),
+            clauses: Some(crate::relnode::pgvec_clone_shallow(mcx, &p.path_hashclauses)),
+        },
+        PathNode::AppendPath(p) => {
+            Snap::Append(crate::relnode::pgvec_clone_shallow(mcx, &p.subpaths))
+        }
+        PathNode::MaterialPath(p) => {
+            Snap::Sub { subpath: p.subpath.unwrap(), param_exprs: None }
+        }
+        PathNode::MemoizePath(p) => Snap::Sub {
+            subpath: p.subpath.unwrap(),
+            param_exprs: Some(crate::relnode::pgvec_clone_shallow(mcx, &p.param_exprs)),
+        },
+        _ => Snap::Unsupported,
+    };
+
+    match snap {
+        Snap::Scan => {
+            let list = crate::relnode::pgvec_clone_shallow(
+                mcx,
+                &run.root.rel(parent).baserestrictinfo,
+            );
+            let new = adjust_rinfos(run, &list, child_rel, top_parent)?;
+            run.root.rel_mut(parent).baserestrictinfo = new;
+        }
+        Snap::Index { indexinfo, indexclauses } => {
+            let old = indexinfo.indrestrictinfo.borrow().clone();
+            let new = adjust_rinfos(run, &old, child_rel, top_parent)?;
+            *indexinfo.indrestrictinfo.borrow_mut() = new;
+            let mut new_clauses: mcx::PgVec<'mcx, types_pathnodes::IndexClause<'mcx>> =
+                mcx::PgVec::new_in(mcx);
+            for ic in indexclauses.iter() {
+                let rinfo = match ic.rinfo {
+                    Some(r) => Some(crate::inherit::adjust_child_rinfo_multilevel(
+                        run, r, child_rel, top_parent,
+                    )?),
+                    None => None,
+                };
+                let indexquals = adjust_rinfos(run, &ic.indexquals, child_rel, top_parent)?;
+                new_clauses.push(types_pathnodes::IndexClause {
+                    rinfo,
+                    indexquals,
+                    lossy: ic.lossy,
+                    indexcol: ic.indexcol,
+                    indexcols: crate::relnode::pgvec_clone_shallow(mcx, &ic.indexcols),
+                });
+            }
+            if let PathNode::IndexPath(p) = run.root.path_mut(path) {
+                p.indexclauses = new_clauses;
+            }
+        }
+        Snap::BitmapHeap(bq) => {
+            let list = crate::relnode::pgvec_clone_shallow(
+                mcx,
+                &run.root.rel(parent).baserestrictinfo,
+            );
+            let new = adjust_rinfos(run, &list, child_rel, top_parent)?;
+            run.root.rel_mut(parent).baserestrictinfo = new;
+            if let Some(bq) = bq {
+                if reparameterize_path_by_child(run, bq, child_rel)?.is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+        Snap::BitmapList(quals) => {
+            for &q in quals.iter() {
+                if reparameterize_path_by_child(run, q, child_rel)?.is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+        Snap::Join { outer, inner, restrictinfo, clauses } => {
+            if reparameterize_path_by_child(run, outer, child_rel)?.is_none()
+                || reparameterize_path_by_child(run, inner, child_rel)?.is_none()
+            {
+                return Ok(None);
+            }
+            let new_rl = adjust_rinfos(run, &restrictinfo, child_rel, top_parent)?;
+            let new_cl = match clauses {
+                Some(cl) => Some(adjust_rinfos(run, &cl, child_rel, top_parent)?),
+                None => None,
+            };
+            match run.root.path_mut(path) {
+                PathNode::NestPath(p) => p.jpath.joinrestrictinfo = new_rl,
+                PathNode::MergePath(p) => {
+                    p.jpath.joinrestrictinfo = new_rl;
+                    p.path_mergeclauses = new_cl.unwrap();
+                }
+                PathNode::HashPath(p) => {
+                    p.jpath.joinrestrictinfo = new_rl;
+                    p.path_hashclauses = new_cl.unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        Snap::Append(subs) => {
+            for &q in subs.iter() {
+                if reparameterize_path_by_child(run, q, child_rel)?.is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+        Snap::Sub { subpath, param_exprs } => {
+            if reparameterize_path_by_child(run, subpath, child_rel)?.is_none() {
+                return Ok(None);
+            }
+            if let Some(pe) = param_exprs {
+                let mut new_pe: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(mcx);
+                for &e in pe.iter() {
+                    new_pe.push(crate::inherit::adjust_child_expr_multilevel(
+                        run, e, child_rel, top_parent,
+                    )?);
+                }
+                if let PathNode::MemoizePath(p) = run.root.path_mut(path) {
+                    p.param_exprs = new_pe;
+                }
+            }
+        }
+        Snap::Unsupported => return Ok(None),
+    }
+
+    // Translate the ParamPathInfo, which refers to the topmost parent.
+    let (old_rows, old_clauses, old_serials, old_req_outer) = {
+        let ppi = run.root.path(path).base().param_info.as_ref().expect("parameterized path");
+        (
+            ppi.ppi_rows,
+            crate::relnode::pgvec_clone_shallow(mcx, &ppi.ppi_clauses),
+            crate::relnode::relids_copy(mcx, &ppi.ppi_serials),
+            crate::relnode::relids_copy(mcx, &ppi.ppi_req_outer),
+        )
+    };
+    let required_outer =
+        crate::inherit::adjust_child_relids_multilevel(run, &old_req_outer, child_rel, top_parent);
+    let existing = run
+        .root
+        .rel(parent)
+        .ppilist
+        .iter()
+        .position(|p| crate::relnode::relids_equal(&p.ppi_req_outer, &required_outer));
+    let new_ppi = match existing {
+        Some(i) => run.root.rel(parent).ppilist[i].clone(),
+        None => {
+            let clauses = adjust_rinfos(run, &old_clauses, child_rel, top_parent)?;
+            let ppi = types_pathnodes::ParamPathInfo {
+                ppi_req_outer: crate::relnode::relids_copy(mcx, &required_outer),
+                ppi_rows: old_rows,
+                ppi_clauses: clauses,
+                ppi_serials: old_serials,
+            };
+            run.root.rel_mut(parent).ppilist.push(ppi.clone());
+            ppi
+        }
+    };
+    run.root.path_mut(path).base_mut().param_info = Some(mcx::box_new_in(mcx, new_ppi));
+
+    // A lateral reference to only the parent of the outer rel shows up in the
+    // pathtarget; translate it too.
+    if crate::relnode::relids_overlap(
+        &run.root.rel(parent).lateral_relids,
+        &run.root.rel(child_rel).top_parent_relids,
+    ) {
+        let pt = run.root.path(path).base().pathtarget_id.expect("path has a pathtarget");
+        let src_exprs = crate::relnode::pgvec_clone_shallow(mcx, &run.root.pathtarget(pt).exprs);
+        let mut exprs: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        for &e in src_exprs.iter() {
+            exprs.push(crate::inherit::adjust_child_expr_multilevel(
+                run, e, child_rel, top_parent,
+            )?);
+        }
+        let copy = {
+            let src = run.root.pathtarget(pt);
+            types_pathnodes::PathTarget {
+                exprs,
+                sortgrouprefs: crate::relnode::pgvec_clone_shallow(mcx, &src.sortgrouprefs),
+                cost: src.cost,
+                width: src.width,
+                has_volatile_expr: src.has_volatile_expr,
+            }
+        };
+        let new_pt = run.root.alloc_pathtarget(copy);
+        run.root.path_mut(path).base_mut().pathtarget_id = Some(new_pt);
+    }
+    Ok(Some(path))
 }

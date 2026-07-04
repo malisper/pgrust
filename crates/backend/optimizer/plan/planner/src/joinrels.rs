@@ -3,7 +3,6 @@
 
 use mcx::PgVec;
 use types_error::PgResult;
-use types_nodes::NodeTag;
 use types_pathnodes::{
     JoinlistNode, RelId, Relids, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     RELOPT_JOINREL,
@@ -60,7 +59,7 @@ pub fn standard_join_search<'mcx>(
             &run.root.join_rel_level[lev],
         );
         for &rel in rels.iter() {
-            debug_assert!(run.root.rel(rel).part_scheme.is_none());
+            crate::allpaths::generate_partitionwise_join_paths(run, rel)?;
             debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
             crate::pathnode::set_cheapest(run, rel)?;
         }
@@ -235,12 +234,6 @@ pub fn make_join_rel(
     rel2: RelId,
 ) -> PgResult<Option<RelId>> {
     debug_assert!(!relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).relids));
-    if is_dummy_rel(&run.root, rel1) || is_dummy_rel(&run.root, rel2) {
-        panic!(
-            "populate_joinrel_with_paths (joinrels.c): dummy input rel; \
-             mark_dummy_rel join lane unported"
-        );
-    }
     let mut joinrelids = relids_union(
         run.mcx,
         &run.root.rel(rel1).relids,
@@ -268,68 +261,169 @@ pub fn make_join_rel(
         ),
     };
     let (joinrel, restrictlist) = build_join_rel(run, joinrelids, rel1, rel2, &sjinfo)?;
-    // restriction_is_constant_false (joinrels.c): a constant-false clause
-    // makes the joinrel (or one input) dummy in every C leg except FULL with
-    // a non-pushed-down qual, which runs add_paths and evaluates the qual at
-    // execution; the dummy legs stay loud (mark_dummy_rel lane unported).
-    for &rid in restrictlist.iter() {
-        let rinfo = run.root.rinfo(rid);
-        let clause = *run.root.expr_node(rinfo.clause);
-        if let Some(con) = clause.as_const() {
-            if con.constisnull || !con.constvalue.as_bool() {
-                let pushed_down = rinfo.is_pushed_down
-                    || !relids_is_subset(&rinfo.required_relids, &run.root.rel(joinrel).relids);
-                if pushed_down || sjinfo.jointype != types_pathnodes::JOIN_FULL {
-                    panic!(
-                        "populate_joinrel_with_paths (joinrels.c): constant-false join qual; \
-                         mark_dummy_rel lane unported"
-                    );
+    // If we've already proven this join is empty, we needn't consider paths.
+    if is_dummy_rel(&run.root, joinrel) {
+        return Ok(Some(joinrel));
+    }
+    populate_joinrel_with_paths(run, rel1, rel2, joinrel, &sjinfo, &restrictlist)?;
+    Ok(Some(joinrel))
+}
+
+// restriction_is_constant_false (joinrels.c).
+fn restriction_is_constant_false(
+    run: &PlannerRun<'_>,
+    restrictlist: &[types_pathnodes::RinfoId],
+    joinrel: RelId,
+    only_pushed_down: bool,
+) -> bool {
+    let joinrelids = &run.root.rel(joinrel).relids;
+    for &rid in restrictlist {
+        if only_pushed_down && !rinfo_is_pushed_down(run, rid, joinrelids) {
+            continue;
+        }
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if let Some(c) = clause.as_const() {
+            // Constant NULL is as good as constant FALSE for our purposes.
+            if c.constisnull || !c.constvalue.as_bool() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// mark_dummy_rel (joinrels.c); the dummy marker is a GroupResultPath (see
+// set_dummy_rel_pathlist), and unlike that function the reltarget width is
+// left alone.
+pub fn mark_dummy_rel(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    if is_dummy_rel(&run.root, rel) {
+        return Ok(());
+    }
+    crate::allpaths::add_dummy_path(run, rel)
+}
+
+// find_join_rel (relnode.c), linear form (join_rel_hash unported).
+pub fn find_join_rel(
+    root: &types_pathnodes::PlannerInfo<'_>,
+    relids: &Relids<'_>,
+) -> Option<RelId> {
+    root.join_rel_list.iter().copied().find(|&jr| relids_equal(&root.rel(jr).relids, relids))
+}
+
+pub(crate) fn populate_joinrel_with_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel1: RelId,
+    rel2: RelId,
+    joinrel: RelId,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &PgVec<'mcx, types_pathnodes::RinfoId>,
+) -> PgResult<()> {
+    'switch: {
+        match sjinfo.jointype {
+            JOIN_INNER => {
+                if is_dummy_rel(&run.root, rel1)
+                    || is_dummy_rel(&run.root, rel2)
+                    || restriction_is_constant_false(run, restrictlist, joinrel, false)
+                {
+                    mark_dummy_rel(run, joinrel)?;
+                    break 'switch;
+                }
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, JOIN_INNER, sjinfo, restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, JOIN_INNER, sjinfo, restrictlist)?;
+            }
+            JOIN_LEFT => {
+                if is_dummy_rel(&run.root, rel1)
+                    || restriction_is_constant_false(run, restrictlist, joinrel, true)
+                {
+                    mark_dummy_rel(run, joinrel)?;
+                    break 'switch;
+                }
+                if restriction_is_constant_false(run, restrictlist, joinrel, false)
+                    && relids_is_subset(&run.root.rel(rel2).relids, &sjinfo.syn_righthand)
+                {
+                    mark_dummy_rel(run, rel2)?;
+                }
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, JOIN_LEFT, sjinfo, restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, JOIN_RIGHT, sjinfo, restrictlist)?;
+            }
+            types_pathnodes::JOIN_FULL => {
+                if (is_dummy_rel(&run.root, rel1) && is_dummy_rel(&run.root, rel2))
+                    || restriction_is_constant_false(run, restrictlist, joinrel, true)
+                {
+                    mark_dummy_rel(run, joinrel)?;
+                    break 'switch;
+                }
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_FULL, sjinfo, restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_FULL, sjinfo, restrictlist)?;
+                if run.root.rel(joinrel).pathlist.is_empty() {
+                    return Err(full_join_unsupported());
                 }
             }
+            types_pathnodes::JOIN_SEMI => {
+                if relids_is_subset(&sjinfo.min_lefthand, &run.root.rel(rel1).relids)
+                    && relids_is_subset(&sjinfo.min_righthand, &run.root.rel(rel2).relids)
+                {
+                    if is_dummy_rel(&run.root, rel1)
+                        || is_dummy_rel(&run.root, rel2)
+                        || restriction_is_constant_false(run, restrictlist, joinrel, false)
+                    {
+                        mark_dummy_rel(run, joinrel)?;
+                        break 'switch;
+                    }
+                    crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_SEMI, sjinfo, restrictlist)?;
+                    crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_SEMI, sjinfo, restrictlist)?;
+                }
+                let unique_ok = relids_equal(&sjinfo.syn_righthand, &run.root.rel(rel2).relids)
+                    && {
+                        let cheapest =
+                            run.root.rel(rel2).cheapest_total_path.expect("cheapest path");
+                        crate::pathnode::create_unique_path(run, rel2, cheapest, sjinfo)?
+                            .is_some()
+                    };
+                if unique_ok {
+                    if is_dummy_rel(&run.root, rel1)
+                        || is_dummy_rel(&run.root, rel2)
+                        || restriction_is_constant_false(run, restrictlist, joinrel, false)
+                    {
+                        mark_dummy_rel(run, joinrel)?;
+                        break 'switch;
+                    }
+                    crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_UNIQUE_INNER, sjinfo, restrictlist)?;
+                    crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_UNIQUE_OUTER, sjinfo, restrictlist)?;
+                }
+            }
+            types_pathnodes::JOIN_ANTI => {
+                if is_dummy_rel(&run.root, rel1)
+                    || restriction_is_constant_false(run, restrictlist, joinrel, true)
+                {
+                    mark_dummy_rel(run, joinrel)?;
+                    break 'switch;
+                }
+                if restriction_is_constant_false(run, restrictlist, joinrel, false)
+                    && relids_is_subset(&run.root.rel(rel2).relids, &sjinfo.syn_righthand)
+                {
+                    mark_dummy_rel(run, rel2)?;
+                }
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_ANTI, sjinfo, restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_ANTI, sjinfo, restrictlist)?;
+            }
+            other => panic!("populate_joinrel_with_paths (joinrels.c): jointype {other}"),
         }
     }
-    match sjinfo.jointype {
-        JOIN_INNER => {
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, JOIN_INNER, &sjinfo, &restrictlist)?;
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, JOIN_INNER, &sjinfo, &restrictlist)?;
-        }
-        JOIN_LEFT => {
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, JOIN_LEFT, &sjinfo, &restrictlist)?;
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, JOIN_RIGHT, &sjinfo, &restrictlist)?;
-        }
-        types_pathnodes::JOIN_SEMI => {
-            if relids_is_subset(&sjinfo.min_lefthand, &run.root.rel(rel1).relids)
-                && relids_is_subset(&sjinfo.min_righthand, &run.root.rel(rel2).relids)
-            {
-                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_SEMI, &sjinfo, &restrictlist)?;
-                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_SEMI, &sjinfo, &restrictlist)?;
-            }
-            let unique_ok = relids_equal(&sjinfo.syn_righthand, &run.root.rel(rel2).relids) && {
-                let cheapest = run.root.rel(rel2).cheapest_total_path.expect("cheapest path");
-                crate::pathnode::create_unique_path(run, rel2, cheapest, &sjinfo)?.is_some()
-            };
-            if unique_ok {
-                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_UNIQUE_INNER, &sjinfo, &restrictlist)?;
-                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_UNIQUE_OUTER, &sjinfo, &restrictlist)?;
-            }
-        }
-        types_pathnodes::JOIN_ANTI => {
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_ANTI, &sjinfo, &restrictlist)?;
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_ANTI, &sjinfo, &restrictlist)?;
-        }
-        types_pathnodes::JOIN_FULL => {
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_FULL, &sjinfo, &restrictlist)?;
-            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_FULL, &sjinfo, &restrictlist)?;
-            // C errors here when neither mergeable nor hashable clauses
-            // exist; add_paths_to_joinrel's !mergejoin_allowed arm is loud
-            // upstream of that.
-        }
-        other => panic!(
-            "populate_joinrel_with_paths (joinrels.c): jointype {other}; join-outer lane \
-             covers INNER/LEFT/SEMI/ANTI"
-        ),
-    }
-    Ok(Some(joinrel))
+    try_partitionwise_join(run, rel1, rel2, joinrel, sjinfo, restrictlist)
+}
+
+#[cold]
+#[inline(never)]
+fn full_join_unsupported() -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::new(
+            types_error::ERROR,
+            "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions"
+                .to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 // join_is_legal (joinrels.c): None = illegal. must_be_leftjoin commutation
@@ -572,6 +666,10 @@ fn build_join_rel<'mcx>(
     let he = crate::equivclass::has_relevant_eclass_joinclause(run, joinrel);
     run.root.rel_mut(joinrel).has_eclass_joins = he;
 
+    crate::relnode::build_joinrel_partition_info(
+        run, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist,
+    )?;
+
     set_joinrel_size_estimates(run, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 
     if run.root.rel(inner_rel).consider_parallel && run.root.rel(outer_rel).consider_parallel {
@@ -705,3 +803,391 @@ fn build_joinrel_joinlist(run: &mut PlannerRun<'_>, joinrel: RelId, outer_rel: R
     run.root.rel_mut(joinrel).joininfo = result;
 }
 
+
+fn is_simple_rel(root: &types_pathnodes::PlannerInfo<'_>, rel: RelId) -> bool {
+    matches!(
+        root.rel(rel).reloptkind,
+        types_pathnodes::RELOPT_BASEREL | types_pathnodes::RELOPT_OTHER_MEMBER_REL
+    )
+}
+
+// try_partitionwise_join (joinrels.c).
+fn try_partitionwise_join<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel1: RelId,
+    rel2: RelId,
+    joinrel: RelId,
+    parent_sjinfo: &SpecialJoinInfo<'mcx>,
+    parent_restrictlist: &PgVec<'mcx, types_pathnodes::RinfoId>,
+) -> PgResult<()> {
+    use types_pathnodes::{JOIN_ANTI, JOIN_FULL, JOIN_SEMI};
+    let mcx = run.mcx;
+    let rel1_is_simple = is_simple_rel(&run.root, rel1);
+    let rel2_is_simple = is_simple_rel(&run.root, rel2);
+
+    if run.root.rel(joinrel).part_scheme.is_none() || run.root.rel(joinrel).nparts == 0 {
+        return Ok(());
+    }
+    debug_assert!(run.root.rel(joinrel).consider_partitionwise_join);
+    if !crate::relnode::rel_is_partitioned(&run.root, rel1)
+        || !crate::relnode::rel_is_partitioned(&run.root, rel2)
+    {
+        return Ok(());
+    }
+    debug_assert!(
+        run.root.rel(rel1).consider_partitionwise_join
+            && run.root.rel(rel2).consider_partitionwise_join
+    );
+    debug_assert!(
+        !(run.root.rel(joinrel).partbounds_merged && run.root.rel(joinrel).nparts <= 0)
+    );
+
+    let merged_parts = compute_partition_bounds(run, rel1, rel2, joinrel, parent_sjinfo)?;
+
+    let nparts = run.root.rel(joinrel).nparts;
+    for cnt_parts in 0..nparts.max(0) as usize {
+        let (child_rel1, child_rel2) = match &merged_parts {
+            Some((p1, p2)) => (p1[cnt_parts], p2[cnt_parts]),
+            None => (
+                run.root.rel(rel1).part_rels[cnt_parts],
+                run.root.rel(rel2).part_rels[cnt_parts],
+            ),
+        };
+        let rel1_empty =
+            child_rel1.is_none_or(|r| is_dummy_rel(&run.root, r));
+        let rel2_empty =
+            child_rel2.is_none_or(|r| is_dummy_rel(&run.root, r));
+
+        // Provably empty join segments are skipped outright; these rules
+        // mirror populate_joinrel_with_paths's dummy-input rules.
+        match parent_sjinfo.jointype {
+            JOIN_INNER | JOIN_SEMI => {
+                if rel1_empty || rel2_empty {
+                    continue;
+                }
+            }
+            JOIN_LEFT | JOIN_ANTI => {
+                if rel1_empty {
+                    continue;
+                }
+            }
+            JOIN_FULL => {
+                if rel1_empty && rel2_empty {
+                    continue;
+                }
+            }
+            other => panic!("try_partitionwise_join (joinrels.c): jointype {other}"),
+        }
+
+        // An entirely-pruned child has no paths: reject partitionwise join
+        // unless the segment was eliminated above.
+        let (Some(child_rel1), Some(child_rel2)) = (child_rel1, child_rel2) else {
+            run.root.rel_mut(joinrel).nparts = 0;
+            return Ok(());
+        };
+
+        // A leaf child with consider_partitionwise_join=false is a dummy rel
+        // whose tlist translation was skipped in set_append_rel_size.
+        if rel1_is_simple && !run.root.rel(child_rel1).consider_partitionwise_join {
+            debug_assert!(
+                run.root.rel(child_rel1).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
+            );
+            debug_assert!(is_dummy_rel(&run.root, child_rel1));
+            run.root.rel_mut(joinrel).nparts = 0;
+            return Ok(());
+        }
+        if rel2_is_simple && !run.root.rel(child_rel2).consider_partitionwise_join {
+            debug_assert!(
+                run.root.rel(child_rel2).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
+            );
+            debug_assert!(is_dummy_rel(&run.root, child_rel2));
+            run.root.rel_mut(joinrel).nparts = 0;
+            return Ok(());
+        }
+
+        debug_assert!(!relids_overlap(
+            &run.root.rel(child_rel1).relids,
+            &run.root.rel(child_rel2).relids
+        ));
+
+        let child_sjinfo = build_child_join_sjinfo(run, parent_sjinfo, child_rel1, child_rel2)?;
+
+        let child_relids = relids_union(
+            mcx,
+            &run.root.rel(child_rel1).relids,
+            &run.root.rel(child_rel2).relids,
+        );
+        let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids);
+
+        let mut child_restrictlist: PgVec<'mcx, types_pathnodes::RinfoId> =
+            PgVec::new_in(mcx);
+        for &rid in parent_restrictlist.iter() {
+            child_restrictlist.push(crate::inherit::adjust_child_rinfo(run, rid, &appinfos)?);
+        }
+
+        let child_joinrel = match run.root.rel(joinrel).part_rels[cnt_parts] {
+            Some(cj) => cj,
+            None => {
+                let cj = crate::relnode::build_child_join_rel(
+                    run,
+                    child_rel1,
+                    child_rel2,
+                    joinrel,
+                    &child_restrictlist,
+                    &child_sjinfo,
+                    &appinfos,
+                )?;
+                run.root.rel_mut(joinrel).part_rels[cnt_parts] = Some(cj);
+                {
+                    let lp = run.root.rel_mut(joinrel).live_parts.take();
+                    run.root.rel_mut(joinrel).live_parts =
+                        crate::relnode::relids_add_member(mcx, &lp, cnt_parts as u32);
+                }
+                {
+                    let cj_relids = relids_copy(mcx, &run.root.rel(cj).relids);
+                    let cur = run.root.rel_mut(joinrel).all_partrels.take();
+                    run.root.rel_mut(joinrel).all_partrels =
+                        relids_union(mcx, &cur, &cj_relids);
+                }
+                cj
+            }
+        };
+        debug_assert!(relids_equal(
+            &run.root.rel(child_joinrel).relids,
+            &crate::inherit::adjust_child_relids(mcx, &run.root.rel(joinrel).relids, &appinfos)
+        ));
+
+        populate_joinrel_with_paths(
+            run,
+            child_rel1,
+            child_rel2,
+            child_joinrel,
+            &child_sjinfo,
+            &child_restrictlist,
+        )?;
+        // C frees appinfos/child_relids/child_sjinfo per iteration; ours are
+        // arena-owned and dropped as handles here.
+    }
+    Ok(())
+}
+
+// build_child_join_sjinfo (joinrels.c); free_child_join_sjinfo is subsumed by
+// dropping the returned value.
+fn build_child_join_sjinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parent_sjinfo: &SpecialJoinInfo<'mcx>,
+    left_rel: RelId,
+    right_rel: RelId,
+) -> PgResult<SpecialJoinInfo<'mcx>> {
+    let mcx = run.mcx;
+    let left_relids = relids_copy(mcx, &run.root.rel(left_rel).relids);
+    let right_relids = relids_copy(mcx, &run.root.rel(right_rel).relids);
+    if parent_sjinfo.jointype == JOIN_INNER {
+        debug_assert!(parent_sjinfo.ojrelid == 0);
+        return Ok(init_dummy_sjinfo(run, left_relids, right_relids));
+    }
+    let left_appinfos = crate::inherit::find_appinfos_by_relids(run, &left_relids);
+    let right_appinfos = crate::inherit::find_appinfos_by_relids(run, &right_relids);
+    let mut sjinfo = parent_sjinfo.clone();
+    sjinfo.min_lefthand =
+        crate::inherit::adjust_child_relids(mcx, &sjinfo.min_lefthand, &left_appinfos);
+    sjinfo.min_righthand =
+        crate::inherit::adjust_child_relids(mcx, &sjinfo.min_righthand, &right_appinfos);
+    sjinfo.syn_lefthand =
+        crate::inherit::adjust_child_relids(mcx, &sjinfo.syn_lefthand, &left_appinfos);
+    sjinfo.syn_righthand =
+        crate::inherit::adjust_child_relids(mcx, &sjinfo.syn_righthand, &right_appinfos);
+    // Outer-join relids need no adjustment.
+    let parent_rhs_exprs = sjinfo.semi_rhs_exprs;
+    let mut rhs_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    for &eid in parent_rhs_exprs.iter() {
+        let e = *run.root.expr_node(eid);
+        let tr = crate::inherit::adjust_appendrel_attrs_multi(run, e, &right_appinfos)?;
+        rhs_exprs.push(run.intern_expr(tr));
+    }
+    sjinfo.semi_rhs_exprs = rhs_exprs;
+    Ok(sjinfo)
+}
+
+// compute_partition_bounds (joinrels.c). Returns the pairs lists only when
+// the joinrel's bounds were merged (Some ⇔ partbounds_merged).
+#[allow(clippy::type_complexity)]
+fn compute_partition_bounds<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel1: RelId,
+    rel2: RelId,
+    joinrel: RelId,
+    parent_sjinfo: &SpecialJoinInfo<'mcx>,
+) -> PgResult<Option<(PgVec<'mcx, Option<RelId>>, PgVec<'mcx, Option<RelId>>)>> {
+    let mcx = run.mcx;
+    if run.root.rel(joinrel).nparts == -1 {
+        debug_assert!(
+            run.root.rel(joinrel).boundinfo.is_none()
+                && run.root.rel(joinrel).part_rels.is_empty()
+        );
+        let partnatts =
+            run.root.rel(joinrel).part_scheme.as_ref().unwrap().partnatts as i32;
+        let bounds_equal = !run.root.rel(rel1).partbounds_merged
+            && !run.root.rel(rel2).partbounds_merged
+            && run.root.rel(rel1).nparts == run.root.rel(rel2).nparts
+            && partbounds::partition_bounds_equal(
+                partnatts,
+                &**run.root.rel(rel1).boundinfo.as_ref().unwrap(),
+                &**run.root.rel(rel2).boundinfo.as_ref().unwrap(),
+            );
+        if bounds_equal {
+            let bcopy = (**run.root.rel(rel1).boundinfo.as_ref().unwrap()).clone();
+            let nparts = run.root.rel(rel1).nparts;
+            debug_assert!(nparts > 0);
+            let j = run.root.rel_mut(joinrel);
+            j.boundinfo = Some(mcx::alloc_in(mcx, bcopy)?);
+            j.nparts = nparts;
+            j.part_rels = mcx::vec_from_elem_in(mcx, None, nparts as usize);
+            return Ok(None);
+        }
+
+        let merged = {
+            let scheme = run.root.rel(joinrel).part_scheme.as_ref().unwrap();
+            let mut supfuncs: Vec<types_fmgr::FmgrInfo> =
+                Vec::with_capacity(partnatts as usize);
+            let mut collations: Vec<types_core::Oid> = Vec::with_capacity(partnatts as usize);
+            for i in 0..partnatts as usize {
+                supfuncs.push(fmgr_core::fmgr_info(scheme.partsupfunc[i].fn_oid)?);
+                collations.push(scheme.partcollation[i]);
+            }
+            let image_datum = |img: &types_pathnodes::DatumImage<'_>| match img {
+                types_pathnodes::DatumImage::ByVal(w) => datum::Datum::from_usize(*w),
+                types_pathnodes::DatumImage::Bytes(b) => {
+                    datum::Datum::from_usize(b.as_ptr() as usize)
+                }
+            };
+            let mut cmp = |keycol: usize,
+                           a: &types_pathnodes::DatumImage<'mcx>,
+                           b: &types_pathnodes::DatumImage<'mcx>|
+             -> PgResult<i32> {
+                let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(collations[keycol]);
+                fcinfo.set_arg(0, image_datum(a));
+                fcinfo.set_arg(1, image_datum(b));
+                let r = supfuncs[keycol].invoke(&mut fcinfo)?;
+                assert!(!fcinfo.isnull, "partition comparison function returned NULL");
+                Ok(r.as_i32())
+            };
+            let dummy_flags = |run: &PlannerRun<'mcx>, rel: RelId| {
+                let n = run.root.rel(rel).nparts as usize;
+                let mut v: Vec<bool> = Vec::with_capacity(n);
+                for i in 0..n {
+                    v.push(match run.root.rel(rel).part_rels[i] {
+                        Some(p) => is_dummy_rel(&run.root, p),
+                        None => true,
+                    });
+                }
+                v
+            };
+            let outer_dummy = dummy_flags(run, rel1);
+            let inner_dummy = dummy_flags(run, rel2);
+            let outer = partbounds::MergeRel {
+                nparts: run.root.rel(rel1).nparts,
+                boundinfo: &**run.root.rel(rel1).boundinfo.as_ref().unwrap(),
+                is_dummy: &outer_dummy,
+            };
+            let inner = partbounds::MergeRel {
+                nparts: run.root.rel(rel2).nparts,
+                boundinfo: &**run.root.rel(rel2).boundinfo.as_ref().unwrap(),
+                is_dummy: &inner_dummy,
+            };
+            partbounds::partition_bounds_merge(
+                mcx,
+                partnatts,
+                &mut cmp,
+                &outer,
+                &inner,
+                parent_sjinfo.jointype,
+            )?
+        };
+        let Some(m) = merged else {
+            run.root.rel_mut(joinrel).nparts = 0;
+            return Ok(None);
+        };
+        let nparts = m.outer_parts.len();
+        debug_assert!(nparts > 0);
+        let mut parts1: PgVec<'mcx, Option<RelId>> = PgVec::new_in(mcx);
+        let mut parts2: PgVec<'mcx, Option<RelId>> = PgVec::new_in(mcx);
+        for i in 0..nparts {
+            parts1.push(match m.outer_parts[i] {
+                -1 => None,
+                ix => run.root.rel(rel1).part_rels[ix as usize],
+            });
+            parts2.push(match m.inner_parts[i] {
+                -1 => None,
+                ix => run.root.rel(rel2).part_rels[ix as usize],
+            });
+        }
+        let j = run.root.rel_mut(joinrel);
+        j.boundinfo = Some(mcx::alloc_in(mcx, m.merged_bounds)?);
+        j.nparts = nparts as i32;
+        j.partbounds_merged = true;
+        j.part_rels = mcx::vec_from_elem_in(mcx, None, nparts);
+        Ok(Some((parts1, parts2)))
+    } else {
+        debug_assert!(
+            run.root.rel(joinrel).nparts > 0
+                && run.root.rel(joinrel).boundinfo.is_some()
+                && !run.root.rel(joinrel).part_rels.is_empty()
+        );
+        if run.root.rel(joinrel).partbounds_merged {
+            let pairs = get_matching_part_pairs(run, joinrel, rel1, rel2);
+            debug_assert!(
+                pairs.0.len() == run.root.rel(joinrel).nparts as usize
+                    && pairs.1.len() == run.root.rel(joinrel).nparts as usize
+            );
+            Ok(Some(pairs))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+// get_matching_part_pairs (joinrels.c).
+#[allow(clippy::type_complexity)]
+fn get_matching_part_pairs<'mcx>(
+    run: &PlannerRun<'mcx>,
+    joinrel: RelId,
+    rel1: RelId,
+    rel2: RelId,
+) -> (PgVec<'mcx, Option<RelId>>, PgVec<'mcx, Option<RelId>>) {
+    let mcx = run.mcx;
+    let rel1_is_simple = is_simple_rel(&run.root, rel1);
+    let rel2_is_simple = is_simple_rel(&run.root, rel2);
+    let mut parts1: PgVec<'mcx, Option<RelId>> = PgVec::new_in(mcx);
+    let mut parts2: PgVec<'mcx, Option<RelId>> = PgVec::new_in(mcx);
+    for cnt_parts in 0..run.root.rel(joinrel).nparts as usize {
+        let Some(child_joinrel) = run.root.rel(joinrel).part_rels[cnt_parts] else {
+            // Previously-ignored empty segment: keep it ignored.
+            parts1.push(None);
+            parts2.push(None);
+            continue;
+        };
+        let resolve = |rel: RelId, simple: bool| -> RelId {
+            let child_relids = crate::relnode::relids_intersect(
+                mcx,
+                &run.root.rel(child_joinrel).relids,
+                &run.root.rel(rel).all_partrels,
+            );
+            debug_assert_eq!(
+                crate::relnode::relids_num_members(&child_relids),
+                crate::relnode::relids_num_members(&run.root.rel(rel).relids)
+            );
+            if simple {
+                let varno = crate::relnode::relids_singleton_member(&child_relids)
+                    .expect("simple rel side is a single partition");
+                find_base_rel(&run.root, varno)
+            } else {
+                find_join_rel(&run.root, &child_relids)
+                    .expect("child join rel was built when planning the input join")
+            }
+        };
+        parts1.push(Some(resolve(rel1, rel1_is_simple)));
+        parts2.push(Some(resolve(rel2, rel2_is_simple)));
+    }
+    (parts1, parts2)
+}

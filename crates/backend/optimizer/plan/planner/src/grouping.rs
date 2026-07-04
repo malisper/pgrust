@@ -1706,10 +1706,8 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         for i in crate::relnode::relids_members(&live) {
             let child = run.root.rel(rel_id).part_rels[i as usize]
                 .expect("live partition has a RelOptInfo");
-            let child_rti = run.root.rel(child).relid as usize;
-            let appinfo = run.root.append_rel_array[child_rti]
-                .clone()
-                .expect("child rel has an AppendRelInfo");
+            let child_relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(child).relids);
+            let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids);
             let mut child_targets: mcx::PgVec<'mcx, types_pathnodes::PtId> =
                 mcx::PgVec::new_in(run.mcx);
             for &t in scanjoin_targets.iter() {
@@ -1719,7 +1717,7 @@ fn apply_scanjoin_target_to_paths<'mcx>(
                     mcx::PgVec::new_in(run.mcx);
                 for &eid in src_exprs.iter() {
                     let e = *run.root.expr_node(eid);
-                    let tr = crate::inherit::adjust_appendrel_attrs(run, e, &appinfo)?;
+                    let tr = crate::inherit::adjust_appendrel_attrs_multi(run, e, &appinfos)?;
                     exprs.push(run.intern_expr(tr));
                 }
                 let src = run.root.pathtarget(t);

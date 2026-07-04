@@ -334,19 +334,42 @@ pub fn adjust_appendrel_attrs<'mcx>(
     node: Node<'mcx>,
     appinfo: &AppendRelInfo<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    adjust_appendrel_attrs_multi(run, node, core::slice::from_ref(appinfo))
+}
+
+struct AppinfoMap<'mcx> {
+    parent_relid: u32,
+    child_relid: u32,
+    // 0 attno = dropped parent column.
+    translated: PgVec<'mcx, i16>,
+}
+
+pub fn adjust_appendrel_attrs_multi<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    appinfos: &[AppendRelInfo<'mcx>],
+) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    // The mutator can't re-enter run (appinfo borrows it), so snapshot the
-    // translated Vars up front. 0 attno = dropped parent column.
-    let mut translated: PgVec<'mcx, i16> = PgVec::new_in(mcx);
-    for &tid in appinfo.translated_vars.iter() {
-        if tid == NodeId::default() {
-            translated.push(0);
-        } else {
-            translated.push(run.root.expr_node(tid).as_var().expect("translated var").varattno);
+    debug_assert!(!appinfos.is_empty());
+    // The mutator can't re-enter run (appinfos may borrow it), so snapshot
+    // the translated Vars up front.
+    let mut maps: PgVec<'mcx, AppinfoMap<'mcx>> = PgVec::new_in(mcx);
+    for appinfo in appinfos {
+        let mut translated: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+        for &tid in appinfo.translated_vars.iter() {
+            if tid == NodeId::default() {
+                translated.push(0);
+            } else {
+                translated
+                    .push(run.root.expr_node(tid).as_var().expect("translated var").varattno);
+            }
         }
+        maps.push(AppinfoMap {
+            parent_relid: appinfo.parent_relid,
+            child_relid: appinfo.child_relid,
+            translated,
+        });
     }
-    let parent_relid = appinfo.parent_relid;
-    let child_relid = appinfo.child_relid;
     fn copy_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>) -> PgResult<Var<'mcx>> {
         Ok(Var {
             varno: v.varno,
@@ -365,35 +388,35 @@ pub fn adjust_appendrel_attrs<'mcx>(
     fn mutate<'mcx>(
         mcx: Mcx<'mcx>,
         node: Node<'mcx>,
-        parent_relid: u32,
-        child_relid: u32,
-        translated: &[i16],
+        maps: &[AppinfoMap<'mcx>],
     ) -> PgResult<Option<Node<'mcx>>> {
         match node.node_tag() {
             NodeTag::T_Var => {
                 let v = node.as_var().expect("Var");
-                if v.varlevelsup != 0 || v.varno != parent_relid as i32 {
+                let map = if v.varlevelsup == 0 {
+                    maps.iter().find(|m| v.varno == m.parent_relid as i32)
+                } else {
+                    None
+                };
+                let Some(map) = map else {
                     return Ok(Some(Node::mk(mcx, copy_var(mcx, v)?)?));
-                }
-                assert!(
-                    v.varnullingrels.is_empty(),
-                    "adjust_appendrel_attrs (appendinfo.c): nulled parent Var; \
-                     inherited outer-join lane"
-                );
+                };
                 if v.varattno > 0 {
                     assert!(
-                        (v.varattno as usize) <= translated.len(),
+                        (v.varattno as usize) <= map.translated.len(),
                         "attribute {} of relation does not exist",
                         v.varattno
                     );
-                    let child_attno = translated[v.varattno as usize - 1];
+                    let child_attno = map.translated[v.varattno as usize - 1];
                     assert!(
                         child_attno > 0,
                         "attribute {} of relation does not exist",
                         v.varattno
                     );
+                    // The translated Var carries the parent's varnullingrels
+                    // (child partitions never have their own; C merges).
                     let mut newvar = copy_var(mcx, v)?;
-                    newvar.varno = child_relid as i32;
+                    newvar.varno = map.child_relid as i32;
                     newvar.varattno = child_attno;
                     // C drops syntactic labeling on generated Vars
                     // (appendinfo.c:278).
@@ -408,7 +431,7 @@ pub fn adjust_appendrel_attrs<'mcx>(
                     );
                 } else {
                     let mut newvar = copy_var(mcx, v)?;
-                    newvar.varno = child_relid as i32;
+                    newvar.varno = map.child_relid as i32;
                     newvar.varnosyn = 0;
                     newvar.varattnosyn = 0;
                     Ok(Some(Node::mk(mcx, newvar)?))
@@ -420,12 +443,127 @@ pub fn adjust_appendrel_attrs<'mcx>(
                 "adjust_appendrel_attrs_mutator (appendinfo.c): {:?} arm unported",
                 node.node_tag()
             ),
-            _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
-                mutate(mcx, n, parent_relid, child_relid, translated)
-            }),
+            _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, maps)),
         }
     }
-    Ok(mutate(mcx, node, parent_relid, child_relid, &translated)?.unwrap_or(node))
+    Ok(mutate(mcx, node, &maps)?.unwrap_or(node))
+}
+
+// find_appinfos_by_relids (appendinfo.c); clones since schemes hand these to
+// mutators that can't hold root borrows.
+pub fn find_appinfos_by_relids<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
+) -> PgVec<'mcx, AppendRelInfo<'mcx>> {
+    let mut out: PgVec<'mcx, AppendRelInfo<'mcx>> = PgVec::new_in(run.mcx);
+    for i in crate::relnode::relids_members(relids) {
+        match run.root.append_rel_array.get(i as usize).and_then(|a| a.clone()) {
+            Some(appinfo) => out.push(appinfo),
+            None => {
+                // Outer-join relids carry no appinfo; a baserel missing one
+                // is a bug.
+                let is_baserel = run
+                    .root
+                    .simple_rel_array
+                    .get(i as usize)
+                    .is_some_and(|r| r.is_some());
+                assert!(!is_baserel, "child rel {i} not found in append_rel_array");
+            }
+        }
+    }
+    out
+}
+
+// adjust_child_relids (appendinfo.c).
+pub fn adjust_child_relids<'mcx>(
+    mcx: Mcx<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
+    appinfos: &[AppendRelInfo<'mcx>],
+) -> types_pathnodes::Relids<'mcx> {
+    let mut result = crate::relnode::relids_copy(mcx, relids);
+    for appinfo in appinfos {
+        if crate::relnode::relids_is_member(appinfo.parent_relid as i32, &result) {
+            result = crate::relnode::relids_del_member(mcx, &result, appinfo.parent_relid as i32);
+            result = crate::relnode::relids_add_member(mcx, &result, appinfo.child_relid);
+        }
+    }
+    result
+}
+
+// adjust_appendrel_attrs_multilevel (appendinfo.c).
+#[allow(dead_code)]
+pub fn adjust_appendrel_attrs_multilevel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    mut node: Node<'mcx>,
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<Node<'mcx>> {
+    let parent = run.root.rel(childrel).parent;
+    if parent != Some(parentrel) {
+        let up = parent.expect("childrel is not a child of parentrel");
+        node = adjust_appendrel_attrs_multilevel(run, node, up, parentrel)?;
+    }
+    let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(childrel).relids);
+    let appinfos = find_appinfos_by_relids(run, &relids);
+    adjust_appendrel_attrs_multi(run, node, &appinfos)
+}
+
+// adjust_child_relids_multilevel (appendinfo.c).
+#[allow(dead_code)]
+pub fn adjust_child_relids_multilevel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
+    childrel: RelId,
+    parentrel: RelId,
+) -> types_pathnodes::Relids<'mcx> {
+    if !crate::relnode::relids_overlap(relids, &run.root.rel(parentrel).relids) {
+        return crate::relnode::relids_copy(run.mcx, relids);
+    }
+    let mut relids = crate::relnode::relids_copy(run.mcx, relids);
+    let parent = run.root.rel(childrel).parent;
+    if parent != Some(parentrel) {
+        let up = parent.expect("childrel is not a child of parentrel");
+        relids = adjust_child_relids_multilevel(run, &relids, up, parentrel);
+    }
+    let appinfos = find_appinfos_by_relids(run, &run.root.rel(childrel).relids);
+    adjust_child_relids(run.mcx, &relids, &appinfos)
+}
+
+// The RestrictInfo arm of adjust_appendrel_attrs_mutator (appendinfo.c):
+// flat-copy, translate the clause, adjust the relid sets, reset the cached
+// derivative fields.
+pub fn adjust_child_rinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rid: types_pathnodes::RinfoId,
+    appinfos: &[AppendRelInfo<'mcx>],
+) -> PgResult<types_pathnodes::RinfoId> {
+    let mcx = run.mcx;
+    let mut ri = run.root.rinfo(rid).clone();
+    debug_assert!(ri.orclause.is_none());
+    let clause = *run.root.expr_node(ri.clause);
+    let clause = adjust_appendrel_attrs_multi(run, clause, appinfos)?;
+    ri.clause = run.intern_expr(clause);
+    ri.clause_relids = adjust_child_relids(mcx, &ri.clause_relids, appinfos);
+    ri.required_relids = adjust_child_relids(mcx, &ri.required_relids, appinfos);
+    ri.outer_relids = adjust_child_relids(mcx, &ri.outer_relids, appinfos);
+    ri.left_relids = adjust_child_relids(mcx, &ri.left_relids, appinfos);
+    ri.right_relids = adjust_child_relids(mcx, &ri.right_relids, appinfos);
+    ri.eval_cost.startup = -1.0;
+    ri.norm_selec = -1.0;
+    ri.outer_selec = -1.0;
+    // C keeps left_ec/right_ec (child EC members make the parent EC valid for
+    // the child); eclass-lite has no child members, so fresh ECs are built
+    // from the translated clause instead.
+    ri.left_ec = None;
+    ri.right_ec = None;
+    ri.left_em = None;
+    ri.right_em = None;
+    ri.scansel_cache = PgVec::new_in(mcx);
+    ri.left_bucketsize = -1.0;
+    ri.right_bucketsize = -1.0;
+    ri.left_mcvfreq = -1.0;
+    ri.right_mcvfreq = -1.0;
+    Ok(run.root.alloc_rinfo(ri))
 }
 
 // apply_child_basequals (inherit.c).
@@ -542,4 +680,34 @@ fn add_child_rte<'mcx>(run: &mut PlannerRun<'mcx>, rte_node: Node<'mcx>) -> PgRe
     }
     debug_assert_eq!(run.root.simple_rte_array.len() as u32, rti + 1);
     Ok(rti)
+}
+
+// The RestrictInfo form of adjust_appendrel_attrs_multilevel (appendinfo.c).
+pub fn adjust_child_rinfo_multilevel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rid: types_pathnodes::RinfoId,
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<types_pathnodes::RinfoId> {
+    let mut rid = rid;
+    let parent = run.root.rel(childrel).parent;
+    if parent != Some(parentrel) {
+        let up = parent.expect("childrel is not a child of parentrel");
+        rid = adjust_child_rinfo_multilevel(run, rid, up, parentrel)?;
+    }
+    let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(childrel).relids);
+    let appinfos = find_appinfos_by_relids(run, &relids);
+    adjust_child_rinfo(run, rid, &appinfos)
+}
+
+// The expression form over a NodeId (interned) for multilevel translation.
+pub fn adjust_child_expr_multilevel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    id: types_pathnodes::NodeId,
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<types_pathnodes::NodeId> {
+    let e = *run.root.expr_node(id);
+    let tr = adjust_appendrel_attrs_multilevel(run, e, childrel, parentrel)?;
+    Ok(run.intern_expr(tr))
 }
