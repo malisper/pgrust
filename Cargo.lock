@@ -12973,6 +12973,7 @@ dependencies = [
  "varlena",
  "vars",
  "xact",
+ "xloginsert",
 ]
 
 [[package]]
