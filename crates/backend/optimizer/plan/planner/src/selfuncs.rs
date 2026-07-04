@@ -1117,13 +1117,15 @@ pub fn examine_variable<'mcx>(
         // returns "don't know".
         NodeTag::T_Aggref | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
         // C's general expression leg: a single-rel expression keeps its rel
-        // (tuple-count clamps) but has no stats (extended statistics absent).
+        // and searches expression-index columns for stats.
         _ => {
             let varnos = vars::pull_varnos(run.mcx, node)?;
             if let Some(v) = varnos.get_singleton_member() {
                 if varrelid == 0 || varrelid == v {
+                    let onerel = crate::relnode::find_base_rel(&run.root, v);
                     vardata.var = Some(node_id);
-                    vardata.rel = Some(crate::relnode::find_base_rel(&run.root, v));
+                    vardata.rel = Some(onerel);
+                    examine_expression_index_stats(run, &mut vardata, onerel, v, node)?;
                 }
             }
             Ok(vardata)
@@ -1166,6 +1168,88 @@ fn tle_in_sortlist(tle: &types_nodes::primnodes::TargetEntry<'_>, sortlist: &typ
         && sortlist.iter().any(|n| {
             n.as_sort_group_clause().expect("sortlist cell").tleSortGroupRef == tle_ref
         })
+}
+
+// examine_variable (selfuncs.c) expression legs: expression-index column
+// stats, then extended-statistics expressions (statext_expressions_load is
+// unported — a matching expression statistics object is loud). nullingrels
+// within the expression aren't stripped before matching (PHV/outer-join
+// expression stats keys are unreachable while PHV creation is loud upstream).
+fn examine_expression_index_stats<'mcx>(
+    run: &PlannerRun<'mcx>,
+    vardata: &mut VariableStatData<'mcx>,
+    onerel: RelId,
+    varno: i32,
+    node: Node<'mcx>,
+) -> PgResult<()> {
+    for index in run.root.rel(onerel).indexlist.iter() {
+        if index.indexprs.is_empty() {
+            continue;
+        }
+        let mut indexpr_item = 0usize;
+        for pos in 0..index.ncolumns as usize {
+            if index.indexkeys[pos] != 0 {
+                continue;
+            }
+            assert!(indexpr_item < index.indexprs.len(), "too few entries in indexprs list");
+            let mut indexkey = *run.root.expr_node(index.indexprs[indexpr_item]);
+            indexpr_item += 1;
+            if let Some(r) = indexkey.as_relabel_type() {
+                indexkey = r.arg;
+            }
+            if !types_nodes::equal(node, indexkey) {
+                continue;
+            }
+            if index.unique
+                && index.nkeycolumns == 1
+                && pos == 0
+                && (index.indpred.is_empty() || index.predOK.get())
+            {
+                vardata.isunique = true;
+            }
+            // Stats only from non-partial indexes.
+            if index.indpred.is_empty() {
+                vardata.stats = syscache_seams::lookup_pg_statistic_bundle::call(
+                    run.mcx,
+                    index.indexoid,
+                    (pos + 1) as i16,
+                    false,
+                )?;
+                vardata.acl_ok = if vardata.stats.is_some() {
+                    all_rows_selectable(run, &run.root, varno, None)?
+                } else {
+                    true
+                };
+            }
+            if vardata.stats.is_some() {
+                break;
+            }
+        }
+        if vardata.stats.is_some() {
+            break;
+        }
+    }
+    if vardata.stats.is_none() {
+        for &sid in run.root.rel(onerel).statlist.iter() {
+            let info = run.root.statistic_ext(sid);
+            if info.kind != b'e' as i8 {
+                continue;
+            }
+            for &eid in info.exprs.iter() {
+                let mut expr = *run.root.expr_node(eid);
+                if let Some(r) = expr.as_relabel_type() {
+                    expr = r.arg;
+                }
+                if types_nodes::equal(node, expr) {
+                    panic!(
+                        "examine_variable (selfuncs.c): statext_expressions_load; \
+                         expression-statistics lane"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // examine_simple_variable (selfuncs.c): the STATRELATTINH probe plus the
