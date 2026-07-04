@@ -73,7 +73,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{FuncAliasCols, KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -2383,14 +2383,24 @@ impl<'mcx> Parser<'mcx> {
                 let alias = view.v(1).alias();
                 *yyval = YYSTYPE::FuncAlias(alias, NodeList::nil());
             }
-            1859 => *yyval = YYSTYPE::FuncAlias(None, view.v(3).list()),
-            1860 | 1861 => {
-                let off = if rule == 1860 { 1 } else { 0 };
-                let a = Node::mk_mut(
-                    mcx,
-                    Alias { aliasname: Some(view.v(1 + off).str_val()), colnames: NodeList::nil() },
-                )?;
-                *yyval = YYSTYPE::FuncAlias(Some(a.seal_ref()), view.v(3 + off).list());
+            1859..=1861 => {
+                let (alias, cols) = match rule {
+                    1859 => (None, view.v(3).list()),
+                    1860 | 1861 => {
+                        let off = if rule == 1860 { 1 } else { 0 };
+                        let a = Node::mk_mut(
+                            mcx,
+                            Alias {
+                                aliasname: Some(view.v(1 + off).str_val()),
+                                colnames: NodeList::nil(),
+                            },
+                        )?;
+                        (Some(a.seal_ref()), view.v(3 + off).list())
+                    }
+                    _ => unreachable!(),
+                };
+                let c = mcx::leak_in(mcx::alloc_in(mcx, FuncAliasCols { alias, coldeflist: cols })?);
+                *yyval = YYSTYPE::FuncAliasV(c);
             }
             1862 => {
                 *yyval = YYSTYPE::FuncAlias(None, NodeList::nil());
