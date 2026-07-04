@@ -127,10 +127,33 @@ pub fn get_typdefault<'mcx>(
     if let Some(bin) = defaults.typdefaultbin {
         return Ok(Some(readfuncs::stringToNode(mcx, bin.as_str())?));
     }
-    if defaults.typdefault.is_some() {
-        panic!("get_typdefault({typid}): literal typdefault without typdefaultbin (OidInputFunctionCall arm)");
-    }
-    Ok(None)
+    let Some(str_default) = defaults.typdefault else {
+        return Ok(None);
+    };
+    let io = syscache_seams::pg_type_io_shape::call(typid)?
+        .ok_or_else(|| type_lookup_failed(typid))?;
+    let mut cstr: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, str_default.len() + 1)?;
+    mcx::vec_append_bytes(&mut cstr, str_default.as_bytes())?;
+    mcx::vec_append_bytes(&mut cstr, &[0u8])?;
+    let mut flinfo = fmgr_seams::fmgr_info::call(io.typinput)?;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<3>::fresh(InvalidOid);
+    // SAFETY: mcx outlives the returned Const, which owns the datum.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, datum::Datum::from_usize(cstr.as_ptr() as usize));
+    fcinfo.set_arg(1, datum::Datum::from_oid(getTypeIOParam(&io)));
+    fcinfo.set_arg(2, datum::Datum::from_i32(-1));
+    let d = flinfo.invoke(&mut fcinfo)?;
+    let coll = get_typcollation(typid)?;
+    Ok(Some(types_nodes::Node::mk_const(
+        mcx,
+        typid,
+        -1,
+        coll,
+        io.typlen as i32,
+        d,
+        false,
+        io.typbyval,
+    )?))
 }
 
 pub fn getBaseType(typid: Oid) -> PgResult<Oid> {
