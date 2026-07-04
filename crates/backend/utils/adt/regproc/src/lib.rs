@@ -834,81 +834,13 @@ fn ts_dict_by_name(n: &str, nsp: Oid) -> PgResult<Oid> {
     syscache_seams::lookup_pg_ts_dict_oid_by_name::call(n, nsp)
 }
 
-pub fn regconfigin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
-    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
-        return Ok(Some(handled.unwrap_or(InvalidOid)));
-    }
-    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
-        return Ok(None);
-    };
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let result = ts_search_path_lookup(&refs, ts_config_by_name)?;
-    if !OidIsValid(result) {
-        return ereturn(
-            esc,
-            Some(InvalidOid),
-            PgError::error(format!("text search configuration \"{s}\" does not exist"))
-                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
-        );
-    }
-    Ok(Some(result))
-}
 
-pub fn regdictionaryin(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
-    if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
-        return Ok(Some(handled.unwrap_or(InvalidOid)));
-    }
-    let Some(names) = string_to_qualified_name_list(mcx, s, esc.as_deref_mut())? else {
-        return Ok(None);
-    };
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let result = ts_search_path_lookup(&refs, ts_dict_by_name)?;
-    if !OidIsValid(result) {
-        return ereturn(
-            esc,
-            Some(InvalidOid),
-            PgError::error(format!("text search dictionary \"{s}\" does not exist"))
-                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
-        );
-    }
-    Ok(Some(result))
-}
 
-pub fn regconfigout(mcx: Mcx<'_>, cfgid: Oid) -> PgResult<RegName<'_>> {
-    if cfgid == InvalidOid {
-        return cstr_in(mcx, &[b"-"]);
-    }
-    let Some(shape) = syscache_seams::lookup_pg_ts_config_shape::call(cfgid)? else {
-        return oid_numeric_cstr(mcx, cfgid);
-    };
-    let name = core::str::from_utf8(shape.cfgname.name_str())
-        .map_err(|_| Box::new(PgError::error("pg_ts_config.cfgname is not UTF-8")))?;
-    let visible = ts_search_path_lookup(&[name], ts_config_by_name)? == cfgid;
-    let nspname = if visible {
-        None
-    } else {
-        lsyscache::get_namespace_name(mcx, shape.cfgnamespace)?
-    };
-    quote_qualified(mcx, nspname.as_deref(), name)
-}
 
-pub fn regdictionaryout(mcx: Mcx<'_>, dictid: Oid) -> PgResult<RegName<'_>> {
-    if dictid == InvalidOid {
-        return cstr_in(mcx, &[b"-"]);
-    }
-    let Some(shape) = syscache_seams::lookup_pg_ts_dict_shape::call(mcx, dictid)? else {
-        return oid_numeric_cstr(mcx, dictid);
-    };
-    let name = core::str::from_utf8(shape.dictname.name_str())
-        .map_err(|_| Box::new(PgError::error("pg_ts_dict.dictname is not UTF-8")))?;
-    let visible = ts_search_path_lookup(&[name], ts_dict_by_name)? == dictid;
-    let nspname = if visible {
-        None
-    } else {
-        lsyscache::get_namespace_name(mcx, shape.dictnamespace)?
-    };
-    quote_qualified(mcx, nspname.as_deref(), name)
-}
+
+
+
+
 
 pub fn regtypeout(mcx: Mcx<'_>, typid: Oid) -> PgResult<RegName<'_>> {
     if typid == InvalidOid {

@@ -21,9 +21,7 @@ use types_nodes::parsenodes::ObjectType;
 use types_nodes::rawnodes::FuncCall;
 use types_nodes::{CoercionForm, FuncExpr, NamedArgExpr, Node, NodeList, NodeTag};
 
-pub fn init_seams() {
-    clauses_seams::recheck_cast_function_args::set(recheck_cast_function_args);
-}
+
 
 const FUNC_MAX_ARGS: usize = 100;
 
@@ -1765,6 +1763,7 @@ fn wrong_prokind(template: &str, parts: &[&str], argtypes: &[Oid]) -> PgResult<B
 pub fn init_seams() {
     parse_func_seams::LookupFuncWithArgs::set(lookup_func_with_args_seam);
     parse_func_seams::LookupFuncName::set(lookup_func_name_seam);
+    clauses_seams::recheck_cast_function_args::set(recheck_cast_function_args);
 }
 
 fn lookup_func_with_args_seam(
