@@ -59,6 +59,8 @@ struct BatchSoa<'mcx> {
     // Fused-sort direct key feed: deform this column only, never publish the
     // prefix onto the slot (other prefix cells stay stale).
     key_col: Option<u16>,
+    // Precomputed !qual_only && key_col.is_none(): one test on the store path.
+    publish: bool,
     qual_col: u16,
     qual_cmp: ::execexpr::CmpOp,
     qual_konst: ::datum::Datum,
@@ -213,6 +215,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 qual_armed: qual.is_some(),
                 qual_only: qual_only && qual.is_some(),
                 key_col: None,
+                publish: !(qual_only && qual.is_some()),
                 qual_col: qual.map_or(0, |(a, _, _)| a),
                 qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
                 qual_konst: qual.map_or(::datum::Datum::null(), |(_, _, k)| k),
@@ -268,6 +271,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             qual_armed: false,
             qual_only: false,
             key_col: Some(attnum),
+            publish: false,
             qual_col: 0,
             qual_cmp: ::execexpr::CmpOp::Int4Eq,
             qual_konst: ::datum::Datum::null(),
@@ -380,7 +384,7 @@ pub fn seq_scan_batch_store<'mcx>(
     let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
     ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
     if let Some(b) = node.batch_soa.as_ref() {
-        if !b.qual_only && b.key_col.is_none() {
+        if b.publish {
             ::exectuples::soa_store_prefix(slot, &b.soa, i);
         }
     }
@@ -660,7 +664,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed },
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_only, key_col, qual_col, qual_cmp, qual_konst, sel,
-        nwords, cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, key_col, publish, qual_col, qual_cmp, qual_konst,
+        sel, nwords, cur_word, cur_bits,
     },
 );
