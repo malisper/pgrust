@@ -1651,6 +1651,9 @@ fn expr_type(node: Node<'_>) -> u32 {
         NodeTag::T_ScalarArrayOpExpr => 16,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_RowCompareExpr => 16,
         other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
     }

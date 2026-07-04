@@ -70,6 +70,18 @@ pub fn ExplainQuery<'mcx>(
 ) -> PgResult<()> {
     let mut es = NewExplainState(mcx)?;
     ParseExplainOptionList(&mut es, mcx, &stmt.options)?;
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        // Unported emission arms panic; a panic here unwinds through
+        // plpgsql/SPI callers — gate with a clean error at the boundary.
+        return Err(elog::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "EXPLAIN {:?} output unported (explain non-text format lane)",
+                es.format
+            ))
+            .into_error()
+            .into());
+    }
 
     let query_node = stmt.query.expect("ExplainQuery: stmt->query is NULL");
 
