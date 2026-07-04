@@ -1,8 +1,15 @@
 // typecmds.c DefineDomain lane (CREATE DOMAIN with NOT NULL/CHECK/NULL
-// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner). ALTER
-// DOMAIN, COLLATE, DEFAULT expressions, and inherited base-type defaults are
-// loud.
-#![allow(non_snake_case)]
+// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner) + ALTER
+// DOMAIN/ALTER TYPE lane (alter.rs). COLLATE and inherited base-type
+// defaults are loud.
+#![allow(non_snake_case, non_upper_case_globals)]
+
+mod alter;
+pub use alter::{
+    checkDomainOwner, AlterDomain, AlterTypeNamespace, AlterTypeNamespace_oid,
+    AlterTypeNamespaceInternal, AlterTypeOwner, AlterTypeOwner_oid, AlterTypeOwnerInternal,
+    RenameDomainConstraint, RenameType,
+};
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
@@ -28,10 +35,10 @@ use pg_type::{
 
 const F_DOMAIN_IN: Oid = 2597;
 const F_DOMAIN_RECV: Oid = 2598;
-const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
+pub(crate) const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
 const TYPTYPE_ENUM: i8 = b'e' as i8;
-const TYPTYPE_RANGE: i8 = b'r' as i8;
-const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+pub(crate) const TYPTYPE_RANGE: i8 = b'r' as i8;
+pub(crate) const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 const TYPCATEGORY_ENUM: i8 = b'E' as i8;
 const TYPALIGN_INT: i8 = b'i' as i8;
@@ -44,7 +51,7 @@ const F_ENUM_SEND: Oid = 3533;
 
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
+pub(crate) fn unported(what: &str) -> ! {
     panic!("{what} unported — unit backend-commands-typecmds")
 }
 
@@ -127,7 +134,7 @@ fn base_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<BaseTypeRow> {
     Ok(row)
 }
 
-fn type_name_to_string<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<mcx::PgString<'mcx>> {
+pub(crate) fn type_name_to_string<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<mcx::PgString<'mcx>> {
     let mut s = mcx::PgString::new_in(mcx);
     for (i, n) in tn.names.iter().enumerate() {
         if i > 0 {
@@ -648,7 +655,7 @@ fn constraint_name<'mcx>(
     }
 }
 
-fn domainAddCheckConstraint<'mcx>(
+pub(crate) fn domainAddCheckConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     domain_oid: Oid,
     domain_namespace: Oid,
@@ -656,7 +663,7 @@ fn domainAddCheckConstraint<'mcx>(
     typ_mod: i32,
     constr: &Constraint<'mcx>,
     domain_name: &str,
-) -> PgResult<Oid> {
+) -> PgResult<(Oid, mcx::PgString<'mcx>)> {
     debug_assert!(constr.contype == ConstrType::CONSTR_CHECK);
     let conname =
         constraint_name(mcx, domain_oid, domain_namespace, domain_name, constr, "check")?;
@@ -702,10 +709,10 @@ fn domainAddCheckConstraint<'mcx>(
     entry.conbin = Some(ccbin.as_str());
     let ccoid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     parser_small1::free_parsestate(cpstate)?;
-    Ok(ccoid)
+    Ok((ccoid, ccbin))
 }
 
-fn domainAddNotNullConstraint<'mcx>(
+pub(crate) fn domainAddNotNullConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     domain_oid: Oid,
     domain_namespace: Oid,

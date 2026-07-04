@@ -1691,7 +1691,7 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     let rinfo = substitute_false_if_always_false(run, rinfo)?;
     debug_assert!(relids_num_members(&relids) > 1);
     let members = relids.as_ref().expect("multi-member relids");
-    for (i, w) in members.words.iter().enumerate() {
+    for (i, w) in members.word_slice().iter().enumerate() {
         let mut w = *w;
         while w != 0 {
             let relid = (i * 64) as i32 + w.trailing_zeros() as i32;

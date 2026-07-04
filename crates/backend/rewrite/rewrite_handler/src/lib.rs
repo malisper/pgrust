@@ -521,26 +521,20 @@ fn rewriteTargetListIU<'mcx>(
             // Stored generated columns are computed in the executor.
             None
         } else if apply_default {
-            let expr = if att.attidentity != 0 || att.atthasdef {
-                Some(build_column_default(mcx, target_relation, attrno)?)
-            } else if command_type == CmdType::CMD_INSERT {
-                // No stored default: C omits the entry; the planner inserts
-                // the NULL (expand_insert_targetlist).
-                None
-            } else {
-                // UPDATE SET col = DEFAULT with no stored default: explicit
-                // NULL. C wraps coerce_to_domain; CREATE DOMAIN is unreachable
-                // on this base, so the wrapper is dead.
-                Some(types_nodes::Node::mk_const(
+            let expr = match build_column_default(mcx, target_relation, attrno)? {
+                Some(e) => Some(e),
+                // No stored default: C omits the entry for INSERT (the
+                // planner inserts the NULL); UPDATE SET col = DEFAULT sets an
+                // explicit NULL, domain-wrapped.
+                None if command_type == CmdType::CMD_INSERT => None,
+                None => Some(coerce::coerce_null_to_domain(
                     mcx,
                     att.atttypid,
-                    -1,
+                    att.atttypmod,
                     att.attcollation,
                     att.attlen as i32,
-                    datum::Datum::null(),
-                    true,
                     att.attbyval,
-                )?)
+                )?),
             };
             match expr {
                 None => None,
@@ -658,22 +652,21 @@ fn rewriteValuesRTE<'mcx>(
             let att = target_relation.rd_att.attr(attrno - 1);
             // Stored generated columns get the NULL placeholder (C leaves
             // new_expr NULL); the executor recomputes them.
-            let new_expr = if !att.attisdropped
-                && att.attgenerated == 0
-                && (att.atthasdef || att.attidentity != 0)
-            {
+            let default_expr = if !att.attisdropped && att.attgenerated == 0 {
                 build_column_default(mcx, target_relation, attrno)?
             } else {
-                types_nodes::Node::mk_const(
+                None
+            };
+            let new_expr = match default_expr {
+                Some(e) => e,
+                None => coerce::coerce_null_to_domain(
                     mcx,
                     att.atttypid,
-                    -1,
+                    att.atttypmod,
                     att.attcollation,
                     att.attlen as i32,
-                    datum::Datum::null(),
-                    true,
                     att.attbyval,
-                )?
+                )?,
             };
             new_list.lappend(mcx, new_expr)?;
         }
@@ -688,32 +681,42 @@ fn rewriteValuesRTE<'mcx>(
     Ok(())
 }
 
-// build_column_default (rewriteHandler.c), atthasdef arm: the stored adbin
-// deserialized and coerced to the column type. get_typdefault (pg_type
-// typdefaultbin) stays with the domain lane; callers gate on atthasdef.
+// build_column_default (rewriteHandler.c): the stored adbin, else the
+// column type's own default (get_typdefault), coerced to the column type;
+// None is C's NULL return (no default anywhere).
 pub fn build_column_default<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     attrno: usize,
-) -> PgResult<types_nodes::Node<'mcx>> {
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
     let att = rel.rd_att.attr(attrno - 1);
     if att.attidentity != 0 {
         let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32)?;
-        return types_nodes::Node::mk(
+        return Ok(Some(types_nodes::Node::mk(
             mcx,
             types_nodes::primnodes::NextValueExpr { seqid, typeId: att.atttypid },
-        );
+        )?));
     }
-    debug_assert!(att.atthasdef);
-    let constr = rel.rd_att.constr.as_deref();
-    let adbin = constr
-        .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
-        .and_then(|d| d.adbin.as_ref());
-    let adbin = match adbin {
-        Some(s) => s,
-        None => return Err(default_expression_not_found(attrno, rel)),
+    let expr = if att.atthasdef {
+        let constr = rel.rd_att.constr.as_deref();
+        let adbin = constr
+            .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
+            .and_then(|d| d.adbin.as_ref());
+        let adbin = match adbin {
+            Some(s) => s,
+            None => return Err(default_expression_not_found(attrno, rel)),
+        };
+        Some(readfuncs::stringToNode(mcx, adbin.as_str())?)
+    } else {
+        None
     };
-    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    let expr = match expr {
+        Some(e) => e,
+        None => match lsyscache::get_typdefault(mcx, att.atttypid)? {
+            Some(e) => e,
+            None => return Ok(None),
+        },
+    };
     let exprtype = parse_expr::expr_type(expr);
     let pstate = parser_small1::make_parsestate(mcx, None);
     let coerced = coerce::coerce_to_target_type(
@@ -728,7 +731,7 @@ pub fn build_column_default<'mcx>(
         -1,
     )?;
     match coerced {
-        Some(e) => Ok(e),
+        Some(e) => Ok(Some(e)),
         None => Err(default_type_mismatch(att.attname.name_str(), att.atttypid, exprtype)),
     }
 }
@@ -741,7 +744,15 @@ pub fn build_generation_expression<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
     debug_assert!(att.attgenerated != 0);
-    let defexpr = build_column_default(mcx, rel, attrno)?;
+    let defexpr = match build_column_default(mcx, rel, attrno)? {
+        Some(e) => e,
+        None => {
+            let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+            return Err(Box::new(PgError::error(format!(
+                "no generation expression found for column number {attrno} of table \"{relname}\""
+            ))));
+        }
+    };
     let attcollid = att.attcollation;
     if attcollid != InvalidOid && attcollid != nodes_core::node_funcs::expr_collation(defexpr) {
         return Node::mk(
