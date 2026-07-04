@@ -118,39 +118,23 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_CommentStmt => CMDTAG_COMMENT,
         T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
         T_CopyStmt => CMDTAG_COPY,
-        // AlterObjectTypeCommandTag over stmt->renameType; ported grammar
-        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table / OBJECT_POLICY.
+        // AlterObjectTypeCommandTag over renameType (relationType for columns).
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
                 .expect("RenameStmt");
-            match stmt.renameType {
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLE
-                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN
-                | types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
-                    CMDTAG_ALTER_TABLE
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_POLICY => CMDTAG_ALTER_POLICY,
-                types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => CMDTAG_ALTER_DATABASE,
-                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
-                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
-                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
-                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
-                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
-                types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION => {
-                    CMDTAG_ALTER_PUBLICATION
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
-                    CMDTAG_ALTER_SUBSCRIPTION
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
-                | types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
-                    CMDTAG_ALTER_DOMAIN
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
-                    CMDTAG_ALTER_TABLESPACE
-                }
-                _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
+            let objtype = if stmt.renameType
+                == types_nodes::parsenodes::ObjectType::OBJECT_COLUMN
+                && stmt.relationType != types_nodes::parsenodes::ObjectType::OBJECT_TABLE
+                && stmt.relationType as i32 != 0
+            {
+                stmt.relationType
+            } else {
+                stmt.renameType
+            };
+            match alter_object_type_command_tag(objtype) {
+                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "RenameStmt non-table"),
+                tag => tag,
             }
         }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
@@ -158,34 +142,16 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
                 .expect("AlterObjectSchemaStmt");
-            match stmt.objectType {
-                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => CMDTAG_ALTER_DOMAIN,
-                types_nodes::parsenodes::ObjectType::OBJECT_TYPE => CMDTAG_ALTER_TYPE,
-                _ => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
+            match alter_object_type_command_tag(stmt.objectType) {
+                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
+                tag => tag,
             }
         }
         T_AlterOwnerStmt => {
-            let stmt = parsetree
-                .as_alter_owner_stmt()
-                .expect("AlterOwnerStmt");
-            match stmt.objectType {
-                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
-                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
-                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
-                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
-                types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION => {
-                    CMDTAG_ALTER_PUBLICATION
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
-                    CMDTAG_ALTER_SUBSCRIPTION
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => CMDTAG_ALTER_DOMAIN,
-                types_nodes::parsenodes::ObjectType::OBJECT_TYPE => CMDTAG_ALTER_TYPE,
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
-                    CMDTAG_ALTER_TABLESPACE
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => CMDTAG_ALTER_DATABASE,
-                _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+            let stmt = parsetree.as_alter_owner_stmt().expect("AlterOwnerStmt");
+            match alter_object_type_command_tag(stmt.objectType) {
+                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+                tag => tag,
             }
         }
         T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
@@ -414,5 +380,51 @@ fn tag_for_command_type(
                 .finish(loc("CreateCommandTag"));
             CMDTAG_UNKNOWN
         }
+    }
+}
+
+// AlterObjectTypeCommandTag (utility.c); classes whose grammar cannot reach
+// the ported dispatch yet fall through to the payload gap at the call sites.
+fn alter_object_type_command_tag(objtype: types_nodes::parsenodes::ObjectType) -> CommandTag {
+    use types_nodes::parsenodes::ObjectType::*;
+    match objtype {
+        OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+        OBJECT_ATTRIBUTE | OBJECT_TYPE => CMDTAG_ALTER_TYPE,
+        OBJECT_COLUMN | OBJECT_TABLE | OBJECT_TABCONSTRAINT => CMDTAG_ALTER_TABLE,
+        OBJECT_COLLATION => CMDTAG_ALTER_COLLATION,
+        OBJECT_CONVERSION => CMDTAG_ALTER_CONVERSION,
+        OBJECT_DATABASE => CMDTAG_ALTER_DATABASE,
+        OBJECT_DOMAIN | OBJECT_DOMCONSTRAINT => CMDTAG_ALTER_DOMAIN,
+        OBJECT_EXTENSION => CMDTAG_ALTER_EXTENSION,
+        OBJECT_EVENT_TRIGGER => CMDTAG_ALTER_EVENT_TRIGGER,
+        OBJECT_FDW => CMDTAG_ALTER_FOREIGN_DATA_WRAPPER,
+        OBJECT_FOREIGN_SERVER => CMDTAG_ALTER_SERVER,
+        OBJECT_FOREIGN_TABLE => CMDTAG_ALTER_FOREIGN_TABLE,
+        OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
+        OBJECT_INDEX => CMDTAG_ALTER_INDEX,
+        OBJECT_LANGUAGE => CMDTAG_ALTER_LANGUAGE,
+        OBJECT_LARGEOBJECT => CMDTAG_ALTER_LARGE_OBJECT,
+        OBJECT_MATVIEW => CMDTAG_ALTER_MATERIALIZED_VIEW,
+        OBJECT_OPCLASS => CMDTAG_ALTER_OPERATOR_CLASS,
+        OBJECT_OPERATOR => CMDTAG_ALTER_OPERATOR,
+        OBJECT_OPFAMILY => CMDTAG_ALTER_OPERATOR_FAMILY,
+        OBJECT_POLICY => CMDTAG_ALTER_POLICY,
+        OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+        OBJECT_PUBLICATION => CMDTAG_ALTER_PUBLICATION,
+        OBJECT_ROLE => CMDTAG_ALTER_ROLE,
+        OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+        OBJECT_RULE => CMDTAG_ALTER_RULE,
+        OBJECT_SCHEMA => CMDTAG_ALTER_SCHEMA,
+        OBJECT_SEQUENCE => CMDTAG_ALTER_SEQUENCE,
+        OBJECT_SUBSCRIPTION => CMDTAG_ALTER_SUBSCRIPTION,
+        OBJECT_TABLESPACE => CMDTAG_ALTER_TABLESPACE,
+        OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
+        OBJECT_TSCONFIGURATION => CMDTAG_ALTER_TEXT_SEARCH_CONFIGURATION,
+        OBJECT_TSDICTIONARY => CMDTAG_ALTER_TEXT_SEARCH_DICTIONARY,
+        OBJECT_TSPARSER => CMDTAG_ALTER_TEXT_SEARCH_PARSER,
+        OBJECT_TSTEMPLATE => CMDTAG_ALTER_TEXT_SEARCH_TEMPLATE,
+        OBJECT_VIEW => CMDTAG_ALTER_VIEW,
+        OBJECT_STATISTIC_EXT => CMDTAG_ALTER_STATISTICS,
+        _ => CMDTAG_UNKNOWN,
     }
 }
