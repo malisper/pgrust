@@ -1183,7 +1183,24 @@ fn prepare_temp_tablespaces_seam() -> PgResult<()> {
     PrepareTempTablespaces(ctx.mcx())
 }
 
+thread_local! {
+    static DEFAULT_TABLESPACE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn default_tablespace_guc() -> Option<String> {
+    DEFAULT_TABLESPACE.with(|c| c.borrow().clone())
+}
+
+fn set_default_tablespace_guc(value: Option<String>) {
+    DEFAULT_TABLESPACE.with(|c| *c.borrow_mut() = value);
+}
+
 pub fn init_seams() {
+    guc_tables::vars::default_tablespace.install(guc_tables::GucVarAccessors {
+        get: default_tablespace_guc,
+        set: set_default_tablespace_guc,
+    });
     tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
     tablespace_seams::get_tablespace_oid::set(get_tablespace_oid);
     tablespace_seams::tblspc_redo::set(tblspc_redo);
