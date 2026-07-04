@@ -619,6 +619,32 @@ fc_int_avg_accum! {
     fc_int4_avg_accum: as_i32;
 }
 
+// int2/int4_avg_accum_inv (numeric.c): the moving-aggregate inverse over the
+// int8[2] {count,sum} transarray.
+macro_rules! fc_int_avg_accum_inv {
+    ($($fc:ident: $get:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let newval = fcinfo.args_n::<2>()[1].value.$get() as i64;
+            // SAFETY: strict fn — arg 0 is a non-null _int8 array; the agg
+            // lane hands the aggcontext-lived, MAXALIGNed transvalue.
+            let in_agg = unsafe { fcinfo.agg_context() }.is_some();
+            // SAFETY: as above.
+            let td = unsafe { int8_transarray(fcinfo, !in_agg)? };
+            // SAFETY: validated 2-slot int8 payload behind td.
+            unsafe {
+                *td -= 1;
+                *td.add(1) -= newval;
+                Ok(Datum::from_usize(td.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
+            }
+        }
+    )*};
+}
+
+fc_int_avg_accum_inv! {
+    fc_int2_avg_accum_inv: as_i16;
+    fc_int4_avg_accum_inv: as_i32;
+}
+
 pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null _int8 array transvalue.
     let td = unsafe { int8_transarray(fcinfo, false)? };
@@ -928,6 +954,8 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3568, "int4_accum_inv", 2, false, fc_int4_accum_inv),
     b(3569, "int8_accum_inv", 2, false, fc_int8_accum_inv),
     b(3387, "int8_avg_accum_inv", 2, false, fc_int8_avg_accum_inv),
+    b(3570, "int2_avg_accum_inv", 2, true, fc_int2_avg_accum_inv),
+    b(3571, "int4_avg_accum_inv", 2, true, fc_int4_avg_accum_inv),
     b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
     b(2917, "numerictypmodin", 1, true, fc_numerictypmodin),
     b(3178, "numeric_sum", 1, false, fc_numeric_sum),

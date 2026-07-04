@@ -796,6 +796,92 @@ pub fn timestamp_mi_interval(timestamp: Timestamp, span: &Interval) -> PgResult<
     timestamp_pl_interval(timestamp, &tspan)
 }
 
+// IntervalAggState (timestamp.c): INTERNAL agg state for avg/sum(interval);
+// infinities counted outside N.
+#[repr(C)]
+#[derive(Default)]
+pub struct IntervalAggState {
+    pub n: i64,
+    pub sum_x: Interval,
+    pub p_infcount: i64,
+    pub n_infcount: i64,
+}
+
+pub fn do_interval_accum(state: &mut IntervalAggState, newval: &Interval) -> PgResult<()> {
+    if newval.is_nobegin() {
+        state.n_infcount += 1;
+        return Ok(());
+    }
+    if newval.is_noend() {
+        state.p_infcount += 1;
+        return Ok(());
+    }
+    state.sum_x = finite_interval_pl(&state.sum_x, newval)?;
+    state.n += 1;
+    Ok(())
+}
+
+pub fn do_interval_discard(state: &mut IntervalAggState, newval: &Interval) -> PgResult<()> {
+    if newval.is_nobegin() {
+        state.n_infcount -= 1;
+        return Ok(());
+    }
+    if newval.is_noend() {
+        state.p_infcount -= 1;
+        return Ok(());
+    }
+    state.n -= 1;
+    if state.n > 0 {
+        state.sum_x = finite_interval_mi(&state.sum_x, newval)?;
+    } else {
+        debug_assert!(state.n == 0);
+        state.sum_x = Interval::default();
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn interval_agg_out_of_range() -> Box<PgError> {
+    Box::new(
+        PgError::error("interval out of range")
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+pub fn interval_agg_total_count(state: &IntervalAggState) -> i64 {
+    state.n + state.p_infcount + state.n_infcount
+}
+
+pub fn interval_avg_final(state: &IntervalAggState) -> PgResult<Option<Interval>> {
+    if interval_agg_total_count(state) == 0 {
+        return Ok(None);
+    }
+    if state.p_infcount > 0 || state.n_infcount > 0 {
+        if state.p_infcount > 0 && state.n_infcount > 0 {
+            return Err(interval_agg_out_of_range());
+        }
+        return Ok(Some(if state.p_infcount > 0 { Interval::NOEND } else { Interval::NOBEGIN }));
+    }
+    Ok(Some(interval_div(&state.sum_x, state.n as f64)?))
+}
+
+pub fn interval_sum_final(state: &IntervalAggState) -> PgResult<Option<Interval>> {
+    if interval_agg_total_count(state) == 0 {
+        return Ok(None);
+    }
+    if state.p_infcount > 0 && state.n_infcount > 0 {
+        return Err(interval_agg_out_of_range());
+    }
+    Ok(Some(if state.p_infcount > 0 {
+        Interval::NOEND
+    } else if state.n_infcount > 0 {
+        Interval::NOBEGIN
+    } else {
+        state.sum_x
+    }))
+}
+
 #[cold]
 #[inline(never)]
 fn invalid_in_range_offset() -> Box<PgError> {

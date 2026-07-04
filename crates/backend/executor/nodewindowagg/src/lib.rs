@@ -316,6 +316,26 @@ fn get_agg_init_val(mcx: ::mcx::Mcx<'_>, text: &str, transtype: Oid) -> PgResult
     }
 }
 
+// C build_aggregate_transfn_expr/fmgr_info_set_expr: transfn arg types
+// [transtype, inputs...] ride fn_expr as the AggFnArgTypes carrier.
+fn erased_agg_argtypes<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    transtype: Oid,
+    args: &NodeList<'mcx>,
+) -> PgResult<::types_core::fmgr::FnExprErased> {
+    let mut argtypes: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, args.len() + 1)?;
+    argtypes.push(transtype);
+    for a in args.iter() {
+        argtypes.push(expr_type(a));
+    }
+    // SAFETY: arena-backed for the query; the carrier FmgrInfos die with the
+    // plan they serve (execexpr's ExecBuildAggTrans precedent).
+    let leaked: &'static [Oid] = unsafe { core::mem::transmute(argtypes.leak()) };
+    let carrier = ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(leaked))?;
+    // SAFETY: as above.
+    Ok(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) })
+}
+
 fn make_agg_state_node<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     ctx: MemoryContext,
@@ -492,6 +512,7 @@ pub fn exec_init_window_agg<'mcx>(
     let mut trans_collid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_typlen: PgVec<'mcx, i16> = PgVec::new_in(mcx);
     let mut trans_byval: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    let mut trans_argtypes: PgVec<'mcx, &'mcx [Oid]> = PgVec::new_in(mcx);
     let mut default_final: PgVec<'mcx, DefaultFinal> = PgVec::new_in(mcx);
     let mut peragg_wfuncno: PgVec<'mcx, u16> = PgVec::new_in(mcx);
     let mut peragg: PgVec<'mcx, PerAggData<'mcx>> = PgVec::new_in(mcx);
@@ -539,6 +560,7 @@ pub fn exec_init_window_agg<'mcx>(
                     &mut trans_collid,
                     &mut trans_typlen,
                     &mut trans_byval,
+                    &mut trans_argtypes,
                     &mut default_final,
                 )?;
             } else {
@@ -637,9 +659,7 @@ pub fn exec_init_window_agg<'mcx>(
                 transfn_oid: trans_fnoid[aggno],
                 inputcollid: trans_collid[aggno],
                 init_value_is_null: trans_init[aggno].isnull,
-                // Empty = get_fn_expr_argtype yields InvalidOid; transfns that
-                // need argtypes error loud rather than silently diverge.
-                arg_types: &[],
+                arg_types: trans_argtypes[aggno],
                 args: &agg_specs_args[aggno],
                 aggfilter: None,
                 pergroup: pg,
@@ -831,6 +851,7 @@ fn initialize_peragg_default<'mcx>(
     trans_collid: &mut PgVec<'mcx, Oid>,
     trans_typlen: &mut PgVec<'mcx, i16>,
     trans_byval: &mut PgVec<'mcx, bool>,
+    trans_argtypes: &mut PgVec<'mcx, &'mcx [Oid]>,
     default_final: &mut PgVec<'mcx, DefaultFinal>,
 ) -> PgResult<()> {
     let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
@@ -846,8 +867,22 @@ fn initialize_peragg_default<'mcx>(
     let (translen, byval) = lsyscache::get_typlenbyval(transtype)?;
     trans_typlen.push(translen);
     trans_byval.push(byval);
-    let finalfn =
-        if shape.aggfinalfn != 0 { Some(fmgr_core::fmgr_info(shape.aggfinalfn)?) } else { None };
+    {
+        let mut at: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, wfunc.args.len() + 1)?;
+        at.push(transtype);
+        for a in wfunc.args.iter() {
+            at.push(expr_type(a));
+        }
+        trans_argtypes.push(at.leak());
+    }
+    let erased = erased_agg_argtypes(mcx, transtype, &wfunc.args)?;
+    let finalfn = if shape.aggfinalfn != 0 {
+        let mut f = fmgr_core::fmgr_info(shape.aggfinalfn)?;
+        f.fn_expr = Some(erased);
+        Some(f)
+    } else {
+        None
+    };
     let num_final_args = if shape.aggfinalextra { wfunc.args.len() as u16 + 1 } else { 1 };
     let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;
     default_final.push(DefaultFinal {
@@ -954,17 +989,15 @@ fn initialize_peragg_framed<'mcx>(
     .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
 
     let (trans_typlen, trans_byval) = lsyscache::get_typlenbyval(aggtranstype)?;
-    let kernel;
+    let mut kernel;
     let fn_strict;
     let init_value;
     let mut finalfn = None;
     let mut has_inverse = invtransfn_oid != 0;
     match (transfn_oid, invtransfn_oid) {
-        (F_INT2_AVG_ACCUM, F_INT2_AVG_ACCUM_INV) | (F_INT4_AVG_ACCUM, F_INT4_AVG_ACCUM_INV) => {
-            assert!(
-                finalfn_oid == F_INT2INT4_SUM,
-                "MovingIntSum kernel: unexpected mfinalfn {finalfn_oid}"
-            );
+        (F_INT2_AVG_ACCUM, F_INT2_AVG_ACCUM_INV) | (F_INT4_AVG_ACCUM, F_INT4_AVG_ACCUM_INV)
+            if finalfn_oid == F_INT2INT4_SUM =>
+        {
             assert!(
                 initval.as_ref().map(|s| s.as_str()) == Some("{0,0}"),
                 "MovingIntSum kernel: unexpected minitval {initval:?}"
@@ -1012,6 +1045,18 @@ fn initialize_peragg_framed<'mcx>(
                 None => NullableDatum::null(),
             };
         }
+    }
+    let erased = erased_agg_argtypes(mcx, aggtranstype, &wfunc.args)?;
+    match &mut kernel {
+        AggKernel::Generic { transfn } => transfn.fn_expr = Some(erased),
+        AggKernel::MovingByVal { transfn, invtransfn } => {
+            transfn.fn_expr = Some(erased);
+            invtransfn.fn_expr = Some(erased);
+        }
+        AggKernel::MovingIntSum { .. } => {}
+    }
+    if let Some(f) = finalfn.as_mut() {
+        f.fn_expr = Some(erased);
     }
     let num_final_args = if finalextra { wfunc.args.len() as u16 + 1 } else { 1 };
     let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;
@@ -1542,9 +1587,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
                                 headisnull || !currisnull
                             }
                         } else {
-                            fmgr_core::function_call5_coll(
+                            fmgr_core::function_call5_coll_in(
                                 start_in_range.as_mut().unwrap(),
                                 plan.inRangeColl,
+                                mcx,
                                 headval,
                                 currval,
                                 start_offset_value,
@@ -1770,9 +1816,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
                                 !currisnull
                             }
                         } else {
-                            !fmgr_core::function_call5_coll(
+                            !fmgr_core::function_call5_coll_in(
                                 end_in_range.as_mut().unwrap(),
                                 plan.inRangeColl,
+                                mcx,
                                 tailval,
                                 currval,
                                 end_offset_value,

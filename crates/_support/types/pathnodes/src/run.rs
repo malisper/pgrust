@@ -97,6 +97,10 @@ pub struct PlannerRun<'mcx> {
     pub minmax_subroots: PgVec<'mcx, Option<SubrootState<'mcx>>>,
     /// C qp_extra.activeWindows (WindowClause nodes in execution order).
     pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
+    /// C qp_extra is grouping_planner-local: a nested subquery_planner must
+    /// not clobber the suspended level's activeWindows (stacked alongside
+    /// suspended_roots).
+    pub suspended_active_windows: PgVec<'mcx, PgVec<'mcx, types_nodes::Node<'mcx>>>,
     /// C qp_extra.setop.
     pub qp_setop: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
     /// PlanRowMark store: C shares the nodes by pointer between
@@ -123,8 +127,8 @@ mcx::forget_safe_struct!(
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
-        minmax_subroots, active_windows, qp_setop, rowmarks, gset_data,
-        pending_part_prune_infos },
+        minmax_subroots, active_windows, suspended_active_windows, qp_setop,
+        rowmarks, gset_data, pending_part_prune_infos },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -141,6 +145,7 @@ impl<'mcx> PlannerRun<'mcx> {
             rel_subroots: PgVec::new_in(mcx),
             minmax_subroots: PgVec::new_in(mcx),
             active_windows: PgVec::new_in(mcx),
+            suspended_active_windows: PgVec::new_in(mcx),
             qp_setop: None,
             rowmarks: PgVec::new_in(mcx),
             gset_data: None,
@@ -172,6 +177,8 @@ impl<'mcx> PlannerRun<'mcx> {
         let old = core::mem::replace(&mut self.root, new_root);
         let processed_tlist = self.processed_tlist.take();
         self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        let aw = core::mem::replace(&mut self.active_windows, PgVec::new_in(self.mcx));
+        self.suspended_active_windows.push(aw);
         Ok(())
     }
 
@@ -185,6 +192,8 @@ impl<'mcx> PlannerRun<'mcx> {
         let old = core::mem::replace(&mut self.root, new_root);
         let processed_tlist = self.processed_tlist.take();
         self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        let aw = core::mem::replace(&mut self.active_windows, PgVec::new_in(self.mcx));
+        self.suspended_active_windows.push(aw);
         Ok(())
     }
 
@@ -194,6 +203,8 @@ impl<'mcx> PlannerRun<'mcx> {
         let parent = self.suspended_roots.pop().expect("pop_root_to_minmax_subroot without push");
         let sub = core::mem::replace(&mut self.root, parent.root);
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.active_windows =
+            self.suspended_active_windows.pop().expect("pop without active-windows push");
         self.minmax_subroots.push(Some(SubrootState { root: sub, processed_tlist: sub_tlist }));
         self.minmax_subroots.len() - 1
     }
@@ -221,6 +232,8 @@ impl<'mcx> PlannerRun<'mcx> {
             sub.outer_params = outer;
         }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.active_windows =
+            self.suspended_active_windows.pop().expect("pop without active-windows push");
         self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
         self.subroots.len() - 1
     }
@@ -247,6 +260,8 @@ impl<'mcx> PlannerRun<'mcx> {
             sub.outer_params = outer;
         }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.active_windows =
+            self.suspended_active_windows.pop().expect("pop without active-windows push");
         self.rel_subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
         self.rel_subroots.len() - 1
     }
