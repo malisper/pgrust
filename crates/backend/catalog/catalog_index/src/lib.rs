@@ -595,15 +595,13 @@ pub fn index_create<'mcx>(
     {
         let pg_attribute = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
         let mut indstate = catalog_indexing::CatalogOpenIndexes(mcx, &pg_attribute)?;
-        for i in 0..indexTupDesc.natts as usize {
-            catalog_heap::create::insert_pg_attribute_tuple(
-                mcx,
-                &pg_attribute,
-                indexTupDesc.attr(i),
-                indexRelationId,
-                &mut indstate,
-            )?;
-        }
+        catalog_heap::create::InsertPgAttributeTuples(
+            mcx,
+            &pg_attribute,
+            &indexTupDesc.attrs[..indexTupDesc.natts as usize],
+            indexRelationId,
+            Some(&mut indstate),
+        )?;
         catalog_indexing::CatalogCloseIndexes(indstate)?;
         pg_attribute.close(RowExclusiveLock)?;
     }

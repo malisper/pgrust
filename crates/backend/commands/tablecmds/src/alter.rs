@@ -1124,9 +1124,13 @@ fn ATExecAddColumn<'mcx>(
     let attribute = tupdesc.attrs[0];
 
     let attrdesc = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
-    let mut indstate = catalog_indexing::CatalogOpenIndexes(mcx, &attrdesc)?;
-    catalog_heap::insert_pg_attribute_tuple(mcx, &attrdesc, &attribute, myrelid, &mut indstate)?;
-    catalog_indexing::CatalogCloseIndexes(indstate)?;
+    catalog_heap::InsertPgAttributeTuples(
+        mcx,
+        &attrdesc,
+        core::slice::from_ref(&attribute),
+        myrelid,
+        None,
+    )?;
     attrdesc.close(RowExclusiveLock)?;
 
     let natts = cdesc.natts as usize;

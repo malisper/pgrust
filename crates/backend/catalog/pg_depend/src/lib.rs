@@ -81,16 +81,16 @@ pub fn recordMultipleDependencies<'mcx>(
     }
 
     let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    // C sizeof(FormData_pg_depend) == 28; Rust layout may differ.
+    let max_slots = referenced
+        .len()
+        .min(catalog_indexing::MAX_CATALOG_MULTI_INSERT_BYTES / 28);
     let mut indstate = None;
+    let mut tuples = std::vec::Vec::with_capacity(max_slots);
     for r in referenced {
         if isObjectPinned(r) {
             continue;
         }
-        if indstate.is_none() {
-            indstate = Some(catalog_indexing::CatalogOpenIndexes(mcx, &rel)?);
-        }
-        // C batches through multi-insert slots; per-row inserts write the same
-        // page image (WAL record shape differs).
         let values = [
             Datum::from_oid(depender.classId),
             Datum::from_oid(depender.objectId),
@@ -101,11 +101,27 @@ pub fn recordMultipleDependencies<'mcx>(
             Datum::from_char(behavior.as_char()),
         ];
         let nulls = [false; Natts_pg_depend];
-        let mut tup = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
-        catalog_indexing::CatalogTupleInsertWithInfo(
+        tuples.push(heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?);
+        if tuples.len() == max_slots {
+            if indstate.is_none() {
+                indstate = Some(catalog_indexing::CatalogOpenIndexes(mcx, &rel)?);
+            }
+            catalog_indexing::CatalogTuplesMultiInsertWithInfo(
+                mcx,
+                &rel,
+                core::mem::take(&mut tuples),
+                indstate.as_mut().unwrap(),
+            )?;
+        }
+    }
+    if !tuples.is_empty() {
+        if indstate.is_none() {
+            indstate = Some(catalog_indexing::CatalogOpenIndexes(mcx, &rel)?);
+        }
+        catalog_indexing::CatalogTuplesMultiInsertWithInfo(
             mcx,
             &rel,
-            &mut tup,
+            tuples,
             indstate.as_mut().unwrap(),
         )?;
     }
