@@ -24,6 +24,7 @@ pub fn StorePartitionKey<'mcx>(
     strategy: u8,
     partnatts: i16,
     partattrs: &[AttrNumber],
+    partexprs: &types_nodes::NodeList<'mcx>,
     partopclass: &[Oid],
     partcollation: &[Oid],
 ) -> PgResult<()> {
@@ -55,7 +56,16 @@ pub fn StorePartitionKey<'mcx>(
     values[4] = Datum::from_usize(partattrs_vec.as_ptr() as usize);
     values[5] = Datum::from_usize(partclass_vec.as_ptr() as usize);
     values[6] = Datum::from_usize(partcollation_vec.as_ptr() as usize);
-    nulls[7] = true; // partexprs (expression keys loud upstream)
+    let exprs_node = if partexprs.is_nil() {
+        nulls[7] = true;
+        None
+    } else {
+        let node = types_nodes::Node::mk_list(mcx, partexprs.clone_in(mcx)?)?;
+        let s = outfuncs::nodeToString(mcx, node)?;
+        let text = varlena::cstring_to_text(mcx, s.as_bytes())?;
+        values[7] = Datum::from_usize(text.as_bytes().as_ptr() as usize);
+        Some(node)
+    };
 
     let mut tuple =
         heaptuple::heap_form_tuple(mcx, pg_partitioned_table.descr(), &values, &nulls)?;
@@ -77,13 +87,25 @@ pub fn StorePartitionKey<'mcx>(
         }
     }
     for i in 0..n {
-        debug_assert!(partattrs[i] != 0, "expression keys loud upstream");
+        if partattrs[i] == 0 {
+            continue;
+        }
         let referenced =
             ObjectAddress::sub_set(RELATION_RELATION_ID, rel.rd_id, partattrs[i] as i32);
         pg_depend::recordDependencyOn(
             mcx,
             &referenced,
             &myself,
+            pg_depend::DependencyType::Internal,
+        )?;
+    }
+    if let Some(exprs_node) = exprs_node {
+        pg_depend::recordDependencyOnSingleRelExpr(
+            mcx,
+            &myself,
+            exprs_node,
+            rel.rd_id,
+            pg_depend::DependencyType::Normal,
             pg_depend::DependencyType::Internal,
         )?;
     }

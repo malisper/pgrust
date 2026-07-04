@@ -1199,15 +1199,13 @@ fn ResetReindexState(nest_level: i32) {
     types_rel::reindex::reset_reindex_state(nest_level)
 }
 
-// BuildDummyIndexInfo reduces to BuildIndexInfo here: expression/predicate/
-// exclusion arms (the fields the dummy form skips) are loud inside it.
 fn index_build_dummy<'mcx>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
     isreindex: bool,
 ) -> types_error::PgResult<()> {
-    let mut indexInfo = execindexing::BuildIndexInfo(mcx, index_relation)?;
+    let mut indexInfo = execindexing::BuildDummyIndexInfo(mcx, index_relation)?;
     index_build(mcx, heap_relation, index_relation, &mut indexInfo, isreindex)
 }
 

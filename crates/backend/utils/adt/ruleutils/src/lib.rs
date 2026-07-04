@@ -16,6 +16,18 @@ mod viewdef;
 mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
+
+pub fn init_seams() {
+    ruleutils_seams::deparse_expression::set(deparse_expression_for_seam);
+}
+
+fn deparse_expression_for_seam<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    expr: types_nodes::Node<'mcx>,
+    relid: types_core::Oid,
+) -> types_error::PgResult<String> {
+    deparse::deparse_expression_pretty(mcx, expr, relid, false, 0)
+}
 pub use deparse::deparse_expression_pretty;
 pub use plan::{
     deparse_context_for_plan_tree, deparse_expression, select_rtable_names_for_explain,

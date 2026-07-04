@@ -2780,7 +2780,10 @@ fn exec_insert<'mcx>(
                     mt.router.as_mut().unwrap()
                 }
             };
-            let idx = router.find_partition(slot)?;
+            let idx = router.find_partition(
+                slot,
+                mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+            )?;
             while mt.leaf_indexes.len() <= idx {
                 mt.leaf_indexes.push(None);
                 mt.leaf_checks.push(None);

@@ -37,6 +37,7 @@ pub struct PartitionKeyData {
     pub strategy: i8,
     pub partnatts: i16,
     pub partattrs: PgVec<'static, AttrNumber>,
+    pub partexprs: types_nodes::NodeList<'static>,
     pub partopfamily: PgVec<'static, Oid>,
     pub partopcintype: PgVec<'static, Oid>,
     // std Vec justified: Rc-owned owner structure outside the arenas;
@@ -115,6 +116,29 @@ fn vector_values(d: Datum, elmlen: usize) -> (usize, *const u8) {
     }
 }
 
+// text varlena -> &str, inline images only (partexprs is written inline).
+fn text_to_str(d: Datum) -> &'static str {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: syscache text attribute; toasted/compressed images are loud.
+    unsafe {
+        let b0 = *p;
+        let (len, off) = if b0 & 0x01 != 0 {
+            if b0 == 0x01 {
+                panic!("partcache: toasted partexprs unported");
+            }
+            ((((b0 as usize) >> 1) & 0x7F) - 1, 1)
+        } else {
+            let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
+            if w & 0x02 != 0 {
+                panic!("partcache: compressed partexprs unported");
+            }
+            ((w as usize >> 2) - 4, 4)
+        };
+        core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
+            .expect("non-UTF-8 partexprs")
+    }
+}
+
 pub fn RelationGetPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData>> {
     let relid = rel.rd_id;
     if let Some(k) = with_state(|st| st.keys.get(&relid).map(Rc::clone)) {
@@ -145,6 +169,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     let mut partattrs: PgVec<'static, AttrNumber>;
     let mut partclass: PgVec<'static, Oid> = PgVec::new_in(mcx);
     let mut partcollation: PgVec<'static, Oid> = PgVec::new_in(mcx);
+    let mut partexprs: types_nodes::NodeList<'static> = types_nodes::NodeList::nil();
     {
         strategy = cache_syscache::SysCacheGetAttrNotNull(
             PARTRELID,
@@ -202,13 +227,22 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
                 ));
             }
         }
-        let (_, exprs_null) = cache_syscache::SysCacheGetAttr(
+        let (exprs_d, exprs_null) = cache_syscache::SysCacheGetAttr(
             PARTRELID,
             &tuple,
             Anum_pg_partitioned_table_partexprs,
         )?;
         if !exprs_null {
-            panic!("partcache: expression partition keys unported (relation {relid})");
+            // Parsed and folded directly in the cache mcx (C parses in a temp
+            // context and copyObjects into partkeycxt; fold garbage persists
+            // here the way C's partkeycxt allocations do).
+            let parsed = readfuncs::stringToNode(mcx, text_to_str(exprs_d))?;
+            let list = parsed.as_list().expect("partexprs is a List");
+            for e in list.iter() {
+                let folded = clauses::eval_const_expressions(mcx, e)?;
+                nodes_core::fix_opfuncids(folded)?;
+                partexprs.lappend(mcx, folded)?;
+            }
         }
     }
     cache_syscache::ReleaseSysCache(tuple);
@@ -227,6 +261,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         strategy,
         partnatts,
         partattrs,
+        partexprs: types_nodes::NodeList::nil(),
         partopfamily: mcx::vec_with_capacity_in(mcx, n)?,
         partopcintype: mcx::vec_with_capacity_in(mcx, n)?,
         partsupfunc: Vec::with_capacity(n),
@@ -239,6 +274,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         parttypcoll: mcx::vec_with_capacity_in(mcx, n)?,
     };
 
+    let mut partexprs_item = partexprs.iter();
     for i in 0..n {
         let opclasstup = cache_syscache::SearchSysCache1(
             CLAOID,
@@ -271,16 +307,25 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         ));
 
         let attno = key.partattrs[i];
-        assert!(attno != 0, "expression partition keys unported");
-        let att = rel.descr().attr(attno as usize - 1);
-        key.parttypid.push(att.atttypid);
-        key.parttypmod.push(att.atttypmod);
-        key.parttypcoll.push(att.attcollation);
-        let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(att.atttypid)?;
+        if attno != 0 {
+            let att = rel.descr().attr(attno as usize - 1);
+            key.parttypid.push(att.atttypid);
+            key.parttypmod.push(att.atttypmod);
+            key.parttypcoll.push(att.attcollation);
+        } else {
+            let expr = partexprs_item
+                .next()
+                .unwrap_or_else(|| panic!("wrong number of partition key expressions"));
+            key.parttypid.push(nodes_core::expr_type(expr));
+            key.parttypmod.push(nodes_core::expr_typmod(expr));
+            key.parttypcoll.push(nodes_core::expr_collation(expr));
+        }
+        let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(key.parttypid[i])?;
         key.parttyplen.push(typlen);
         key.parttypbyval.push(typbyval);
         key.parttypalign.push(typalign);
     }
+    key.partexprs = partexprs;
 
     let key = Rc::new(key);
     with_state(|st| st.keys.insert(relid, Rc::clone(&key)));

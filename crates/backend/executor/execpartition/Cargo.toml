@@ -20,6 +20,7 @@ partcache = { path = "../../utils/cache/partcache" }
 partdesc = { path = "../../partitioning/partdesc" }
 table = { path = "../../access/table/table" }
 exectuples = { path = "../exectuples" }
+execexpr = { path = "../execexpr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 types_nodes = { path = "../../../_support/types/nodes" }
