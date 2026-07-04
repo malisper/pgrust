@@ -602,7 +602,7 @@ fn step_footprint_and_program_shapes() {
         assert!(matches!(state.steps()[0], Step::ScanFetchSome { last_var: 1 }));
         assert!(matches!(
             state.steps()[1],
-            Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }
+            Step::ScanVarFuncStrict2Thin { attnum: 0, argno: 0, .. }
         ));
         assert!(matches!(state.steps()[2], Step::Qual { jumpdone: 3 }));
         assert!(matches!(state.steps()[3], Step::DoneReturn));
@@ -1452,10 +1452,10 @@ fn fused_func_chain_evaluates_like_unfused() {
         }
         let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
         assert_eq!(state.steps().len(), 7);
-        assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }));
-        assert!(matches!(state.steps()[2], Step::FuncFuncStrict2 { argno: 0, .. }));
-        assert!(matches!(state.steps()[4], Step::FuncFuncStrict2 { .. }));
-        assert!(matches!(state.steps()[5], Step::FuncExprStrict2 { .. }));
+        assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2Thin { attnum: 0, argno: 0, .. }));
+        assert!(matches!(state.steps()[2], Step::FuncFuncStrict2Thin { argno: 0, .. }));
+        assert!(matches!(state.steps()[4], Step::FuncFuncStrict2Thin { .. }));
+        assert!(matches!(state.steps()[5], Step::FuncExprStrict2Thin { .. }));
         for v in [Some(5), Some(-1000), None] {
             let mut slot = virtual_slot(mcx, &[v]);
             let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
@@ -1492,7 +1492,7 @@ fn fused_two_clause_qual_matches() {
         assert!(state
             .steps()
             .iter()
-            .any(|s| matches!(s, Step::ScanVarFuncStrict2 { .. })));
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. })));
         for (a, b, want) in [
             (Some(-1), Some(6), true),
             (Some(-1), Some(5), false),
@@ -1502,6 +1502,118 @@ fn fused_two_clause_qual_matches() {
         ] {
             assert_eq!(run_qual(mcx, &mut state, &[a, b]), want, "a={a:?} b={b:?}");
         }
+    });
+}
+
+#[test]
+fn thin_fused_chain_overflow_error_intact() {
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(i32::MAX)),
+        )
+        .unwrap();
+        let expr = mk_opexpr(mcx, 177, INT4OID, args);
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. })));
+        let mut slot = virtual_slot(mcx, &[Some(1)]);
+        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        let mut slot = virtual_slot(mcx, &[Some(-1)]);
+        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!((r.isnull, r.value.as_i32()), (false, i32::MAX - 1));
+    });
+}
+
+#[test]
+fn thin_qual_matches_general_path() {
+    with_mcx(|mcx| {
+        // int4lt is thin-registered; the fused qual selects a thin arm and
+        // must agree with the kernel path on every null/value combination.
+        let args =
+            NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 66, BOOLOID, args));
+        state.force_program_kernel();
+        assert!(state.steps().iter().any(|s| matches!(
+            s,
+            Step::FuncStrict2QualThin { .. } | Step::ScanVarFuncStrict2Thin { .. }
+        )));
+        for (v, want) in [(Some(-1), true), (Some(0), false), (Some(1), false), (None, false)] {
+            assert_eq!(run_qual(mcx, &mut state, &[v]), want, "v={v:?}");
+        }
+    });
+}
+
+#[test]
+fn thin_strict1_single_rewrite() {
+    with_mcx(|mcx| {
+        // int4um (212) is thin-registered at arity 1 and errors on INT32_MIN.
+        let args = NodeList::make1(mcx, mk_scan_var(mcx, 1, INT4OID)).unwrap();
+        let expr = mk_opexpr(mcx, 212, INT4OID, args);
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        state.force_program_kernel();
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::FuncExprStrict1Thin { .. })));
+        for (v, want) in [(Some(5), Some(-5)), (None, None)] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            match want {
+                Some(x) => assert_eq!((r.isnull, r.value.as_i32()), (false, x)),
+                None => assert!(r.isnull),
+            }
+        }
+        let mut slot = virtual_slot(mcx, &[Some(i32::MIN)]);
+        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    });
+}
+
+#[test]
+fn thin_agg_count_star_kernel() {
+    use core::ptr::NonNull;
+
+    use crate::compile::{exec_build_agg_trans, AggTransSpec};
+    use crate::steps::AggPerGroup;
+
+    with_mcx(|mcx| {
+        let mut pergroup = [AggPerGroup {
+            trans_value: Datum::from_i64(0),
+            trans_value_is_null: false,
+            no_trans_value: false,
+        }];
+        let base = NonNull::new(pergroup.as_mut_ptr()).unwrap();
+        let empty_args = NodeList::nil();
+        let specs = [AggTransSpec {
+            arg_types: &[],
+            transtype_byval: true,
+            transtype_len: 8,
+            transfn_oid: 1219,
+            inputcollid: 0,
+            init_value_is_null: false,
+            args: &empty_args,
+            aggfilter: None,
+            pergroup: base,
+            ordered: None,
+        }];
+        let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
+        assert!(matches!(trans.kernel(), Kernel::AggTransByValThin { strict: true, .. }));
+        for _ in 0..3 {
+            let mut slots = EvalSlots::default();
+            crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
+        }
+        assert_eq!(pergroup[0].trans_value.as_i64(), 3);
+        assert!(!pergroup[0].trans_value_is_null);
     });
 }
 

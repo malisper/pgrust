@@ -394,6 +394,7 @@ struct PgIndexRow {
     indclass: Vec<Oid>,
     indoption: Vec<i16>,
     has_exprs: bool,
+    indexprs_src: Option<String>,
     has_pred: bool,
 }
 
@@ -416,6 +417,7 @@ fn pg_index_row(indexrelid: Oid) -> PgResult<Option<PgIndexRow>> {
         indclass: oid_array_at(notnull(ANUM_PG_INDEX_INDCLASS)),
         indoption: i16_array_at(notnull(ANUM_PG_INDEX_INDOPTION)),
         has_exprs: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDEXPRS).is_some(),
+        indexprs_src: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDEXPRS).map(text_at),
         has_pred: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDPRED).is_some(),
     };
     drop(t);
@@ -510,6 +512,38 @@ pub fn pg_get_indexdef_worker(
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
+    pg_get_indexdef_worker_extended(
+        mcx, indexrelid, colno, attrs_only, false, pretty_flags, missing_ok,
+    )
+}
+
+/// pg_get_indexdef_columns_extended's RULE_INDEXDEF_KEYS_ONLY arm
+/// (BuildIndexValueDescription's column list).
+pub fn pg_get_indexdef_columns_keys_only(
+    mcx: Mcx<'_>,
+    indexrelid: Oid,
+) -> PgResult<Option<String>> {
+    pg_get_indexdef_worker_extended(
+        mcx,
+        indexrelid,
+        0,
+        true,
+        true,
+        PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pg_get_indexdef_worker_extended(
+    mcx: Mcx<'_>,
+    indexrelid: Oid,
+    colno: i32,
+    attrs_only: bool,
+    keys_only: bool,
+    pretty_flags: i32,
+    missing_ok: bool,
+) -> PgResult<Option<String>> {
     let Some(idx) = pg_index_row(indexrelid)? else {
         if missing_ok {
             return Ok(None);
@@ -519,12 +553,17 @@ pub fn pg_get_indexdef_worker(
     let idxrel =
         pg_class_row(indexrelid)?.ok_or_else(|| cache_lookup_failed("relation", indexrelid))?;
     let amname = pg_am_name(idxrel.relam)?;
-    if idxrel.relam != BTREE_AM_OID {
+    if idxrel.relam != BTREE_AM_OID && !attrs_only {
         gap("pg_get_indexdef", &format!("non-btree index (am \"{amname}\")"));
     }
-    if idx.has_exprs {
-        gap("pg_get_indexdef", "expression index columns");
+    let mut indexpr_items: std::vec::Vec<types_nodes::Node<'_>> = std::vec::Vec::new();
+    if let Some(src) = idx.indexprs_src.as_deref() {
+        let node = readfuncs::stringToNode(mcx, src)?;
+        for e in node.as_list().expect("indexprs is a List").iter() {
+            indexpr_items.push(e);
+        }
     }
+    let mut indexpr_next = 0usize;
 
     let mut buf = String::new();
     if !attrs_only {
@@ -544,7 +583,8 @@ pub fn pg_get_indexdef_worker(
     }
 
     let mut sep = "";
-    for keyno in 0..idx.indnatts as usize {
+    let natts = if keys_only { idx.indnkeyatts as usize } else { idx.indnatts as usize };
+    for keyno in 0..natts {
         let attnum = idx.indkey[keyno];
         if colno == 0 && keyno == idx.indnkeyatts as usize {
             buf.push_str(") INCLUDE (");
@@ -554,16 +594,37 @@ pub fn pg_get_indexdef_worker(
             buf.push_str(sep);
         }
         sep = ", ";
-        if attnum == 0 {
-            gap("pg_get_indexdef", "expression index column");
+        let (keycoltype, keycolcollation);
+        if attnum != 0 {
+            let attname = lsyscache::get_attname(mcx, idx.indrelid, attnum, false)?
+                .expect("get_attname missing_ok=false");
+            if colno == 0 || colno == keyno as i32 + 1 {
+                buf.push_str(&quote_identifier(attname.as_str()));
+            }
+            let (t, _, c) = lsyscache::get_atttypetypmodcoll(idx.indrelid, attnum)?;
+            keycoltype = t;
+            keycolcollation = c;
+        } else {
+            let indexkey = *indexpr_items
+                .get(indexpr_next)
+                .expect("too few entries in indexprs list");
+            indexpr_next += 1;
+            keycoltype = parse_expr::expr_type(indexkey);
+            keycolcollation = parse_expr::expr_collation(indexkey);
+            if colno == 0 || colno == keyno as i32 + 1 {
+                let str = deparse::deparse_expression_pretty(
+                    mcx, indexkey, idx.indrelid, false, pretty_flags,
+                )?;
+                if looks_like_function(indexkey) {
+                    buf.push_str(&str);
+                } else {
+                    buf.push('(');
+                    buf.push_str(&str);
+                    buf.push(')');
+                }
+            }
         }
-        let attname = lsyscache::get_attname(mcx, idx.indrelid, attnum, false)?
-            .expect("get_attname missing_ok=false");
-        if colno == 0 || colno == keyno as i32 + 1 {
-            buf.push_str(&quote_identifier(attname.as_str()));
-        }
-        let (keycoltype, _, keycolcollation) =
-            lsyscache::get_atttypetypmodcoll(idx.indrelid, attnum)?;
+        let _ = keycolcollation;
 
         if !attrs_only
             && keyno < idx.indnkeyatts as usize
@@ -602,6 +663,23 @@ pub fn pg_get_indexdef_worker(
         }
     }
     Ok(Some(buf))
+}
+
+pub fn init_seams() {
+    genam_seams::pg_get_indexdef_columns_keys_only::set(pg_get_indexdef_columns_keys_only);
+}
+
+// looks_like_function (ruleutils.c): node types that deparse as func(...).
+fn looks_like_function(node: types_nodes::Node<'_>) -> bool {
+    use types_nodes::NodeTag::*;
+    match node.node_tag() {
+        T_FuncExpr => node
+            .as_func_expr()
+            .map(|f| f.funcformat == types_nodes::CoercionForm::COERCE_EXPLICIT_CALL)
+            .unwrap_or(false),
+        T_NullIfExpr | T_CoalesceExpr | T_MinMaxExpr | T_SQLValueFunction | T_XmlExpr => true,
+        _ => false,
+    }
 }
 
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;

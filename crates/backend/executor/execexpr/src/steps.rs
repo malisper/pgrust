@@ -109,6 +109,10 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL; `frame` is an argless FuncFrame
+    // carried only for its armed per-eval mcx (detoast scratch).
+    NullTestRowIsNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
+    NullTestRowIsNotNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
     // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
     // element table (and its hash FuncCall) lives in state.saop_tables.
     HashedScalarArrayOp {
@@ -235,6 +239,29 @@ pub enum Step {
         transno: u16,
     },
     AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
+    // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
+    FuncExprStrict1Thin { call: CallThin, out: OutRef },
+    FuncExprStrict2Thin { call: CallThin, out: OutRef },
+    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    FuncFuncStrict2Thin { call1: CallThin, argno: u8, call2: CallThin, out: OutRef },
+    FuncStrict2QualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
+    NotDistinctQualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    AggTransStrictByValIndirectThin {
+        call: CallThin,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+}
+
+// C ExprEvalStep d.nulltest_row.rowcache: last-seen rowtype's tupdesc,
+// refreshed from typcache when the header's (type, typmod) changes. `mcx` is
+// the compile mcx restamped 'static; it outlives every eval of this step.
+pub struct RowNullState {
+    pub tup_type: Oid,
+    pub tup_typmod: i32,
+    pub desc: Option<NonNull<::types_tuple::TupleDescData<'static>>>,
+    pub mcx: Mcx<'static>,
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -286,6 +313,13 @@ pub struct IoCoerceCalls {
 pub struct Call2 {
     pub(crate) fcinfo: NonNull<u8>,
     pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+// Call2 with the thin fn resolved in place of the FmgrInfo indirection.
+#[derive(Clone, Copy, Debug)]
+pub struct CallThin {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) f: ::types_fmgr::PGFunctionThin,
 }
 
 impl From<FuncCall> for Call2 {
@@ -644,6 +678,7 @@ pub enum Kernel {
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
     AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
+    AggTransByValThin { call: CallThin, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
 const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);

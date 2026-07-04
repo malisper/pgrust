@@ -35,6 +35,8 @@ typcache = { path = "../../utils/cache/typcache" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }
 adt_rangetypes = { path = "../../utils/adt/rangetypes" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+detoast = { path = "../../access/common/detoast" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }

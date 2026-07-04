@@ -35,10 +35,10 @@ pub use temp::{
 };
 
 pub use lookup::{
-    get_collation_oid, get_collation_oid_list, get_namespace_oid, CheckSetNamespace,
-    DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates, FuncnameGetCandidatesExtended,
-    LookupCreationNamespace, LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate,
-    OpernameGetCandidates,
+    get_collation_oid, get_collation_oid_list, get_namespace_oid, get_ts_config_oid,
+    get_ts_dict_oid, CheckSetNamespace, DeconstructQualifiedName, FuncCandidate,
+    FuncnameGetCandidates, FuncnameGetCandidatesExtended, LookupCreationNamespace,
+    LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
     OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
     TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
@@ -244,6 +244,20 @@ fn namespace_search_path_set(value: Option<String>) {
     NAMESPACE_SEARCH_PATH.with(|s| *s.borrow_mut() = value);
 }
 
+fn opername_get_candidate_oids<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    names: &[&str],
+    oprkind: i8,
+    missing_schema_ok: bool,
+) -> types_error::PgResult<mcx::PgVec<'mcx, types_core::Oid>> {
+    let cands = lookup::OpernameGetCandidates(mcx, names, oprkind, missing_schema_ok)?;
+    let mut oids = mcx::PgVec::new_in(mcx);
+    for c in cands.iter() {
+        oids.push(c.oid);
+    }
+    Ok(oids)
+}
+
 pub fn init_seams() {
     namespace_seams::range_var_get_relid::set(seam_range_var_get_relid);
     namespace_seams::at_eoxact_namespace::set(AtEOXact_Namespace);
@@ -255,6 +269,11 @@ pub fn init_seams() {
     namespace_seams::initialize_search_path::set(InitializeSearchPath);
     namespace_seams::fetch_search_path::set(fetch_search_path);
     namespace_seams::find_default_conversion_proc::set(lookup::FindDefaultConversionProc);
+    namespace_seams::get_collation_oid::set(lookup::get_collation_oid);
+    namespace_seams::get_ts_config_oid::set(lookup::get_ts_config_oid);
+    namespace_seams::get_ts_dict_oid::set(lookup::get_ts_dict_oid);
+    namespace_seams::opername_get_oprid::set(lookup::OpernameGetOprid);
+    namespace_seams::opername_get_candidate_oids::set(opername_get_candidate_oids);
     namespace_seams::type_is_visible::set(lookup::TypeIsVisible);
 
     guc_tables::vars::namespace_search_path.install(guc_tables::GucVarAccessors {

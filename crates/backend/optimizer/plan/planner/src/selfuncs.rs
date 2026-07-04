@@ -2409,6 +2409,58 @@ pub fn estimate_num_groups_pgset<'mcx>(
     estimate_num_groups_core(run, group_exprs, input_rows, pgset, None)
 }
 
+struct GroupVarInfo<'mcx> {
+    node: Node<'mcx>,
+    rel: RelId,
+    ndistinct: f64,
+    isdefault: bool,
+}
+
+// add_unique_group_var (selfuncs.c): drop exact duplicates; among known-equal
+// vars of different rels keep the one with the smaller ndistinct.
+fn add_unique_group_var<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    varinfos: &mut mcx::PgVec<'mcx, GroupVarInfo<'mcx>>,
+    node: Node<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+) -> PgResult<()> {
+    let (ndistinct, isdefault) = get_variable_numdistinct(run, vardata);
+    // remove_nulling_relids: Vars only carry outer-join nulling relids here,
+    // so stripping to empty matches C's outer_join_rels removal. Nulled Vars
+    // inside larger grouped expressions keep theirs (such expressions can
+    // only reach this list via expression stats, whose match already
+    // requires the exact form).
+    let node = match node.as_var() {
+        Some(v) if !v.varnullingrels.is_empty() => {
+            let stripped = types_nodes::primnodes::Var {
+                varnullingrels: types_nodes::Bitmapset::empty(),
+                ..*v
+            };
+            Node::mk(run.mcx, stripped)?
+        }
+        _ => node,
+    };
+    let rel = vardata.rel.expect("grouping expr has a base rel");
+    let mut i = 0;
+    while i < varinfos.len() {
+        if types_nodes::equal(node, varinfos[i].node) {
+            return Ok(());
+        }
+        if varinfos[i].rel != rel
+            && crate::equivclass::exprs_known_equal(run, node, varinfos[i].node, 0)
+        {
+            if varinfos[i].ndistinct <= ndistinct {
+                return Ok(());
+            }
+            varinfos.remove(i);
+            continue;
+        }
+        i += 1;
+    }
+    varinfos.push(GroupVarInfo { node, rel, ndistinct, isdefault });
+    Ok(())
+}
+
 fn estimate_num_groups_core<'mcx>(
     run: &mut PlannerRun<'mcx>,
     group_exprs: &[(NodeId, Node<'mcx>)],
@@ -2421,107 +2473,63 @@ fn estimate_num_groups_core<'mcx>(
         return Ok(1.0);
     }
 
-    struct GroupVarInfo {
-        var: NodeId,
-        rel: RelId,
-        ndistinct: f64,
-        isdefault: bool,
-    }
     let mcx = run.mcx;
-    let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
-    let mut work: mcx::PgVec<'_, (NodeId, Node<'mcx>)> = mcx::PgVec::new_in(mcx);
+    let mut varinfos: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut numdistinct = 1.0f64;
+    let mut srf_multiplier = 1.0f64;
     for (listidx, &(id, node)) in group_exprs.iter().enumerate() {
         if pgset.is_some_and(|s| !s.contains(&(listidx as i32))) {
             continue;
         }
-        if node.node_tag() == NodeTag::T_Const {
+        // SRFs are estimated as scalars here; the end result is scaled up by
+        // the largest SRF rowcount instead.
+        let this_srf_multiplier = crate::costsize::expression_returns_set_rows(node)?;
+        if srf_multiplier < this_srf_multiplier {
+            srf_multiplier = this_srf_multiplier;
+        }
+        if crate::costsize::expr_type_typmod(node).0 == BOOLOID {
+            numdistinct *= 2.0;
             continue;
         }
-        if node.node_tag() == NodeTag::T_Var {
-            work.push((id, node));
+        // If examine_variable deduces anything (expression-index stats,
+        // provable uniqueness), the whole expression is one variable.
+        let vardata = examine_variable(run, id, node, 0)?;
+        if vardata.stats.is_some() || vardata.isunique {
+            add_unique_group_var(run, &mut varinfos, node, &vardata)?;
             continue;
         }
-        // C's expression leg: no expression stats, so decompose to the
-        // contained Vars (a Var-free volatile expr keeps every row distinct).
         let vars_here = vars::pull_var_clause(
             mcx,
             node,
             vars::PVC_RECURSE_AGGREGATES | vars::PVC_RECURSE_WINDOWFUNCS | vars::PVC_RECURSE_PLACEHOLDERS,
         )?;
         if vars_here.is_nil() {
+            // A Var-free item is a constant (ignorable) or volatile (every
+            // input row is its own group).
             if clauses::contain_volatile_functions(node)? {
                 return Ok(input_rows);
             }
             continue;
         }
         for v in &vars_here {
-            work.push((run.intern_expr(v), v));
+            let vid = run.intern_expr(v);
+            let vardata = examine_variable(run, vid, v, 0)?;
+            add_unique_group_var(run, &mut varinfos, v, &vardata)?;
         }
-    }
-    // add_unique_group_var (selfuncs.c): drop exact duplicates; among
-    // known-equal vars of different rels keep the smaller ndistinct. The
-    // probe var is compared with nullingrels stripped, per C.
-    for &(id, node) in work.iter() {
-        let vardata = examine_variable(run, id, node, 0)?;
-        let (id, node) = {
-            let v = node.as_var().unwrap();
-            if v.varnullingrels.is_empty() {
-                (id, node)
-            } else {
-                let stripped = types_nodes::primnodes::Var {
-                    varnullingrels: types_nodes::Bitmapset::empty(),
-                    ..*v
-                };
-                let n = Node::mk(mcx, stripped)?;
-                (run.intern_expr(n), n)
-            }
-        };
-        let v = node.as_var().unwrap();
-        let (ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
-        let rel = vardata.rel.expect("grouping Var has a base rel");
-        let mut keep_new = true;
-        let mut i = 0;
-        while i < varinfos.len() {
-            let u = run.root.expr_node(varinfos[i].var).as_var().unwrap();
-            if u.varno == v.varno && u.varattno == v.varattno {
-                keep_new = false;
-                break;
-            }
-            if varinfos[i].rel != rel
-                && crate::equivclass::exprs_known_equal(
-                    run,
-                    node,
-                    *run.root.expr_node(varinfos[i].var),
-                    0,
-                )
-            {
-                if varinfos[i].ndistinct <= ndistinct {
-                    keep_new = false;
-                    break;
-                }
-                varinfos.remove(i);
-                continue;
-            }
-            i += 1;
-        }
-        if !keep_new {
-            continue;
-        }
-        varinfos.push(GroupVarInfo { var: id, rel, ndistinct, isdefault });
     }
     if varinfos.is_empty() {
-        return Ok(1.0);
+        let numdistinct = (numdistinct * srf_multiplier).ceil();
+        return Ok(numdistinct.clamp(1.0, input_rows));
     }
 
-    let mut numdistinct = 1.0f64;
     let mut remaining = varinfos;
     while !remaining.is_empty() {
         let rel_id = remaining[0].rel;
         let mut reldistinct = 1.0f64;
         let mut relmaxndistinct = 1.0f64;
         let mut relvarcount = 0usize;
-        let mut rest: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
-        let mut relvars: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+        let mut rest: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
+        let mut relvars: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
         for vi in remaining {
             if vi.rel == rel_id {
                 relvars.push(vi);
@@ -2530,11 +2538,17 @@ fn estimate_num_groups_core<'mcx>(
             }
         }
         // estimate_multivariate_ndistinct loop (selfuncs.c): consume vars
-        // covered by ndistinct extended statistics first.
-        while relvars.len() >= 2 && !run.root.rel(rel_id).statlist.is_empty() {
+        // covered by ndistinct extended statistics first. Expression entries
+        // never match here (C matches them against statistics-object
+        // expressions; statext expression stats are loud upstream).
+        while relvars.iter().filter(|vi| vi.node.as_var().is_some()).count() >= 2
+            && !run.root.rel(rel_id).statlist.is_empty()
+        {
             let mut varattnos: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(mcx);
             for vi in relvars.iter() {
-                varattnos.push(run.root.expr_node(vi.var).as_var().unwrap().varattno);
+                if let Some(v) = vi.node.as_var() {
+                    varattnos.push(v.varattno);
+                }
             }
             let Some((mvndistinct, covered)) =
                 crate::extended_stats::estimate_multivariate_ndistinct(run, rel_id, &varattnos)?
@@ -2546,11 +2560,11 @@ fn estimate_num_groups_core<'mcx>(
                 relmaxndistinct = mvndistinct;
             }
             relvarcount += 1;
-            let mut kept: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+            let mut kept: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
             for vi in relvars {
-                let attno = run.root.expr_node(vi.var).as_var().unwrap().varattno;
-                if !covered.contains(&attno) {
-                    kept.push(vi);
+                match vi.node.as_var() {
+                    Some(v) if covered.contains(&v.varattno) => {}
+                    _ => kept.push(vi),
                 }
             }
             relvars = kept;
@@ -2592,7 +2606,7 @@ fn estimate_num_groups_core<'mcx>(
         remaining = rest;
     }
 
-    let numdistinct = numdistinct.ceil();
+    let numdistinct = (numdistinct * srf_multiplier).ceil();
     Ok(numdistinct.clamp(1.0, input_rows))
 }
 

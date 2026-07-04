@@ -428,6 +428,75 @@ pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+#[cold]
+#[inline(never)]
+fn undefined_ts_object(kind: &str, names: &[&str]) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("text search {} \"{}\" does not exist", kind, names.join(".")))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, config_name) = DeconstructQualifiedName(names)?;
+    let mut cfgoid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            cfgoid =
+                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            cfgoid =
+                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+            if OidIsValid(cfgoid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(cfgoid) && !missing_ok {
+        return Err(undefined_ts_object("configuration", names));
+    }
+    Ok(cfgoid)
+}
+
+pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, dict_name) = DeconstructQualifiedName(names)?;
+    let mut dictoid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            dictoid =
+                syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::call(dict_name, namespace_id)?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            dictoid =
+                syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::call(dict_name, namespace_id)?;
+            if OidIsValid(dictoid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(dictoid) && !missing_ok {
+        return Err(undefined_ts_object("dictionary", names));
+    }
+    Ok(dictoid)
+}
+
 // TypenameGetTypidExtended (namespace.c).
 pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
     recomputeNamespacePath()?;

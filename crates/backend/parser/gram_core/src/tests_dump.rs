@@ -845,12 +845,14 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);
         list_field(out, "including", &c.including);
-        out.push_str(" :exclusions <>");
+        list_field(out, "exclusions", &c.exclusions);
         list_field(out, "options", &c.options);
         string_field(out, "indexname", c.indexname);
         string_field(out, "indexspace", c.indexspace);
         bool_field(out, "reset_default_tblspc", false);
-        out.push_str(" :access_method <> :where_clause <> :pktable ");
+        string_field(out, "access_method", c.access_method);
+        node_field(out, "where_clause", c.where_clause);
+        out.push_str(" :pktable ");
         match c.pktable {
             Some(rv) => range_var(out, rv),
             None => out.push_str("<>"),

@@ -332,6 +332,21 @@ fn eval_kernel<'mcx>(
             }
             Ok(NullableDatum::null())
         }
+        Kernel::AggTransByValThin { call, pergroup, strict } => {
+            // SAFETY: as AggTransByVal; thin callee never sets isnull.
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !strict || !(*pg).trans_value_is_null {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    (*pg).trans_value = invoke_thin(&call)?;
+                    (*pg).trans_value_is_null = false;
+                }
+            }
+            Ok(NullableDatum::null())
+        }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
             // SAFETY: the frame's fcinfo image and mcx-boxed FmgrInfo are
@@ -883,6 +898,16 @@ fn run_program<'mcx>(
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
+            Step::NullTestRowIsNull { rn, frame, out } => {
+                let r = read_out(*out);
+                let b = eval_row_null(frames, *rn, *frame, r, true)?;
+                write_out(*out, Datum::from_bool(b), false);
+            }
+            Step::NullTestRowIsNotNull { rn, frame, out } => {
+                let r = read_out(*out);
+                let b = eval_row_null(frames, *rn, *frame, r, false)?;
+                write_out(*out, Datum::from_bool(b), false);
+            }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(r.isnull), false);
@@ -1271,6 +1296,107 @@ fn run_program<'mcx>(
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
                 assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
                 assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
+            }
+            Step::FuncExprStrict1Thin { call, out } => {
+                // SAFETY: arg 0 of the call's live fcinfo image.
+                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+                if a0.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::FuncExprStrict2Thin { call, out } => {
+                let r = strict2_thin_eval(call)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::ScanVarFuncStrict2Thin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut scan), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::FuncFuncStrict2Thin { call1, argno, call2, out } => {
+                let r1 = strict2_thin_eval(call1)?;
+                // SAFETY: as ScanVarFuncStrict2, for call2's image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call2.fcinfo, *argno as usize).write(r1);
+                    crate::steps::arg_slot_of(call2.fcinfo, 1 - *argno as usize).read()
+                };
+                if r1.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call2)?, false);
+                }
+            }
+            Step::FuncStrict2QualThin { call, jumpdone, out } => {
+                let r = strict2_thin_eval(call)?;
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarNotDistinctThin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: as ScanVarFuncStrict2.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull && other.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
+            Step::NotDistinctQualThin { call, jumpdone, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let v = if a0.isnull && a1.isnull {
+                    Datum::from_bool(true)
+                } else if a0.isnull || a1.isnull {
+                    Datum::from_bool(false)
+                } else {
+                    invoke_thin(call)?
+                };
+                if !v.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, v, false);
+            }
+            Step::AggTransStrictByValIndirectThin { call, base, transno } => {
+                // SAFETY: as AggTransByValIndirect; thin callee never sets isnull.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        (*pg).trans_value = invoke_thin(call)?;
+                        (*pg).trans_value_is_null = false;
+                    }
+                }
             }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -1668,6 +1794,29 @@ fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
     Ok(NullableDatum { value, isnull })
 }
 
+// Thin-ABI call: no flinfo arg, no arity check, no isnull round trip — the
+// registered callee never writes fcinfo.isnull (fmgr_thin_builtin contract).
+#[inline(always)]
+fn invoke_thin(call: &crate::steps::CallThin) -> PgResult<Datum> {
+    // SAFETY: live 2-arg fcinfo image; thin contract holds at registration.
+    unsafe { (call.f)(call.fcinfo.cast()) }
+}
+
+#[inline(always)]
+fn strict2_thin_eval(call: &crate::steps::CallThin) -> PgResult<NullableDatum> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        return Ok(NullableDatum::null());
+    }
+    Ok(NullableDatum { value: invoke_thin(call)?, isnull: false })
+}
+
 #[inline(always)]
 fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
@@ -1842,6 +1991,85 @@ fn errdatatype(e: &mut PgError, typid: u32) {
         }
         drop(nsp);
     }
+}
+
+// C ExecEvalRowNullInt: SQL-standard row IS [NOT] NULL — per-field primitive
+// attisnull tests, not recursive; zero-field rows vacuously satisfy both.
+fn eval_row_null(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    rn: core::ptr::NonNull<crate::steps::RowNullState>,
+    frame: u32,
+    r: NullableDatum,
+    checkisnull: bool,
+) -> PgResult<bool> {
+    if r.isnull {
+        return Ok(checkisnull);
+    }
+    let p = r.value.as_usize() as *const u8;
+    // SAFETY: a live varlena-headed composite image, per the datum contract.
+    let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
+    // SAFETY: `total` readable bytes at p, per the datum contract.
+    let raw = unsafe { core::slice::from_raw_parts(p, total) };
+    // C PG_DETOAST_DATUM returns the original pointer for a plain 4B image;
+    // only the toasted leg touches the frame's per-eval mcx.
+    let detoasted;
+    let rec: &[u8] = if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        raw
+    } else {
+        let f = &mut frames[frame as usize];
+        // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+        let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+        detoasted = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        &detoasted
+    };
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const ::types_tuple::HeapTupleHeaderData) };
+    let tup_type = hdr.type_id();
+    let tup_typmod = hdr.typmod();
+    // SAFETY: compile-allocated state, single-threaded interpreter.
+    let rn = unsafe { &mut *rn.as_ptr() };
+    if rn.desc.is_none() || rn.tup_type != tup_type || rn.tup_typmod != tup_typmod {
+        use ::mcx::Allocator;
+        let desc = typcache::lookup_rowtype_tupdesc_copy(rn.mcx, tup_type, tup_typmod)?;
+        let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
+        let desc_ptr: core::ptr::NonNull<::types_tuple::TupleDescData<'static>> = rn
+            .mcx
+            .allocate(desc_layout)
+            .map_err(|_| rn.mcx.oom(desc_layout.size()))?
+            .cast();
+        // SAFETY: fresh exact-layout allocation; the desc's referents live in
+        // rn.mcx, which outlives every eval of this step.
+        unsafe {
+            desc_ptr.as_ptr().write(core::mem::transmute::<
+                ::types_tuple::TupleDescData<'_>,
+                ::types_tuple::TupleDescData<'static>,
+            >(desc));
+        }
+        rn.desc = Some(desc_ptr);
+        rn.tup_type = tup_type;
+        rn.tup_typmod = tup_typmod;
+    }
+    // SAFETY: rn.mcx-allocated tupdesc, live for the plan.
+    let desc = unsafe { rn.desc.expect("refreshed above").as_ref() };
+    // SAFETY: detoasted MAXALIGN'd image of datum_length() bytes.
+    let tuple = unsafe {
+        ::types_tuple::HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ::types_tuple::ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    for att in 1..=desc.natts {
+        if desc.compact_attrs[(att - 1) as usize].attisdropped {
+            continue;
+        }
+        if ::types_tuple::heap_attisnull(&tuple, att, Some(desc)) == checkisnull {
+            continue;
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 // C ExecEvalWholeRowVar, named-composite leg. First eval checks the slot's

@@ -526,6 +526,7 @@ fn after_trigger_save_event<'mcx>(
     ctid2: ItemPointerData,
     old_tup: Option<&HeapTupleData<'_>>,
     new_tup: Option<&HeapTupleData<'_>>,
+    recheck_indexes: &[Oid],
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
@@ -583,11 +584,10 @@ fn after_trigger_save_event<'mcx>(
             }
         }
         const F_UNIQUE_KEY_RECHECK: Oid = 1250;
-        if trigger.tgfoid == F_UNIQUE_KEY_RECHECK {
-            panic!(
-                "AfterTriggerSaveEvent (trigger.c): unique_key_recheck \
-                 (recheckIndexes) unported"
-            );
+        if trigger.tgfoid == F_UNIQUE_KEY_RECHECK
+            && !recheck_indexes.contains(&trigger.tgconstrindid)
+        {
+            continue;
         }
         let ats_event = (event & TRIGGER_EVENT_OPMASK)
             | TRIGGER_EVENT_ROW
@@ -613,6 +613,7 @@ pub fn ExecARInsertTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
     new_tid: ItemPointerData,
+    recheck_indexes: &[Oid],
 ) -> PgResult<()> {
     if !trigdesc.trig_insert_after_row {
         return Ok(());
@@ -627,6 +628,7 @@ pub fn ExecARInsertTriggers<'mcx>(
         ItemPointerData::default(),
         None,
         None,
+        recheck_indexes,
     )
 }
 
@@ -649,6 +651,7 @@ pub fn ExecARDeleteTriggers<'mcx>(
         ItemPointerData::default(),
         None,
         None,
+        &[],
     )
 }
 
@@ -658,6 +661,7 @@ pub fn ExecARUpdateTriggers<'mcx>(
     trigdesc: &TriggerDesc<'static>,
     old_tid: ItemPointerData,
     new_tid: ItemPointerData,
+    recheck_indexes: &[Oid],
 ) -> PgResult<()> {
     if !trigdesc.trig_update_after_row {
         return Ok(());
@@ -684,6 +688,7 @@ pub fn ExecARUpdateTriggers<'mcx>(
         new_tid,
         Some(&old_t),
         Some(&new_t),
+        recheck_indexes,
     )
 }
 

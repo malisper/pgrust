@@ -18,6 +18,9 @@ format_type = { path = "../../utils/adt/format_type" }
 genam = { path = "../../access/index/genam" }
 indexcmds_seams = { path = "../indexcmds_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_oper = { path = "../../parser/parse_oper" }
+parser_small1 = { path = "../../parser/parser_small1" }
+regproc = { package = "adt_regproc", path = "../../utils/adt/regproc" }
 mcx = { path = "../../../_support/mcx" }
 table = { path = "../../access/table/table" }
 types_core = { path = "../../../_support/types/types_core" }

@@ -490,6 +490,97 @@ fn make_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
     }
 }
 
+// The planner probes reach all_rows_selectable -> pg_class_aclcheck ->
+// SearchSysCache1(RELOID); a real miss would phase-2-open pg_class, so the
+// registered cache is force-initialized and seeded with the test table's row.
+fn seed_reloid_cache() {
+    use cache_syscache::{SysCacheKey, RELOID};
+    use catcache::CCFastKind;
+    use types_tuple::ATTNULLABLE_UNRESTRICTED;
+
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("test-pgclass")));
+    let mcx = cx.mcx();
+
+    let attr = |attlen: i16, attbyval: bool, attalignby: u8| CompactAttribute {
+        attcacheoff: Cell::new(-1),
+        attlen,
+        attbyval,
+        attispackable: attlen == -1,
+        atthasmissing: false,
+        attisdropped: false,
+        attgenerated: false,
+        attnullability: ATTNULLABLE_UNRESTRICTED,
+        attalignby,
+    };
+    let n1 = || attr(1, true, 1);
+    let o4 = || attr(4, true, 4);
+    let i2 = || attr(2, true, 2);
+    let cols = [
+        o4(),
+        attr(64, false, 1),
+        o4(), o4(), o4(), o4(), o4(), o4(), o4(),
+        o4(), o4(), o4(), o4(), o4(),
+        n1(), n1(), n1(),
+        n1(),
+        i2(), i2(),
+        n1(), n1(), n1(), n1(), n1(), n1(), n1(), n1(),
+        o4(), o4(), o4(),
+        attr(-1, false, 4),
+        attr(-1, false, 4),
+        attr(-1, false, 4),
+    ];
+    let mut compact: PgVec<'_, CompactAttribute> = PgVec::new_in(mcx);
+    let mut attrs: PgVec<'_, FormData_pg_attribute> = PgVec::new_in(mcx);
+    for c in &cols {
+        compact.push(c.clone());
+        attrs.push(FormData_pg_attribute::default());
+    }
+    let td: &'static TupleDescData<'static> = Box::leak(Box::new(TupleDescData {
+        natts: cols.len() as i32,
+        tdtypeid: 83,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    }));
+    catcache::testing::force_initialized(RELOID, [CCFastKind::Int4; 4]);
+    catcache::testing::set_tupdesc(RELOID, td);
+
+    let mut nd = NameData::default();
+    nd.namestrcpy("t");
+    let mut name_buf: PgVec<'_, u8> = PgVec::new_in(mcx);
+    mcx::vec_append_bytes(&mut name_buf, &nd.data).unwrap();
+    let mut values = [Datum::null(); 34];
+    let mut nulls = [false; 34];
+    values[0] = Datum::from_oid(T_OID);
+    values[1] = Datum::from_usize(name_buf.as_ptr() as usize);
+    values[2] = Datum::from_oid(2200);
+    values[5] = Datum::from_oid(10);
+    values[16] = Datum::from_u8(b'p');
+    values[17] = Datum::from_u8(b'r');
+    values[18] = Datum::from_i16(2);
+    values[25] = Datum::from_bool(true);
+    values[26] = Datum::from_u8(b'd');
+    nulls[31] = true;
+    nulls[32] = true;
+    nulls[33] = true;
+    let tup = heaptuple::heap_form_tuple(mcx, td, &values, &nulls).unwrap();
+    let t = tup.as_tuple();
+    // SAFETY: contiguous formed image, t_len bytes from the header.
+    let image = unsafe { core::slice::from_raw_parts(t.header_ptr(), t.t_len as usize) };
+    catcache::testing::insert_positive(
+        RELOID,
+        &[
+            SysCacheKey::Value(Datum::from_oid(T_OID)),
+            SysCacheKey::UNUSED,
+            SysCacheKey::UNUSED,
+            SysCacheKey::UNUSED,
+        ],
+        image,
+    );
+}
+
 fn install_relation_seams() {
     relation_seams::relation_open::set(|mcx, relid, _lockmode| {
         assert!(
@@ -730,6 +821,7 @@ fn boot() {
 
     miscinit::SetIgnoreSystemIndexes(true);
     cache_syscache::InitCatalogCache().unwrap();
+    seed_reloid_cache();
 
     RELSTATS.lock().unwrap().clear();
     vacuum_seams::vac_update_relstats::set(|rel, num_pages, num_tuples, allvis, _allfroz, _hasindex, _in_outer| {

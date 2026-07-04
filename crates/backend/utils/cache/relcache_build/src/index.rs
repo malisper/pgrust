@@ -360,3 +360,74 @@ fn opclass_not_found(opc: Oid) -> Box<PgError> {
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }
+
+const CONSTRAINT_RELATION_ID: Oid = 2606;
+const CONSTRAINT_RELID_TYPID_NAME_INDEX_ID: Oid = 2665;
+const Anum_pg_constraint_contype: i32 = 4;
+const Anum_pg_constraint_conrelid: i32 = 9;
+const Anum_pg_constraint_conindid: i32 = 11;
+const Anum_pg_constraint_conperiod: i32 = 20;
+const Anum_pg_constraint_conexclop: i32 = 27;
+const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
+const CONSTRAINT_PRIMARY: i8 = b'p' as i8;
+const CONSTRAINT_UNIQUE: i8 = b'u' as i8;
+
+// RelationGetExclusionInfo's pg_constraint scan (relcache.c:5640-5773).
+pub(crate) fn scan_exclusion_ops<'mcx>(
+    mcx: Mcx<'mcx>,
+    conrelid: Oid,
+    index_relid: Oid,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let cx = MemoryContext::new("RelationGetExclusionInfo");
+    let smcx = cx.mcx();
+    let rel = table::table_open(smcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_constraint_conrelid, conrelid)];
+    let mut scan = genam::systable_beginscan(
+        smcx,
+        &rel,
+        CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut out: Option<PgVec<'mcx, Oid>> = None;
+    while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
+        let td = rel.descr();
+        let contype = req(td, tup, Anum_pg_constraint_contype)?.as_i8();
+        let conperiod = req(td, tup, Anum_pg_constraint_conperiod)?.as_bool();
+        if contype != CONSTRAINT_EXCLUSION
+            && !(conperiod && (contype == CONSTRAINT_PRIMARY || contype == CONSTRAINT_UNIQUE))
+        {
+            continue;
+        }
+        if req(td, tup, Anum_pg_constraint_conindid)?.as_oid() != index_relid {
+            continue;
+        }
+        assert!(
+            out.is_none(),
+            "unexpected exclusion constraint record found for rel {index_relid}"
+        );
+        let (d, isnull) = crate::getattr(td, tup, Anum_pg_constraint_conexclop);
+        assert!(!isnull, "null conexclop for rel {index_relid}");
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live oid[] varlena image through its extent.
+        let image =
+            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(smcx, image)?;
+        let body = payload.as_bytes();
+        let total = body.len() + 4;
+        let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(smcx, total)?;
+        mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+        mcx::vec_append_bytes(&mut full, body)?;
+        let elems = datum::array_build::deconstruct_array_image(smcx, &full, 4, true, b'i')?;
+        let mut ops: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+        for e in elems.iter() {
+            ops.push(e.as_oid());
+        }
+        out = Some(ops);
+    }
+    genam::systable_endscan(smcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(out
+        .unwrap_or_else(|| panic!("exclusion constraint record missing for rel {index_relid}")))
+}
