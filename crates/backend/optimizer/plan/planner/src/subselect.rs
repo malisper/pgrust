@@ -1775,19 +1775,20 @@ pub fn ss_finalize_plan<'mcx>(
             }
         }
     }
-    finalize_plan(run, root, plan, &valid, &types_nodes::bitmapset::Bitmapset::empty())?;
+    finalize_plan(run, root, plan, -1, &valid, &types_nodes::bitmapset::Bitmapset::empty())?;
     Ok(())
 }
 
-// finalize_plan (subselect.c) over the ported node set; the gather_param leg
-// (parallel) is dead here.
+// finalize_plan (subselect.c) over the ported node set.
 fn finalize_plan<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &types_pathnodes::PlannerInfo<'mcx>,
     plan: Node<'mcx>,
+    gather_param: i32,
     valid_params: &types_nodes::bitmapset::Bitmapset<'mcx>,
     scan_params: &types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<types_nodes::bitmapset::Bitmapset<'mcx>> {
+    let mut gather_param = gather_param;
     let mcx = run.mcx;
     let mut paramids = types_nodes::bitmapset::Bitmapset::empty();
     let mut locally_added_param: i32 = -1;
@@ -1813,9 +1814,34 @@ fn finalize_plan<'mcx>(
 
     finalize_primnode_list(run, root, &base.targetlist, &mut paramids)?;
     finalize_primnode_list(run, root, &base.qual, &mut paramids)?;
-    debug_assert!(!base.parallel_aware, "gather_param leg; M3 parallel lane");
+
+    // A parallel-aware scan depends on the parent Gather's rescan Param.
+    if base.parallel_aware {
+        assert!(gather_param >= 0, "parallel-aware plan node is not below a Gather");
+        paramids.add_member(mcx, gather_param)?;
+    }
 
     match plan.node_tag() {
+        // Children may reference rescan_param; it stays out of scan_params
+        // and (as a locally added param) out of this level's extParam.
+        NodeTag::T_Gather => {
+            let g = plan.as_gather().unwrap();
+            if g.rescan_param >= 0 {
+                locally_added_param = g.rescan_param;
+                valid.add_member(mcx, locally_added_param)?;
+                assert!(gather_param < 0, "nested Gathers are not supported");
+                gather_param = locally_added_param;
+            }
+        }
+        NodeTag::T_GatherMerge => {
+            let g = plan.as_gather_merge().unwrap();
+            if g.rescan_param >= 0 {
+                locally_added_param = g.rescan_param;
+                valid.add_member(mcx, locally_added_param)?;
+                assert!(gather_param < 0, "nested Gathers are not supported");
+                gather_param = locally_added_param;
+            }
+        }
         NodeTag::T_Result => {
             if let Some(rcq) = plan.as_result().unwrap().resconstantqual {
                 finalize_primnode(run, root, rcq, &mut paramids)?;
@@ -1899,25 +1925,25 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_Append => {
             for sub in &plan.as_append().unwrap().appendplans {
-                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
+                let child = finalize_plan(run, root, sub, gather_param, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_MergeAppend => {
             for sub in &plan.as_merge_append().unwrap().mergeplans {
-                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
+                let child = finalize_plan(run, root, sub, gather_param, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_BitmapAnd => {
             for sub in &plan.as_bitmap_and().unwrap().bitmapplans {
-                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
+                let child = finalize_plan(run, root, sub, gather_param, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_BitmapOr => {
             for sub in &plan.as_bitmap_or().unwrap().bitmapplans {
-                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
+                let child = finalize_plan(run, root, sub, gather_param, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
@@ -2031,7 +2057,7 @@ fn finalize_plan<'mcx>(
 
     let scan_params = scan_owned.as_ref().unwrap_or(scan_params);
     if let Some(child) = base.lefttree {
-        let child_params = finalize_plan(run, root, child, &valid, scan_params)?;
+        let child_params = finalize_plan(run, root, child, gather_param, &valid, scan_params)?;
         paramids.add_members(mcx, &child_params)?;
     }
     if let Some(child) = base.righttree {
@@ -2045,12 +2071,12 @@ fn finalize_plan<'mcx>(
             }
         }
         if nestloop_params.is_empty() {
-            let child_params = finalize_plan(run, root, child, &valid, scan_params)?;
+            let child_params = finalize_plan(run, root, child, gather_param, &valid, scan_params)?;
             paramids.add_members(mcx, &child_params)?;
         } else {
             let mut inner_valid = valid.clone_in(mcx)?;
             inner_valid.add_members(mcx, &nestloop_params)?;
-            let mut child_params = finalize_plan(run, root, child, &inner_valid, scan_params)?;
+            let mut child_params = finalize_plan(run, root, child, gather_param, &inner_valid, scan_params)?;
             child_params.del_members(&nestloop_params);
             paramids.add_members(mcx, &child_params)?;
         }
