@@ -67,6 +67,9 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
                 let mcx = estate.ecxt(self.rowcontext).per_tuple_mcx();
                 let mut state =
                     exec_init_expr(mcx, Some(expr), pb)?.expect("non-NULL values expression");
+                // C evaluates in the per-row context (CurrentMemoryContext);
+                // by-ref results (RowExpr forms) need the frames armed with it.
+                state.arm_result_mcx(mcx);
                 let mut slots = EvalSlots { scan: None, inner: None, outer: None };
                 exec_eval_expr(&mut state, &mut slots)?
             };
