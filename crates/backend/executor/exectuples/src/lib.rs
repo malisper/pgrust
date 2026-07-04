@@ -12,7 +12,8 @@ mod deform;
 mod slots;
 
 pub use batch::{
-    soa_deform_tuple, soa_store_prefix, SoaBatch, SoaDeformPlan, SOA_BM_WORDS, SOA_MAX_ROWS,
+    soa_deform_tuple, soa_deform_tuple_qual_col, soa_store_prefix, SoaBatch, SoaDeformPlan,
+    SOA_BM_WORDS, SOA_MAX_ROWS,
 };
 pub use deform::{
     heap_slot_getattr, minimal_slot_getattr, slot_attisnull, slot_getallattrs, slot_getattr,

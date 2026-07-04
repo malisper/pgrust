@@ -660,6 +660,19 @@ fn soa_batch_deform_matches_lazy_deform() {
         exec_clear_tuple(&mut want, mcx);
     }
 
+    // Qual-column-only deform matches the full deform for that column.
+    let mut qsoa = SoaBatch::new_in(mcx, plan.ncols());
+    qsoa.begin(tuples.len() as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_deform_tuple_qual_col(&mut qsoa, &plan, &desc.compact_attrs, i as u32, t, 2);
+    }
+    for i in 0..tuples.len() {
+        assert_eq!(qsoa.col_isnull(2)[i], soa.col_isnull(2)[i], "qrow {i}");
+        if !qsoa.col_isnull(2)[i] {
+            assert_eq!(qsoa.col_values(2)[i].as_i64(), soa.col_values(2)[i].as_i64(), "qrow {i}");
+        }
+    }
+
     // Narrow tuple (pre-ALTER ADD COLUMN image) falls back to the lazy path.
     let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
     let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();

@@ -147,6 +147,72 @@ pub fn soa_deform_tuple(
     }
 }
 
+/// Late-materialization deform: only column `col` of the plan's prefix (the
+/// qual column) is written; survivors deform lazily from the stored tuple.
+#[inline(always)]
+pub fn soa_deform_tuple_qual_col(
+    soa: &mut SoaBatch<'_>,
+    plan: &SoaDeformPlan<'_>,
+    atts: &[CompactAttribute],
+    i: u32,
+    tuple: &HeapTupleData<'_>,
+    col: u16,
+) {
+    let ncols = plan.ncols as usize;
+    let col = col as usize;
+    debug_assert!(col < ncols && soa.ncols as usize == ncols && (i as usize) < SOA_MAX_ROWS);
+    if (tuple.t_data().natts() as usize) < ncols {
+        soa.fallback[(i / 64) as usize] |= 1u64 << (i % 64);
+        return;
+    }
+    if tuple.has_nulls() {
+        return soa_deform_qual_col_nulls(soa, atts, i as usize, col, tuple);
+    }
+    let tp = tuple.getstruct();
+    let idx = i as usize;
+    // SAFETY: as soa_deform_tuple's fixed lane, single column.
+    unsafe {
+        let att = atts.get_unchecked(col);
+        let off = *plan.offs.get_unchecked(col) as usize;
+        *soa.values.get_unchecked_mut(col * SOA_MAX_ROWS + idx) =
+            fetch_att(tp.add(off), att.attbyval, att.attlen as i32);
+        *soa.isnull.get_unchecked_mut(col * SOA_MAX_ROWS + idx) = false;
+    }
+}
+
+#[inline(never)]
+fn soa_deform_qual_col_nulls(
+    soa: &mut SoaBatch<'_>,
+    atts: &[CompactAttribute],
+    idx: usize,
+    col: usize,
+    tuple: &HeapTupleData<'_>,
+) {
+    let tp = tuple.getstruct();
+    // SAFETY: as soa_deform_tuple_nulls; the walk stops at the qual column.
+    let bp = unsafe { tuple.header_ptr().add(SizeofHeapTupleHeader) };
+    let mut off = 0usize;
+    for c in 0..=col {
+        unsafe {
+            if att_isnull(c, bp) {
+                if c == col {
+                    soa.values[c * SOA_MAX_ROWS + idx] = Datum::null();
+                    soa.isnull[c * SOA_MAX_ROWS + idx] = true;
+                }
+                continue;
+            }
+            let att = &atts[c];
+            off = att_nominal_alignby(off, att.attalignby);
+            if c == col {
+                soa.values[c * SOA_MAX_ROWS + idx] =
+                    fetch_att(tp.add(off), att.attbyval, att.attlen as i32);
+                soa.isnull[c * SOA_MAX_ROWS + idx] = false;
+            }
+            off += att.attlen as usize;
+        }
+    }
+}
+
 #[inline(never)]
 fn soa_deform_tuple_nulls(
     soa: &mut SoaBatch<'_>,
