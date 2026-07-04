@@ -907,8 +907,47 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             });
             2
         }
-        // NullTest/BooleanTest take C's default arm: no name.
-        NodeTag::T_A_Const
+        NodeTag::T_JsonParseExpr => {
+            *name = Some("json");
+            2
+        }
+        NodeTag::T_JsonScalarExpr => {
+            *name = Some("json_scalar");
+            2
+        }
+        NodeTag::T_JsonSerializeExpr => {
+            *name = Some("json_serialize");
+            2
+        }
+        NodeTag::T_JsonObjectConstructor => {
+            *name = Some("json_object");
+            2
+        }
+        NodeTag::T_JsonArrayConstructor | NodeTag::T_JsonArrayQueryConstructor => {
+            *name = Some("json_array");
+            2
+        }
+        NodeTag::T_JsonObjectAgg => {
+            *name = Some("json_objectagg");
+            2
+        }
+        NodeTag::T_JsonArrayAgg => {
+            *name = Some("json_arrayagg");
+            2
+        }
+        NodeTag::T_JsonFuncExpr => {
+            use types_nodes::primnodes::JsonExprOp::*;
+            *name = Some(match node.as_json_func_expr().unwrap().op {
+                JSON_EXISTS_OP => "json_exists",
+                JSON_QUERY_OP => "json_query",
+                JSON_VALUE_OP => "json_value",
+                JSON_TABLE_OP => panic!("JSON_TABLE_OP cannot happen here"),
+            });
+            2
+        }
+        // NullTest/BooleanTest/JsonIsPredicate take C's default arm: no name.
+        NodeTag::T_JsonIsPredicate
+        | NodeTag::T_A_Const
         | NodeTag::T_ParamRef
         | NodeTag::T_BoolExpr
         | NodeTag::T_NullTest

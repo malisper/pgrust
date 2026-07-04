@@ -1928,6 +1928,8 @@ name = "clauses"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "adt_json",
+ "adt_jsonb",
  "arrayfuncs",
  "arrayutils",
  "clauses_seams",
@@ -3155,6 +3157,8 @@ dependencies = [
  "adt_date",
  "adt_datetime",
  "adt_int",
+ "adt_json",
+ "adt_jsonb",
  "adt_timestamp",
  "arrayfuncs",
  "arrayutils",
@@ -6636,6 +6640,7 @@ name = "parse_expr"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
+ "adt_jsonb",
  "analyze_seams",
  "catalog_namespace",
  "coerce",
@@ -6657,6 +6662,7 @@ dependencies = [
  "parser_small1",
  "stack_depth",
  "syscache_seams",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_nodes",

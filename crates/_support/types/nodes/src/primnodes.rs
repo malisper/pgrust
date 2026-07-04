@@ -589,6 +589,226 @@ pub struct SQLValueFunction {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
+pub enum JsonEncoding {
+    #[default]
+    JS_ENC_DEFAULT = 0,
+    JS_ENC_UTF8 = 1,
+    JS_ENC_UTF16 = 2,
+    JS_ENC_UTF32 = 3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonFormatType {
+    #[default]
+    JS_FORMAT_DEFAULT = 0,
+    JS_FORMAT_JSON = 1,
+    JS_FORMAT_JSONB = 2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct JsonFormat {
+    pub format_type: JsonFormatType,
+    pub encoding: JsonEncoding,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonFormat {
+    fn default() -> Self {
+        JsonFormat {
+            format_type: JsonFormatType::JS_FORMAT_DEFAULT,
+            encoding: JsonEncoding::JS_ENC_DEFAULT,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct JsonReturning<'mcx> {
+    pub format: Option<&'mcx JsonFormat>,
+    pub typid: Oid,
+    pub typmod: i32,
+}
+
+impl Default for JsonReturning<'_> {
+    fn default() -> Self {
+        JsonReturning { format: None, typid: 0, typmod: -1 }
+    }
+}
+
+#[derive(Default)]
+pub struct JsonValueExpr<'mcx> {
+    pub raw_expr: Option<Node<'mcx>>,
+    pub formatted_expr: Option<Node<'mcx>>,
+    pub format: Option<&'mcx JsonFormat>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonConstructorType {
+    #[default]
+    JSCTOR_JSON_OBJECT = 1,
+    JSCTOR_JSON_ARRAY = 2,
+    JSCTOR_JSON_OBJECTAGG = 3,
+    JSCTOR_JSON_ARRAYAGG = 4,
+    JSCTOR_JSON_PARSE = 5,
+    JSCTOR_JSON_SCALAR = 6,
+    JSCTOR_JSON_SERIALIZE = 7,
+}
+
+pub struct JsonConstructorExpr<'mcx> {
+    pub r#type: JsonConstructorType,
+    pub args: NodeList<'mcx>,
+    pub func: Option<Node<'mcx>>,
+    pub coercion: Option<Node<'mcx>>,
+    pub returning: Option<&'mcx JsonReturning<'mcx>>,
+    pub absent_on_null: bool,
+    pub unique: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonConstructorExpr<'_> {
+    fn default() -> Self {
+        JsonConstructorExpr {
+            r#type: JsonConstructorType::JSCTOR_JSON_OBJECT,
+            args: NodeList::nil(),
+            func: None,
+            coercion: None,
+            returning: None,
+            absent_on_null: false,
+            unique: false,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonValueType {
+    #[default]
+    JS_TYPE_ANY = 0,
+    JS_TYPE_OBJECT = 1,
+    JS_TYPE_ARRAY = 2,
+    JS_TYPE_SCALAR = 3,
+}
+
+pub struct JsonIsPredicate<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub format: Option<&'mcx JsonFormat>,
+    pub item_type: JsonValueType,
+    pub unique_keys: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonIsPredicate<'_> {
+    fn default() -> Self {
+        JsonIsPredicate {
+            expr: None,
+            format: None,
+            item_type: JsonValueType::JS_TYPE_ANY,
+            unique_keys: false,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonWrapper {
+    #[default]
+    JSW_UNSPEC = 0,
+    JSW_NONE = 1,
+    JSW_CONDITIONAL = 2,
+    JSW_UNCONDITIONAL = 3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonBehaviorType {
+    #[default]
+    JSON_BEHAVIOR_NULL = 0,
+    JSON_BEHAVIOR_ERROR = 1,
+    JSON_BEHAVIOR_EMPTY = 2,
+    JSON_BEHAVIOR_TRUE = 3,
+    JSON_BEHAVIOR_FALSE = 4,
+    JSON_BEHAVIOR_UNKNOWN = 5,
+    JSON_BEHAVIOR_EMPTY_ARRAY = 6,
+    JSON_BEHAVIOR_EMPTY_OBJECT = 7,
+    JSON_BEHAVIOR_DEFAULT = 8,
+}
+
+pub struct JsonBehavior<'mcx> {
+    pub btype: JsonBehaviorType,
+    pub expr: Option<Node<'mcx>>,
+    pub coerce: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonBehavior<'_> {
+    fn default() -> Self {
+        JsonBehavior {
+            btype: JsonBehaviorType::JSON_BEHAVIOR_NULL,
+            expr: None,
+            coerce: false,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonExprOp {
+    #[default]
+    JSON_EXISTS_OP = 0,
+    JSON_QUERY_OP = 1,
+    JSON_VALUE_OP = 2,
+    JSON_TABLE_OP = 3,
+}
+
+pub struct JsonExpr<'mcx> {
+    pub op: JsonExprOp,
+    pub column_name: Option<&'mcx str>,
+    pub formatted_expr: Option<Node<'mcx>>,
+    pub format: Option<&'mcx JsonFormat>,
+    pub path_spec: Option<Node<'mcx>>,
+    pub returning: Option<&'mcx JsonReturning<'mcx>>,
+    pub passing_names: NodeList<'mcx>,
+    pub passing_values: NodeList<'mcx>,
+    pub on_empty: Option<Node<'mcx>>,
+    pub on_error: Option<Node<'mcx>>,
+    pub use_io_coercion: bool,
+    pub use_json_coercion: bool,
+    pub wrapper: JsonWrapper,
+    pub omit_quotes: bool,
+    pub collation: Oid,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonExpr<'_> {
+    fn default() -> Self {
+        JsonExpr {
+            op: JsonExprOp::JSON_EXISTS_OP,
+            column_name: None,
+            formatted_expr: None,
+            format: None,
+            path_spec: None,
+            returning: None,
+            passing_names: NodeList::nil(),
+            passing_values: NodeList::nil(),
+            on_empty: None,
+            on_error: None,
+            use_io_coercion: false,
+            use_json_coercion: false,
+            wrapper: JsonWrapper::JSW_UNSPEC,
+            omit_quotes: false,
+            collation: 0,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum OnConflictAction {
     #[default]
     ONCONFLICT_NONE = 0,
@@ -702,6 +922,27 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RowExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_WindowFunc;
+}
+unsafe impl NodeVariant<'_> for JsonFormat {
+    const TAG: NodeTag = NodeTag::T_JsonFormat;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonReturning<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonReturning;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonValueExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonValueExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonConstructorExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonConstructorExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonIsPredicate<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonIsPredicate;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonBehavior<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonBehavior;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TargetEntry<'mcx> {
     const TAG: NodeTag = NodeTag::T_TargetEntry;
@@ -1110,6 +1351,41 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_collate_expr(self) -> Option<&'mcx CollateExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_format(self) -> Option<&'mcx JsonFormat> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_returning(self) -> Option<&'mcx JsonReturning<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_value_expr(self) -> Option<&'mcx JsonValueExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_constructor_expr(self) -> Option<&'mcx JsonConstructorExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_is_predicate(self) -> Option<&'mcx JsonIsPredicate<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_behavior(self) -> Option<&'mcx JsonBehavior<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_expr(self) -> Option<&'mcx JsonExpr<'mcx>> {
         self.as_variant()
     }
 }

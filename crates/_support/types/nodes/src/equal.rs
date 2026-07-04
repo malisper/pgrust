@@ -117,6 +117,13 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_OidList => cmp!(as_oid_list),
         NodeTag::T_XidList => cmp!(as_xid_list),
         NodeTag::T_Bitmapset => cmp!(as_bitmapset),
+        NodeTag::T_JsonFormat => cmp!(as_json_format),
+        NodeTag::T_JsonReturning => cmp!(as_json_returning),
+        NodeTag::T_JsonValueExpr => cmp!(as_json_value_expr),
+        NodeTag::T_JsonConstructorExpr => cmp!(as_json_constructor_expr),
+        NodeTag::T_JsonIsPredicate => cmp!(as_json_is_predicate),
+        NodeTag::T_JsonBehavior => cmp!(as_json_behavior),
+        NodeTag::T_JsonExpr => cmp!(as_json_expr),
         other => panic!(
             "equal() (equalfuncs.c): node type {other:?} not in the carried vocabulary — \
              unit backend-nodes-equalfuncs"
@@ -896,5 +903,72 @@ impl NodeEqual for TypeName<'_> {
 impl NodeEqual for TypeCast<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         equal_opt(self.arg, b.arg) && equal_opt(self.typeName, b.typeName)
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonFormat {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.format_type == b.format_type && self.encoding == b.encoding
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonReturning<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.format, b.format) && self.typid == b.typid && self.typmod == b.typmod
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonValueExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.raw_expr, b.raw_expr)
+            && equal_opt(self.formatted_expr, b.formatted_expr)
+            && eq_ref(self.format, b.format)
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonConstructorExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.r#type == b.r#type
+            && self.args.node_equal(&b.args)
+            && equal_opt(self.func, b.func)
+            && equal_opt(self.coercion, b.coercion)
+            && eq_ref(self.returning, b.returning)
+            && self.absent_on_null == b.absent_on_null
+            && self.unique == b.unique
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonIsPredicate<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr)
+            && eq_ref(self.format, b.format)
+            && self.item_type == b.item_type
+            && self.unique_keys == b.unique_keys
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonBehavior<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.btype == b.btype && equal_opt(self.expr, b.expr) && self.coerce == b.coerce
+    }
+}
+
+impl NodeEqual for crate::primnodes::JsonExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op
+            && self.column_name == b.column_name
+            && equal_opt(self.formatted_expr, b.formatted_expr)
+            && eq_ref(self.format, b.format)
+            && equal_opt(self.path_spec, b.path_spec)
+            && eq_ref(self.returning, b.returning)
+            && self.passing_names.node_equal(&b.passing_names)
+            && self.passing_values.node_equal(&b.passing_values)
+            && equal_opt(self.on_empty, b.on_empty)
+            && equal_opt(self.on_error, b.on_error)
+            && self.use_io_coercion == b.use_io_coercion
+            && self.use_json_coercion == b.use_json_coercion
+            && self.wrapper == b.wrapper
+            && self.omit_quotes == b.omit_quotes
+            && self.collation == b.collation
     }
 }

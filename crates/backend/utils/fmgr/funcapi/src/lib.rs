@@ -114,6 +114,14 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_JsonValueExpr => {
+            expr_type(node.as_json_value_expr().unwrap().formatted_expr)
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
+        }
+        NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
     }
 }

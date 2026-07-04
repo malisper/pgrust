@@ -932,6 +932,33 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 },
             )?))
         }
+        // C T_JsonValueExpr arm (clauses.c:2916): a Const formatted_expr
+        // elides the JsonValueExpr; else fold both legs.
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            let formatted = j.formatted_expr.expect("formatted_expr");
+            let new_formatted = ece_mutator(formatted, cx)?.unwrap_or(formatted);
+            if new_formatted.as_const().is_some() {
+                return Ok(Some(new_formatted));
+            }
+            let raw = j.raw_expr.expect("raw_expr");
+            let new_raw = ece_mutator(raw, cx)?.unwrap_or(raw);
+            Ok(Some(Node::mk(
+                cx.mcx,
+                types_nodes::JsonValueExpr {
+                    raw_expr: Some(new_raw),
+                    formatted_expr: Some(new_formatted),
+                    format: j.format,
+                },
+            )?))
+        }
+        // C default ece_generic_processing over the remaining SQL/JSON nodes.
+        NodeTag::T_JsonConstructorExpr
+        | NodeTag::T_JsonIsPredicate
+        | NodeTag::T_JsonExpr
+        | NodeTag::T_JsonBehavior => {
+            expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
+        }
         other => deferred("eval_const_expressions_mutator", other),
     }
 }

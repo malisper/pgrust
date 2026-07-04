@@ -187,6 +187,25 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let r = node.as_row_expr().unwrap();
             walk_list(&r.args, w)
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            Ok(walk_opt(j.raw_expr, w)? || walk_opt(j.formatted_expr, w)?)
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            Ok(walk_list(&c.args, w)? || walk_opt(c.func, w)? || walk_opt(c.coercion, w)?)
+        }
+        NodeTag::T_JsonIsPredicate => walk_opt(node.as_json_is_predicate().unwrap().expr, w),
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            // C: "we assume walker doesn't care about passing_names".
+            Ok(walk_opt(j.formatted_expr, w)?
+                || walk_opt(j.path_spec, w)?
+                || walk_list(&j.passing_values, w)?
+                || walk_opt(j.on_empty, w)?
+                || walk_opt(j.on_error, w)?)
+        }
+        NodeTag::T_JsonBehavior => walk_opt(node.as_json_behavior().unwrap().expr, w),
         NodeTag::T_CoerceToDomain => w.visit(node.as_coerce_to_domain().unwrap().arg),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
@@ -498,6 +517,77 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
         }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
+        // JsonFormat/JsonReturning subtrees are leaves here (typed refs, no
+        // expressions inside; C walks them as nodes — divergence, no walker
+        // inspects them).
+        NodeTag::T_JsonReturning => Ok(false),
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            Ok(walk_opt(j.raw_expr, w)? || walk_opt(j.formatted_expr, w)?)
+        }
+        NodeTag::T_JsonParseExpr => {
+            let j = node.as_json_parse_expr().unwrap();
+            Ok(walk_opt(j.expr, w)? || walk_opt(j.output, w)?)
+        }
+        NodeTag::T_JsonScalarExpr => {
+            let j = node.as_json_scalar_expr().unwrap();
+            Ok(walk_opt(j.expr, w)? || walk_opt(j.output, w)?)
+        }
+        NodeTag::T_JsonSerializeExpr => {
+            let j = node.as_json_serialize_expr().unwrap();
+            Ok(walk_opt(j.expr, w)? || walk_opt(j.output, w)?)
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            Ok(walk_list(&c.args, w)? || walk_opt(c.func, w)? || walk_opt(c.coercion, w)?)
+        }
+        NodeTag::T_JsonIsPredicate => walk_opt(node.as_json_is_predicate().unwrap().expr, w),
+        NodeTag::T_JsonArgument => walk_opt(node.as_json_argument().unwrap().val, w),
+        NodeTag::T_JsonBehavior => walk_opt(node.as_json_behavior().unwrap().expr, w),
+        NodeTag::T_JsonFuncExpr => {
+            let f = node.as_json_func_expr().unwrap();
+            Ok(walk_opt(f.context_item, w)?
+                || walk_opt(f.pathspec, w)?
+                || walk_list(&f.passing, w)?
+                || walk_opt(f.output, w)?
+                || walk_opt(f.on_empty, w)?
+                || walk_opt(f.on_error, w)?)
+        }
+        NodeTag::T_JsonOutput => {
+            let o = node.as_json_output().unwrap();
+            walk_opt(o.typeName, w)
+        }
+        NodeTag::T_JsonKeyValue => {
+            let kv = node.as_json_key_value().unwrap();
+            Ok(walk_opt(kv.key, w)? || walk_opt(kv.value, w)?)
+        }
+        NodeTag::T_JsonObjectConstructor => {
+            let c = node.as_json_object_constructor().unwrap();
+            Ok(walk_opt(c.output, w)? || walk_list(&c.exprs, w)?)
+        }
+        NodeTag::T_JsonArrayConstructor => {
+            let c = node.as_json_array_constructor().unwrap();
+            Ok(walk_opt(c.output, w)? || walk_list(&c.exprs, w)?)
+        }
+        NodeTag::T_JsonAggConstructor => {
+            let c = node.as_json_agg_constructor().unwrap();
+            Ok(walk_opt(c.output, w)?
+                || walk_list(&c.agg_order, w)?
+                || walk_opt(c.agg_filter, w)?
+                || walk_opt(c.over, w)?)
+        }
+        NodeTag::T_JsonObjectAgg => {
+            let a = node.as_json_object_agg().unwrap();
+            Ok(walk_opt(a.constructor, w)? || walk_opt(a.arg, w)?)
+        }
+        NodeTag::T_JsonArrayAgg => {
+            let a = node.as_json_array_agg().unwrap();
+            Ok(walk_opt(a.constructor, w)? || walk_opt(a.arg, w)?)
+        }
+        NodeTag::T_JsonArrayQueryConstructor => {
+            let c = node.as_json_array_query_constructor().unwrap();
+            Ok(walk_opt(c.output, w)? || walk_opt(c.query, w)?)
+        }
         other => deferred("raw_expression_tree_walker", other),
     }
 }
@@ -1001,6 +1091,120 @@ where
                 )?)),
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            let raw = mutate_opt(j.raw_expr, m)?;
+            let formatted = mutate_opt(j.formatted_expr, m)?;
+            if raw.is_none() && formatted.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::JsonValueExpr {
+                    raw_expr: raw.or(j.raw_expr),
+                    formatted_expr: formatted.or(j.formatted_expr),
+                    format: j.format,
+                },
+            )?))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            let args = mutate_list(mcx, &c.args, m)?;
+            let func = mutate_opt(c.func, m)?;
+            let coercion = mutate_opt(c.coercion, m)?;
+            if args.is_none() && func.is_none() && coercion.is_none() {
+                return Ok(None);
+            }
+            let args = match args {
+                Some(l) => l,
+                None => c.args.clone_in(mcx)?,
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::JsonConstructorExpr {
+                    r#type: c.r#type,
+                    args,
+                    func: func.or(c.func),
+                    coercion: coercion.or(c.coercion),
+                    returning: c.returning,
+                    absent_on_null: c.absent_on_null,
+                    unique: c.unique,
+                    location: c.location,
+                },
+            )?))
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().unwrap();
+            match mutate_opt(p.expr, m)? {
+                None => Ok(None),
+                Some(expr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::JsonIsPredicate {
+                        expr: Some(expr),
+                        format: p.format,
+                        item_type: p.item_type,
+                        unique_keys: p.unique_keys,
+                        location: p.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_JsonBehavior => {
+            let b = node.as_json_behavior().unwrap();
+            match mutate_opt(b.expr, m)? {
+                None => Ok(None),
+                Some(expr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::JsonBehavior {
+                        btype: b.btype,
+                        expr: Some(expr),
+                        coerce: b.coerce,
+                        location: b.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            let formatted = mutate_opt(j.formatted_expr, m)?;
+            let path_spec = mutate_opt(j.path_spec, m)?;
+            let passing_values = mutate_list(mcx, &j.passing_values, m)?;
+            let on_empty = mutate_opt(j.on_empty, m)?;
+            let on_error = mutate_opt(j.on_error, m)?;
+            if formatted.is_none()
+                && path_spec.is_none()
+                && passing_values.is_none()
+                && on_empty.is_none()
+                && on_error.is_none()
+            {
+                return Ok(None);
+            }
+            let passing_values = match passing_values {
+                Some(l) => l,
+                None => j.passing_values.clone_in(mcx)?,
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::JsonExpr {
+                    op: j.op,
+                    column_name: j.column_name,
+                    formatted_expr: formatted.or(j.formatted_expr),
+                    format: j.format,
+                    path_spec: path_spec.or(j.path_spec),
+                    returning: j.returning,
+                    passing_names: j.passing_names.clone_in(mcx)?,
+                    passing_values,
+                    on_empty: on_empty.or(j.on_empty),
+                    on_error: on_error.or(j.on_error),
+                    use_io_coercion: j.use_io_coercion,
+                    use_json_coercion: j.use_json_coercion,
+                    wrapper: j.wrapper,
+                    omit_quotes: j.omit_quotes,
+                    collation: j.collation,
+                    location: j.location,
+                },
+            )?))
+        }
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             match mutate_list(mcx, &mm.args, m)? {
@@ -1211,6 +1415,20 @@ where
             }
         }
         other => deferred("expression_tree_mutator", other),
+    }
+}
+
+/// Mutate an optional child; `None` = unchanged (absent child included).
+pub fn mutate_opt<'mcx, F>(
+    n: Option<Node<'mcx>>,
+    m: &mut F,
+) -> PgResult<Option<Node<'mcx>>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    match n {
+        Some(x) => m(x),
+        None => Ok(None),
     }
 }
 
