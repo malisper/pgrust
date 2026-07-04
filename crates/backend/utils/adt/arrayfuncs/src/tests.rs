@@ -426,3 +426,207 @@ mod expanded {
         parent.reset();
     }
 }
+
+mod ops_tests {
+    use super::*;
+    use crate::ops::{
+        array_cmp_core, array_eq_loop, array_fill_core, contain_core, dims_text, hash_array_core,
+        replace_core, ElemMeta, FlatIter,
+    };
+    use ::mcx::PgVec;
+
+    const INT4_META: ElemMeta = ElemMeta { typlen: 4, typbyval: true, typalign: b'i' };
+
+    fn fc_i4eq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        Ok(Datum::from_bool(fcinfo.arg(0).as_i32() == fcinfo.arg(1).as_i32()))
+    }
+    fn fc_i4cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        Ok(Datum::from_i32(fcinfo.arg(0).as_i32().cmp(&fcinfo.arg(1).as_i32()) as i32))
+    }
+    fn fc_i4hash(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        Ok(Datum::from_u64(fcinfo.arg(0).as_i32() as u32 as u64))
+    }
+
+    fn finfo(f: ::types_fmgr::PGFunction) -> FmgrInfo {
+        FmgrInfo::new(f, 1, 2, true, false)
+    }
+
+    fn int4_arr<'m>(mcx: Mcx<'m>, vals: &[Option<i32>]) -> PgVec<'m, u8> {
+        int4_arr_md(mcx, vals, 1, &[vals.len() as i32], &[1])
+    }
+
+    fn int4_arr_md<'m>(
+        mcx: Mcx<'m>,
+        vals: &[Option<i32>],
+        ndims: i32,
+        dims: &[i32],
+        lbs: &[i32],
+    ) -> PgVec<'m, u8> {
+        let elems: std::vec::Vec<Datum> =
+            vals.iter().map(|v| Datum::from_i32(v.unwrap_or(0))).collect();
+        let nulls: std::vec::Vec<bool> = vals.iter().map(|v| v.is_none()).collect();
+        construct_md_array(mcx, &elems, Some(&nulls), ndims, dims, lbs, INT4OID, 4, true, b'i')
+            .unwrap()
+    }
+
+    fn int4_arr_vals(img: &[u8]) -> std::vec::Vec<Option<i32>> {
+        let (ndim, dims, _lbs) = crate::foundation::read_dims_lbounds(img);
+        let n = ::arrayutils::array_get_n_items(ndim, &dims).unwrap();
+        let mut it = FlatIter::new(img);
+        (0..n)
+            .map(|_| {
+                let (d, isnull) = it.next(4, true, b'i');
+                if isnull { None } else { Some(d.as_i32()) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn eq_and_cmp_cores() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let a = int4_arr(mcx, &[Some(1), None, Some(3)]);
+        let b = int4_arr(mcx, &[Some(1), None, Some(3)]);
+        let c = int4_arr(mcx, &[Some(1), Some(2), Some(3)]);
+        let mut eq = finfo(fc_i4eq);
+        assert!(array_eq_loop(mcx, &a, &b, 0, INT4_META, &mut eq).unwrap());
+        assert!(!array_eq_loop(mcx, &a, &c, 0, INT4_META, &mut eq).unwrap());
+
+        let mut cmp = finfo(fc_i4cmp);
+        assert_eq!(array_cmp_core(mcx, &a, &b, 0, INT4_META, &mut cmp).unwrap(), 0);
+        // NULL sorts greater than any value
+        assert_eq!(array_cmp_core(mcx, &a, &c, 0, INT4_META, &mut cmp).unwrap(), 1);
+        let short = int4_arr(mcx, &[Some(1)]);
+        assert_eq!(array_cmp_core(mcx, &short, &c, 0, INT4_META, &mut cmp).unwrap(), -1);
+        // same data, different lower bounds
+        let lb2 = int4_arr_md(mcx, &[Some(1), Some(2), Some(3)], 1, &[3], &[2]);
+        assert_eq!(array_cmp_core(mcx, &c, &lb2, 0, INT4_META, &mut cmp).unwrap(), -1);
+    }
+
+    #[test]
+    fn hash_core_combines_like_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let a = int4_arr(mcx, &[None]);
+        let mut h = finfo(fc_i4hash);
+        assert_eq!(hash_array_core(mcx, &a, 0, INT4_META, &mut h, None).unwrap(), 31);
+        let b = int4_arr(mcx, &[Some(7), Some(9)]);
+        // ((1*31 + 7) * 31) + 9 = 1187
+        assert_eq!(hash_array_core(mcx, &b, 0, INT4_META, &mut h, None).unwrap(), 1187);
+        let seeded =
+            hash_array_core(mcx, &b, 0, INT4_META, &mut h, Some(Datum::from_i64(0))).unwrap();
+        assert_eq!(seeded, 1187);
+    }
+
+    #[test]
+    fn contain_cores() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let a = int4_arr(mcx, &[Some(1), Some(2)]);
+        let b = int4_arr(mcx, &[Some(2), Some(3), Some(1)]);
+        let n = int4_arr(mcx, &[Some(1), None]);
+        let mut eq = finfo(fc_i4eq);
+        // overlap: any-match
+        assert!(contain_core(mcx, &a, &b, 0, false, INT4_META, &mut eq).unwrap());
+        // contains: a ⊆ b
+        assert!(contain_core(mcx, &a, &b, 0, true, INT4_META, &mut eq).unwrap());
+        assert!(!contain_core(mcx, &b, &a, 0, true, INT4_META, &mut eq).unwrap());
+        // NULL can't match: matchall fails, any-match skips
+        assert!(!contain_core(mcx, &n, &b, 0, true, INT4_META, &mut eq).unwrap());
+        assert!(contain_core(mcx, &n, &b, 0, false, INT4_META, &mut eq).unwrap());
+    }
+
+    #[test]
+    fn replace_and_remove_cores() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut eq = finfo(fc_i4eq);
+
+        let a = int4_arr(mcx, &[Some(1), Some(2), None, Some(2)]);
+        let out = replace_core(
+            mcx, a, Datum::from_i32(2), false, Datum::from_i32(9), false, false, 0, INT4_META,
+            &mut eq,
+        )
+        .unwrap();
+        assert_eq!(int4_arr_vals(&out), vec![Some(1), Some(9), None, Some(9)]);
+
+        // replace NULLs with a value
+        let a = int4_arr(mcx, &[Some(1), None]);
+        let out = replace_core(
+            mcx, a, Datum::null(), true, Datum::from_i32(0), false, false, 0, INT4_META, &mut eq,
+        )
+        .unwrap();
+        assert_eq!(int4_arr_vals(&out), vec![Some(1), Some(0)]);
+
+        // remove matches and NULL search removes NULLs
+        let a = int4_arr(mcx, &[Some(1), Some(2), None, Some(2)]);
+        let out = replace_core(
+            mcx, a, Datum::from_i32(2), false, Datum::null(), true, true, 0, INT4_META, &mut eq,
+        )
+        .unwrap();
+        assert_eq!(int4_arr_vals(&out), vec![Some(1), None]);
+
+        // unchanged input returned as-is
+        let a = int4_arr(mcx, &[Some(1)]);
+        let out = replace_core(
+            mcx, a, Datum::from_i32(5), false, Datum::null(), true, true, 0, INT4_META, &mut eq,
+        )
+        .unwrap();
+        assert_eq!(int4_arr_vals(&out), vec![Some(1)]);
+
+        // removing everything yields an empty array
+        let a = int4_arr(mcx, &[Some(5), Some(5)]);
+        let out = replace_core(
+            mcx, a, Datum::from_i32(5), false, Datum::null(), true, true, 0, INT4_META, &mut eq,
+        )
+        .unwrap();
+        assert_eq!(crate::foundation::arr_ndim(&out), 0);
+    }
+
+    #[test]
+    fn fill_core() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let dims = int4_arr(mcx, &[Some(2), Some(3)]);
+        let lbs = int4_arr(mcx, &[Some(0), Some(-1)]);
+        let out = array_fill_core(
+            mcx, &dims, Some(&lbs), Datum::from_i32(7), false, INT4OID, INT4_META,
+        )
+        .unwrap();
+        let (ndim, dv, lv) = crate::foundation::read_dims_lbounds(&out);
+        assert_eq!((ndim, dv[0], dv[1], lv[0], lv[1]), (2, 2, 3, 0, -1));
+        assert_eq!(int4_arr_vals(&out), vec![Some(7); 6]);
+        assert_eq!(dims_text(ndim, &dv, &lv), "[0:1][-1:1]");
+
+        // null fill value → all-null bitmap
+        let out =
+            array_fill_core(mcx, &dims, None, Datum::null(), true, INT4OID, INT4_META).unwrap();
+        assert_eq!(int4_arr_vals(&out), vec![None; 6]);
+
+        // empty dims → empty array
+        let nodims = int4_arr(mcx, &[]);
+        let out = array_fill_core(
+            mcx, &nodims, None, Datum::from_i32(7), false, INT4OID, INT4_META,
+        )
+        .unwrap();
+        assert_eq!(crate::foundation::arr_ndim(&out), 0);
+
+        // error arms
+        let md = int4_arr_md(mcx, &[Some(1), Some(2)], 2, &[1, 2], &[1, 1]);
+        let e = array_fill_core(mcx, &md, None, Datum::from_i32(7), false, INT4OID, INT4_META)
+            .unwrap_err();
+        assert_eq!(e.message(), "wrong number of array subscripts");
+        let withnull = int4_arr(mcx, &[Some(1), None]);
+        let e = array_fill_core(
+            mcx, &withnull, None, Datum::from_i32(7), false, INT4OID, INT4_META,
+        )
+        .unwrap_err();
+        assert_eq!(e.message(), "dimension values cannot be null");
+        let lbs1 = int4_arr(mcx, &[Some(1)]);
+        let e = array_fill_core(
+            mcx, &dims, Some(&lbs1), Datum::from_i32(7), false, INT4OID, INT4_META,
+        )
+        .unwrap_err();
+        assert_eq!(e.message(), "wrong number of array subscripts");
+    }
+}

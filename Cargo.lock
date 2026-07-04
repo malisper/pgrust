@@ -965,6 +965,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "array_userfuncs"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "arrayutils",
+ "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "format_type",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "pg_prng",
+ "tuplesort_seams",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "arrayfuncs"
 version = "0.1.0"
 dependencies = [
@@ -3986,6 +4007,7 @@ dependencies = [
  "adt_varchar",
  "adt_windowfuncs",
  "adt_xml",
+ "array_userfuncs",
  "arrayfuncs",
  "commands_async",
  "conv",
@@ -11830,6 +11852,7 @@ dependencies = [
  "nbtree",
  "pg_locale",
  "postgres_seams",
+ "tuplesort_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -11839,6 +11862,17 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "tuplesort_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -12607,6 +12641,7 @@ dependencies = [
  "pg_locale_seams",
  "pqformat",
  "stringinfo",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",

@@ -303,7 +303,7 @@ fn fc_wrappers_dispatch() {
 
 #[test]
 fn builtin_table_matches_declared_arity() {
-    let non_strict = [3535u32, 3536, 3543, 3544, 6299];
+    let non_strict = [3535u32, 3536, 3543, 3544, 6299, 394, 376];
     for row in crate::builtins::VARLENA_BUILTINS {
         assert_eq!(row.strict, !non_strict.contains(&row.foid), "{}", row.name);
         assert!(!row.retset);
@@ -772,4 +772,102 @@ fn unistr_rows() {
     assert_eq!(u(r"\xyz").unwrap_err().to_string(), "invalid Unicode escape");
     assert_eq!(u(r"\+00D800").unwrap_err().to_string(), "invalid Unicode surrogate pair");
     assert_eq!(u(r"\0000").unwrap_err().to_string(), "invalid Unicode code point: 0000");
+}
+
+#[test]
+fn text_to_array_arms() {
+    use datum::Datum;
+    use mcx::Mcx;
+    use types_fmgr::LocalFcinfo;
+
+    static SEAM: std::sync::Once = std::sync::Once::new();
+    SEAM.call_once(|| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok((typid == types_core::TEXTOID).then_some(types_tuple::tupdesc::PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typcollation: 100,
+            }))
+        });
+    });
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    fn run(
+        mcx: Mcx<'_>,
+        input: Option<&[u8]>,
+        sep: Option<&[u8]>,
+        ns: Option<&[u8]>,
+    ) -> Option<std::vec::Vec<Option<std::string::String>>> {
+        let mut fcinfo = LocalFcinfo::<3>::new(C);
+        // SAFETY: mcx outlives the call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        let mut hold = std::vec::Vec::new();
+        for (i, v) in [input, sep, ns].into_iter().enumerate() {
+            match v {
+                Some(b) => {
+                    let t = cstring_to_text(mcx, b).unwrap();
+                    fcinfo.set_arg(i, Datum::from_usize(t.as_bytes().as_ptr() as usize));
+                    hold.push(t);
+                }
+                None => fcinfo.set_arg_null(i),
+            }
+        }
+        let d = crate::split_text::fc_text_to_array(None, &mut fcinfo).unwrap();
+        if fcinfo.isnull {
+            return None;
+        }
+        let p = d.as_usize() as *const u8;
+        let img = unsafe {
+            core::slice::from_raw_parts(p, arrayfuncs::foundation::varsize_any(p))
+        };
+        let (elems, nulls) =
+            arrayfuncs::deconstruct_array_builtin(mcx, img, types_core::TEXTOID, true).unwrap();
+        Some(
+            elems
+                .iter()
+                .zip(nulls.iter())
+                .map(|(e, &isnull)| {
+                    if isnull {
+                        None
+                    } else {
+                        let ep = e.as_usize() as *const u8;
+                        let n = arrayfuncs::foundation::varsize_any(ep);
+                        let payload =
+                            unsafe { core::slice::from_raw_parts(ep.add(4), n - 4) };
+                        Some(std::string::String::from_utf8(payload.to_vec()).unwrap())
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    let s = |x: &str| Some(x.to_string());
+    assert_eq!(
+        run(mcx, Some(b"1|2|3"), Some(b"|"), None),
+        Some(vec![s("1"), s("2"), s("3")])
+    );
+    assert_eq!(run(mcx, Some(b""), Some(b"|"), None), Some(vec![]));
+    assert_eq!(run(mcx, Some(b"abc"), Some(b""), None), Some(vec![s("abc")]));
+    assert_eq!(
+        run(mcx, Some(b"abc"), None, None),
+        Some(vec![s("a"), s("b"), s("c")])
+    );
+    assert_eq!(
+        run(mcx, Some(b"1|NULL|3"), Some(b"|"), Some(b"NULL")),
+        Some(vec![s("1"), None, s("3")])
+    );
+    assert_eq!(
+        run(mcx, Some(b"1||2"), Some(b"|"), None),
+        Some(vec![s("1"), s(""), s("2")])
+    );
+    assert_eq!(run(mcx, None, Some(b"|"), None), None);
+    // NULL separator + null_string still applies per-character
+    assert_eq!(
+        run(mcx, Some(b"ab"), None, Some(b"b")),
+        Some(vec![s("a"), None])
+    );
 }
