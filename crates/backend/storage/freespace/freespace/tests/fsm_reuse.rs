@@ -244,7 +244,7 @@ fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
     });
     let mut relname = NameData::default();
     relname.namestrcpy("t");
-    RelationData { rd_locator: RelFileLocator::new(1663, 5, REL_OID), rd_smgr: Default::default(),
+    RelationData { rd_locator: Cell::new(RelFileLocator::new(1663, 5, REL_OID)), rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
