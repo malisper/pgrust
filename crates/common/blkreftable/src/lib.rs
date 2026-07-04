@@ -498,7 +498,8 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
             return Err(PgError::error(format!(
                 "file \"{}\" has wrong magic number: expected {}, found {}",
                 reader.error_filename, BLOCKREFTABLE_MAGIC, magic
-            )));
+            ))
+            .into());
         }
         Ok(reader)
     }
@@ -534,11 +535,12 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
     }
 
     #[cold]
-    fn ends_unexpectedly(&self) -> PgError {
+    fn ends_unexpectedly(&self) -> Box<PgError> {
         PgError::error(format!(
             "file \"{}\" ends unexpectedly",
             self.error_filename
         ))
+        .into()
     }
 
     pub fn next_relation(
@@ -559,7 +561,8 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
                 return Err(PgError::error(format!(
                     "file \"{}\" has wrong checksum: expected {:08X}, found {:08X}",
                     self.error_filename, expected_crc, actual_crc
-                )));
+                ))
+                .into());
             }
             return Ok(None);
         }
