@@ -278,8 +278,15 @@ pub fn fmgr_internal_function(proname: &str) -> Oid {
 }
 
 /// The builtin fast path's FmgrInfo fill (C: fmgr_info_cxt_security's fbp arm).
+/// Late-registered builtins resolve to their real entry point here so
+/// flinfo-less invocations (sortsupport shims) don't dead-end in the stub.
 #[inline]
 pub fn fmgr_info_from_builtin_into(fbp: &FmgrBuiltin, function_id: Oid, finfo: &mut FmgrInfo) {
+    let fbp = if fbp.func as usize == builtin_not_ported as usize {
+        late_builtin(function_id).unwrap_or(fbp)
+    } else {
+        fbp
+    };
     finfo.fn_addr = fbp.func;
     finfo.fn_nargs = fbp.nargs;
     finfo.fn_strict = fbp.strict;
