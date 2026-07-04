@@ -148,6 +148,10 @@ pub fn CheckIndexCompatible<'mcx>(
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_HasExclusion: false,
+        ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
     };
     let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -163,6 +167,7 @@ pub fn CheckIndexCompatible<'mcx>(
         &mut opclassIds,
         &mut coloptions,
         attribute_list,
+        exclusion_op_names,
         false,
         accessMethodId,
         amname,
