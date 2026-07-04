@@ -63,7 +63,7 @@ fn fc_aclitemin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     let esc = unsafe { fcinfo.error_save_node() };
     match crate::io::aclitemin(s.to_bytes(), esc)? {
         Some(item) => aclitem_result(fcinfo, &item),
-        None => Ok(Datum::null()),
+        None => Ok(fcinfo.return_null()),
     }
 }
 
@@ -321,10 +321,10 @@ fn table_priv_check(roleid: Oid, tableoid: Oid, mode: u64) -> PgResult<Datum> {
     Ok(Datum::from_bool(aclresult == ACLCHECK_OK))
 }
 
-fn table_priv_check_ext(roleid: Oid, tableoid: Oid, mode: u64) -> PgResult<Datum> {
+fn table_priv_check_ext(fcinfo: &mut Fcinfo, roleid: Oid, tableoid: Oid, mode: u64) -> PgResult<Datum> {
     let (aclresult, is_missing) = aclchk_seams::pg_class_aclcheck_ext::call(tableoid, roleid, mode)?;
     if is_missing {
-        return Ok(Datum::null());
+        return Ok(fcinfo.return_null());
     }
     Ok(Datum::from_bool(aclresult == ACLCHECK_OK))
 }
@@ -353,14 +353,14 @@ fn fc_has_table_privilege_name_id(
     let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
     let tableoid = fcinfo.arg_oid(1);
     let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
-    table_priv_check_ext(roleid, tableoid, mode)
+    table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
 fn fc_has_table_privilege_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = fcinfo.arg_oid(0);
     let mode = convert_table_priv_string(arg_text_str(fcinfo, 1)?)?;
-    table_priv_check_ext(roleid, tableoid, mode)
+    table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
 fn fc_has_table_privilege_id_name(
@@ -380,7 +380,7 @@ fn fc_has_table_privilege_id_id(
     let roleid = fcinfo.arg_oid(0);
     let tableoid = fcinfo.arg_oid(1);
     let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
-    table_priv_check_ext(roleid, tableoid, mode)
+    table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
 const DATABASE_PRIV_MAP: &[PrivMapEntry] = &[
@@ -426,10 +426,16 @@ fn object_priv_check(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> PgR
     Ok(Datum::from_bool(r == ACLCHECK_OK))
 }
 
-fn object_priv_check_ext(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> PgResult<Datum> {
+fn object_priv_check_ext(
+    fcinfo: &mut Fcinfo,
+    classid: Oid,
+    objectid: Oid,
+    roleid: Oid,
+    mode: u64,
+) -> PgResult<Datum> {
     let (r, is_missing) = aclchk_seams::object_aclcheck_ext::call(classid, objectid, roleid, mode)?;
     if is_missing {
-        return Ok(Datum::null());
+        return Ok(fcinfo.return_null());
     }
     Ok(Datum::from_bool(r == ACLCHECK_OK))
 }
@@ -483,7 +489,7 @@ macro_rules! has_priv_family {
             let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
             let objoid = fcinfo.arg_oid(1);
             let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
-            object_priv_check_ext($classid, objoid, roleid, mode)
+            object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
         fn $in_(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = fcinfo.arg_oid(0);
@@ -495,7 +501,7 @@ macro_rules! has_priv_family {
             let roleid = fcinfo.arg_oid(0);
             let objoid = fcinfo.arg_oid(1);
             let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
-            object_priv_check_ext($classid, objoid, roleid, mode)
+            object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
         fn $n(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = miscinit_seams::get_user_id::call();
@@ -507,7 +513,7 @@ macro_rules! has_priv_family {
             let roleid = miscinit_seams::get_user_id::call();
             let objoid = fcinfo.arg_oid(0);
             let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, $map)?;
-            object_priv_check_ext($classid, objoid, roleid, mode)
+            object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
     };
 }
@@ -572,10 +578,10 @@ has_priv_family!(
     fc_has_type_privilege_id
 );
 
-fn lo_priv_result(roleid: Oid, lobj: Oid, mode: u64) -> PgResult<Datum> {
+fn lo_priv_result(fcinfo: &mut Fcinfo, roleid: Oid, lobj: Oid, mode: u64) -> PgResult<Datum> {
     let (result, is_missing) = aclchk_seams::has_lo_priv_byid::call(roleid, lobj, mode)?;
     if is_missing {
-        return Ok(Datum::null());
+        return Ok(fcinfo.return_null());
     }
     Ok(Datum::from_bool(result))
 }
@@ -587,7 +593,7 @@ fn fc_has_largeobject_privilege_name_id(
     let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
     let lobj = fcinfo.arg_oid(1);
     let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
-    lo_priv_result(roleid, lobj, mode)
+    lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
 fn fc_has_largeobject_privilege_id(
@@ -597,7 +603,7 @@ fn fc_has_largeobject_privilege_id(
     let roleid = miscinit_seams::get_user_id::call();
     let lobj = fcinfo.arg_oid(0);
     let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, LARGEOBJECT_PRIV_MAP)?;
-    lo_priv_result(roleid, lobj, mode)
+    lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
 fn fc_has_largeobject_privilege_id_id(
@@ -607,7 +613,7 @@ fn fc_has_largeobject_privilege_id_id(
     let roleid = fcinfo.arg_oid(0);
     let lobj = fcinfo.arg_oid(1);
     let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
-    lo_priv_result(roleid, lobj, mode)
+    lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
