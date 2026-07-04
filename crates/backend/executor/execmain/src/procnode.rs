@@ -1633,6 +1633,15 @@ impl<'mcx> ::nodesort::SortFeedSource<'mcx> for SeqScanSortSource<'_, 'mcx> {
     ) -> PgResult<Option<ExecSlotId>> {
         ::nodeseqscan::seq_scan_batch_emit(self.ss, estate, i)
     }
+
+    fn key_direct(&mut self, estate: &mut EStateData<'mcx>) -> bool {
+        ::nodeseqscan::seq_scan_sortkey_direct(self.ss, estate)
+    }
+
+    #[inline(always)]
+    fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
+        ::nodeseqscan::seq_scan_batch_key(self.ss, i)
+    }
 }
 
 #[inline(never)]
