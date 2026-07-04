@@ -435,3 +435,8 @@ DROP TABLE ec_pe2;
 DROP TABLE ec_poc;
 DROP TABLE ec_pb;
 DROP TABLE ec_pe;
+
+-- tablefunc RTE selectivity: examine_simple_variable no-stats fallthrough
+EXPLAIN SELECT * FROM XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt WHERE n = 1;
+EXPLAIN SELECT * FROM XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt WHERE n > 1 AND n IS NOT NULL;
+EXPLAIN SELECT * FROM ec_small s JOIN XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt ON s.x = xt.n;

@@ -1426,15 +1426,17 @@ fn examine_simple_variable<'mcx>(
                 varattno,
             )
         }
-        // C falls through with no stats for these RTE kinds (appendrel
+        // C falls through with no stats for every other RTE kind (appendrel
         // subqueries and self-referencing CTEs included).
         RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_TABLEFUNC
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_JOIN
         | RTEKind::RTE_SUBQUERY
         | RTEKind::RTE_NAMEDTUPLESTORE
+        | RTEKind::RTE_RESULT
+        | RTEKind::RTE_GROUP
         | RTEKind::RTE_CTE => Ok(SimpleVarStats::none()),
-        other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
 }
 
