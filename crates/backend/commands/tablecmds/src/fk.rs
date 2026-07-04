@@ -1,9 +1,9 @@
 // ATExecAddConstraint FK slice (tablecmds.c): ATAddForeignKeyConstraint +
 // addFkConstraint/addFkRecurseReferenced/addFkRecurseReferencing +
-// createForeignKey{Action,Check}Triggers, plain-table MATCH SIMPLE
-// NO ACTION/RESTRICT lane. LOUD: CASCADE/SET NULL/SET DEFAULT actions,
-// MATCH FULL/PARTIAL, PERIOD, partitioned rels, NOT ENFORCED, validation
-// scans (skip_validation=false), old_conpfeqop re-add lane.
+// createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint,
+// plain-table MATCH SIMPLE NO ACTION/RESTRICT lane. LOUD: CASCADE/SET NULL/
+// SET DEFAULT actions, MATCH FULL/PARTIAL, PERIOD, partitioned rels,
+// NOT ENFORCED, old_conpfeqop re-add lane.
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_MAX_KEYS};
@@ -43,11 +43,19 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// NewConstraint CONSTR_FOREIGN fields (tablecmds.c), for the Phase-3 pass.
+pub(crate) struct FkValidateItem<'mcx> {
+    pub conname: &'mcx str,
+    pub refrelid: Oid,
+    pub refindid: Oid,
+    pub conid: Oid,
+}
+
 pub(crate) fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     constraint: &Constraint<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<FkValidateItem<'mcx>>> {
     use types_nodes::rawnodes::ConstrType;
     match constraint.contype {
         ConstrType::CONSTR_FOREIGN => {}
@@ -89,7 +97,7 @@ fn at_add_foreign_key_constraint<'mcx>(
     rel: &Relation<'mcx>,
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
-) -> PgResult<()> {
+) -> PgResult<Option<FkValidateItem<'mcx>>> {
     if fkconstraint.old_pktable_oid != InvalidOid || !fkconstraint.old_conpfeqop.is_nil() {
         unported("old_pktable_oid / old_conpfeqop (re-add lane)");
     }
@@ -117,10 +125,6 @@ fn at_add_foreign_key_constraint<'mcx>(
     if !fkconstraint.is_enforced {
         unported("NOT ENFORCED");
     }
-    if !fkconstraint.skip_validation {
-        unported("FK validation scan (RI_Initial_Check / ATRewriteTables phase 3)");
-    }
-    debug_assert!(fkconstraint.initially_valid);
 
     let pktable = fkconstraint.pktable.expect("FK constraint without pktable");
     let pkrv = rel_vocab::RangeVar {
@@ -324,8 +328,83 @@ fn at_add_foreign_key_constraint<'mcx>(
     create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
     create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, constr_oid, index_oid)?;
 
+    let validate = if !fkconstraint.skip_validation && fkconstraint.is_enforced {
+        debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
+        Some(FkValidateItem {
+            conname: str_in(mcx, conname)?,
+            refrelid: pkrel.rd_id,
+            refindid: index_oid,
+            conid: constr_oid,
+        })
+    } else {
+        None
+    };
+
     pkrel.close(NoLock)?;
-    Ok(())
+    Ok(validate)
+}
+
+// validateForeignKeyConstraint (tablecmds.c): Phase-3 whole-table check.
+// DIVERGENCE: the RI_Initial_Check LEFT-JOIN fast path is unported (arrives
+// with the trigger-subsystem landing); the per-row RI_FKey_check_ins walk is
+// C's fallback and raises the identical 23503 report.
+pub(crate) fn validate_foreign_key_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    item: &FkValidateItem<'mcx>,
+) -> PgResult<()> {
+    let pkrel = table::table_open(mcx, item.refrelid, types_rel::RowShareLock)?;
+
+    let trig = types_trigger::Trigger {
+        tgoid: InvalidOid,
+        tgname: mcx::PgString::from_str_in(item.conname, mcx)?,
+        tgfoid: InvalidOid,
+        tgtype: 0,
+        tgenabled: types_trigger::TRIGGER_FIRES_ON_ORIGIN,
+        tgisinternal: true,
+        tgisclone: false,
+        tgconstrrelid: pkrel.rd_id,
+        tgconstrindid: item.refindid,
+        tgconstraint: item.conid,
+        tgdeferrable: false,
+        tginitdeferred: false,
+        tgnargs: 0,
+        tgnattr: 0,
+        tgattr: mcx::PgVec::new_in(mcx),
+        tgargs: mcx::PgVec::new_in(mcx),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    };
+
+    let snap = snapmgr::GetLatestSnapshot()?;
+    let snap = snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot");
+    let mut scan = tableam::table_beginscan(
+        mcx,
+        rel,
+        Some(snap.clone()),
+        0,
+        mcx::PgVec::new_in(mcx),
+    )?;
+    {
+        let tableam::TableScanDesc::Heap(hscan) = &mut scan;
+        while let Some(tup) = heapam::heap_getnext(
+            hscan,
+            types_scan::ScanDirection::ForwardScanDirection,
+        )? {
+            let data = ri_triggers_seams::RiTriggerData {
+                tg_event: types_trigger::TRIGGER_EVENT_INSERT | types_trigger::TRIGGER_EVENT_ROW,
+                tg_relation: rel,
+                tg_trigtuple: tup,
+                tg_newtuple: None,
+                tg_trigger: &trig,
+            };
+            ri_triggers_seams::ri_fkey_trigger::call(mcx, F_RI_FKEY_CHECK_INS, &data)?;
+        }
+    }
+    tableam::table_endscan(scan)?;
+    snapmgr::UnregisterSnapshot(Some(&snap));
+    pkrel.close(types_rel::NoLock)
 }
 
 // transformColumnNameList (tablecmds.c) over the open relation's descriptor

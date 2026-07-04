@@ -17,7 +17,7 @@ use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, TypeName};
 use types_nodes::{Node, NodeList};
 use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, LOCKMODE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_tuple::{MaxHeapAttributeNumber, TupleDescData};
+use types_tuple::{MaxHeapAttributeNumber, TupleDescData, ATTNULLABLE_VALID};
 
 const AT_NUM_PASSES: usize = 12;
 const AT_PASS_DROP: usize = 0;
@@ -84,7 +84,8 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_AddIndex
             | AlterTableType::AT_AddIndexConstraint
             | AlterTableType::AT_SetStorage => AccessExclusiveLock,
-            AlterTableType::AT_SetStatistics => types_rel::ShareUpdateExclusiveLock,
+            AlterTableType::AT_SetStatistics
+            | AlterTableType::AT_ValidateConstraint => types_rel::ShareUpdateExclusiveLock,
             AlterTableType::AT_AddConstraint => {
                 let constr = cmd
                     .def
@@ -211,6 +212,7 @@ struct AlteredTableInfo<'mcx> {
     verify_new_notnull: bool,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
+    fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
 }
 
 pub fn AlterTable<'mcx>(
@@ -245,6 +247,7 @@ fn ATController<'mcx>(
         verify_new_notnull: false,
         newvals: PgVec::new_in(mcx),
         constraints: PgVec::new_in(mcx),
+        fk_checks: PgVec::new_in(mcx),
     };
 
     for cnode in cmds.iter() {
@@ -306,6 +309,11 @@ fn ATPrepCmd<'mcx>(
         AlterTableType::AT_DropConstraint => {
             set_recurse();
             AT_PASS_DROP
+        }
+        // Recursion occurs during execution.
+        AlterTableType::AT_ValidateConstraint => {
+            set_recurse();
+            AT_PASS_MISC
         }
         AlterTableType::AT_AlterColumnType => {
             ATPrepAlterColumnType(mcx, tab, rel, cmd, query_string)?;
@@ -399,6 +407,10 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_DropConstraint => {
                     ATExecDropConstraint(mcx, &rel, cmd)?;
                 }
+                AlterTableType::AT_ValidateConstraint => {
+                    let name = cmd.name.expect("AT_ValidateConstraint name");
+                    ATExecValidateConstraint(mcx, tab, &rel, name, cmd.recurse)?;
+                }
                 AlterTableType::AT_AddIndex => {
                     ATExecAddIndex(mcx, tab, &rel, cmd)?;
                 }
@@ -489,6 +501,15 @@ fn ATRewriteTables<'mcx>(
         ATRewriteTable(mcx, tab, InvalidOid)?;
     }
     let _ = tab.has_newvals;
+
+    // C's final pass: FK constraints are checked after all rewrites.
+    if !tab.fk_checks.is_empty() {
+        let rel = table::table_open(mcx, tab.relid, NoLock)?;
+        for item in tab.fk_checks.iter() {
+            crate::fk::validate_foreign_key_constraint(mcx, &rel, item)?;
+        }
+        rel.close(NoLock)?;
+    }
     Ok(())
 }
 
@@ -529,9 +550,13 @@ fn ATRewriteTable<'mcx>(
 
     let mut notnull_attrs: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     if newrel.is_some() || tab.verify_new_notnull {
+        // C reads CompactAttribute.attnullability: invalid not-null
+        // constraints are not verified.
         for i in 0..new_tupdesc.natts as usize {
             let att = new_tupdesc.attr(i);
-            if att.attnotnull && !att.attisdropped {
+            if new_tupdesc.compact_attr(i).attnullability == ATTNULLABLE_VALID
+                && !att.attisdropped
+            {
                 debug_assert!(att.attgenerated == 0);
                 notnull_attrs.push(att.attnum);
             }
@@ -1072,6 +1097,7 @@ fn ATExecDropNotNull<'mcx>(
         coninhcount: con.coninhcount,
         connoinherit: con.connoinherit,
         conislocal: con.conislocal,
+        conenforced: true,
         convalidated: con.convalidated,
         conindid: InvalidOid,
         confrelid: InvalidOid,
@@ -1208,7 +1234,7 @@ fn ATExecSetNotNull<'mcx>(
             unported("ATExecSetNotNull conislocal flip (inheritance)");
         }
         if !con.convalidated {
-            unported("ATExecSetNotNull ATExecValidateConstraint (NOT VALID lane)");
+            return ATExecValidateConstraint(mcx, tab, rel, con.name_str(), cmd.recurse);
         }
         return Ok(());
     }
@@ -1217,7 +1243,7 @@ fn ATExecSetNotNull<'mcx>(
     } else {
         false
     };
-    create_notnull_constraint(mcx, tab, rel, attnum, col_name, None, is_no_inherit)
+    create_notnull_constraint(mcx, tab, rel, attnum, col_name, None, is_no_inherit, true)
 }
 
 // The CreateConstraintEntry + set_attnotnull tail shared by SET NOT NULL and
@@ -1230,6 +1256,7 @@ fn create_notnull_constraint<'mcx>(
     col_name: &str,
     conname: Option<&str>,
     is_no_inherit: bool,
+    initially_valid: bool,
 ) -> PgResult<()> {
     let relname = rel.name().to_string();
     let name_storage;
@@ -1275,6 +1302,7 @@ fn create_notnull_constraint<'mcx>(
     entry.conkey = &conkey;
     entry.n_keys = 1;
     entry.is_no_inherit = is_no_inherit;
+    entry.is_validated = initially_valid;
     pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     // AddRelationNewConstraints tail: pg_class update fires the SI message
     // peers use to rebuild relcache entries.
@@ -1286,6 +1314,7 @@ fn create_notnull_constraint<'mcx>(
 
     // set_attnotnull: NotNullImpliedByRelConstraints proof unported — phase 3
     // always verifies (C skips the scan when existing constraints imply it).
+    // An invalid constraint sets attnotnull without queueing verification.
     if !rel.rd_att.attr(attnum as usize - 1).attnotnull {
         update_pg_attribute(
             mcx,
@@ -1293,7 +1322,9 @@ fn create_notnull_constraint<'mcx>(
             attnum,
             &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
         )?;
-        tab.verify_new_notnull = true;
+        if initially_valid {
+            tab.verify_new_notnull = true;
+        }
         xact::CommandCounterIncrement()?;
     }
     Ok(())
@@ -1403,6 +1434,7 @@ fn ATExecAddNotNullConstraint<'mcx>(
     if constr.is_no_inherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
         unported("ATAddCheckNNConstraint inheritance recursion");
     }
+    debug_assert!(constr.initially_valid != constr.skip_validation);
     create_notnull_constraint(
         mcx,
         tab,
@@ -1411,6 +1443,7 @@ fn ATExecAddNotNullConstraint<'mcx>(
         col_name,
         constr.conname,
         constr.is_no_inherit,
+        constr.initially_valid,
     )?;
     xact::CommandCounterIncrement()?;
     if find_inheritance_children_exist(mcx, rel.rd_id)? {
@@ -1713,7 +1746,10 @@ fn ATExecAddConstraint<'mcx>(
     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
-        return crate::fk::ATExecAddConstraint(mcx, rel, constr);
+        if let Some(item) = crate::fk::ATExecAddConstraint(mcx, rel, constr)? {
+            tab.fk_checks.push(item);
+        }
+        return Ok(());
     }
     if constr.contype != ConstrType::CONSTR_CHECK {
         unported(&format!("ATExecAddConstraint {:?}", constr.contype));
@@ -1735,6 +1771,97 @@ fn ATExecAddConstraint<'mcx>(
         unported("ATAddCheckNNConstraint inheritance recursion");
     }
     Ok(())
+}
+
+// ATExecValidateConstraint + Queue{FK,Check,NN}ConstraintValidation
+// (tablecmds.c), single-level lane: inheritance children are loud, the
+// partitioned arms unreachable (relkind gated at ATPrepCmd).
+fn ATExecValidateConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    rel: &Relation<'mcx>,
+    constr_name: &str,
+    recurse: bool,
+) -> PgResult<()> {
+    let relname = rel.name().to_string();
+    let Some(con) = pg_constraint::findConstraintByName(mcx, rel.rd_id, constr_name)? else {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "constraint \"{constr_name}\" of relation \"{relname}\" does not exist"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    };
+    if con.contype != pg_constraint::CONSTRAINT_FOREIGN
+        && con.contype != pg_constraint::CONSTRAINT_CHECK
+        && con.contype != pg_constraint::CONSTRAINT_NOTNULL
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("cannot validate constraint \"{constr_name}\" of relation \"{relname}\""),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .with_detail("This operation is not supported for this type of constraint."),
+        ));
+    }
+    if !con.conenforced {
+        return Err(Box::new(
+            PgError::new(ERROR, "cannot validate NOT ENFORCED constraint".to_string())
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    if con.convalidated {
+        return Ok(());
+    }
+    if con.contype != pg_constraint::CONSTRAINT_FOREIGN
+        && !con.connoinherit
+        && find_inheritance_children_exist(mcx, rel.rd_id)?
+    {
+        if !recurse {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "constraint must be validated on child tables too".to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        unported("Queue{Check,NN}ConstraintValidation inheritance recursion");
+    }
+    match con.contype {
+        pg_constraint::CONSTRAINT_FOREIGN => {
+            tab.fk_checks.push(crate::fk::FkValidateItem {
+                conname: str_arena(mcx, con.name_str())?,
+                refrelid: con.confrelid,
+                refindid: con.conindid,
+                conid: con.oid,
+            });
+        }
+        pg_constraint::CONSTRAINT_CHECK => {
+            for i in 0..rel.rd_att.natts as usize {
+                if rel.rd_att.attr(i).attgenerated != 0 {
+                    unported("QueueCheckConstraintValidation expand_generated_columns_in_expr");
+                }
+            }
+            let conbin = pg_constraint::constraint_conbin(mcx, con.oid)?;
+            let qual = readfuncs::stringToNode(mcx, conbin.as_str())?;
+            tab.constraints
+                .push(NewConstraint { name: str_arena(mcx, con.name_str())?, qual });
+            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+        }
+        _ => {
+            // QueueNNConstraintValidation: attnotnull was set by the invalid
+            // ADD, so set_attnotnull reduces to its relcache-inval arm.
+            debug_assert!(rel.rd_att.attr(con.notnull_attnum as usize - 1).attnotnull);
+            tab.verify_new_notnull = true;
+            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+        }
+    }
+    pg_constraint::SetConstraintValidated(mcx, con.oid)
 }
 
 // ATPrepAlterColumnType: build the transform (no USING; loud upstream) and
