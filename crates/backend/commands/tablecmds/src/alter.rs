@@ -3818,8 +3818,8 @@ fn ATPostAlterTypeParse<'mcx>(
     )?;
     let rel = table::table_open(mcx, rel_id, NoLock)?;
     for rs in raw_list.iter() {
-        let stmt = rs.stmt;
-        if let Some(_istmt) = stmt.as_variant::<types_nodes::rawnodes::IndexStmt>() {
+        let stmt = rs.stmt.expect("RawStmt.stmt");
+        if stmt.as_variant::<types_nodes::rawnodes::IndexStmt>().is_some() {
             parse_clause::transformIndexStmt(mcx, rel_id, stmt, def)?;
             if tab.rewrite == 0 {
                 TryReuseIndex(mcx, old_id, stmt)?;
