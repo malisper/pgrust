@@ -941,7 +941,7 @@ fn dispatch_switch<'mcx>(
             typecmds::DefineCompositeType(
                 mcx,
                 stmt.typevar.expect("CompositeTypeStmt.typevar"),
-                stmt.coldeflist,
+                stmt.coldeflist.clone_in(mcx)?,
                 source_text,
             )?;
         }
