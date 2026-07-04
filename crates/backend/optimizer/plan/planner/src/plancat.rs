@@ -585,7 +585,7 @@ fn btcanreturn() -> bool {
 
 // ChangeVarNodes (rewriteManip.c), rt_index 1 arm over freshly parsed index
 // expression trees (exclusively owned, so in-place mutation is safe).
-fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {
+pub(crate) fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {
     use types_nodes::NodeTag;
     let walk_list = |l: &types_nodes::NodeList<'_>| {
         for e in l {

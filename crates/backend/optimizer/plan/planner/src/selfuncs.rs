@@ -1227,10 +1227,10 @@ fn tle_in_sortlist(tle: &types_nodes::primnodes::TargetEntry<'_>, sortlist: &typ
 }
 
 // examine_variable (selfuncs.c) expression legs: expression-index column
-// stats, then extended-statistics expressions (statext_expressions_load is
-// unported — a matching expression statistics object is loud). nullingrels
-// within the expression aren't stripped before matching (PHV/outer-join
-// expression stats keys are unreachable while PHV creation is loud upstream).
+// stats, then extended-statistics expressions via statext_expressions_load.
+// nullingrels within the expression aren't stripped before matching
+// (PHV/outer-join expression stats keys are unreachable while PHV creation
+// is loud upstream).
 fn examine_expression_index_stats<'mcx>(
     run: &PlannerRun<'mcx>,
     vardata: &mut VariableStatData<'mcx>,
@@ -1286,21 +1286,27 @@ fn examine_expression_index_stats<'mcx>(
         }
     }
     if vardata.stats.is_none() {
-        for &sid in run.root.rel(onerel).statlist.iter() {
+        let inh = rte_at(run, &run.root, varno as usize).inh;
+        'stats: for &sid in run.root.rel(onerel).statlist.iter() {
             let info = run.root.statistic_ext(sid);
-            if info.kind != b'e' as i8 {
+            if info.kind != b'e' as i8 || info.inherit != inh {
                 continue;
             }
-            for &eid in info.exprs.iter() {
+            for (pos, &eid) in info.exprs.iter().enumerate() {
                 let mut expr = *run.root.expr_node(eid);
                 if let Some(r) = expr.as_relabel_type() {
                     expr = r.arg;
                 }
                 if types_nodes::equal(node, expr) {
-                    panic!(
-                        "examine_variable (selfuncs.c): statext_expressions_load; \
-                         expression-statistics lane"
-                    );
+                    let stat_oid = info.stat_oid;
+                    vardata.stats = Some(syscache_seams::statext_expressions_load::call(
+                        run.mcx,
+                        stat_oid,
+                        inh,
+                        pos as i32,
+                    )?);
+                    vardata.acl_ok = all_rows_selectable(run, &run.root, varno, None)?;
+                    break 'stats;
                 }
             }
         }
@@ -2595,36 +2601,28 @@ fn estimate_num_groups_core<'mcx>(
             }
         }
         // estimate_multivariate_ndistinct loop (selfuncs.c): consume vars
-        // covered by ndistinct extended statistics first. Expression entries
-        // never match here (C matches them against statistics-object
-        // expressions; statext expression stats are loud upstream).
-        while relvars.iter().filter(|vi| vi.node.as_var().is_some()).count() >= 2
-            && !run.root.rel(rel_id).statlist.is_empty()
-        {
-            let mut varattnos: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(mcx);
-            for vi in relvars.iter() {
-                if let Some(v) = vi.node.as_var() {
-                    varattnos.push(v.varattno);
+        // and expressions covered by ndistinct extended statistics first.
+        if relvars.len() > 1 && !run.root.rel(rel_id).statlist.is_empty() {
+            while !relvars.is_empty() {
+                let nodes: Vec<Node<'mcx>> = relvars.iter().map(|vi| vi.node).collect();
+                let Some((mvndistinct, consumed)) =
+                    crate::extended_stats::estimate_multivariate_ndistinct(run, rel_id, &nodes)?
+                else {
+                    break;
+                };
+                reldistinct *= mvndistinct;
+                if relmaxndistinct < mvndistinct {
+                    relmaxndistinct = mvndistinct;
                 }
-            }
-            let Some((mvndistinct, covered)) =
-                crate::extended_stats::estimate_multivariate_ndistinct(run, rel_id, &varattnos)?
-            else {
-                break;
-            };
-            reldistinct *= mvndistinct;
-            if relmaxndistinct < mvndistinct {
-                relmaxndistinct = mvndistinct;
-            }
-            relvarcount += 1;
-            let mut kept: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
-            for vi in relvars {
-                match vi.node.as_var() {
-                    Some(v) if covered.contains(&v.varattno) => {}
-                    _ => kept.push(vi),
+                relvarcount += 1;
+                let mut kept: mcx::PgVec<'_, GroupVarInfo<'mcx>> = mcx::PgVec::new_in(mcx);
+                for (i, vi) in relvars.into_iter().enumerate() {
+                    if !consumed[i] {
+                        kept.push(vi);
+                    }
                 }
+                relvars = kept;
             }
-            relvars = kept;
         }
         for vi in relvars {
             reldistinct *= vi.ndistinct;
@@ -3006,9 +3004,9 @@ fn find_join_input_rel<'mcx>(
 }
 
 // estimate_multivariate_bucketsize (selfuncs.c). Returns (otherclauses,
-// innerbucketsize). Non-Var inner-side expressions never match extended
-// ndistinct stats on this substrate (estimate_multivariate_ndistinct is
-// attno-keyed), mirroring its use in estimate_num_groups.
+// innerbucketsize). DIVERGENCE: nullingrels are cleared only on bare Vars,
+// not inside larger expressions (C remove_nulling_relids), so outer-join
+// hash keys over stat expressions fall back to per-var estimates.
 pub fn estimate_multivariate_bucketsize<'mcx>(
     run: &mut PlannerRun<'mcx>,
     _inner: RelId,
@@ -3117,19 +3115,17 @@ pub fn estimate_multivariate_bucketsize<'mcx>(
         let mut estimated: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(run.mcx);
         estimated.extend(core::iter::repeat_n(false, varinfos.len()));
         loop {
-            let mut attnos: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(run.mcx);
-            let mut attno_idx: mcx::PgVec<'mcx, usize> = mcx::PgVec::new_in(run.mcx);
+            let mut nodes: Vec<Node<'mcx>> = Vec::new();
+            let mut node_idx: Vec<usize> = Vec::new();
             for (i, &vi) in varinfos.iter().enumerate() {
                 if estimated[i] {
                     continue;
                 }
-                if let Some(v) = vi.as_var() {
-                    attnos.push(v.varattno);
-                    attno_idx.push(i);
-                }
+                nodes.push(vi);
+                node_idx.push(i);
             }
-            let Some((mvndistinct, covered)) = crate::extended_stats::
-                estimate_multivariate_ndistinct(run, group_rel, &attnos)?
+            let Some((mvndistinct, consumed)) = crate::extended_stats::
+                estimate_multivariate_ndistinct(run, group_rel, &nodes)?
             else {
                 break;
             };
@@ -3137,8 +3133,8 @@ pub fn estimate_multivariate_bucketsize<'mcx>(
                 ndistinct = mvndistinct;
             }
             debug_assert!(ndistinct >= 1.0);
-            for (k, &i) in attno_idx.iter().enumerate() {
-                if covered.contains(&attnos[k]) {
+            for (k, &i) in node_idx.iter().enumerate() {
+                if consumed[k] {
                     estimated[i] = true;
                 }
             }
