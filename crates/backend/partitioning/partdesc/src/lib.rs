@@ -1,7 +1,5 @@
-// partdesc.c: RelationGetPartitionDesc / RelationBuildPartitionDesc.
-// C divergence: descriptors cached in partdesc-owned maps keyed by relid
-// (cleared by the same relcache inval that clears C's rd_partdesc /
-// rd_partdesc_nodetached); nodetached mirrors C's xmin-validity rule.
+// partdesc.c. C divergence: descriptors cached in partdesc-owned maps keyed
+// by relid (same relcache inval as C's rd_partdesc / rd_partdesc_nodetached).
 #![allow(non_snake_case)]
 
 use core::cell::{Cell, RefCell};
@@ -217,9 +215,8 @@ fn RelationBuildPartitionDesc(
     };
 
     let desc = Rc::new(desc);
-    // A snapshot-dependent descriptor (a pending row was omitted by xmin
-    // visibility) may only live in the nodetached slot keyed by that xmin
-    // (partdesc.c:363-402).
+    // Snapshot-dependent (a pending row omitted by xmin visibility) => only
+    // the nodetached slot, keyed by that xmin (partdesc.c:363-402).
     if omit_detached && detached_exist && detached_xmin != InvalidTransactionId {
         with_state(|st| st.descs_nodetached.insert(relid, (Rc::clone(&desc), detached_xmin)));
     } else {
