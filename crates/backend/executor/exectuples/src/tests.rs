@@ -619,8 +619,9 @@ fn soa_batch_deform_matches_lazy_deform() {
     }
     soa.begin(tuples.len() as u32);
     for (i, t) in tuples.iter().enumerate() {
-        soa_deform_tuple(&mut soa, &plan, &desc.compact_attrs, i as u32, t);
+        soa_classify_row(&mut soa, &plan, &desc.compact_attrs, i as u32, t);
     }
+    soa_deform_columns(&mut soa, &plan, &desc.compact_attrs, None);
 
     for (i, (values, isnull)) in rows.iter().enumerate() {
         let mut got = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
@@ -664,8 +665,9 @@ fn soa_batch_deform_matches_lazy_deform() {
     let mut qsoa = SoaBatch::new_in(mcx, plan.ncols());
     qsoa.begin(tuples.len() as u32);
     for (i, t) in tuples.iter().enumerate() {
-        soa_deform_tuple_qual_col(&mut qsoa, &plan, &desc.compact_attrs, i as u32, t, 2);
+        soa_classify_row(&mut qsoa, &plan, &desc.compact_attrs, i as u32, t);
     }
+    soa_deform_columns(&mut qsoa, &plan, &desc.compact_attrs, Some(2));
     for i in 0..tuples.len() {
         assert_eq!(qsoa.col_isnull(2)[i], soa.col_isnull(2)[i], "qrow {i}");
         if !qsoa.col_isnull(2)[i] {
@@ -677,7 +679,8 @@ fn soa_batch_deform_matches_lazy_deform() {
     let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
     let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();
     soa.begin(1);
-    soa_deform_tuple(&mut soa, &plan, &desc.compact_attrs, 0, &nt);
+    soa_classify_row(&mut soa, &plan, &desc.compact_attrs, 0, &nt);
+    soa_deform_columns(&mut soa, &plan, &desc.compact_attrs, None);
     assert!(soa.is_fallback(0));
     let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc));
     let nt2 = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();

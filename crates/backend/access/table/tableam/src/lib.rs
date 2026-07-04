@@ -896,6 +896,7 @@ pub fn table_scan_batch_deform<'mcx>(
 }
 
 /// Store tuple `i` of the staged page batch into `slot`.
+#[inline(always)]
 pub fn table_scan_batch_store_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,

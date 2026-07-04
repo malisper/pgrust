@@ -1003,13 +1003,12 @@ pub fn heap_batch_deform_soa<'mcx>(
                 relid,
             )
         };
-        match qual_col_only {
-            None => exectuples::soa_deform_tuple(soa, plan, atts, i, &tuple),
-            Some(c) => exectuples::soa_deform_tuple_qual_col(soa, plan, atts, i, &tuple, c),
-        }
+        exectuples::soa_classify_row(soa, plan, atts, i, &tuple);
     }
+    exectuples::soa_deform_columns(soa, plan, atts, qual_col_only);
 }
 
+#[inline(always)]
 pub fn heap_batch_store_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut HeapScanDescData<'mcx>,
