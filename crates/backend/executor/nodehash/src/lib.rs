@@ -6,7 +6,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_hash32_from_attrs, exec_eval_expr, EvalSlots, ExprState};
+use ::execexpr::{exec_build_hash32_from_exprs, exec_eval_expr, EvalSlots, ExprState, ParamBind};
 use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
 use ::fd::buffile::BufFile;
 use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
@@ -560,18 +560,18 @@ pub fn exec_init_hash<'mcx>(
     node: &'mcx Hash<'mcx>,
     estate: &mut EStateData<'mcx>,
     inner_desc: Rc<TupleDescData<'static>>,
-    inner_attnums: &[i16],
     inner_hashfn_oids: &[Oid],
     collations: &[Oid],
 ) -> PgResult<HashState<'mcx>> {
     let mcx = estate.es_query_cxt;
-    let hash_expr = exec_build_hash32_from_attrs(
+    let hash_expr = exec_build_hash32_from_exprs(
         mcx,
         &inner_desc,
+        &node.hashkeys,
         inner_hashfn_oids,
         collations,
-        inner_attnums,
         0,
+        ParamBind::NONE,
     )?;
     let hash_tuple_slot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);

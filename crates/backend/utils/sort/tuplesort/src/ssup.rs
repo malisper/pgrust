@@ -171,7 +171,7 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         }
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
-             (merge join over shim-compared types not ported)",
+             (use apply_sort_comparator_in)",
             shim.fn_oid
         ),
     }

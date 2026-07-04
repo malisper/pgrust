@@ -722,6 +722,126 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
     Ok(state)
 }
 
+/// C `ExecBuildHash32Expr` (execExpr.c), serial hashjoin arm: hash arbitrary
+/// key expressions of the hashed slot, non-strict fold (NULL keys hash as 0,
+/// the recheck rejects them). C binds the hashed slot as ecxt_outertuple; our
+/// hashjoin eval sites bind it as the inner slot, so outer-slot reads are
+/// remapped to inner reads (datum-identical). All-plain-Var keys take the
+/// [`exec_build_hash32_from_attrs`] path.
+pub fn exec_build_hash32_from_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    desc: &TupleDescData<'_>,
+    hash_exprs: &NodeList<'mcx>,
+    hash_fn_oids: &[Oid],
+    collations: &[Oid],
+    init_value: u32,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let num_cols = hash_exprs.len();
+    debug_assert!(hash_fn_oids.len() == num_cols && collations.len() == num_cols);
+    'exprs: {
+        let mut attnums: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+        attnums.try_reserve(num_cols).map_err(|_| mcx.oom(num_cols * 2))?;
+        for k in hash_exprs.iter() {
+            match k.as_var() {
+                Some(v) if v.varattno > 0 => attnums.push(v.varattno),
+                _ => break 'exprs,
+            }
+        }
+        return exec_build_hash32_from_attrs(
+            mcx,
+            desc,
+            hash_fn_oids,
+            collations,
+            &attnums,
+            init_value,
+        );
+    }
+
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    let iresult = if num_cols as u64 + (init_value != 0) as u64 > 1 {
+        Some(alloc_nullable_datum(mcx)?)
+    } else {
+        None
+    };
+
+    let mut info = SetupInfo::default();
+    for k in hash_exprs.iter() {
+        setup_walker(k, &mut info);
+    }
+    assert!(info.last_scan == 0, "ExecBuildHash32Expr: scan-slot Var in a hash key");
+    let last_var = info.last_inner.max(info.last_outer);
+    if last_var > 0 {
+        push_step(&mut state, mcx, Step::InnerFetchSome { last_var: last_var as u16 })?;
+    }
+
+    let mut first = true;
+    if init_value != 0 {
+        let out = if num_cols > 0 {
+            OutRef(iresult.expect("multi-part hash requires an intermediate slot"))
+        } else {
+            state.result_out()
+        };
+        push_step(
+            &mut state,
+            mcx,
+            Step::HashDatumSetInitVal { init_value: ::datum::Datum::from_u32(init_value), out },
+        )?;
+        first = false;
+    }
+
+    for (i, k) in hash_exprs.iter().enumerate() {
+        let flinfo = fmgr_core::fmgr_info(hash_fn_oids[i])?;
+        let frame = FuncFrame::new_in(mcx, flinfo, 1, collations[i])?;
+        let frame_ix = state.frames.len() as u32;
+        let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 1 };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+
+        // SAFETY: arg 0 of the frame's freshly allocated 1-arg fcinfo.
+        let arg_out = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) });
+        init_expr_rec(k, &mut state, mcx, arg_out, None, params, None)?;
+
+        let out = if i == num_cols - 1 {
+            state.result_out()
+        } else {
+            OutRef(iresult.expect("multi-part hash requires an intermediate slot"))
+        };
+        let step = if first {
+            Step::HashDatumFirst { call, out }
+        } else {
+            Step::HashDatumNext32 {
+                call,
+                iresult: iresult.expect("NEXT32 requires an intermediate slot"),
+                out,
+            }
+        };
+        push_step(&mut state, mcx, step)?;
+        first = false;
+    }
+
+    for s in state.steps.iter_mut() {
+        match *s {
+            Step::OuterVar { attnum, vartype, out } => {
+                *s = Step::InnerVar { attnum, vartype, out }
+            }
+            Step::OuterSysVar { attnum, out } => *s = Step::InnerSysVar { attnum, out },
+            Step::WholeRow { src: SlotSrc::Outer, wr, frame, out } => {
+                *s = Step::WholeRow { src: SlotSrc::Inner, wr, frame, out }
+            }
+            _ => {}
+        }
+    }
+
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    state.arm_result_mcx(mcx);
+    Ok(state)
+}
+
 /// C `ExecBuildGroupingEqual` (execExpr.c): NOT DISTINCT comparison of the
 /// inner (input) and outer (table) slots on `key_col_idx`, compared last
 /// column first as C does; evaluated via [`crate::exec_qual`].

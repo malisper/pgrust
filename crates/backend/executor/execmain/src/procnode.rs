@@ -740,8 +740,8 @@ pub fn exec_init_node<'mcx>(
                 result_desc,
                 &outer_desc,
                 inner_desc,
-                |es, idesc, iattnums, ihashfns, colls| {
-                    ::nodehash::exec_init_hash(hash_plan_node, es, idesc, iattnums, ihashfns, colls)
+                |es, idesc, ihashfns, colls| {
+                    ::nodehash::exec_init_hash(hash_plan_node, es, idesc, ihashfns, colls)
                 },
             )?;
             PlanStateNode::HashJoin(::mcx::alloc_in(

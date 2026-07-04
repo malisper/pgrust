@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_hash32_from_attrs, exec_build_projection_info, exec_init_qual, exec_project,
+    exec_build_hash32_from_exprs, exec_build_projection_info, exec_init_qual, exec_project,
     exec_eval_expr, exec_qual, EvalSlots, ExprState, ParamBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
@@ -78,7 +78,6 @@ pub fn exec_init_hash_join<'mcx>(
     init_hash: impl FnOnce(
         &mut EStateData<'mcx>,
         Rc<TupleDescData<'static>>,
-        &[i16],
         &[::types_core::Oid],
         &[::types_core::Oid],
     ) -> PgResult<HashState<'mcx>>,
@@ -135,14 +134,14 @@ pub fn exec_init_hash_join<'mcx>(
         collations.push(node.hashcollations.nth(i));
     }
 
-    let outer_attnums = hashkey_attnums(mcx, &node.hashkeys);
-    let outer_hash_expr = exec_build_hash32_from_attrs(
+    let outer_hash_expr = exec_build_hash32_from_exprs(
         mcx,
         outer_desc,
+        &node.hashkeys,
         &outer_hashfns,
         &collations,
-        &outer_attnums,
         0,
+        ParamBind::NONE,
     )?;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -153,7 +152,7 @@ pub fn exec_init_hash_join<'mcx>(
     let joinqual = exec_init_qual(mcx, &node.join.joinqual, ParamBind::NONE)?;
     let otherqual = exec_init_qual(mcx, &node.join.plan.qual, ParamBind::NONE)?;
 
-    // Inner keys + inner hash fns feed the Hash sub-node (C builds it here too).
+    let hash_state = init_hash(estate, inner_desc, &inner_hashfns, &collations)?;
     let hash_node = node
         .join
         .plan
@@ -161,8 +160,6 @@ pub fn exec_init_hash_join<'mcx>(
         .expect("HashJoin without a Hash inner plan")
         .as_hash()
         .expect("HashJoin inner is a Hash node");
-    let inner_attnums = hashkey_attnums(mcx, &hash_node.hashkeys);
-    let hash_state = init_hash(estate, inner_desc, &inner_attnums, &inner_hashfns, &collations)?;
 
     // The Hash sub-node has no Instrumented wrapper; MultiExecHash provides
     // its own instrumentation over this slot.
@@ -213,22 +210,6 @@ pub fn exec_init_hash_join<'mcx>(
         hash_instr,
     };
     Ok((hjstate, hash_state))
-}
-
-// Hashkeys are simple Vars after setrefs; non-Var (expression) keys are loud.
-fn hashkey_attnums<'mcx>(
-    mcx: ::mcx::Mcx<'mcx>,
-    keys: &::types_nodes::list::NodeList<'_>,
-) -> ::mcx::PgVec<'mcx, i16> {
-    let mut out = ::mcx::PgVec::new_in(mcx);
-    for k in keys.iter() {
-        let v = k.as_var().unwrap_or_else(|| {
-            panic!("ExecInitHashJoin (nodeHashjoin.c): non-Var hash key; expression-hash lane unported")
-        });
-        assert!(v.varattno > 0, "ExecInitHashJoin: whole-row/system hash key not ported");
-        out.push(v.varattno);
-    }
-    out
 }
 
 /// `ExecHashJoin` (serial `ExecHashJoinImpl`).

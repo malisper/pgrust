@@ -1,7 +1,6 @@
-// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI MJ_* state machine; the
-// MergeJoinInner trait carries ExecMarkPos/ExecRestrPos. FULL,
-// RIGHT_SEMI/RIGHT_ANTI, mj_ConstFalseJoin and clauseless/parallel merge are
-// loud.
+// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI/FULL MJ_* state machine; the
+// MergeJoinInner trait carries ExecMarkPos/ExecRestrPos. RIGHT_SEMI/RIGHT_ANTI
+// and clauseless/parallel merge are loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -13,8 +12,8 @@ use ::execexpr::{
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::PgBox;
-use ::tuplesort::{apply_sort_comparator, SortSupport};
-use ::types_error::PgResult;
+use ::tuplesort::{apply_sort_comparator_in, SortSupport};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_nodes::plannodes::MergeJoin;
 use ::types_nodes::JoinType;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
@@ -92,6 +91,7 @@ pub struct MergeJoinState<'mcx> {
     mj_SkipMarkRestore: bool,
     mj_ExtraMarks: bool,
     js_single_match: bool,
+    mj_ConstFalseJoin: bool,
     mj_FillOuter: bool,
     mj_FillInner: bool,
     mj_NullInnerTupleSlot: Option<ExecSlotId>,
@@ -121,10 +121,11 @@ pub fn exec_init_merge_join<'mcx>(
             JoinType::JOIN_INNER
                 | JoinType::JOIN_LEFT
                 | JoinType::JOIN_RIGHT
+                | JoinType::JOIN_FULL
                 | JoinType::JOIN_SEMI
                 | JoinType::JOIN_ANTI
         ),
-        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI/RIGHT_ANTI/FULL lane unported",
+        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI/RIGHT_ANTI lane unported",
         node.join.jointype
     );
     assert!(
@@ -140,9 +141,18 @@ pub fn exec_init_merge_join<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
     let mj_MarkedTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
-    let mj_FillOuter =
-        matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);
-    let mj_FillInner = node.join.jointype == JoinType::JOIN_RIGHT;
+    let mj_FillOuter = matches!(
+        node.join.jointype,
+        JoinType::JOIN_LEFT | JoinType::JOIN_ANTI | JoinType::JOIN_FULL
+    );
+    let mj_FillInner =
+        matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_FULL);
+    let mut mj_ConstFalseJoin = false;
+    if matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_FULL)
+        && !check_constant_qual(&node.join.joinqual, &mut mj_ConstFalseJoin)
+    {
+        return Err(non_mergeable_join_cond(node.join.jointype));
+    }
     let mut null_slot = |desc: &Rc<TupleDescData<'static>>, estate: &mut EStateData<'mcx>| {
         let slot_id =
             estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
@@ -184,6 +194,7 @@ pub fn exec_init_merge_join<'mcx>(
         mj_ExtraMarks,
         js_single_match: node.join.inner_unique
             || node.join.jointype == JoinType::JOIN_SEMI,
+        mj_ConstFalseJoin,
         mj_FillOuter,
         mj_FillInner,
         mj_NullInnerTupleSlot,
@@ -203,6 +214,32 @@ pub fn inner_child_eflags(eflags: i32, skip_mark_restore: bool) -> i32 {
     } else {
         eflags | EXEC_FLAG_MARK
     }
+}
+
+// check_constant_qual (nodeMergejoin.c): the planner throws away non-constant
+// terms ANDed with a constant false, so a surviving non-Const term is an error.
+fn check_constant_qual(qual: &::types_nodes::list::NodeList<'_>, is_const_false: &mut bool) -> bool {
+    for n in qual.iter() {
+        let Some(con) = n.as_const() else {
+            return false;
+        };
+        if con.constisnull || !con.constvalue.as_bool() {
+            *is_const_false = true;
+        }
+    }
+    true
+}
+
+#[cold]
+#[inline(never)]
+fn non_mergeable_join_cond(jointype: JoinType) -> Box<PgError> {
+    let kind = if jointype == JoinType::JOIN_FULL { "FULL" } else { "RIGHT" };
+    Box::new(
+        PgError::error(format!(
+            "{kind} JOIN is only supported with merge-joinable join conditions"
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 fn examine_quals<'mcx>(
@@ -230,8 +267,8 @@ fn examine_quals<'mcx>(
         let nulls_first = node.mergeNullsFirst[i];
 
         // Comparator resolve keys on (lefttype, righttype) like C: a
-        // cross-type clause lands on the loud BTORDER-shim panic instead of
-        // a silently wrong same-type comparator.
+        // cross-type clause resolves to the BTORDER_PROC shim (live via
+        // mj_compare's per-tuple mcx).
         let (op_strategy, lefttype, righttype) =
             lsyscache::amop::get_op_opfamily_properties(op.opno, opfamily, false)?;
         assert!(
@@ -319,9 +356,12 @@ fn eval_inner_values<'mcx>(
 }
 
 // MJCompare: btree 3-way over the loaded merge keys; a NULL-vs-NULL column
-// keeps scanning but forces "unequal" (advance inner) if all columns tie.
+// keeps scanning but forces "unequal" (advance inner) if all columns tie, as
+// does a constant-false joinqual (the rescan logic depends on it). Comparator
+// shims (cross-type merges) allocate in the per-tuple context, as C.
 fn mj_compare(node: &mut MergeJoinState<'_>, estate: &mut EStateData<'_>) -> i32 {
     estate.reset_expr_context(node.ps_ExprContext);
+    let mcx = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
     let mut result = 0i32;
     let mut nulleqnull = false;
     for c in &node.clauses {
@@ -329,12 +369,12 @@ fn mj_compare(node: &mut MergeJoinState<'_>, estate: &mut EStateData<'_>) -> i32
             nulleqnull = true;
             continue;
         }
-        result = apply_sort_comparator(c.ldatum, c.lisnull, c.rdatum, c.risnull, &c.ssup);
+        result = apply_sort_comparator_in(mcx, c.ldatum, c.lisnull, c.rdatum, c.risnull, &c.ssup);
         if result != 0 {
             break;
         }
     }
-    if result == 0 && nulleqnull {
+    if result == 0 && (nulleqnull || node.mj_ConstFalseJoin) {
         result = 1;
     }
     result
@@ -439,7 +479,7 @@ fn mj_fill_inner<'mcx>(
     emit
 }
 
-/// `ExecMergeJoin`, INNER/LEFT/RIGHT.
+/// `ExecMergeJoin`, INNER/LEFT/RIGHT/SEMI/ANTI/FULL.
 pub fn exec_merge_join<'mcx, O, I>(
     node: &mut MergeJoinState<'mcx>,
     outer: &mut O,
@@ -561,7 +601,8 @@ where
             }
             EXEC_MJ_JOINTUPLES => {
                 node.mj_JoinState = EXEC_MJ_NEXTINNER;
-                let matched = eval_qual(node, estate, Qual::Join)?;
+                let matched =
+                    !node.mj_ConstFalseJoin && eval_qual(node, estate, Qual::Join)?;
                 if matched {
                     node.mj_MatchedOuter = true;
                     node.mj_MatchedInner = true;
@@ -733,7 +774,7 @@ mcx::forget_safe_struct!(
         lexpr, rexpr, ssup },
     MergeJoinState<'_> { plan, ps_ExprContext, mj_OuterEContext,
         mj_InnerEContext, ps_ResultTupleSlot, mj_JoinState,
-        mj_SkipMarkRestore, mj_ExtraMarks, js_single_match, mj_FillOuter,
+        mj_SkipMarkRestore, mj_ExtraMarks, js_single_match, mj_ConstFalseJoin, mj_FillOuter,
         mj_FillInner, mj_NullInnerTupleSlot, mj_NullOuterTupleSlot,
         mj_MatchedOuter, mj_MatchedInner, mj_OuterTupleSlot,
         mj_InnerTupleSlot, mj_MarkedTupleSlot;
