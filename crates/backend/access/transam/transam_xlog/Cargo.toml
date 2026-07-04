@@ -47,6 +47,7 @@ predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 origin_seams = { path = "../../../replication/origin_seams" }
 snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }

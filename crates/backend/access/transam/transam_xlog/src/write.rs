@@ -57,24 +57,11 @@ fn wal_sync_method() -> i32 {
 }
 
 fn wal_io_start() -> i64 {
-    if pgstat_seams::pgstat_prepare_io_time::is_installed() {
-        pgstat_seams::pgstat_prepare_io_time::call(guc_tables::vars::track_wal_io_timing.read())
-    } else {
-        0
-    }
+    pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read())
 }
 
-fn count_wal_io(io_context: u32, io_op: u32, start_ns: i64, bytes: u64) {
-    if pgstat_seams::pgstat_count_io_op_time::is_installed() {
-        pgstat_seams::pgstat_count_io_op_time::call(
-            pgstat_seams::IOOBJECT_WAL,
-            io_context,
-            io_op,
-            start_ns,
-            1,
-            bytes,
-        );
-    }
+fn count_wal_io(io_context: pgstat::io::IOContext, io_op: pgstat::io::IOOp, start_ns: i64, bytes: u64) {
+    pgstat::io::pgstat_count_io_op_time(pgstat::io::IOObject::Wal, io_context, io_op, start_ns, 1, bytes);
 }
 
 fn get_sync_bit(method: i32) -> i32 {
@@ -110,7 +97,7 @@ pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> Pg
             .errmsg(format!("could not fsync file \"{fname}\""))
             .finish(loc("issue_xlog_fsync"));
     }
-    count_wal_io(pgstat_seams::IOCONTEXT_NORMAL, pgstat_seams::IOOP_FSYNC, start_ns, 0);
+    count_wal_io(pgstat::io::IOContext::IOCONTEXT_NORMAL, pgstat::io::IOOp::Fsync, start_ns, 0);
     Ok(())
 }
 
@@ -197,8 +184,8 @@ fn XLogFileInitInternal(
         }
     }
     count_wal_io(
-        pgstat_seams::IOCONTEXT_INIT,
-        pgstat_seams::IOOP_WRITE,
+        pgstat::io::IOContext::IOCONTEXT_INIT,
+        pgstat::io::IOOp::Write,
         io_start,
         if init_zero { wal_segsz as u64 } else { 1 },
     );
@@ -221,7 +208,7 @@ fn XLogFileInitInternal(
             .finish(loc("XLogFileInitInternal"))
             .map(|_| -1);
     }
-    count_wal_io(pgstat_seams::IOCONTEXT_INIT, pgstat_seams::IOOP_FSYNC, io_start, 0);
+    count_wal_io(pgstat::io::IOContext::IOCONTEXT_INIT, pgstat::io::IOOp::Fsync, io_start, 0);
     // SAFETY: fd owned here.
     if unsafe { libc::close(f) } != 0 {
         return ereport(ERROR)
@@ -380,8 +367,8 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                     libc::pwrite(OPEN_LOG_FILE.get(), from.cast(), nleft, startoffset as i64)
                 };
                 count_wal_io(
-                    pgstat_seams::IOCONTEXT_NORMAL,
-                    pgstat_seams::IOOP_WRITE,
+                    pgstat::io::IOContext::IOCONTEXT_NORMAL,
+                    pgstat::io::IOOp::Write,
                     io_start,
                     written.max(0) as u64,
                 );
