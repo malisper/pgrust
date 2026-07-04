@@ -513,6 +513,10 @@ pub fn exec_mark_pos<'mcx>(
             ::nodesort::exec_sort_mark_pos(&mut s.state);
             Ok(())
         }
+        PlanStateNode::Material(m) => {
+            ::nodematerial::exec_material_mark_pos(&mut m.state);
+            Ok(())
+        }
         _ => panic!("ExecMarkPos (execAmi.c): node type does not support mark/restore"),
     }
 }
@@ -528,6 +532,10 @@ pub fn exec_restr_pos<'mcx>(
         PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_restr_pos(ios),
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_sort_restr_pos(&mut s.state);
+            Ok(())
+        }
+        PlanStateNode::Material(m) => {
+            ::nodematerial::exec_material_restr_pos(&mut m.state);
             Ok(())
         }
         _ => panic!("ExecRestrPos (execAmi.c): node type does not support mark/restore"),

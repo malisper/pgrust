@@ -1,5 +1,5 @@
 // tuplestore.c, TSS_INMEM arms only. Spill to tape (TSS_WRITEFILE/READFILE
-// over BufFile) and trim are loud panics naming their C lanes.
+// over BufFile) is a loud panic naming its C lane.
 #![allow(non_snake_case)]
 
 use core::mem;
@@ -64,6 +64,7 @@ pub struct TuplestoreData<'m> {
     tuples: i64,
     max_space: i64,
     memtuples: PgVec<'m, *mut MinimalTupleData>,
+    memtupdeleted: usize,
     readptrs: PgVec<'m, ReadPointer>,
     activeptr: usize,
 }
@@ -121,6 +122,7 @@ impl Tuplestore {
                 st.avail_mem = allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
                 st.grow_memtuples = true;
                 st.max_space = 0;
+                st.memtupdeleted = 0;
                 st.readptrs.clear();
                 st.readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
                 st.activeptr = 0;
@@ -144,6 +146,7 @@ impl Tuplestore {
                 tuples: 0,
                 max_space: 0,
                 memtuples,
+                memtupdeleted: 0,
                 readptrs,
                 activeptr: 0,
             })
@@ -231,6 +234,7 @@ impl Tuplestore {
             st.tuplecontext.reset();
             st.avail_mem = st.allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
             st.memtuples.clear();
+            st.memtupdeleted = 0;
             st.tuples = 0;
             for rp in st.readptrs.iter_mut() {
                 rp.eof_reached = false;
@@ -355,6 +359,66 @@ impl Tuplestore {
         })
     }
 
+    /// `tuplestore_copy_read_pointer`, TSS_INMEM arm.
+    pub fn copy_read_pointer(&mut self, srcptr: i32, destptr: i32) {
+        self.0.with_mut(|st| {
+            let (s, d) = (srcptr as usize, destptr as usize);
+            debug_assert!(s < st.readptrs.len() && d < st.readptrs.len());
+            if s == d {
+                return;
+            }
+            let recompute = st.readptrs[d].eflags != st.readptrs[s].eflags;
+            st.readptrs[d] = st.readptrs[s];
+            if recompute {
+                let mut eflags = st.readptrs[0].eflags;
+                for rp in st.readptrs.iter().skip(1) {
+                    eflags |= rp.eflags;
+                }
+                st.eflags = eflags;
+            }
+        })
+    }
+
+    /// `tuplestore_trim`, TSS_INMEM arm. C DIVERGENCE: the bump tuplecontext
+    /// cannot free one tuple, so C's pfree is mirrored in the accounting only
+    /// (spill decisions match C; the arena holds the bytes until reset).
+    pub fn trim(&mut self) {
+        self.0.with_mut(|st| {
+            if st.eflags & EXEC_FLAG_REWIND != 0 {
+                return;
+            }
+            let count = st.memtuples.len();
+            let mut oldest = count;
+            for rp in st.readptrs.iter() {
+                if !rp.eof_reached {
+                    oldest = oldest.min(rp.current);
+                }
+            }
+            let Some(nremove) = oldest.checked_sub(1).filter(|&n| n > 0) else {
+                return;
+            };
+            debug_assert!(nremove >= st.memtupdeleted && nremove <= count);
+            st.updatemax();
+            for i in st.memtupdeleted..nremove {
+                // SAFETY: live tuplecontext image; header read.
+                let len = unsafe { (*st.memtuples[i]).t_len } as usize;
+                st.avail_mem += generation_chunk_space(len);
+            }
+            st.memtupdeleted = nremove;
+            if nremove < count / 8 {
+                return;
+            }
+            st.memtuples.copy_within(nremove.., 0);
+            st.memtuples.truncate(count - nremove);
+            st.memtupdeleted = 0;
+            for rp in st.readptrs.iter_mut() {
+                if !rp.eof_reached {
+                    rp.current -= nremove;
+                }
+            }
+        })
+    }
+
     /// TSS_INMEM select is a pure index swap; READFILE seek save/restore is
     /// the spill lane's problem.
     pub fn select_read_pointer(&mut self, ptr: i32) {
@@ -436,17 +500,16 @@ impl<'m> TuplestoreData<'m> {
         let rp = &mut self.readptrs[self.activeptr];
         if !forward {
             debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
-            // C's memtupdeleted floor is 0 here (trim unported).
             if rp.eof_reached {
                 rp.current = count;
                 rp.eof_reached = false;
             } else {
-                if rp.current == 0 {
+                if rp.current <= self.memtupdeleted {
                     return None;
                 }
                 rp.current -= 1;
             }
-            if rp.current == 0 {
+            if rp.current <= self.memtupdeleted {
                 return None;
             }
             return Some(self.memtuples[rp.current - 1]);

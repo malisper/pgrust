@@ -1,5 +1,5 @@
-// nodeMaterial.c over the in-memory tuplestore; mark/restore (merge-join
-// inner) is loud.
+// nodeMaterial.c over the in-memory tuplestore, mark/restore (merge-join
+// inner) included: read pointer 1 is the mark.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -30,13 +30,13 @@ pub struct MaterialState<'mcx> {
 pub fn exec_init_material<'mcx>(
     node: &'mcx Material<'mcx>,
     estate: &mut EStateData<'mcx>,
-    eflags: i32,
+    mut eflags: i32,
     result_desc: Rc<TupleDescData<'static>>,
 ) -> PgResult<MaterialState<'mcx>> {
-    assert!(
-        eflags & EXEC_FLAG_MARK == 0,
-        "ExecInitMaterial (nodeMaterial.c): MARK consumer; mark-restore lane unported"
-    );
+    // BACKWARD without REWIND would let tuplestore_trim discard too much.
+    if eflags & EXEC_FLAG_BACKWARD != 0 {
+        eflags |= EXEC_FLAG_REWIND;
+    }
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
     Ok(MaterialState {
@@ -71,7 +71,10 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     if node.tuplestorestate.is_none() && node.eflags != 0 {
         let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
         ts.set_eflags(node.eflags);
-        debug_assert!(node.eflags & EXEC_FLAG_MARK == 0);
+        if node.eflags & EXEC_FLAG_MARK != 0 {
+            let ptrno = ts.alloc_read_pointer(node.eflags);
+            debug_assert_eq!(ptrno, 1);
+        }
         node.tuplestorestate = Some(ts);
     }
 
@@ -118,6 +121,21 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
         .expect("distinct in-range material slot ids");
     exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
     Ok(Some(result))
+}
+
+pub fn exec_material_mark_pos(node: &mut MaterialState<'_>) {
+    debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
+    if let Some(ts) = node.tuplestorestate.as_mut() {
+        ts.copy_read_pointer(0, 1);
+        ts.trim();
+    }
+}
+
+pub fn exec_material_restr_pos(node: &mut MaterialState<'_>) {
+    debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
+    if let Some(ts) = node.tuplestorestate.as_mut() {
+        ts.copy_read_pointer(1, 0);
+    }
 }
 
 pub fn exec_end_material(node: &mut MaterialState<'_>) {
