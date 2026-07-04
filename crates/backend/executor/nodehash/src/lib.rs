@@ -144,7 +144,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
             table.outer_batch_file.resize_with(nbatch as usize, || None);
-            ::fd::buffile::PrepareTempTablespaces();
+            ::fd::buffile::PrepareTempTablespaces()?;
         }
         Ok(table)
     }
@@ -331,7 +331,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         }
         let nbatch = oldnbatch * 2;
         if self.inner_batch_file.is_empty() {
-            ::fd::buffile::PrepareTempTablespaces();
+            ::fd::buffile::PrepareTempTablespaces()?;
         }
         self.inner_batch_file.resize_with(nbatch as usize, || None);
         self.outer_batch_file.resize_with(nbatch as usize, || None);

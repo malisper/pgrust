@@ -1867,6 +1867,34 @@ impl<'mcx> Parser<'mcx> {
             655 => *yyval = def_elem(mcx, "restart", None, view.l(1))?,
             656 => *yyval = def_elem(mcx, "restart", view.v(3).node(), view.l(1))?,
             657 => *yyval = def_elem(mcx, "unlogged", None, view.l(1))?,
+            // CreateTableSpaceStmt: CREATE TABLESPACE name OptTableSpaceOwner
+            // LOCATION Sconst opt_reloptions
+            680 => {
+                let mut n = Node::build::<parsenodes::CreateTableSpaceStmt>(mcx)?;
+                n.tablespacename = Some(view.v(3).str_val());
+                n.owner = view.v(4).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                n.location = Some(view.v(6).str_val());
+                n.options = view.v(7).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // OptTableSpaceOwner: OWNER RoleSpec | empty.
+            681 => *yyval = YYSTYPE::Node(view.v(2).node()),
+            682 => *yyval = YYSTYPE::Node(None),
+            // DropTableSpaceStmt: DROP TABLESPACE [IF EXISTS] name
+            683 | 684 => {
+                let mut n = Node::build::<parsenodes::DropTableSpaceStmt>(mcx)?;
+                n.tablespacename = Some(view.v(if rule == 683 { 3 } else { 5 }).str_val());
+                n.missing_ok = rule == 684;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTblSpcStmt: ALTER TABLESPACE name SET/RESET reloptions
+            1272 | 1273 => {
+                let mut n = Node::build::<parsenodes::AlterTableSpaceOptionsStmt>(mcx)?;
+                n.tablespacename = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                n.isReset = rule == 1273;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // CreateExtensionStmt: CREATE EXTENSION [IF NOT EXISTS] name
             // opt_with create_extension_opt_list
             685 | 686 => {
@@ -6433,6 +6461,22 @@ impl<'mcx> Parser<'mcx> {
             265 => *yyval = YYSTYPE::List(NodeList::nil()),
             267 => *yyval = YYSTYPE::Boolean(true),
             268 => *yyval = YYSTYPE::Boolean(false),
+            // RenameStmt: ALTER TABLESPACE name RENAME TO name
+            1321 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TABLESPACE;
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER TABLESPACE name OWNER TO RoleSpec
+            1395 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_TABLESPACE;
+                n.object = Some(Node::mk_string(mcx, view.v(3).str_val())?);
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // RenameStmt: ALTER TRIGGER name ON qualified_name RENAME TO name
             1317 => {
                 let mut n = Node::build::<RenameStmt>(mcx)?;
@@ -7047,9 +7091,9 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // privilege_target DATABASE/DOMAIN/LANGUAGE/LARGE OBJECT/SCHEMA/
-            // TYPE forms (FDW 1049 / SERVER 1050 / PARAMETER 1058 /
-            // TABLESPACE 1060 stay louds: fdw/tablespace lanes).
-            1054 | 1055 | 1056 | 1057 | 1059 | 1061 => {
+            // TABLESPACE/TYPE forms (FDW 1049 / SERVER 1050 / PARAMETER 1058
+            // stay louds: fdw lanes).
+            1054 | 1055 | 1056 | 1057 | 1059 | 1060 | 1061 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
                 n.objtype = match rule {
@@ -7058,6 +7102,7 @@ impl<'mcx> Parser<'mcx> {
                     1056 => ObjectType::OBJECT_LANGUAGE,
                     1057 => ObjectType::OBJECT_LARGEOBJECT,
                     1059 => ObjectType::OBJECT_SCHEMA,
+                    1060 => ObjectType::OBJECT_TABLESPACE,
                     _ => ObjectType::OBJECT_TYPE,
                 };
                 n.objects = view.v(if rule == 1057 { 3 } else { 2 }).list();

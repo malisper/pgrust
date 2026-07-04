@@ -163,7 +163,11 @@ pub fn heap_create<'mcx>(
             catalog_storage::RelationCreateStorage(rel.rd_locator.get(), relpersistence, true)?;
         }
     }
-    let _ = mcx;
+    // C: relations without storage protect their tablespace via pg_shdepend
+    // instead of a physical file.
+    if !create_storage && reltablespace != InvalidOid {
+        pg_depend::recordDependencyOnTablespace(mcx, RELATION_RELATION_ID, relid, reltablespace)?;
+    }
     Ok((rel, relfrozenxid, relminmxid))
 }
 

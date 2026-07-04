@@ -706,6 +706,45 @@ pub fn partitioned_table_reloptions(options: Option<&[u8]>, validate: bool) -> P
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TableSpaceOpts {
+    pub random_page_cost: f64,
+    pub seq_page_cost: f64,
+    pub effective_io_concurrency: i32,
+    pub maintenance_io_concurrency: i32,
+}
+
+pub fn tablespace_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<TableSpaceOpts>> {
+    let values = parseRelOptions(mcx, options, validate, RELOPT_KIND_TABLESPACE)?;
+    if options.is_none() {
+        return Ok(None);
+    }
+    let mut out = TableSpaceOpts {
+        random_page_cost: -1.0,
+        seq_page_cost: -1.0,
+        effective_io_concurrency: -1,
+        maintenance_io_concurrency: -1,
+    };
+    for v in values.iter() {
+        match v.def.name {
+            "random_page_cost" => out.random_page_cost = v.real_val(),
+            "seq_page_cost" => out.seq_page_cost = v.real_val(),
+            "effective_io_concurrency" => out.effective_io_concurrency = v.int_val(),
+            "maintenance_io_concurrency" => out.maintenance_io_concurrency = v.int_val(),
+            other => {
+                if validate {
+                    panic!("reloption \"{other}\" not found in parse table");
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 pub fn view_reloptions<'mcx>(
     mcx: Mcx<'mcx>,
     options: Option<&[u8]>,

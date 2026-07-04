@@ -393,8 +393,9 @@ fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
         }
         ObjectType::OBJECT_LARGEOBJECT => exec_grant_largeobject(mcx, istmt),
         ObjectType::OBJECT_SCHEMA => exec_grant_common(mcx, istmt, &CLASS_NAMESPACE, None),
+        ObjectType::OBJECT_TABLESPACE => exec_grant_common(mcx, istmt, &CLASS_TABLESPACE, None),
         other => panic!(
-            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (tablespace/fdw/parameter lanes)",
+            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (fdw/parameter lanes)",
             other as i32
         ),
     }
@@ -464,6 +465,19 @@ fn object_names_to_oids<'mcx>(
                 let name = cell.as_string().expect("database name").sval;
                 let oid = dbcommands_seams::get_database_oid::call(mcx, name, false)?;
                 lmgr::LockSharedObject(DATABASE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_TABLESPACE => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("tablespace name").sval;
+                let oid = tablespace_seams::get_tablespace_oid::call(mcx, name, false)?;
+                lmgr::LockSharedObject(
+                    types_core::catalog::TABLE_SPACE_RELATION_ID,
+                    oid,
+                    0,
+                    AccessShareLock,
+                )?;
                 objects.push(oid);
             }
         }
@@ -999,6 +1013,18 @@ const CLASS_DATABASE: GrantClass = GrantClass {
     acl_objtype: AclObjectType::Database,
     default_privs: adt_acl::ACL_ALL_RIGHTS_DATABASE,
     descr: "database",
+};
+
+const CLASS_TABLESPACE: GrantClass = GrantClass {
+    classid: types_core::catalog::TABLE_SPACE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::TABLESPACEOID,
+    owner_attnum: 3,
+    acl_attnum: 4,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_TABLESPACE,
+    acl_objtype: AclObjectType::Tablespace,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_TABLESPACE,
+    descr: "tablespace",
 };
 
 const CLASS_TYPE: GrantClass = GrantClass {

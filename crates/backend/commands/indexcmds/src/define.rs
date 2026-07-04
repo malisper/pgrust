@@ -374,7 +374,49 @@ pub fn DefineIndex<'mcx>(
     if rel.rd_rel.relisshared {
         unported("DefineIndex: shared relations");
     }
-    let tablespaceId = InvalidOid; // GetDefaultTablespace (DefineRelation precedent)
+    let tablespaceId = match stmt.tableSpace {
+        Some(name) => {
+            let oid = commands_tablespace::get_tablespace_oid(mcx, name, false)?;
+            if partitioned && oid == init_small::globals::MyDatabaseTableSpace() {
+                return Err(err(
+                    "cannot specify default tablespace for partitioned relations".to_string(),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
+            oid
+        }
+        None => commands_tablespace::GetDefaultTablespace(
+            mcx,
+            rel.rd_rel.relpersistence,
+            partitioned,
+        )?,
+    };
+    if check_rights
+        && tablespaceId != InvalidOid
+        && tablespaceId != init_small::globals::MyDatabaseTableSpace()
+    {
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            commands_tablespace::TableSpaceRelationId,
+            tablespaceId,
+            root_save_userid,
+            ACL_CREATE,
+        )?;
+        if aclresult != 0 {
+            let ctx = mcx::MemoryContext::new("DefineIndex");
+            let name = commands_tablespace::get_tablespace_name(ctx.mcx(), tablespaceId)?;
+            aclchk::aclcheck_error(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE,
+                name.as_ref().map(|n| std::str::from_utf8(n.name_str()).unwrap_or("")).unwrap_or(""),
+            )?;
+        }
+    }
+    if tablespaceId == commands_tablespace::GLOBALTABLESPACE_OID {
+        return Err(err(
+            "only shared relations can be placed in pg_global tablespace".to_string(),
+            types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+        ));
+    }
 
     let indexColNames = ChooseIndexColumnNames(mcx, &stmt.indexParams)?;
     let name_storage;

@@ -324,8 +324,51 @@ pub fn fc_pg_get_keywords(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     }
 }
 
+const DEFAULTTABLESPACE_OID: Oid = 1663;
+const GLOBALTABLESPACE_OID: Oid = 1664;
+
+pub fn fc_pg_tablespace_location(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use elog::ereport;
+    use types_error::ERROR;
+
+    let mut tablespace_oid = fcinfo.arg_oid(0);
+    if tablespace_oid == InvalidOid {
+        tablespace_oid = init_small::globals::MyDatabaseTableSpace();
+    }
+    let mcx = fcinfo.result_mcx();
+    if tablespace_oid == DEFAULTTABLESPACE_OID || tablespace_oid == GLOBALTABLESPACE_OID {
+        return Ok(varlena_result(varlena::cstring_to_text(mcx, b"")?));
+    }
+    let sourcepath = format!("pg_tblspc/{tablespace_oid}");
+    let md = std::fs::symlink_metadata(&sourcepath).map_err(|e| -> Box<types_error::PgError> {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{sourcepath}\": %m"))
+            .into_error()
+            .into()
+    })?;
+    if !md.file_type().is_symlink() {
+        return Ok(varlena_result(varlena::cstring_to_text(mcx, sourcepath.as_bytes())?));
+    }
+    let target = std::fs::read_link(&sourcepath).map_err(|e| -> Box<types_error::PgError> {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not read symbolic link \"{sourcepath}\": %m"))
+            .into_error()
+            .into()
+    })?;
+    let target = target.to_string_lossy();
+    Ok(varlena_result(varlena::cstring_to_text(mcx, target.as_bytes())?))
+}
+
 pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(89, "pgsql_version", 0, fc_version),
+    b(3778, "pg_tablespace_location", 1, fc_pg_tablespace_location),
     b(2918, "numerictypmodout", 1, fc_numerictypmodout),
     b(861, "current_database", 0, fc_current_database),
     b(1215, "obj_description", 2, fc_obj_description),

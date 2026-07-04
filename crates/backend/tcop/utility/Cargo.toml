@@ -25,6 +25,7 @@ commands_dropcmds = { path = "../../commands/dropcmds" }
 collationcmds = { path = "../../commands/collationcmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
+commands_tablespace = { path = "../../commands/tablespace" }
 functioncmds = { path = "../../commands/functioncmds" }
 statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }

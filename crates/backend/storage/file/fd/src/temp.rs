@@ -267,7 +267,7 @@ pub fn SetTempTablespaces(table_spaces: &[Oid]) {
     let num_spaces = table_spaces.len();
     // C picks a pg_prng random start to spread sort files across tablespaces.
     let start = if num_spaces > 1 {
-        unported_pg_prng()
+        pg_prng::global_prng(|p| p.u64_range(0, num_spaces as u64 - 1)) as i32
     } else {
         0
     };
@@ -275,12 +275,6 @@ pub fn SetTempTablespaces(table_spaces: &[Oid]) {
         fd.temp_table_spaces = Some(table_spaces.to_vec());
         fd.next_temp_table_space = start;
     });
-}
-
-#[cold]
-#[inline(never)]
-fn unported_pg_prng() -> i32 {
-    panic!("unported callee reached from fd.c: pg_prng_uint64_range (common/pg_prng.c)")
 }
 
 pub fn TempTablespacesAreSet() -> bool {
