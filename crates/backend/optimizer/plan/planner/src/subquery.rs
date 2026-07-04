@@ -25,6 +25,7 @@ pub const EXPRKIND_TABLEFUNC: i32 = 8;
 pub const EXPRKIND_TABLEFUNC_LATERAL: i32 = 9;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 pub const EXPRKIND_PHV: i32 = 11;
+pub const EXPRKIND_TABLESAMPLE: i32 = 12;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
 // child root's query_level).
@@ -99,7 +100,20 @@ pub fn subquery_planner<'mcx>(
                     };
                 }
                 if rte.tablesample.is_some() {
-                    panic!("preprocess_expression (planner.c): TABLESAMPLE; M2 lane");
+                    let ts = preprocess_expression(
+                        run,
+                        &parse.rtable,
+                        rte.tablesample,
+                        EXPRKIND_TABLESAMPLE,
+                        parse.hasSubLinks,
+                    )?;
+                    // SAFETY: pre-seal Query owned by this invocation; the
+                    // shared `rte` borrow is not read past this write.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.tablesample = ts
+                        })
+                    };
                 }
             }
             RTEKind::RTE_RESULT => has_result_rtes = true,

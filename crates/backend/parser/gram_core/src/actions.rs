@@ -8770,6 +8770,8 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rts));
             }
+            // opt_repeatable_clause: REPEATABLE '(' a_expr ')'
+            1882 => *yyval = YYSTYPE::Node(view.v(3).node()),
             // tablesample_clause: TABLESAMPLE func_name '(' expr_list ')'
             //   opt_repeatable_clause
             1881 => {

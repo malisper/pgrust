@@ -183,7 +183,6 @@ fn expand_single_inheritance_child<'mcx>(
     let mcx = run.mcx;
     let parentrte = run.rte(parent_rti);
     debug_assert!(parentrte.rtekind == RTEKind::RTE_RELATION);
-    debug_assert!(parentrte.tablesample.is_none());
     let child_oid = childrel.rd_id;
     let child_relkind = childrel.rd_rel.relkind;
 
@@ -225,7 +224,8 @@ fn expand_single_inheritance_child<'mcx>(
         relkind: child_relkind,
         rellockmode: parentrte.rellockmode,
         perminfoindex: 0,
-        tablesample: None,
+        // C's flat-copy carries the parent's tablesample into each child.
+        tablesample: parentrte.tablesample,
         subquery: None,
         security_barrier: parentrte.security_barrier,
         jointype: parentrte.jointype,
