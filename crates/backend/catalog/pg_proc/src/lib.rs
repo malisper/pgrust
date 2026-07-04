@@ -2,8 +2,7 @@
 // parameter arrays, argument defaults, transforms, proconfig, prosqlbody,
 // RECORD-tupdesc replace compare, named-argument replace compare,
 // non-superuser owner check. pgstat_create_function is skipped (function
-// stats unported); proacl is NULL (get_user_default_acl unported — initdb
-// default is no pg_default_acl rows, same result).
+// stats unported).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -332,7 +331,15 @@ pub fn ProcedureCreate<'mcx>(
     }
     nulls[Anum_pg_proc_prosqlbody - 1] = true;
     nulls[Anum_pg_proc_proconfig - 1] = true;
-    nulls[Anum_pg_proc_proacl - 1] = true;
+    let proacl = aclchk_seams::get_user_default_acl::call(mcx, b'f', a.proowner, a.procNamespace)?;
+    match proacl.as_deref() {
+        Some(img) => set(
+            &mut values,
+            Anum_pg_proc_proacl,
+            Datum::from_usize(img.as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_proacl - 1] = true,
+    }
 
     let rel = table::table_open(mcx, PROCEDURE_RELATION_ID, RowExclusiveLock)?;
 
@@ -530,9 +537,18 @@ pub fn ProcedureCreate<'mcx>(
 
     if !is_update {
         pg_depend::recordDependencyOnOwner(mcx, PROCEDURE_RELATION_ID, retval, a.proowner)?;
+        if let Some(img) = proacl.as_deref() {
+            aclchk_seams::record_dependency_on_new_acl::call(
+                mcx,
+                PROCEDURE_RELATION_ID,
+                retval,
+                0,
+                a.proowner,
+                img,
+            )?;
+        }
     }
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, is_update)?;
-    // recordDependencyOnNewAcl: no-op — proacl is always NULL here.
 
     rel.close(RowExclusiveLock)?;
 
