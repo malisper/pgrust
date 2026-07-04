@@ -155,7 +155,11 @@ fn fc_wrappers_and_registry() {
     assert_eq!(oids, sorted);
     oids.dedup();
     assert_eq!(oids.len(), BOOL_BUILTINS.len());
-    assert!(BOOL_BUILTINS.iter().all(|r| r.strict && !r.retset));
+    // bool_accum/bool_accum_inv (3496/3497) are the catalog's two
+    // non-strict rows (NULL transvalue on first call).
+    assert!(BOOL_BUILTINS
+        .iter()
+        .all(|r| (r.strict || r.foid == 3496 || r.foid == 3497) && !r.retset));
 }
 
 #[test]
