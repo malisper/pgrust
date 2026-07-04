@@ -1092,6 +1092,13 @@ pub struct AccessPriv<'mcx> {
     pub cols: NodeList<'mcx>,
 }
 
+// C: action is a GrantStmt with objects == NIL and targtype ACL_TARGET_DEFAULTS.
+#[derive(Default)]
+pub struct AlterDefaultPrivilegesStmt<'mcx> {
+    pub options: NodeList<'mcx>,
+    pub action: Option<&'mcx GrantStmt<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct GrantRoleStmt<'mcx> {
     pub granted_roles: NodeList<'mcx>,
@@ -1310,6 +1317,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for GrantStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AccessPriv<'mcx> {
     const TAG: NodeTag = NodeTag::T_AccessPriv;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDefaultPrivilegesStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDefaultPrivilegesStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for GrantRoleStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_GrantRoleStmt;
@@ -1634,6 +1644,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_grant_stmt(self) -> Option<&'mcx GrantStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_default_privileges_stmt(self) -> Option<&'mcx AlterDefaultPrivilegesStmt<'mcx>> {
         self.as_variant()
     }
 

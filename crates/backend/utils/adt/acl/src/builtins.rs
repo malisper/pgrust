@@ -616,6 +616,330 @@ fn fc_has_largeobject_privilege_id_id(
     lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
+const COLUMN_PRIV_MAP: &[PrivMapEntry] = &[
+    PrivMapEntry { name: "SELECT", value: ACL_SELECT },
+    PrivMapEntry { name: "SELECT WITH GRANT OPTION", value: acl_grant_option_for(ACL_SELECT) },
+    PrivMapEntry { name: "INSERT", value: ACL_INSERT },
+    PrivMapEntry { name: "INSERT WITH GRANT OPTION", value: acl_grant_option_for(ACL_INSERT) },
+    PrivMapEntry { name: "UPDATE", value: ACL_UPDATE },
+    PrivMapEntry { name: "UPDATE WITH GRANT OPTION", value: acl_grant_option_for(ACL_UPDATE) },
+    PrivMapEntry { name: "REFERENCES", value: ACL_REFERENCES },
+    PrivMapEntry {
+        name: "REFERENCES WITH GRANT OPTION",
+        value: acl_grant_option_for(ACL_REFERENCES),
+    },
+];
+
+fn convert_column_priv_string(priv_type: &str) -> PgResult<u64> {
+    convert_any_priv_string(priv_type, COLUMN_PRIV_MAP)
+}
+
+// convert_column_name (acl.c): InvalidAttrNumber (0) for a dropped column or
+// vanished table, error for a bad column name on a live table.
+fn convert_column_name(fcinfo: &Fcinfo, tableoid: Oid, i: usize) -> PgResult<i16> {
+    use cache_syscache::cacheinfo::ATTNAME;
+    use cache_syscache::{ReleaseSysCache, SearchSysCache2, SysCacheGetAttrNotNull, SysCacheKey};
+    const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
+    const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
+
+    let colname = arg_text_str(fcinfo, i)?;
+    match SearchSysCache2(
+        ATTNAME,
+        SysCacheKey::Value(Datum::from_oid(tableoid)),
+        SysCacheKey::Str(colname),
+    )? {
+        Some(tuple) => {
+            let dropped =
+                SysCacheGetAttrNotNull(ATTNAME, &tuple, ANUM_PG_ATTRIBUTE_ATTISDROPPED)?.as_bool();
+            let attnum = if dropped {
+                0
+            } else {
+                SysCacheGetAttrNotNull(ATTNAME, &tuple, ANUM_PG_ATTRIBUTE_ATTNUM)?.as_i16()
+            };
+            ReleaseSysCache(tuple);
+            Ok(attnum)
+        }
+        None => {
+            if let Some(relname) = syscache_seams::pg_class_relname::call(tableoid)? {
+                let relname = core::str::from_utf8(relname.name_str()).unwrap_or("");
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "column \"{colname}\" of relation \"{relname}\" does not exist"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+                ));
+            }
+            Ok(0)
+        }
+    }
+}
+
+// column_privilege_check (acl.c): 1 has, 0 lacks, -1 dropped/missing → NULL.
+fn column_privilege_check(tableoid: Oid, attnum: i16, roleid: Oid, mode: u64) -> PgResult<i32> {
+    if attnum == 0 {
+        return Ok(-1);
+    }
+    let (aclresult, is_missing) =
+        aclchk_seams::pg_attribute_aclcheck_ext::call(tableoid, attnum, roleid, mode)?;
+    if aclresult == ACLCHECK_OK {
+        return Ok(1);
+    }
+    if is_missing {
+        return Ok(-1);
+    }
+    let (aclresult, is_missing) =
+        aclchk_seams::pg_class_aclcheck_ext::call(tableoid, roleid, mode)?;
+    if aclresult == ACLCHECK_OK {
+        Ok(1)
+    } else if is_missing {
+        Ok(-1)
+    } else {
+        Ok(0)
+    }
+}
+
+fn column_priv_result(fcinfo: &mut Fcinfo, privresult: i32) -> PgResult<Datum> {
+    if privresult < 0 {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_bool(privresult > 0))
+}
+
+fn fc_has_column_privilege_name_name_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_name_name_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let colattnum = fcinfo.arg_i16(2);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_name_id_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = fcinfo.arg_oid(1);
+    let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_name_id_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = fcinfo.arg_oid(1);
+    let colattnum = fcinfo.arg_i16(2);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_name_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_name_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let colattnum = fcinfo.arg_i16(2);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_id_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = fcinfo.arg_oid(1);
+    let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_id_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = fcinfo.arg_oid(1);
+    let colattnum = fcinfo.arg_i16(2);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_name_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = convert_table_name(fcinfo, 0)?;
+    let colattnum = convert_column_name(fcinfo, tableoid, 1)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_name_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = convert_table_name(fcinfo, 0)?;
+    let colattnum = fcinfo.arg_i16(1);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = fcinfo.arg_oid(0);
+    let colattnum = convert_column_name(fcinfo, tableoid, 1)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn fc_has_column_privilege_id_attnum(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = fcinfo.arg_oid(0);
+    let colattnum = fcinfo.arg_i16(1);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
+    column_priv_result(fcinfo, r)
+}
+
+fn any_column_priv_check(roleid: Oid, tableoid: Oid, mode: u64) -> PgResult<Datum> {
+    let mut aclresult = aclchk_seams::pg_class_aclmask::call(tableoid, roleid, mode, false)
+        .map(|m| if m != 0 { ACLCHECK_OK } else { 1 })?;
+    if aclresult != ACLCHECK_OK {
+        aclresult = aclchk_seams::pg_attribute_aclcheck_all::call(tableoid, roleid, mode, false)?;
+    }
+    Ok(Datum::from_bool(aclresult == ACLCHECK_OK))
+}
+
+fn any_column_priv_check_ext(
+    fcinfo: &mut Fcinfo,
+    roleid: Oid,
+    tableoid: Oid,
+    mode: u64,
+) -> PgResult<Datum> {
+    let (mut aclresult, is_missing) =
+        aclchk_seams::pg_class_aclcheck_ext::call(tableoid, roleid, mode)?;
+    if aclresult != ACLCHECK_OK {
+        if is_missing {
+            return Ok(fcinfo.return_null());
+        }
+        let (r, is_missing) =
+            aclchk_seams::pg_attribute_aclcheck_all_ext::call(tableoid, roleid, mode, false)?;
+        if is_missing {
+            return Ok(fcinfo.return_null());
+        }
+        aclresult = r;
+    }
+    Ok(Datum::from_bool(aclresult == ACLCHECK_OK))
+}
+
+fn fc_has_any_column_privilege_name_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    any_column_priv_check(roleid, tableoid, mode)
+}
+
+fn fc_has_any_column_privilege_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = convert_table_name(fcinfo, 0)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 1)?)?;
+    any_column_priv_check(roleid, tableoid, mode)
+}
+
+fn fc_has_any_column_privilege_name_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let tableoid = fcinfo.arg_oid(1);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
+}
+
+fn fc_has_any_column_privilege_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = miscinit_seams::get_user_id::call();
+    let tableoid = fcinfo.arg_oid(0);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 1)?)?;
+    any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
+}
+
+fn fc_has_any_column_privilege_id_name(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = convert_table_name(fcinfo, 1)?;
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    any_column_priv_check(roleid, tableoid, mode)
+}
+
+fn fc_has_any_column_privilege_id_id(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let roleid = fcinfo.arg_oid(0);
+    let tableoid = fcinfo.arg_oid(1);
+    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -667,6 +991,24 @@ pub const ACL_BUILTINS: &[FmgrBuiltin] = &[
     b(2271, "has_schema_privilege_id_id", 3, fc_has_schema_privilege_id_id),
     b(2272, "has_schema_privilege_name", 2, fc_has_schema_privilege_name),
     b(2273, "has_schema_privilege_id", 2, fc_has_schema_privilege_id),
+    b(3012, "has_column_privilege_name_name_name", 4, fc_has_column_privilege_name_name_name),
+    b(3013, "has_column_privilege_name_name_attnum", 4, fc_has_column_privilege_name_name_attnum),
+    b(3014, "has_column_privilege_name_id_name", 4, fc_has_column_privilege_name_id_name),
+    b(3015, "has_column_privilege_name_id_attnum", 4, fc_has_column_privilege_name_id_attnum),
+    b(3016, "has_column_privilege_id_name_name", 4, fc_has_column_privilege_id_name_name),
+    b(3017, "has_column_privilege_id_name_attnum", 4, fc_has_column_privilege_id_name_attnum),
+    b(3018, "has_column_privilege_id_id_name", 4, fc_has_column_privilege_id_id_name),
+    b(3019, "has_column_privilege_id_id_attnum", 4, fc_has_column_privilege_id_id_attnum),
+    b(3020, "has_column_privilege_name_name", 3, fc_has_column_privilege_name_name),
+    b(3021, "has_column_privilege_name_attnum", 3, fc_has_column_privilege_name_attnum),
+    b(3022, "has_column_privilege_id_name", 3, fc_has_column_privilege_id_name),
+    b(3023, "has_column_privilege_id_attnum", 3, fc_has_column_privilege_id_attnum),
+    b(3024, "has_any_column_privilege_name_name", 3, fc_has_any_column_privilege_name_name),
+    b(3025, "has_any_column_privilege_name_id", 3, fc_has_any_column_privilege_name_id),
+    b(3026, "has_any_column_privilege_id_name", 3, fc_has_any_column_privilege_id_name),
+    b(3027, "has_any_column_privilege_id_id", 3, fc_has_any_column_privilege_id_id),
+    b(3028, "has_any_column_privilege_name", 2, fc_has_any_column_privilege_name),
+    b(3029, "has_any_column_privilege_id", 2, fc_has_any_column_privilege_id),
     b(3138, "has_type_privilege_name_name", 3, fc_has_type_privilege_name_name),
     b(3139, "has_type_privilege_name_id", 3, fc_has_type_privilege_name_id),
     b(3140, "has_type_privilege_id_name", 3, fc_has_type_privilege_id_name),

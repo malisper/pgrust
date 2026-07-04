@@ -1,6 +1,6 @@
 // heap.c DDL half, plain-table lane. Out of scope (loud or WARNING'd below):
 // TOAST, typed/partitioned/shared/mapped rels, constraints/defaults,
-// pg_shdepend recording, default ACLs.
+// pg_shdepend recording.
 use std::rc::Rc;
 
 use catalog::AccessMethodRelationId;
@@ -172,6 +172,7 @@ pub fn InsertPgClassTuple<'mcx>(
     rd_rel: &types_rel::FormData_pg_class,
     natts: i16,
     new_rel_oid: Oid,
+    relacl: Option<&[u8]>,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
     let mut values = [Datum::null(); Natts_pg_class];
@@ -208,7 +209,10 @@ pub fn InsertPgClassTuple<'mcx>(
     values[28] = Datum::from_oid(InvalidOid); // relrewrite
     values[29] = Datum::from_transaction_id(rd_rel.relfrozenxid);
     values[30] = Datum::from_transaction_id(rd_rel.relminmxid);
-    nulls[Anum_pg_class_relacl - 1] = true;
+    match relacl {
+        Some(img) => values[Anum_pg_class_relacl - 1] = Datum::from_usize(img.as_ptr() as usize),
+        None => nulls[Anum_pg_class_relacl - 1] = true,
+    }
     match reloptions {
         Some(img) => {
             values[Anum_pg_class_reloptions - 1] = Datum::from_usize(img.as_ptr() as usize)
@@ -232,6 +236,7 @@ fn AddNewRelationTuple<'mcx>(
     relkind: u8,
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
+    relacl: Option<&[u8]>,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
     let mut form = new_rel_desc.rd_rel.clone();
@@ -253,6 +258,7 @@ fn AddNewRelationTuple<'mcx>(
         &form,
         new_rel_desc.rd_att.natts as i16,
         new_rel_oid,
+        relacl,
         reloptions,
     )
 }
@@ -419,8 +425,27 @@ pub fn heap_create_with_catalog<'mcx>(
         (InvalidOid, InvalidOid)
     };
 
-    // relacl: get_user_default_acl unported; pg_default_acl entries (if any)
-    // are not honored — relacl is always NULL here.
+    // C's use_user_acl=false callers are exactly the toast path, which the
+    // relkind switch already maps to NULL.
+    let relacl: Option<mcx::PgVec<'mcx, u8>> = match p.relkind {
+        RELKIND_RELATION
+        | RELKIND_VIEW
+        | types_rel::RELKIND_MATVIEW
+        | types_rel::RELKIND_PARTITIONED_TABLE => aclchk_seams::get_user_default_acl::call(
+            mcx,
+            b'r',
+            p.ownerid,
+            p.relnamespace,
+        )?,
+        types_rel::RELKIND_SEQUENCE => aclchk_seams::get_user_default_acl::call(
+            mcx,
+            b'S',
+            p.ownerid,
+            p.relnamespace,
+        )?,
+        _ => None,
+    };
+
     let (new_rel_desc, relfrozenxid, relminmxid) = heap_create(
         mcx,
         p.relname,
@@ -496,6 +521,7 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relkind,
         relfrozenxid,
         relminmxid,
+        relacl.as_deref(),
         p.reloptions,
     )?;
 
@@ -506,8 +532,16 @@ pub fn heap_create_with_catalog<'mcx>(
     {
         let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
         pg_depend::recordDependencyOnOwner(mcx, RELATION_RELATION_ID, relid, p.ownerid)?;
-        // recordDependencyOnNewAcl: relacl is always NULL here (divergence
-        // above) and the owner needs no entry, so C records nothing.
+        if let Some(img) = relacl.as_deref() {
+            aclchk_seams::record_dependency_on_new_acl::call(
+                mcx,
+                RELATION_RELATION_ID,
+                relid,
+                0,
+                p.ownerid,
+                img,
+            )?;
+        }
         pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
         let mut addrs: [ObjectAddress; 2] = [
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),

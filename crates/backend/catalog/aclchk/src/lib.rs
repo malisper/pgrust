@@ -27,6 +27,8 @@ use types_error::{
 use types_nodes::parsenodes::ObjectType;
 use types_rel::{RELKIND_SEQUENCE, RELKIND_VIEW};
 
+mod defacl;
+pub use defacl::{get_user_default_acl, ExecAlterDefaultPrivilegesStmt, DefaultAclRelationId};
 mod grant;
 pub use grant::{get_rolespec_oid, ExecuteGrantStmt};
 mod lo;
@@ -499,6 +501,26 @@ pub fn pg_attribute_aclcheck(table_oid: Oid, attnum: i16, roleid: Oid, mode: u64
     }
 }
 
+// pg_attribute_aclcheck_ext (aclchk.c): (AclResult, is_missing).
+pub fn pg_attribute_aclcheck_ext(
+    table_oid: Oid,
+    attnum: i16,
+    roleid: Oid,
+    mode: u64,
+) -> PgResult<(i32, bool)> {
+    let mut is_missing = false;
+    let m = pg_attribute_aclmask_ext(
+        table_oid,
+        attnum,
+        roleid,
+        mode,
+        AclMaskHow::AclmaskAny,
+        Some(&mut is_missing),
+    )?;
+    let r = if m != 0 { ACLCHECK_OK } else { ACLCHECK_NO_PRIV };
+    Ok((r, is_missing))
+}
+
 #[cold]
 #[inline(never)]
 fn undefined_column(attnum: i16, table_oid: Oid) -> Box<PgError> {
@@ -570,8 +592,22 @@ pub fn pg_attribute_aclcheck_all(
     mode: u64,
     how: AclMaskHow,
 ) -> PgResult<i32> {
+    pg_attribute_aclcheck_all_ext(table_oid, roleid, mode, how, None)
+}
+
+pub fn pg_attribute_aclcheck_all_ext(
+    table_oid: Oid,
+    roleid: Oid,
+    mode: u64,
+    how: AclMaskHow,
+    is_missing: Option<&mut bool>,
+) -> PgResult<i32> {
     let Some(class_tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(table_oid)))?
     else {
+        if let Some(m) = is_missing {
+            *m = true;
+            return Ok(ACLCHECK_NO_PRIV);
+        }
         return Err(undefined_table(table_oid));
     };
     let owner_id = SysCacheGetAttrNotNull(RELOID, &class_tuple, ANUM_PG_CLASS_RELOWNER)?.as_oid();
@@ -656,7 +692,7 @@ pub(crate) fn pg_aclmask_for_grant(
     }
 }
 
-fn objtype_from_i32(objtype: i32) -> ObjectType {
+pub(crate) fn objtype_from_i32(objtype: i32) -> ObjectType {
     assert!(
         (0..=ObjectType::OBJECT_VIEW as i32).contains(&objtype),
         "aclcheck_error: bad ObjectType {objtype}"
@@ -872,9 +908,17 @@ pub fn init_seams() {
         let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
         pg_attribute_aclcheck_all(table_oid, roleid, mode, how)
     });
+    aclchk_seams::pg_attribute_aclcheck_ext::set(pg_attribute_aclcheck_ext);
+    aclchk_seams::pg_attribute_aclcheck_all_ext::set(|table_oid, roleid, mode, how_all| {
+        let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
+        let mut is_missing = false;
+        let r = pg_attribute_aclcheck_all_ext(table_oid, roleid, mode, how, Some(&mut is_missing))?;
+        Ok((r, is_missing))
+    });
     aclchk_seams::aclcheck_error::set(|aclresult, objtype, objectname| {
         aclcheck_error(aclresult, objtype_from_i32(objtype), objectname)
     });
+    defacl::init_seams();
 }
 
 #[cfg(test)]

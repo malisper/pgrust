@@ -55,6 +55,8 @@ const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const PolicyRelationId: Oid = 3256;
+const DefaultAclRelationId: Oid = 826;
+const DefaultAclOidIndexId: Oid = 828;
 const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
 const AuthMemRelationId: Oid = 1261;
@@ -852,6 +854,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
             object.objectId,
         )?,
+        DefaultAclRelationId => {
+            drop_row_by_oid(mcx, DefaultAclRelationId, DefaultAclOidIndexId, object.objectId)?
+        }
         // DropObjectById (objectaddress.c) takes the EVENTTRIGGEROID catcache
         // branch; the unique-index scan reaches the same tuple.
         EventTriggerRelationId => {

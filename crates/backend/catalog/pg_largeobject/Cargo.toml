@@ -25,3 +25,4 @@ catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 miscinit = { path = "../../utils/init/miscinit" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
