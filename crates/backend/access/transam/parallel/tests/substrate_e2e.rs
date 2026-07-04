@@ -22,6 +22,28 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(9000);
 
+// A hang here otherwise burns the whole fleet job deadline.
+struct Watchdog(Arc<std::sync::atomic::AtomicBool>);
+impl Watchdog {
+    fn arm(secs: u64, label: &'static str) -> Self {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            if !flag.load(Relaxed) {
+                eprintln!("WATCHDOG: {label} still running after {secs}s — aborting");
+                std::process::abort();
+            }
+        });
+        Watchdog(done)
+    }
+}
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.store(true, Relaxed);
+    }
+}
+
 // IsUnderPostmaster is thread-local; scope it to registration so the latch
 // wait paths never arm a postmaster-death watch (no postmaster pipe here).
 fn launch_as_if_under_postmaster(
@@ -382,12 +404,20 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                     bgworker::BackgroundWorkerMain(&sd)
                 }))
                 .unwrap_err();
-                let code = payload
-                    .downcast_ref::<ipc::ProcExitThread>()
-                    .map(|p| p.code)
-                    .unwrap_or_else(|| panic!("worker died without proc_exit"));
+                let code = payload.downcast_ref::<ipc::ProcExitThread>().map(|p| p.code);
+                if code.is_none() {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic".to_string());
+                    eprintln!("e2e worker {pid} died without proc_exit: {msg}");
+                }
+                // The reaper reports the exit no matter how the worker died —
+                // otherwise a worker crash hangs the leader instead of raising
+                // C's "parallel worker failed to initialize".
                 bgworker::ReportBackgroundWorkerExit(idx);
-                code
+                code.unwrap_or(27)
             })
             .unwrap();
         joins.push(handle);
@@ -411,6 +441,7 @@ fn end_parallel_ready_xact() {
 #[test]
 fn substrate_happy_path_with_launch_fewer() {
     let _s = serial();
+    let _w = Watchdog::arm(180, "substrate_happy_path_with_launch_fewer");
     setup();
 
     g::SetMyDatabaseId(InvalidOid);
@@ -501,6 +532,7 @@ fn substrate_happy_path_with_launch_fewer() {
 #[test]
 fn worker_error_rethrows_with_c_shape() {
     let _s = serial();
+    let _w = Watchdog::arm(180, "worker_error_rethrows_with_c_shape");
     setup();
 
     g::SetMyDatabaseId(InvalidOid);
