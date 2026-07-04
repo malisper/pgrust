@@ -598,9 +598,8 @@ pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
     stmt_requires_parse_analysis(parse_tree)
 }
 
-// transformPLAssignStmt (analyze.c). Unported louds: indirection beyond the
-// dotted-name prefix (transformAssignmentIndirection / SubscriptingRef) and
-// DISTINCT ON.
+// transformPLAssignStmt (analyze.c). Unported loud: indirection beyond the
+// dotted-name prefix (transformAssignmentIndirection / SubscriptingRef).
 fn transformPLAssignStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -797,10 +796,16 @@ fn transformPLAssignStmt<'mcx>(
             )?;
             qry.hasDistinctOn = false;
         }
-        types_nodes::rawnodes::DistinctClause::On(_) => panic!(
-            "transformPLAssignStmt (analyze.c): transformDistinctOnClause (DISTINCT ON) \
-             unported — unit backend-parser-clause"
-        ),
+        types_nodes::rawnodes::DistinctClause::On(list) => {
+            qry.distinctClause = parse_clause::transformDistinctOnClause(
+                mcx,
+                pstate,
+                list,
+                &mut qry.targetList,
+                &qry.sortClause,
+            )?;
+            qry.hasDistinctOn = true;
+        }
     }
 
     qry.limitOffset = transformLimitClause(
@@ -937,10 +942,16 @@ fn transformSelectStmt<'mcx>(
             )?;
             qry.hasDistinctOn = false;
         }
-        types_nodes::rawnodes::DistinctClause::On(_) => panic!(
-            "transformSelectStmt (analyze.c): transformDistinctOnClause (DISTINCT ON) \
-             unported — unit backend-parser-clause"
-        ),
+        types_nodes::rawnodes::DistinctClause::On(list) => {
+            qry.distinctClause = parse_clause::transformDistinctOnClause(
+                mcx,
+                pstate,
+                list,
+                &mut qry.targetList,
+                &qry.sortClause,
+            )?;
+            qry.hasDistinctOn = true;
+        }
     }
 
     qry.limitOffset = transformLimitClause(

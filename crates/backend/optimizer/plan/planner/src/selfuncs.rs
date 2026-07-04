@@ -1068,11 +1068,10 @@ pub fn examine_variable<'mcx>(
             vardata.var = Some(node_id);
             vardata.rel = Some(rel);
             vardata.isunique = crate::plancat::has_unique_index(run, rel, var.varattno);
-            vardata.stats = examine_simple_variable(run, var.varno, var.varattno)?;
-            // C: acl_ok = all_rows_selectable when a stats tuple was found,
-            // true otherwise (suppress leakproofness checks).
-            vardata.acl_ok =
-                vardata.stats.is_none() || all_rows_selectable(run, var.varno);
+            let simple = examine_simple_variable(run, &run.root, var.varno, var.varattno)?;
+            vardata.stats = simple.stats;
+            vardata.isunique |= simple.force_unique;
+            vardata.acl_ok = simple.acl_ok;
             return Ok(vardata);
         }
         // A Var of some other rel (varRelid restricts to one rel) falls to
@@ -1100,27 +1099,165 @@ pub fn examine_variable<'mcx>(
     }
 }
 
-// examine_simple_variable (selfuncs.c): the STATRELATTINH probe, decoded once.
+struct SimpleVarStats<'mcx> {
+    stats: Option<PgStatisticBundle<'mcx>>,
+    acl_ok: bool,
+    force_unique: bool,
+}
+
+impl SimpleVarStats<'_> {
+    fn none() -> Self {
+        SimpleVarStats { stats: None, acl_ok: true, force_unique: false }
+    }
+}
+
+fn rte_at<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
+    varno: usize,
+) -> &'mcx types_nodes::parsenodes::RangeTblEntry<'mcx> {
+    match root.simple_rte_array[varno] {
+        types_pathnodes::RangeTblEntryId::Parse { query, index } => run.queries
+            [query.0 as usize]
+            .rtable
+            .nth(index as usize)
+            .as_range_tbl_entry()
+            .expect("rtable cell is a RangeTblEntry"),
+        other => panic!("rte_at({varno}): unresolvable {other:?}"),
+    }
+}
+
+// C targetIsInSortList with sortop == InvalidOid: pure sortgroupref match.
+fn tle_in_sortlist(tle: &types_nodes::primnodes::TargetEntry<'_>, sortlist: &types_nodes::NodeList<'_>) -> bool {
+    let tle_ref = tle.ressortgroupref;
+    tle_ref != 0
+        && sortlist.iter().any(|n| {
+            n.as_sort_group_clause().expect("sortlist cell").tleSortGroupRef == tle_ref
+        })
+}
+
+// examine_simple_variable (selfuncs.c): the STATRELATTINH probe plus the
+// subquery/CTE drill into the already-planned subroot's targetlist.
 fn examine_simple_variable<'mcx>(
     run: &PlannerRun<'mcx>,
+    root: &types_pathnodes::PlannerInfo<'mcx>,
     varno: i32,
     varattno: i16,
-) -> PgResult<Option<PgStatisticBundle<'mcx>>> {
-    let rte = run.rte(varno as usize);
+) -> PgResult<SimpleVarStats<'mcx>> {
+    let rte = rte_at(run, root, varno as usize);
     match rte.rtekind {
-        RTEKind::RTE_RELATION => {}
-        // C falls through with no stats for these RTE kinds. For SUBQUERY/CTE
-        // the drill into rel->subroot targetlists is unported — no stats is
-        // C's own fallback whenever that drill fails, so estimates only
-        // differ where the sub-SELECT output is itself a plain column.
+        RTEKind::RTE_RELATION => {
+            let stats = syscache_seams::lookup_pg_statistic_bundle::call(
+                run.mcx,
+                rte.relid,
+                varattno,
+                rte.inh,
+            )?;
+            // C: acl_ok = all_rows_selectable when a stats tuple was found,
+            // true otherwise (suppress leakproofness checks). The aclcheck
+            // half is vacuous here; securityQuals is the live half.
+            let acl_ok = stats.is_none() || rte.securityQuals.is_nil();
+            Ok(SimpleVarStats { stats, acl_ok, force_unique: false })
+        }
+        RTEKind::RTE_SUBQUERY if !rte.inh => {
+            if varattno == 0 {
+                return Ok(SimpleVarStats::none());
+            }
+            let rel = crate::relnode::find_base_rel(root, varno);
+            let Some(idx) = root.rel(rel).subroot_idx else {
+                return Ok(SimpleVarStats::none());
+            };
+            examine_subroot_output(run, rte, &run.rel_subroots[idx].root, varattno)
+        }
+        RTEKind::RTE_CTE if !rte.self_reference => {
+            if varattno == 0 {
+                return Ok(SimpleVarStats::none());
+            }
+            let ctename = rte.ctename.expect("CTE rte has a ctename");
+            assert!(
+                rte.ctelevelsup == 0,
+                "examine_simple_variable (selfuncs.c): ctelevelsup {} for CTE \
+                 \"{ctename}\"; M2 nested-CTE lane",
+                rte.ctelevelsup
+            );
+            let cparse = run.queries[root.parse.0 as usize];
+            let ndx = cparse
+                .cteList
+                .iter()
+                .position(|c| {
+                    c.as_common_table_expr().expect("cteList cell").ctename == Some(ctename)
+                })
+                .unwrap_or_else(|| panic!("could not find CTE \"{ctename}\""));
+            assert!(
+                ndx < root.cte_plan_ids.len(),
+                "could not find plan for CTE \"{ctename}\""
+            );
+            let plan_id = root.cte_plan_ids[ndx];
+            assert!(plan_id > 0, "no plan was made for CTE \"{ctename}\"");
+            examine_subroot_output(run, rte, &run.subroots[(plan_id - 1) as usize].root, varattno)
+        }
+        // C falls through with no stats for these RTE kinds (appendrel
+        // subqueries and self-referencing CTEs included).
         RTEKind::RTE_FUNCTION
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_JOIN
         | RTEKind::RTE_SUBQUERY
-        | RTEKind::RTE_CTE => return Ok(None),
+        | RTEKind::RTE_CTE => Ok(SimpleVarStats::none()),
         other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
-    syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
+}
+
+// The RTE_SUBQUERY/RTE_CTE tail of C examine_simple_variable, on the
+// planner-mangled subquery parsetree.
+fn examine_subroot_output<'mcx>(
+    run: &PlannerRun<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    subroot: &types_pathnodes::PlannerInfo<'mcx>,
+    varattno: i16,
+) -> PgResult<SimpleVarStats<'mcx>> {
+    let subquery = run.queries[subroot.parse.0 as usize];
+    // Set ops and grouping sets mash underlying columns' stats beyond
+    // recognition.
+    if subquery.setOperations.is_some() || !subquery.groupingSets.is_nil() {
+        return Ok(SimpleVarStats::none());
+    }
+    let subtlist = if !subquery.returningList.is_nil() {
+        &subquery.returningList
+    } else {
+        &subquery.targetList
+    };
+    let aliasname =
+        || rte.eref.and_then(|e| e.aliasname).unwrap_or("(unnamed)");
+    let ste_node = subtlist
+        .iter()
+        .find(|n| n.as_target_entry().expect("tlist cell").resno == varattno)
+        .unwrap_or_else(|| {
+            panic!("subquery {} does not have attribute {varattno}", aliasname())
+        });
+    let ste = ste_node.as_target_entry().unwrap();
+    assert!(!ste.resjunk, "subquery {} does not have attribute {varattno}", aliasname());
+
+    // A single-column DISTINCT (or DISTINCT ON) / GROUP BY makes the output
+    // unique, but its stats are no longer usable.
+    if !subquery.distinctClause.is_nil() {
+        let force_unique = subquery.distinctClause.len() == 1
+            && tle_in_sortlist(ste, &subquery.distinctClause);
+        return Ok(SimpleVarStats { stats: None, acl_ok: true, force_unique });
+    }
+    if !subquery.groupClause.is_nil() {
+        let force_unique =
+            subquery.groupClause.len() == 1 && tle_in_sortlist(ste, &subquery.groupClause);
+        return Ok(SimpleVarStats { stats: None, acl_ok: true, force_unique });
+    }
+    if rte.security_barrier {
+        return Ok(SimpleVarStats::none());
+    }
+    if let Some(v) = ste.expr.as_var() {
+        if v.varlevelsup == 0 {
+            return examine_simple_variable(run, subroot, v.varno, v.varattno);
+        }
+    }
+    Ok(SimpleVarStats::none())
 }
 
 // get_variable_numdistinct (selfuncs.c). Returns (ndistinct, isdefault).

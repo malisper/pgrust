@@ -964,7 +964,7 @@ fn create_distinct_paths<'mcx>(
     target: types_pathnodes::PtId,
 ) -> PgResult<RelId> {
     let parse = run.parse();
-    assert!(!parse.hasDistinctOn, "DISTINCT ON is loud upstream");
+    let has_distinct_on = parse.hasDistinctOn;
 
     let distinct_rel = crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_DISTINCT);
     {
@@ -1008,8 +1008,15 @@ fn create_distinct_paths<'mcx>(
 
     if grouping_is_sortable(run, &run.root.processed_distinctClause) {
         let limittuples = if run.root.distinct_pathkeys.is_empty() { 1.0 } else { -1.0 };
-        let needed_pathkeys =
-            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys);
+        // DISTINCT ON sorts by the more rigorous of DISTINCT and ORDER BY
+        // (the parser ensured one is a prefix of the other).
+        let needed_pathkeys = if has_distinct_on
+            && run.root.distinct_pathkeys.len() < run.root.sort_pathkeys.len()
+        {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys)
+        } else {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys)
+        };
         let paths =
             crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).pathlist);
         for &input_path in paths.iter() {
@@ -1054,7 +1061,8 @@ fn create_distinct_paths<'mcx>(
     let allow_hash = if run.root.rel(distinct_rel).pathlist.is_empty() {
         true
     } else {
-        crate::gucs::enable_hashagg()
+        // Hashing loses DISTINCT ON's row-choice semantics.
+        !has_distinct_on && crate::gucs::enable_hashagg()
     };
     if allow_hash && grouping_is_hashable(run, &run.root.processed_distinctClause) {
         let distinct_clause =
@@ -1087,7 +1095,7 @@ fn create_distinct_paths<'mcx>(
     Ok(distinct_rel)
 }
 
-// get_useful_pathkeys_for_distinct (planner.c), hasDistinctOn loud upstream.
+// get_useful_pathkeys_for_distinct (planner.c).
 fn get_useful_pathkeys_for_distinct<'mcx>(
     run: &PlannerRun<'mcx>,
     needed_pathkeys: &mcx::PgVec<'mcx, types_pathnodes::PathKey>,
@@ -1100,9 +1108,15 @@ fn get_useful_pathkeys_for_distinct<'mcx>(
     if !crate::gucs::enable_distinct_reordering() {
         return list;
     }
+    let has_distinct_on = run.parse().hasDistinctOn;
     let mut useful: mcx::PgVec<'mcx, types_pathnodes::PathKey> = mcx::PgVec::new_in(mcx);
     for pk in path_pathkeys {
         if !needed_pathkeys.contains(pk) {
+            break;
+        }
+        // A reordering must keep matching the initial distinctClause pathkeys
+        // under DISTINCT ON.
+        if has_distinct_on && !run.root.distinct_pathkeys.contains(pk) {
             break;
         }
         useful.push(*pk);
