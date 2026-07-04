@@ -85,8 +85,6 @@ fc_reg_out! {
     fc_regconfigout: regconfigout;
     fc_regdictionaryout: regdictionaryout;
     fc_regclassout: regclassout;
-    fc_regconfigout: regconfigout;
-    fc_regdictionaryout: regdictionaryout;
     fc_regtypeout: regtypeout;
     fc_regnamespaceout: regnamespaceout;
     fc_regroleout: regroleout;
@@ -190,14 +188,6 @@ pub const REGPROC_BUILTINS: &[FmgrBuiltin] = &[
     b(3479, "to_regprocedure", 1, fc_to_regprocedure),
     b(3492, "to_regoper", 1, fc_to_regoper),
     b(3493, "to_regtype", 1, fc_to_regtype),
-    b(3736, "regconfigin", 1, fc_regconfigin),
-    b(3737, "regconfigout", 1, fc_regconfigout),
-    b(3738, "regconfigrecv", 1, fc_reg_recv),
-    b(3739, "regconfigsend", 1, fc_reg_send),
-    b(3771, "regdictionaryin", 1, fc_regdictionaryin),
-    b(3772, "regdictionaryout", 1, fc_regdictionaryout),
-    b(3773, "regdictionaryrecv", 1, fc_reg_recv),
-    b(3774, "regdictionarysend", 1, fc_reg_send),
     b(3494, "to_regproc", 1, fc_to_regproc),
     b(3495, "to_regclass", 1, fc_to_regclass),
     b(4084, "regnamespacein", 1, fc_regnamespacein),

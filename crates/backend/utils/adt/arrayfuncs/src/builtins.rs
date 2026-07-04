@@ -420,117 +420,9 @@ const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
     FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
-// fn_extra memo for hash_array{_extended} (C caches the TypeCacheEntry).
-struct ArrayHashState {
-    elem_type: Oid,
-    typlen: i32,
-    typbyval: bool,
-    typalign: u8,
-    finfo: FmgrInfo,
-}
-
 const HASH_RECORD_OID: Oid = 6192;
 const HASH_RECORD_EXTENDED_OID: Oid = 6193;
 
-fn cached_hash_state<'f>(
-    flinfo: &'f mut FmgrInfo,
-    elem_type: Oid,
-    extended: bool,
-) -> PgResult<&'f mut ArrayHashState> {
-    let need = match flinfo.fn_extra_ref::<ArrayHashState>() {
-        Some(s) => s.elem_type != elem_type,
-        None => true,
-    };
-    if need {
-        let flags = if extended {
-            ::typcache::TYPECACHE_HASH_EXTENDED_PROC_FINFO
-        } else {
-            ::typcache::TYPECACHE_HASH_PROC_FINFO
-        };
-        let tc = ::typcache::lookup_type_cache(elem_type, flags)?;
-        let finfo = if elem_type == ::types_core::catalog::RECORDOID {
-            // The typcache refuses record hashing; commit to hash_record here (C).
-            ::fmgr_seams::fmgr_info::call(if extended {
-                HASH_RECORD_EXTENDED_OID
-            } else {
-                HASH_RECORD_OID
-            })?
-        } else {
-            let f = if extended {
-                tc.hash_extended_proc_finfo().clone()
-            } else {
-                tc.hash_proc_finfo().clone()
-            };
-            if f.fn_oid == ::types_core::InvalidOid {
-                return Err(Box::new(
-                    PgError::error(alloc::format!(
-                        "could not identify a hash function for type {elem_type}"
-                    ))
-                    .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
-                ));
-            }
-            f
-        };
-        flinfo.set_fn_extra(ArrayHashState {
-            elem_type,
-            typlen: tc.typlen() as i32,
-            typbyval: tc.typbyval(),
-            typalign: tc.typalign() as u8,
-            finfo,
-        });
-    }
-    Ok(flinfo.fn_extra_mut::<ArrayHashState>().unwrap())
-}
-
-pub fn fc_hash_array(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let coll = fcinfo.get_collation();
-    let array = arg_array_bytes(fcinfo, 0, mcx)?;
-    let s = cached_hash_state(
-        flinfo.expect("hash_array: NULL flinfo"),
-        crate::foundation::arr_elemtype(&array),
-        false,
-    )?;
-    let (elems, nulls) =
-        crate::construct::deconstruct_array(mcx, &array, s.typlen, s.typbyval, s.typalign, true)?;
-    let mut result: u32 = 1;
-    for (i, &d) in elems.iter().enumerate() {
-        let elthash = if nulls[i] {
-            0
-        } else {
-            ::types_fmgr::function_call1_coll_in(&mut s.finfo, coll, mcx, d)?.as_u32()
-        };
-        result = (result << 5).wrapping_sub(result).wrapping_add(elthash);
-    }
-    Ok(Datum::from_u32(result))
-}
-
-pub fn fc_hash_array_extended(
-    flinfo: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let coll = fcinfo.get_collation();
-    let seed = fcinfo.arg(1);
-    let array = arg_array_bytes(fcinfo, 0, mcx)?;
-    let s = cached_hash_state(
-        flinfo.expect("hash_array_extended: NULL flinfo"),
-        crate::foundation::arr_elemtype(&array),
-        true,
-    )?;
-    let (elems, nulls) =
-        crate::construct::deconstruct_array(mcx, &array, s.typlen, s.typbyval, s.typalign, true)?;
-    let mut result: u64 = 1;
-    for (i, &d) in elems.iter().enumerate() {
-        let elthash = if nulls[i] {
-            0
-        } else {
-            ::types_fmgr::function_call2_coll_in(&mut s.finfo, coll, mcx, d, seed)?.as_u64()
-        };
-        result = (result << 5).wrapping_sub(result).wrapping_add(elthash);
-    }
-    Ok(Datum::from_u64(result))
-}
 
 // C array_cat (array_userfuncs.c), hosted with the array machinery it
 // consumes; catalog unit backend-utils-adt-array-user.
@@ -914,8 +806,6 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(396, "array_ge", 2, fc_array_ge),
     b(744, "array_eq", 2, fc_array_eq),
     b(750, "array_in", 3, fc_array_in),
-    b(626, "hash_array", 1, fc_hash_array),
-    b(782, "hash_array_extended", 2, fc_hash_array_extended),
     b(751, "array_out", 1, fc_array_out),
     b(395, "array_to_text", 2, fc_array_to_text),
     nb(384, "array_to_text_null", 3, fc_array_to_text_null),
