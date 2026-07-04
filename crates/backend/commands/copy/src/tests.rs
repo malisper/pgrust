@@ -102,6 +102,7 @@ fn mk_state<'mcx>(
         line_buf: PgVec::new_in(mcx),
         line_buf_valid: false,
         attribute_buf: PgVec::new_in(mcx),
+        binary_attr_buf: stringinfo::StringInfo::new_in(mcx).unwrap(),
         raw_fields: PgVec::new_in(mcx),
         max_fields: 8,
         eol_type: EolType::Unknown,
