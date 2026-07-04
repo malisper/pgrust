@@ -2094,6 +2094,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_storage",
  "types_trigger",
  "types_tuple",
  "varlena",

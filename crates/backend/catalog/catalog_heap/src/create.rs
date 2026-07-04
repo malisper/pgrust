@@ -413,11 +413,19 @@ fn AddNewRelationTuple<'mcx>(
     )
 }
 
+#[derive(Clone, Copy)]
+#[allow(non_camel_case_types)]
+pub struct FormExtraData_pg_attribute {
+    pub attstattarget: datum::NullableDatum,
+    pub attoptions: datum::NullableDatum,
+}
+
 fn form_pg_attribute_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     pg_attribute_rel: &Relation<'mcx>,
     attrs: &FormData_pg_attribute,
     new_rel_oid: Oid,
+    extra: Option<&FormExtraData_pg_attribute>,
 ) -> PgResult<heaptuple::HeapTuple<'mcx>> {
     let mut values = [Datum::null(); Natts_pg_attribute];
     let mut nulls = [false; Natts_pg_attribute];
@@ -445,17 +453,23 @@ fn form_pg_attribute_tuple<'mcx>(
     for n in &mut nulls[20..25] {
         *n = true;
     }
+    if let Some(extra) = extra {
+        values[20] = extra.attstattarget.value;
+        nulls[20] = extra.attstattarget.isnull;
+        values[22] = extra.attoptions.value;
+        nulls[22] = extra.attoptions.isnull;
+    }
 
     heaptuple::heap_form_tuple(mcx, pg_attribute_rel.descr(), &values, &nulls)
 }
 
 // InsertPgAttributeTuples (heap.c): batches of Heap2 MULTI_INSERT records.
-// FormExtraData (attstattarget/attoptions) unported — all call sites pass NULL.
 pub fn InsertPgAttributeTuples<'mcx>(
     mcx: Mcx<'mcx>,
     pg_attribute_rel: &Relation<'mcx>,
     attrs: &[FormData_pg_attribute],
     new_rel_oid: Oid,
+    attrs_extra: Option<&[FormExtraData_pg_attribute]>,
     indstate: Option<&mut catalog_indexing::CatalogIndexState<'mcx>>,
 ) -> PgResult<()> {
     // C sizeof(FormData_pg_attribute) == 100; Rust layout may differ.
@@ -471,10 +485,12 @@ pub fn InsertPgAttributeTuples<'mcx>(
             opened.as_mut().unwrap()
         }
     };
-    for chunk in attrs.chunks(nslots) {
+    debug_assert!(attrs_extra.is_none_or(|e| e.len() == attrs.len()));
+    for (chunk_i, chunk) in attrs.chunks(nslots).enumerate() {
         let mut tuples = std::vec::Vec::with_capacity(chunk.len());
-        for att in chunk {
-            tuples.push(form_pg_attribute_tuple(mcx, pg_attribute_rel, att, new_rel_oid)?);
+        for (j, att) in chunk.iter().enumerate() {
+            let extra = attrs_extra.map(|e| &e[chunk_i * nslots + j]);
+            tuples.push(form_pg_attribute_tuple(mcx, pg_attribute_rel, att, new_rel_oid, extra)?);
         }
         catalog_indexing::CatalogTuplesMultiInsertWithInfo(
             mcx,
@@ -503,6 +519,7 @@ fn AddNewAttributeTuples<'mcx>(
         &rel,
         &tupdesc.attrs[..tupdesc.natts as usize],
         new_rel_oid,
+        None,
         Some(&mut indstate),
     )?;
 
@@ -528,7 +545,7 @@ fn AddNewAttributeTuples<'mcx>(
     }
 
     if relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE {
-        InsertPgAttributeTuples(mcx, &rel, &SysAtt, new_rel_oid, Some(&mut indstate))?;
+        InsertPgAttributeTuples(mcx, &rel, &SysAtt, new_rel_oid, None, Some(&mut indstate))?;
     }
 
     catalog_indexing::CatalogCloseIndexes(indstate)?;

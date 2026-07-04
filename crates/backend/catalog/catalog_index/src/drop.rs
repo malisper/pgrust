@@ -1,11 +1,11 @@
-// index_drop / IndexGetRelation (index.c), non-concurrent lane; concurrent
-// drop, expression statistics and pg_inherits rows are loud or unreachable.
+// index_drop / IndexGetRelation (index.c).
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid, INDEX_RELATION_ID};
-use types_error::PgResult;
-use types_rel::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use types_core::{InvalidOid, InvalidTransactionId, Oid, INDEX_RELATION_ID};
+use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_rel::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use types_storage::lock::LOCKTAG;
 
-use crate::{getattr, oid_scankey, unported, IndexRelidIndexId};
+use crate::{err, getattr, oid_scankey, IndexRelidIndexId, IndexStateFlagsAction};
 
 const IndexIndrelidIndexId: Oid = 2678;
 const Anum_pg_index_indexrelid: usize = 1;
@@ -33,19 +33,67 @@ pub fn index_drop<'mcx>(
     concurrent: bool,
     concurrent_lock_mode: bool,
 ) -> PgResult<()> {
-    if concurrent {
-        unported("index_drop: concurrent lane");
-    }
-    let lockmode =
-        if concurrent_lock_mode { types_rel::ShareUpdateExclusiveLock } else { AccessExclusiveLock };
+    debug_assert!(
+        lsyscache::get_rel_persistence(indexId)? != types_core::RELPERSISTENCE_TEMP as i8
+            || (!concurrent && !concurrent_lock_mode)
+    );
+    let lockmode = if concurrent || concurrent_lock_mode {
+        ShareUpdateExclusiveLock
+    } else {
+        AccessExclusiveLock
+    };
 
     let heapId = IndexGetRelation(mcx, indexId, false)?;
-    let userHeapRelation = table::table_open(mcx, heapId, lockmode)?;
-    let userIndexRelation = indexam::index_open(mcx, indexId, lockmode)?;
+    let mut userHeapRelation = table::table_open(mcx, heapId, lockmode)?;
+    let mut userIndexRelation = indexam::index_open(mcx, indexId, lockmode)?;
 
     catalog_heap::CheckTableNotInUse(&userIndexRelation, "DROP INDEX")?;
 
-    predicate_seams::transfer_predicate_locks_to_heap_relation::call(&userIndexRelation)?;
+    let mut session_relids = None;
+    if concurrent {
+        if xact::GetTopTransactionIdIfAny() != InvalidTransactionId {
+            return Err(err(
+                "DROP INDEX CONCURRENTLY must be first action in transaction".into(),
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+
+        crate::index_set_state_flags(mcx, indexId, IndexStateFlagsAction::DropClearValid)?;
+
+        inval::invalidate::CacheInvalidateRelcache(&userHeapRelation)?;
+
+        let heaprelid = userHeapRelation.rd_lockInfo.lockRelId;
+        let heaplocktag = [LOCKTAG::relation(heaprelid.dbId, heaprelid.relId)];
+        let indexrelid = userIndexRelation.rd_lockInfo.lockRelId;
+
+        userHeapRelation.close(NoLock)?;
+        indexam::index_close(userIndexRelation, NoLock)?;
+
+        lmgr::LockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock)?;
+        lmgr::LockRelationIdForSession(&indexrelid, ShareUpdateExclusiveLock)?;
+        session_relids = Some((heaprelid, indexrelid));
+
+        snapmgr::PopActiveSnapshot()?;
+        xact::CommitTransactionCommand()?;
+        xact::StartTransactionCommand()?;
+
+        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock)?;
+
+        let snapshot = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snapshot)?;
+        crate::index_concurrently_set_dead(mcx, heapId, indexId)?;
+        snapmgr::PopActiveSnapshot()?;
+
+        xact::CommitTransactionCommand()?;
+        xact::StartTransactionCommand()?;
+
+        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock)?;
+
+        userHeapRelation = table::table_open(mcx, heapId, ShareUpdateExclusiveLock)?;
+        userIndexRelation = indexam::index_open(mcx, indexId, AccessExclusiveLock)?;
+    } else {
+        predicate_seams::transfer_predicate_locks_to_heap_relation::call(&userIndexRelation)?;
+    }
 
     if types_rel::RELKIND_HAS_STORAGE(userIndexRelation.rd_rel.relkind) {
         catalog_storage::RelationDropStorage(&userIndexRelation)?;
@@ -96,7 +144,13 @@ pub fn index_drop<'mcx>(
 
     inval::invalidate::CacheInvalidateRelcache(&userHeapRelation)?;
 
-    userHeapRelation.close(NoLock)
+    userHeapRelation.close(NoLock)?;
+
+    if let Some((heaprelid, indexrelid)) = session_relids {
+        lmgr::UnlockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock)?;
+        lmgr::UnlockRelationIdForSession(&indexrelid, ShareUpdateExclusiveLock)?;
+    }
+    Ok(())
 }
 
 const _: () = assert!(IndexIndrelidIndexId == 2678);

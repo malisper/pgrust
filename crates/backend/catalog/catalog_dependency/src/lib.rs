@@ -179,9 +179,10 @@ fn stack_address_present_add_flags(
 pub fn AcquireDeletionLock(object: &ObjectAddress, flags: i32) -> PgResult<()> {
     if object.classId == RELATION_RELATION_ID {
         if flags & PERFORM_DELETION_CONCURRENTLY != 0 {
-            unported("AcquireDeletionLock: concurrent (ShareUpdateExclusiveLock) lane");
+            lmgr::LockRelationOid(object.objectId, types_rel::ShareUpdateExclusiveLock)
+        } else {
+            lmgr::LockRelationOid(object.objectId, AccessExclusiveLock)
         }
-        lmgr::LockRelationOid(object.objectId, AccessExclusiveLock)
     } else if object.classId == AuthMemRelationId {
         lmgr::LockSharedObject(object.classId, object.objectId, 0, AccessExclusiveLock)
     } else {
@@ -230,7 +231,7 @@ pub fn performDeletion<'mcx>(
     behavior: DropBehavior,
     flags: i32,
 ) -> PgResult<()> {
-    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
+    let mut depRel = Some(table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?);
     AcquireDeletionLock(object, 0)?;
     let mut targetObjects = ObjectAddresses::new();
     let mut stack: Vec<StackEntry> = Vec::new();
@@ -242,11 +243,11 @@ pub fn performDeletion<'mcx>(
         &mut stack,
         &mut targetObjects,
         None,
-        &depRel,
+        depRel.as_ref().expect("pg_depend open"),
     )?;
     reportDependentObjects(mcx, &targetObjects, behavior, flags, Some(object))?;
-    deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
-    depRel.close(RowExclusiveLock)
+    deleteObjectsInList(mcx, &targetObjects, &mut depRel, flags)?;
+    depRel.take().expect("pg_depend open").close(RowExclusiveLock)
 }
 
 pub fn performMultipleDeletions<'mcx>(
@@ -258,7 +259,7 @@ pub fn performMultipleDeletions<'mcx>(
     if objects.is_empty() {
         return Ok(());
     }
-    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
+    let mut depRel = Some(table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?);
     let mut targetObjects = ObjectAddresses::new();
     for thisobj in objects.refs.iter() {
         AcquireDeletionLock(thisobj, flags)?;
@@ -271,13 +272,13 @@ pub fn performMultipleDeletions<'mcx>(
             &mut stack,
             &mut targetObjects,
             Some(objects),
-            &depRel,
+            depRel.as_ref().expect("pg_depend open"),
         )?;
     }
     let origObject = if objects.refs.len() == 1 { Some(&objects.refs[0]) } else { None };
     reportDependentObjects(mcx, &targetObjects, behavior, flags, origObject)?;
-    deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
-    depRel.close(RowExclusiveLock)
+    deleteObjectsInList(mcx, &targetObjects, &mut depRel, flags)?;
+    depRel.take().expect("pg_depend open").close(RowExclusiveLock)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -685,7 +686,7 @@ fn reportDependentObjects<'mcx>(
 fn deleteObjectsInList<'mcx>(
     mcx: Mcx<'mcx>,
     targetObjects: &ObjectAddresses,
-    depRel: &Relation<'mcx>,
+    depRel: &mut Option<Relation<'mcx>>,
     flags: i32,
 ) -> PgResult<()> {
     if event_trigger_seams::track_dropped_objects_needed::call(mcx)?
@@ -719,12 +720,21 @@ fn deleteObjectsInList<'mcx>(
 fn deleteOneObject<'mcx>(
     mcx: Mcx<'mcx>,
     object: &ObjectAddress,
-    depRel: &Relation<'mcx>,
+    depRel: &mut Option<Relation<'mcx>>,
     flags: i32,
 ) -> PgResult<()> {
-    debug_assert!(flags & PERFORM_DELETION_CONCURRENTLY == 0);
+    // doDeletion commits the transaction in the concurrent case; pg_depend
+    // cannot stay open across it.
+    if flags & PERFORM_DELETION_CONCURRENTLY != 0 {
+        depRel.take().expect("pg_depend open").close(RowExclusiveLock)?;
+    }
 
     doDeletion(mcx, object, flags)?;
+
+    if flags & PERFORM_DELETION_CONCURRENTLY != 0 {
+        *depRel = Some(table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?);
+    }
+    let depRel = depRel.as_ref().expect("pg_depend open");
 
     let mut keys: Vec<ScanKeyData> = vec![
         oid_key(Anum_pg_depend_classid, object.classId),

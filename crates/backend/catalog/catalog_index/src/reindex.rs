@@ -7,7 +7,7 @@ use types_rel::{
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
 };
 
-use crate::{oid_scankey, unported, IndexGetRelation, IndexRelidIndexId};
+use crate::{oid_scankey, IndexGetRelation, IndexRelidIndexId};
 
 const Natts_pg_class: usize = 34;
 const Anum_pg_class_relfilenode: usize = 8;

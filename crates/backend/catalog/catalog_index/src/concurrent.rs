@@ -1,7 +1,6 @@
 // index.c concurrent slice: index_concurrently_create_copy/_build/_swap/
 // _set_dead, index_set_state_flags, validate_index.
 use datum::Datum;
-use execindexing::IndexInfo;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, INDEX_RELATION_ID, RELATION_RELATION_ID};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -9,7 +8,7 @@ use types_rel::{NoLock, Relation, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::{HeapTupleData, TupleDescData};
 
 use crate::{
-    err, index_create, oid_scankey, unported, IndexCreateExtra, IndexRelidIndexId,
+    err, index_create, oid_scankey, IndexCreateExtra, IndexRelidIndexId,
     INDEX_CREATE_CONCURRENT, INDEX_CREATE_SKIP_BUILD,
 };
 
@@ -27,6 +26,7 @@ const Anum_pg_index_indislive: i32 = 14;
 const Anum_pg_index_indisreplident: i32 = 15;
 const Anum_pg_index_indclass: i32 = 18;
 
+const Anum_pg_attribute_attnum: usize = 5;
 const Anum_pg_attribute_attstattarget: i32 = 21;
 const AttributeRelidNumIndexId: Oid = 2659;
 const ATTRIBUTE_RELATION_ID: Oid = 1249;
@@ -70,6 +70,17 @@ fn int4_scankey(attno: usize, v: i32) -> types_scan::scankey::ScanKeyData {
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT4EQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_INT4EQ) failed: {e:?}"));
     key.sk_argument = Datum::from_i32(v);
+    key
+}
+
+fn int2_scankey(attno: usize, v: i16) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno as types_core::AttrNumber;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT2EQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_INT2EQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_i16(v);
     key
 }
 
@@ -226,23 +237,39 @@ pub fn index_concurrently_create_copy<'mcx>(
         colnames.push(core::str::from_utf8(mcx::slice_borrow_in(mcx, name.as_bytes())?).expect("utf8"));
     }
 
+    let mut opclassOptions: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, nattrs)?;
     for i in 0..nattrs {
-        if lsyscache::get_attoptions(mcx, oldIndexId, (i + 1) as i16)?.as_usize() != 0 {
-            unported("index_concurrently_create_copy: per-column opclass options");
-        }
+        opclassOptions.push(lsyscache::get_attoptions(mcx, oldIndexId, (i + 1) as i16)?);
     }
+
+    let mut stattargets: mcx::PgVec<'mcx, datum::NullableDatum> =
+        mcx::vec_with_capacity_in(mcx, nattrs)?;
     {
         let pg_att = table::table_open(mcx, ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
-        let keys = [oid_scankey(1, oldIndexId)];
-        let mut scan =
-            genam::systable_beginscan(mcx, &pg_att, AttributeRelidNumIndexId, true, None, &keys)?;
-        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-            let (_, isnull) = getattr_null(tup, Anum_pg_attribute_attstattarget, pg_att.descr());
-            if !isnull {
-                unported("index_concurrently_create_copy: per-column statistics targets");
-            }
+        for i in 0..nattrs {
+            let keys = [
+                oid_scankey(1, oldIndexId),
+                int2_scankey(Anum_pg_attribute_attnum, (i + 1) as i16),
+            ];
+            let mut scan = genam::systable_beginscan(
+                mcx,
+                &pg_att,
+                AttributeRelidNumIndexId,
+                true,
+                None,
+                &keys,
+            )?;
+            let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+                panic!(
+                    "cache lookup failed for attribute {} of relation {oldIndexId}",
+                    i + 1
+                )
+            });
+            let (value, isnull) =
+                getattr_null(tup, Anum_pg_attribute_attstattarget, pg_att.descr());
+            stattargets.push(datum::NullableDatum { value, isnull });
+            genam::systable_endscan(mcx, scan)?;
         }
-        genam::systable_endscan(mcx, scan)?;
         pg_att.close(types_rel::AccessShareLock)?;
     }
 
@@ -266,6 +293,8 @@ pub fn index_concurrently_create_copy<'mcx>(
             parent_index_relid: InvalidOid,
             parent_constraint_id: InvalidOid,
             reloptions: reloptions_img.as_deref(),
+            opclass_options: Some(&opclassOptions[..]),
+            stattargets: Some(&stattargets[..]),
             old_number: 0,
         },
     )?;
