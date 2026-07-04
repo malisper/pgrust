@@ -251,6 +251,7 @@ pub fn exec_rescan_nest_loop(node: &mut NestLoopState<'_>) {
     node.nl_MatchedOuter = false;
 }
 
+#[inline(always)]
 fn eval_join_qual<'mcx>(
     qual: Option<&mut ExprState<'mcx>>,
     estate: &mut EStateData<'mcx>,
