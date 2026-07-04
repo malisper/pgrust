@@ -509,16 +509,18 @@ fn mcv_get_match_bitmap<'mcx>(
                     continue;
                 }
                 let m = if expronleft {
-                    types_fmgr::function_call2_coll(
+                    types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         item.values[idx],
                         cst.constvalue,
                     )?
                 } else {
-                    types_fmgr::function_call2_coll(
+                    types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         cst.constvalue,
                         item.values[idx],
                     )?
@@ -567,9 +569,10 @@ fn mcv_get_match_bitmap<'mcx>(
                     if result_is_final(m, saop.useOr) {
                         break;
                     }
-                    let em = types_fmgr::function_call2_coll(
+                    let em = types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         item.values[idx],
                         elem_value,
                     )?;
