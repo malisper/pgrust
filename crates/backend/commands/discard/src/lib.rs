@@ -31,7 +31,7 @@ fn DiscardAll(is_top_level: bool) -> PgResult<()> {
     portalmem::PortalHashTableDeleteAll()?;
     guc_funcs::SetPGVariable("session_authorization", None, false)?;
     guc::ResetAllOptions();
-    prepare::DropAllPreparedStatements();
+    prepare::DropAllPreparedStatements()?;
     Async_UnlistenAll();
     lock::LockReleaseAll(USER_LOCKMETHOD.into(), true)?;
     plancache::ResetPlanCache();

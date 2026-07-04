@@ -4392,7 +4392,7 @@ impl<'mcx> Parser<'mcx> {
             }
             1571 | 1573 | 1575 | 1577 => *yyval = YYSTYPE::Boolean(true),
             1572 | 1574 | 1576 | 1578 => *yyval = YYSTYPE::Boolean(false),
-            // PREPARE/EXECUTE/DEALLOCATE; CREATE TABLE AS EXECUTE stays loud.
+            // PREPARE/EXECUTE/DEALLOCATE, incl. CREATE TABLE AS EXECUTE.
             1600 => {
                 let n = Node::mk(
                     mcx,
@@ -4410,6 +4410,39 @@ impl<'mcx> Parser<'mcx> {
                     ExecuteStmt { name: Some(view.v(2).str_val()), params: view.v(3).list() },
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
+            }
+            1609 | 1610 => {
+                let ine = rule == 1610;
+                let (t, nm, w) = if ine { (7, 10, 12) } else { (4, 7, 9) };
+                let persistence = view.v(2).ival() as u8;
+                let into_node = view.v(t).node().expect("create_as_target");
+                let with_data = view.v(w).boolean();
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    let rel = into_node
+                        .with_mut::<IntoClause, _>(|ic| {
+                            ic.skipData = !with_data;
+                            ic.rel
+                        })
+                        .expect("create_as_target is IntoClause")
+                        .expect("IntoClause.rel");
+                    rel.with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("IntoClause.rel is RangeVar");
+                }
+                let e = Node::mk(
+                    mcx,
+                    ExecuteStmt {
+                        name: Some(view.v(nm).str_val()),
+                        params: view.v(nm + 1).list(),
+                    },
+                )?;
+                let mut n = Node::build::<CreateTableAsStmt>(mcx)?;
+                n.query = Some(e);
+                n.into = Some(into_node);
+                n.objtype = ObjectType::OBJECT_TABLE;
+                n.is_select_into = false;
+                n.if_not_exists = ine;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1613 | 1614 => {
                 let i = if rule == 1614 { 3 } else { 2 };

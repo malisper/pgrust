@@ -51,3 +51,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn intorel_shutdown<'mcx>(state: &mut IntoRelState<'mcx>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // GetIntoRelEFlags projected to its one input (prepare cannot dep
+    // createas: createas deps prepare for ExecuteQuery).
+    pub fn get_into_rel_eflags(skip_data: bool) -> i32
+);

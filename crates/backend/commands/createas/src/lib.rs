@@ -1,6 +1,6 @@
 // createas.c — CREATE TABLE AS / SELECT INTO / CREATE MATERIALIZED VIEW
-// (PG 18.3). CREATE TABLE AS EXECUTE is loud; the DR_intorel marshal shape
-// lives in createas_seams (tcop_dest sits below the executor stack).
+// (PG 18.3). The DR_intorel marshal shape lives in createas_seams (tcop_dest
+// sits below the executor stack).
 #![allow(non_snake_case)]
 
 use createas_seams::IntoRelState;
@@ -24,6 +24,15 @@ pub fn init_seams() {
     createas_seams::intorel_startup::set(intorel_startup);
     createas_seams::intorel_receive::set(intorel_receive);
     createas_seams::intorel_shutdown::set(intorel_shutdown);
+    createas_seams::get_into_rel_eflags::set(into_rel_eflags);
+}
+
+fn into_rel_eflags(skip_data: bool) -> i32 {
+    if skip_data {
+        EXEC_FLAG_WITH_NO_DATA
+    } else {
+        0
+    }
 }
 
 struct QueryDescOwner(types_portal::QueryDescHandle);
@@ -70,10 +79,14 @@ pub fn ExecCreateTableAs<'mcx>(
 
     if query.commandType == CmdType::CMD_UTILITY {
         debug_assert!(!is_matview);
-        panic!(
-            "ExecCreateTableAs (createas.c): CREATE TABLE AS EXECUTE arm unported \
-             (ExecuteQuery has no IntoClause threading) — unit backend-commands-createas"
-        );
+        let estmt = query
+            .utilityStmt
+            .and_then(|u| u.as_execute_stmt())
+            .expect("CTAS utility query is EXECUTE (excluded by syntax)");
+        let mut dest = tcop_dest::DestReceiver::IntoRel(IntoRelState::new(mcx, into_node));
+        let r = prepare::ExecuteQuery(mcx, estmt, source_text, params, Some(into), &mut dest, qc);
+        dest.destroy();
+        return r;
     }
     debug_assert!(query.commandType == CmdType::CMD_SELECT);
 
@@ -160,11 +173,7 @@ pub fn ExecCreateTableAs<'mcx>(
 }
 
 pub fn GetIntoRelEFlags(into: &IntoClause<'_>) -> i32 {
-    if into.skipData {
-        EXEC_FLAG_WITH_NO_DATA
-    } else {
-        0
-    }
+    into_rel_eflags(into.skipData)
 }
 
 pub fn CreateTableAsRelExists<'mcx>(
