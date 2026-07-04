@@ -146,3 +146,56 @@ CREATE VIEW v_jsonagg AS SELECT JSON_OBJECTAGG(c: a) AS joa, JSON_ARRAYAGG(b RET
 CREATE VIEW v_jsonquery AS SELECT JSON_EXISTS(j, '$.a[*] ? (@ == $n)' PASSING id AS n) AS je, JSON_VALUE(j, '$.b' RETURNING int4 DEFAULT 0 ON ERROR) AS jv, JSON_QUERY(j, '$.c' WITH WRAPPER) AS jq, JSON_QUERY(j, '$.d' RETURNING text OMIT QUOTES EMPTY ARRAY ON EMPTY ERROR ON ERROR) AS jq2 FROM xt;
 CREATE VIEW v_isjson AS SELECT (c IS JSON) AS ij, (c IS JSON OBJECT WITH UNIQUE KEYS) AS ijo, (c IS NOT JSON ARRAY) AS inj, (c IS JSON SCALAR) AS ijs FROM t1;
 CREATE VIEW v_namedargs AS SELECT f_add(y => 5, x => a) AS s1, f_add(a, y => b) AS s2 FROM t1;
+
+-- batch closeout: GROUPING SETS / TABLESAMPLE deparse
+CREATE VIEW v_gsets AS SELECT a, b, count(*) AS n FROM t1 GROUP BY GROUPING SETS ((a), (b), ());
+CREATE VIEW v_rollup AS SELECT a, b, sum(e) AS s FROM t1 GROUP BY ROLLUP (a, b);
+CREATE VIEW v_cube AS SELECT a, b, max(b) AS m FROM t1 GROUP BY CUBE (a, (a, b));
+CREATE VIEW v_gsets_nested AS SELECT a, b, c, count(*) AS n FROM t1 GROUP BY GROUPING SETS (ROLLUP (a, b), CUBE (c), ());
+CREATE VIEW v_gsets_distinct AS SELECT a, b, count(*) AS n FROM t1 GROUP BY DISTINCT ROLLUP (a), ROLLUP (b);
+CREATE VIEW v_tsample AS SELECT a FROM t1 TABLESAMPLE bernoulli(10);
+CREATE VIEW v_tsample_rep AS SELECT t1.a, t2.f FROM t1 TABLESAMPLE system(5) REPEATABLE (42), t2 TABLESAMPLE bernoulli(2.5) REPEATABLE (1.5);
+
+-- indexdef residue: non-btree ams, reloptions, attoptions, collation
+CREATE INDEX idx_hash ON t2 USING hash (f);
+CREATE INDEX idx_gin ON arr_t USING gin (xs);
+CREATE INDEX idx_brin ON t1 USING brin (b) WITH (pages_per_range = 64);
+CREATE INDEX idx_brin_attopt ON t1 USING brin (e int8_minmax_multi_ops (values_per_range = 16));
+CREATE INDEX idx_spgist ON t2 USING spgist (g);
+CREATE INDEX idx_relopt ON t1 (b) WITH (fillfactor = 70, deduplicate_items = off);
+CREATE INDEX idx_collate ON t2 (g COLLATE "C" DESC);
+CREATE TABLE geo_t (gid int4, p point);
+CREATE INDEX idx_gist ON geo_t USING gist (p);
+
+-- serial / identity sequences
+CREATE TABLE ser_t (id serial PRIMARY KEY, iid int4 GENERATED ALWAYS AS IDENTITY, n int4);
+
+-- partition constraint deparse
+CREATE TABLE pt (pa int4, pb text) PARTITION BY RANGE (pa);
+CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10);
+CREATE TABLE pt2 PARTITION OF pt DEFAULT;
+CREATE TABLE ptl (la int4, lb int4) PARTITION BY LIST (la);
+CREATE TABLE ptl1 PARTITION OF ptl FOR VALUES IN (1, 2, 3) PARTITION BY HASH (lb);
+CREATE TABLE ptl1h PARTITION OF ptl1 FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+
+-- SQL-standard function bodies
+CREATE FUNCTION f_ret(x int4) RETURNS int4 LANGUAGE sql IMMUTABLE RETURN x + 1;
+CREATE FUNCTION f_atomic(x int4, y int4) RETURNS int8 LANGUAGE sql BEGIN ATOMIC SELECT sum(a) FROM t1 WHERE a > x; END;
+CREATE FUNCTION f_atomic_multi(x int4) RETURNS int4 LANGUAGE sql BEGIN ATOMIC INSERT INTO rule_log VALUES (x, x, 'body'); SELECT x + 1; END;
+CREATE FUNCTION f_body_unnamed(int4) RETURNS int4 LANGUAGE sql RETURN $1 * 2;
+
+-- prefix operator deparse (generate_operator_name left arm)
+CREATE VIEW v_prefix_op AS SELECT |/ (a::float8) AS sq, @ (b - 10) AS ab FROM t1;
+CREATE OPERATOR public.@<< (RIGHTARG = int4, FUNCTION = int4um);
+CREATE VIEW v_prefix_custom AS SELECT @<< a AS neg FROM t1;
+
+-- extended statistics expressions
+CREATE STATISTICS st_ab (dependencies) ON a, b FROM t1;
+CREATE STATISTICS st_expr ON (a + b), (lower(c)), a FROM t1;
+
+-- new columns under an aliased join
+CREATE TABLE jt1 (ja int4, jz int4);
+CREATE TABLE jt2 (ja int4, jw int4);
+CREATE VIEW v_jalias AS SELECT j.* FROM (jt1 JOIN jt2 USING (ja)) j;
+ALTER TABLE jt1 ADD COLUMN newcol1 int4;
+ALTER TABLE jt2 ADD COLUMN newcol2 int4;
