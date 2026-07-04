@@ -215,6 +215,7 @@ fn install() {
         smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
 
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        transam_xlog_seams::xlog_logical_info_active::set(|| false);
         xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, _main, _bufs| {
             with_fake(|f| {
                 f.wal.push((rmid, info));

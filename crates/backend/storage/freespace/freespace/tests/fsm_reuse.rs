@@ -71,6 +71,7 @@ static INIT: Once = Once::new();
 fn install_seams() {
     INIT.call_once(|| {
         freespace::init_seams();
+        transam_xlog_seams::xlog_logical_info_active::set(|| false);
         guc_tables::vars::XLOGbuffers
             .install(guc_tables::GucVarAccessors { get: || 64, set: |_| {} });
         transam_xlog::XLOGShmemInit();
