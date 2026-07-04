@@ -362,6 +362,46 @@ pub fn get_partition_ancestors<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgV
     Ok(ancestors)
 }
 
+pub fn PartitionHasPendingDetach(mcx: Mcx<'_>, partoid: Oid) -> PgResult<bool> {
+    let rel = table::table_open(mcx, InheritsRelationId, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_inherits_inhrelid, F_OIDEQ, Datum::from_oid(partoid))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, InheritsRelidSeqnoIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_inherits columns under its descriptor.
+        let detached = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                Anum_pg_inherits_inhdetachpending as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_bool();
+        genam::systable_endscan(mcx, scan)?;
+        rel.close(RowExclusiveLock)?;
+        return Ok(detached);
+    }
+    panic!("relation {partoid} is not a partition");
+}
+
+// C: partition.c index_get_partition; takes the partition's relid (Rust
+// relcache hands out index lists by relid).
+pub fn index_get_partition(mcx: Mcx<'_>, partition_relid: Oid, index_id: Oid) -> PgResult<Oid> {
+    let idxlist = relcache_seams::relation_get_index_list::call(mcx, partition_relid)?;
+    for &part_idx in idxlist.iter() {
+        if !lsyscache::get_rel_relispartition(part_idx)? {
+            continue;
+        }
+        if get_partition_parent(mcx, part_idx, false)? == index_id {
+            return Ok(part_idx);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 fn get_partition_parent_worker<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,

@@ -26,3 +26,4 @@ syscache_seams = { path = "../../utils/cache/syscache_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 pg_inherits_seams = { path = "../pg_inherits_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
