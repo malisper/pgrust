@@ -94,8 +94,6 @@ pub fn CatalogTupleDelete(heap_rel: &Relation<'_>, tid: &ItemPointerData) -> PgR
     heapam::simple_heap_delete(heap_rel.data_rc(), tid)
 }
 
-// CatalogTuplesMultiInsertWithInfo (indexing.c): one Heap2 MULTI_INSERT record
-// per batch, then per-tuple index inserts.
 pub fn CatalogTuplesMultiInsertWithInfo<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: &Relation<'mcx>,
