@@ -20,14 +20,20 @@ impl OrderProcFrame {
 
     #[inline]
     fn call(&mut self, key: &mut ScanKeyData, left: Datum, right: Datum) -> PgResult<Datum> {
-        self.fcinfo.rearm(key.sk_collation);
-        self.fcinfo.set_arg(0, left);
-        self.fcinfo.set_arg(1, right);
-        let r = key.sk_func.invoke(&mut self.fcinfo)?;
-        if self.fcinfo.isnull {
-            return Err(returned_null(key));
-        }
-        Ok(r)
+        let fcinfo = &mut self.fcinfo;
+        with_proc_scratch(|mcx| {
+            fcinfo.rearm(key.sk_collation);
+            // SAFETY: the scratch borrow spans this whole call; reset happens
+            // only on the next outermost acquisition.
+            unsafe { fcinfo.set_result_mcx(mcx) };
+            fcinfo.set_arg(0, left);
+            fcinfo.set_arg(1, right);
+            let r = key.sk_func.invoke(fcinfo)?;
+            if fcinfo.isnull {
+                return Err(returned_null(key));
+            }
+            Ok(r)
+        })
     }
 
     /// FunctionCall2Coll(&key->sk_func, …) returning int32 (BTORDER_PROC).
@@ -117,17 +123,46 @@ impl OrderProcFrame {
                 Ok(::adt_numeric::sortsupport::numeric_fast_cmp(a.data(), b.data()))
             }
             _ => {
-                self.fcinfo.rearm(collation);
-                self.fcinfo.set_arg(0, left);
-                self.fcinfo.set_arg(1, right);
-                let r = proc.invoke(&mut self.fcinfo)?;
-                if self.fcinfo.isnull {
-                    return Err(proc_returned_null(proc.fn_oid));
-                }
-                Ok(r.as_i32())
+                let fcinfo = &mut self.fcinfo;
+                with_proc_scratch(|mcx| {
+                    fcinfo.rearm(collation);
+                    // SAFETY: as `call` — the scratch borrow spans the invoke.
+                    unsafe { fcinfo.set_result_mcx(mcx) };
+                    fcinfo.set_arg(0, left);
+                    fcinfo.set_arg(1, right);
+                    let r = proc.invoke(fcinfo)?;
+                    if fcinfo.isnull {
+                        return Err(proc_returned_null(proc.fn_oid));
+                    }
+                    Ok(r.as_i32())
+                })
             }
         }
     }
+}
+
+thread_local! {
+    static PROC_SCRATCH: core::cell::RefCell<::mcx::MemoryContext> =
+        core::cell::RefCell::new(::mcx::MemoryContext::new("btproc scratch"));
+}
+
+// Detoast/deserialize scratch for the generic proc arm (C detoasts into the
+// caller's current context; the compare's by-value result never escapes).
+// Reset per outermost acquisition; the borrow spans the invoke, so re-entry
+// (a cmp proc whose catalog lookup runs a nested index scan) sees the cell
+// busy and takes a fresh short-lived context instead of resetting the
+// outer's live copies.
+fn with_proc_scratch<R>(f: impl for<'s> FnOnce(::mcx::Mcx<'s>) -> PgResult<R>) -> PgResult<R> {
+    PROC_SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut ctx) => {
+            ctx.reset();
+            f(ctx.mcx())
+        }
+        Err(_) => {
+            let ctx = ::mcx::MemoryContext::new("btproc scratch (reentrant)");
+            f(ctx.mcx())
+        }
+    })
 }
 
 #[cold]
