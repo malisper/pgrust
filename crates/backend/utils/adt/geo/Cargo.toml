@@ -11,3 +11,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 adt_float = { path = "../float" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+stack_depth = { path = "../../misc/stack_depth" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
