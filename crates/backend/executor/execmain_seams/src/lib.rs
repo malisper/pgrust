@@ -163,3 +163,16 @@ seam_core::seam!(
         pstmt: &'p PlannedStmt<'a>,
     ) -> PgResult<Rc<TupleDescData<'static>>>
 );
+
+seam_core::seam!(
+    // execCurrentOf (execCurrent.c): C's (cexpr, econtext, table_oid, *tid)
+    // -> bool; None = valid cursor not on a row of this table. Direct dep
+    // would cycle (execmain -> nodetidscan -> execmain). table_name rides in
+    // from the caller's open scan relation (C re-derives it via syscache).
+    pub fn exec_current_of<'a>(
+        cursor_name: Option<&'a str>,
+        cursor_param: i32,
+        table_oid: types_core::Oid,
+        table_name: &'a str,
+    ) -> PgResult<Option<types_tuple::ItemPointerData>>
+);

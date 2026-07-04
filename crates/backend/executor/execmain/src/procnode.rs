@@ -41,6 +41,8 @@ pub enum PlanStateNode<'mcx> {
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
     CteScan(PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
+    TidScan(::nodetidscan::TidScanState<'mcx>),
+    TidRangeScan(::nodetidrangescan::TidRangeScanState<'mcx>),
     IndexOnlyScan(PgBox<'mcx, ::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
     Sort(SortNode<'mcx>),
@@ -220,6 +222,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::ProjectSet(ps) => ps.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
+            PlanStateNode::TidScan(ts) => Some(ts.ss.ps_ExprContext),
+            PlanStateNode::TidRangeScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
             PlanStateNode::CteScan(cs) => Some(cs.ss.ps_ExprContext),
@@ -280,6 +284,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::CteScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
+            | PlanStateNode::TidScan(_)
+            | PlanStateNode::TidRangeScan(_)
             | PlanStateNode::Limit(_)
             | PlanStateNode::LockRows(_)
             | PlanStateNode::BitmapHeapScan(_)
@@ -407,6 +413,24 @@ pub fn exec_init_node<'mcx>(
             PlanStateNode::IndexScan(::nodeindexscan::exec_init_index_scan(
                 mcx,
                 node.as_index_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
+        NodeTag::T_TidScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::TidScan(::nodetidscan::exec_init_tid_scan(
+                mcx,
+                node.as_tid_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
+        NodeTag::T_TidRangeScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::TidRangeScan(::nodetidrangescan::exec_init_tid_range_scan(
+                mcx,
+                node.as_tid_range_scan().unwrap(),
                 estate,
                 eflags,
             )?)
@@ -906,8 +930,6 @@ pub fn exec_init_node<'mcx>(
         tag => unported_nodes!(tag, {
             T_MergeAppend => "nodeMergeAppend.c",
             T_SampleScan => "nodeSamplescan.c",
-            T_TidScan => "nodeTidscan.c",
-            T_TidRangeScan => "nodeTidrangescan.c",
             T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
@@ -971,6 +993,8 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
+        PlanStateNode::TidScan(ts) => Some(&mut ts.ss),
+        PlanStateNode::TidRangeScan(ts) => Some(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
         _ => None,
@@ -994,6 +1018,8 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
         PlanStateNode::CteScan(cs) => cte_scan_arm(cs, estate),
         PlanStateNode::IndexScan(is) => index_scan_arm(is, estate),
+        PlanStateNode::TidScan(ts) => tid_scan_arm(ts, estate),
+        PlanStateNode::TidRangeScan(ts) => tid_range_scan_arm(ts, estate),
         PlanStateNode::IndexOnlyScan(ios) => index_only_scan_arm(ios, estate),
         PlanStateNode::Agg(aps) => agg_arm(aps, estate),
         PlanStateNode::WindowAgg(w) => window_agg_arm(w, estate),
@@ -1075,6 +1101,22 @@ fn index_scan_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     ::nodeindexscan::exec_index_scan(is, estate)
+}
+
+#[inline(never)]
+fn tid_scan_arm<'mcx>(
+    ts: &mut ::nodetidscan::TidScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetidscan::exec_tid_scan(ts, estate)
+}
+
+#[inline(never)]
+fn tid_range_scan_arm<'mcx>(
+    ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodetidrangescan::exec_tid_range_scan(ts, estate)
 }
 
 #[inline(never)]
@@ -1525,6 +1567,8 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
         PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
+        PlanStateNode::TidScan(ts) => end_scan(&mut ts.ss),
+        PlanStateNode::TidRangeScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => end_scan(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
         PlanStateNode::Sort(s) => s.outer_desc = None,
@@ -1628,6 +1672,8 @@ pub fn planstate_instr_extra<'mcx>(
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::IndexScan(_)
+        | PlanStateNode::TidScan(_)
+        | PlanStateNode::TidRangeScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => None,
     }
@@ -1701,6 +1747,8 @@ fn exec_end_node_inner<'mcx>(
             Ok(())
         }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_end_index_scan(is),
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_end_tid_scan(ts),
+        PlanStateNode::TidRangeScan(ts) => ::nodetidrangescan::exec_end_tid_range_scan(ts),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_end_index_only_scan(ios)
         }
@@ -1820,6 +1868,8 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         | PlanStateNode::CteScan(_)
         | PlanStateNode::WorkTableScan(_)
         | PlanStateNode::IndexScan(_)
+        | PlanStateNode::TidScan(_)
+        | PlanStateNode::TidRangeScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
         PlanStateNode::RecursiveUnion(ru) => {
@@ -2077,7 +2127,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
         Result(x), SeqScan(x), FunctionScan(x), ValuesScan(x), CteScan(x),
-        IndexScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
+        IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),

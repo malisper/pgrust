@@ -13,6 +13,7 @@ pub mod equivclass;
 pub mod grouping;
 pub mod groupingsets;
 pub mod indxpath;
+mod tidpath;
 mod inherit;
 pub mod initsplan;
 pub mod joinpath;

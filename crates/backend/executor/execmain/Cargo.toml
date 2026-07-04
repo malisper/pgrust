@@ -36,6 +36,9 @@ noderecursiveunion = { path = "../noderecursiveunion" }
 nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
+nodetidscan = { path = "../nodetidscan" }
+nodetidrangescan = { path = "../nodetidrangescan" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
 nodebitmapindexscan = { path = "../nodebitmapindexscan" }
 nodebitmapheapscan = { path = "../nodebitmapheapscan" }
