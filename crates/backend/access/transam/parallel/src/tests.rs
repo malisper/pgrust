@@ -6,6 +6,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+// Caller must hold serial(): installed-check and install are two steps.
+fn xact_seams_boot() {
+    if !xact_seams::is_in_parallel_mode::is_installed() {
+        xact::init_seams();
+    }
+}
+
 fn guc_boot() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -15,6 +22,7 @@ fn guc_boot() {
         adt_float::init_seams();
         install_debug_parallel_query_accessor();
     });
+    xact_seams_boot();
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
     }
@@ -63,7 +71,7 @@ fn fence_prevent_command_if_parallel_mode() {
 #[test]
 fn fence_query_snapshot_in_parallel_mode() {
     let _s = serial();
-    xact::init_seams();
+    xact_seams_boot();
     let _g = ParallelModeGuard::enter();
     let err = snapmgr::GetTransactionSnapshot().unwrap_err();
     assert_eq!(err.message(), "cannot take query snapshot during a parallel operation");

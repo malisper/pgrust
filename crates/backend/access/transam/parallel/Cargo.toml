@@ -88,6 +88,7 @@ namespace_seams = { path = "../../../catalog/namespace_seams" }
 catalog_index_seams = { path = "../../../catalog/catalog_index_seams" }
 catalog_storage_seams = { path = "../../../catalog/storage_seams" }
 multixact_seams = { path = "../multixact_seams" }
+xact_seams = { path = "../xact_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 catcache_seams = { path = "../../../utils/cache/catcache_seams" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }
