@@ -8,5 +8,7 @@ SELECT c.relname,
        WHERE a.attrelid = pr.prrelid AND a.attnum = (pr.prattrs::pg_catalog.int2[])[s.i])
    END) AS attnames
 FROM pg_catalog.pg_publication_rel pr JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid;
+SELECT pubname, schemaname, tablename, attnames, rowfilter
+FROM pg_catalog.pg_publication_tables ORDER BY 1, 2, 3;
 DROP PUBLICATION pr_pub;
 DROP TABLE pr_t;
