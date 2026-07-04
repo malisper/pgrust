@@ -386,6 +386,10 @@ fn get_object_address_unqualified<'mcx>(
             AccessMethodRelationId,
             commands_amcmds::get_am_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_PARAMETER_ACL => Ok(ObjectAddress::set(
+            catalog::ParameterAclRelationId,
+            pg_parameter_acl::ParameterAclLookup(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
 }

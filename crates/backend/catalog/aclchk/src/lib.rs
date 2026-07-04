@@ -7,7 +7,7 @@ use adt_acl::{
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
 use cache_syscache::cacheinfo::{
-    ATTNUM, AUTHOID, DATABASEOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID,
+    ATTNUM, AUTHOID, DATABASEOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
 };
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
@@ -720,8 +720,42 @@ pub(crate) fn pg_aclmask_for_grant(
             mask,
             how,
         ),
+        ObjectType::OBJECT_PARAMETER_ACL => {
+            pg_parameter_acl_aclmask(object_oid, roleid, mask, how)
+        }
         other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
     }
+}
+
+// pg_parameter_acl_aclmask (aclchk.c): by pg_parameter_acl OID, unlike
+// pg_parameter_aclmask's by-name probe.
+fn pg_parameter_acl_aclmask(acl_oid: Oid, roleid: Oid, mask: u64, how: AclMaskHow) -> PgResult<u64> {
+    if superuser::superuser_arg(roleid)? {
+        return Ok(mask);
+    }
+    let Some(tuple) =
+        SearchSysCache1(PARAMETERACLOID, SysCacheKey::Value(Datum::from_oid(acl_oid)))?
+    else {
+        return Err(Box::new(
+            PgError::error(format!("parameter ACL with OID {acl_oid} does not exist"))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    };
+    let (acl_datum, isnull) =
+        SysCacheGetAttr(PARAMETERACLOID, &tuple, ANUM_PG_PARAMETER_ACL_PARACL)?;
+    let result = if isnull {
+        aclmask(
+            acldefault(AclObjectType::ParameterAcl, BOOTSTRAP_SUPERUSERID).as_slice(),
+            roleid,
+            BOOTSTRAP_SUPERUSERID,
+            mask,
+            how,
+        )?
+    } else {
+        with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, BOOTSTRAP_SUPERUSERID, mask, how))?
+    };
+    ReleaseSysCache(tuple);
+    Ok(result)
 }
 
 pub(crate) fn objtype_from_i32(objtype: i32) -> ObjectType {
