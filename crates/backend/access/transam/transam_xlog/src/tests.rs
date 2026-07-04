@@ -37,6 +37,15 @@ fn checkpoint_byte_roundtrip() {
     assert_eq!(CheckPoint::from_bytes(&bytes), ckpt);
 }
 
+fn init_seams_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        shmem::init_seams();
+        guc_tables::init_seams();
+        crate::init_seams();
+    });
+}
+
 fn with_seg(size: i32, f: impl FnOnce()) {
     set_wal_segment_size(size);
     f();
@@ -152,9 +161,7 @@ fn insert_flush_smoke() {
     init_small::globals::SetDataDir(dir.to_str().unwrap());
     init_small::globals::set_enableFsync(false);
 
-    shmem::init_seams();
-    guc_tables::init_seams();
-    crate::init_seams();
+    init_seams_once();
     xact_seams::mark_current_transaction_id_logged_if_any::set(|| {});
     xact_seams::get_current_sub_transaction_id::set(|| 1);
     aio_seams::pgaio_closing_fd::set(|_| {});
@@ -456,7 +463,7 @@ fn xlog_filename_parse_roundtrip() {
 fn keep_log_seg_matches_c() {
     let seg = 16 * 1024 * 1024;
     with_seg(seg, || {
-        guc_tables::init_seams();
+        init_seams_once();
         let recptr = 100 * seg as u64 + 1234;
 
         // No slots, no wal_keep_size: horizon untouched.
@@ -497,7 +504,7 @@ fn keep_log_seg_matches_c() {
 fn xlog_fileslop_clamps_to_wal_size_bounds() {
     let seg = 16 * 1024 * 1024;
     with_seg(seg, || {
-        guc_tables::init_seams();
+        init_seams_once();
         guc_tables::vars::min_wal_size_mb.write(5 * 16);
         guc_tables::vars::max_wal_size_mb.write(64 * 16);
         guc_tables::vars::CheckPointCompletionTarget.write(0.9);
