@@ -459,6 +459,66 @@ fn dispatch_switch<'mcx>(
             commands_policy::AlterPolicy(mcx, stmt)?;
         }
 
+        T_CreatePublicationStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::CreatePublicationStmt>()
+                .expect("CreatePublicationStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatePublicationStmt<'_>,
+                    &types_nodes::parsenodes::CreatePublicationStmt<'mcx>,
+                >(stmt)
+            };
+            commands_publicationcmds::CreatePublication(mcx, stmt, source_text)?;
+        }
+        T_AlterPublicationStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterPublicationStmt>()
+                .expect("AlterPublicationStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterPublicationStmt<'_>,
+                    &types_nodes::parsenodes::AlterPublicationStmt<'mcx>,
+                >(stmt)
+            };
+            commands_publicationcmds::AlterPublication(mcx, stmt, source_text)?;
+        }
+
+        T_CreateSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::CreateSubscriptionStmt>()
+                .expect("CreateSubscriptionStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateSubscriptionStmt<'_>,
+                    &types_nodes::parsenodes::CreateSubscriptionStmt<'mcx>,
+                >(stmt)
+            };
+            subscriptioncmds::CreateSubscription(mcx, stmt, is_top_level)?;
+        }
+        T_AlterSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterSubscriptionStmt>()
+                .expect("AlterSubscriptionStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterSubscriptionStmt<'_>,
+                    &types_nodes::parsenodes::AlterSubscriptionStmt<'mcx>,
+                >(stmt)
+            };
+            subscriptioncmds::AlterSubscription(mcx, stmt, is_top_level)?;
+        }
+        T_DropSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::DropSubscriptionStmt>()
+                .expect("DropSubscriptionStmt");
+            subscriptioncmds::DropSubscription(mcx, stmt, is_top_level)?;
+        }
+
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
         T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
@@ -681,12 +741,35 @@ fn dispatch_switch<'mcx>(
                 types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
                     tablecmds::RenameConstraint(mcx, stmt)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::RenameStmt<'_>,
+                            &types_nodes::parsenodes::RenameStmt<'mcx>,
+                        >(stmt)
+                    };
+                    commands_alter::ExecRenameStmt_generic(mcx, stmt)?;
+                }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
         }
 
         T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
-        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterOwnerStmt>()
+                .expect("AlterOwnerStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterOwnerStmt<'_>,
+                    &types_nodes::parsenodes::AlterOwnerStmt<'mcx>,
+                >(stmt)
+            };
+            commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
+        }
 
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.

@@ -27,3 +27,5 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 parse_relation = { path = "../../parser/parse_relation" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+lmgr = { path = "../../storage/lmgr/lmgr" }

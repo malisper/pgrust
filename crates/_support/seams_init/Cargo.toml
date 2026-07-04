@@ -41,6 +41,7 @@ xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 rls = { path = "../../backend/utils/misc/rls" }
 commands_policy = { path = "../../backend/commands/policy" }
+commands_publicationcmds = { path = "../../backend/commands/publicationcmds" }
 be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
 large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }

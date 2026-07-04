@@ -85,7 +85,7 @@ pub struct Subscription<'mcx> {
     pub conninfo: PgString<'mcx>,
     pub slotname: Option<PgString<'mcx>>,
     pub synccommit: PgString<'mcx>,
-    pub publications: PgVec<'mcx, PgString<'mcx>>,
+    pub publications: PgVec<'mcx, &'mcx str>,
     pub origin: PgString<'mcx>,
 }
 
@@ -309,15 +309,13 @@ pub fn DisableSubscription<'mcx>(mcx: Mcx<'mcx>, subid: Oid) -> PgResult<()> {
 pub fn textarray_to_stringlist<'mcx>(
     mcx: Mcx<'mcx>,
     textarray: &[u8],
-) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+) -> PgResult<PgVec<'mcx, &'mcx str>> {
     let (elems, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, textarray, TEXTOID, false)?;
-    let mut res: PgVec<'mcx, PgString<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    let mut res: PgVec<'mcx, &'mcx str> = mcx::vec_with_capacity_in(mcx, elems.len())?;
     for &e in elems.iter() {
         let img = detoast_datum(mcx, e)?;
-        res.push(PgString::from_str_in(
-            core::str::from_utf8(varlena_payload(&img)).expect("publication name is UTF-8"),
-            mcx,
-        )?);
+        let bytes = mcx::slice_borrow_in(mcx, varlena_payload(&img))?;
+        res.push(core::str::from_utf8(bytes).expect("publication name is UTF-8"));
     }
     Ok(res)
 }

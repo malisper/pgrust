@@ -77,6 +77,12 @@ fn name_parts<'mcx>(names: &NodeList<'mcx>) -> Vec<&'mcx str> {
 }
 
 pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult<()> {
+    if matches!(
+        stmt.objtype,
+        ObjectType::OBJECT_PUBLICATION | ObjectType::OBJECT_SUBSCRIPTION
+    ) {
+        return comment_by_name_object(mcx, stmt);
+    }
     let names = stmt
         .object
         .expect("grammar always supplies the object")
@@ -161,6 +167,47 @@ pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult
     };
     CreateComments(mcx, relid, RELATION_RELATION_ID, objsubid, comment)?;
     rel.close(NoLock)
+}
+
+const PublicationRelationId: Oid = 6104;
+const SubscriptionRelationId: Oid = 6100;
+
+// get_object_address unqualified-name arm + CreateComments for the classes
+// without a namespace (publication, subscription).
+fn comment_by_name_object<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult<()> {
+    let name = stmt
+        .object
+        .expect("grammar always supplies the object")
+        .as_string()
+        .expect("publication/subscription comment object is a name")
+        .sval;
+    let (classid, objid) = match stmt.objtype {
+        ObjectType::OBJECT_PUBLICATION => {
+            (PublicationRelationId, lsyscache::get_publication_oid(name, false)?)
+        }
+        ObjectType::OBJECT_SUBSCRIPTION => {
+            (SubscriptionRelationId, lsyscache::get_subscription_oid(name, false)?)
+        }
+        _ => unreachable!(),
+    };
+
+    if classid == SubscriptionRelationId {
+        lmgr::LockSharedObject(classid, objid, 0, ShareUpdateExclusiveLock)?;
+    } else {
+        lmgr::LockDatabaseObject(classid, objid, 0, ShareUpdateExclusiveLock)?;
+    }
+
+    // check_object_ownership (objectaddress.c): superuser fast path; role
+    // ownership walks are the unported remainder.
+    if !superuser::superuser_arg(miscinit::GetUserId())? {
+        unported("CommentObject: check_object_ownership for non-superusers");
+    }
+
+    let comment = match stmt.comment {
+        Some("") => None,
+        c => c,
+    };
+    CreateComments(mcx, objid, classid, 0, comment)
 }
 
 pub fn CreateComments<'mcx>(
