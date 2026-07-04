@@ -133,7 +133,10 @@ pub fn init_seams() {
     autovacuum_seams::autovacuuming_active::set(AutoVacuumingActive);
     autovacuum_seams::vacuum_update_costs::set(cost::VacuumUpdateCosts);
     autovacuum_seams::auto_vacuum_update_cost_limit::set(cost::AutoVacuumUpdateCostLimit);
-    autovacuum_seams::wake_autovacuum_launcher::set(wake_autovacuum_launcher);
+    // Fixture tests pre-install a no-op wake (no launcher there); keep it.
+    if !autovacuum_seams::wake_autovacuum_launcher::is_installed() {
+        autovacuum_seams::wake_autovacuum_launcher::set(wake_autovacuum_launcher);
+    }
     autovacuum_seams::autovac_worker_failed::set(launcher::AutoVacWorkerFailed);
 }
 
