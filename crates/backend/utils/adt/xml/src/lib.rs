@@ -1042,8 +1042,11 @@ pub fn xml_parse_doc(
         None
     } else {
         let ctx = ::mcx::MemoryContext::new("xml_parse encoding conversion");
-        ::mbutils::pg_do_encoding_conversion(ctx.mcx(), data, encoding, PG_UTF8)?
-            .map(|conv| conv.to_vec())
+        let conv =
+            ::mbutils::pg_do_encoding_conversion(ctx.mcx(), data, encoding, PG_UTF8)?
+                .map(|conv| conv.to_vec());
+        drop(ctx);
+        conv
     };
     let utf8: &[u8] = utf8_owned.as_deref().unwrap_or(data);
 
