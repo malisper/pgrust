@@ -136,11 +136,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             ACL_USAGE,
         )?;
         if aclresult != 0 {
-            aclchk::aclcheck_error(
-                aclresult,
-                ObjectType::OBJECT_TYPE,
-                &format_type::format_type_be(relation.rd_rel.reltype)?,
-            )?;
+            aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_TYPE, relation.name())?;
         }
     } else {
         let aclresult = aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT)?;
