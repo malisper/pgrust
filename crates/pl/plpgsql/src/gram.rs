@@ -1,8 +1,8 @@
-// pl_gram.y, phase-1 subset as recursive descent (keyword-led statements;
-// the bison grammar's pushback tricks map 1:1). Named louds: CASE, FOREACH,
-// EXECUTE, OPEN/FETCH/MOVE/CLOSE, CALL/DO, COMMIT/ROLLBACK, EXCEPTION
-// sections, RETURN NEXT/QUERY, cursor declarations, %ROWTYPE, qualified
-// %TYPE, #option dump.
+// pl_gram.y as recursive descent (keyword-led statements; the bison
+// grammar's pushback tricks map 1:1). Named louds: CASE, FOREACH,
+// FOR ... IN EXECUTE, OPEN/FETCH/MOVE/CLOSE, CALL/DO, COMMIT/ROLLBACK,
+// RETURN NEXT/QUERY, cursor declarations, %ROWTYPE, qualified %TYPE,
+// #option dump.
 use parser_seams::RawParseMode;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};

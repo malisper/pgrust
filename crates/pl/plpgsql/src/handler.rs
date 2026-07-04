@@ -1,6 +1,6 @@
-// pl_handler.c + pl_comp.c's plpgsql_compile / do_compile (phase-1 subset)
-// + pl_exec.c's plpgsql_exec_function shell. Triggers, DO blocks, procedures
-// and polymorphic signatures are named louds. GUC-backed compile options
+// pl_handler.c + pl_comp.c's plpgsql_compile / do_compile + pl_exec.c's
+// plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks, procedures,
+// event triggers and polymorphic signatures are named louds. GUC-backed compile options
 // (plpgsql.variable_conflict, ...) read their C-source defaults; SET on the
 // unregistered custom GUCs is loud at the GUC layer.
 use std::collections::HashMap;
