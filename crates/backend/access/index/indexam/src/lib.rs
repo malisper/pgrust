@@ -203,7 +203,7 @@ pub fn index_bulk_delete<'mcx>(
 pub fn index_bulk_delete_collect<'mcx>(
     mcx: Mcx<'mcx>,
     info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
-    callback: &mut dyn FnMut(&ItemPointerData) -> PgResult<()>,
+    callback: &mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_),
 ) -> PgResult<IndexBulkDeleteResult> {
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {

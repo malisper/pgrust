@@ -50,7 +50,7 @@ pub(crate) struct BTVacState<'a, 'mcx> {
     pub dead_items: Option<&'a [ItemPointerData]>,
     // C's IndexBulkDeleteCallback shape for callers that never delete
     // (validate_index): every live heap TID is reported, nothing is removed.
-    pub collect: Option<&'a mut dyn FnMut(&ItemPointerData) -> PgResult<()>>,
+    pub collect: Option<&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'a)>,
     pub cycleid: BTCycleId,
     pub pendingpages: PgVec<'mcx, ::types_nbtree::BTPendingFSM>,
     pub maxbufsize: usize,
@@ -94,7 +94,7 @@ pub fn btbulkdelete<'mcx>(
 pub fn btbulkdelete_collect<'mcx>(
     mcx: Mcx<'mcx>,
     info: &IndexVacuumInfo<'_, 'mcx>,
-    callback: &mut dyn FnMut(&ItemPointerData) -> PgResult<()>,
+    callback: &mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_),
 ) -> PgResult<IndexBulkDeleteResult> {
     let rel = info.index;
     let mut stats = IndexBulkDeleteResult::default();
@@ -144,7 +144,7 @@ fn btvacuumscan<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     stats: &mut IndexBulkDeleteResult,
     dead_items: Option<&[ItemPointerData]>,
-    collect: Option<&mut dyn FnMut(&ItemPointerData) -> PgResult<()>>,
+    collect: Option<&mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_)>,
     cycleid: BTCycleId,
 ) -> PgResult<()> {
     let rel = info.index;
