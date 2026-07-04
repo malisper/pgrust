@@ -278,6 +278,27 @@ pub struct CteScan<'mcx> {
 
 #[derive(Default)]
 #[repr(C)]
+pub struct WorkTableScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub wtParam: i32,
+}
+
+/// Outer child is the non-recursive term, inner child the recursive term;
+/// dup fields are zero/empty for UNION ALL. Per-key arrays as in [`Sort`].
+#[derive(Default)]
+#[repr(C)]
+pub struct RecursiveUnion<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub wtParam: i32,
+    pub numCols: i32,
+    pub dupColIdx: &'mcx [i16],
+    pub dupOperators: &'mcx [Oid],
+    pub dupCollations: &'mcx [Oid],
+    pub numGroups: i64,
+}
+
+#[derive(Default)]
+#[repr(C)]
 pub struct ValuesScan<'mcx> {
     pub scan: Scan<'mcx>,
     pub values_lists: NodeList<'mcx>,
@@ -686,6 +707,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CteScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_CteScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WorkTableScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WorkTableScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RecursiveUnion<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RecursiveUnion;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ValuesScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_ValuesScan;
 }
@@ -765,6 +792,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for SetOp<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
+unsafe impl<'mcx> PlanVariant<'mcx> for WorkTableScan<'mcx> {}
+unsafe impl<'mcx> PlanVariant<'mcx> for RecursiveUnion<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -906,6 +935,8 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
             | NodeTag::T_CteScan
+            | NodeTag::T_WorkTableScan
+            | NodeTag::T_RecursiveUnion
             | NodeTag::T_ValuesScan
             | NodeTag::T_Sort
             | NodeTag::T_IncrementalSort
@@ -982,6 +1013,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_cte_scan(self) -> Option<&'mcx CteScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_work_table_scan(self) -> Option<&'mcx WorkTableScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_recursive_union(self) -> Option<&'mcx RecursiveUnion<'mcx>> {
         self.as_variant()
     }
 
