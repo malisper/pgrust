@@ -356,6 +356,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_ArrayExpr
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_SubLink
+        | NodeTag::T_XmlExpr
         | NodeTag::T_SubscriptingRef) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
