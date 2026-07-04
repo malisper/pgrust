@@ -73,7 +73,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{FuncAliasCols, KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{FuncAliasCols, JoinQualUsing, KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -4808,26 +4808,35 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(j));
             }
             // joined_table: CROSS JOIN | join_type JOIN ... join_qual |
-            // JOIN ... join_qual | NATURAL variants (unported louds).
-            1845 | 1846 | 1847 => {
-                let (jointype, rarg_at, qual_at) = match rule {
-                    1845 => (JoinType::JOIN_INNER, 4, 0),
-                    1846 => (join_type_from_ival(view.v(2).ival()), 4, 5),
-                    _ => (JoinType::JOIN_INNER, 3, 4),
+            // JOIN ... join_qual | NATURAL join_type JOIN | NATURAL JOIN.
+            1845 | 1846 | 1847 | 1848 | 1849 => {
+                let (jointype, is_natural, rarg_at, qual_at) = match rule {
+                    1845 => (JoinType::JOIN_INNER, false, 4, 0),
+                    1846 => (join_type_from_ival(view.v(2).ival()), false, 4, 5),
+                    1847 => (JoinType::JOIN_INNER, false, 3, 4),
+                    1848 => (join_type_from_ival(view.v(3).ival()), true, 5, 0),
+                    _ => (JoinType::JOIN_INNER, true, 4, 0),
                 };
-                let quals = if qual_at == 0 { None } else { view.v(qual_at).node() };
-                // join_qual USING is a loud unported rule (1869), so quals
-                // here is always the ON expression.
-                debug_assert!(!quals.is_some_and(|q| q.node_tag() == NodeTag::T_List));
+                let (using_clause, join_using_alias, quals) = if qual_at == 0 {
+                    (NodeList::nil(), None, None)
+                } else {
+                    let q = view.v(qual_at);
+                    if q.is_join_using() {
+                        let u = q.join_using();
+                        (u.cols, u.alias, None)
+                    } else {
+                        (NodeList::nil(), None, q.node())
+                    }
+                };
                 let n = Node::mk(
                     mcx,
                     JoinExpr {
                         jointype,
-                        isNatural: false,
+                        isNatural: is_natural,
                         larg: view.v(1).node().expect("table_ref"),
                         rarg: view.v(rarg_at).node().expect("table_ref"),
-                        usingClause: NodeList::nil(),
-                        join_using_alias: None,
+                        usingClause: using_clause,
+                        join_using_alias,
                         quals,
                         alias: None,
                         rtindex: 0,
@@ -4835,15 +4844,23 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
             }
-            1848 | 1849 => panic!(
-                "gram_core: NATURAL JOIN unimplemented (rule {rule}); join-using lane"
-            ),
+            // opt_alias_clause_for_join_using: AS ColId (empty rides DISPATCH).
+            1856 => {
+                let name = view.v(2).str_val();
+                *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
+            }
             // join_type: FULL/LEFT/RIGHT/INNER opt_outer.
             1863 => *yyval = YYSTYPE::Ival(JoinType::JOIN_FULL as i32),
             1864 => *yyval = YYSTYPE::Ival(JoinType::JOIN_LEFT as i32),
             1865 => *yyval = YYSTYPE::Ival(JoinType::JOIN_RIGHT as i32),
             1866 => *yyval = YYSTYPE::Ival(JoinType::JOIN_INNER as i32),
-            1869 => panic!("gram_core: JOIN USING unimplemented (rule 1869); join-using lane"),
+            // join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using.
+            1869 => {
+                *yyval = YYSTYPE::JoinUsing(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    JoinQualUsing { cols: view.v(3).list(), alias: view.v(5).alias() },
+                )?));
+            }
             2171 => {
                 let n = Node::mk(
                     mcx,

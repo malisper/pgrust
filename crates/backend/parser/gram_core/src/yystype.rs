@@ -46,6 +46,13 @@ pub struct KeyActions<'mcx> {
     pub delete_action: KeyAction<'mcx>,
 }
 
+// join_qual's list_make2(name_list, opt_alias_clause_for_join_using) pair,
+// live only between join_qual and the JoinExpr build.
+pub struct JoinQualUsing<'mcx> {
+    pub cols: NodeList<'mcx>,
+    pub alias: Option<&'mcx Alias<'mcx>>,
+}
+
 pub struct YYSTYPE<'mcx> {
     p: *mut u8,
     meta: u64,
@@ -71,6 +78,7 @@ const T_DISTINCT_ALL: u32 = 12;
 const T_KEY_ACTION: u32 = 13;
 const T_KEY_ACTIONS: u32 = 14;
 const T_FUNC_ALIAS_COLS: u32 = 15;
+const T_JOIN_USING: u32 = 16;
 
 #[cold]
 #[inline(never)]
@@ -185,6 +193,24 @@ impl<'mcx> YYSTYPE<'mcx> {
     #[inline(always)]
     pub fn KeyActionsV(a: &'mcx mut KeyActions<'mcx>) -> Self {
         Self::mk(a as *mut KeyActions<'mcx> as *mut u8, T_KEY_ACTIONS, 0)
+    }
+
+    #[inline(always)]
+    pub fn JoinUsing(j: &'mcx mut JoinQualUsing<'mcx>) -> Self {
+        Self::mk(j as *mut JoinQualUsing<'mcx> as *mut u8, T_JOIN_USING, 0)
+    }
+
+    #[inline]
+    pub fn is_join_using(&self) -> bool {
+        self.tag() == T_JOIN_USING
+    }
+
+    pub fn join_using(self) -> &'mcx JoinQualUsing<'mcx> {
+        if self.tag() != T_JOIN_USING {
+            confusion("JoinQualUsing");
+        }
+        // SAFETY: built by JoinUsing() from &'mcx mut; moved, never duplicated.
+        unsafe { &*(self.p as *const JoinQualUsing<'mcx>) }
     }
 
     pub fn key_action(self) -> &'mcx mut KeyAction<'mcx> {
