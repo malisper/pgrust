@@ -697,9 +697,6 @@ fn transformColumnDefinition<'mcx>(
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
-    if column.identity != 0 || column.generated != 0 {
-        unported("identity/generated columns");
-    }
     if column.is_from_type {
         unported("is_from_type columns (OF type / LIKE)");
     }
