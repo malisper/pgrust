@@ -441,7 +441,10 @@ fn add_row_identity_columns<'mcx>(
         // TLE; no ctid exists (appendinfo.c adds nothing for views).
         return tlist.clone_in(mcx);
     }
-    if rel.rd_rel.relkind != types_rel::RELKIND_RELATION {
+    // C's ctid arm covers RELATION | MATVIEW | PARTITIONED_TABLE.
+    if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
+        && rel.rd_rel.relkind != types_rel::RELKIND_MATVIEW
+    {
         panic!(
             "add_row_identity_columns (appendinfo.c): relkind '{}' (wholerow/FDW \
              row identity); M4 lane",
