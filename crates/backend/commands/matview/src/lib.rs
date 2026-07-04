@@ -204,7 +204,7 @@ pub fn RefreshMatViewByOid<'mcx>(
 
     // C: tableSpace = concurrent ? GetDefaultTablespace(TEMP) : rd_rel->reltablespace.
     let table_space = if concurrent {
-        fd::PrepareTempTablespaces();
+        fd::PrepareTempTablespaces()?;
         fd::GetNextTempTableSpace()
     } else {
         matview_rel.rd_rel.reltablespace
