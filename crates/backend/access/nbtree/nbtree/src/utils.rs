@@ -770,7 +770,7 @@ unsafe fn bt_oppodir_checkkeys(
 /// # Safety
 /// As [`bt_checkkeys`].
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
