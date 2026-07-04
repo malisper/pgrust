@@ -660,7 +660,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed },
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_only, qual_col, qual_cmp, qual_konst, sel, nwords,
-        cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, key_col, qual_col, qual_cmp, qual_konst, sel,
+        nwords, cur_word, cur_bits,
     },
 );
