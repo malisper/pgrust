@@ -72,12 +72,14 @@ pub(crate) fn compute_partition_key<'mcx>(
         let mut attnum: AttrNumber = 0;
         let mut atttype: Oid = InvalidOid;
         let mut attcollation: Oid = InvalidOid;
+        let mut attgenerated: i8 = 0;
         for i in 0..rel.rd_att.natts as usize {
             let att = rel.rd_att.attr(i);
             if att.attname.name_str() == name.as_bytes() && !att.attisdropped {
                 attnum = att.attnum;
                 atttype = att.atttypid;
                 attcollation = att.attcollation;
+                attgenerated = att.attgenerated;
                 break;
             }
         }
@@ -97,6 +99,13 @@ pub(crate) fn compute_partition_key<'mcx>(
                     format!("cannot use system column \"{name}\" in partition key"),
                 )
                 .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
+        if attgenerated != 0 {
+            return Err(Box::new(
+                PgError::new(ERROR, "cannot use generated column in partition key".to_string())
+                    .with_detail(format!("Column \"{name}\" is a generated column."))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
             ));
         }
         info.partattrs.push(attnum);

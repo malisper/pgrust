@@ -219,9 +219,43 @@ fn at_add_foreign_key_constraint<'mcx>(
     }
 
     for i in 0..numfks {
-        let att = rel.rd_att.attr(fkattnum[i] as usize - 1);
-        if att.attgenerated != 0 {
-            unported("FK over generated columns");
+        let attgenerated = rel.rd_att.attr(fkattnum[i] as usize - 1).attgenerated;
+        if attgenerated != 0 {
+            // SQL-standard restrictions on UPDATE/DELETE actions.
+            if fkconstraint.fk_upd_action == FKCONSTR_ACTION_SETNULL
+                || fkconstraint.fk_upd_action == FKCONSTR_ACTION_SETDEFAULT
+                || fkconstraint.fk_upd_action == FKCONSTR_ACTION_CASCADE
+            {
+                let e = err(
+                    "invalid ON UPDATE action for foreign key constraint containing \
+                     generated column"
+                        .into(),
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                );
+                pkrel.close(NoLock)?;
+                return Err(e);
+            }
+            if fkconstraint.fk_del_action == FKCONSTR_ACTION_SETNULL
+                || fkconstraint.fk_del_action == FKCONSTR_ACTION_SETDEFAULT
+            {
+                let e = err(
+                    "invalid ON DELETE action for foreign key constraint containing \
+                     generated column"
+                        .into(),
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                );
+                pkrel.close(NoLock)?;
+                return Err(e);
+            }
+        }
+        if attgenerated == b'v' as i8 {
+            let e = err(
+                "foreign key constraints on virtual generated columns are not supported"
+                    .into(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            );
+            pkrel.close(NoLock)?;
+            return Err(e);
         }
     }
 

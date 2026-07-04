@@ -1,5 +1,5 @@
 // LIKE arm: transformTableLikeClause + expandTableLikeClause +
-// generateClonedIndexStmt. LOUD: identity/generated/compression copy,
+// generateClonedIndexStmt. LOUD: identity/compression copy,
 // non-default opclass/collation, INCLUDE, extended statistics.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
@@ -168,7 +168,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             && attribute.attgenerated != 0
             && (options & CREATE_TABLE_LIKE_GENERATED) != 0
         {
-            unported("LIKE INCLUDING GENERATED (generated columns)");
+            def.generated = attribute.attgenerated as u8;
         }
         if attribute.attidentity != 0 && (options & CREATE_TABLE_LIKE_IDENTITY) != 0 {
             unported("LIKE INCLUDING IDENTITY (identity sequences)");
@@ -323,9 +323,6 @@ pub fn expandTableLikeClause<'mcx>(
             };
             if options & wanted == 0 {
                 continue;
-            }
-            if attribute.attgenerated != 0 {
-                unported("LIKE INCLUDING GENERATED (generation expressions)");
             }
             let defbin = tupdesc::TupleDescGetDefaultBin(tuple_desc, (i + 1) as AttrNumber)
                 .unwrap_or_else(|| {

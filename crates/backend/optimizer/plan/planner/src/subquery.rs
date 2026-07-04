@@ -49,6 +49,11 @@ pub fn subquery_planner<'mcx>(
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
     }
+    if parse.rtable.iter().any(|n| {
+        n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_RELATION
+    }) {
+        crate::prepjointree::expand_virtual_generated_columns(mcx, &mut parse)?;
+    }
     if parse
         .rtable
         .iter()

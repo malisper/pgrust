@@ -817,10 +817,16 @@ pub fn get_relation_constraints<'mcx>(
                 }
             }
         }
-        assert!(
-            !constr.has_generated_virtual || result.is_empty(),
-            "get_relation_constraints (plancat.c): expand_generated_columns_in_expr unported"
-        );
+        if constr.has_generated_virtual {
+            for item in result.iter_mut() {
+                *item = crate::prepjointree::expand_generated_columns_in_expr(
+                    mcx,
+                    *item,
+                    &relation,
+                    varno as i32,
+                )?;
+            }
+        }
     }
     assert!(
         !(include_partition && relation.rd_rel.relispartition),
