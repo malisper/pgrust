@@ -37,10 +37,11 @@ pub fn transformTargetList<'mcx>(
             } else if let Some(ind) = val.as_a_indirection() {
                 // C expands only when the LAST indirection item is A_Star.
                 if ind.indirection.last().is_some_and(|n| n.node_tag() == NodeTag::T_A_Star) {
-                    panic!(
-                        "transformTargetList (parse_target.c): ExpandIndirectionStar \
-                         unported — unit backend-parser-parse-target"
-                    );
+                    p_target.concat(
+                        mcx,
+                        &ExpandIndirectionStar(mcx, pstate, ind, true, exprKind)?,
+                    )?;
+                    continue;
                 }
             }
         }
@@ -595,6 +596,91 @@ pub fn resolveTargetListUnknowns<'mcx>(
         }
     }
     Ok(())
+}
+
+// ExpandIndirectionStar (parse_target.c): strip the trailing A_Star,
+// transform the remaining rowtype expression, expand it into fields.
+fn ExpandIndirectionStar<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    ind: &types_nodes::rawnodes::A_Indirection<'mcx>,
+    make_target_entry: bool,
+    exprKind: ParseExprKind,
+) -> PgResult<NodeList<'mcx>> {
+    let mut trimmed = NodeList::nil();
+    for n in ind.indirection.as_slice()[..ind.indirection.len() - 1].iter() {
+        trimmed.lappend(mcx, *n)?;
+    }
+    let arg = ind.arg.expect("A_Indirection.arg");
+    let expr = if trimmed.is_nil() {
+        transformExpr(mcx, pstate, arg, exprKind)?
+    } else {
+        let stripped = Node::mk_mut(
+            mcx,
+            types_nodes::rawnodes::A_Indirection { arg: Some(arg), indirection: trimmed },
+        )?
+        .seal_ref();
+        transformExpr(mcx, pstate, stripped, exprKind)?
+    };
+    ExpandRowReference(mcx, pstate, expr, make_target_entry)
+}
+
+// ExpandRowReference (parse_target.c). C copyObjects the rowtype expression
+// per field; the sealed node is shared instead (immutable subtree).
+fn ExpandRowReference<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+    make_target_entry: bool,
+) -> PgResult<NodeList<'mcx>> {
+    if let Some(var) = expr.as_var() {
+        if var.varattno == 0 {
+            let nsitem = parse_relation::GetNSItemByRangeTablePosn(
+                pstate,
+                var.varno as i32,
+                var.varlevelsup as i32,
+            );
+            return ExpandSingleTable(
+                mcx,
+                pstate,
+                nsitem,
+                var.varlevelsup as i32,
+                var.location,
+                make_target_entry,
+            );
+        }
+    }
+
+    let tupdesc = funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
+        .expect("no_error=false returns a descriptor");
+    let mut result = NodeList::nil();
+    for i in 0..tupdesc.natts as usize {
+        let att = tupdesc.attr(i);
+        if att.attisdropped {
+            continue;
+        }
+        let fselect = Node::mk(
+            mcx,
+            types_nodes::primnodes::FieldSelect {
+                arg: expr,
+                fieldnum: (i + 1) as AttrNumber,
+                resulttype: att.atttypid,
+                resulttypmod: att.atttypmod,
+                resultcollid: att.attcollation,
+            },
+        )?;
+        if make_target_entry {
+            let name = core::str::from_utf8(att.attname.name_str()).expect("attname is UTF-8");
+            let resno = pstate.p_next_resno as AttrNumber;
+            pstate.p_next_resno += 1;
+            let te =
+                Node::mk_target_entry(mcx, fselect, resno, Some(str_in(mcx, name)?), false)?;
+            result.lappend(mcx, te)?;
+        } else {
+            result.lappend(mcx, fselect)?;
+        }
+    }
+    Ok(result)
 }
 
 fn ExpandColumnRefStar<'mcx>(

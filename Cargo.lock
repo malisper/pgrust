@@ -7470,6 +7470,7 @@ dependencies = [
  "datum",
  "elog",
  "format_type",
+ "funcapi",
  "lsyscache",
  "mbutils",
  "mcx",
