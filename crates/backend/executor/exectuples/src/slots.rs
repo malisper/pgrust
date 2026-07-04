@@ -1018,3 +1018,35 @@ pub fn slot_is_current_xact_tuple(
         None => Err(no_xact_info("don't have a storage tuple in this context")),
     }
 }
+
+/// `execute_attr_map_slot` (tupconvert.c): remap `in_slot` into `out_slot`
+/// via `attmap[out-1] = in attno` (0 = force NULL). `out_slot` must already
+/// carry its own descriptor (`tts_values`/`tts_isnull` sized to it).
+pub fn execute_attr_map_slot<'mcx>(
+    attmap: &[i16],
+    in_slot: &mut SlotData<'mcx>,
+    out_slot: &mut SlotData<'mcx>,
+    mcx: Mcx<'mcx>,
+) {
+    debug_assert!(in_slot.base().tts_tupleDescriptor.is_some());
+    debug_assert!(out_slot.base().tts_tupleDescriptor.is_some());
+
+    let outnatts = attmap.len();
+    slot_getallattrs(in_slot);
+    exec_clear_tuple(out_slot, mcx);
+
+    for i in 0..outnatts {
+        let j = attmap[i] - 1;
+        let (value, isnull) = if j < 0 {
+            (Datum::null(), true)
+        } else {
+            let base = in_slot.base();
+            (base.tts_values[j as usize], base.tts_isnull[j as usize])
+        };
+        let out_base = out_slot.base_mut();
+        out_base.tts_values[i] = value;
+        out_base.tts_isnull[i] = isnull;
+    }
+
+    exec_store_virtual_tuple(out_slot);
+}

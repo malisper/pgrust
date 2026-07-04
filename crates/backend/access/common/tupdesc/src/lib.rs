@@ -614,12 +614,36 @@ fn unsupported_type(oidtypeid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("unsupported type {oidtypeid}")))
 }
 
-// build_attrmap_by_name (access/common/attmap.c), missing_ok=false shape:
-// attmap[out_attno-1] = the indesc attno with the same name.
-pub fn build_attrmap_by_name<'mcx>(
+#[cold]
+#[inline(never)]
+fn could_not_convert_row_type<'mcx>(
+    attname: &str,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+    exists: bool,
+) -> PgResult<Box<PgError>> {
+    let outty = format_type::format_type_be(outdesc.tdtypeid)?;
+    let inty = format_type::format_type_be(indesc.tdtypeid)?;
+    let detail = if exists {
+        format!("Attribute \"{attname}\" of type {outty} does not match corresponding attribute of type {inty}.")
+    } else {
+        format!("Attribute \"{attname}\" of type {outty} does not exist in type {inty}.")
+    };
+    Ok(Box::new(
+        PgError::error("could not convert row type")
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(detail),
+    ))
+}
+
+// build_attrmap_by_name (attmap.c): attmap[out_attno-1] = the indesc attno
+// with the same name.  attnums[i] stays 0 for a dropped outdesc column, or
+// for a missing indesc match when `missing_ok`.
+fn build_attrmap_by_name_impl<'mcx>(
     mcx: Mcx<'mcx>,
     indesc: &TupleDescData<'_>,
     outdesc: &TupleDescData<'_>,
+    missing_ok: bool,
 ) -> PgResult<PgVec<'mcx, i16>> {
     let mut attmap: PgVec<'mcx, i16> = vec_with_capacity_in(mcx, outdesc.natts as usize)?;
     for i in 0..outdesc.natts as usize {
@@ -633,18 +657,153 @@ pub fn build_attrmap_by_name<'mcx>(
         for j in 0..indesc.natts as usize {
             let inatt = indesc.attr(j);
             if !inatt.attisdropped && inatt.attname.name_str() == name {
-                assert!(
-                    inatt.atttypid == outatt.atttypid && inatt.atttypmod == outatt.atttypmod,
-                    "build_attrmap_by_name: could-not-convert-row-type report unported"
-                );
+                if inatt.atttypid != outatt.atttypid || inatt.atttypmod != outatt.atttypmod {
+                    return Err(could_not_convert_row_type(name, indesc, outdesc, true)?);
+                }
                 mapped = inatt.attnum;
                 break;
             }
         }
-        assert!(mapped != 0, "build_attrmap_by_name: missing-attribute report unported");
+        if mapped == 0 && !missing_ok {
+            return Err(could_not_convert_row_type(name, indesc, outdesc, false)?);
+        }
         attmap.push(mapped);
     }
     Ok(attmap)
+}
+
+// build_attrmap_by_name (attmap.c), missing_ok=false shape.
+pub fn build_attrmap_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+) -> PgResult<PgVec<'mcx, i16>> {
+    build_attrmap_by_name_impl(mcx, indesc, outdesc, false)
+}
+
+// check_attrmap_match (attmap.c): true when the map is a one-to-one identity,
+// so the caller can skip runtime tuple conversion entirely.
+fn check_attrmap_match(indesc: &TupleDescData<'_>, outdesc: &TupleDescData<'_>, attmap: &[i16]) -> bool {
+    if indesc.natts != outdesc.natts {
+        return false;
+    }
+    for i in 0..attmap.len() {
+        let inatt = indesc.compact_attr(i);
+        if inatt.atthasmissing {
+            return false;
+        }
+        if attmap[i] == (i + 1) as i16 {
+            continue;
+        }
+        let outatt = outdesc.compact_attr(i);
+        if attmap[i] == 0
+            && inatt.attisdropped
+            && inatt.attlen == outatt.attlen
+            && inatt.attalignby == outatt.attalignby
+        {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+// build_attrmap_by_name_if_req (attmap.c): None when no runtime conversion
+// is needed.
+pub fn build_attrmap_by_name_if_req<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+    missing_ok: bool,
+) -> PgResult<Option<PgVec<'mcx, i16>>> {
+    let attmap = build_attrmap_by_name_impl(mcx, indesc, outdesc, missing_ok)?;
+    if check_attrmap_match(indesc, outdesc, &attmap) {
+        return Ok(None);
+    }
+    Ok(Some(attmap))
+}
+
+// build_attrmap_by_position (attmap.c): positional match over non-dropped
+// columns; indesc is the "returned" rowtype, outdesc the "expected" one in
+// the errdetail texts, matching C's comment.
+pub fn build_attrmap_by_position<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+    msg: &str,
+) -> PgResult<Option<PgVec<'mcx, i16>>> {
+    let n = outdesc.natts as usize;
+    let mut attmap: PgVec<'mcx, i16> = vec_with_capacity_in(mcx, n)?;
+    for _ in 0..n {
+        attmap.push(0);
+    }
+
+    let mut j = 0usize;
+    let mut nincols = 0i32;
+    let mut noutcols = 0i32;
+    let mut same = true;
+    for i in 0..n {
+        let outatt = outdesc.attr(i);
+        if outatt.attisdropped {
+            continue;
+        }
+        noutcols += 1;
+        while j < indesc.natts as usize {
+            let inatt = indesc.attr(j);
+            if inatt.attisdropped {
+                j += 1;
+                continue;
+            }
+            nincols += 1;
+            if outatt.atttypid != inatt.atttypid
+                || (outatt.atttypmod != inatt.atttypmod && outatt.atttypmod >= 0)
+            {
+                return Err(Box::new(
+                    PgError::error(msg.to_string())
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                        .with_detail(format!(
+                            "Returned type {} does not match expected type {} in column \"{}\" (position {}).",
+                            format_type::format_type_with_typemod(inatt.atttypid, inatt.atttypmod)?,
+                            format_type::format_type_with_typemod(outatt.atttypid, outatt.atttypmod)?,
+                            outatt.attname.name_str(),
+                            noutcols,
+                        )),
+                ));
+            }
+            attmap[i] = (j + 1) as i16;
+            j += 1;
+            break;
+        }
+        if attmap[i] == 0 {
+            same = false;
+        }
+    }
+
+    // Unused input columns: mirrors C's for-loop, which still visits every
+    // remaining j (via the increment clause) even when a dropped one
+    // `continue`s past the count.
+    for jj in j..indesc.natts as usize {
+        if indesc.attr(jj).attisdropped {
+            continue;
+        }
+        nincols += 1;
+        same = false;
+    }
+
+    if !same {
+        return Err(Box::new(
+            PgError::error(msg.to_string())
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .with_detail(format!(
+                    "Number of returned columns ({nincols}) does not match expected column count ({noutcols})."
+                )),
+        ));
+    }
+
+    if check_attrmap_match(indesc, outdesc, &attmap) {
+        return Ok(None);
+    }
+    Ok(Some(attmap))
 }
 
 // convert_tuples_by_name (tupconvert.c): None when the by-name map is the
@@ -654,15 +813,27 @@ pub fn convert_tuples_by_name<'mcx>(
     indesc: &TupleDescData<'_>,
     outdesc: &TupleDescData<'_>,
 ) -> PgResult<Option<PgVec<'mcx, i16>>> {
-    let attmap = build_attrmap_by_name(mcx, indesc, outdesc)?;
-    if indesc.natts == outdesc.natts {
-        let identity = attmap.iter().enumerate().all(|(i, &m)| {
-            m == (i + 1) as i16
-                || (m == 0 && indesc.attr(i).attisdropped && outdesc.attr(i).attisdropped)
-        });
-        if identity {
-            return Ok(None);
-        }
-    }
-    Ok(Some(attmap))
+    build_attrmap_by_name_if_req(mcx, indesc, outdesc, false)
+}
+
+// convert_tuples_by_position (tupconvert.c): thin wrapper, matching the
+// convert_tuples_by_name shape above.
+pub fn convert_tuples_by_position<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+    msg: &str,
+) -> PgResult<Option<PgVec<'mcx, i16>>> {
+    build_attrmap_by_position(mcx, indesc, outdesc, msg)
+}
+
+// convert_tuples_by_name_attrmap (tupconvert.c): C wraps a precomputed
+// attrmap into a TupleConversionMap; this repo's map IS the bare attrmap
+// vec, so wrapping is the identity.
+pub fn convert_tuples_by_name_attrmap<'mcx>(
+    _indesc: &TupleDescData<'_>,
+    _outdesc: &TupleDescData<'_>,
+    attrmap: PgVec<'mcx, i16>,
+) -> PgVec<'mcx, i16> {
+    attrmap
 }
