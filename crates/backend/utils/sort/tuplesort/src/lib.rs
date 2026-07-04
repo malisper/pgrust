@@ -1485,9 +1485,27 @@ impl<'m> TuplesortData<'m> {
         // SAFETY: TSS_BOUNDED invariant — memtuples holds exactly `bound` >= 1
         // tuples from make_bounded_heap on.
         let heap_top = unsafe { *self.memtuples.get_unchecked(0) };
-        let compare = {
-            let ctx = ctx!(self);
-            dispatch_cmp!(ctx, |cmp| cmp(&tuple, &heap_top))
+        // datum1 decides alone when only_key, or for a Datum sort with abbrev
+        // disarmed (set_bound guarantees; tiebreak is 0) — result-identical to
+        // comparetup, minus the CmpCtx/dispatch ladder (~35 instr/put, m2
+        // orderby dist-prof, docs/optimizations/orderby.md). Generic arm
+        // outlined so its frame stays off this path.
+        let compare = if self.only_key || matches!(self.variant, SortVariant::Datum { .. }) {
+            debug_assert!(self.abbrev.is_none());
+            // SAFETY: non-IndexHash variants carry >=1 key (begin_* asserts);
+            // IndexHash sorts are never bounded.
+            let key0 = unsafe { self.sort_keys.get_unchecked(0) };
+            ssup::apply_sort_comparator_as_in(
+                key0.comparator,
+                self.mcx,
+                tuple.datum1,
+                tuple.isnull1,
+                heap_top.datum1,
+                heap_top.isnull1,
+                key0,
+            )
+        } else {
+            self.bounded_cmp_generic(&tuple, &heap_top)
         };
         if compare <= 0 {
             self.free_sort_tuple(&tuple);
@@ -1495,6 +1513,12 @@ impl<'m> TuplesortData<'m> {
         } else {
             self.puttuple_bounded_replace(tuple)
         }
+    }
+
+    #[inline(never)]
+    fn bounded_cmp_generic(&self, a: &SortTuple, b: &SortTuple) -> i32 {
+        let ctx = ctx!(self);
+        dispatch_cmp!(ctx, |cmp| cmp(a, b))
     }
 
     #[inline(never)]
