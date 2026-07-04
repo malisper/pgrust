@@ -7995,6 +7995,7 @@ dependencies = [
  "parse_target",
  "parse_utilcmd",
  "parser_small1",
+ "relation_seams",
  "stack_depth",
  "syscache_seams",
  "table",
