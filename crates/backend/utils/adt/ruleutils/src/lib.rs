@@ -687,6 +687,10 @@ pub fn pg_get_constraintdef_worker(
     let confupdtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFUPDTYPE).as_i8();
     let confdeltype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELTYPE).as_i8();
     let confmatchtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFMATCHTYPE).as_i8();
+    let condeferrable = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool();
+    let condeferred = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool();
+    let conenforced = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool();
+    let convalidated = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool();
     let connoinherit = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNOINHERIT).as_bool();
     let conperiod = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONPERIOD).as_bool();
     let conkey = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONKEY).map(i16_array_at);
@@ -790,15 +794,15 @@ pub fn pg_get_constraintdef_worker(
         ),
     }
 
-    if getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool() {
+    if condeferrable {
         buf.push_str(" DEFERRABLE");
     }
-    if getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool() {
+    if condeferred {
         buf.push_str(" INITIALLY DEFERRED");
     }
-    if !getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool() {
+    if !conenforced {
         buf.push_str(" NOT ENFORCED");
-    } else if !getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool() {
+    } else if !convalidated {
         buf.push_str(" NOT VALID");
     }
     Ok(Some(buf))
