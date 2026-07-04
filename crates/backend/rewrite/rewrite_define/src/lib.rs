@@ -1,6 +1,5 @@
 //! rewriteDefine.c (DefineRule/DefineQueryRewrite/EnableDisableRule),
-//! rewriteRemove.c, rewriteSupport.c. CREATE OR REPLACE of an existing rule
-//! stays a loud panic.
+//! rewriteRemove.c, rewriteSupport.c.
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
@@ -39,6 +38,10 @@ const REWRITE_REL_RULENAME_INDEX_ID: Oid = 2693;
 const Anum_pg_rewrite_oid: AttrNumber = 1;
 const Anum_pg_rewrite_rulename: AttrNumber = 2;
 const Anum_pg_rewrite_ev_class: AttrNumber = 3;
+const Anum_pg_rewrite_ev_type: AttrNumber = 4;
+const Anum_pg_rewrite_is_instead: AttrNumber = 6;
+const Anum_pg_rewrite_ev_qual: AttrNumber = 7;
+const Anum_pg_rewrite_ev_action: AttrNumber = 8;
 const Anum_pg_class_relhasrules: usize = 21;
 const Anum_pg_class_oid: AttrNumber = 1;
 const CLASS_OID_INDEX_ID: Oid = 2662;
@@ -63,8 +66,7 @@ fn name_image<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<mcx::PgVec<'mcx, u8>
     Ok(buf)
 }
 
-// InsertRule (rewriteDefine.c), insert lane; replacing an existing rule is
-// loud (CREATE OR REPLACE VIEW unported).
+// InsertRule (rewriteDefine.c).
 fn InsertRule<'mcx>(
     mcx: Mcx<'mcx>,
     rulname: &str,
@@ -95,9 +97,25 @@ fn InsertRule<'mcx>(
     ];
     let mut scan =
         genam::systable_beginscan(mcx, &rel, REWRITE_REL_RULENAME_INDEX_ID, true, None, &keys)?;
-    let oldtup = genam::systable_getnext(mcx, &mut scan)?.is_some();
-    genam::systable_endscan(mcx, scan)?;
-    if oldtup {
+    let oldtup = genam::systable_getnext(mcx, &mut scan)?;
+
+    let evqual_text = varlena::cstring_to_text(mcx, evqual.as_bytes())?;
+    let action_text = varlena::cstring_to_text(mcx, actiontree.as_bytes())?;
+    let mut values = [
+        Datum::null(),
+        Datum::from_usize(rname.as_ptr() as usize),
+        Datum::from_oid(eventrel_oid),
+        Datum::from_i8((evtype as u8 + b'0') as i8),
+        Datum::from_i8(RULE_FIRES_ON_ORIGIN as i8),
+        Datum::from_bool(evinstead),
+        Datum::from_usize(evqual_text.as_bytes().as_ptr() as usize),
+        Datum::from_usize(action_text.as_bytes().as_ptr() as usize),
+    ];
+    let nulls = [false; 8];
+
+    let mut is_update = false;
+    let rule_oid;
+    if let Some(oldtup) = oldtup {
         if !replace {
             let relname = lsyscache::get_rel_name(mcx, eventrel_oid)?
                 .map(|s| s.to_string())
@@ -109,26 +127,35 @@ fn InsertRule<'mcx>(
                 .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
             ));
         }
-        panic!("InsertRule (rewriteDefine.c): rule replace lane unported (CREATE OR REPLACE)");
+        let mut replaces = [false; 8];
+        replaces[Anum_pg_rewrite_ev_type as usize - 1] = true;
+        replaces[Anum_pg_rewrite_is_instead as usize - 1] = true;
+        replaces[Anum_pg_rewrite_ev_qual as usize - 1] = true;
+        replaces[Anum_pg_rewrite_ev_action as usize - 1] = true;
+        let mut tuple =
+            heaptuple::heap_modify_tuple(mcx, oldtup, rel.descr(), &values, &nulls, &replaces)?;
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL oid column under pg_rewrite's descriptor.
+        rule_oid = unsafe {
+            types_tuple::heap_getattr(oldtup, Anum_pg_rewrite_oid as i32, rel.descr(), &mut isnull)
+        }
+        .as_oid();
+        let otid = oldtup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut tuple)?;
+        is_update = true;
+    } else {
+        genam::systable_endscan(mcx, scan)?;
+        rule_oid =
+            catalog::GetNewOidWithIndex(mcx, &rel, REWRITE_OID_INDEX_ID, Anum_pg_rewrite_oid)?;
+        values[0] = Datum::from_oid(rule_oid);
+        let mut tuple = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
+        catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut tuple)?;
     }
 
-    let rule_oid =
-        catalog::GetNewOidWithIndex(mcx, &rel, REWRITE_OID_INDEX_ID, Anum_pg_rewrite_oid)?;
-    let evqual_text = varlena::cstring_to_text(mcx, evqual.as_bytes())?;
-    let action_text = varlena::cstring_to_text(mcx, actiontree.as_bytes())?;
-    let values = [
-        Datum::from_oid(rule_oid),
-        Datum::from_usize(rname.as_ptr() as usize),
-        Datum::from_oid(eventrel_oid),
-        Datum::from_i8((evtype as u8 + b'0') as i8),
-        Datum::from_i8(RULE_FIRES_ON_ORIGIN as i8),
-        Datum::from_bool(evinstead),
-        Datum::from_usize(evqual_text.as_bytes().as_ptr() as usize),
-        Datum::from_usize(action_text.as_bytes().as_ptr() as usize),
-    ];
-    let nulls = [false; 8];
-    let mut tuple = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
-    catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut tuple)?;
+    if is_update {
+        pg_depend::deleteDependencyRecordsFor(mcx, REWRITE_RELATION_ID, rule_oid, false)?;
+    }
 
     let myself = ObjectAddress::set(REWRITE_RELATION_ID, rule_oid);
     let referenced = ObjectAddress::set(RELATION_RELATION_ID, eventrel_oid);
