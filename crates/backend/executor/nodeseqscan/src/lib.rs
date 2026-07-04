@@ -256,6 +256,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
 /// Store row `i` of the staged batch and apply the scan qual; false =
 /// filtered out (bitmap-armed batches test the selection bit instead of
 /// evaluating the kernel per row).
+#[inline(always)]
 pub fn seq_scan_batch_fetch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -287,6 +288,7 @@ pub fn seq_scan_batch_fetch<'mcx>(
     }
 }
 
+#[inline(always)]
 pub fn seq_scan_batch_store<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
