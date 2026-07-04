@@ -1295,7 +1295,7 @@ pub fn get_relation_data_width(
     attr_widths: Option<&mut [i32]>,
 ) -> PgResult<i32> {
     let relation = table::table_open(mcx, relid, NoLock)?;
-    let result = get_rel_data_width(&relation, attr_widths, 1)?;
+    let result = get_rel_data_width(&relation, attr_widths, 0)?;
     table::table_close(relation, NoLock)?;
     Ok(result)
 }
