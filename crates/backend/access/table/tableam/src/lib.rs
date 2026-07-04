@@ -908,6 +908,36 @@ pub fn table_scan_batch_store_slot<'mcx>(
     }
 }
 
+/// Bitmap page-batch feed for the fused drive: stage the next page with
+/// visible tuples (visibility resolved at staging); 0 = bitmap exhausted.
+pub fn table_scan_bitmap_next_pagebatch<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    tbm: &tidbitmap::TIDBitmap<'_>,
+    iterator: &mut tidbitmap::TbmIterator,
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_next_pagebatch(
+            h, tbm, iterator, recheck, lossy_pages, exact_pages,
+        ),
+    }
+}
+
+/// Store staged bitmap tuple `i` of the current page into `slot`.
+#[inline(always)]
+pub fn table_scan_bitmap_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_batch_store(mcx, h, i, slot),
+    }
+}
+
 pub fn table_beginscan_tidrange<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,

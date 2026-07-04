@@ -307,8 +307,8 @@ fn copy_param_datum<'mcx>(
 }
 
 // datumCopy (datum.c) scoped to bind parameters; by-ref sources are
-// input/receive-function results (4B-header varlenas or cstrings, never
-// toast pointers).
+// input/receive-function results (canonical 4B today), but the -1 arm is
+// C's VARSIZE_ANY so a future short/toast source copies, never misreads.
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
@@ -316,8 +316,25 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
     }
     let size = match typlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum (see above).
-            unsafe { ::datum::VarlenaRef::from_ptr(p).varsize() }
+            // SAFETY: non-null by-ref varlena datum, readable for its
+            // header-declared (VARSIZE_ANY) size.
+            unsafe {
+                let b0 = *p;
+                if b0 == 0x01 {
+                    2 + match *p.add(1) {
+                        18 => 16,
+                        1 => 8,
+                        2 | 3 => panic!(
+                            "datum_copy_in: expanded-object flatten (EOH_flatten_into) unported"
+                        ),
+                        tag => panic!("datum_copy_in: unknown vartag {tag}"),
+                    }
+                } else if b0 & 0x01 != 0 {
+                    (b0 as usize >> 1) & 0x7F
+                } else {
+                    ::datum::VarlenaRef::from_ptr(p).varsize()
+                }
+            }
         }
         -2 => {
             let mut n = 0usize;
@@ -946,4 +963,31 @@ pub fn exec_describe_portal_message<'mcx>(mcx: Mcx<'mcx>, portal_name: &str) -> 
 /// of the named or unnamed source.
 pub fn plan_cache_counts(stmt_name: &str) -> PgResult<(i64, i64)> {
     Ok(plancache::CachedPlanCounts(lookup_plansource(stmt_name)?))
+}
+
+#[cfg(test)]
+mod short_varlena_tests {
+    use super::*;
+
+    #[test]
+    fn datum_copy_in_reads_any_header_form() {
+        let ctx = mcx::MemoryContext::new("copy-any-test");
+        let mcx = ctx.mcx();
+        let short: [u8; 4] = [(4u8 << 1) | 0x01, b'a', b'b', b'c'];
+        let out = datum_copy_in(mcx, Datum::from_usize(short.as_ptr() as usize), -1).unwrap();
+        let p = out.as_usize() as *const u8;
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, 4) }, &short[..]);
+
+        let mut long = ((4u32 + 3) << 2).to_ne_bytes().to_vec();
+        long.extend_from_slice(b"abc");
+        let out = datum_copy_in(mcx, Datum::from_usize(long.as_ptr() as usize), -1).unwrap();
+        let p = out.as_usize() as *const u8;
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, 7) }, &long[..]);
+
+        let mut ondisk = vec![0x01u8, 18];
+        ondisk.extend_from_slice(&[0u8; 16]);
+        let out = datum_copy_in(mcx, Datum::from_usize(ondisk.as_ptr() as usize), -1).unwrap();
+        let p = out.as_usize() as *const u8;
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, 18) }, &ondisk[..]);
+    }
 }

@@ -108,6 +108,41 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
     Ok(namespaceId)
 }
 
+pub fn LookupCreationNamespace(nspname: &str) -> PgResult<Oid> {
+    if nspname == "pg_temp" {
+        panic!("LookupCreationNamespace: pg_temp alias (AccessTempTableNamespace) unported");
+    }
+    let namespaceId = get_namespace_oid(nspname, false)?;
+    const ACL_CREATE: u64 = 1 << 9;
+    let aclresult = aclchk_seams::object_aclcheck::call(
+        types_core::catalog::NAMESPACE_RELATION_ID,
+        namespaceId,
+        miscinit_seams::get_user_id::call(),
+        ACL_CREATE,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        aclchk_seams::aclcheck_error::call(aclresult, OBJECT_SCHEMA, nspname)?;
+    }
+    Ok(namespaceId)
+}
+
+pub fn CheckSetNamespace(oldNspOid: Oid, nspOid: Oid) -> PgResult<()> {
+    if crate::isAnyTempNamespace(nspOid)? || crate::isAnyTempNamespace(oldNspOid)? {
+        return Err(Box::new(
+            PgError::error("cannot move objects into or out of temporary schemas")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    const PG_TOAST_NAMESPACE: Oid = 99;
+    if nspOid == PG_TOAST_NAMESPACE || oldNspOid == PG_TOAST_NAMESPACE {
+        return Err(Box::new(
+            PgError::error("cannot move objects into or out of TOAST schema")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    Ok(())
+}
+
 pub fn FindDefaultConversionProc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid> {
     recomputeNamespacePath()?;
 
@@ -391,6 +426,75 @@ pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
         return Err(undefined_collation(collname));
     }
     Ok(InvalidOid)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_ts_object(kind: &str, names: &[&str]) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("text search {} \"{}\" does not exist", kind, names.join(".")))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, config_name) = DeconstructQualifiedName(names)?;
+    let mut cfgoid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            cfgoid =
+                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            cfgoid =
+                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+            if OidIsValid(cfgoid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(cfgoid) && !missing_ok {
+        return Err(undefined_ts_object("configuration", names));
+    }
+    Ok(cfgoid)
+}
+
+pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let (schemaname, dict_name) = DeconstructQualifiedName(names)?;
+    let mut dictoid = InvalidOid;
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if !(missing_ok && !OidIsValid(namespace_id)) {
+            dictoid =
+                syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::call(dict_name, namespace_id)?;
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            dictoid =
+                syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::call(dict_name, namespace_id)?;
+            if OidIsValid(dictoid) {
+                break;
+            }
+        }
+    }
+    if !OidIsValid(dictoid) && !missing_ok {
+        return Err(undefined_ts_object("dictionary", names));
+    }
+    Ok(dictoid)
 }
 
 // TypenameGetTypidExtended (namespace.c).
