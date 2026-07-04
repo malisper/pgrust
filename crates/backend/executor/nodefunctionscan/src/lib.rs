@@ -294,7 +294,7 @@ pub fn exec_init_function_scan<'mcx>(
         ordinal: 0,
         funcstates,
         scratch: PgVec::new_in(mcx),
-        arg_mcx: ::mcx::MemoryContext::new("Table function arguments"),
+        arg_mcx: mcx.context().new_child("Table function arguments"),
         eflags,
     })
 }
@@ -616,5 +616,7 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
     FunctionScanPerFuncState<'_> { colcount, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
-    FunctionScanState<'_> { ss, simple, ordinality, ordinal, eflags; funcstates, scratch },
+    // arg_mcx: child of es_query_cxt; forget skips its individual delete,
+    // the query-context teardown reclaims it (C argcontext lifetime).
+    FunctionScanState<'_> { ss, simple, ordinality, ordinal, eflags; funcstates, scratch, arg_mcx },
 );
