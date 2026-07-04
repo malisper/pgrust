@@ -1049,6 +1049,49 @@ pub fn getIdentitySequence<'mcx>(
     Ok(result)
 }
 
+// pg_get_serial_sequence's dependency scan (ruleutils.c:2861): objids of
+// AUTO/INTERNAL pg_depend entries from whole pg_class objects on
+// (relid, attnum), in DependReferenceIndexId scan order. The
+// relkind == SEQUENCE filter stays with the caller, as in C.
+pub fn get_serial_sequence_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i32,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, relid),
+        int4_key(Anum_pg_depend_refobjsubid, attnum),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
+    let mut out: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        let deptype = dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8();
+        if dep_attr(&view, Anum_pg_depend_classid, desc).as_oid()
+            == types_core::RELATION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_objsubid, desc).as_i32() == 0
+            && (deptype == DependencyType::Auto.as_char()
+                || deptype == DependencyType::Internal.as_char())
+        {
+            out.push(dep_attr(&view, Anum_pg_depend_objid, desc).as_oid());
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(out)
+}
+
 pub fn deleteDependencyRecordsForClass<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,
