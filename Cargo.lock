@@ -13006,6 +13006,7 @@ dependencies = [
  "sequence_seams",
  "smgr",
  "snapmgr",
+ "statscmds",
  "superuser",
  "syscache_seams",
  "table",

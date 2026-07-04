@@ -318,6 +318,7 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     pub(crate) validate_default: bool,
     changed_constraints: Vec<(Oid, String)>,
     changed_indexes: Vec<(Oid, String)>,
+    changed_statistics: Vec<(Oid, String)>,
     replica_identity_index: Option<String>,
 }
 
@@ -343,6 +344,7 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             validate_default: false,
             changed_constraints: Vec::new(),
             changed_indexes: Vec::new(),
+            changed_statistics: Vec::new(),
             replica_identity_index: None,
         }
     }
@@ -779,6 +781,19 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_ReAddIndex => {
                     ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, true)?;
+                }
+                AlterTableType::AT_ReAddStatistics => {
+                    // ATExecAddStatistics (tablecmds.c:9683); the stmt has
+                    // been through transformStatsStmt. DIVERGENCE: the port's
+                    // CreateStatistics always checks namespace rights
+                    // (check_rights=false in C's rebuild) — the caller just
+                    // proved ownership via ALTER TABLE.
+                    let stmt = cmd
+                        .def
+                        .expect("AT_ReAddStatistics CreateStatsStmt")
+                        .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                        .expect("CreateStatsStmt");
+                    statscmds::CreateStatistics(mcx, stmt)?;
                 }
                 AlterTableType::AT_ReAddConstraint => {
                     let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
@@ -3923,7 +3938,7 @@ fn RememberAllDependentForRebuilding<'mcx>(
                 ));
             }
             StatisticExtRelationId => {
-                unported("RememberStatisticsForRebuilding (extended statistics)");
+                RememberStatisticsForRebuilding(mcx, tab, objid)?;
             }
             PublicationRelRelationId => {
                 if is_alter_type {
@@ -3983,6 +3998,22 @@ fn RememberIndexForRebuilding<'mcx>(
     RememberClusterOnForRebuilding(indoid)
 }
 
+// RememberStatisticsForRebuilding (tablecmds.c:15407): capture the definition
+// string before any of the type changes apply.
+fn RememberStatisticsForRebuilding<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    stxoid: Oid,
+) -> PgResult<()> {
+    if tab.changed_statistics.iter().any(|(o, _)| *o == stxoid) {
+        return Ok(());
+    }
+    let defstring = ruleutils::pg_get_statisticsobj_worker(mcx, stxoid, false, false)?
+        .unwrap_or_else(|| panic!("cache lookup failed for statistics object {stxoid}"));
+    tab.changed_statistics.push((stxoid, defstring));
+    Ok(())
+}
+
 fn RememberReplicaIdentityForRebuilding<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
@@ -4013,6 +4044,7 @@ fn ATPostAlterTypeCleanup<'mcx>(
 ) -> PgResult<()> {
     if wqueue[tabidx].changed_constraints.is_empty()
         && wqueue[tabidx].changed_indexes.is_empty()
+        && wqueue[tabidx].changed_statistics.is_empty()
         && wqueue[tabidx].replica_identity_index.is_none()
     {
         return Ok(());
@@ -4021,6 +4053,7 @@ fn ATPostAlterTypeCleanup<'mcx>(
     let tab_rewrite = wqueue[tabidx].rewrite;
     let changed_constraints = std::mem::take(&mut wqueue[tabidx].changed_constraints);
     let changed_indexes = std::mem::take(&mut wqueue[tabidx].changed_indexes);
+    let changed_statistics = std::mem::take(&mut wqueue[tabidx].changed_statistics);
     let mut objects = catalog_dependency::ObjectAddresses::new();
     for (conoid, def) in &changed_constraints {
         let (conrelid, confrelid, conislocal) = constraint_rebuild_shape(mcx, *conoid)?;
@@ -4046,6 +4079,19 @@ fn ATPostAlterTypeCleanup<'mcx>(
         ATPostAlterTypeParse(mcx, wqueue, *indoid, relid, InvalidOid, def, tab_rewrite)?;
         objects
             .add_exact_object_address(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, *indoid));
+    }
+    for (stxoid, def) in &changed_statistics {
+        let relid = statscmds::StatisticsGetRelation(*stxoid, false)?;
+        // ShareUpdateExclusiveLock aligns with CreateStatistics and
+        // RemoveStatisticsById; taken after all AccessExclusiveLock cases.
+        if relid != tab_relid {
+            lmgr::LockRelationOid(relid, ShareUpdateExclusiveLock)?;
+        }
+        ATPostAlterTypeParse(mcx, wqueue, *stxoid, relid, InvalidOid, def, tab_rewrite)?;
+        objects.add_exact_object_address(pg_depend::ObjectAddress::set(
+            StatisticExtRelationId,
+            *stxoid,
+        ));
     }
     if let Some(idxname) = wqueue[tabidx].replica_identity_index.take() {
         let mut sub = Node::build::<types_nodes::parsenodes::ReplicaIdentityStmt>(mcx)?;
@@ -4193,6 +4239,24 @@ fn ATPostAlterTypeParse<'mcx>(
                     other => panic!("unexpected constraint type: {other:?}"),
                 }
             }
+        } else if stmt.as_variant::<types_nodes::rawnodes::CreateStatsStmt>().is_some() {
+            parse_clause::transformStatsStmt(mcx, rel_id, stmt, def)?;
+            // keep the statistics object's comment
+            let comment = commands_comment::GetComment(mcx, old_id, StatisticExtRelationId, 0)?;
+            if let Some(c) = comment {
+                let c = str_arena(mcx, c.as_str())?;
+                // SAFETY: parse tree is arena-owned; no derived refs live.
+                unsafe {
+                    stmt.with_mut::<types_nodes::rawnodes::CreateStatsStmt, _>(|st| {
+                        st.stxcomment = Some(c);
+                    })
+                    .expect("CreateStatsStmt");
+                }
+            }
+            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+            newcmd.subtype = AlterTableType::AT_ReAddStatistics;
+            newcmd.def = Some(stmt);
+            tab.subcmds[AT_PASS_MISC].lappend(mcx, newcmd.seal())?;
         } else {
             panic!("unexpected statement type in ATPostAlterTypeParse");
         }
