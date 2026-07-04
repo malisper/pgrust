@@ -178,6 +178,7 @@ pub fn ExecSecLabelStmt<'mcx>(
         stmt.objtype,
         addr,
         object,
+        relation.as_ref(),
     )?;
 
     if stmt.objtype == ObjectType::OBJECT_COLUMN {
