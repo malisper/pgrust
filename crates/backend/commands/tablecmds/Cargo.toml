@@ -111,3 +111,4 @@ types_storage = { path = "../../../_support/types/types_storage" }
 statscmds = { path = "../statscmds" }
 pg_class_seams = { path = "../../catalog/pg_class_seams" }
 typecmds_seams = { path = "../typecmds_seams" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
