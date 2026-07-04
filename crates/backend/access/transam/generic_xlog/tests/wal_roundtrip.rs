@@ -417,9 +417,9 @@ fn generic_wal_roundtrip() {
 
     // block 0: delta replays onto the pristine image, byte-exact vs live.
     assert!(!reader.XLogRecHasBlockImage(0));
-    let delta = reader.XLogRecGetBlockData(0).unwrap();
+    let delta = reader.XLogRecGetBlockData(0).unwrap().to_vec();
     let mut replayed = pristine0.0;
-    generic_xlog::redo_page_transform(&mut replayed, delta, lsn);
+    generic_xlog::redo_page_transform(&mut replayed, &delta, lsn);
     assert_eq!(replayed[..], live0.0[..], "replayed delta page differs from live page");
 
     // block 1: forced image (pd_lsn is stamped after the image is taken, so
