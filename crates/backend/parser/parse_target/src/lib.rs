@@ -14,6 +14,10 @@ use types_error::PgResult;
 use types_nodes::rawnodes::{A_Expr_Kind, ColumnRef};
 use types_nodes::{CoercionForm, Node, NodeList, NodeTag, RTEKind, TargetEntry};
 
+pub fn init_seams() {
+    parse_func_seams::expandRecordVariable::set(expandRecordVariable);
+}
+
 pub fn transformTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,

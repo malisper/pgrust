@@ -20,6 +20,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 nodes_core = { path = "../../nodes/nodes_core" }
 parse_expr = { path = "../parse_expr" }
+parse_func_seams = { path = "../parse_func_seams" }
 parse_relation = { path = "../parse_relation" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 parser_small1 = { path = "../parser_small1" }

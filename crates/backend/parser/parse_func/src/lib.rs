@@ -2217,14 +2217,13 @@ pub fn ParseComplexProjection<'mcx>(
                 location,
             );
         }
-        if v.vartype == RECORDOID {
-            panic!(
-                "ParseComplexProjection (parse_func.c): expandRecordVariable over a \
-                 RECORD Var unported — rowtypes lane"
-            );
-        }
     }
-    let Some(tupdesc) = funcapi::get_expr_result_tupdesc(mcx, Some(first_arg), true)? else {
+    let tupdesc = if first_arg.as_var().is_some_and(|v| v.vartype == RECORDOID) {
+        Some(parse_func_seams::expandRecordVariable::call(mcx, pstate, first_arg, 0)?)
+    } else {
+        funcapi::get_expr_result_tupdesc(mcx, Some(first_arg), true)?
+    };
+    let Some(tupdesc) = tupdesc else {
         return Ok(None);
     };
     for i in 0..tupdesc.natts as usize {

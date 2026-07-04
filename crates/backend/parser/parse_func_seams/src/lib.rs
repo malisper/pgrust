@@ -20,3 +20,14 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> types_error::PgResult<types_core::Oid>
 );
+
+seam_core::seam!(
+    // expandRecordVariable (parse_target); a direct parse_func -> parse_target
+    // dep would cycle through parse_expr. Installed by parse_target.
+    pub fn expandRecordVariable<'a, 'p, 'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pstate: &'a parser_small1::ParseState<'p, 'mcx>,
+        var_node: types_nodes::Node<'mcx>,
+        levelsup: i32,
+    ) -> types_error::PgResult<types_tuple::tupdesc::TupleDescData<'mcx>>
+);

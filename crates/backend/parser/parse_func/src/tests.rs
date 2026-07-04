@@ -514,3 +514,140 @@ fn positional_after_named_is_42601() {
         err.message()
     );
 }
+
+// C ParseComplexProjection RECORD-Var leg: (record_var).field resolves via
+// expandRecordVariable drilling to the defining subquery.
+mod complex_projection_record {
+    use super::*;
+    use types_core::catalog::{DEFAULT_COLLATION_OID, RECORDOID, TEXTOID};
+    use types_nodes::{NodeList, RTEKind};
+
+    fn install_record_fixture() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            parse_func_seams::expandRecordVariable::set(parse_target::expandRecordVariable);
+            syscache_seams::lookup_pg_type_shape::set(|typid| {
+                Ok(Some(types_tuple::PgTypeShape {
+                    typlen: if typid == TEXTOID { -1 } else { 4 },
+                    typbyval: typid != TEXTOID,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: if typid == TEXTOID { DEFAULT_COLLATION_OID } else { InvalidOid },
+                }))
+            });
+        });
+    }
+
+    fn record_var<'mcx>(mcx: Mcx<'mcx>, varno: i32, varattno: i16) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            types_nodes::Var {
+                varno,
+                varattno,
+                vartype: RECORDOID,
+                vartypmod: -1,
+                varcollid: InvalidOid,
+                varnullingrels: types_nodes::Bitmapset::empty(),
+                varlevelsup: 0,
+                varreturningtype: types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                varnosyn: varno as types_core::Index,
+                varattnosyn: varattno,
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn subquery_rte<'mcx>(
+        mcx: Mcx<'mcx>,
+        aliasname: &'mcx str,
+        tlist: NodeList<'mcx>,
+        colnames: NodeList<'mcx>,
+        rtable: NodeList<'mcx>,
+    ) -> Node<'mcx> {
+        let q = mcx::leak_in(
+            mcx::alloc_in(
+                mcx,
+                types_nodes::parsenodes::Query { targetList: tlist, rtable, ..Default::default() },
+            )
+            .unwrap(),
+        );
+        let eref = Node::mk_mut(mcx, types_nodes::Alias { aliasname: Some(aliasname), colnames })
+            .unwrap()
+            .seal_ref();
+        Node::mk(
+            mcx,
+            types_nodes::RangeTblEntry {
+                rtekind: RTEKind::RTE_SUBQUERY,
+                subquery: Some(q),
+                eref: Some(eref),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn record_var_field_projection() {
+        install_record_fixture();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut pstate = make_parsestate(mcx, None);
+
+        let c1 =
+            Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, datum::Datum::null(), true, true)
+                .unwrap();
+        let c2 = Node::mk_const(
+            mcx,
+            TEXTOID,
+            -1,
+            DEFAULT_COLLATION_OID,
+            -1,
+            datum::Datum::null(),
+            true,
+            false,
+        )
+        .unwrap();
+        let inner_tlist = NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, c1, 1, Some("a"), false).unwrap(),
+            Node::mk_target_entry(mcx, c2, 2, Some("b"), false).unwrap(),
+        )
+        .unwrap();
+        let inner_names = NodeList::make2(
+            mcx,
+            Node::mk_string(mcx, "a").unwrap(),
+            Node::mk_string(mcx, "b").unwrap(),
+        )
+        .unwrap();
+        let inner = subquery_rte(mcx, "inner_ss", inner_tlist, inner_names, NodeList::nil());
+
+        let outer_tlist = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, record_var(mcx, 1, 0), 1, Some("r"), false).unwrap(),
+        )
+        .unwrap();
+        let outer_names = NodeList::make1(mcx, Node::mk_string(mcx, "r").unwrap()).unwrap();
+        let outer = subquery_rte(
+            mcx,
+            "outer_ss",
+            outer_tlist,
+            outer_names,
+            NodeList::make1(mcx, inner).unwrap(),
+        );
+        pstate.p_rtable.lappend(mcx, outer).unwrap();
+
+        let first_arg = record_var(mcx, 1, 1);
+        let got =
+            crate::ParseComplexProjection(mcx, &mut pstate, "b", first_arg, -1).unwrap();
+        let fs = got.expect("column b resolves").as_field_select().unwrap();
+        assert_eq!(fs.fieldnum, 2);
+        assert_eq!(fs.resulttype, TEXTOID);
+        assert_eq!(fs.resultcollid, DEFAULT_COLLATION_OID);
+
+        let none =
+            crate::ParseComplexProjection(mcx, &mut pstate, "nosuch", first_arg, -1).unwrap();
+        assert!(none.is_none());
+    }
+}

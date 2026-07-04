@@ -106,6 +106,7 @@ parse_relation = { path = "../../backend/parser/parse_relation" }
 parse_clause = { path = "../../backend/parser/parse_clause" }
 parse_expr = { path = "../../backend/parser/parse_expr" }
 parse_func = { path = "../../backend/parser/parse_func" }
+parse_target = { path = "../../backend/parser/parse_target" }
 parse_utilcmd = { path = "../../backend/parser/parse_utilcmd" }
 parser_analyze = { path = "../../backend/parser/parser_analyze" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
