@@ -14,6 +14,9 @@ use types_nodes::parsenodes::{
     DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
     FunctionParameterMode, GrantRoleStmt, GrantStmt, GrantTargetType, GroupingSetKind,
     ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectType, ObjectWithArgs, PrepareStmt,
+    AlterPublicationAction, AlterPublicationStmt, AlterSubscriptionStmt, AlterSubscriptionType,
+    CreatePublicationStmt, CreateSubscriptionStmt, DropSubscriptionStmt, PublicationObjSpec,
+    PublicationObjSpecType, PublicationTable,
     ReassignOwnedStmt,
     ReindexObjectType, ReindexStmt, RenameStmt, ReplicaIdentityStmt, RoleSpec, RoleSpecType,
     RoleStmtType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
@@ -423,24 +426,11 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(rv));
             }
             2431 => {
-                let name = view.v(1).str_val();
-                let ind = view.v(2).list();
-                let loc = view.l(1);
-                let mut parts = [None; 2];
-                for (i, n) in ind.iter().enumerate() {
-                    // check_qualified_name
-                    let Some(s) = n.as_string() else {
-                        return Err(self.parser_yyerror("syntax error"));
-                    };
-                    if i < 2 {
-                        parts[i] = Some(s.sval);
-                    }
-                }
-                let rv = match ind.len() {
-                    1 => make_range_var(mcx, None, Some(name), parts[0], loc)?,
-                    2 => make_range_var(mcx, Some(name), parts[0], parts[1], loc)?,
-                    _ => return Err(self.improper_qualified_name(Some(name), &ind, loc)),
-                };
+                let rv = self.range_var_from_qualified_name(
+                    view.v(1).str_val(),
+                    view.v(2).list(),
+                    view.l(1),
+                )?;
                 *yyval = YYSTYPE::Node(Some(rv));
             }
             // func_name: type_function_name [indirection] (check_func_name).
@@ -6458,6 +6448,257 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(make_string_const_cast(mcx, s, sloc, t)?));
             }
+            // CreatePublicationStmt: CREATE PUBLICATION name
+            //   [FOR ALL TABLES | FOR pub_obj_list] opt_definition
+            1404 => {
+                let n = CreatePublicationStmt {
+                    pubname: Some(view.v(3).str_val()),
+                    options: view.v(4).list(),
+                    pubobjects: NodeList::nil(),
+                    for_all_tables: false,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            1405 => {
+                let n = CreatePublicationStmt {
+                    pubname: Some(view.v(3).str_val()),
+                    options: view.v(7).list(),
+                    pubobjects: NodeList::nil(),
+                    for_all_tables: true,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            1406 => {
+                let pubobjects = view.v(5).list();
+                self.preprocess_pubobj_list(&pubobjects)?;
+                let n = CreatePublicationStmt {
+                    pubname: Some(view.v(3).str_val()),
+                    options: view.v(6).list(),
+                    pubobjects,
+                    for_all_tables: false,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // PublicationObjSpec: TABLE relation_expr opt_column_list OptWhereClause
+            1407 => {
+                let mut pt = Node::build::<PublicationTable>(mcx)?;
+                pt.relation =
+                    view.v(2).node().expect("relation_expr").as_variant::<RangeVar>();
+                pt.columns = view.v(3).list();
+                pt.whereClause = view.v(4).node();
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_TABLE;
+                n.pubtable = Some(pt.seal_ref());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: TABLES IN SCHEMA ColId
+            1408 => {
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_TABLES_IN_SCHEMA;
+                n.name = Some(view.v(4).str_val());
+                n.location = view.l(4);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: TABLES IN SCHEMA CURRENT_SCHEMA
+            1409 => {
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype =
+                    PublicationObjSpecType::PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA;
+                n.location = view.l(4);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: ColId opt_column_list OptWhereClause
+            1410 => {
+                let name = view.v(1).str_val();
+                let columns = view.v(2).list();
+                let where_clause = view.v(3).node();
+                let loc = view.l(1);
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_CONTINUATION;
+                if !columns.is_nil() || where_clause.is_some() {
+                    let mut pt = Node::build::<PublicationTable>(mcx)?;
+                    pt.relation = make_range_var(mcx, None, None, Some(name), loc)?
+                        .as_variant::<RangeVar>();
+                    pt.columns = columns;
+                    pt.whereClause = where_clause;
+                    n.pubtable = Some(pt.seal_ref());
+                } else {
+                    n.name = Some(name);
+                }
+                n.location = loc;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: ColId indirection opt_column_list OptWhereClause
+            1411 => {
+                let mut pt = Node::build::<PublicationTable>(mcx)?;
+                pt.relation = self
+                    .range_var_from_qualified_name(
+                        view.v(1).str_val(),
+                        view.v(2).list(),
+                        view.l(1),
+                    )?
+                    .as_variant::<RangeVar>();
+                pt.columns = view.v(3).list();
+                pt.whereClause = view.v(4).node();
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_CONTINUATION;
+                n.pubtable = Some(pt.seal_ref());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: extended_relation_expr opt_column_list OptWhereClause
+            1412 => {
+                let mut pt = Node::build::<PublicationTable>(mcx)?;
+                pt.relation = view
+                    .v(1)
+                    .node()
+                    .expect("extended_relation_expr")
+                    .as_variant::<RangeVar>();
+                pt.columns = view.v(2).list();
+                pt.whereClause = view.v(3).node();
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_CONTINUATION;
+                n.pubtable = Some(pt.seal_ref());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PublicationObjSpec: CURRENT_SCHEMA
+            1413 => {
+                let mut n = Node::build::<PublicationObjSpec>(mcx)?;
+                n.pubobjtype = PublicationObjSpecType::PUBLICATIONOBJ_CONTINUATION;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // pub_obj_list
+            1414 => {
+                let n = view.v(1).node().expect("PublicationObjSpec");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1415 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("PublicationObjSpec"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // AlterPublicationStmt: ALTER PUBLICATION name
+            //   SET definition | ADD_P/SET/DROP pub_obj_list
+            1416 => {
+                let n = AlterPublicationStmt {
+                    pubname: Some(view.v(3).str_val()),
+                    options: view.v(5).list(),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            1417 | 1418 | 1419 => {
+                let pubobjects = view.v(5).list();
+                self.preprocess_pubobj_list(&pubobjects)?;
+                let n = AlterPublicationStmt {
+                    pubname: Some(view.v(3).str_val()),
+                    pubobjects,
+                    action: match rule {
+                        1417 => AlterPublicationAction::AP_AddObjects,
+                        1418 => AlterPublicationAction::AP_SetObjects,
+                        _ => AlterPublicationAction::AP_DropObjects,
+                    },
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // CreateSubscriptionStmt: CREATE SUBSCRIPTION name CONNECTION Sconst
+            //   PUBLICATION name_list opt_definition
+            1420 => {
+                let n = CreateSubscriptionStmt {
+                    subname: Some(view.v(3).str_val()),
+                    conninfo: Some(view.v(5).str_val()),
+                    publication: view.v(7).list(),
+                    options: view.v(8).list(),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: SET definition
+            1421 => {
+                let n = AlterSubscriptionStmt {
+                    kind: AlterSubscriptionType::ALTER_SUBSCRIPTION_OPTIONS,
+                    subname: Some(view.v(3).str_val()),
+                    options: view.v(5).list(),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: CONNECTION Sconst
+            1422 => {
+                let n = AlterSubscriptionStmt {
+                    kind: AlterSubscriptionType::ALTER_SUBSCRIPTION_CONNECTION,
+                    subname: Some(view.v(3).str_val()),
+                    conninfo: Some(view.v(5).str_val()),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: REFRESH PUBLICATION opt_definition
+            1423 => {
+                let n = AlterSubscriptionStmt {
+                    kind: AlterSubscriptionType::ALTER_SUBSCRIPTION_REFRESH,
+                    subname: Some(view.v(3).str_val()),
+                    options: view.v(6).list(),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: ADD_P/DROP/SET PUBLICATION name_list opt_definition
+            1424 | 1425 | 1426 => {
+                let n = AlterSubscriptionStmt {
+                    kind: match rule {
+                        1424 => AlterSubscriptionType::ALTER_SUBSCRIPTION_ADD_PUBLICATION,
+                        1425 => {
+                            AlterSubscriptionType::ALTER_SUBSCRIPTION_DROP_PUBLICATION
+                        }
+                        _ => AlterSubscriptionType::ALTER_SUBSCRIPTION_SET_PUBLICATION,
+                    },
+                    subname: Some(view.v(3).str_val()),
+                    publication: view.v(6).list(),
+                    options: view.v(7).list(),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: ENABLE_P | DISABLE_P
+            1427 | 1428 => {
+                let enabled = def_elem(
+                    mcx,
+                    "enabled",
+                    Some(Node::mk_boolean(mcx, rule == 1427)?),
+                    view.l(1),
+                )?
+                .node()
+                .expect("DefElem");
+                let n = AlterSubscriptionStmt {
+                    kind: AlterSubscriptionType::ALTER_SUBSCRIPTION_ENABLED,
+                    subname: Some(view.v(3).str_val()),
+                    options: NodeList::make1(mcx, enabled)?,
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterSubscriptionStmt: SKIP definition
+            1429 => {
+                let n = AlterSubscriptionStmt {
+                    kind: AlterSubscriptionType::ALTER_SUBSCRIPTION_SKIP,
+                    subname: Some(view.v(3).str_val()),
+                    options: view.v(5).list(),
+                    ..Default::default()
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // DropSubscriptionStmt: DROP SUBSCRIPTION [IF EXISTS] name opt_drop_behavior
+            1430 | 1431 => {
+                let (nm, beh) = if rule == 1430 { (3, 4) } else { (5, 6) };
+                let n = DropSubscriptionStmt {
+                    subname: Some(view.v(nm).str_val()),
+                    missing_ok: rule == 1431,
+                    behavior: drop_behavior(view.v(beh).ival()),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
             // --- rules-lane arms (append-only; splice after grammar-batch) ---
             // RuleStmt: CREATE opt_or_replace RULE name AS ON event TO
             // qualified_name where_clause DO opt_instead RuleActionList
@@ -6598,6 +6839,112 @@ impl<'mcx> Parser<'mcx> {
             format!("improper qualified name (too many dotted names): {joined}"),
             location,
         )
+    }
+
+    // makeRangeVarFromQualifiedName (incl. check_qualified_name).
+    fn range_var_from_qualified_name(
+        &self,
+        name: &'mcx str,
+        ind: NodeList<'mcx>,
+        location: i32,
+    ) -> PgResult<Node<'mcx>> {
+        let mut parts = [None; 2];
+        for (i, n) in ind.iter().enumerate() {
+            let Some(s) = n.as_string() else {
+                return Err(self.parser_yyerror("syntax error"));
+            };
+            if i < 2 {
+                parts[i] = Some(s.sval);
+            }
+        }
+        match ind.len() {
+            1 => make_range_var(self.mcx, None, Some(name), parts[0], location),
+            2 => make_range_var(self.mcx, Some(name), parts[0], parts[1], location),
+            _ => Err(self.improper_qualified_name(Some(name), &ind, location)),
+        }
+    }
+
+    fn preprocess_pubobj_list(&self, list: &NodeList<'mcx>) -> PgResult<()> {
+        use PublicationObjSpecType::*;
+        let mcx = self.mcx;
+        let Some(first) = list.iter().next() else {
+            return Ok(());
+        };
+        {
+            let p = first.as_variant::<PublicationObjSpec>().expect("PublicationObjSpec");
+            if p.pubobjtype == PUBLICATIONOBJ_CONTINUATION {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "invalid publication object list".into(),
+                        p.location,
+                    ))
+                    .with_detail(
+                        "One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name.",
+                    ),
+                ));
+            }
+        }
+        let mut prevobjtype = PUBLICATIONOBJ_CONTINUATION;
+        for nd in list.iter() {
+            let (mut objtype, name, pubtable, location) = {
+                let p = nd.as_variant::<PublicationObjSpec>().expect("PublicationObjSpec");
+                (p.pubobjtype, p.name, p.pubtable, p.location)
+            };
+            if objtype == PUBLICATIONOBJ_CONTINUATION {
+                objtype = prevobjtype;
+            }
+            let mut new_pubtable = None;
+            if objtype == PUBLICATIONOBJ_TABLE {
+                if name.is_none() && pubtable.is_none() {
+                    return Err(self.errposition_error("invalid table name".into(), location));
+                }
+                if let Some(nm) = name {
+                    let mut pt = Node::build::<PublicationTable>(mcx)?;
+                    pt.relation =
+                        make_range_var(mcx, None, None, Some(nm), location)?.as_variant();
+                    new_pubtable = Some(pt.seal_ref());
+                }
+            } else if objtype == PUBLICATIONOBJ_TABLES_IN_SCHEMA
+                || objtype == PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA
+            {
+                if let Some(pt) = pubtable {
+                    if pt.whereClause.is_some() {
+                        return Err(self.errposition_error(
+                            "WHERE clause not allowed for schema".into(),
+                            location,
+                        ));
+                    }
+                    if !pt.columns.is_nil() {
+                        return Err(self.errposition_error(
+                            "column specification not allowed for schema".into(),
+                            location,
+                        ));
+                    }
+                }
+                objtype = if name.is_some() {
+                    PUBLICATIONOBJ_TABLES_IN_SCHEMA
+                } else if pubtable.is_none() {
+                    PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA
+                } else {
+                    return Err(
+                        self.errposition_error("invalid schema name".into(), location)
+                    );
+                };
+            }
+            // SAFETY: parser-owned tree, no live derived refs (as rule 8).
+            unsafe {
+                nd.with_mut::<PublicationObjSpec, _>(|m| {
+                    m.pubobjtype = objtype;
+                    if new_pubtable.is_some() {
+                        m.pubtable = new_pubtable;
+                        m.name = None;
+                    }
+                })
+                .expect("PublicationObjSpec");
+            }
+            prevobjtype = objtype;
+        }
+        Ok(())
     }
 
     // doNegate: fold the '-' into integer/float A_Const literals so

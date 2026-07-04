@@ -7302,6 +7302,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_publication"
+version = "0.1.0"
+dependencies = [
+ "adt_int",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catalog_namespace",
+ "catcache",
+ "datum",
+ "detoast",
+ "fmgr_core",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "heaptuple",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "outfuncs",
+ "pg_class_seams",
+ "pg_depend",
+ "pg_inherits",
+ "syscache_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_sema"
 version = "0.0.0"
 dependencies = [
@@ -7358,6 +7396,33 @@ name = "pg_strong_random"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "pg_subscription"
+version = "0.1.0"
+dependencies = [
+ "adt_quote",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "detoast",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -9570,8 +9635,10 @@ dependencies = [
  "pg_enum",
  "pg_locale",
  "pg_prng",
+ "pg_publication",
  "pg_sema",
  "pg_string",
+ "pg_subscription",
  "pgstat",
  "pgtz",
  "plancache",

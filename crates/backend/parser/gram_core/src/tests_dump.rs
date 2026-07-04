@@ -1021,6 +1021,55 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "qual", a.qual);
         node_field(out, "with_check", a.with_check);
         out.push('}');
+    } else if let Some(pt) = n.as_variant::<types_nodes::parsenodes::PublicationTable>() {
+        publication_table(out, pt);
+    } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::PublicationObjSpec>() {
+        out.push_str("{PUBLICATIONOBJSPEC");
+        int_field(out, "pubobjtype", p.pubobjtype as i32);
+        string_field(out, "name", p.name);
+        out.push_str(" :pubtable ");
+        match p.pubtable {
+            Some(pt) => publication_table(out, pt),
+            None => out.push_str("<>"),
+        }
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreatePublicationStmt>() {
+        out.push_str("{CREATEPUBLICATIONSTMT");
+        string_field(out, "pubname", c.pubname);
+        list_field(out, "options", &c.options);
+        list_field(out, "pubobjects", &c.pubobjects);
+        bool_field(out, "for_all_tables", c.for_all_tables);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterPublicationStmt>() {
+        out.push_str("{ALTERPUBLICATIONSTMT");
+        string_field(out, "pubname", a.pubname);
+        list_field(out, "options", &a.options);
+        list_field(out, "pubobjects", &a.pubobjects);
+        bool_field(out, "for_all_tables", a.for_all_tables);
+        int_field(out, "action", a.action as i32);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateSubscriptionStmt>() {
+        out.push_str("{CREATESUBSCRIPTIONSTMT");
+        string_field(out, "subname", c.subname);
+        string_field(out, "conninfo", c.conninfo);
+        list_field(out, "publication", &c.publication);
+        list_field(out, "options", &c.options);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterSubscriptionStmt>() {
+        out.push_str("{ALTERSUBSCRIPTIONSTMT");
+        int_field(out, "kind", a.kind as i32);
+        string_field(out, "subname", a.subname);
+        string_field(out, "conninfo", a.conninfo);
+        list_field(out, "publication", &a.publication);
+        list_field(out, "options", &a.options);
+        out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DropSubscriptionStmt>() {
+        out.push_str("{DROPSUBSCRIPTIONSTMT");
+        string_field(out, "subname", d.subname);
+        bool_field(out, "missing_ok", d.missing_ok);
+        int_field(out, "behavior", d.behavior as i32);
+        out.push('}');
     } else if let Some(o) = n.as_object_with_args() {
         object_with_args(out, o);
     } else if let Some(p) = n.as_function_parameter() {
@@ -1197,6 +1246,18 @@ fn select_stmt(out: &mut String, s: &types_nodes::SelectStmt<'_>) {
         Some(r) => select_stmt(out, r),
         None => out.push_str("<>"),
     }
+    out.push('}');
+}
+
+fn publication_table(out: &mut String, pt: &types_nodes::parsenodes::PublicationTable<'_>) {
+    out.push_str("{PUBLICATIONTABLE");
+    out.push_str(" :relation ");
+    match pt.relation {
+        Some(rv) => range_var(out, rv),
+        None => out.push_str("<>"),
+    }
+    node_field(out, "whereClause", pt.whereClause);
+    list_field(out, "columns", &pt.columns);
     out.push('}');
 }
 

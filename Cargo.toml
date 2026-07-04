@@ -354,6 +354,8 @@ members = [
     "crates/backend/catalog/pg_inherits",
     "crates/backend/catalog/pg_depend",
     "crates/backend/catalog/pg_shdepend",
+    "crates/backend/catalog/pg_publication",
+    "crates/backend/catalog/pg_subscription",
     "crates/backend/catalog/pg_namespace",
     "crates/backend/catalog/pg_proc",
     "crates/backend/catalog/dependency_seams",
