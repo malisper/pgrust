@@ -45,7 +45,7 @@ use types_nodes::parsenodes::{
     ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
     RTEPermissionInfo, RangeTblEntry, RangeTblFunction, ReassignOwnedStmt, ReindexStmt,
     RenameStmt, ReplicaIdentityStmt, RoleSpec, RowMarkClause, SetOperationStmt,
-    SortGroupClause, TransactionStmt, TruncateStmt, UnlistenStmt, VacuumRelation, VacuumStmt,
+    SortGroupClause, TableSampleClause, TransactionStmt, TruncateStmt, UnlistenStmt, VacuumRelation, VacuumStmt,
     VariableSetStmt, VariableShowStmt, WindowClause, WithCheckOption, WithClause,
 };
 use types_nodes::rawnodes::{
@@ -607,6 +607,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_GroupingSet => {
             let s = node.as_variant::<GroupingSet>().expect("GroupingSet");
             Node::mk(mcx, copy_GroupingSet(mcx, s)?)?
+        }
+        NodeTag::T_TableSampleClause => {
+            let s = node.as_variant::<TableSampleClause>().expect("TableSampleClause");
+            Node::mk(mcx, copy_TableSampleClause(mcx, s)?)?
         }
         NodeTag::T_Hash => {
             let s = node.as_variant::<Hash>().expect("Hash");
@@ -3584,6 +3588,14 @@ pub(crate) fn copy_RangeTblFunction<'d>(mcx: Mcx<'d>, s: &RangeTblFunction<'_>) 
         funccoltypmods: IntList::from_slice(mcx, s.funccoltypmods.as_slice())?,
         funccolcollations: OidList::from_slice(mcx, s.funccolcollations.as_slice())?,
         funcparams: copy_bms(mcx, &s.funcparams)?,
+    })
+}
+
+pub(crate) fn copy_TableSampleClause<'d>(mcx: Mcx<'d>, s: &TableSampleClause<'_>) -> PgResult<TableSampleClause<'d>> {
+    Ok(TableSampleClause {
+        tsmhandler: s.tsmhandler,
+        args: copy_node_list(mcx, &s.args)?,
+        repeatable: copy_node_opt(mcx, s.repeatable)?,
     })
 }
 
