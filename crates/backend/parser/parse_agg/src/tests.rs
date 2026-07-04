@@ -566,9 +566,162 @@ fn ungrouped_outer_var_in_sublink_is_42803() {
 
     let err = parseCheckAggregates(mcx, &pstate, &mut qry).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
-    assert!(
-        err.message().contains("column \"t.x\" must appear in the GROUP BY clause"),
-        "{}",
-        err.message()
+    assert_eq!(
+        err.message(),
+        "subquery uses ungrouped column \"t.x\" from outer query"
     );
+}
+
+fn sublink_with_from<'mcx>(mcx: Mcx<'mcx>, sub_tlist: NodeList<'mcx>) -> Node<'mcx> {
+    let colnames = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "z" }).unwrap()).unwrap();
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("s"), colnames }).unwrap().seal_ref();
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.eref = Some(eref);
+    let rtr = Node::mk(mcx, types_nodes::primnodes::RangeTblRef { rtindex: 1 }).unwrap();
+    let jointree = Node::mk_mut(
+        mcx,
+        types_nodes::primnodes::FromExpr {
+            fromlist: NodeList::make1(mcx, rtr).unwrap(),
+            quals: None,
+        },
+    )
+    .unwrap()
+    .seal_ref();
+    let mut subq = Query::default();
+    subq.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    subq.jointree = Some(jointree);
+    subq.targetList = sub_tlist;
+    Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: Node::mk(mcx, subq).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn sublink_with_from_clause_in_agg_arg_walks_jointree() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let local_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
+    let sublink = sublink_with_from(mcx, NodeList::make1(mcx, tle).unwrap());
+    let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+        .unwrap();
+    assert_eq!(agg.agglevelsup, 0);
+}
+
+#[test]
+fn sublink_with_from_clause_passes_ungrouped_check() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        gtle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+
+    let local_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let stle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
+    let sublink = sublink_with_from(mcx, NodeList::make1(mcx, stle).unwrap());
+    let tle2 = Node::mk_target_entry(mcx, sublink, 2, Some("s"), false).unwrap();
+
+    let mut tlist = NodeList::make1(mcx, gtle).unwrap();
+    tlist.lappend(mcx, tle2).unwrap();
+    let mut qry = query_with_rtable(mcx, tlist);
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+}
+
+#[test]
+fn subscripting_ref_over_grouped_var_passes_check() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        gtle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+
+    let refexpr = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let sref = Node::mk(
+        mcx,
+        types_nodes::primnodes::SubscriptingRef {
+            refexpr: Some(refexpr),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tle2 = Node::mk_target_entry(mcx, sref, 2, Some("a"), false).unwrap();
+
+    let mut tlist = NodeList::make1(mcx, gtle).unwrap();
+    tlist.lappend(mcx, tle2).unwrap();
+    let mut qry = query_with_rtable(mcx, tlist);
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+}
+
+#[test]
+fn grouping_func_in_sublink_resolves_refs() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        gtle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let gf = Node::mk(
+        mcx,
+        GroupingFunc {
+            args: NodeList::make1(mcx, outer_var).unwrap(),
+            agglevelsup: 1,
+            location: 5,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let stle = Node::mk_target_entry(mcx, gf, 1, None, false).unwrap();
+    let sublink = sublink_with_from(mcx, NodeList::make1(mcx, stle).unwrap());
+    let tle2 = Node::mk_target_entry(mcx, sublink, 2, Some("g"), false).unwrap();
+
+    let mut tlist = NodeList::make1(mcx, gtle).unwrap();
+    tlist.lappend(mcx, tle2).unwrap();
+    let mut qry = query_with_rtable(mcx, tlist);
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+
+    let grp = gf.as_grouping_func().unwrap();
+    assert_eq!(grp.refs.len(), 1);
+    assert_eq!(grp.refs.nth(0), 1);
 }
