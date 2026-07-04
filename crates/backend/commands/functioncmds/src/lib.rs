@@ -242,6 +242,7 @@ fn compute_function_attributes<'mcx>(
 // setof rides on the TypeName; shell types and decorated names are loud.
 fn resolve_type_name<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &parser_small1::ParseState<'_, 'mcx>,
     tn: &TypeName<'_>,
     languageOid: Oid,
 ) -> PgResult<Oid> {
@@ -252,7 +253,7 @@ fn resolve_type_name<'mcx>(
             ERRCODE_UNDEFINED_OBJECT,
         ));
     }
-    shell_type_check(mcx, tn, typoid, languageOid, false)?;
+    shell_type_check(mcx, Some(pstate), tn, typoid, languageOid, false)?;
     check_defined_and_acl(typoid)?;
     Ok(typoid)
 }
@@ -315,6 +316,7 @@ fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
 
 fn shell_type_check<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, 'mcx>>,
     tn: &TypeName<'_>,
     typoid: Oid,
     languageOid: Oid,
@@ -324,17 +326,25 @@ fn shell_type_check<'mcx>(
         return Ok(());
     }
     let name = commands_define::TypeNameToString(mcx, tn)?;
+    let pos = pstate.map_or(0, |ps| {
+        parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding())
+    });
     if languageOid == SQLlanguageId {
         let verb = if is_return { "return" } else { "accept" };
-        return Err(err(
-            format!("SQL function cannot {verb} shell type {}", name.as_str()),
-            ERRCODE_INVALID_FUNCTION_DEFINITION,
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("SQL function cannot {verb} shell type {}", name.as_str()),
+            )
+            .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+            .with_cursor_position(pos),
         ));
     }
     let what = if is_return { "return type" } else { "argument type" };
     elog::ereport(types_error::NOTICE)
         .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
         .errmsg(format!("{what} {} is only a shell", name.as_str()))
+        .errposition(pos)
         .finish(types_error::ErrorLocation::new("functioncmds.c", 0, "CreateFunction"))
 }
 
@@ -347,7 +357,7 @@ fn compute_return_type<'mcx>(
 ) -> PgResult<(Oid, bool)> {
     let (mut rettype, _typname) = resolve_type_oid(mcx, returnType)?;
     if rettype != InvalidOid {
-        shell_type_check(mcx, returnType, rettype, languageOid, true)?;
+        shell_type_check(mcx, None, returnType, rettype, languageOid, true)?;
     } else {
         let typnam = commands_define::TypeNameToString(mcx, returnType)?;
         // C: only C-coded functions can be I/O functions; anything else is a
@@ -418,6 +428,7 @@ struct ParameterList<'mcx> {
 // are loud.
 fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &parser_small1::ParseState<'_, 'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
     languageOid: Oid,
 ) -> PgResult<ParameterList<'mcx>> {
@@ -443,7 +454,7 @@ fn interpret_function_parameter_list<'mcx>(
         };
         let tn_node: Node<'mcx> = fp.argType.expect("FunctionParameter.argType");
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
-        let toid = resolve_type_name(mcx, tn, languageOid)?;
+        let toid = resolve_type_name(mcx, pstate, tn, languageOid)?;
         if tn.setof {
             let msg = if is_procedure {
                 "procedures cannot accept set arguments"
@@ -634,6 +645,7 @@ fn qualified_name_get_creation_namespace<'mcx>(
 // CreateFunction (functioncmds.c).
 pub fn CreateFunction<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &parser_small1::ParseState<'_, 'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
     source_text: &str,
 ) -> PgResult<ObjectAddress> {
@@ -733,7 +745,7 @@ pub fn CreateFunction<'mcx>(
         ));
     }
 
-    let params = interpret_function_parameter_list(mcx, stmt, languageOid)?;
+    let params = interpret_function_parameter_list(mcx, pstate, stmt, languageOid)?;
 
     let (prorettype, returnsSet) = if stmt.is_procedure {
         debug_assert!(stmt.returnType.is_none());

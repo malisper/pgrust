@@ -179,7 +179,11 @@ fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
         return Ok(format!("{typname}({typmod})"));
     }
     let mut finfo = fmgr_seams::fmgr_info::call(typmodout)?;
+    let ctx = mcx::MemoryContext::new("print_typmod");
     let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+    // SAFETY: ctx outlives the call; the cstring is copied into the format!
+    // below before ctx drops.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
     fcinfo.set_arg(0, Datum::from_i32(typmod));
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: typmodout fns return a NUL-terminated cstring datum.
