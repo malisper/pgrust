@@ -5688,6 +5688,7 @@ dependencies = [
 name = "nbtree"
 version = "0.1.0"
 dependencies = [
+ "adt_numeric",
  "aio_seams",
  "arrayfuncs",
  "autovacuum_seams",
