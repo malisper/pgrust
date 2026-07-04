@@ -9,7 +9,7 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry, RowMarkClause};
 use types_nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, BoolTestType, BooleanTest, FromExpr, GroupingFunc,
-    TargetEntry, Var,
+    PlaceHolderVar, TargetEntry, Var,
 };
 use types_nodes::{Node, NodeList, NodeTag};
 
@@ -150,6 +150,21 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for OffsetVars<'mcx> {
                 }
                 .expect("Var")?;
                 Ok(false)
+            }
+            NodeTag::T_PlaceHolderVar => {
+                let (sup, offset, mcx) = (self.sublevels_up, self.offset, self.mcx);
+                // SAFETY: as above.
+                unsafe {
+                    node.with_mut::<PlaceHolderVar, _>(|p| -> PgResult<()> {
+                        if p.phlevelsup == sup {
+                            p.phrels = offset_relid_set(mcx, &p.phrels, offset)?;
+                            p.phnullingrels = offset_relid_set(mcx, &p.phnullingrels, offset)?;
+                        }
+                        Ok(())
+                    })
+                }
+                .expect("PlaceHolderVar")?;
+                nodes_core::expression_tree_walker(node, self)
             }
             NodeTag::T_CurrentOfExpr => {
                 if self.sublevels_up == 0 {
@@ -305,6 +320,23 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for ChangeVars<'mcx> {
                 }
                 .expect("Var")?;
                 Ok(false)
+            }
+            NodeTag::T_PlaceHolderVar => {
+                let (sup, rt_index, new_index, mcx) =
+                    (self.sublevels_up, self.rt_index, self.new_index, self.mcx);
+                // SAFETY: as above.
+                unsafe {
+                    node.with_mut::<PlaceHolderVar, _>(|p| -> PgResult<()> {
+                        if p.phlevelsup == sup {
+                            p.phrels = adjust_relid_set(mcx, &p.phrels, rt_index, new_index)?;
+                            p.phnullingrels =
+                                adjust_relid_set(mcx, &p.phnullingrels, rt_index, new_index)?;
+                        }
+                        Ok(())
+                    })
+                }
+                .expect("PlaceHolderVar")?;
+                return nodes_core::expression_tree_walker(node, self);
             }
             NodeTag::T_CurrentOfExpr => {
                 if self.sublevels_up == 0 {
@@ -482,6 +514,19 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                     })
                 }
                 .expect("Aggref");
+                nodes_core::expression_tree_walker(node, self)
+            }
+            NodeTag::T_PlaceHolderVar => {
+                let (min, delta) = (self.min_sublevels_up, self.delta);
+                // SAFETY: as above.
+                unsafe {
+                    node.with_mut::<PlaceHolderVar, _>(|p| {
+                        if p.phlevelsup >= min {
+                            p.phlevelsup = p.phlevelsup.wrapping_add_signed(delta);
+                        }
+                    })
+                }
+                .expect("PlaceHolderVar");
                 nodes_core::expression_tree_walker(node, self)
             }
             NodeTag::T_GroupingFunc => {

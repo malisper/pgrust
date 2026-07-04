@@ -370,3 +370,17 @@ EXPLAIN SELECT * FROM ec_pl2 ORDER BY a LIMIT 10;
 -- loud (heap.c lane); ec_pr is left in place.
 DROP TABLE ec_pl2;
 DROP TABLE ec_pl;
+
+-- outer-join pullup: nulled Vars over pulled-up subqueries (plain-Var and
+-- strict-expression outputs; PHV-requiring var-free outputs are separate)
+EXPLAIN SELECT s.x, sub.v FROM ec_small s LEFT JOIN (SELECT k, v FROM ec_dup) sub ON s.x = sub.k;
+EXPLAIN SELECT s.x, sub.v1 FROM ec_small s LEFT JOIN (SELECT k, v + 1 AS v1 FROM ec_dup) sub ON s.x = sub.k;
+EXPLAIN SELECT s.x, sub.v1 FROM ec_small s LEFT JOIN (SELECT k, v + 1 AS v1 FROM ec_dup) sub ON s.x = sub.k WHERE sub.v1 IS NULL;
+EXPLAIN SELECT sub.y, d.v FROM (SELECT x, y FROM ec_small) sub FULL JOIN ec_dup d ON sub.x = d.k;
+EXPLAIN SELECT s.x, sub.v FROM ec_small s LEFT JOIN (SELECT k, v FROM ec_dup WHERE v > 10) sub ON s.x = sub.k ORDER BY sub.v LIMIT 5;
+EXPLAIN SELECT s.x, s2.q FROM ec_small s LEFT JOIN (SELECT s1.x AS p, d.v AS q FROM ec_small s1 JOIN ec_dup d ON s1.x = d.k) s2 ON s.x = s2.p;
+-- OJ identity 3: lower-OJ nullable side referenced by an upper OJ clause
+EXPLAIN SELECT count(*) FROM ec_big a LEFT JOIN ec_small b ON a.b = b.x LEFT JOIN ec_dup c ON b.y = c.k;
+EXPLAIN SELECT count(*) FROM ec_big a LEFT JOIN ec_small b ON a.b = b.x LEFT JOIN ec_dup c ON b.y = c.k WHERE c.v IS NULL;
+EXPLAIN SELECT count(*) FROM ec_small a LEFT JOIN ec_dup b ON a.x = b.k LEFT JOIN ec_big c ON b.v = c.a AND a.y = c.b;
+EXPLAIN SELECT count(*) FROM ec_small a LEFT JOIN (ec_dup b LEFT JOIN ec_big c ON b.v = c.a) ON a.x = b.k;

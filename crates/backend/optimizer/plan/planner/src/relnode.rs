@@ -363,7 +363,31 @@ fn strip_nulling_relids<'mcx>(
                 Ok(Some(types_nodes::Node::mk(mcx, newvar)?))
             }
             NodeTag::T_PlaceHolderVar => {
-                panic!("remove_nulling_relids_mutator (rewriteManip.c): PlaceHolderVar")
+                let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+                if phv.phlevelsup != 0 {
+                    return nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+                        mutate(mcx, n, removable)
+                    });
+                }
+                let new_expr =
+                    mutate(mcx, phv.phexpr, removable)?.unwrap_or(phv.phexpr);
+                let mut phnullingrels = phv.phnullingrels.clone_in(mcx)?;
+                let mut phrels = phv.phrels.clone_in(mcx)?;
+                for m in relids_members(removable) {
+                    phnullingrels.del_member(m);
+                    phrels.del_member(m);
+                }
+                debug_assert!(!phrels.is_empty());
+                Ok(Some(types_nodes::Node::mk(
+                    mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: new_expr,
+                        phrels,
+                        phnullingrels,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    },
+                )?))
             }
             _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, removable)),
         }

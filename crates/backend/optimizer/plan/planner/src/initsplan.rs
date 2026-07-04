@@ -41,7 +41,7 @@ pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 // pull_var_clause, PVC_RECURSE_AGGREGATES|WINDOWFUNCS + INCLUDE_PLACEHOLDERS.
 pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
     match node.node_tag() {
-        NodeTag::T_Var => out.push(node),
+        NodeTag::T_Var | NodeTag::T_PlaceHolderVar => out.push(node),
         NodeTag::T_Const | NodeTag::T_NextValueExpr => {}
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
@@ -249,7 +249,7 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
     }
 }
 
-// add_vars_to_targetlist (initsplan.c); PlaceHolderVars can't reach here.
+// add_vars_to_targetlist (initsplan.c).
 pub fn add_vars_to_targetlist<'mcx>(
     run: &mut PlannerRun<'mcx>,
     vars: &[Node<'mcx>],
@@ -258,6 +258,12 @@ pub fn add_vars_to_targetlist<'mcx>(
     let mcx = run.mcx;
     debug_assert!(!relids_is_empty(where_needed));
     for &node in vars {
+        if let Some(phv) = node.as_place_holder_var() {
+            let id = crate::placeholder::find_placeholder_info(run, phv)?;
+            let cur = run.root.phinfo_mut(id).ph_needed.take();
+            run.root.phinfo_mut(id).ph_needed = relids_union(mcx, &cur, where_needed);
+            continue;
+        }
         let var = node.as_var().expect("Var");
         let rel_id = find_base_rel(&run.root, var.varno);
         let (min_attr, max_attr) = {
@@ -297,6 +303,13 @@ pub(crate) fn add_vars_to_attr_needed<'mcx>(
     let mcx = run.mcx;
     debug_assert!(!relids_is_empty(where_needed));
     for &node in vars {
+        if let Some(phv) = node.as_place_holder_var() {
+            let id = crate::placeholder::find_placeholder_info(run, phv)
+                .expect("find_placeholder_info after freeze");
+            let cur = run.root.phinfo_mut(id).ph_needed.take();
+            run.root.phinfo_mut(id).ph_needed = relids_union(mcx, &cur, where_needed);
+            continue;
+        }
         let var = node.as_var().expect("Var");
         let rel_id = find_base_rel(&run.root, var.varno);
         let min_attr = {
@@ -455,7 +468,13 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
         return Ok(());
     }
     debug_assert!(run.root.placeholdersFrozen);
-    debug_assert!(run.root.placeholder_list.is_empty());
+    for i in 0..run.root.placeholder_list.len() {
+        let id = run.root.placeholder_list[i];
+        assert!(
+            relids_is_empty(&run.root.phinfo(id).ph_lateral),
+            "create_lateral_join_info (initsplan.c): lateral PlaceHolderVar crawl unported"
+        );
+    }
     let mcx = run.mcx;
     let mut found_laterals = false;
     let size = run.root.simple_rel_array_size as usize;
@@ -579,6 +598,9 @@ pub fn deconstruct_jointree<'mcx>(
     });
 
     let mut oj_postponed: PgVec<'mcx, (usize, PgVec<'mcx, Node<'mcx>>)> = PgVec::new_in(mcx);
+    // jdomain of each join_info_list entry, in list order (C reaches it via
+    // the JoinTreeItem back-link).
+    let mut sj_jdomains: PgVec<'mcx, usize> = PgVec::new_in(mcx);
     // Per-JtItem quals postponed by children for carrying lateral references
     // (C: jtitem->lateral_clauses); ancestors sit later in the post-order.
     let mut lateral_pending: PgVec<'mcx, PgVec<'mcx, Node<'mcx>>> = PgVec::new_in(mcx);
@@ -586,6 +608,7 @@ pub fn deconstruct_jointree<'mcx>(
         lateral_pending.push(PgVec::new_in(mcx));
     }
     let plain_security_level = run.root.qual_security_level;
+    let no_incompat: types_pathnodes::Relids<'mcx> = None;
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
         // C folds these into my_quals, so make_outerjoininfo's semijoin
@@ -610,6 +633,7 @@ pub fn deconstruct_jointree<'mcx>(
                     None,
                     jdomain,
                     plain_security_level,
+                    CloneCtl::not_clone(&no_incompat),
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -632,6 +656,7 @@ pub fn deconstruct_jointree<'mcx>(
                     None,
                     *jdomain,
                     plain_security_level,
+                    CloneCtl::not_clone(&no_incompat),
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -653,6 +678,7 @@ pub fn deconstruct_jointree<'mcx>(
                         None,
                         *jdomain,
                         level,
+                        CloneCtl::not_clone(&no_incompat),
                         None,
                         Some((&items, idx)),
                         &mut lateral_pending,
@@ -701,7 +727,7 @@ pub fn deconstruct_jointree<'mcx>(
                 )?;
                 // Semijoins build an sjinfo but distribute their quals with
                 // ojscope = NULL and no nonnullable side (C's hybrid case).
-                let ojscope = if *jointype == types_pathnodes::JOIN_SEMI {
+                let mut ojscope = if *jointype == types_pathnodes::JOIN_SEMI {
                     None
                 } else {
                     relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand)
@@ -718,9 +744,15 @@ pub fn deconstruct_jointree<'mcx>(
                 };
                 let mut postponed: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
                 // Non-degenerate quals of a strict-LHS LEFT join are
-                // postponed (commute_below_l/r additions are dead: multi-OJ
-                // commute is loud in make_outerjoininfo).
+                // postponed in case identity 3 lets this join commute.
                 let postpone = *jointype == JOIN_LEFT && sjinfo.lhs_strict;
+                if postpone {
+                    // Commutable lower OJ relids removed from the min sets go
+                    // back into ojscope; only the distribute cross-check sees
+                    // them (real placement happens on the postponed pass).
+                    ojscope = relids_union(mcx, &ojscope, &sjinfo.commute_below_l);
+                    ojscope = relids_union(mcx, &ojscope, &sjinfo.commute_below_r);
+                }
                 distribute_quals_to_rels(
                     run,
                     *quals,
@@ -730,12 +762,14 @@ pub fn deconstruct_jointree<'mcx>(
                     Some(&sjinfo),
                     *jdomain,
                     plain_security_level,
+                    CloneCtl::not_clone(&no_incompat),
                     if postpone { Some(&mut postponed) } else { None },
                     Some((&items, idx)),
                     &mut lateral_pending,
                 )?;
                 let sj_index = run.root.join_info_list.len();
                 run.root.join_info_list.push(sjinfo);
+                sj_jdomains.push(*jdomain);
                 if !postponed.is_empty() {
                     oj_postponed.push((sj_index, postponed));
                 }
@@ -743,35 +777,281 @@ pub fn deconstruct_jointree<'mcx>(
         }
     }
 
-    // deconstruct_distribute_oj_quals, no-commutation arm (commuting OJ pairs
-    // panic in make_outerjoininfo, so the clone-variant machinery is dead).
+    debug_assert_eq!(sj_jdomains.len(), run.root.join_info_list.len());
     for (sj_index, postponed) in oj_postponed {
-        let sjinfo = run.root.join_info_list[sj_index].clone();
-        let qualscope = relids_add_member(
-            mcx,
-            &relids_union(mcx, &sjinfo.syn_lefthand, &sjinfo.syn_righthand),
-            sjinfo.ojrelid,
-        );
-        let ojscope = relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
-        let seclevel = run.root.qual_security_level;
+        deconstruct_distribute_oj_quals(
+            run,
+            sj_index,
+            postponed,
+            &sj_jdomains,
+            &mut lateral_pending,
+        )?;
+    }
+
+    Ok(joinlist)
+}
+
+// deconstruct_distribute_oj_quals (initsplan.c): re-distribute a strict-LHS
+// LEFT join's postponed non-degenerate quals, generating nullingrels-variant
+// clones when identity 3 lets the join commute.
+fn deconstruct_distribute_oj_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    sj_index: usize,
+    postponed: PgVec<'mcx, Node<'mcx>>,
+    sj_jdomains: &PgVec<'mcx, usize>,
+    lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let sjinfo = run.root.join_info_list[sj_index].clone();
+    let seclevel = run.root.qual_security_level;
+    let no_incompat: types_pathnodes::Relids<'mcx> = None;
+    let qualscope = relids_add_member(
+        mcx,
+        &relids_union(mcx, &sjinfo.syn_lefthand, &sjinfo.syn_righthand),
+        sjinfo.ojrelid,
+    );
+    let ojscope = relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
+    let nonnullable = &sjinfo.syn_lefthand;
+    debug_assert!(sjinfo.lhs_strict);
+
+    if relids_is_empty(&sjinfo.commute_above_r) && relids_is_empty(&sjinfo.commute_below_l) {
         for clause in postponed {
             distribute_qual_to_rels(
                 run,
                 clause,
                 &qualscope,
                 &ojscope,
-                &sjinfo.syn_lefthand,
+                nonnullable,
                 Some(&sjinfo),
-                0,
+                sj_jdomains[sj_index],
                 seclevel,
+                CloneCtl::not_clone(&no_incompat),
                 None,
                 None,
-                &mut lateral_pending,
+                lateral_pending,
             )?;
         }
+        return Ok(());
     }
 
-    Ok(joinlist)
+    let joins_above = &sjinfo.commute_above_r;
+    let joins_below = &sjinfo.commute_below_l;
+
+    // Qual variants only need the successively-less-nested nullingrels forms:
+    // strip the commuting-below bits, then put them back crawling up the
+    // syntactic join stack (join_info_list order).
+    let mut quals = postponed;
+    if !relids_is_empty(joins_below) {
+        quals = map_quals(mcx, quals, &mut |n| strip_var_nulling(mcx, n, joins_below))?;
+    }
+
+    let mut incompatible_joins = relids_union(mcx, joins_below, joins_above);
+    incompatible_joins = relids_add_member(mcx, &incompatible_joins, sjinfo.ojrelid);
+
+    // Identical serials across the variants let duplicate usage be detected.
+    let save_last_rinfo_serial = run.root.last_rinfo_serial;
+
+    let mut joins_so_far: types_pathnodes::Relids<'mcx> = None;
+    for other_index in 0..run.root.join_info_list.len() {
+        let othersj = run.root.join_info_list[other_index].clone();
+        let below_sjinfo = relids_is_member(othersj.ojrelid as i32, joins_below);
+        let above_sjinfo = !below_sjinfo
+            && other_index != sj_index
+            && relids_is_member(othersj.ojrelid as i32, joins_above);
+        if !below_sjinfo && !above_sjinfo && other_index != sj_index {
+            continue;
+        }
+        if other_index == sj_index {
+            debug_assert!(crate::relnode::relids_equal(&joins_so_far, joins_below));
+        }
+
+        run.root.last_rinfo_serial = save_last_rinfo_serial;
+
+        // Above: we envision pushing this join above othersj (second form of
+        // identity 3 to the first), so our LHS Vars pick up othersj's bit.
+        if above_sjinfo {
+            quals = map_quals(mcx, quals, &mut |n| {
+                add_var_nulling(mcx, n, &sjinfo.syn_lefthand, othersj.ojrelid)
+            })?;
+            incompatible_joins = crate::relnode::relids_del_member(
+                mcx,
+                &incompatible_joins,
+                othersj.ojrelid as i32,
+            );
+        }
+
+        let mut this_qualscope = relids_union(mcx, &qualscope, &joins_so_far);
+        let mut this_ojscope = relids_union(mcx, &ojscope, &joins_so_far);
+        if above_sjinfo {
+            this_qualscope = relids_add_member(mcx, &this_qualscope, othersj.ojrelid);
+            this_ojscope = relids_add_member(mcx, &this_ojscope, othersj.ojrelid);
+            this_ojscope = crate::relnode::relids_del_member(
+                mcx,
+                &this_ojscope,
+                sjinfo.ojrelid as i32,
+            );
+        }
+
+        // ECs come only from the fewest-nullingrels form; that form is the
+        // has_clone one.
+        let allow_equivalence = relids_is_empty(&joins_so_far);
+        let has_clone = allow_equivalence;
+        let incompatible_now = relids_copy(mcx, &incompatible_joins);
+        let clone_ctl = CloneCtl {
+            incompatible_relids: &incompatible_now,
+            allow_equivalence,
+            has_clone,
+            is_clone: !has_clone,
+        };
+        for &clause in quals.iter() {
+            distribute_qual_to_rels(
+                run,
+                clause,
+                &this_qualscope,
+                &this_ojscope,
+                nonnullable,
+                Some(&sjinfo),
+                sj_jdomains[other_index],
+                seclevel,
+                clone_ctl,
+                None,
+                None,
+                lateral_pending,
+            )?;
+        }
+
+        // Below: put back the parser's bits for the next level up (Pbc ->
+        // Pb*c); our own bit never goes in.
+        if below_sjinfo {
+            quals = map_quals(mcx, quals, &mut |n| {
+                add_var_nulling(mcx, n, &othersj.syn_righthand, othersj.ojrelid)
+            })?;
+            incompatible_joins = crate::relnode::relids_del_member(
+                mcx,
+                &incompatible_joins,
+                othersj.ojrelid as i32,
+            );
+        }
+        joins_so_far = relids_add_member(mcx, &joins_so_far, othersj.ojrelid);
+    }
+    Ok(())
+}
+
+fn map_quals<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    quals: PgVec<'mcx, Node<'mcx>>,
+    f: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
+    let mut out: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for n in quals {
+        out.push(f(n)?.unwrap_or(n));
+    }
+    Ok(out)
+}
+
+// remove_nulling_relids (rewriteManip.c), copy-on-write expression form over
+// planner quals (no Query nodes remain at deconstruct time).
+fn strip_var_nulling<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    removable: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().expect("Var");
+            if v.varlevelsup != 0 {
+                return Ok(None);
+            }
+            let mut nulling = v.varnullingrels.clone_in(mcx)?;
+            for m in crate::relnode::relids_members(removable) {
+                nulling.del_member(m);
+            }
+            let newvar = types_nodes::primnodes::Var { varnullingrels: nulling, ..*v };
+            Ok(Some(Node::mk(mcx, newvar)?))
+        }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+            if phv.phlevelsup != 0 {
+                return Ok(None);
+            }
+            let new_expr = strip_var_nulling(mcx, phv.phexpr, removable)?;
+            let hit = crate::relnode::relids_members(removable)
+                .any(|m| phv.phnullingrels.is_member(m as i32) || phv.phrels.is_member(m as i32));
+            if new_expr.is_none() && !hit {
+                return Ok(None);
+            }
+            let mut nulling = phv.phnullingrels.clone_in(mcx)?;
+            let mut rels = phv.phrels.clone_in(mcx)?;
+            for m in crate::relnode::relids_members(removable) {
+                nulling.del_member(m as i32);
+                rels.del_member(m as i32);
+            }
+            debug_assert!(!rels.is_empty());
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::PlaceHolderVar {
+                    phexpr: new_expr.unwrap_or(phv.phexpr),
+                    phrels: rels,
+                    phnullingrels: nulling,
+                    phid: phv.phid,
+                    phlevelsup: phv.phlevelsup,
+                },
+            )?))
+        }
+        NodeTag::T_SubLink | NodeTag::T_Query => {
+            panic!("remove_nulling_relids_mutator (rewriteManip.c): sublevel recursion in a commuted OJ qual")
+        }
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+            strip_var_nulling(mcx, n, removable)
+        }),
+    }
+}
+
+// add_nulling_relids (rewriteManip.c), same form.
+fn add_var_nulling<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    target_relids: &types_pathnodes::Relids<'mcx>,
+    added_ojrelid: u32,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().expect("Var");
+            if v.varlevelsup != 0 || !relids_is_member(v.varno, target_relids) {
+                return Ok(None);
+            }
+            let mut nulling = v.varnullingrels.clone_in(mcx)?;
+            nulling.add_member(mcx, added_ojrelid as i32)?;
+            let newvar = types_nodes::primnodes::Var { varnullingrels: nulling, ..*v };
+            Ok(Some(Node::mk(mcx, newvar)?))
+        }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+            if phv.phlevelsup != 0
+                || !phv.phrels.iter().any(|m| relids_is_member(m, target_relids))
+            {
+                return Ok(None);
+            }
+            let mut nulling = phv.phnullingrels.clone_in(mcx)?;
+            nulling.add_member(mcx, added_ojrelid as i32)?;
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::PlaceHolderVar {
+                    phexpr: phv.phexpr,
+                    phrels: phv.phrels.clone_in(mcx)?,
+                    phnullingrels: nulling,
+                    phid: phv.phid,
+                    phlevelsup: phv.phlevelsup,
+                },
+            )?))
+        }
+        NodeTag::T_SubLink | NodeTag::T_Query => {
+            panic!("add_nulling_relids_mutator (rewriteManip.c): sublevel recursion in a commuted OJ qual")
+        }
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+            add_var_nulling(mcx, n, target_relids, added_ojrelid)
+        }),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -784,6 +1064,7 @@ fn distribute_quals_to_rels<'mcx>(
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
     security_level: u32,
+    clone_ctl: CloneCtl<'_, 'mcx>,
     mut postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -802,12 +1083,30 @@ fn distribute_quals_to_rels<'mcx>(
             sjinfo,
             jdomain,
             security_level,
+            clone_ctl,
             postponed.as_deref_mut(),
             jt,
             lateral_pending,
         )?;
     }
     Ok(())
+}
+
+// The incompatible_relids / allow_equivalence / has_clone / is_clone knob set
+// of C's distribute_qual_to_rels; not_clone everywhere outside
+// deconstruct_distribute_oj_quals.
+#[derive(Clone, Copy)]
+struct CloneCtl<'a, 'mcx> {
+    incompatible_relids: &'a types_pathnodes::Relids<'mcx>,
+    allow_equivalence: bool,
+    has_clone: bool,
+    is_clone: bool,
+}
+
+impl<'a, 'mcx> CloneCtl<'a, 'mcx> {
+    fn not_clone(incompatible_relids: &'a types_pathnodes::Relids<'mcx>) -> Self {
+        CloneCtl { incompatible_relids, allow_equivalence: true, has_clone: false, is_clone: false }
+    }
 }
 
 fn deconstruct_recurse<'mcx>(
@@ -1070,9 +1369,7 @@ fn mark_rels_nulled_by_join<'mcx>(
     }
 }
 
-// make_outerjoininfo (initsplan.c), LEFT/SEMI/ANTI arms (FULL is loud
-// upstream); the identity-3 commute legs are loud (multi-OJ clone machinery
-// is the join-outer follow-on).
+// make_outerjoininfo (initsplan.c).
 fn make_outerjoininfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
     left_rels: &types_pathnodes::Relids<'mcx>,
@@ -1134,6 +1431,10 @@ fn make_outerjoininfo<'mcx>(
     );
 
     let is_semi_or_anti = matches!(jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
+    // Tentative identity-3 commutability; surviving relids merge into the
+    // SpecialJoinInfos below.
+    let mut commute_below_l: types_pathnodes::Relids<'mcx> = None;
+    let mut commute_below_r: types_pathnodes::Relids<'mcx> = None;
     for i in 0..run.root.join_info_list.len() {
         let other = run.root.join_info_list[i].clone();
         assert!(
@@ -1144,10 +1445,12 @@ fn make_outerjoininfo<'mcx>(
             "make_outerjoininfo (initsplan.c): lower {} join ordering arm; join-outer lane",
             other.jointype
         );
-        assert!(
-            run.root.placeholder_list.is_empty(),
-            "make_outerjoininfo (initsplan.c): placeholder_list crawl unported"
-        );
+        let have_unsafe_phvs = match (other.ojrelid, clause) {
+            (0, _) | (_, None) => false,
+            (oj, Some(c)) => {
+                crate::placeholder::contain_placeholder_references_to(run, c, oj as i32)?
+            }
+        };
         // A full join is an optimization barrier: expand whichever side
         // overlaps it to cover the whole full join.
         if other.jointype == types_pathnodes::JOIN_FULL {
@@ -1173,7 +1476,9 @@ fn make_outerjoininfo<'mcx>(
         }
         if relids_overlap(left_rels, &other.syn_righthand) {
             if relids_overlap(&clause_relids, &other.syn_righthand)
-                && (is_semi_or_anti || !relids_overlap(&strict_relids, &other.min_righthand))
+                && (have_unsafe_phvs
+                    || is_semi_or_anti
+                    || !relids_overlap(&strict_relids, &other.min_righthand))
             {
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_lefthand);
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_righthand);
@@ -1185,10 +1490,12 @@ fn make_outerjoininfo<'mcx>(
                 && relids_overlap(&strict_relids, &other.min_righthand)
                 && !relids_overlap(&clause_relids, &other.syn_lefthand)
             {
-                panic!(
-                    "make_outerjoininfo (initsplan.c): OJ identity 3 commute \
-                     (commute_below_l); multi-outer-join lane"
+                min_lefthand = crate::relnode::relids_del_member(
+                    mcx,
+                    &min_lefthand,
+                    other.ojrelid as i32,
                 );
+                commute_below_l = relids_add_member(mcx, &commute_below_l, other.ojrelid);
             }
         }
         if relids_overlap(right_rels, &other.syn_righthand) {
@@ -1196,6 +1503,7 @@ fn make_outerjoininfo<'mcx>(
                 matches!(other.jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
             if relids_overlap(&clause_relids, &other.syn_righthand)
                 || !relids_overlap(&clause_relids, &other.min_lefthand)
+                || have_unsafe_phvs
                 || is_semi_or_anti
                 || other_semi_or_anti
                 || !other.lhs_strict
@@ -1205,13 +1513,30 @@ fn make_outerjoininfo<'mcx>(
                 if other.ojrelid != 0 {
                     min_righthand = relids_add_member(mcx, &min_righthand, other.ojrelid);
                 }
-            } else {
-                panic!(
-                    "make_outerjoininfo (initsplan.c): OJ identity 3 commute \
-                     (commute_below_r); multi-outer-join lane"
+            } else if jointype == JOIN_LEFT
+                && other.jointype == JOIN_LEFT
+                && other.lhs_strict
+            {
+                min_righthand = crate::relnode::relids_del_member(
+                    mcx,
+                    &min_righthand,
+                    other.ojrelid as i32,
                 );
+                commute_below_r = relids_add_member(mcx, &commute_below_r, other.ojrelid);
             }
         }
+    }
+
+    // A PHV due to be evaluated within our RHS forces min_righthand to cover
+    // its full eval_at set (C initsplan.c:1965-1984).
+    for i in 0..run.root.placeholder_list.len() {
+        let id = run.root.placeholder_list[i];
+        let phinfo = run.root.phinfo(id);
+        if !crate::relnode::relids_is_subset(&phinfo.ph_var_phrels, right_rels) {
+            continue;
+        }
+        let eval_at = relids_copy(mcx, &phinfo.ph_eval_at);
+        min_righthand = relids_union(mcx, &min_righthand, &eval_at);
     }
 
     if relids_is_empty(&min_lefthand) {
@@ -1223,6 +1548,27 @@ fn make_outerjoininfo<'mcx>(
     debug_assert!(!relids_is_empty(&min_lefthand));
     debug_assert!(!relids_is_empty(&min_righthand));
     debug_assert!(!relids_overlap(&min_lefthand, &min_righthand));
+
+    // Commute relids re-added to the min sets by intervening outer joins are
+    // not commutable after all.
+    commute_below_l = relids_difference(mcx, &commute_below_l, &min_lefthand);
+    commute_below_r = relids_difference(mcx, &commute_below_r, &min_righthand);
+    if !relids_is_empty(&commute_below_l) || !relids_is_empty(&commute_below_r) {
+        for i in 0..run.root.join_info_list.len() {
+            let other_ojrelid = run.root.join_info_list[i].ojrelid;
+            if relids_is_member(other_ojrelid as i32, &commute_below_l) {
+                let cur = run.root.join_info_list[i].commute_above_l.take();
+                run.root.join_info_list[i].commute_above_l =
+                    relids_add_member(mcx, &cur, ojrelid as u32);
+            } else if relids_is_member(other_ojrelid as i32, &commute_below_r) {
+                let cur = run.root.join_info_list[i].commute_above_r.take();
+                run.root.join_info_list[i].commute_above_r =
+                    relids_add_member(mcx, &cur, ojrelid as u32);
+            }
+        }
+        sjinfo.commute_below_l = commute_below_l;
+        sjinfo.commute_below_r = commute_below_r;
+    }
 
     sjinfo.min_lefthand = min_lefthand;
     sjinfo.min_righthand = min_righthand;
@@ -1353,9 +1699,7 @@ fn check_redundant_nullability_qual(run: &PlannerRun<'_>, clause: Node<'_>) -> b
     })
 }
 
-// distribute_qual_to_rels (initsplan.c). allow_equivalence is true for every
-// live caller (the clone-variant OJ commutation that passes false is loud in
-// make_outerjoininfo), so maybe_equivalence needs no parameter.
+// distribute_qual_to_rels (initsplan.c).
 #[allow(clippy::too_many_arguments)]
 fn distribute_qual_to_rels<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1366,6 +1710,7 @@ fn distribute_qual_to_rels<'mcx>(
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
     security_level: u32,
+    clone_ctl: CloneCtl<'_, 'mcx>,
     postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -1422,6 +1767,7 @@ fn distribute_qual_to_rels<'mcx>(
     }
 
     let is_pushed_down;
+    let maybe_equivalence;
     let maybe_outer_join;
     if relids_overlap(&relids, outerjoin_nonnullable) {
         // Non-degenerate outer-join clause.
@@ -1430,6 +1776,7 @@ fn distribute_qual_to_rels<'mcx>(
             return Ok(());
         }
         is_pushed_down = false;
+        maybe_equivalence = false;
         maybe_outer_join = true;
         debug_assert!(ojscope.is_some());
         relids = relids_copy(run.mcx, ojscope);
@@ -1439,6 +1786,7 @@ fn distribute_qual_to_rels<'mcx>(
         if check_redundant_nullability_qual(run, clause) {
             return Ok(());
         }
+        maybe_equivalence = clone_ctl.allow_equivalence;
         maybe_outer_join = false;
     }
 
@@ -1446,26 +1794,32 @@ fn distribute_qual_to_rels<'mcx>(
         run,
         clause,
         is_pushed_down,
-        false,
-        false,
+        clone_ctl.has_clone,
+        clone_ctl.is_clone,
         pseudoconstant,
         security_level,
         relids,
-        None,
+        relids_copy(run.mcx, clone_ctl.incompatible_relids),
         relids_copy(run.mcx, outerjoin_nonnullable),
     )?;
 
     if relids_num_members(&run.root.rinfo(rinfo).required_relids) > 1 {
         let mut vars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(run.mcx);
         pull_var_nodes(clause, &mut vars);
-        let where_needed = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
+        // A clone's OJ relids would overstate where its vars must bubble up.
+        let required = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
+        let where_needed = if clone_ctl.is_clone {
+            relids_intersect(run.mcx, &required, &run.root.all_baserels)
+        } else {
+            required
+        };
         add_vars_to_targetlist(run, &vars, &where_needed)?;
     }
 
     check_mergejoinable(run, rinfo)?;
     let mut rinfo = rinfo;
     if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
-        if !maybe_outer_join {
+        if maybe_equivalence {
             if crate::equivclass::process_equivalence(run, &mut rinfo, jdomain)? {
                 return Ok(());
             }
@@ -1473,7 +1827,7 @@ fn distribute_qual_to_rels<'mcx>(
             if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
                 crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
             }
-        } else if run.root.rinfo(rinfo).can_join {
+        } else if maybe_outer_join && run.root.rinfo(rinfo).can_join {
             crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
             let (left_sub, right_over, right_sub, left_over) = {
                 let ri = run.root.rinfo(rinfo);

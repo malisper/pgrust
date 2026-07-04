@@ -1548,7 +1548,29 @@ fn strip_ojrelid_nulling<'mcx>(
             Node::mk(mcx, types_nodes::primnodes::RelabelType { arg, ..*r })
         }
         NodeTag::T_PlaceHolderVar => {
-            panic!("remove_nulling_relids (rewriteManip.c): PlaceHolderVar; PHV lane")
+            let phv = node.as_place_holder_var().unwrap();
+            if phv.phlevelsup == 0
+                && (phv.phnullingrels.is_member(ojrelid as i32)
+                    || phv.phrels.is_member(ojrelid as i32))
+            {
+                let new_expr = strip_ojrelid_nulling(mcx, phv.phexpr, ojrelid)?;
+                let mut phnullingrels = phv.phnullingrels.clone_in(mcx)?;
+                let mut phrels = phv.phrels.clone_in(mcx)?;
+                phnullingrels.del_member(ojrelid as i32);
+                phrels.del_member(ojrelid as i32);
+                debug_assert!(!phrels.is_empty());
+                return Node::mk(
+                    mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: new_expr,
+                        phrels,
+                        phnullingrels,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    },
+                );
+            }
+            Ok(node)
         }
         _ => Ok(node),
     }

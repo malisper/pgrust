@@ -244,12 +244,9 @@ pub fn make_join_rel(
         return Ok(None);
     };
 
-    if let Some(sj) = &match_sjinfo {
-        if sj.ojrelid != 0 {
-            debug_assert!(sj.commute_below_l.is_none() && sj.commute_above_l.is_none());
-            joinrelids = relids_add_member(run.mcx, &joinrelids, sj.ojrelid);
-        }
-    }
+    let mut pushed_down_joins: PgVec<'_, SpecialJoinInfo<'_>> = PgVec::new_in(run.mcx);
+    joinrelids =
+        add_outer_joins_to_relids(run, joinrelids, &match_sjinfo, &mut pushed_down_joins);
     let (rel1, rel2) = if reversed { (rel2, rel1) } else { (rel1, rel2) };
 
     let sjinfo = match match_sjinfo {
@@ -260,13 +257,66 @@ pub fn make_join_rel(
             relids_copy(run.mcx, &run.root.rel(rel2).relids),
         ),
     };
-    let (joinrel, restrictlist) = build_join_rel(run, joinrelids, rel1, rel2, &sjinfo)?;
+    let (joinrel, restrictlist) =
+        build_join_rel(run, joinrelids, rel1, rel2, &sjinfo, &pushed_down_joins)?;
     // If we've already proven this join is empty, we needn't consider paths.
     if is_dummy_rel(&run.root, joinrel) {
         return Ok(Some(joinrel));
     }
     populate_joinrel_with_paths(run, rel1, rel2, joinrel, &sjinfo, &restrictlist)?;
     Ok(Some(joinrel))
+}
+
+// add_outer_joins_to_relids (joinrels.c): canonical joinrel relids include
+// the OJ's own relid plus any identity-3-pushed-down joins completed here.
+fn add_outer_joins_to_relids<'mcx>(
+    run: &PlannerRun<'mcx>,
+    input_relids: Relids<'mcx>,
+    sjinfo: &Option<SpecialJoinInfo<'mcx>>,
+    pushed_down_joins: &mut PgVec<'mcx, SpecialJoinInfo<'mcx>>,
+) -> Relids<'mcx> {
+    let mcx = run.mcx;
+    let Some(sj) = sjinfo else { return input_relids };
+    if sj.ojrelid == 0 {
+        return input_relids;
+    }
+    if sj.jointype != JOIN_LEFT {
+        return relids_add_member(mcx, &input_relids, sj.ojrelid);
+    }
+    // Pushed into a lower join's RHS per identity 3: our outputs are not the
+    // final state of our RHS yet.
+    if !relids_is_subset(&sj.commute_below_l, &input_relids) {
+        return input_relids;
+    }
+    let mut input_relids = relids_add_member(mcx, &input_relids, sj.ojrelid);
+    if !crate::relnode::relids_is_empty(&sj.commute_above_l) {
+        let mut commute_above_rels = relids_copy(mcx, &sj.commute_above_l);
+        // join_info_list is bottom-up, so one pass suffices.
+        for i in 0..run.root.join_info_list.len() {
+            let othersj = &run.root.join_info_list[i];
+            if othersj.ojrelid == sj.ojrelid
+                || othersj.ojrelid == 0
+                || othersj.jointype != JOIN_LEFT
+            {
+                continue;
+            }
+            if !relids_is_member(othersj.ojrelid as i32, &commute_above_rels) {
+                continue;
+            }
+            if !relids_is_member(othersj.ojrelid as i32, &input_relids)
+                && relids_is_subset(&othersj.min_lefthand, &input_relids)
+                && relids_is_subset(&othersj.min_righthand, &input_relids)
+                && relids_is_subset(&othersj.commute_below_l, &input_relids)
+            {
+                input_relids = relids_add_member(mcx, &input_relids, othersj.ojrelid);
+                let othersj = run.root.join_info_list[i].clone();
+                commute_above_rels =
+                    relids_union(mcx, &commute_above_rels, &othersj.commute_above_l);
+                pushed_down_joins.push(othersj);
+            }
+        }
+    }
+    input_relids
 }
 
 // restriction_is_constant_false (joinrels.c).
@@ -426,8 +476,7 @@ fn full_join_unsupported() -> Box<types_error::PgError> {
     )
 }
 
-// join_is_legal (joinrels.c): None = illegal. must_be_leftjoin commutation
-// cannot arise while make_outerjoininfo panics on identity-3.
+// join_is_legal (joinrels.c): None = illegal.
 fn join_is_legal<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel1: RelId,
@@ -439,6 +488,7 @@ fn join_is_legal<'mcx>(
     let mut match_sjinfo: Option<SpecialJoinInfo<'mcx>> = None;
     let mut reversed = false;
     let mut unique_ified = false;
+    let mut must_be_leftjoin = false;
 
     for i in 0..run.root.join_info_list.len() {
         let sj = run.root.join_info_list[i].clone();
@@ -514,13 +564,27 @@ fn join_is_legal<'mcx>(
             reversed = true;
             unique_ified = true;
         } else {
+            // Both inputs overlapping the RHS means any violation already
+            // happened below (a previously-allowed commutation).
             if relids_overlap(&r1, &sj.min_righthand) && relids_overlap(&r2, &sj.min_righthand) {
                 continue;
             }
-            // Associating into an SJ's RHS needs identity 3, which is loud
-            // in make_outerjoininfo — nothing can legalize this join.
-            return Ok(None);
+            // Associating into this SJ's RHS (identity 3) demands a LEFT SJ
+            // and no LHS overlap.
+            if sj.jointype != JOIN_LEFT || relids_overlap(joinrelids, &sj.min_lefthand) {
+                return Ok(None);
+            }
+            must_be_leftjoin = true;
         }
+    }
+
+    // Identity 3 also demands the proposed join be a strict-LHS LEFT join.
+    if must_be_leftjoin
+        && match_sjinfo
+            .as_ref()
+            .is_none_or(|sj| sj.jointype != JOIN_LEFT || !sj.lhs_strict)
+    {
+        return Ok(None);
     }
 
     if run.root.hasLateralRTEs {
@@ -616,6 +680,7 @@ fn build_join_rel<'mcx>(
     outer_rel: RelId,
     inner_rel: RelId,
     sjinfo: &SpecialJoinInfo<'mcx>,
+    pushed_down_joins: &PgVec<'mcx, SpecialJoinInfo<'mcx>>,
 ) -> PgResult<(RelId, PgVec<'mcx, types_pathnodes::RinfoId>)> {
     let mcx = run.mcx;
     for i in 0..run.root.join_rel_list.len() {
@@ -645,9 +710,23 @@ fn build_join_rel<'mcx>(
         Some(run.root.alloc_pathtarget(types_pathnodes::PathTarget::new(mcx)));
     let joinrel = run.root.alloc_rel(joinrel);
 
-    debug_assert!(run.root.placeholder_list.is_empty());
-    build_joinrel_tlist(run, joinrel, outer_rel, sjinfo, sjinfo.jointype == types_pathnodes::JOIN_FULL)?;
-    build_joinrel_tlist(run, joinrel, inner_rel, sjinfo, sjinfo.jointype != JOIN_INNER)?;
+    build_joinrel_tlist(
+        run,
+        joinrel,
+        outer_rel,
+        sjinfo,
+        pushed_down_joins,
+        sjinfo.jointype == types_pathnodes::JOIN_FULL,
+    )?;
+    build_joinrel_tlist(
+        run,
+        joinrel,
+        inner_rel,
+        sjinfo,
+        pushed_down_joins,
+        sjinfo.jointype != JOIN_INNER,
+    )?;
+    crate::placeholder::add_placeholders_to_joinrel(run, joinrel, outer_rel, inner_rel)?;
 
     {
         let d = crate::relnode::relids_difference(
@@ -700,13 +779,16 @@ fn build_join_rel<'mcx>(
     Ok((joinrel, restrictlist))
 }
 
-// build_joinrel_tlist (relnode.c), Var-only arm. can_null adds the OJ's
-// relid to nullable-side Vars (pushed_down_joins/commute legs are dead).
+// build_joinrel_tlist (relnode.c), Var-only arm. Under can_null the output
+// Var carries the nulling bits it would have in syntactic join order: this
+// join's relid, the relids of identity-3 joins completed here, and any
+// commute_above_r relids already inside the joinrel.
 fn build_joinrel_tlist<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrel: RelId,
     input_rel: RelId,
     sjinfo: &SpecialJoinInfo<'mcx>,
+    pushed_down_joins: &PgVec<'mcx, SpecialJoinInfo<'mcx>>,
     can_null: bool,
 ) -> PgResult<()> {
     let mcx = run.mcx;
@@ -718,6 +800,65 @@ fn build_joinrel_tlist<'mcx>(
     );
     for &id in exprs.iter() {
         let node = *run.root.expr_node(id);
+        if let Some(phv) = node.as_place_holder_var() {
+            // relnode.c:1116-1163: keep the PHV if still needed above, adding
+            // this join's nulling bits under can_null; width from its phinfo.
+            let phinfo_id = crate::placeholder::find_placeholder_info(run, phv)?;
+            let (ph_needed, ph_width) = {
+                let phinfo = run.root.phinfo(phinfo_id);
+                (relids_copy(mcx, &phinfo.ph_needed), phinfo.ph_width)
+            };
+            if crate::relnode::relids_is_subset(&ph_needed, &relids) {
+                continue;
+            }
+            let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+            let out_id = if can_null {
+                let mut nulling = phv.phnullingrels.clone_in(mcx)?;
+                let mut changed = false;
+                let phrels_subset = |side: &types_pathnodes::Relids<'mcx>| {
+                    phv.phrels.iter().all(|m| relids_is_member(m, side))
+                };
+                if sjinfo.ojrelid != 0
+                    && relids_is_member(sjinfo.ojrelid as i32, &relids)
+                    && (phrels_subset(&sjinfo.syn_righthand)
+                        || (sjinfo.jointype == types_pathnodes::JOIN_FULL
+                            && phrels_subset(&sjinfo.syn_lefthand)))
+                {
+                    nulling.add_member(mcx, sjinfo.ojrelid as i32)?;
+                    changed = true;
+                }
+                for othersj in pushed_down_joins.iter() {
+                    debug_assert!(relids_is_member(othersj.ojrelid as i32, &relids));
+                    if phrels_subset(&othersj.syn_righthand) {
+                        nulling.add_member(mcx, othersj.ojrelid as i32)?;
+                        changed = true;
+                    }
+                }
+                for m in crate::relnode::relids_members(&sjinfo.commute_above_r) {
+                    if relids_is_member(m, &relids) {
+                        nulling.add_member(mcx, m)?;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let copy = types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: phv.phexpr,
+                        phrels: phv.phrels.clone_in(mcx)?,
+                        phnullingrels: nulling,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    };
+                    run.intern_expr(types_nodes::Node::mk(mcx, copy)?)
+                } else {
+                    id
+                }
+            } else {
+                id
+            };
+            run.root.rel_reltarget_mut(joinrel).exprs.push(out_id);
+            tuple_width += ph_width as i64;
+            continue;
+        }
         let var = node
             .as_var()
             .unwrap_or_else(|| panic!("unexpected node type in rel targetlist: {:?}", node.node_tag()));
@@ -728,23 +869,37 @@ fn build_joinrel_tlist<'mcx>(
             continue;
         }
         tuple_width += run.root.rel(baserel).attr_widths[ndx] as i64;
-        let in_oj = can_null
-            && sjinfo.ojrelid != 0
-            && relids_is_member(sjinfo.ojrelid as i32, &relids);
-        let nullable_side = in_oj
-            && (relids_is_member(var.varno, &sjinfo.syn_righthand)
-                || (sjinfo.jointype == types_pathnodes::JOIN_FULL
-                    && relids_is_member(var.varno, &sjinfo.syn_lefthand)));
-        let out_id = if nullable_side {
-            debug_assert!(
-                sjinfo.commute_above_r.is_none() && sjinfo.commute_above_l.is_none()
-            );
-            let mut nulled = types_nodes::primnodes::Var {
-                varnullingrels: var.varnullingrels.clone_in(mcx)?,
-                ..*var
-            };
-            nulled.varnullingrels.add_member(mcx, sjinfo.ojrelid as i32)?;
-            run.intern_expr(types_nodes::Node::mk(mcx, nulled)?)
+        let out_id = if can_null {
+            let mut nulling = var.varnullingrels.clone_in(mcx)?;
+            let mut changed = false;
+            if sjinfo.ojrelid != 0
+                && relids_is_member(sjinfo.ojrelid as i32, &relids)
+                && (relids_is_member(var.varno, &sjinfo.syn_righthand)
+                    || (sjinfo.jointype == types_pathnodes::JOIN_FULL
+                        && relids_is_member(var.varno, &sjinfo.syn_lefthand)))
+            {
+                nulling.add_member(mcx, sjinfo.ojrelid as i32)?;
+                changed = true;
+            }
+            for othersj in pushed_down_joins.iter() {
+                debug_assert!(relids_is_member(othersj.ojrelid as i32, &relids));
+                if relids_is_member(var.varno, &othersj.syn_righthand) {
+                    nulling.add_member(mcx, othersj.ojrelid as i32)?;
+                    changed = true;
+                }
+            }
+            for m in crate::relnode::relids_members(&sjinfo.commute_above_r) {
+                if relids_is_member(m, &relids) {
+                    nulling.add_member(mcx, m)?;
+                    changed = true;
+                }
+            }
+            if changed {
+                let nulled = types_nodes::primnodes::Var { varnullingrels: nulling, ..*var };
+                run.intern_expr(types_nodes::Node::mk(mcx, nulled)?)
+            } else {
+                id
+            }
         } else {
             id
         };
@@ -762,13 +917,29 @@ fn build_joinrel_restrictlist<'mcx>(
     inner_rel: RelId,
     sjinfo: &SpecialJoinInfo<'mcx>,
 ) -> PgResult<PgVec<'mcx, types_pathnodes::RinfoId>> {
+    let both_input_relids = relids_union(
+        run.mcx,
+        &run.root.rel(outer_rel).relids,
+        &run.root.rel(inner_rel).relids,
+    );
     let mut result: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
     for &input in [outer_rel, inner_rel].iter() {
         for &rid in run.root.rel(input).joininfo.iter() {
             if !relids_is_subset(&run.root.rinfo(rid).required_relids, joinrelids) {
                 continue;
             }
-            debug_assert!(!run.root.rinfo(rid).has_clone && !run.root.rinfo(rid).is_clone);
+            // A clone variant may be too late (or wrong) to evaluate here;
+            // skipping trusts that another clone was or will be selected.
+            let ri = run.root.rinfo(rid);
+            if ri.has_clone || ri.is_clone {
+                debug_assert!(!rinfo_is_pushed_down(run, rid, joinrelids));
+                if !relids_is_subset(&ri.required_relids, &both_input_relids) {
+                    continue;
+                }
+                if relids_overlap(&ri.incompatible_relids, &both_input_relids) {
+                    continue;
+                }
+            }
             if !result.iter().any(|&r| r == rid) {
                 result.push(rid);
             }

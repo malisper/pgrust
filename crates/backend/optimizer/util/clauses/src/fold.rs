@@ -1222,6 +1222,26 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 },
             )?))
         }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().unwrap();
+            if cx.estimate {
+                // Estimation mode strips the PHV (assume not nulled).
+                return Ok(Some(ece_mutator(phv.phexpr, cx)?.unwrap_or(phv.phexpr)));
+            }
+            match ece_mutator(phv.phexpr, cx)? {
+                None => Ok(None),
+                Some(e) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: e,
+                        phrels: phv.phrels.clone_in(cx.mcx)?,
+                        phnullingrels: phv.phnullingrels.clone_in(cx.mcx)?,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    },
+                )?)),
+            }
+        }
         other => deferred("eval_const_expressions_mutator", other),
     }
 }

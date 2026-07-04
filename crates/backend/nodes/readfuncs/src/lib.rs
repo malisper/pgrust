@@ -370,6 +370,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"RANGETBLREF" => self.read_range_tbl_ref(),
             b"TARGETENTRY" => self.read_target_entry(),
             b"VAR" => self.read_var(),
+            b"PLACEHOLDERVAR" => self.read_place_holder_var(),
             b"CONST" => self.read_const(),
             b"OPEXPR" => self.read_op_expr(),
             b"FUNCEXPR" => self.read_func_expr(),
@@ -1176,6 +1177,18 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, c)
+    }
+
+    fn read_place_holder_var(&mut self) -> PgResult<Node<'mcx>> {
+        let phexpr = self.read_node("phexpr")?.expect("PlaceHolderVar has a phexpr");
+        let phv = types_nodes::primnodes::PlaceHolderVar {
+            phexpr,
+            phrels: self.read_bitmapset("phrels")?,
+            phnullingrels: self.read_bitmapset("phnullingrels")?,
+            phid: self.read_u32("phid"),
+            phlevelsup: self.read_u32("phlevelsup"),
+        };
+        Node::mk(self.mcx, phv)
     }
 
     fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {
