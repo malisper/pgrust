@@ -484,25 +484,26 @@ fn copy_boundinfo_for_planner<'mcx>(
         let has_default = i32::from(bi.default_index != -1);
         if out.ndatums + accepts_nulls + has_default != nparts {
             let mut last_index = -1;
-            for &index in out.indexes.iter() {
+            for i in 0..out.indexes.len() {
+                let index = out.indexes[i];
                 if index < last_index
                     || (bi.null_index != -1 && index == bi.null_index)
                 {
-                    let set = out.interleaved_parts.get_or_insert(mcx::alloc_in(
+                    types_pathnodes::relids::relids_add_member_mut(
                         mcx,
-                        types_nodes::bitmapset::Bitmapset::empty(),
-                    )?);
-                    set.add_member(mcx, index)?;
+                        &mut out.interleaved_parts,
+                        index as u32,
+                    );
                 }
                 last_index = index;
             }
         }
         if bi.default_index != -1 {
-            let set = out.interleaved_parts.get_or_insert(mcx::alloc_in(
+            types_pathnodes::relids::relids_add_member_mut(
                 mcx,
-                types_nodes::bitmapset::Bitmapset::empty(),
-            )?);
-            set.add_member(mcx, bi.default_index)?;
+                &mut out.interleaved_parts,
+                bi.default_index as u32,
+            );
         }
     }
     Ok(out)
