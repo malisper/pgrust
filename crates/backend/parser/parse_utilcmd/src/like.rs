@@ -50,6 +50,7 @@ pub(crate) struct LikeCxt<'a, 'mcx> {
     pub nnconstraints: &'a mut NodeList<'mcx>,
     pub likeclauses: &'a mut NodeList<'mcx>,
     pub alist: &'a mut NodeList<'mcx>,
+    pub is_foreign: bool,
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -170,13 +171,21 @@ pub(crate) fn transformTableLikeClause<'mcx>(
         {
             def.generated = attribute.attgenerated as u8;
         }
-        if attribute.attidentity != 0 && (options & CREATE_TABLE_LIKE_IDENTITY) != 0 {
+        // Identity/storage/compression never copy onto foreign tables
+        // (C parse_utilcmd.c:1219,1239,1247 !cxt->isforeign).
+        if attribute.attidentity != 0
+            && (options & CREATE_TABLE_LIKE_IDENTITY) != 0
+            && !cxt.is_foreign
+        {
             unported("LIKE INCLUDING IDENTITY (identity sequences)");
         }
-        if (options & CREATE_TABLE_LIKE_STORAGE) != 0 {
+        if (options & CREATE_TABLE_LIKE_STORAGE) != 0 && !cxt.is_foreign {
             def.storage = attribute.attstorage as u8;
         }
-        if (options & CREATE_TABLE_LIKE_COMPRESSION) != 0 && attribute.attcompression != 0 {
+        if (options & CREATE_TABLE_LIKE_COMPRESSION) != 0
+            && attribute.attcompression != 0
+            && !cxt.is_foreign
+        {
             unported("LIKE INCLUDING COMPRESSION (GetCompressionMethodName)");
         }
         if (options & CREATE_TABLE_LIKE_COMMENTS) != 0 {
