@@ -383,9 +383,9 @@ fn typenameTypeMod<'mcx>(
     }
 }
 
-struct CreateStmtCxt<'mcx> {
-    blist: NodeList<'mcx>,
-    alist: NodeList<'mcx>,
+pub struct CreateStmtCxt<'mcx> {
+    pub blist: NodeList<'mcx>,
+    pub alist: NodeList<'mcx>,
 }
 
 fn transformColumnDefinition<'mcx>(
@@ -446,6 +446,8 @@ fn transformColumnDefinition<'mcx>(
             column,
             is_serial_oid,
             NodeList::nil(),
+            false,
+            None,
             false,
             cxt,
         )?;
@@ -540,6 +542,8 @@ fn transformColumnDefinition<'mcx>(
                     // C list_copy: generateSerialExtraStmts prepends AS.
                     constraint.options.clone_in(mcx)?,
                     true,
+                    None,
+                    false,
                     cxt,
                 )?;
                 let when = constraint.generated_when;
@@ -1159,8 +1163,10 @@ fn leak_str(s: PgString<'_>) -> &str {
     unsafe { core::str::from_utf8_unchecked(s.into_bytes().leak()) }
 }
 
-// generateSerialExtraStmts, CREATE TABLE serial+identity arms (ALTER lanes
-// and SEQUENCE NAME/LOGGED/UNLOGGED options are loud).
+// generateSerialExtraStmts, CREATE TABLE + ALTER serial/identity arms
+// (SEQUENCE NAME/LOGGED/UNLOGGED options are loud). rel = C's cxt->rel
+// (ALTER TABLE: namespace/persistence/owner come from the existing table);
+// col_exists routes the OWNED BY AlterSeqStmt to blist (AT_AddIdentity).
 fn generateSerialExtraStmts<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar<'mcx>,
@@ -1169,6 +1175,8 @@ fn generateSerialExtraStmts<'mcx>(
     seqtypid: Oid,
     seqoptions: NodeList<'mcx>,
     for_identity: bool,
+    rel: Option<&types_rel::Relation<'_>>,
+    col_exists: bool,
     cxt: &mut CreateStmtCxt<'mcx>,
 ) -> PgResult<(&'mcx str, &'mcx str)> {
     for opt in seqoptions.iter() {
@@ -1179,7 +1187,10 @@ fn generateSerialExtraStmts<'mcx>(
             _ => {}
         }
     }
-    let snamespaceid = RangeVarGetCreationNamespace(mcx, relation)?;
+    let snamespaceid = match rel {
+        Some(r) => r.rd_rel.relnamespace,
+        None => RangeVarGetCreationNamespace(mcx, relation)?,
+    };
     let snamespace = leak_str(
         lsyscache::get_namespace_name(mcx, snamespaceid)?
             .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
@@ -1195,7 +1206,8 @@ fn generateSerialExtraStmts<'mcx>(
             schemaname: Some(snamespace),
             relname: Some(sname),
             inh: true,
-            relpersistence: relation.relpersistence,
+            relpersistence: rel
+                .map_or(relation.relpersistence, |r| r.rd_rel.relpersistence),
             alias: None,
             location: -1,
         },
@@ -1224,7 +1236,7 @@ fn generateSerialExtraStmts<'mcx>(
     seqstmt.for_identity = for_identity;
     seqstmt.sequence = Some(seq_rv);
     seqstmt.options = options;
-    seqstmt.ownerId = InvalidOid;
+    seqstmt.ownerId = rel.map_or(InvalidOid, |r| r.rd_rel.relowner);
     cxt.blist.lappend(mcx, seqstmt.seal())?;
 
     // SAFETY: parse tree is analyze-owned; no derived refs live.
@@ -1251,7 +1263,11 @@ fn generateSerialExtraStmts<'mcx>(
     altseqstmt.sequence = Some(seq_rv);
     altseqstmt.options = NodeList::make1(mcx, owned_defel)?;
     altseqstmt.for_identity = for_identity;
-    cxt.alist.lappend(mcx, altseqstmt.seal())?;
+    if col_exists {
+        cxt.blist.lappend(mcx, altseqstmt.seal())?;
+    } else {
+        cxt.alist.lappend(mcx, altseqstmt.seal())?;
+    }
 
     Ok((snamespace, sname))
 }
@@ -1391,13 +1407,20 @@ pub fn quote_qualified_identifier<'mcx>(
 // newcmds list).
 pub fn transformAlterTableCmd<'mcx>(
     mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'_>,
     relname: &str,
     cnode: Node<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<CreateStmtCxt<'mcx>> {
     use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
+    let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
+    let arena_relname = || -> PgResult<&'mcx str> {
+        let mut s = PgString::new_in(mcx);
+        s.try_push_str(relname)?;
+        Ok(leak_str(s))
+    };
     match cmd.subtype {
         AlterTableType::AT_AddColumn => {
             let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
@@ -1405,15 +1428,10 @@ pub fn transformAlterTableCmd<'mcx>(
             let mut ixconstraints = NodeList::nil();
             let mut fkconstraints = NodeList::nil();
             let mut rv = RangeVar::default();
-            rv.relname = Some({
-                let mut s = PgString::new_in(mcx);
-                s.try_push_str(relname)?;
-                leak_str(s)
-            });
+            rv.relname = Some(arena_relname()?);
             rv.inh = true;
             rv.relpersistence = types_core::RELPERSISTENCE_PERMANENT;
             rv.location = -1;
-            let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
             transformColumnDefinition(
                 mcx,
                 defnode,
@@ -1439,8 +1457,105 @@ pub fn transformAlterTableCmd<'mcx>(
                     .expect("ColumnDef");
             }
         }
+        AlterTableType::AT_AddIdentity => {
+            let defnode = cmd.def.expect("AT_AddIdentity Constraint");
+            let con = defnode
+                .as_variant::<types_nodes::rawnodes::Constraint>()
+                .expect("Constraint");
+            let colname = cmd.name.expect("AT_AddIdentity name");
+            let when = con.generated_when;
+            let mut newdef = Node::build::<ColumnDef>(mcx)?;
+            newdef.colname = Some({
+                let mut s = PgString::new_in(mcx);
+                s.try_push_str(colname)?;
+                leak_str(s)
+            });
+            newdef.identity = when;
+            newdef.location = -1;
+            let newdef_node = newdef.seal();
+            let attnum = lsyscache::get_attnum(rel.rd_id, colname)?;
+            if attnum == 0 {
+                return Err(alter_undefined_column(colname, relname));
+            }
+            let cd = newdef_node.as_variant::<ColumnDef>().expect("ColumnDef");
+            let mut rv = RangeVar::default();
+            rv.relname = Some(arena_relname()?);
+            rv.inh = true;
+            rv.relpersistence = rel.rd_rel.relpersistence;
+            rv.location = -1;
+            generateSerialExtraStmts(
+                mcx,
+                &rv,
+                newdef_node,
+                cd,
+                lsyscache::get_atttype(rel.rd_id, attnum)?,
+                con.options.clone_in(mcx)?,
+                true,
+                Some(rel),
+                true,
+                &mut cxt,
+            )?;
+            // SAFETY: parse tree is statement-owned; no derived refs live.
+            unsafe {
+                cnode
+                    .with_mut::<AlterTableCmd, _>(|c| c.def = Some(newdef_node))
+                    .expect("AlterTableCmd");
+            }
+        }
+        AlterTableType::AT_SetIdentity => {
+            let mut newseqopts = NodeList::nil();
+            let mut newdef = NodeList::nil();
+            for opt in cmd.def.expect("AT_SetIdentity options").as_list().expect("DefElem list").iter()
+            {
+                let defel = opt.as_variant::<DefElem>().expect("DefElem");
+                if defel.defname == Some("generated") {
+                    newdef.lappend(mcx, opt)?;
+                } else {
+                    newseqopts.lappend(mcx, opt)?;
+                }
+            }
+            let colname = cmd.name.expect("AT_SetIdentity name");
+            let attnum = lsyscache::get_attnum(rel.rd_id, colname)?;
+            if attnum == 0 {
+                return Err(alter_undefined_column(colname, relname));
+            }
+            let seq_relid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, true)?;
+            if seq_relid != InvalidOid {
+                let snamespaceid = lsyscache::get_rel_namespace(seq_relid)?;
+                let snamespace = leak_str(
+                    lsyscache::get_namespace_name(mcx, snamespaceid)?
+                        .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
+                );
+                let sname = leak_str(
+                    lsyscache::get_rel_name(mcx, seq_relid)?
+                        .unwrap_or_else(|| panic!("cache lookup failed for relation {seq_relid}")),
+                );
+                let mut seq_rv = RangeVar::default();
+                seq_rv.schemaname = Some(snamespace);
+                seq_rv.relname = Some(sname);
+                seq_rv.inh = true;
+                seq_rv.relpersistence = types_core::RELPERSISTENCE_PERMANENT;
+                seq_rv.location = -1;
+                let mut seqstmt = Node::build::<AlterSeqStmt>(mcx)?;
+                seqstmt.sequence = Some(Node::mk_mut(mcx, seq_rv)?.seal_ref());
+                seqstmt.options = newseqopts;
+                seqstmt.for_identity = true;
+                seqstmt.missing_ok = false;
+                cxt.blist.lappend(mcx, seqstmt.seal())?;
+            }
+            // A non-identity column errors in ATExecSetIdentity, per C.
+            let newdef_node =
+                if newdef.is_nil() { None } else { Some(Node::mk_list(mcx, newdef)?) };
+            // SAFETY: parse tree is statement-owned; no derived refs live.
+            unsafe {
+                cnode
+                    .with_mut::<AlterTableCmd, _>(|c| c.def = newdef_node)
+                    .expect("AlterTableCmd");
+            }
+        }
         AlterTableType::AT_DropColumn
         | AlterTableType::AT_ColumnDefault
+        | AlterTableType::AT_DropIdentity
         | AlterTableType::AT_DropNotNull
         | AlterTableType::AT_SetNotNull
         | AlterTableType::AT_DropConstraint
@@ -1474,7 +1589,19 @@ pub fn transformAlterTableCmd<'mcx>(
     if !ckconstraints.is_nil() || !nnconstraints.is_nil() {
         unported("ALTER TABLE ADD COLUMN with CHECK/NOT NULL (AT_AddConstraint lane)");
     }
-    Ok(())
+    Ok(cxt)
+}
+
+#[cold]
+#[inline(never)]
+fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("column \"{colname}\" of relation \"{relname}\" does not exist"),
+        )
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+    )
 }
 
 #[cold]

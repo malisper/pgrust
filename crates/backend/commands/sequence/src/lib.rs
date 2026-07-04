@@ -151,6 +151,8 @@ pub fn init_seams() {
     sequence_seams::lastval_internal::set(lastval_internal);
     sequence_seams::do_setval::set(do_setval_entry);
     sequence_seams::delete_sequence_tuple::set(delete_sequence_tuple_entry);
+    sequence_seams::define_sequence::set(DefineSequence);
+    sequence_seams::alter_sequence::set(AlterSequence);
 }
 
 fn my_lxid() -> LocalTransactionId {
