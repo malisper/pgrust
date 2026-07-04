@@ -416,7 +416,15 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
         }
     }
 
-    debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+    // Gather partial paths for every baserel except an inheritance child
+    // (the parent appendrel gathers) and the topmost scan/join rel (it waits
+    // for the final tlist; see grouping_planner).
+    if run.root.rel(rel).reloptkind == RELOPT_BASEREL
+        && !crate::relnode::relids_equal(&run.root.rel(rel).relids, &run.root.all_query_rels)
+    {
+        generate_useful_gather_paths(run, rel, false)?;
+    }
+
     set_cheapest(run, rel)?;
     Ok(())
 }
@@ -995,25 +1003,40 @@ fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     Ok(())
 }
 
-// set_rel_consider_parallel (allpaths.c), RTE_RELATION arm.
+// set_rel_consider_parallel (allpaths.c).
 fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     debug_assert!(!run.root.rel(rel).consider_parallel);
     let rte = run.rte(rti);
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
+            // Workers can't read the leader's temp buffers.
             if lsyscache::get_rel_persistence(rte.relid)? != b'p' as i8 {
                 return Ok(());
             }
             debug_assert!(rte.tablesample.is_none());
         }
-        RTEKind::RTE_FUNCTION
-        | RTEKind::RTE_TABLEFUNC
-        | RTEKind::RTE_VALUES
-        | RTEKind::RTE_SUBQUERY => {
-            // C tests is_parallel_safe over the funcexprs/values_lists (and
-            // security_barrier for subqueries); parallel plans are loud on
-            // this lane, so the flag stays conservatively false.
-            return Ok(());
+        RTEKind::RTE_SUBQUERY => {
+            // LIMIT/OFFSET in a subquery gives nondeterministic row order
+            // across workers.
+            let subquery = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+            if crate::grouping::limit_needed(subquery) {
+                return Ok(());
+            }
+        }
+        RTEKind::RTE_FUNCTION => {
+            let node = types_nodes::Node::mk_list(run.mcx, rte.functions.clone_in(run.mcx)?)?;
+            if !crate::is_parallel_safe_opt(run, Some(node))? {
+                return Ok(());
+            }
+        }
+        RTEKind::RTE_VALUES => {
+            let node = types_nodes::Node::mk_list(run.mcx, rte.values_lists.clone_in(run.mcx)?)?;
+            if !crate::is_parallel_safe_opt(run, Some(node))? {
+                return Ok(());
+            }
+        }
+        RTEKind::RTE_TABLEFUNC => {
+            return Ok(()); // not parallel safe
         }
         RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE => {
             return Ok(()); // tuplestores aren't shared among workers
@@ -1050,12 +1073,280 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
         return Ok(());
     }
 
-    // create_plain_partial_paths: M3 parallel lane (Gather is loud).
     let seqscan = crate::pathnode::create_seqscan_path(run, rel, 0)?;
     add_path(run, rel, seqscan);
 
+    // required_outer is empty here (lateral assert above), so the C
+    // `required_outer == NULL` condition is just consider_parallel.
+    if run.root.rel(rel).consider_parallel {
+        create_plain_partial_paths(run, rel)?;
+    }
+
     crate::indxpath::create_index_paths(run, rel)?;
     Ok(())
+}
+
+// create_plain_partial_paths (allpaths.c).
+fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let parallel_workers = {
+        let r = run.root.rel(rel);
+        ::allpaths::compute_parallel_worker(
+            r,
+            r.pages as f64,
+            -1.0,
+            crate::gucs::max_parallel_workers_per_gather(),
+        )
+    };
+    if parallel_workers <= 0 {
+        return Ok(());
+    }
+    let p = crate::pathnode::create_seqscan_path(run, rel, parallel_workers)?;
+    crate::pathnode::add_partial_path(run, rel, p);
+    Ok(())
+}
+
+// generate_gather_paths (allpaths.c): only call once all partial paths for
+// the rel exist (add_partial_path may drop paths a Gather references).
+pub(crate) fn generate_gather_paths(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    override_rows: bool,
+) -> PgResult<()> {
+    if run.root.rel(rel).partial_pathlist.is_empty() {
+        return Ok(());
+    }
+    let target = run.rel_reltarget_id(rel);
+
+    // Gather output is unordered: only the cheapest partial path (kept in
+    // front by add_partial_path) is interesting for a plain Gather.
+    let cheapest = run.root.rel(rel).partial_pathlist[0];
+    let rows = {
+        let cb = run.root.path(cheapest).base();
+        override_rows.then(|| ::costsize::compute_gather_rows(cb.rows, cb.parallel_workers))
+    };
+    let gather = crate::pathnode::create_gather_path(run, rel, cheapest, Some(target), rows);
+    add_path(run, rel, gather);
+
+    let mut i = 0usize;
+    while i < run.root.rel(rel).partial_pathlist.len() {
+        let subpath = run.root.rel(rel).partial_pathlist[i];
+        i += 1;
+        let sb = run.root.path(subpath).base();
+        if sb.pathkeys.is_empty() {
+            continue;
+        }
+        let rows =
+            override_rows.then(|| ::costsize::compute_gather_rows(sb.rows, sb.parallel_workers));
+        let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &sb.pathkeys);
+        let gm =
+            crate::pathnode::create_gather_merge_path(run, rel, subpath, Some(target), keys, rows);
+        add_path(run, rel, gm);
+    }
+    Ok(())
+}
+
+// get_useful_pathkeys_for_relation (allpaths.c): today only query_pathkeys
+// prefixes qualify, so at most one entry comes back.
+fn get_useful_pathkeys_for_relation<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    require_parallel_safe: bool,
+) -> PgResult<Vec<mcx::PgVec<'mcx, PathKey>>> {
+    let mut useful_pathkeys_list = Vec::new();
+    if run.root.query_pathkeys.is_empty() {
+        return Ok(useful_pathkeys_list);
+    }
+    let mut npathkeys = 0usize;
+    while npathkeys < run.root.query_pathkeys.len() {
+        let pathkey = run.root.query_pathkeys[npathkeys];
+        let pathkey_ec = pathkey.pk_eclass.expect("pathkey has an eclass");
+        // A sortable prefix is still useful (incremental sort); stop at the
+        // first pathkey with no early-computable member.
+        if !relation_can_be_sorted_early(run, rel, pathkey_ec, require_parallel_safe)? {
+            break;
+        }
+        npathkeys += 1;
+    }
+    if npathkeys > 0 {
+        let mut keys: mcx::PgVec<'mcx, PathKey> = mcx::PgVec::new_in(run.mcx);
+        keys.extend(run.root.query_pathkeys.iter().take(npathkeys).copied());
+        useful_pathkeys_list.push(keys);
+    }
+    Ok(useful_pathkeys_list)
+}
+
+// generate_useful_gather_paths (allpaths.c): plain gathers plus Gather
+// Merges over (incrementally) sorted partial paths for useful orderings.
+pub(crate) fn generate_useful_gather_paths(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    override_rows: bool,
+) -> PgResult<()> {
+    if run.root.rel(rel).partial_pathlist.is_empty() {
+        return Ok(());
+    }
+
+    generate_gather_paths(run, rel, override_rows)?;
+
+    let useful_pathkeys_list = get_useful_pathkeys_for_relation(run, rel, true)?;
+    let cheapest_partial_path = run.root.rel(rel).partial_pathlist[0];
+    let target = run.rel_reltarget_id(rel);
+
+    for useful_pathkeys in useful_pathkeys_list {
+        let mut i = 0usize;
+        while i < run.root.rel(rel).partial_pathlist.len() {
+            let subpath = run.root.rel(rel).partial_pathlist[i];
+            i += 1;
+            let (is_sorted, presorted_keys) = crate::pathkeys::pathkeys_count_contained_in(
+                &useful_pathkeys,
+                &run.root.path(subpath).base().pathkeys,
+            );
+            // Fully sorted subpaths already got their Gather Merge in
+            // generate_gather_paths; no sort to add.
+            if is_sorted {
+                continue;
+            }
+            if subpath != cheapest_partial_path
+                && (presorted_keys == 0 || !crate::gucs::enable_incremental_sort())
+            {
+                continue;
+            }
+            let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &useful_pathkeys);
+            let sorted = if presorted_keys == 0 || !crate::gucs::enable_incremental_sort() {
+                crate::pathnode::create_sort_path(run, rel, subpath, keys, -1.0)
+            } else {
+                crate::pathnode::create_incremental_sort_path(
+                    run,
+                    rel,
+                    subpath,
+                    keys,
+                    presorted_keys,
+                    -1.0,
+                )?
+            };
+            let (rows, gm_keys) = {
+                let sb = run.root.path(sorted).base();
+                (
+                    ::costsize::compute_gather_rows(sb.rows, sb.parallel_workers),
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &sb.pathkeys),
+                )
+            };
+            let gm = crate::pathnode::create_gather_merge_path(
+                run,
+                rel,
+                sorted,
+                Some(target),
+                gm_keys,
+                override_rows.then_some(rows),
+            );
+            add_path(run, rel, gm);
+        }
+    }
+    Ok(())
+}
+
+// relation_can_be_sorted_early (equivclass.c).
+fn relation_can_be_sorted_early(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    ec: types_pathnodes::EcId,
+    require_parallel_safe: bool,
+) -> PgResult<bool> {
+    // Volatile-EC sorts must always wait for the final output step.
+    if run.root.ec(ec).ec_has_volatile {
+        return Ok(false);
+    }
+    let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).relids);
+    let target = run.rel_reltarget_id(rel);
+
+    let nexprs = run.root.pathtarget(target).exprs.len();
+    for i in 0..nexprs {
+        let texpr = *run.root.expr_node(run.root.pathtarget(target).exprs[i]);
+        let Some(em_id) = crate::createplan::find_ec_member_matching_expr(run, ec, texpr, &relids)
+        else {
+            continue;
+        };
+        let em_expr = *run.root.expr_node(run.root.em(em_id).em_expr);
+        // SRF results can't be computed early either.
+        if coerce::expression_returns_set(em_expr) {
+            continue;
+        }
+        if require_parallel_safe && !crate::is_parallel_safe_opt(run, Some(em_expr))? {
+            continue;
+        }
+        return Ok(true);
+    }
+
+    let Some(em_id) = find_computable_ec_member(run, ec, target, &relids, require_parallel_safe)?
+    else {
+        return Ok(false);
+    };
+    let em_expr = *run.root.expr_node(run.root.em(em_id).em_expr);
+    // SRFs can't appear in WHERE, so no other member could do better.
+    if coerce::expression_returns_set(em_expr) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+// find_computable_ec_member (equivclass.c). The reltarget stands in for C's
+// "exprs" list (the only ported call site); PVC_INCLUDE_CONVERTROWTYPES is
+// dead until appendrel wholerow children exist (the var walker is loud there).
+fn find_computable_ec_member(
+    run: &mut PlannerRun<'_>,
+    ec: types_pathnodes::EcId,
+    target: types_pathnodes::PtId,
+    relids: &types_pathnodes::Relids<'_>,
+    require_parallel_safe: bool,
+) -> PgResult<Option<types_pathnodes::EmId>> {
+    use vars::{PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_INCLUDE_WINDOWFUNCS};
+    let mcx = run.mcx;
+    let flags = PVC_INCLUDE_AGGREGATES | PVC_INCLUDE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS;
+
+    let mut exprvars: Vec<types_nodes::Node<'_>> = Vec::new();
+    let nexprs = run.root.pathtarget(target).exprs.len();
+    for i in 0..nexprs {
+        let e = *run.root.expr_node(run.root.pathtarget(target).exprs[i]);
+        for v in &vars::pull_var_clause(mcx, e, flags)? {
+            exprvars.push(v);
+        }
+    }
+
+    let candidates = {
+        use crate::relnode::relids_members;
+        let e = run.root.ec(ec);
+        let mut out: Vec<types_pathnodes::EmId> = Vec::new();
+        out.extend(e.ec_members.iter().copied());
+        if !e.ec_childmembers.is_empty() {
+            for r in relids_members(relids) {
+                if let Some(list) = e.ec_childmembers.get(r as usize) {
+                    out.extend(list.iter().copied());
+                }
+            }
+        }
+        out
+    };
+
+    'candidate: for em_id in candidates {
+        let em = run.root.em(em_id);
+        if em.em_is_const {
+            continue;
+        }
+        if em.em_is_child && !crate::relnode::relids_is_subset(&em.em_relids, relids) {
+            continue;
+        }
+        let em_expr = *run.root.expr_node(em.em_expr);
+        for emv in &vars::pull_var_clause(mcx, em_expr, flags)? {
+            if !exprvars.iter().any(|&x| types_nodes::equal(x, emv)) {
+                continue 'candidate;
+            }
+        }
+        if require_parallel_safe && !crate::is_parallel_safe_opt(run, Some(em_expr))? {
+            continue;
+        }
+        return Ok(Some(em_id));
+    }
+    Ok(None)
 }
 
 // generate_partitionwise_join_paths (allpaths.c).

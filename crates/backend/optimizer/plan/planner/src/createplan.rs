@@ -77,6 +77,8 @@ fn create_plan_recurse<'mcx>(
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
+        PathNode::GatherPath(_) => create_gather_plan(run, path_id),
+        PathNode::GatherMergePath(_) => create_gather_merge_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::LockRowsPath(_) => create_lockrows_plan(run, path_id, flags),
         PathNode::UniquePath(_) => create_unique_plan(run, path_id, flags),
@@ -2698,9 +2700,91 @@ fn create_sort_plan<'mcx>(
     Ok(plan)
 }
 
+// create_gather_plan (createplan.c).
+fn create_gather_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, num_workers, single_copy, target_id) = {
+        let PathNode::GatherPath(g) = run.root.path(path_id) else { unreachable!() };
+        (
+            g.subpath.expect("Gather subpath"),
+            g.num_workers,
+            g.single_copy,
+            g.path.pathtarget_id.expect("Gather path has a pathtarget"),
+        )
+    };
+    // Projection pushes down to the child: the work parallelizes, and no
+    // system column can ride the tuple queue (MinimalTuple representation).
+    let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let mut plan = Node::build::<types_nodes::plannodes::Gather>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.num_workers = num_workers;
+    plan.rescan_param = crate::cte::assign_special_exec_param(run)?;
+    plan.single_copy = single_copy;
+    plan.invisible = false;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+
+    run.glob.parallel_mode_needed = true;
+    Ok(plan.seal())
+}
+
+// create_gather_merge_plan (createplan.c).
+fn create_gather_merge_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, num_workers, target_id, pathkeys) = {
+        let PathNode::GatherMergePath(g) = run.root.path(path_id) else { unreachable!() };
+        (
+            g.subpath.expect("GatherMerge subpath"),
+            g.num_workers,
+            g.path.pathtarget_id.expect("GatherMerge path has a pathtarget"),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &g.path.pathkeys),
+        )
+    };
+    assert!(!pathkeys.is_empty());
+    let tlist = build_path_tlist(run, target_id)?;
+    // As with Gather, project away columns in the workers.
+    let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
+
+    let mut plan = Node::build::<types_nodes::plannodes::GatherMerge>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.num_workers = num_workers;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    plan.rescan_param = crate::cte::assign_special_exec_param(run)?;
+
+    let relids = {
+        let subparent = run.root.path(subpath_id).base().parent;
+        types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(subparent).relids)
+    };
+    // create_gather_merge_path guaranteed the order; prepare only computes
+    // the sort-column info (the resjunk-injection leg stays loud inside).
+    let cols = prepare_sort_from_pathkeys(
+        run,
+        &subplan.as_plan().expect("plan node").targetlist,
+        &pathkeys,
+        &relids,
+        None,
+    )?;
+    plan.numCols = cols.sort_col_idx.len() as i32;
+    plan.sortColIdx = mcx::slice_borrow_in(mcx, &cols.sort_col_idx)?;
+    plan.sortOperators = mcx::slice_borrow_in(mcx, &cols.sort_operators)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &cols.collations)?;
+    plan.nullsFirst = mcx::slice_borrow_in(mcx, &cols.nulls_first)?;
+    plan.plan.lefttree = Some(subplan);
+
+    run.glob.parallel_mode_needed = true;
+    Ok(plan.seal())
+}
+
 // find_ec_member_matching_expr (equivclass.c): child members match only when
 // computable from relids.
-fn find_ec_member_matching_expr<'mcx>(
+pub(crate) fn find_ec_member_matching_expr<'mcx>(
     run: &PlannerRun<'mcx>,
     ec: types_pathnodes::EcId,
     expr: Node<'mcx>,

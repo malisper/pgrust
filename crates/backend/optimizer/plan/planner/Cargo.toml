@@ -23,7 +23,9 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_portal = { path = "../../../../_support/types/portal" }
 planner_seams = { path = "../planner_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
 costsize = { path = "../../path/costsize" }
+allpaths = { path = "../../path/allpaths" }
 pathnode = { path = "../../util/pathnode" }
 equivclass = { path = "../../path/equivclass" }
 indxpath = { path = "../../path/indxpath" }

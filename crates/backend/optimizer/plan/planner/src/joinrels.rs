@@ -60,7 +60,11 @@ pub fn standard_join_search<'mcx>(
         );
         for &rel in rels.iter() {
             crate::allpaths::generate_partitionwise_join_paths(run, rel)?;
-            debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+            // No partial join paths exist yet (partial-join lane), so this
+            // gathers nothing today; the call keeps C's shape.
+            if !crate::relnode::relids_equal(&run.root.rel(rel).relids, &run.root.all_query_rels) {
+                crate::allpaths::generate_useful_gather_paths(run, rel, false)?;
+            }
             crate::pathnode::set_cheapest(run, rel)?;
         }
     }

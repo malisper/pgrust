@@ -214,13 +214,13 @@ pub fn contain_volatile_functions_after_planning(_expr: Node<'_>) -> PgResult<bo
     panic!("contain_volatile_functions_after_planning deferred: expression_planner unported");
 }
 
-struct MaxParallelHazard<'a> {
+struct MaxParallelHazard {
     max_hazard: i8,
     max_interesting: i8,
-    safe_param_ids: &'a [i32],
+    safe_param_ids: Vec<i32>,
 }
 
-impl MaxParallelHazard<'_> {
+impl MaxParallelHazard {
     fn test(&mut self, proparallel: i8) -> bool {
         test_hazard(proparallel, self.max_interesting, &mut self.max_hazard)
     }
@@ -242,7 +242,7 @@ fn test_hazard(proparallel: i8, max_interesting: i8, max_hazard: &mut i8) -> boo
     }
 }
 
-impl<'a, 'mcx> NodeWalker<'mcx> for MaxParallelHazard<'a> {
+impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         let (mi, mh) = (self.max_interesting, &mut self.max_hazard);
         if check_functions_in_node(node, &mut |f| {
@@ -261,12 +261,26 @@ impl<'a, 'mcx> NodeWalker<'mcx> for MaxParallelHazard<'a> {
             }
             NodeTag::T_NextValueExpr => Ok(self.test(PROPARALLEL_UNSAFE)),
             NodeTag::T_SubPlan => {
-                if !node.as_sub_plan().unwrap().parallel_safe
-                    && self.test(PROPARALLEL_RESTRICTED)
-                {
+                // The subplan's output params are safe within its testexpr
+                // (and only there); args get no such exemption.
+                let sp = node.as_sub_plan().unwrap();
+                if !sp.parallel_safe && self.test(PROPARALLEL_RESTRICTED) {
                     return Ok(true);
                 }
-                expression_tree_walker(node, self)
+                let save_len = self.safe_param_ids.len();
+                self.safe_param_ids.extend(sp.paramIds.iter());
+                if let Some(testexpr) = sp.testexpr {
+                    if self.visit(testexpr)? {
+                        return Ok(true);
+                    }
+                }
+                self.safe_param_ids.truncate(save_len);
+                for arg in &sp.args {
+                    if self.visit(arg)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
             t @ NodeTag::T_RestrictInfo => deferred("max_parallel_hazard_walker", t),
             NodeTag::T_Param => {
@@ -303,7 +317,7 @@ pub fn max_parallel_hazard<'mcx>(parse: &'mcx types_nodes::parsenodes::Query<'mc
     let mut cx = MaxParallelHazard {
         max_hazard: PROPARALLEL_SAFE,
         max_interesting: PROPARALLEL_UNSAFE,
-        safe_param_ids: &[],
+        safe_param_ids: Vec::new(),
     };
     cx.visit_query_ref(parse)?;
     Ok(cx.max_hazard)
@@ -315,7 +329,7 @@ pub fn max_parallel_hazard<'mcx>(parse: &'mcx types_nodes::parsenodes::Query<'mc
 pub fn is_parallel_safe(
     glob_max_parallel_hazard: i8,
     param_exec_types_is_empty: bool,
-    safe_param_ids: &[i32],
+    safe_param_ids: Vec<i32>,
     node: Node<'_>,
 ) -> PgResult<bool> {
     if glob_max_parallel_hazard == PROPARALLEL_SAFE && param_exec_types_is_empty {

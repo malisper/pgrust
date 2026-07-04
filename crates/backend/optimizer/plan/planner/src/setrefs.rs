@@ -632,6 +632,10 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_Hash => {
             set_hash_references(run, plan, rtoffset)?;
         }
+        NodeTag::T_Gather | NodeTag::T_GatherMerge => {
+            set_upper_references(run, plan, rtoffset)?;
+            set_param_references(run, plan)?;
+        }
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
@@ -886,6 +890,49 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
 
 // set_upper_references (setrefs.c): retarget an upper node's tlist at its
 // subplan's output; the sortgroupref fast path is the M3 grouping lane.
+// set_param_references (setrefs.c): record which external initplan output
+// Params feed the Gather subtree (the executor rebroadcasts their values to
+// workers). extParam is empty unless ss_finalize_plan ran (paramExecTypes
+// non-NIL), exactly as in C.
+fn set_param_references<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(matches!(plan.node_tag(), NodeTag::T_Gather | NodeTag::T_GatherMerge));
+    let base = plan.as_plan().expect("plan node");
+    let lefttree = base.lefttree.expect("Gather has a subplan");
+    let ext = &lefttree.as_plan().expect("plan node").extParam;
+    if ext.is_empty() {
+        return Ok(());
+    }
+    let mut init_set_param = types_nodes::Bitmapset::empty();
+    for root in run
+        .suspended_roots
+        .iter()
+        .map(|s| &s.root)
+        .chain(core::iter::once(&run.root))
+    {
+        for &ipid in root.init_plans.iter() {
+            let sp = root
+                .expr_node(ipid)
+                .as_sub_plan()
+                .expect("init_plans holds SubPlan nodes");
+            for p in sp.setParam.iter() {
+                init_set_param.add_member(mcx, p)?;
+            }
+        }
+    }
+    let init_param = ext.intersect(&init_set_param, mcx)?;
+    // SAFETY: exclusive plan-tree ownership (prologue note).
+    unsafe {
+        if plan.node_tag() == NodeTag::T_Gather {
+            plan.with_mut::<types_nodes::plannodes::Gather, _>(|g| g.initParam = init_param)
+        } else {
+            plan.with_mut::<types_nodes::plannodes::GatherMerge, _>(|g| g.initParam = init_param)
+        }
+    }
+    .expect("Gather node");
+    Ok(())
+}
+
 fn set_upper_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     plan: Node<'mcx>,
