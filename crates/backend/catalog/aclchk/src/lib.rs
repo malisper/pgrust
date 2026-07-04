@@ -7,7 +7,7 @@ use adt_acl::{
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
 use cache_syscache::cacheinfo::{
-    ATTNUM, AUTHOID, DATABASEOID, LANGOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID,
+    ATTNUM, AUTHOID, DATABASEOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID,
 };
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
@@ -41,6 +41,10 @@ pub const ACLCHECK_NOT_OWNER: i32 = 2;
 const ANUM_PG_DATABASE_DATDBA: i32 = 3;
 const ANUM_PG_DATABASE_DATACL: i32 = 18;
 const ANUM_PG_PROC_PROOWNER: i32 = 4;
+const ANUM_PG_FOREIGN_DATA_WRAPPER_FDWOWNER: i32 = 3;
+const ANUM_PG_FOREIGN_DATA_WRAPPER_FDWACL: i32 = 6;
+const ANUM_PG_FOREIGN_SERVER_SRVOWNER: i32 = 3;
+const ANUM_PG_FOREIGN_SERVER_SRVACL: i32 = 7;
 const ANUM_PG_PROC_PROACL: i32 = 30;
 const ANUM_PG_TYPE_TYPOWNER: i32 = 4;
 pub(crate) const ANUM_PG_TYPE_TYPTYPE: i32 = 7;
@@ -199,6 +203,20 @@ fn object_aclmask_ext(
             4,
             AclObjectType::Tablespace,
             "tablespace",
+        ),
+        types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => (
+            FOREIGNDATAWRAPPEROID,
+            ANUM_PG_FOREIGN_DATA_WRAPPER_FDWOWNER,
+            ANUM_PG_FOREIGN_DATA_WRAPPER_FDWACL,
+            AclObjectType::Fdw,
+            "foreign-data wrapper",
+        ),
+        types_core::FOREIGN_SERVER_RELATION_ID => (
+            FOREIGNSERVEROID,
+            ANUM_PG_FOREIGN_SERVER_SRVOWNER,
+            ANUM_PG_FOREIGN_SERVER_SRVACL,
+            AclObjectType::ForeignServer,
+            "foreign server",
         ),
         _ => panic!("object_aclmask: classid {classid} unported (ObjectProperty table)"),
     };
