@@ -615,11 +615,10 @@ fn ExpandIndirectionStar<'mcx>(
     let expr = if trimmed.is_nil() {
         transformExpr(mcx, pstate, arg, exprKind)?
     } else {
-        let stripped = Node::mk_mut(
+        let stripped = Node::mk(
             mcx,
             types_nodes::rawnodes::A_Indirection { arg: Some(arg), indirection: trimmed },
-        )?
-        .seal_ref();
+        )?;
         transformExpr(mcx, pstate, stripped, exprKind)?
     };
     ExpandRowReference(mcx, pstate, expr, make_target_entry)
