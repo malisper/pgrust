@@ -417,6 +417,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"NAMEDARGEXPR" => self.read_named_arg_expr(),
             b"FIELDSELECT" => self.read_field_select(),
             b"FIELDSTORE" => self.read_field_store(),
+            b"ROWEXPR" => self.read_row_expr(),
             b"MERGEACTION" => self.read_merge_action(),
             b"XMLEXPR" => self.read_xml_expr(),
             b"TABLEFUNC" => self.read_table_func(),
@@ -689,6 +690,17 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         n.argnumber = self.read_i32("argnumber");
         n.location = self.read_location("location");
         Ok(n.seal())
+    }
+
+    fn read_row_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut r = Node::build::<types_nodes::primnodes::RowExpr>(mcx)?;
+        r.args = self.read_node_list("args")?;
+        r.row_typeid = self.read_u32("row_typeid");
+        r.row_format = coercion_form(self.read_u32("row_format"));
+        r.colnames = self.read_node_list("colnames")?;
+        r.location = self.read_location("location");
+        Ok(r.seal())
     }
 
     fn read_field_select(&mut self) -> PgResult<Node<'mcx>> {
