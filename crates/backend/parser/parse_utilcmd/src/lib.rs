@@ -1847,6 +1847,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 &mut nnconstraints,
                 &mut ixconstraints,
                 &mut fkconstraints,
+                false,
             )?;
             if !ixconstraints.is_nil() || !fkconstraints.is_nil() {
                 unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
