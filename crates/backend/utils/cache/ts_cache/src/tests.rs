@@ -2,8 +2,8 @@ use super::*;
 
 fn items(input: &[u8]) -> Vec<(String, String, Option<i64>)> {
     let ctx = MemoryContext::new("deflist-test");
-    deserialize_deflist(ctx.mcx(), input)
-        .expect("parse")
+    let parsed = deserialize_deflist(ctx.mcx(), input).expect("parse");
+    let out = parsed
         .iter()
         .map(|i| {
             (
@@ -12,7 +12,8 @@ fn items(input: &[u8]) -> Vec<(String, String, Option<i64>)> {
                 i.int_value,
             )
         })
-        .collect()
+        .collect();
+    out
 }
 
 #[test]

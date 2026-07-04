@@ -130,16 +130,16 @@ fn tsdicts_bad_pairs_oracle() {
     );
     let mcx = static_mcx();
 
-    let err = make_dict(mcx, "ispell_sample", "hunspell_sample_long").unwrap_err();
+    let err = make_dict(mcx, "ispell_sample", "hunspell_sample_long").err().unwrap();
     assert_eq!(err, "invalid affix alias \"GJUS\"");
 
-    let err = make_dict(mcx, "ispell_sample", "hunspell_sample_num").unwrap_err();
+    let err = make_dict(mcx, "ispell_sample", "hunspell_sample_num").err().unwrap();
     assert_eq!(err, "invalid affix flag \"SZ\\\"");
 
     assert!(make_dict(mcx, "hunspell_sample_long", "ispell_sample").is_ok());
     assert!(make_dict(mcx, "hunspell_sample_long", "hunspell_sample_num").is_ok());
     assert!(make_dict(mcx, "hunspell_sample_num", "ispell_sample").is_ok());
 
-    let err = make_dict(mcx, "hunspell_sample_num", "hunspell_sample_long").unwrap_err();
+    let err = make_dict(mcx, "hunspell_sample_num", "hunspell_sample_long").err().unwrap();
     assert_eq!(err, "invalid affix alias \"302,301,202,303\"");
 }
