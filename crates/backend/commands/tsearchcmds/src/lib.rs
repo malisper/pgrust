@@ -312,7 +312,7 @@ fn make_dictionary_dependencies(
     templId: Oid,
 ) -> PgResult<ObjectAddress> {
     let myself = ObjectAddress::set(TSDictionaryRelationId, dictOid);
-    pg_depend::recordDependencyOnOwner(myself.classId, myself.objectId, owner);
+    pg_depend::recordDependencyOnOwner(mcx, myself.classId, myself.objectId, owner)?;
     let mut refs = [
         ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid),
         ObjectAddress::set(TSTemplateRelationId, templId),
@@ -479,7 +479,7 @@ fn make_configuration_dependencies<'mcx>(
         pg_depend::deleteDependencyRecordsFor(mcx, myself.classId, myself.objectId, true)?;
         // C also flushes pg_shdepend; the pinned owner recorded nothing there.
     }
-    pg_depend::recordDependencyOnOwner(myself.classId, myself.objectId, owner);
+    pg_depend::recordDependencyOnOwner(mcx, myself.classId, myself.objectId, owner)?;
 
     let mut refs: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
     refs.push(ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid));
