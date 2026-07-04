@@ -197,7 +197,7 @@ fn rescan_with_random_access_replays_without_resort() {
     let (mut node, mut estate, desc, mut feed) = setup(1, rows, EXEC_FLAG_REWIND);
     let out = drain(&mut node, &mut estate, &desc, &mut feed);
     assert_eq!(out, vec![vec![Some(1)], vec![Some(2)]]);
-    let need_outer = exec_rescan_sort(&mut node, &mut estate);
+    let need_outer = exec_rescan_sort(&mut node, &mut estate).unwrap();
     assert!(!need_outer);
     let out = drain(&mut node, &mut estate, &desc, &mut feed);
     assert_eq!(out, vec![vec![Some(1)], vec![Some(2)]]);
@@ -209,7 +209,7 @@ fn rescan_without_random_access_resorts() {
     let (mut node, mut estate, desc, mut feed) = setup(1, rows.clone(), 0);
     let out = drain(&mut node, &mut estate, &desc, &mut feed);
     assert_eq!(out.len(), 2);
-    let need_outer = exec_rescan_sort(&mut node, &mut estate);
+    let need_outer = exec_rescan_sort(&mut node, &mut estate).unwrap();
     assert!(need_outer);
     feed.next = 0;
     let out = drain(&mut node, &mut estate, &desc, &mut feed);

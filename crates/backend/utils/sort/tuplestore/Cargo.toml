@@ -21,3 +21,15 @@ exectuples = { path = "../../../executor/exectuples" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 tuplestore_hold_seams = { path = "../tuplestore_hold_seams" }
+
+[dev-dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+elog = { path = "../../error/elog" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../activity/waitevent_seams" }
+pgstat_seams = { path = "../../activity/pgstat_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+resowner = { path = "../../resowner/resowner" }
+resowner_seams = { path = "../../resowner/resowner_seams" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }

@@ -12389,10 +12389,19 @@ dependencies = [
 name = "sort_storage"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
  "elog",
  "fd",
+ "guc_tables",
+ "ipc_seams",
  "mcx",
+ "pgstat_seams",
+ "resowner",
+ "resowner_seams",
  "types_error",
+ "types_resowner",
+ "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -13833,16 +13842,24 @@ dependencies = [
  "adt_numeric",
  "adt_timestamp",
  "adt_uuid",
+ "aio_seams",
  "datum",
+ "elog",
  "exectuples",
+ "fd",
  "fmgr_seams",
+ "guc_tables",
  "heaptuple",
  "init_small",
+ "ipc_seams",
  "lsyscache",
  "mcx",
  "nbtree",
  "pg_locale",
+ "pgstat_seams",
  "postgres_seams",
+ "resowner",
+ "resowner_seams",
  "sort_storage",
  "tuplesort_seams",
  "types_core",
@@ -13851,9 +13868,12 @@ dependencies = [
  "types_hash",
  "types_nbtree",
  "types_rel",
+ "types_resowner",
  "types_slot",
  "types_tuple",
  "varlena",
+ "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -13871,19 +13891,29 @@ dependencies = [
 name = "tuplestore"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
  "datum",
+ "elog",
  "exectuples",
  "fd",
+ "guc_tables",
  "heaptuple",
  "init_small",
+ "ipc_seams",
  "mcx",
+ "pgstat_seams",
  "postgres_seams",
+ "resowner",
+ "resowner_seams",
  "tuplestore_hold_seams",
  "types_core",
  "types_error",
  "types_portal",
+ "types_resowner",
  "types_slot",
  "types_tuple",
+ "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
