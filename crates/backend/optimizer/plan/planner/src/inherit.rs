@@ -551,11 +551,8 @@ pub fn adjust_child_rinfo<'mcx>(
     ri.eval_cost.startup = -1.0;
     ri.norm_selec = -1.0;
     ri.outer_selec = -1.0;
-    // C keeps left_ec/right_ec (child EC members make the parent EC valid for
-    // the child); eclass-lite has no child members, so fresh ECs are built
-    // from the translated clause instead.
-    ri.left_ec = None;
-    ri.right_ec = None;
+    // left_ec/right_ec stay: each child variable is implicitly equivalent to
+    // its parent, so the clause is still a member of the same parent ECs.
     ri.left_em = None;
     ri.right_em = None;
     ri.scansel_cache = PgVec::new_in(mcx);

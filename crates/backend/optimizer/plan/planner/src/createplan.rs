@@ -2343,7 +2343,7 @@ fn create_upper_unique_plan<'mcx>(
         let mut found: Option<(i16, u32)> = None;
         for tle_node in &tlist {
             let tle = tle_node.as_target_entry().expect("TargetEntry");
-            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr) {
+            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, &None) {
                 found = Some((tle.resno, run.root.em(em_id).em_datatype));
                 break;
             }
@@ -2469,26 +2469,51 @@ fn create_sort_plan<'mcx>(
     };
     // Sort can't project: request a tlist without excess columns.
     let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
-    // IS_OTHER_REL child sorts can't arise (append lanes are loud).
-    let plan = make_sort_from_pathkeys(run, subplan, &pathkeys)?;
+    // Child sorts resolve pathkey EC members through the child rel's relids.
+    let relids = {
+        let subparent = run.root.path(subpath_id).base().parent;
+        if types_pathnodes::relids::relids_is_empty(&run.root.rel(subparent).top_parent_relids)
+        {
+            None
+        } else {
+            let parent = run.root.path(path_id).base().parent;
+            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
+        }
+    };
+    let plan = make_sort_from_pathkeys(run, subplan, &pathkeys, &relids)?;
     copy_generic_path_info_node(run, plan, path_id);
     Ok(plan)
 }
 
-// find_ec_member_matching_expr (equivclass.c); relids=NULL so child members
-// are skipped.
+// find_ec_member_matching_expr (equivclass.c): child members match only when
+// computable from relids.
 fn find_ec_member_matching_expr<'mcx>(
     run: &PlannerRun<'mcx>,
     ec: types_pathnodes::EcId,
     expr: Node<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
 ) -> Option<types_pathnodes::EmId> {
+    use types_pathnodes::relids::{relids_is_subset, relids_members};
     let mut expr = expr;
     while let Some(r) = expr.as_relabel_type() {
         expr = r.arg;
     }
-    for &em_id in run.root.ec(ec).ec_members.iter() {
+    let e = run.root.ec(ec);
+    let mut candidates: mcx::PgVec<'mcx, types_pathnodes::EmId> = mcx::PgVec::new_in(run.mcx);
+    candidates.extend(e.ec_members.iter().copied());
+    if !e.ec_childmembers.is_empty() {
+        for r in relids_members(relids) {
+            if let Some(list) = e.ec_childmembers.get(r as usize) {
+                candidates.extend(list.iter().copied());
+            }
+        }
+    }
+    for &em_id in candidates.iter() {
         let em = run.root.em(em_id);
-        if em.em_is_child || em.em_is_const {
+        if em.em_is_const {
+            continue;
+        }
+        if em.em_is_child && !relids_is_subset(&em.em_relids, relids) {
             continue;
         }
         let mut em_expr = *run.root.expr_node(em.em_expr);
@@ -2516,6 +2541,7 @@ fn prepare_sort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
     lefttree: Node<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
+    relids: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<SortColumns<'mcx>> {
     let mcx = run.mcx;
     // C shares lefttree->targetlist by pointer; flat cell copy, shared nodes.
@@ -2534,7 +2560,7 @@ fn prepare_sort_from_pathkeys<'mcx>(
         let mut found: Option<(i16, u32)> = None;
         for tle_node in &tlist {
             let tle = tle_node.as_target_entry().expect("TargetEntry");
-            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr) {
+            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, relids) {
                 found = Some((tle.resno, run.root.em(em_id).em_datatype));
                 break;
             }
@@ -2591,8 +2617,9 @@ fn make_sort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
     lefttree: Node<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
+    relids: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys)?;
+    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys, relids)?;
     let mut plan = Node::build::<types_nodes::plannodes::Sort>(run.mcx)?;
     fill_sort_fields(run, &mut plan, lefttree, cols)?;
     Ok(plan.seal())
@@ -2605,9 +2632,10 @@ fn make_incrementalsort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
     lefttree: Node<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
+    relids: &types_pathnodes::Relids<'mcx>,
     n_presorted_cols: i32,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys)?;
+    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys, relids)?;
     let mut plan = Node::build::<types_nodes::plannodes::IncrementalSort>(run.mcx)?;
     fill_sort_fields(run, &mut plan.sort, lefttree, cols)?;
     plan.sort.plan.disabled_nodes = 0;
@@ -2630,7 +2658,17 @@ fn create_incremental_sort_plan<'mcx>(
         )
     };
     let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
-    let plan = make_incrementalsort_from_pathkeys(run, subplan, &pathkeys, n_presorted)?;
+    let relids = {
+        let subparent = run.root.path(subpath_id).base().parent;
+        if types_pathnodes::relids::relids_is_empty(&run.root.rel(subparent).top_parent_relids)
+        {
+            None
+        } else {
+            let parent = run.root.path(path_id).base().parent;
+            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
+        }
+    };
+    let plan = make_incrementalsort_from_pathkeys(run, subplan, &pathkeys, &relids, n_presorted)?;
     copy_generic_path_info_node(run, plan, path_id);
     Ok(plan)
 }
@@ -3241,12 +3279,14 @@ fn create_mergejoin_plan<'mcx>(
                 run,
                 outer_plan,
                 &outersortkeys,
+                &outer_relids,
                 outer_presorted_keys as i32,
             )?;
             label_incrementalsort_with_costsize(run, sort_plan, &outersortkeys, -1.0)?;
             outer_plan = sort_plan;
         } else {
-            let sort_plan = make_sort_from_pathkeys(run, outer_plan, &outersortkeys)?;
+            let sort_plan =
+                make_sort_from_pathkeys(run, outer_plan, &outersortkeys, &outer_relids)?;
             label_sort_with_costsize(run, sort_plan, -1.0);
             outer_plan = sort_plan;
         }
@@ -3260,7 +3300,12 @@ fn create_mergejoin_plan<'mcx>(
 
     let innerpathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey>;
     if !innersortkeys.is_empty() {
-        let sort_plan = make_sort_from_pathkeys(run, inner_plan, &innersortkeys)?;
+        let inner_relids = crate::relnode::relids_copy(
+            mcx,
+            &run.root.rel(run.root.path(inner_path).base().parent).relids,
+        );
+        let sort_plan =
+            make_sort_from_pathkeys(run, inner_plan, &innersortkeys, &inner_relids)?;
         label_sort_with_costsize(run, sort_plan, -1.0);
         inner_plan = sort_plan;
         innerpathkeys = innersortkeys;

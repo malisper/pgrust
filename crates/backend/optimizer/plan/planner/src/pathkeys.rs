@@ -894,3 +894,11 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         _ => nodes_core::expr_collation(node),
     }
 }
+
+// has_useful_pathkeys (pathkeys.c).
+pub(crate) fn has_useful_pathkeys(run: &crate::run::PlannerRun<'_>, rel: types_pathnodes::RelId) -> bool {
+    if !run.root.rel(rel).joininfo.is_empty() || run.root.rel(rel).has_eclass_joins {
+        return true;
+    }
+    !run.root.query_pathkeys.is_empty()
+}

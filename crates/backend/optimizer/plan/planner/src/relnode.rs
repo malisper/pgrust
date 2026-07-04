@@ -502,6 +502,12 @@ pub fn build_child_join_rel<'mcx>(
     debug_assert!(crate::joinrels::find_join_rel(&run.root, &run.root.rel(joinrel).relids)
         .is_none());
     run.root.join_rel_list.push(joinrel);
+
+    if run.root.rel(joinrel).has_eclass_joins
+        || crate::pathkeys::has_useful_pathkeys(run, parent_joinrel)
+    {
+        crate::equivclass::add_child_join_rel_equivalences(run, appinfos, parent_joinrel, joinrel)?;
+    }
     Ok(joinrel)
 }
 

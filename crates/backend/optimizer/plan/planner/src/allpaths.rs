@@ -420,10 +420,6 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         run.root.rel(rel).reloptkind == RELOPT_BASEREL
             || run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
     );
-    // add_child_rel_equivalences: only feeds child index-path pathkeys and
-    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
-    // stays loud where those could change the chosen plan.
-    debug_assert!(!run.root.rel(rel).has_eclass_joins);
 
     if crate::gucs::enable_partitionwise_join()
         && run.root.rel(rel).reloptkind == RELOPT_BASEREL
@@ -505,6 +501,12 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         }
         let child_target = run.rel_reltarget_id(childrel);
         run.root.pathtarget_mut(child_target).exprs = child_exprs;
+
+        if run.root.rel(rel).has_eclass_joins || crate::pathkeys::has_useful_pathkeys(run, rel) {
+            crate::equivclass::add_child_rel_equivalences(run, &appinfo, rel, childrel)?;
+        }
+        let parent_has_ec_joins = run.root.rel(rel).has_eclass_joins;
+        run.root.rel_mut(childrel).has_eclass_joins = parent_has_ec_joins;
 
         // C abuses the flag on unpartitioned children to mark them valid
         // per-partition join inputs (tlist set up above).
