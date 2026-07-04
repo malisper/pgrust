@@ -871,6 +871,94 @@ impl<'mcx> Parser<'mcx> {
                 n.constraints = constraints;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterDomainStmt: ALTER DOMAIN_P any_name ...
+            1530 => {
+                let mut n = Node::build::<parsenodes::AlterDomainStmt>(mcx)?;
+                n.subtype = b'T';
+                n.typeName = view.v(3).list();
+                n.def = view.v(4).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1531 | 1532 => {
+                let mut n = Node::build::<parsenodes::AlterDomainStmt>(mcx)?;
+                n.subtype = if rule == 1531 { b'N' } else { b'O' };
+                n.typeName = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1533 => {
+                let mut n = Node::build::<parsenodes::AlterDomainStmt>(mcx)?;
+                n.subtype = b'C';
+                n.typeName = view.v(3).list();
+                n.def = view.v(5).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1534 | 1535 => {
+                let (ni, bi) = if rule == 1534 { (6, 7) } else { (8, 9) };
+                let mut n = Node::build::<parsenodes::AlterDomainStmt>(mcx)?;
+                n.subtype = b'X';
+                n.typeName = view.v(3).list();
+                n.name = Some(view.v(ni).str_val());
+                n.behavior = drop_behavior(view.v(bi).ival());
+                n.missing_ok = rule == 1535;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1536 => {
+                let mut n = Node::build::<parsenodes::AlterDomainStmt>(mcx)?;
+                n.subtype = b'V';
+                n.typeName = view.v(3).list();
+                n.name = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // DomainConstraint: CONSTRAINT name DomainConstraintElem
+            546 => {
+                let name = view.v(2).str_val();
+                let node = view.v(3).node().expect("DomainConstraintElem");
+                let loc = view.l(1);
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<Constraint, _>(|c| {
+                        c.conname = Some(name);
+                        c.location = loc;
+                    })
+                    .expect("DomainConstraintElem is Constraint");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            547 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            // DomainConstraintElem: CHECK '(' a_expr ')' ConstraintAttributeSpec
+            548 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_CHECK;
+                n.location = view.l(1);
+                n.raw_expr = view.v(3).node();
+                n.cooked_expr = Option::None;
+                let cas = self.process_cas_bits(
+                    view.v(5).ival(),
+                    view.l(5),
+                    "CHECK",
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true },
+                )?;
+                n.skip_validation = cas.not_valid;
+                n.is_no_inherit = cas.no_inherit;
+                n.is_enforced = true;
+                n.initially_valid = !n.skip_validation;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // DomainConstraintElem: NOT NULL_P ConstraintAttributeSpec
+            549 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_NOTNULL;
+                n.location = view.l(1);
+                n.keys = NodeList::make1(mcx, Node::mk_string(mcx, "value")?)?;
+                self.process_cas_bits(
+                    view.v(3).ival(),
+                    view.l(3),
+                    "NOT NULL",
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: false, no_inherit: false },
+                )?;
+                n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // ColConstraintElem: CHECK '(' a_expr ')' opt_no_inherit
             503 => {
                 let mut n = Node::build::<Constraint>(mcx)?;
@@ -5599,6 +5687,39 @@ impl<'mcx> Parser<'mcx> {
                 n.object = view.v(4).node();
                 let c = view.v(6);
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER DOMAIN_P any_name RENAME TO name
+            1278 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_DOMAIN;
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER DOMAIN_P any_name RENAME CONSTRAINT name TO name
+            1279 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_DOMCONSTRAINT;
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.subname = Some(view.v(6).str_val());
+                n.newname = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectSchemaStmt: ALTER DOMAIN_P any_name SET SCHEMA name
+            1344 => {
+                let mut n = Node::build::<parsenodes::AlterObjectSchemaStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_DOMAIN;
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newschema = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt: ALTER DOMAIN_P any_name OWNER TO RoleSpec
+            1384 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_DOMAIN;
+                n.object = Some(Node::mk_list(mcx, view.v(3).list())?);
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1274 | 1281 | 1288 | 1290 => {
