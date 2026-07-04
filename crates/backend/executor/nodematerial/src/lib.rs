@@ -84,7 +84,7 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
         if !node.eof_underlying {
             // C: skip one back so gettupleslot yields the pre-EOF tuple's predecessor.
             let ts = node.tuplestorestate.as_mut().expect("backward read requires a store");
-            if !ts.advance(forward) {
+            if !ts.advance(forward)? {
                 return Ok(None);
             }
         }
@@ -123,19 +123,21 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     Ok(Some(result))
 }
 
-pub fn exec_material_mark_pos(node: &mut MaterialState<'_>) {
+pub fn exec_material_mark_pos(node: &mut MaterialState<'_>) -> PgResult<()> {
     debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
     if let Some(ts) = node.tuplestorestate.as_mut() {
-        ts.copy_read_pointer(0, 1);
+        ts.copy_read_pointer(0, 1)?;
         ts.trim();
     }
+    Ok(())
 }
 
-pub fn exec_material_restr_pos(node: &mut MaterialState<'_>) {
+pub fn exec_material_restr_pos(node: &mut MaterialState<'_>) -> PgResult<()> {
     debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
     if let Some(ts) = node.tuplestorestate.as_mut() {
-        ts.copy_read_pointer(1, 0);
+        ts.copy_read_pointer(1, 0)?;
     }
+    Ok(())
 }
 
 pub fn exec_end_material(node: &mut MaterialState<'_>) {
@@ -159,12 +161,12 @@ pub fn exec_rescan_material_chg<'mcx>(
 pub fn exec_rescan_material<'mcx>(
     node: &mut MaterialState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
+) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
-    if node.eflags != 0 {
+    Ok(if node.eflags != 0 {
         if node.tuplestorestate.is_none() {
-            return false;
+            return Ok(false);
         }
         // Without REWIND the store can't rewind (MARK-only mergejoin inner):
         // forget it and re-read the subplan.
@@ -173,14 +175,14 @@ pub fn exec_rescan_material<'mcx>(
             node.eof_underlying = false;
             true
         } else {
-            node.tuplestorestate.as_mut().expect("checked above").rescan();
+            node.tuplestorestate.as_mut().expect("checked above").rescan()?;
             false
         }
     } else {
         node.tuplestorestate = None;
         node.eof_underlying = false;
         true
-    }
+    })
 }
 
 // Exempt: released in exec_end_material.

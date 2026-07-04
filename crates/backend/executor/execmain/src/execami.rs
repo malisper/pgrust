@@ -76,8 +76,7 @@ pub fn exec_re_scan<'mcx>(
             Ok(())
         }
         PlanStateNode::NamedTuplestoreScan(nts) => {
-            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate);
-            Ok(())
+            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)
         }
         // The inner term takes C's chgParam={wtParam} deferred rescan, eagerly.
         PlanStateNode::RecursiveUnion(ru) => {
@@ -108,7 +107,7 @@ pub fn exec_re_scan<'mcx>(
         }
         PlanStateNode::Material(m) => {
             let m = &mut **m;
-            if ::nodematerial::exec_rescan_material(&mut m.state, estate) {
+            if ::nodematerial::exec_rescan_material(&mut m.state, estate)? {
                 exec_re_scan(&mut m.outer, estate)?;
             }
             Ok(())
@@ -132,7 +131,7 @@ pub fn exec_re_scan<'mcx>(
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).
         PlanStateNode::Sort(s) => {
-            if ::nodesort::exec_rescan_sort(&mut s.state, estate) {
+            if ::nodesort::exec_rescan_sort(&mut s.state, estate)? {
                 exec_re_scan(&mut s.outer, estate)?;
             }
             Ok(())
@@ -397,7 +396,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
             ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)
         }
         PlanStateNode::NamedTuplestoreScan(nts) => {
-            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)
+            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)?;
         }
         // Inner gets chg + wtParam (C: bms_add_member onto the deferred set).
         PlanStateNode::RecursiveUnion(ru) => {
@@ -638,14 +637,8 @@ pub fn exec_mark_pos<'mcx>(
         PlanStateNode::Instrumented(w) => exec_mark_pos(&mut w.inner, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_mark_pos(is),
         PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_mark_pos(ios),
-        PlanStateNode::Sort(s) => {
-            ::nodesort::exec_sort_mark_pos(&mut s.state);
-            Ok(())
-        }
-        PlanStateNode::Material(m) => {
-            ::nodematerial::exec_material_mark_pos(&mut m.state);
-            Ok(())
-        }
+        PlanStateNode::Sort(s) => ::nodesort::exec_sort_mark_pos(&mut s.state),
+        PlanStateNode::Material(m) => ::nodematerial::exec_material_mark_pos(&mut m.state),
         _ => panic!("ExecMarkPos (execAmi.c): node type does not support mark/restore"),
     }
 }
@@ -659,14 +652,8 @@ pub fn exec_restr_pos<'mcx>(
         PlanStateNode::Instrumented(w) => exec_restr_pos(&mut w.inner, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_restr_pos(is),
         PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_restr_pos(ios),
-        PlanStateNode::Sort(s) => {
-            ::nodesort::exec_sort_restr_pos(&mut s.state);
-            Ok(())
-        }
-        PlanStateNode::Material(m) => {
-            ::nodematerial::exec_material_restr_pos(&mut m.state);
-            Ok(())
-        }
+        PlanStateNode::Sort(s) => ::nodesort::exec_sort_restr_pos(&mut s.state),
+        PlanStateNode::Material(m) => ::nodematerial::exec_material_restr_pos(&mut m.state),
         _ => panic!("ExecRestrPos (execAmi.c): node type does not support mark/restore"),
     }
 }

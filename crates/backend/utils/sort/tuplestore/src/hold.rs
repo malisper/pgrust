@@ -142,11 +142,11 @@ fn gettupleslot_hold(
     with_store(h, |store| store.gettupleslot(forward, copy, slot, mcx))
 }
 
-fn rescan_hold(h: TuplestoreHandle) {
+fn rescan_hold(h: TuplestoreHandle) -> PgResult<()> {
     with_store(h, |store| store.rescan())
 }
 
-fn skiptuples_hold(h: TuplestoreHandle, ntuples: i64, forward: bool) -> bool {
+fn skiptuples_hold(h: TuplestoreHandle, ntuples: i64, forward: bool) -> PgResult<bool> {
     with_store(h, |store| store.skiptuples(ntuples, forward))
 }
 

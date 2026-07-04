@@ -17,6 +17,7 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_hash = { path = "../../../../_support/types/hash" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 exectuples = { path = "../../../executor/exectuples" }
+sort_storage = { path = "../sort_storage" }
 heaptuple = { path = "../../../access/common/heaptuple" }
 lsyscache = { path = "../../cache/lsyscache" }
 types_rel = { path = "../../../../_support/types/rel" }

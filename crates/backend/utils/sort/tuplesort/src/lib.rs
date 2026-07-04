@@ -1,5 +1,6 @@
-// tuplesort.c + tuplesortvariants.c in-memory serial core; external merge,
-// parallel sort, cstring datum sorts = loud panics naming C.
+// tuplesort.c + tuplesortvariants.c serial core, in-memory + external
+// (spill-to-tape balanced k-way merge in tape.rs over sort_storage's
+// logtape); parallel sort and cstring datum sorts = loud panics naming C.
 #![allow(non_snake_case)]
 
 use core::cell::Cell;
@@ -118,7 +119,10 @@ const _: () = assert!(mem::size_of::<SortTuple>() == 24);
 enum TupSortStatus {
     Initial,
     Bounded,
+    BuildRuns,
     SortedInMem,
+    SortedOnTape,
+    FinalMerge,
 }
 
 enum SortVariant {
@@ -173,6 +177,9 @@ pub struct TuplesortData<'m> {
     bound: i32,
     avail_mem: i64,
     allowed_mem: i64,
+    // C tupleMem: per-tuple memory alone, so dumptuples can return exactly
+    // the tuple share when it resets tuplecontext.
+    tuple_mem: i64,
     // Largest count below which a tuplen==0 put provably takes the pure
     // store-and-return path (no grow, no bounded transition, no lackmem);
     // 0 whenever status != Initial. u32 so the fast-path load cannot be
@@ -185,7 +192,11 @@ pub struct TuplesortData<'m> {
     markpos_offset: usize,
     markpos_eof: bool,
     max_space: i64,
+    is_max_space_disk: bool,
     max_space_status: TupSortStatus,
+    // Some from the first spill on (C tapeset != NULL); Boxed so the
+    // in-memory hot fields keep their cache-line footprint.
+    tapes: Option<Box<tape::TapeState<'m>>>,
     sort_keys: PgVec<'m, SortSupport>,
     only_key: bool,
     have_datum1: bool,
@@ -588,6 +599,11 @@ macro_rules! dispatch_cmp {
     }};
 }
 
+// Declared after dispatch_cmp! so the macro is in scope inside the module.
+mod tape;
+
+pub use tape::tuplesort_merge_order;
+
 impl Tuplesort {
     /// `tuplesort_begin_heap`.
     #[allow(clippy::too_many_arguments)]
@@ -868,7 +884,10 @@ impl Tuplesort {
                 markpos_offset: 0,
                 markpos_eof: false,
                 max_space: 0,
+                is_max_space_disk: false,
                 max_space_status: TupSortStatus::Initial,
+                tapes: None,
+                tuple_mem: 0,
                 sort_keys,
                 only_key,
                 have_datum1: true,
@@ -919,11 +938,17 @@ impl Tuplesort {
                 sortMethod: match st.max_space_status {
                     TupSortStatus::SortedInMem if st.bound_used => TuplesortMethod::TopNHeapsort,
                     TupSortStatus::SortedInMem => TuplesortMethod::Quicksort,
-                    TupSortStatus::Initial | TupSortStatus::Bounded => {
-                        TuplesortMethod::StillInProgress
-                    }
+                    TupSortStatus::SortedOnTape => TuplesortMethod::ExternalSort,
+                    TupSortStatus::FinalMerge => TuplesortMethod::ExternalMerge,
+                    TupSortStatus::Initial
+                    | TupSortStatus::Bounded
+                    | TupSortStatus::BuildRuns => TuplesortMethod::StillInProgress,
                 },
-                spaceType: TuplesortSpaceType::Memory,
+                spaceType: if st.is_max_space_disk {
+                    TuplesortSpaceType::Disk
+                } else {
+                    TuplesortSpaceType::Memory
+                },
                 spaceUsed: (st.max_space + 1023) / 1024,
             }
         })
@@ -933,8 +958,17 @@ impl Tuplesort {
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
             st.updatemax();
+            if let Some(ts) = st.tapes.take() {
+                ts.tapeset
+                    .close()
+                    .expect("tuplesort_reset: closing tape temp files failed");
+            }
             st.tuplecontext.reset();
             st.memtuples.clear();
+            if st.memtuples.capacity() == 0 {
+                st.memtuples.reserve(INITIAL_MEMTUPSIZE);
+            }
+            st.tuple_mem = 0;
             st.status = TupSortStatus::Initial;
             st.bounded = false;
             st.bound_used = false;
@@ -1181,13 +1215,22 @@ impl Tuplesort {
                     st.status = TupSortStatus::SortedInMem;
                 }
                 TupSortStatus::Bounded => st.sort_bounded_heap()?,
-                TupSortStatus::SortedInMem => {
+                TupSortStatus::BuildRuns => {
+                    st.dumptuples(true)?;
+                    st.mergeruns()?;
+                }
+                TupSortStatus::SortedInMem
+                | TupSortStatus::SortedOnTape
+                | TupSortStatus::FinalMerge => {
                     return Err(invalid_state("tuplesort_performsort"))
                 }
             }
             st.put_watermark = 0;
             st.current = 0;
             st.eof_reached = false;
+            if let Some(ts) = st.tapes.as_mut() {
+                ts.markpos_block = 0;
+            }
             st.markpos_offset = 0;
             st.markpos_eof = false;
             Ok(())
@@ -1291,50 +1334,108 @@ impl Tuplesort {
         if ntuples < 0 {
             return Ok(false);
         }
-        self.0.with_mut(|st| {
-            if st.status != TupSortStatus::SortedInMem {
-                return Err(invalid_state("tuplesort_skiptuples"));
+        self.0.with_mut(|st| match st.status {
+            TupSortStatus::SortedInMem => {
+                if st.memtuples.len() - st.current >= ntuples as usize {
+                    st.current += ntuples as usize;
+                    return Ok(true);
+                }
+                st.current = st.memtuples.len();
+                st.eof_reached = true;
+                Ok(false)
             }
-            if st.memtuples.len() - st.current >= ntuples as usize {
-                st.current += ntuples as usize;
-                return Ok(true);
+            TupSortStatus::SortedOnTape | TupSortStatus::FinalMerge => {
+                for _ in 0..ntuples {
+                    if st.gettuple_common(true)?.is_none() {
+                        return Ok(false);
+                    }
+                    cfi()?;
+                }
+                Ok(true)
             }
-            st.current = st.memtuples.len();
-            st.eof_reached = true;
-            Ok(false)
+            _ => Err(invalid_state("tuplesort_skiptuples")),
         })
     }
 
-    pub fn rescan(&mut self) {
+    pub fn rescan(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
-            debug_assert!(st.status == TupSortStatus::SortedInMem);
-            st.current = 0;
-            st.eof_reached = false;
-            st.markpos_offset = 0;
-            st.markpos_eof = false;
+            match st.status {
+                TupSortStatus::SortedInMem => {
+                    st.current = 0;
+                    st.eof_reached = false;
+                    st.markpos_offset = 0;
+                    st.markpos_eof = false;
+                    Ok(())
+                }
+                TupSortStatus::SortedOnTape => {
+                    let ts = st.tapes.as_mut().expect("SortedOnTape without tapes");
+                    let tape = ts.result_tape.expect("SortedOnTape without result tape");
+                    ts.tapeset.rewind_for_read(tape, 0)?;
+                    ts.markpos_block = 0;
+                    st.eof_reached = false;
+                    st.markpos_offset = 0;
+                    st.markpos_eof = false;
+                    Ok(())
+                }
+                _ => Err(invalid_state("tuplesort_rescan")),
+            }
         })
     }
 
-    pub fn markpos(&mut self) {
+    pub fn markpos(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
-            debug_assert!(st.status == TupSortStatus::SortedInMem);
-            st.markpos_offset = st.current;
-            st.markpos_eof = st.eof_reached;
+            match st.status {
+                TupSortStatus::SortedInMem => {
+                    st.markpos_offset = st.current;
+                    st.markpos_eof = st.eof_reached;
+                    Ok(())
+                }
+                TupSortStatus::SortedOnTape => {
+                    let ts = st.tapes.as_mut().expect("SortedOnTape without tapes");
+                    let tape = ts.result_tape.expect("SortedOnTape without result tape");
+                    let (block, offset) = ts.tapeset.tell(tape)?;
+                    ts.markpos_block = block;
+                    st.markpos_offset = offset as usize;
+                    st.markpos_eof = st.eof_reached;
+                    Ok(())
+                }
+                _ => Err(invalid_state("tuplesort_markpos")),
+            }
         })
     }
 
-    pub fn restorepos(&mut self) {
+    pub fn restorepos(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
-            debug_assert!(st.status == TupSortStatus::SortedInMem);
-            st.current = st.markpos_offset;
-            st.eof_reached = st.markpos_eof;
+            match st.status {
+                TupSortStatus::SortedInMem => {
+                    st.current = st.markpos_offset;
+                    st.eof_reached = st.markpos_eof;
+                    Ok(())
+                }
+                TupSortStatus::SortedOnTape => {
+                    let ts = st.tapes.as_mut().expect("SortedOnTape without tapes");
+                    let tape = ts.result_tape.expect("SortedOnTape without result tape");
+                    ts.tapeset.seek(tape, ts.markpos_block, st.markpos_offset as i32)?;
+                    st.eof_reached = st.markpos_eof;
+                    Ok(())
+                }
+                _ => Err(invalid_state("tuplesort_restorepos")),
+            }
         })
     }
 
-    pub fn end(self) {}
+    pub fn end(mut self) {
+        self.0.with_mut(|st| {
+            if let Some(ts) = st.tapes.take() {
+                ts.tapeset
+                    .close()
+                    .expect("tuplesort_end: closing tape temp files failed");
+            }
+        })
+    }
 }
 
 /// Register-resident put cursor over the TSS_INITIAL window [len, watermark).
@@ -1488,6 +1589,7 @@ impl<'m> TuplesortData<'m> {
         tuplen: i64,
     ) -> PgResult<()> {
         self.avail_mem -= tuplen;
+        self.tuple_mem += tuplen;
 
         match self.status {
             TupSortStatus::Initial => {
@@ -1525,13 +1627,24 @@ impl<'m> TuplesortData<'m> {
                     self.recompute_put_watermark();
                     return Ok(());
                 }
-                external_sort_unported();
+                self.inittapes()?;
+                self.dumptuples(false)
             }
             TupSortStatus::Bounded => {
                 debug_assert!(self.abbrev.is_none());
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
-            TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
+            TupSortStatus::BuildRuns => {
+                if self.abbrev.is_some() && !isnull1 {
+                    datum1 = self.abbrev_datum1(datum1);
+                }
+                debug_assert!(self.memtuples.len() < self.memtuples.capacity());
+                self.memtuples.push(SortTuple { tuple, datum1, isnull1 });
+                self.dumptuples(false)
+            }
+            TupSortStatus::SortedInMem | TupSortStatus::SortedOnTape | TupSortStatus::FinalMerge => {
+                Err(invalid_state("tuplesort_puttuple_common"))
+            }
         }
     }
 
@@ -1594,10 +1707,17 @@ impl<'m> TuplesortData<'m> {
         }
     }
 
+    /// `tuplesort_updatemax`: disk usage dominates memory usage.
     fn updatemax(&mut self) {
-        let space_used = self.allowed_mem - self.avail_mem;
-        if space_used > self.max_space {
+        let (is_disk, space_used) = match &self.tapes {
+            Some(ts) => (true, ts.tapeset.blocks() * tape::BLCKSZ as i64),
+            None => (false, self.allowed_mem - self.avail_mem),
+        };
+        if (is_disk && !self.is_max_space_disk)
+            || (is_disk == self.is_max_space_disk && space_used > self.max_space)
+        {
             self.max_space = space_used;
+            self.is_max_space_disk = is_disk;
             self.max_space_status = self.status;
         }
     }
@@ -1985,6 +2105,11 @@ impl<'m> TuplesortData<'m> {
                     Ok(Some(self.memtuples[self.current - 1]))
                 }
             }
+            TupSortStatus::SortedOnTape => self.gettuple_ontape(forward),
+            TupSortStatus::FinalMerge => {
+                debug_assert!(forward);
+                self.gettuple_finalmerge()
+            }
             _ => Err(invalid_state("tuplesort_gettuple_common")),
         }
     }
@@ -2081,15 +2206,6 @@ fn heap_replace_top_n(
     }
     heap[i] = tuple;
     Ok(())
-}
-
-#[cold]
-#[inline(never)]
-fn external_sort_unported() -> ! {
-    panic!(
-        "tuplesort: workMem exceeded; external sort \
-         (inittapes/dumptuples, tuplesort.c) not ported"
-    )
 }
 
 #[cold]

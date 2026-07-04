@@ -1111,7 +1111,7 @@ fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
 
     let hold_store = portal.borrow().holdStore;
     if !hold_store.is_null() {
-        tuplestore_hold_seams::tuplestore_rescan::call(hold_store);
+        tuplestore_hold_seams::tuplestore_rescan::call(hold_store)?;
     }
 
     let query_desc = portal.borrow().queryDesc;

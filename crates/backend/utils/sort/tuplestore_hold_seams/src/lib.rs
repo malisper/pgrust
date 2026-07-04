@@ -24,7 +24,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     // tuplestore_rescan(state) (tuplestore.c) — active read pointer to start.
-    pub fn tuplestore_rescan(store: types_portal::TuplestoreHandle)
+    pub fn tuplestore_rescan(store: types_portal::TuplestoreHandle) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -33,5 +33,5 @@ seam_core::seam!(
         store: types_portal::TuplestoreHandle,
         ntuples: i64,
         forward: bool,
-    ) -> bool
+    ) -> types_error::PgResult<bool>
 );

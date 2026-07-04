@@ -370,19 +370,19 @@ pub fn exec_end_sort(node: &mut SortState<'_>) {
 }
 
 /// `ExecSortMarkPos`.
-pub fn exec_sort_mark_pos(node: &mut SortState<'_>) {
+pub fn exec_sort_mark_pos(node: &mut SortState<'_>) -> PgResult<()> {
     if !node.sort_Done {
-        return;
+        return Ok(());
     }
-    node.tuplesortstate.as_mut().unwrap().markpos();
+    node.tuplesortstate.as_mut().unwrap().markpos()
 }
 
 /// `ExecSortRestrPos`.
-pub fn exec_sort_restr_pos(node: &mut SortState<'_>) {
+pub fn exec_sort_restr_pos(node: &mut SortState<'_>) -> PgResult<()> {
     if !node.sort_Done {
-        return;
+        return Ok(());
     }
-    node.tuplesortstate.as_mut().unwrap().restorepos();
+    node.tuplesortstate.as_mut().unwrap().restorepos()
 }
 
 /// `ExecReScanSort` node-local half. Returns true when the caller must rescan
@@ -404,9 +404,9 @@ pub fn exec_rescan_sort_chg<'mcx>(
 pub fn exec_rescan_sort<'mcx>(
     node: &mut SortState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
+) -> PgResult<bool> {
     if !node.sort_Done {
-        return false;
+        return Ok(false);
     }
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
@@ -415,10 +415,10 @@ pub fn exec_rescan_sort<'mcx>(
     {
         node.sort_Done = false;
         node.tuplesortstate = None;
-        true
+        Ok(true)
     } else {
-        node.tuplesortstate.as_mut().unwrap().rescan();
-        false
+        node.tuplesortstate.as_mut().unwrap().rescan()?;
+        Ok(false)
     }
 }
 

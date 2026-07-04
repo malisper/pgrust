@@ -368,7 +368,7 @@ fn exec_make_function_result_set<'mcx>(
                     let mut store = *set_result
                         .downcast::<::tuplestore::Tuplestore>()
                         .expect("rsinfo.setResult downcasts to Tuplestore");
-                    store.rescan();
+                    store.rescan()?;
                     srf.result_store = Some(store);
                     read_result_store(srf, per_tuple, query_mcx)
                 }
