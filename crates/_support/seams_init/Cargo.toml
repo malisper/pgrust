@@ -155,6 +155,8 @@ gistproc = { path = "../../backend/access/gist/gistproc" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
+genfile = { path = "../../backend/utils/adt/genfile" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }

@@ -35,3 +35,4 @@ timestamp_seams = { path = "../timestamp_seams" }
 waitevent = { path = "../../activity/waitevent" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 syscache_seams = { path = "../../cache/syscache_seams" }
+keywords = { path = "../../../../common/keywords" }
