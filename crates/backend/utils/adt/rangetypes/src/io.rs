@@ -323,6 +323,9 @@ pub fn range_in<'m>(
         )? {
             return Ok(None);
         }
+        // An input function's by-ref result may alias its retained scratch
+        // (textin's OutBuf); copy before the upper bound's call overwrites it.
+        lower_val = copy_byref_bound(mcx, &cache.ri, lower_val)?;
     }
     if range_has_ubound(flags) {
         let s = CString::new(parsed.ubound.as_deref().unwrap_or(&[]))
@@ -397,6 +400,27 @@ fn cstr_bytes<'a>(d: Datum) -> &'a [u8] {
         }
         core::slice::from_raw_parts(p, n)
     }
+}
+
+fn copy_byref_bound<'m>(mcx: Mcx<'m>, ri: &RangeInfo, d: Datum) -> PgResult<Datum> {
+    let el = &ri.elem;
+    if el.typbyval || d.as_usize() == 0 {
+        return Ok(d);
+    }
+    let p = d.as_usize() as *const u8;
+    let n = match el.typlen {
+        // SAFETY: live varlena header readable through its full VARSIZE_ANY.
+        -1 => unsafe { ::types_tuple::varatt::varsize_any(p) },
+        l if l > 0 => l as usize,
+        other => panic!("range bound copy: unsupported typlen {other}"),
+    };
+    let mut v: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    // SAFETY: n readable bytes at p; capacity reserved above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(p, v.as_mut_ptr(), n);
+        v.set_len(n);
+    }
+    Ok(Datum::from_usize(v.leak().as_ptr() as usize))
 }
 
 /// range_recv body.
