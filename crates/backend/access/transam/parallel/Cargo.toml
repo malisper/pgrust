@@ -51,6 +51,7 @@ lock = { path = "../../../storage/lmgr/lock" }
 adt_bool = { path = "../../../utils/adt/bool" }
 adt_float = { path = "../../../utils/adt/float" }
 transam_xlog = { path = "../transam_xlog" }
+xloginsert = { path = "../xloginsert" }
 xlogutils = { path = "../xlogutils" }
 heapam_visibility = { path = "../../heap/heapam_visibility" }
 clog = { path = "../clog" }
