@@ -1020,6 +1020,17 @@ unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
+#[derive(Default)]
+pub struct AlterStatsStmt<'mcx> {
+    pub defnames: NodeList<'mcx>,
+    // Integer node; None = SET STATISTICS DEFAULT.
+    pub stxstattarget: Option<Node<'mcx>>,
+    pub missing_ok: bool,
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterStatsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterStatsStmt;
+}
+
 // timing/events use the TRIGGER_TYPE bits of catalog/pg_trigger.h.
 #[derive(Default)]
 pub struct CreateTrigStmt<'mcx> {

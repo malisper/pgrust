@@ -1064,6 +1064,15 @@ fn slow_switch<'mcx>(
             Ok(None)
         }
 
+        T_AlterStatsStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::AlterStatsStmt>()
+                .expect("AlterStatsStmt");
+            collect_gap("ALTER STATISTICS");
+            statscmds::AlterStatistics(mcx, stmt)?;
+            Ok(None)
+        }
+
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()

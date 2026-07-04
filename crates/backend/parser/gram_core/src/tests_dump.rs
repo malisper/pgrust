@@ -1541,6 +1541,27 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "cursor_name", c.cursor_name);
         int_field(out, "cursor_param", c.cursor_param);
         out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::CreateStatsStmt>() {
+        out.push_str("{CREATESTATSSTMT");
+        list_field(out, "defnames", &s.defnames);
+        list_field(out, "stat_types", &s.stat_types);
+        list_field(out, "exprs", &s.exprs);
+        list_field(out, "relations", &s.relations);
+        string_field(out, "stxcomment", s.stxcomment);
+        bool_field(out, "transformed", s.transformed);
+        bool_field(out, "if_not_exists", s.if_not_exists);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::StatsElem>() {
+        out.push_str("{STATSELEM");
+        string_field(out, "name", s.name);
+        node_field(out, "expr", s.expr);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::AlterStatsStmt>() {
+        out.push_str("{ALTERSTATSSTMT");
+        list_field(out, "defnames", &s.defnames);
+        node_field(out, "stxstattarget", s.stxstattarget);
+        bool_field(out, "missing_ok", s.missing_ok);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }

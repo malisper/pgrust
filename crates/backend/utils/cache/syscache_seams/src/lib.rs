@@ -501,6 +501,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GetSysCacheOid2(STATEXTNAMENSP, stxname, stxnamespace); InvalidOid on a miss.
+    pub fn lookup_pg_statistic_ext_oid_by_name_nsp(stxname: &str, stxnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // SearchSysCache1(TSDICTOID, dictid); None mirrors !HeapTupleIsValid.
     pub fn lookup_pg_ts_dict_row(dictid: Oid) -> PgResult<Option<PgTsObjectRow>>
 );
