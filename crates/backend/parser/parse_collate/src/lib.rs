@@ -884,9 +884,6 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
     }
 }
 
-// assign_ordered_set_collations (parse_collate.c): direct args contribute
-// normally; aggregated args contribute only for single-arg non-variadic aggs,
-// else each is an independent sort column.
 fn assign_ordered_set_collations<'mcx>(
     agg: &'mcx types_nodes::primnodes::Aggref<'mcx>,
     loccontext: &mut AssignCollationsCtx<'_, '_, 'mcx>,
@@ -906,8 +903,6 @@ fn assign_ordered_set_collations<'mcx>(
     Ok(())
 }
 
-// assign_hypothetical_collations (parse_collate.c): unify each hypothetical/
-// aggregated pair, forcing the choice into the sort column via RelabelType.
 fn assign_hypothetical_collations<'mcx>(
     agg: &'mcx types_nodes::primnodes::Aggref<'mcx>,
     loccontext: &mut AssignCollationsCtx<'_, '_, 'mcx>,
