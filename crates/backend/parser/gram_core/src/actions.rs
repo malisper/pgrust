@@ -7247,6 +7247,13 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("RoleSpec"))?;
                 *yyval = YYSTYPE::List(list);
             }
+            // CallStmt: CALL func_application
+            146 => {
+                let mut n = Node::build::<types_nodes::CallStmt>(mcx)?;
+                n.funccall =
+                    view.v(2).node().expect("func_application").as_variant::<FuncCall>();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             147 | 170 | 185 => {
                 let mut n = Node::build::<CreateRoleStmt>(mcx)?;
                 n.stmt_type = match rule {
