@@ -17,6 +17,8 @@ types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 adt_date = { path = "../../utils/adt/adt_date" }
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+adt_xml = { path = "../../utils/adt/xml" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 tupdesc = { path = "../../access/common/tupdesc" }
 typcache = { path = "../../utils/cache/typcache" }
@@ -42,7 +44,6 @@ bench-internals = []
 clauses = { path = "../../optimizer/util/clauses" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 adt_int = { path = "../../utils/adt/int" }
-adt_datetime = { path = "../../utils/adt/adt_datetime" }
 pgtz = { path = "../../timezone/pgtz" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }

@@ -347,6 +347,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_BitmapAnd => "BitmapAnd",
         NodeTag::T_BitmapOr => "BitmapOr",
         NodeTag::T_FunctionScan => "Function Scan",
+        NodeTag::T_TableFuncScan => "Table Function Scan",
         NodeTag::T_ValuesScan => "Values Scan",
         NodeTag::T_CteScan => "CTE Scan",
         NodeTag::T_WorkTableScan => "WorkTable Scan",
@@ -496,6 +497,9 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_ValuesScan {
         ExplainScanTarget(node.as_values_scan().unwrap().scan.scanrelid, es)?;
     }
+    if let Some(tfs) = node.as_table_func_scan() {
+        ExplainTableFuncTarget(tfs, es)?;
+    }
     if node.node_tag() == NodeTag::T_SubqueryScan {
         ExplainScanTarget(node.as_subquery_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -564,7 +568,14 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_SeqScan
         | NodeTag::T_CteScan
         | NodeTag::T_ValuesScan
-        | NodeTag::T_WorkTableScan => {
+        | NodeTag::T_WorkTableScan
+        | NodeTag::T_TableFuncScan => {
+            if node.node_tag() == NodeTag::T_TableFuncScan && es.verbose {
+                node_gap(
+                    "show_table_func_scan_info",
+                    "VERBOSE Table Function Call deparse (ruleutils get_tablefunc unported)",
+                );
+            }
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
@@ -1724,6 +1735,37 @@ fn ancestors_vec<'mcx>(
 
 fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) -> PgResult<()> {
     ExplainTargetRel(scanrelid, es)
+}
+
+// ExplainTargetRel's T_TableFuncScan arm: objectname keys off functype.
+fn ExplainTableFuncTarget<'mcx>(
+    tfs: &types_nodes::plannodes::TableFuncScan<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    let rti = tfs.scan.scanrelid;
+    let rte: &RangeTblEntry<'_> = es
+        .rtable
+        .expect("ExplainTableFuncTarget before ExplainPrintPlan")
+        .nth(rti as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable holds RTEs");
+    debug_assert_eq!(rte.rtekind, RTEKind::RTE_TABLEFUNC);
+    let tf = tfs
+        .tablefunc
+        .and_then(|n| n.as_table_func())
+        .expect("TableFuncScan has a TableFunc");
+    let objectname = match tf.functype {
+        types_nodes::TableFuncType::TFT_XMLTABLE => "xmltable",
+        types_nodes::TableFuncType::TFT_JSON_TABLE => "json_table",
+    };
+    let refname = es.rtable_names[rti as usize - 1]
+        .or_else(|| rte.eref.expect("RTE without eref").aliasname)
+        .expect("scan RTE has a refname");
+    append!(es, " on {}", quote_identifier(objectname));
+    if objectname != refname {
+        append!(es, " {}", quote_identifier(refname));
+    }
+    Ok(())
 }
 
 // ExplainTargetRel's T_FunctionScan arm: objectname is the function's name

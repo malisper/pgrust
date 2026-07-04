@@ -284,6 +284,14 @@ pub struct FunctionScan<'mcx> {
     pub funcordinality: bool,
 }
 
+/// `tablefunc` is a `TableFunc` node.
+#[derive(Default)]
+#[repr(C)]
+pub struct TableFuncScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub tablefunc: Option<Node<'mcx>>,
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct CteScan<'mcx> {
@@ -726,6 +734,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SetOp<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_FunctionScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for TableFuncScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TableFuncScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CteScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_CteScan;
 }
@@ -812,6 +823,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for SubqueryScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for SetOp<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for TableFuncScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for WorkTableScan<'mcx> {}
@@ -903,6 +916,10 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<FunctionScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(TableFuncScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<TableFuncScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(CteScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<CteScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -966,6 +983,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_SubqueryScan
             | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
+            | NodeTag::T_TableFuncScan
             | NodeTag::T_CteScan
             | NodeTag::T_WorkTableScan
             | NodeTag::T_RecursiveUnion
@@ -1050,6 +1068,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_function_scan(self) -> Option<&'mcx FunctionScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_table_func_scan(self) -> Option<&'mcx TableFuncScan<'mcx>> {
         self.as_variant()
     }
 

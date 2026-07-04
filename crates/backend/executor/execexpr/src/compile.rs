@@ -813,6 +813,15 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
+        NodeTag::T_XmlExpr => {
+            use ::types_nodes::primnodes::XmlExprOp;
+            let x = node.as_xml_expr().unwrap();
+            match x.op {
+                XmlExprOp::IS_DOCUMENT => 16,
+                XmlExprOp::IS_XMLSERIALIZE => 25,
+                _ => ::types_core::catalog::XMLOID,
+            }
+        }
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_ScalarArrayOpExpr
@@ -926,6 +935,15 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_MinMaxExpr => {
             for a in node.as_min_max_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter() {
+                setup_walker(a, info);
+            }
+            for a in x.args.iter() {
                 setup_walker(a, info);
             }
         }
@@ -1245,6 +1263,7 @@ pub(crate) fn init_expr_rec<'mcx>(
             let step = init_minmax(node, mm, state, mcx, out, agg, params, sub)?;
             push_step(state, mcx, step)
         }
+        NodeTag::T_XmlExpr => init_xml_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_SQLValueFunction => {
             use ::types_nodes::primnodes::SQLValueFunctionOp;
             let svf = node.as_sql_value_function().unwrap();
@@ -1656,6 +1675,50 @@ impl HasResMcx for crate::arrayops::SbsRefState {
     unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
         unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
     }
+}
+impl HasResMcx for crate::xmlops::XmlExprState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+
+// C ExecInitExprRec T_XmlExpr: per-list arg slot arrays, args evaluated in
+// place before the XmlExprEval step runs.
+fn init_xml_expr<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let x = node.as_xml_expr().unwrap();
+    let n_named = x.named_args.len();
+    let n_args = x.args.len();
+    let named_slots: NonNull<::datum::NullableDatum> = alloc_array(mcx, n_named)?;
+    let arg_slots: NonNull<::datum::NullableDatum> = alloc_array(mcx, n_args)?;
+    for (i, arg) in x.named_args.iter().enumerate() {
+        // SAFETY: i < n_named of the fresh slot array.
+        let arg_out = OutRef(unsafe { NonNull::new_unchecked(named_slots.as_ptr().add(i)) });
+        init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
+    }
+    for (i, arg) in x.args.iter().enumerate() {
+        // SAFETY: i < n_args of the fresh slot array.
+        let arg_out = OutRef(unsafe { NonNull::new_unchecked(arg_slots.as_ptr().add(i)) });
+        init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
+    }
+    let st = crate::xmlops::XmlExprState {
+        xexpr: NonNull::from(x).cast(),
+        named_slots,
+        arg_slots,
+        n_named: n_named as u16,
+        n_args: n_args as u16,
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+    push_step(state, mcx, Step::XmlExprEval { state: stp, out })
 }
 
 // C ExecInitSubscriptingRef over the closed array handler (arraysubs.c
