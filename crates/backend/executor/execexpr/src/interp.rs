@@ -1272,6 +1272,84 @@ fn run_program<'mcx>(
                 assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
                 assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
             }
+            Step::FuncExprStrict2Thin { call, out } => {
+                let r = strict2_thin_eval(call)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::ScanVarFuncStrict2Thin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut scan), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke2_thin(call)?, false);
+                }
+            }
+            Step::FuncFuncStrict2Thin { call1, argno, call2, out } => {
+                let r1 = strict2_thin_eval(call1)?;
+                // SAFETY: as ScanVarFuncStrict2, for call2's image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call2.fcinfo, *argno as usize).write(r1);
+                    crate::steps::arg_slot_of(call2.fcinfo, 1 - *argno as usize).read()
+                };
+                if r1.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke2_thin(call2)?, false);
+                }
+            }
+            Step::FuncStrict2QualThin { call, jumpdone, out } => {
+                let r = strict2_thin_eval(call)?;
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarNotDistinctThin { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: as ScanVarFuncStrict2.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull && other.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else {
+                    write_out(*out, invoke2_thin(call)?, false);
+                }
+            }
+            Step::NotDistinctQualThin { call, jumpdone, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let v = if a0.isnull && a1.isnull {
+                    Datum::from_bool(true)
+                } else if a0.isnull || a1.isnull {
+                    Datum::from_bool(false)
+                } else {
+                    invoke2_thin(call)?
+                };
+                if !v.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, v, false);
+            }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
                 let (a0, a1) = unsafe {
@@ -1664,6 +1742,29 @@ fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
     }
     let (value, isnull) = invoke2(call)?;
     Ok(NullableDatum { value, isnull })
+}
+
+// Thin-ABI call: no flinfo arg, no arity check, no isnull round trip — the
+// registered callee never writes fcinfo.isnull (fmgr_thin_builtin contract).
+#[inline(always)]
+fn invoke2_thin(call: &crate::steps::Call2Thin) -> PgResult<Datum> {
+    // SAFETY: live 2-arg fcinfo image; thin contract holds at registration.
+    unsafe { (call.f)(call.fcinfo.cast()) }
+}
+
+#[inline(always)]
+fn strict2_thin_eval(call: &crate::steps::Call2Thin) -> PgResult<NullableDatum> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        return Ok(NullableDatum::null());
+    }
+    Ok(NullableDatum { value: invoke2_thin(call)?, isnull: false })
 }
 
 #[inline(always)]

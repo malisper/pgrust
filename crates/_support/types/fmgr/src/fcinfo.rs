@@ -55,6 +55,27 @@ pub struct FunctionCallInfoBaseData<A: ?Sized = [NullableDatum]> {
 
 pub type LocalFcinfo<const N: usize> = FunctionCallInfoBaseData<[NullableDatum; N]>;
 
+// Thin call ABI: the callee must never read flinfo, never write
+// fcinfo.isnull, and read at most its registered arity of args; error
+// surface identical to its PGFunction wrapper (same core body).
+pub type ThinFcinfo = LocalFcinfo<0>;
+pub type PGFunctionThin = unsafe fn(NonNull<ThinFcinfo>) -> PgResult<Datum>;
+
+/// # Safety
+/// `fcinfo` is a live fcinfo image with more than `argno` args.
+#[inline(always)]
+pub unsafe fn thin_arg(fcinfo: NonNull<ThinFcinfo>, argno: usize) -> NullableDatum {
+    const OFF: usize = core::mem::offset_of!(LocalFcinfo<1>, args);
+    // SAFETY: caller contract — argno is inside the image's args tail.
+    unsafe {
+        fcinfo
+            .cast::<u8>()
+            .add(OFF + argno * core::mem::size_of::<NullableDatum>())
+            .cast::<NullableDatum>()
+            .read()
+    }
+}
+
 // Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 32 == 32
 // (result_mcx rides where C keeps flinfo); fcinfo(2) 64 <= 64; FmgrInfo 56
 // vs 48 (fat erased slots +8 each, fn_mcxt dropped; rule-9 cap 128).
@@ -457,6 +478,15 @@ define_calls! {
     function_call7_coll direct_function_call7_coll function_call7_coll_in direct_function_call7_coll_in 7 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6);
     function_call8_coll direct_function_call8_coll function_call8_coll_in direct_function_call8_coll_in 8 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7);
     function_call9_coll direct_function_call9_coll function_call9_coll_in direct_function_call9_coll_in 9 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7, arg9 8);
+}
+
+// `func` referees the registration: `thin` is handed out only for a carrier
+// whose fn_addr is exactly `func`; any diverging resolution falls back.
+#[derive(Clone, Copy)]
+pub struct ThinBuiltin {
+    pub foid: Oid,
+    pub func: PGFunction,
+    pub thin: PGFunctionThin,
 }
 
 #[derive(Clone, Copy, Debug)]
