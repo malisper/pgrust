@@ -1082,7 +1082,15 @@ fn coerce_function_result_tuple(
             )?;
             let mut td = tupdesc::CreateTupleDescCopy(out_mcx, expected)?;
             td.tdtypeid = resolved.result_type_id;
-            td.tdtypmod = -1;
+            if td.tdtypeid == RECORDOID {
+                // C BlessTupleDesc in internal_get_result_type: OUT-param
+                // rowtypes are anonymous records.
+                if td.tdtypmod < 0 {
+                    typcache::assign_record_type_typmod(&mut td)?;
+                }
+            } else {
+                td.tdtypmod = -1;
+            }
             let tup = heaptuple::heap_form_tuple(out_mcx, &td, &values, &nulls)?;
             let img = tup.header_ptr();
             core::mem::forget(tup);
