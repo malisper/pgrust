@@ -328,6 +328,21 @@ fn install_detoast_seams() {
     ONCE.call_once(detoast::init_seams);
 }
 
+fn install_text_type_shape() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok((typid == types_core::TEXTOID).then_some(types_tuple::tupdesc::PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typcollation: 100,
+            }))
+        });
+    });
+}
+
 #[test]
 fn levenshtein_matches_c_values() {
     install_mb_for_levenshtein();
@@ -780,18 +795,7 @@ fn text_to_array_arms() {
     use mcx::Mcx;
     use types_fmgr::LocalFcinfo;
 
-    static SEAM: std::sync::Once = std::sync::Once::new();
-    SEAM.call_once(|| {
-        syscache_seams::lookup_pg_type_shape::set(|typid| {
-            Ok((typid == types_core::TEXTOID).then_some(types_tuple::tupdesc::PgTypeShape {
-                typlen: -1,
-                typbyval: false,
-                typalign: b'i' as i8,
-                typstorage: b'x' as i8,
-                typcollation: 100,
-            }))
-        });
-    });
+    install_text_type_shape();
 
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -924,15 +928,7 @@ mod format_variadic {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             install_detoast_seams();
-            syscache_seams::lookup_pg_type_shape::set(|typid| {
-                Ok((typid == TEXTOID).then_some(::types_tuple::PgTypeShape {
-                    typlen: -1,
-                    typbyval: false,
-                    typalign: b'i' as i8,
-                    typstorage: b'x' as i8,
-                    typcollation: 100,
-                }))
-            });
+            install_text_type_shape();
             syscache_seams::pg_type_io_shape::set(|typid| {
                 Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
                     oid: TEXTOID,
