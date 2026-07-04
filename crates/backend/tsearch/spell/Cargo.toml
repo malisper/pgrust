@@ -15,3 +15,6 @@ regex_core = { path = "../../regex/regex_core" }
 mbutils = { path = "../../utils/mb/mbutils" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 ts_locale = { path = "../ts_locale" }
+
+[dev-dependencies]
+pg_locale = { path = "../../utils/adt/pg_locale" }

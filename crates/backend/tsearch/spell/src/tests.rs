@@ -16,6 +16,7 @@ fn opts<'m>(mcx: Mcx<'m>, pairs: &[(&str, &str)]) -> PgVec<'m, (PgVec<'m, u8>, P
 }
 
 fn static_mcx() -> Mcx<'static> {
+    ::pg_locale::set_default_locale_c_for_tests();
     let ctx: &'static ::mcx::MemoryContext =
         Box::leak(Box::new(::mcx::MemoryContext::new("spell-test")));
     ctx.mcx()

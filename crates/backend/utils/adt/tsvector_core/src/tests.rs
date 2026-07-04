@@ -41,7 +41,7 @@ fn tsvector_io_matrix() {
         roundtrip(r"'\\as' ab\c ab\\c AB\\\c ab\\\\c"),
         r"'AB\\c' '\\as' 'ab\\\\c' 'ab\\c' 'abc'"
     );
-    assert_eq!(roundtrip("'w':4A,3B,2C,1D,5 a:8"), "'w':4A,3B,2C,1D,5 'a':8");
+    assert_eq!(roundtrip("'w':4A,3B,2C,1D,5 a:8"), "'a':8 'w':1,2C,3B,4A,5");
     assert_eq!(
         roundtrip("base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3"),
         "'base':7 'hidden':6 'rebel':1 'spaceship':2,33A,34B,35C 'strike':3"

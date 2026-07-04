@@ -12,3 +12,6 @@ types_error = { path = "../../../_support/types/types_error" }
 ts_locale = { path = "../../tsearch/ts_locale" }
 mbutils = { path = "../../utils/mb/mbutils" }
 wchar = { path = "../../../common/wchar" }
+
+[dev-dependencies]
+pg_locale = { path = "../../utils/adt/pg_locale" }
