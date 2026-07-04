@@ -3570,6 +3570,7 @@ dependencies = [
 name = "equivclass"
 version = "0.1.0"
 dependencies = [
+ "clauses",
  "costsize",
  "lsyscache",
  "mcx",
@@ -5467,6 +5468,7 @@ name = "indxpath"
 version = "0.1.0"
 dependencies = [
  "adt_network",
+ "clauses",
  "costsize",
  "datum",
  "equivclass",
