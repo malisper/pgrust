@@ -416,6 +416,28 @@ pub fn UnlockSharedObject(
     Ok(())
 }
 
+pub fn LockSharedObjectForSession(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag = LOCKTAG::object(types_core::primitive::InvalidOid, classid, objid, objsubid);
+    lock_seams::lock_acquire_extended::call(tag, lockmode, true, false, true, false)?;
+    Ok(())
+}
+
+pub fn UnlockSharedObjectForSession(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag = LOCKTAG::object(types_core::primitive::InvalidOid, classid, objid, objsubid);
+    lock_seams::lock_release::call(tag, lockmode, true)?;
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn xact_wait_context(

@@ -19,6 +19,7 @@ mod localbuf;
 mod ops;
 mod pin;
 mod privref;
+mod dbcopy;
 mod read;
 mod uring;
 mod write;
@@ -219,6 +220,7 @@ pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {
     write::FlushRelationsAllBuffers(&[rlocator])
 }
 
+pub use dbcopy::CreateAndCopyRelationData;
 pub use drop_buffers::DropDatabaseBuffers;
 pub use write::FlushDatabaseBuffers;
 

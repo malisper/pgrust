@@ -27,12 +27,18 @@ catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 elog = { path = "../../../utils/error/elog" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+acl_seams = { path = "../../../utils/adt/acl_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+procsignal = { path = "../procsignal" }
+libc = "0.2"
+
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 latch_seams = { path = "../latch_seams" }
-miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 ipc_seams = { path = "../ipc_seams" }
 deadlock_seams = { path = "../../lmgr/deadlock_seams" }

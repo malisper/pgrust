@@ -26,6 +26,7 @@ pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 scalar_seams = { path = "../../adt/scalar_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+superuser_seams = { path = "../superuser_seams" }
 guc_file = { path = "../guc_file" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
 pgtz = { path = "../../../timezone/pgtz" }

@@ -17,11 +17,18 @@ use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
 
 pub mod builtins;
+mod alterdb;
 mod createdb;
 mod dropdb;
+mod walcopy;
 
+pub use alterdb::{
+    movedb, AlterDatabase, AlterDatabaseOwner, AlterDatabaseRefreshColl, AlterDatabaseSet,
+    RenameDatabase,
+};
 pub use createdb::{check_encoding_locale_matches, createdb};
 pub use dropdb::dropdb;
+pub(crate) use dropdb::name_key;
 
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("dbcommands.c", 0, funcname)
@@ -336,10 +343,12 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
         fd::copydir(src_path.as_str(), dst_path.as_str(), false)?;
     } else if info == XLOG_DBASE_CREATE_WAL_LOG {
-        panic!(
-            "dbase_redo: XLOG_DBASE_CREATE_WAL_LOG replay unported \
-             (createdb WAL_LOG strategy — land the buffer-level copy engine)"
-        );
+        let db_id = u32_at(0);
+        let tablespace_id = u32_at(4);
+
+        let dbpath = relpath::GetDatabasePath(mcx, db_id, tablespace_id)?;
+        recovery_create_dbdir(get_parent_directory(dbpath.as_str()), true)?;
+        walcopy::CreateDirAndVersionFile(dbpath.as_str(), db_id, tablespace_id, true)?;
     } else if info == XLOG_DBASE_DROP {
         let db_id = u32_at(0);
         let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().expect("short drop record"));

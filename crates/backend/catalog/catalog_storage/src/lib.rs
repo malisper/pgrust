@@ -430,6 +430,14 @@ pub fn init_seams() {
     catalog_storage_seams::post_prepare_smgr::set(PostPrepare_smgr);
     catalog_storage_seams::drop_relation_files::set(DropRelationFiles);
     catalog_storage_seams::relation_preserve_storage::set(RelationPreserveStorage);
+    catalog_storage_seams::relation_create_storage::set(
+        |rlocator, relpersistence, register_delete| {
+            RelationCreateStorage(rlocator, relpersistence, register_delete).map(|_| ())
+        },
+    );
+    catalog_storage_seams::log_smgrcreate::set(|rlocator, fork_num| {
+        log_smgrcreate(&rlocator, fork_num)
+    });
 }
 
 #[cfg(test)]

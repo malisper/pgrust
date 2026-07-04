@@ -84,7 +84,7 @@ fn count_db_subscriptions(mcx: Mcx<'_>, dbid: Oid) -> PgResult<i32> {
     Ok(n)
 }
 
-fn name_key<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<(mcx::PgBox<'mcx, NameData>, ScanKeyData)> {
+pub(crate) fn name_key<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<(mcx::PgBox<'mcx, NameData>, ScanKeyData)> {
     let mut nd = NameData::default();
     nd.namestrcpy(name);
     let boxed = mcx::PgBox::new_in(nd, mcx);
@@ -187,15 +187,8 @@ pub fn dropdb(mcx: Mcx<'_>, dbname: &str, missing_ok: bool, force: bool) -> PgRe
             .into());
     }
 
-    // C terminates other backends here (TerminateOtherDBBackends); the signal
-    // lane is unported, so FORCE is a catchable error, never a wrong drop.
     if force {
-        return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("DROP DATABASE ... WITH (FORCE) is not supported yet".to_string())
-            .errdetail("TerminateOtherDBBackends is unported (procarray signal lane).".to_string())
-            .into_error()
-            .into());
+        procarray::TerminateOtherDBBackends(db_id)?;
     }
 
     if let Some((notherbackends, npreparedxacts)) = procarray::CountOtherDBBackends(db_id)? {

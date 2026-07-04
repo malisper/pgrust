@@ -864,10 +864,32 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        DATABASE_RELATION_ID_OWNERCHECK => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::DATABASEOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for database {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::DATABASEOID,
+                &tuple,
+                ANUM_PG_DATABASE_DATDBA,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
 }
+
+const DATABASE_RELATION_ID_OWNERCHECK: Oid = 1262;
+const ANUM_PG_DATABASE_DATDBA: i32 = 3;
 
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
