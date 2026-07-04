@@ -257,6 +257,12 @@ fn eval_join_qual<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<bool> {
+    // C ExecQual(NULL) returns true before any slot access (constraint: the
+    // hashjoin eval_probe_qual fast path; its absence here cost memoize_lat
+    // ~36M instr/q in with_qual_slots calls on None quals).
+    if qual.is_none() {
+        return Ok(true);
+    }
     if qual.as_ref().is_some_and(|q| q.has_subplan()) {
         return ::executils::exec_qual_with_subplans(qual, estate, ecxt);
     }

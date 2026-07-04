@@ -257,18 +257,14 @@ pub fn exec_re_scan<'mcx>(
 /// per-edge intersection C materializes is equivalent). C defers a changed
 /// child's rescan to its next ExecProcNode; the values are already bound, so
 /// the eager recursion here is the same rescan one call earlier.
-pub fn exec_re_scan_with_chg<'mcx>(
-    node: &mut PlanStateNode<'mcx>,
-    plan: Node<'mcx>,
+#[cold]
+#[inline(never)]
+fn rescan_mark_initplans<'mcx>(
+    base: &'mcx types_nodes::plannodes::Plan<'mcx>,
     estate: &mut EStateData<'mcx>,
     chg: &types_nodes::bitmapset::Bitmapset<'mcx>,
+    chg_owned: &mut Option<types_nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
-    let base = plan.as_plan().expect("plan-tree node");
-    if !chg.overlap(&base.allParam) {
-        return exec_re_scan(node, estate);
-    }
-
-    let mut chg_owned: Option<types_nodes::bitmapset::Bitmapset<'mcx>> = None;
     for sp_node in base.initPlan.iter() {
         let sp = sp_node.as_sub_plan().expect("initPlan cell is a SubPlan");
         let init_plan = estate
@@ -285,7 +281,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
                 let owned = match chg_owned.as_mut() {
                     Some(o) => o,
                     None => {
-                        chg_owned = Some(chg.clone_in(mcx)?);
+                        *chg_owned = Some(chg.clone_in(mcx)?);
                         chg_owned.as_mut().unwrap()
                     }
                 };
@@ -310,7 +306,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
             let owned = match chg_owned.as_mut() {
                 Some(o) => o,
                 None => {
-                    chg_owned = Some(chg.clone_in(mcx)?);
+                    *chg_owned = Some(chg.clone_in(mcx)?);
                     chg_owned.as_mut().unwrap()
                 }
             };
@@ -321,8 +317,31 @@ pub fn exec_re_scan_with_chg<'mcx>(
             }
         }
     }
+    Ok(())
+}
+
+pub fn exec_re_scan_with_chg<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    plan: Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    let base = plan.as_plan().expect("plan-tree node");
+    if !chg.overlap(&base.allParam) {
+        return exec_re_scan(node, estate);
+    }
+
+    // The initplan mark/rescan walk and the hashed-SubPlan stale sweep are
+    // outlined cold: this function runs per Memoize probe (200k/q on
+    // memoize_lat) and the common shape has no initplans and no SubPlans.
+    let mut chg_owned: Option<types_nodes::bitmapset::Bitmapset<'mcx>> = None;
+    if !base.initPlan.is_nil() {
+        rescan_mark_initplans(base, estate, chg, &mut chg_owned)?;
+    }
     let chg: &types_nodes::bitmapset::Bitmapset<'mcx> = chg_owned.as_ref().unwrap_or(chg);
-    crate::nodesubplan::mark_hashed_subplans_stale(estate, chg);
+    if !estate.es_subplan_expr_states.is_empty() {
+        crate::nodesubplan::mark_hashed_subplans_stale(estate, chg);
+    }
 
     if let Some(id) = node.ps_expr_context() {
         estate.ecxt_mut(id).rescan();
