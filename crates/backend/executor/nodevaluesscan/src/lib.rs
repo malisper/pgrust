@@ -152,14 +152,19 @@ pub fn exec_init_values_scan<'mcx>(
     let array_len = node.values_lists.len() as i32;
     let mut exprlists: PgVec<'mcx, Node<'mcx>> =
         mcx::vec_with_capacity_in(mcx, array_len as usize)?;
+    // Droppy ExprState carriers: released in exec_end_values_scan, so the
+    // no-drop ctor is skipped (nodeagg peragg precedent).
     let mut exprstatelists: PgVec<'mcx, Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>> =
-        mcx::vec_with_capacity_in(mcx, array_len as usize)?;
+        PgVec::new_in(mcx);
+    exprstatelists
+        .try_reserve(array_len as usize)
+        .map_err(|_| mcx.oom(array_len as usize))?;
     for row in &node.values_lists {
         if !estate.es_subplanstates.is_empty() && clauses::contain_subplans(row)? {
             let row_list = row.as_list().expect("values row is a List");
             let pb = estate.param_bind();
-            let mut states: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
-                mcx::vec_with_capacity_in(mcx, row_list.len())?;
+            let mut states: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+            states.try_reserve(row_list.len()).map_err(|_| mcx.oom(row_list.len()))?;
             ::executils::with_subplan_compile_env(estate, |env| -> PgResult<()> {
                 for e in row_list.iter() {
                     states.push(
