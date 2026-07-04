@@ -404,7 +404,10 @@ mod expanded {
         let mut parent = MemoryContext::new("t");
         let img: std::vec::Vec<u8> = {
             let tmp = MemoryContext::new("img");
-            int4_array(tmp.mcx(), &[1, 2], None).as_slice().to_vec()
+            let v = int4_array(tmp.mcx(), &[1, 2], None);
+            let out = v.as_slice().to_vec();
+            drop(v);
+            out
         };
         let _ = expand_array(
             Datum::from_usize(img.as_ptr() as usize),
