@@ -30,6 +30,7 @@ parse_func = { path = "../../parser/parse_func" }
 parser_small1 = { path = "../../parser/parser_small1" }
 commands_define = { path = "../commands_define" }
 aclchk = { path = "../../catalog/aclchk" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
 adt_acl = { path = "../../utils/adt/acl" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 varlena = { path = "../../utils/adt/varlena" }

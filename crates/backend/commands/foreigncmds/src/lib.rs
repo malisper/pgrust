@@ -857,8 +857,10 @@ pub fn ImportForeignSchema<'mcx>(
             server.servername,
         )?;
     }
-    // C next checks the local schema, then the FDW handler. The no-handler
-    // error is the live surface; a handler-bearing FDW is loud.
+    catalog_namespace::LookupCreationNamespace(
+        stmt.local_schema.expect("ImportForeignSchemaStmt.local_schema"),
+    )?;
+    // The no-handler error is the live surface; a handler-bearing FDW is loud.
     let fdw = GetForeignDataWrapper(mcx, server.fdwid)?;
     if fdw.fdwhandler == InvalidOid {
         return Err(::elog::ereport(ERROR)
