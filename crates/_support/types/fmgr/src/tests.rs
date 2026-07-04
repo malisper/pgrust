@@ -508,3 +508,27 @@ mod soft {
         assert!(unsafe { fci.soft_error_context() }.is_none());
     }
 }
+
+#[test]
+fn fn_extra_take_restore_and_drop() {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    struct Memo(#[allow(dead_code)] alloc::vec::Vec<u64>);
+    impl Drop for Memo {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let mut a = FmgrInfo::new(int4pl, 177, 2, true, false);
+    a.set_fn_extra(Memo(alloc::vec![1, 2, 3]));
+    let taken = a.fn_extra.take();
+    assert!(!a.has_fn_extra());
+    let mut b = FmgrInfo::new(int4pl, 177, 2, true, false);
+    b.fn_extra = taken;
+    assert_eq!(b.fn_extra_ref::<Memo>().unwrap().0, alloc::vec![1, 2, 3]);
+    assert_eq!(DROPS.load(Ordering::Relaxed), 0);
+    b.set_fn_extra(Memo(alloc::vec![9]));
+    assert_eq!(DROPS.load(Ordering::Relaxed), 1, "replacement drops the old memo");
+    drop(b);
+    assert_eq!(DROPS.load(Ordering::Relaxed), 2, "flinfo death drops the memo");
+}
