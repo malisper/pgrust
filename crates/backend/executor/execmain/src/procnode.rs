@@ -205,6 +205,34 @@ pub struct HashJoinNode<'mcx> {
     pub state: ::nodehashjoin::HashJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
+    pub probe_batch: ProbeBatch,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeBatchMode {
+    Unknown,
+    Off,
+    On,
+}
+
+// Probe-side fused-drive cursor: exec_hash_join returns per joined row, so
+// the staged-page position must outlive each hash_join_arm call.
+pub struct ProbeBatch {
+    mode: ProbeBatchMode,
+    n: u32,
+    i: u32,
+}
+
+impl ProbeBatch {
+    pub const fn new() -> Self {
+        ProbeBatch { mode: ProbeBatchMode::Unknown, n: 0, i: 0 }
+    }
+
+    // Rescan invalidates the staged page; the fusibility verdict survives.
+    pub fn reset_staged(&mut self) {
+        self.n = 0;
+        self.i = 0;
+    }
 }
 
 // Both children live here; nodemergejoin drives them via the MergeJoin traits.
@@ -756,6 +784,7 @@ pub fn exec_init_node<'mcx>(
                         mcx,
                         HashSubNode { state: hash_state, child: ::mcx::alloc_in(mcx, hash_child)? },
                     )?,
+                    probe_batch: ProbeBatch::new(),
                 },
             )?)
         }
@@ -1798,8 +1827,94 @@ fn hash_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let hj = &mut **hj;
-    let HashSubNode { state: hstate, child } = &mut *hj.hash;
-    ::nodehashjoin::exec_hash_join(&mut hj.state, &mut *hj.outer, hstate, &mut **child, estate)
+    let HashJoinNode { state, outer, hash, probe_batch } = hj;
+    let HashSubNode { state: hstate, child } = &mut **hash;
+    if probe_batch.mode == ProbeBatchMode::Unknown {
+        probe_batch.mode = probe_batch_probe(state, &mut **outer, estate)?;
+    }
+    if probe_batch.mode == ProbeBatchMode::On {
+        let PlanStateNode::SeqScan(ss) = &mut **outer else {
+            unreachable!("probe fusion armed on a non-SeqScan outer")
+        };
+        let mut src = SeqScanProbeSource { ss, cur: probe_batch };
+        return ::nodehashjoin::exec_hash_join(state, &mut src, hstate, &mut **child, estate);
+    }
+    ::nodehashjoin::exec_hash_join(state, &mut **outer, hstate, &mut **child, estate)
+}
+
+// Probe-drive gate, decided once — EXEC_FLAG_BACKWARD is asserted off at HJ
+// init and EPQ trees re-init with es_epq_active set, so the verdict cannot
+// flip mid-drive. Instrumented outers never fuse (EXPLAIN ANALYZE keeps the
+// per-tuple drive and its counters).
+#[inline(never)]
+fn probe_batch_probe<'mcx>(
+    hjs: &::nodehashjoin::HashJoinState<'mcx>,
+    outer: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ProbeBatchMode> {
+    use ::execexpr::{Kernel, SlotSrc};
+    let PlanStateNode::SeqScan(ss) = outer else { return Ok(ProbeBatchMode::Off) };
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(ProbeBatchMode::Off);
+    }
+    let variant_ok = match ss.variant() {
+        ::nodeseqscan::SeqScanVariant::Plain => true,
+        ::nodeseqscan::SeqScanVariant::WithQual => {
+            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
+                Some(Kernel::QualScanVarCmpConst { .. }) => true,
+                Some(Kernel::QualVarCmpVar { a_src, b_src, .. }) => {
+                    a_src == SlotSrc::Scan && b_src == SlotSrc::Scan
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if !variant_ok || !::nodeseqscan::seq_scan_batch_supported(ss, estate)? {
+        return Ok(ProbeBatchMode::Off);
+    }
+    let mut prefix = hjs.probe_outer_prefix().unwrap_or(0);
+    if let Some(q) = ss.ss.qual.as_deref() {
+        prefix = match q.max_fetch(SlotSrc::Scan) {
+            Some(qp) => prefix.max(qp),
+            None => 0,
+        };
+    }
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false);
+    Ok(ProbeBatchMode::On)
+}
+
+struct SeqScanProbeSource<'a, 'mcx> {
+    ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+    cur: &'a mut ProbeBatch,
+}
+
+impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for SeqScanProbeSource<'_, 'mcx> {
+    #[inline]
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        loop {
+            while self.cur.i < self.cur.n {
+                let i = self.cur.i;
+                self.cur.i += 1;
+                if ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)? {
+                    return Ok(Some(self.ss.ss.ss_ScanTupleSlot));
+                }
+            }
+            let n = ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            self.cur.n = n;
+            self.cur.i = 0;
+        }
+    }
+
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        self.cur.reset_staged();
+        ::nodeseqscan::exec_rescan_seq_scan(self.ss, estate)
+    }
 }
 
 #[inline(never)]
@@ -2556,6 +2671,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 
 // Exempt fields: released by release_owned/the per-node end fns before
 // standard_executor_end forgets the bundle (Drop stays the abort path).
+::mcx::forget_safe_nodrop!(ProbeBatch);
 ::mcx::forget_safe_struct!(
     PlanStateBase<'_> { plan, ps_ExprContext, ps_ResultTupleSlot;
         ps_ResultTupleDesc, ps_ProjInfo, qual },
@@ -2578,7 +2694,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     UniqueNode<'_> { state, outer },
     NestLoopNode<'_> { state, outer, inner },
     HashSubNode<'_> { state, child },
-    HashJoinNode<'_> { state, outer, hash },
+    HashJoinNode<'_> { state, outer, hash, probe_batch },
     MergeJoinNode<'_> { state, outer, inner },
 );
 ::mcx::forget_safe_enum!(

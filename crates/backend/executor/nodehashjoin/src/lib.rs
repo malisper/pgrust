@@ -66,6 +66,30 @@ pub struct HashJoinState<'mcx> {
     hash_instr: Option<u32>,
 }
 
+impl<'mcx> HashJoinState<'mcx> {
+    /// Probe-drive deform prefix; the outer hash expr binds the outer slot as
+    /// INNER (get_outer_tuple's EvalSlots shape). None = lazy deform.
+    pub fn probe_outer_prefix(&self) -> Option<i32> {
+        use ::execexpr::{Kernel, SlotSrc};
+        let mut p = match self.outer_hash_expr.kernel() {
+            Kernel::Hash32Var { src: SlotSrc::Inner, attnum, .. } => attnum as i32 + 1,
+            _ => self.outer_hash_expr.max_fetch(SlotSrc::Inner)?,
+        };
+        for q in [
+            self.hashclauses.as_deref(),
+            self.joinqual.as_deref(),
+            self.otherqual.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            p = p.max(q.max_fetch(SlotSrc::Outer)?);
+        }
+        p = p.max(self.proj.max_fetch(SlotSrc::Outer)?);
+        Some(p)
+    }
+}
+
 /// `ExecInitHashJoin` minus child linkage.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_init_hash_join<'mcx>(

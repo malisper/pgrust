@@ -181,6 +181,7 @@ pub fn exec_re_scan<'mcx>(
         // land).
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
+            hj.probe_batch.reset_staged();
             let inner = ::nodehashjoin::exec_rescan_hash_join(
                 &mut hj.state,
                 &mut hj.hash.state,
@@ -445,6 +446,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
         }
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
+            hj.probe_batch.reset_staged();
             let inner_plan = base.righttree.expect("HashJoin Hash plan");
             let inner_chg = chg.overlap(&inner_plan.as_plan().expect("plan node").allParam);
             exec_re_scan_with_chg(&mut hj.outer, base.lefttree.expect("HashJoin outer plan"), estate, chg)?;
