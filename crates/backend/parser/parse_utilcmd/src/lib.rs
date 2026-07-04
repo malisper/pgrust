@@ -44,6 +44,25 @@ pub fn typenameTypeIdAndMod<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
+    typename_type_id_and_mod(mcx, pstate, tn, false)
+}
+
+// C's typenameTypeIdAndMod has no typtype gate; the column lanes here narrow
+// it, so composite-consumers (ALTER TABLE OF) use the allowing variant.
+pub fn typenameTypeIdAndModAllowComposite<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+) -> PgResult<(Oid, i32)> {
+    typename_type_id_and_mod(mcx, pstate, tn, true)
+}
+
+fn typename_type_id_and_mod<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+    allow_composite: bool,
+) -> PgResult<(Oid, i32)> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
     }
@@ -91,6 +110,7 @@ pub fn typenameTypeIdAndMod<'mcx>(
                 || t == b'r' as i8
                 || t == b'm' as i8
                 || t == b'd' as i8 => {}
+        Some(t) if t == b'c' as i8 && allow_composite => {}
         Some(t) => unported(match t as u8 {
             b'c' => "composite column types",
             b'p' => "pseudo-type columns",
@@ -841,6 +861,7 @@ pub fn transformCreateStmt<'mcx>(
         &mut nnconstraints,
         &ixconstraints,
         &mut alist,
+        query_string,
     )?;
 
     // transformFKConstraints(skipValidation=true, isAddConstraint=false).
@@ -930,6 +951,7 @@ fn transform_index_constraints<'mcx>(
     nnconstraints: &mut NodeList<'mcx>,
     ixconstraints: &NodeList<'mcx>,
     alist: &mut NodeList<'mcx>,
+    src: &str,
 ) -> PgResult<()> {
     let mut indexlist = NodeList::nil();
     let mut pkey: Option<Node<'mcx>> = None;
@@ -940,12 +962,16 @@ fn transform_index_constraints<'mcx>(
             ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
         ));
         if constraint.indexname.is_some() {
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    "cannot use an existing index in CREATE TABLE".to_string(),
-                )
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            return Err(cursor_at(
+                Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot use an existing index in CREATE TABLE".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ),
+                Some(src.as_bytes()),
+                constraint.location,
             ));
         }
         if constraint.deferrable || constraint.initdeferred {
@@ -1087,6 +1113,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
     cnode: Node<'mcx>,
+    query_string: &str,
 ) -> PgResult<(Node<'mcx>, NodeList<'mcx>)> {
     let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
     debug_assert!(matches!(
@@ -1094,7 +1121,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
     ));
     if constraint.indexname.is_some() {
-        return transform_existing_index_constraint(mcx, rel, cnode);
+        return transform_existing_index_constraint(mcx, rel, cnode, query_string);
     }
     if constraint.deferrable || constraint.initdeferred {
         unported("transformIndexConstraint: DEFERRABLE constraint indexes");
@@ -1143,10 +1170,12 @@ fn transform_existing_index_constraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
     cnode: Node<'mcx>,
+    src: &str,
 ) -> PgResult<(Node<'mcx>, NodeList<'mcx>)> {
     let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
     let index_name = constraint.indexname.expect("Constraint.indexname");
     debug_assert!(constraint.keys.is_nil());
+    let at = |e: Box<PgError>| cursor_at(e, Some(src.as_bytes()), constraint.location);
 
     let mut index = Node::build::<IndexStmt>(mcx)?;
     index.unique = true;
@@ -1161,17 +1190,17 @@ fn transform_existing_index_constraint<'mcx>(
 
     let index_oid = lsyscache::get_relname_relid(index_name, rel.rd_rel.relnamespace)?;
     if index_oid == InvalidOid {
-        return Err(Box::new(
+        return Err(at(Box::new(
             PgError::new(ERROR, format!("index \"{index_name}\" does not exist"))
                 .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
-        ));
+        )));
     }
     let index_rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
     let existing_err = |msg: String| -> Box<PgError> {
-        Box::new(
+        at(Box::new(
             PgError::new(ERROR, msg)
                 .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-        )
+        ))
     };
     let wrong_type = |msg: String, detail: bool| -> Box<PgError> {
         let mut e = PgError::new(ERROR, msg)
@@ -1182,7 +1211,7 @@ fn transform_existing_index_constraint<'mcx>(
                     .to_string(),
             );
         }
-        Box::new(e)
+        at(Box::new(e))
     };
     if pg_depend::get_index_constraint(mcx, index_oid)? != InvalidOid {
         return Err(existing_err(format!(
@@ -1214,7 +1243,7 @@ fn transform_existing_index_constraint<'mcx>(
         e = e.with_detail(
             "Cannot create a non-deferrable constraint using a deferrable index.".to_string(),
         );
-        return Err(Box::new(e));
+        return Err(at(Box::new(e)));
     }
     if index_rel.rd_rel.relam != types_core::BTREE_AM_OID {
         return Err(wrong_type(format!("index \"{index_name}\" is not a btree"), false));
@@ -1727,6 +1756,17 @@ fn conflicting_null_decls(colname: &str, relname: &str) -> Box<PgError> {
         )
         .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
+}
+
+#[cold]
+#[inline(never)]
+fn cursor_at(mut e: Box<PgError>, src: Option<&[u8]>, location: i32) -> Box<PgError> {
+    let pos =
+        parser_small1::parser_errposition_source(src, location, mbutils::GetDatabaseEncoding());
+    if pos > 0 {
+        e.cursor_position = Some(pos);
+    }
+    e
 }
 
 #[cold]
