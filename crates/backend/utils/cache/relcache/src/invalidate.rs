@@ -64,17 +64,6 @@ fn deleted_while_in_use(relid: Oid) -> Box<PgError> {
     )
 }
 
-thread_local! {
-    static REBUILD_DEPTH: Cell<u32> = const { Cell::new(0) };
-}
-
-struct DepthGuard;
-impl Drop for DepthGuard {
-    fn drop(&mut self) {
-        REBUILD_DEPTH.with(|d| d.set(d.get() - 1));
-    }
-}
-
 // RelationRebuildRelation. C swaps the rebuilt contents in place; here the
 // entry Rc is replaced and live holders keep their invalidated snapshot until
 // they reopen. The swap's keep_* preservation set maps to copying the Cell
@@ -83,11 +72,6 @@ pub(crate) fn RelationRebuildRelation(
     relid: Oid,
     held: &Rc<RelationData<'static>>,
 ) -> PgResult<Rc<RelationData<'static>>> {
-    REBUILD_DEPTH.with(|d| {
-        d.set(d.get() + 1);
-        assert!(d.get() < 40, "PUBTRACE rebuild depth {}", d.get());
-    });
-    let _guard = DepthGuard;
     debug_assert!(!store::refcount_zero(held, 0));
     debug_assert_eq!(held.rd_droppedSubid.get(), InvalidSubTransactionId);
 

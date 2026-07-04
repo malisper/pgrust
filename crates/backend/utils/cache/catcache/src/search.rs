@@ -303,22 +303,7 @@ fn search_internal<K: ProbeKeys>(cache_id: i32, keys: &K) -> PgResult<Option<Cat
 
 /// `SearchCatCacheMiss`.
 #[cold]
-thread_local! {
-    static MISS_DEPTH: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
-}
-struct MissDepthGuard;
-impl Drop for MissDepthGuard {
-    fn drop(&mut self) {
-        MISS_DEPTH.with(|d| d.set(d.get() - 1));
-    }
-}
-
 fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgResult<Option<CatCTuple>> {
-    MISS_DEPTH.with(|d| {
-        d.set(d.get() + 1);
-        assert!(d.get() < 30, "PUBTRACE catcache miss depth {} cache {cache_id}", d.get());
-    });
-    let _miss_guard = MissDepthGuard;
     let (reloid, indexoid, nkeys) = with_state(|st| {
         let c = st.cache(cache_id);
         (c.cc_reloid, c.cc_indexoid, c.cc_nkeys)
