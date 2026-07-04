@@ -349,7 +349,12 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         orderby_unported();
     }
 
-    let ioss_ScanKeys = exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual)?;
+    let (ioss_ScanKeys, runtime_keys) =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
+    assert!(
+        runtime_keys.is_empty(),
+        "nodeindexonlyscan: runtime keys pending the IOS runtime-key lane"
+    );
     let ioss_NameCStringAttNums = name_cstring_attnums(mcx, &index_rel)?;
 
     Ok(IndexOnlyScanState {
