@@ -863,8 +863,9 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // OptTemp (GLOBAL-deprecated and UNLOGGED variants stay unported).
+            // OptTemp (GLOBAL-deprecated variants stay unported).
             461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
+            467 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_UNLOGGED as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
             // ViewStmt (RECURSIVE variants 1490/1491 stay unported).
             1488 | 1489 => {
