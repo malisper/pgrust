@@ -89,7 +89,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
     let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
-    let _is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
+    let is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
         || context == PROCESS_UTILITY_QUERY_NONATOMIC)
         || xact::IsTransactionBlock();
 
@@ -272,7 +272,10 @@ fn dispatch_switch<'mcx>(
             portalcmds::PerformPortalFetch(stmt, dest, qc.as_deref_mut())?;
         }
 
-        T_DoStmt => handler_gap("ExecuteDoStmt (functioncmds lane)"),
+        T_DoStmt => {
+            let stmt = parsetree.as_do_stmt().unwrap();
+            functioncmds::ExecuteDoStmt(stmt, is_atomic_context)?;
+        }
 
         T_CreateTableSpaceStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE TABLESPACE")?;

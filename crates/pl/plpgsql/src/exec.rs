@@ -161,8 +161,72 @@ pub struct Estate<'a> {
     datum_ctx: Ctx,
     // Per-evaluation scratch (C's eval_mcontext); reset by exec_eval_cleanup.
     eval_ctx: Ctx,
-    pub err_stmt: Option<(i32, &'static str)>,
-    pub err_text: Option<&'static str>,
+    // Execution-copy datatype changes (C mutates its per-estate datum copies;
+    // the shared AST here is immutable). Consulted wherever a Var's declared
+    // type feeds plan/param typing.
+    var_type_overrides: FxHashMap<Dno, PlType>,
+    pub frame: std::rc::Rc<FrameShared>,
+}
+
+// C's plpgsql_exec_error_callback arg, shared with the thread-local context
+// stack so GET DIAGNOSTICS PG_CONTEXT can render every live frame without
+// aliasing the estates.
+pub struct FrameShared {
+    pub sig: String,
+    pub stmt: core::cell::Cell<Option<(i32, &'static str)>>,
+    pub text: core::cell::Cell<Option<&'static str>>,
+}
+
+enum CtxFrame {
+    Pl(std::rc::Rc<FrameShared>),
+    Spi(String),
+}
+
+std::thread_local! {
+    static CONTEXT_FRAMES: core::cell::RefCell<Vec<CtxFrame>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+pub struct FrameGuard;
+
+impl FrameGuard {
+    pub fn push_pl(estate: &Estate<'_>) -> FrameGuard {
+        let f = estate.frame.clone();
+        CONTEXT_FRAMES.with(|s| s.borrow_mut().push(CtxFrame::Pl(f)));
+        FrameGuard
+    }
+
+    fn push_spi(query: &str, mode: parser_seams::RawParseMode) -> FrameGuard {
+        CONTEXT_FRAMES
+            .with(|s| s.borrow_mut().push(CtxFrame::Spi(spi_context_line(query, mode))));
+        FrameGuard
+    }
+}
+
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        CONTEXT_FRAMES.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
+// GetErrorContextStack (elog.c): innermost frame first.
+fn get_error_context_stack() -> String {
+    CONTEXT_FRAMES.with(|s| {
+        let s = s.borrow();
+        let mut out = String::new();
+        for frame in s.iter().rev() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            match frame {
+                CtxFrame::Pl(f) => out.push_str(&frame_context_line_of(f)),
+                CtxFrame::Spi(line) => out.push_str(line),
+            }
+        }
+        out
+    })
 }
 
 // _SPI_error_callback (spi.c): position becomes internal query/position;
@@ -180,18 +244,23 @@ fn spi_ctx_err(
         e.internal_query = Some(query.to_string());
         return e;
     }
-    let line = match mode {
-        M::RAW_PARSE_PLPGSQL_EXPR => format!("PL/pgSQL expression \"{query}\""),
-        M::RAW_PARSE_PLPGSQL_ASSIGN1
-        | M::RAW_PARSE_PLPGSQL_ASSIGN2
-        | M::RAW_PARSE_PLPGSQL_ASSIGN3 => format!("PL/pgSQL assignment \"{query}\""),
-        _ => format!("SQL statement \"{query}\""),
-    };
+    let line = spi_context_line(query, mode);
     match e.context.take() {
         Some(prev) => e.context = Some(format!("{prev}\n{line}")),
         None => e.context = Some(line),
     }
     e
+}
+
+fn spi_context_line(query: &str, mode: parser_seams::RawParseMode) -> String {
+    use parser_seams::RawParseMode as M;
+    match mode {
+        M::RAW_PARSE_PLPGSQL_EXPR => format!("PL/pgSQL expression \"{query}\""),
+        M::RAW_PARSE_PLPGSQL_ASSIGN1
+        | M::RAW_PARSE_PLPGSQL_ASSIGN2
+        | M::RAW_PARSE_PLPGSQL_ASSIGN3 => format!("PL/pgSQL assignment \"{query}\""),
+        _ => format!("SQL statement \"{query}\""),
+    }
 }
 
 #[cold]
@@ -244,12 +313,19 @@ impl<'a> Estate<'a> {
             cast_cache: FxHashMap::default(),
             datum_ctx: Ctx::new("PLpgSQL per-invocation values"),
             eval_ctx: Ctx::new("PLpgSQL eval scratch"),
-            err_stmt: None,
-            err_text: None,
+            var_type_overrides: FxHashMap::default(),
+            frame: std::rc::Rc::new(FrameShared {
+                sig: func.fn_signature.clone(),
+                stmt: core::cell::Cell::new(None),
+                text: core::cell::Cell::new(None),
+            }),
         }
     }
 
     fn var_type(&self, dno: Dno) -> &PlType {
+        if let Some(t) = self.var_type_overrides.get(&dno) {
+            return t;
+        }
         match &self.func.datums[dno as usize] {
             PlDatum::Var(v) => &v.datatype,
             _ => panic!("plpgsql: datum {dno} is not a Var"),
@@ -400,7 +476,8 @@ impl<'a> Estate<'a> {
         for d in &func.datums {
             params_by_dno.push(match d {
                 PlDatum::Var(v) => {
-                    Some((v.datatype.typoid, v.datatype.atttypmod, v.datatype.collation))
+                    let t = self.var_type(v.dno);
+                    Some((t.typoid, t.atttypmod, t.collation))
                 }
                 PlDatum::RecField(f) => self.recfield_type(f)?,
                 _ => None,
@@ -416,13 +493,8 @@ impl<'a> Estate<'a> {
                 NsType::Var => {
                     if let PlDatum::Var(v) = &func.datums[item.itemno as usize] {
                         let key = item.name.to_ascii_lowercase();
-                        let info = (
-                            key.clone(),
-                            v.dno,
-                            v.datatype.typoid,
-                            v.datatype.atttypmod,
-                            v.datatype.collation,
-                        );
+                        let t = self.var_type(v.dno);
+                        let info = (key.clone(), v.dno, t.typoid, t.atttypmod, t.collation);
                         if !have(&names, &key) {
                             names.push(info.clone());
                         }
@@ -768,6 +840,7 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, maxtuples)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         self.eval_processed = spi::SPI_processed();
@@ -993,23 +1066,23 @@ impl<'a> Estate<'a> {
     // ------------------------------------------------------------------
 
     pub fn exec_toplevel_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
-        self.err_stmt = Some((block.lineno, "statement block"));
+        self.frame.stmt.set(Some((block.lineno, "statement block")));
         let rc = self.exec_stmt_block(block)?;
-        self.err_stmt = None;
+        self.frame.stmt.set(None);
         Ok(rc)
     }
 
     fn exec_stmts(&mut self, stmts: &'a [PlStmt]) -> PgResult<i32> {
-        let save = self.err_stmt;
+        let save = self.frame.stmt.get();
         for s in stmts {
-            self.err_stmt = Some((stmt_lineno(s), stmt_typename(s)));
+            self.frame.stmt.set(Some((stmt_lineno(s), stmt_typename(s))));
             let rc = self.exec_stmt(s)?;
             if rc != RC_OK {
-                self.err_stmt = save;
+                self.frame.stmt.set(save);
                 return Ok(rc);
             }
         }
-        self.err_stmt = save;
+        self.frame.stmt.set(save);
         Ok(RC_OK)
     }
 
@@ -1092,16 +1165,266 @@ impl<'a> Estate<'a> {
             PlStmt::DynExecute { query, into, strict, target, params, .. } => {
                 self.exec_stmt_dynexecute(query, *into, *strict, *target, params)
             }
-            PlStmt::GetDiag { items, .. } => {
-                for item in items {
-                    debug_assert_eq!(item.kind, GETDIAG_ROW_COUNT);
+            PlStmt::GetDiag { is_stacked, items, .. } => {
+                self.exec_stmt_getdiag(*is_stacked, items)
+            }
+            PlStmt::Case { t_expr, t_varno, whens, have_else, else_stmts, .. } => self
+                .exec_stmt_case(
+                    t_expr.as_ref(),
+                    *t_varno,
+                    whens,
+                    *have_else,
+                    else_stmts,
+                ),
+            PlStmt::ForEachA { label, varno, slice, expr, body, .. } => {
+                self.exec_stmt_foreach_a(label.as_deref(), *varno, *slice, expr, body)
+            }
+        }
+    }
+
+    // exec_stmt_getdiag (pl_exec.c:2410).
+    fn exec_stmt_getdiag(&mut self, is_stacked: bool, items: &[GetDiagItem]) -> PgResult<i32> {
+        if is_stacked && self.cur_error.is_none() {
+            return Err(exec_err(
+                types_error::ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER,
+                "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
+                    .to_string(),
+            ));
+        }
+        const OIDOID: Oid = 26;
+        for item in items {
+            match item.kind {
+                GETDIAG_ROW_COUNT => {
                     let v = Datum::from_i64(self.eval_processed as i64);
                     self.exec_assign_value(item.target, v, false, INT8OID, -1)?;
                 }
-                self.exec_eval_cleanup();
-                Ok(RC_OK)
+                GETDIAG_ROUTINE_OID => {
+                    let v = Datum::from_oid(self.func.fn_oid);
+                    self.exec_assign_value(item.target, v, false, OIDOID, -1)?;
+                }
+                GETDIAG_CONTEXT => {
+                    let s = get_error_context_stack();
+                    self.exec_assign_c_string(item.target, Some(&s))?;
+                }
+                _ => {
+                    let e = self.cur_error.as_ref().expect("stacked item without cur_error");
+                    let s: Option<String> = match item.kind {
+                        GETDIAG_ERROR_CONTEXT => e.context.clone(),
+                        GETDIAG_ERROR_DETAIL => e.detail.clone(),
+                        GETDIAG_ERROR_HINT => e.hint.clone(),
+                        GETDIAG_RETURNED_SQLSTATE => Some(unpack_sql_state(e.sqlstate)),
+                        GETDIAG_COLUMN_NAME => e.column_name.clone(),
+                        GETDIAG_CONSTRAINT_NAME => e.constraint_name.clone(),
+                        GETDIAG_DATATYPE_NAME => e.datatype_name.clone(),
+                        GETDIAG_MESSAGE_TEXT => Some(e.message.clone()),
+                        GETDIAG_TABLE_NAME => e.table_name.clone(),
+                        GETDIAG_SCHEMA_NAME => e.schema_name.clone(),
+                        other => panic!("unrecognized diagnostic item kind: {other}"),
+                    };
+                    self.exec_assign_c_string(item.target, s.as_deref())?;
+                }
             }
         }
+        self.exec_eval_cleanup();
+        Ok(RC_OK)
+    }
+
+    // exec_assign_c_string: NULL C string assigns SQL NULL.
+    fn exec_assign_c_string(&mut self, target: Dno, s: Option<&str>) -> PgResult<()> {
+        match s {
+            Some(s) => {
+                let v = varlena::cstring_to_text(self.eval_ctx.mcx(), s.as_bytes())?;
+                self.exec_assign_value(target, fmgr::varlena_result(v), false, TEXTOID, -1)
+            }
+            None => self.exec_assign_value(target, Datum::null(), true, TEXTOID, -1),
+        }
+    }
+
+    // exec_stmt_case (pl_exec.c:2556).
+    fn exec_stmt_case(
+        &mut self,
+        t_expr: Option<&PlExpr>,
+        t_varno: Dno,
+        whens: &'a [(PlExpr, Vec<PlStmt>)],
+        have_else: bool,
+        else_stmts: &'a [PlStmt],
+    ) -> PgResult<i32> {
+        let have_t = t_expr.is_some();
+        if let Some(te) = t_expr {
+            let (t_val, isnull, t_typoid, t_typmod) = self.exec_eval_expr(te)?;
+            {
+                let cur = self.var_type(t_varno);
+                if cur.typoid != t_typoid || cur.atttypmod != t_typmod {
+                    let ty = crate::comp::CompState::build_datatype(
+                        t_typoid,
+                        t_typmod,
+                        self.func.fn_input_collation,
+                    )?;
+                    self.var_type_overrides.insert(t_varno, ty);
+                }
+            }
+            let (tl, bv) = {
+                let t = self.var_type(t_varno);
+                (t.typlen, t.typbyval)
+            };
+            let stored = self.copy_to_datum_ctx(t_val, isnull, tl, bv)?;
+            self.set_var(t_varno, stored, isnull);
+            self.exec_eval_cleanup();
+        }
+
+        for (expr, stmts) in whens {
+            let (value, isnull) = self.exec_eval_boolean(expr)?;
+            self.exec_eval_cleanup();
+            if !isnull && value {
+                if have_t {
+                    self.set_var(t_varno, Datum::null(), true);
+                }
+                return self.exec_stmts(stmts);
+            }
+        }
+
+        if have_t {
+            self.set_var(t_varno, Datum::null(), true);
+        }
+        if !have_else {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_CASE_NOT_FOUND)
+                    .errmsg("case not found")
+                    .errhint("CASE statement is missing ELSE part.")
+                    .into_error(),
+            ));
+        }
+        self.exec_stmts(else_stmts)
+    }
+
+    // exec_stmt_foreach_a (pl_exec.c:3008).
+    fn exec_stmt_foreach_a(
+        &mut self,
+        label: Option<&str>,
+        varno: Dno,
+        slice: i32,
+        expr: &PlExpr,
+        body: &'a [PlStmt],
+    ) -> PgResult<i32> {
+        use arrayfuncs::foundation::read_dims_lbounds;
+
+        let (value, isnull, arrtype, arrtypmod) = self.exec_eval_expr(expr)?;
+        if isnull {
+            return Err(exec_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                "FOREACH expression must not be null".to_string(),
+            ));
+        }
+        let elemtype = lsyscache::typ::get_element_type(arrtype)?;
+        if !OidIsValid(elemtype) {
+            return Err(exec_err(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "FOREACH expression must yield an array, not type {}",
+                    format_type::format_type_be(arrtype)?
+                ),
+            ));
+        }
+
+        // C's private stmt_mcontext: the array copy must survive the body's
+        // eval resets.
+        let stmt_ctx = Ctx::new("PLpgSQL FOREACH");
+        // SAFETY: non-null by-ref array datum; the ref lives only for the
+        // detoast copy below.
+        let vr = unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8) };
+        let arr = detoast::detoast_attr(stmt_ctx.mcx(), vr.as_bytes())?;
+        self.exec_eval_cleanup();
+        let arr: &[u8] = &arr;
+
+        let (ndim, dims, lbs) = read_dims_lbounds(arr);
+        if slice < 0 || slice > ndim {
+            return Err(exec_err(
+                types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+                format!("slice dimension ({slice}) is out of the valid range 0..{ndim}"),
+            ));
+        }
+
+        let loop_var_elem = match &self.func.datums[varno as usize] {
+            PlDatum::Rec(_) | PlDatum::Row(_) => types_core::InvalidOid,
+            _ => lsyscache::typ::get_element_type(self.var_type(varno).typoid)?,
+        };
+        if slice > 0 && !OidIsValid(loop_var_elem) {
+            return Err(exec_err(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                "FOREACH ... SLICE loop variable must be of an array type".to_string(),
+            ));
+        }
+        if slice == 0 && OidIsValid(loop_var_elem) {
+            return Err(exec_err(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                "FOREACH loop variable must not be of an array type".to_string(),
+            ));
+        }
+
+        let (elmlen, elmbyval, elmalign) = lsyscache::typ::get_typlenbyvalalign(elemtype)?;
+        let (elems, nulls) = arrayfuncs::construct::deconstruct_array(
+            stmt_ctx.mcx(),
+            arr,
+            elmlen as i32,
+            elmbyval,
+            elmalign as u8,
+            true,
+        )?;
+
+        let mut found = false;
+        let mut rc = RC_OK;
+        if slice == 0 {
+            for i in 0..elems.len() {
+                found = true;
+                self.exec_assign_value(varno, elems[i], nulls[i], elemtype, arrtypmod)?;
+                self.exec_eval_cleanup();
+                rc = self.exec_stmts(body)?;
+                if let Some(r) = self.loop_rc(label, rc) {
+                    rc = r;
+                    break;
+                }
+            }
+        } else {
+            let outer: usize = dims[..(ndim - slice) as usize]
+                .iter()
+                .map(|&d| d as usize)
+                .product();
+            let slice_dims = &dims[(ndim - slice) as usize..ndim as usize];
+            let slice_lbs = &lbs[(ndim - slice) as usize..ndim as usize];
+            let slice_len: usize = slice_dims.iter().map(|&d| d as usize).product();
+            for s in 0..outer {
+                let sub = arrayfuncs::construct::construct_md_array(
+                    stmt_ctx.mcx(),
+                    &elems[s * slice_len..(s + 1) * slice_len],
+                    Some(&nulls[s * slice_len..(s + 1) * slice_len]),
+                    slice,
+                    slice_dims,
+                    slice_lbs,
+                    elemtype,
+                    elmlen as i32,
+                    elmbyval,
+                    elmalign as u8,
+                )?;
+                found = true;
+                self.exec_assign_value(
+                    varno,
+                    Datum::from_usize(sub.as_ptr() as usize),
+                    false,
+                    arrtype,
+                    arrtypmod,
+                )?;
+                self.exec_eval_cleanup();
+                rc = self.exec_stmts(body)?;
+                if let Some(r) = self.loop_rc(label, rc) {
+                    rc = r;
+                    break;
+                }
+            }
+        }
+
+        self.exec_set_found(found);
+        Ok(rc)
     }
 
     // LOOP_RC_PROCESSING: Some(rc) = terminate loop with rc, None = iterate.
@@ -1134,7 +1457,7 @@ impl<'a> Estate<'a> {
     }
 
     fn exec_stmt_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
-        self.err_text = Some("during statement block local variable initialization");
+        self.frame.text.set(Some("during statement block local variable initialization"));
         for &dno in &block.initvarnos {
             match &self.func.datums[dno as usize] {
                 PlDatum::Var(v) => {
@@ -1165,14 +1488,14 @@ impl<'a> Estate<'a> {
                 _ => {}
             }
         }
-        self.err_text = None;
+        self.frame.text.set(None);
 
         let rc = if let Some(exc) = &block.exceptions {
             self.exec_block_with_exceptions(block, exc)?
         } else {
             self.exec_stmts(&block.body)?
         };
-        self.err_text = None;
+        self.frame.text.set(None);
 
         // C's block rc handling: CONTINUE never matches a block; EXIT matches
         // only on a label match.
@@ -1200,9 +1523,9 @@ impl<'a> Estate<'a> {
         exc: &'a ExceptionBlock,
     ) -> PgResult<i32> {
         let save_owner = resowner::CurrentResourceOwner();
-        self.err_text = Some("during statement block entry");
+        self.frame.text.set(Some("during statement block entry"));
         xact::BeginInternalSubTransaction(None)?;
-        self.err_text = None;
+        self.frame.text.set(None);
 
         // Loud panics unwind without a PgResult; the subtransaction must
         // still die with the unwind or a later ROLLBACK walks a stack with a
@@ -1222,7 +1545,7 @@ impl<'a> Estate<'a> {
         // C's PG_TRY extends over the return-value transfer and the subxact
         // release; errors there reach the same handlers.
         let attempt = body_result.and_then(|rc| {
-            self.err_text = Some("during statement block exit");
+            self.frame.text.set(Some("during statement block exit"));
             // The return value must survive subxact exit (C datumTransfer
             // out of the subxact eval_econtext).
             if rc == RC_RETURN && !self.retisnull && self.ret_rec.is_none()
@@ -1233,7 +1556,7 @@ impl<'a> Estate<'a> {
             }
             xact::ReleaseCurrentSubTransaction()?;
             resowner::SetCurrentResourceOwner(save_owner);
-            self.err_text = None;
+            self.frame.text.set(None);
             Ok(rc)
         });
 
@@ -1251,7 +1574,7 @@ impl<'a> Estate<'a> {
                 // before the cleanup markers overwrite them (C's callback ran
                 // at errfinish).
                 let edata = attach_frame_context_at_catch(e, self);
-                self.err_text = Some("during exception cleanup");
+                self.frame.text.set(Some("during exception cleanup"));
                 xact::RollbackAndReleaseCurrentSubTransaction()?;
                 resowner::SetCurrentResourceOwner(save_owner);
                 // The subxact abort freed tuple tables made inside it
@@ -1270,7 +1593,7 @@ impl<'a> Estate<'a> {
                         let msg = edata.message.clone();
                         self.assign_text_var(exc.sqlerrm_varno, &msg)?;
                         let save = self.cur_error.replace(edata);
-                        self.err_text = None;
+                        self.frame.text.set(None);
                         let rc = self.exec_stmts(&exception.action)?;
                         self.cur_error = save;
                         Ok(rc)
@@ -2017,6 +2340,7 @@ impl<'a> Estate<'a> {
         };
 
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, tcount)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
 
@@ -2155,6 +2479,8 @@ impl<'a> Estate<'a> {
             self.exec_eval_cleanup();
         }
 
+        let _frame =
+            FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
         let rc = spi::SPI_execute_extended(&querystr, &ptypes, &pvalues, &pnulls, self.readonly_func)
             .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
 
@@ -2319,20 +2645,20 @@ pub(crate) fn attach_frame_context_at_exit(
     attach_frame_line(e, estate)
 }
 
-#[cold]
-fn attach_frame_line(
-    mut e: Box<types_error::PgError>,
-    estate: &Estate<'_>,
-) -> Box<types_error::PgError> {
-    let sig = &estate.func.fn_signature;
-    let line = if let Some(t) = estate.err_text {
-        match estate.err_stmt {
+fn frame_context_line(estate: &Estate<'_>) -> String {
+    frame_context_line_of(&estate.frame)
+}
+
+fn frame_context_line_of(frame: &FrameShared) -> String {
+    let sig = &frame.sig;
+    if let Some(t) = frame.text.get() {
+        match frame.stmt.get() {
             Some((lineno, _)) if lineno > 0 => {
                 format!("PL/pgSQL function {sig} line {lineno} {t}")
             }
             _ => format!("PL/pgSQL function {sig} {t}"),
         }
-    } else if let Some((lineno, typename)) = estate.err_stmt {
+    } else if let Some((lineno, typename)) = frame.stmt.get() {
         if lineno > 0 {
             format!("PL/pgSQL function {sig} line {lineno} at {typename}")
         } else {
@@ -2340,7 +2666,15 @@ fn attach_frame_line(
         }
     } else {
         format!("PL/pgSQL function {sig}")
-    };
+    }
+}
+
+#[cold]
+fn attach_frame_line(
+    mut e: Box<types_error::PgError>,
+    estate: &Estate<'_>,
+) -> Box<types_error::PgError> {
+    let line = frame_context_line(estate);
     match e.context.take() {
         Some(prev) => e.context = Some(format!("{prev}\n{line}")),
         None => e.context = Some(line),

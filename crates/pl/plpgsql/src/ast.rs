@@ -135,6 +135,18 @@ pub struct NsItem {
 }
 
 pub const GETDIAG_ROW_COUNT: i32 = 0;
+pub const GETDIAG_ROUTINE_OID: i32 = 1;
+pub const GETDIAG_CONTEXT: i32 = 2;
+pub const GETDIAG_ERROR_CONTEXT: i32 = 3;
+pub const GETDIAG_ERROR_DETAIL: i32 = 4;
+pub const GETDIAG_ERROR_HINT: i32 = 5;
+pub const GETDIAG_RETURNED_SQLSTATE: i32 = 6;
+pub const GETDIAG_COLUMN_NAME: i32 = 7;
+pub const GETDIAG_CONSTRAINT_NAME: i32 = 8;
+pub const GETDIAG_DATATYPE_NAME: i32 = 9;
+pub const GETDIAG_MESSAGE_TEXT: i32 = 10;
+pub const GETDIAG_TABLE_NAME: i32 = 11;
+pub const GETDIAG_SCHEMA_NAME: i32 = 12;
 
 #[derive(Debug)]
 pub struct GetDiagItem {
@@ -185,6 +197,22 @@ pub enum PlStmt {
         /// Rec or Row datum receiving each result row.
         var: Dno,
         query: PlExpr,
+        body: Vec<PlStmt>,
+    },
+    Case {
+        lineno: i32,
+        t_expr: Option<PlExpr>,
+        t_varno: Dno,
+        whens: Vec<(PlExpr, Vec<PlStmt>)>,
+        have_else: bool,
+        else_stmts: Vec<PlStmt>,
+    },
+    ForEachA {
+        lineno: i32,
+        label: Option<String>,
+        varno: Dno,
+        slice: i32,
+        expr: PlExpr,
         body: Vec<PlStmt>,
     },
     ExitContinue {
@@ -301,6 +329,8 @@ pub fn stmt_lineno(s: &PlStmt) -> i32 {
         | PlStmt::ExecSql { lineno, .. }
         | PlStmt::Perform { lineno, .. }
         | PlStmt::GetDiag { lineno, .. }
+        | PlStmt::Case { lineno, .. }
+        | PlStmt::ForEachA { lineno, .. }
         | PlStmt::DynExecute { lineno, .. } => *lineno,
     }
 }
@@ -315,6 +345,8 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
         PlStmt::While { .. } => "WHILE",
         PlStmt::ForI { .. } => "FOR with integer loop variable",
         PlStmt::ForS { .. } => "FOR over SELECT rows",
+        PlStmt::Case { .. } => "CASE",
+        PlStmt::ForEachA { .. } => "FOREACH over array",
         PlStmt::ExitContinue { is_exit: true, .. } => "EXIT",
         PlStmt::ExitContinue { is_exit: false, .. } => "CONTINUE",
         PlStmt::Return { .. } => "RETURN",

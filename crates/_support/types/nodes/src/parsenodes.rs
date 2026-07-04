@@ -1207,6 +1207,17 @@ pub struct ReassignOwnedStmt<'mcx> {
     pub newrole: &'mcx RoleSpec<'mcx>,
 }
 
+pub struct DoStmt<'mcx> {
+    pub args: NodeList<'mcx>,
+}
+
+pub struct InlineCodeBlock<'mcx> {
+    pub source_text: &'mcx str,
+    pub lang_oid: Oid,
+    pub lang_is_trusted: bool,
+    pub atomic: bool,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -1444,6 +1455,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for LockStmt<'mcx> {
 }
 unsafe impl NodeVariant<'_> for CheckPointStmt {
     const TAG: NodeTag = NodeTag::T_CheckPointStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DoStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DoStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for InlineCodeBlock<'mcx> {
+    const TAG: NodeTag = NodeTag::T_InlineCodeBlock;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
@@ -1806,6 +1823,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_close_portal_stmt(self) -> Option<&'mcx ClosePortalStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_do_stmt(self) -> Option<&'mcx DoStmt<'mcx>> {
         self.as_variant()
     }
 
