@@ -277,7 +277,7 @@ CREATE TABLE ec_pr_p3 PARTITION OF ec_pr FOR VALUES FROM (200) TO (300);
 INSERT INTO ec_pr SELECT i % 300, i % 17, 'v' || (i % 50) FROM generate_series(0, 2999) i;
 CREATE INDEX ec_pr_a ON ec_pr (a);
 CREATE INDEX ec_pr_b ON ec_pr (b);
-ANALYZE ec_pr;
+ANALYZE ec_pr_p1; ANALYZE ec_pr_p2; ANALYZE ec_pr_p3;
 -- partition-order match: ordered Append over child index scans
 EXPLAIN SELECT * FROM ec_pr ORDER BY a LIMIT 10;
 EXPLAIN SELECT * FROM ec_pr ORDER BY a;
@@ -292,7 +292,7 @@ EXPLAIN SELECT * FROM ec_pr ORDER BY b, c LIMIT 10;
 -- DEFAULT partition kills partition ordering
 CREATE TABLE ec_pr_pd PARTITION OF ec_pr DEFAULT;
 INSERT INTO ec_pr SELECT 300 + i FROM generate_series(0, 49) i;
-ANALYZE ec_pr;
+ANALYZE ec_pr_pd;
 EXPLAIN SELECT * FROM ec_pr ORDER BY a LIMIT 10;
 -- LIST partitions: interleaved values force MergeAppend
 CREATE TABLE ec_pl (a int, b int) PARTITION BY LIST (a);
@@ -300,7 +300,7 @@ CREATE TABLE ec_pl_p1 PARTITION OF ec_pl FOR VALUES IN (1, 3);
 CREATE TABLE ec_pl_p2 PARTITION OF ec_pl FOR VALUES IN (2, 4);
 INSERT INTO ec_pl SELECT 1 + i % 4, i FROM generate_series(0, 799) i;
 CREATE INDEX ec_pl_a ON ec_pl (a);
-ANALYZE ec_pl;
+ANALYZE ec_pl_p1; ANALYZE ec_pl_p2;
 EXPLAIN SELECT * FROM ec_pl ORDER BY a LIMIT 10;
 -- LIST partitions in order: plain ordered Append
 CREATE TABLE ec_pl2 (a int, b int) PARTITION BY LIST (a);
@@ -308,7 +308,7 @@ CREATE TABLE ec_pl2_p1 PARTITION OF ec_pl2 FOR VALUES IN (1, 2);
 CREATE TABLE ec_pl2_p2 PARTITION OF ec_pl2 FOR VALUES IN (3, 4);
 INSERT INTO ec_pl2 SELECT 1 + i % 4, i FROM generate_series(0, 799) i;
 CREATE INDEX ec_pl2_a ON ec_pl2 (a);
-ANALYZE ec_pl2;
+ANALYZE ec_pl2_p1; ANALYZE ec_pl2_p2;
 EXPLAIN SELECT * FROM ec_pl2 ORDER BY a LIMIT 10;
 -- sorted UNION: MergeAppend + Unique when children are presorted
 CREATE TABLE ec_u1 (a int); CREATE TABLE ec_u2 (a int);
