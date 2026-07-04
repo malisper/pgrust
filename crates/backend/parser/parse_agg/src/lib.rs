@@ -1622,26 +1622,26 @@ fn check_ungrouped_columns<'mcx>(
         NodeTag::T_JsonValueExpr => {
             let j = node.as_json_value_expr().unwrap();
             for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
-                check_ungrouped_columns(pstate, qry, hnvg, e)?;
+                check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, e)?;
             }
             Ok(())
         }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
             for arg in &c.args {
-                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+                check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, arg)?;
             }
             for e in [c.func, c.coercion].into_iter().flatten() {
-                check_ungrouped_columns(pstate, qry, hnvg, e)?;
+                check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, e)?;
             }
             Ok(())
         }
         NodeTag::T_JsonIsPredicate => match node.as_json_is_predicate().unwrap().expr {
-            Some(e) => check_ungrouped_columns(pstate, qry, hnvg, e),
+            Some(e) => check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, e),
             None => Ok(()),
         },
         NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
-            Some(e) => check_ungrouped_columns(pstate, qry, hnvg, e),
+            Some(e) => check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, e),
             None => Ok(()),
         },
         NodeTag::T_JsonExpr => {
@@ -1650,10 +1650,10 @@ fn check_ungrouped_columns<'mcx>(
                 .into_iter()
                 .flatten()
             {
-                check_ungrouped_columns(pstate, qry, hnvg, e)?;
+                check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, e)?;
             }
             for v in &j.passing_values {
-                check_ungrouped_columns(pstate, qry, hnvg, v)?;
+                check_ungrouped_columns(pstate, qry, hnvg, sublevels_up, in_agg_direct_args, v)?;
             }
             Ok(())
         }
