@@ -658,6 +658,9 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         _ => false,
     };
     if !desc_equal && fixed_result {
+        // search_path's schemas PgVec lives in new_qctx: it must be dead
+        // before the arena is reclaimed or its Drop scribbles a freed slab.
+        drop(search_path);
         reclaim_ctx(new_qctx);
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
