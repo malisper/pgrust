@@ -203,7 +203,7 @@ fn transformJoinExpr<'mcx>(
     let r_nscolumns = r_nsitem.p_nscolumns;
     let r_colnames = &r_nsitem.p_names.colnames;
 
-    let mut using_clause = j.usingClause;
+    let mut using_clause = j.usingClause.clone_in(mcx)?;
     if j.isNatural {
         debug_assert!(using_clause.is_nil());
         let mut rlist = NodeList::nil();
@@ -227,7 +227,7 @@ fn transformJoinExpr<'mcx>(
         Some(a) => Some(
             Node::mk_mut(
                 mcx,
-                types_nodes::Alias { aliasname: a.aliasname, colnames: using_clause },
+                types_nodes::Alias { aliasname: a.aliasname, colnames: using_clause.clone_in(mcx)? },
             )?
             .seal_ref(),
         ),
