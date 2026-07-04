@@ -42,6 +42,7 @@ pub use pquery_seams::TargetEntrySummary;
 pub fn init_seams() {
     pquery_seams::fetch_portal_target_list::set(FetchPortalTargetList);
     pquery_seams::stmt_list_free::set(stmt_list::free);
+    pquery_seams::ensure_portal_snapshot_exists::set(EnsurePortalSnapshotExists);
 }
 
 thread_local! {

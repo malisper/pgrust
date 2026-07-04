@@ -34,3 +34,14 @@ datum = { path = "../../../_support/types/datum" }
 extension = { path = "../extension" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
+types_portal = { path = "../../../_support/types/portal" }
+tcop_dest = { path = "../../tcop/dest" }
+pquery_seams = { path = "../../tcop/pquery_seams" }
+execexpr = { path = "../../executor/execexpr" }
+exectuples_output = { path = "../../executor/exectuples_output" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+nodes_core = { path = "../../nodes/nodes_core" }
