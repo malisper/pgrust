@@ -20,7 +20,7 @@ use parse_clause::{
     transformFromClause, transformGroupClause, transformLimitClause, transformSortClause,
     transformWhereClause, transformWindowDefinitions,
 };
-use parse_collate::assign_query_collations;
+use parse_collate::{assign_expr_collations, assign_query_collations};
 use parse_target::{markTargetListOrigins, resolveTargetListUnknowns, transformTargetList};
 use parser_small1::{
     free_parsestate, make_parsestate, setup_parse_fixed_parameters, ParseExprKind, ParseState,
@@ -334,8 +334,8 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
         NodeTag::T_MergeStmt => {
             parse_merge::transformMergeStmt(mcx, pstate, parse_tree.as_merge_stmt().unwrap())?
         }
-        t @ (NodeTag::T_ReturnStmt
-        | NodeTag::T_CallStmt) => panic!(
+        NodeTag::T_CallStmt => transformCallStmt(mcx, pstate, parse_tree)?,
+        t @ NodeTag::T_ReturnStmt => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
              unit backend-parser-analyze"
         ),
@@ -349,6 +349,105 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
 
     result.querySource = QuerySource::QSRC_ORIGINAL;
     result.canSetTag = true;
+    Ok(result)
+}
+
+const PROARGMODE_IN: i8 = b'i' as i8;
+const PROARGMODE_OUT: i8 = b'o' as i8;
+const PROARGMODE_INOUT: i8 = b'b' as i8;
+const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+
+fn transformCallStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    call_node: Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let stmt = call_node.as_call_stmt().expect("CallStmt");
+    let fn_call = stmt.funccall.expect("CallStmt.funccall");
+
+    let mut targs = types_nodes::NodeList::nil();
+    for arg in &fn_call.args {
+        targs.lappend(
+            mcx,
+            parse_expr::transformExpr(mcx, pstate, arg, ParseExprKind::EXPR_KIND_CALL_ARGUMENT)?,
+        )?;
+    }
+    let mut arg_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, targs.len())?;
+    for arg in &targs {
+        arg_types.push(nodes_core::node_funcs::expr_type(arg));
+    }
+
+    let last_srf = pstate.p_last_srf;
+    let node = parse_func::ParseFuncOrColumn(
+        mcx,
+        pstate,
+        &fn_call.funcname,
+        targs,
+        arg_types.as_slice(),
+        fn_call,
+        None,
+        last_srf,
+        true,
+        fn_call.location,
+    )?;
+
+    assign_expr_collations(mcx, pstate, node)?;
+
+    let fexpr = node.as_func_expr().expect("CALL resolved to a FuncExpr");
+    let funcid = fexpr.funcid;
+    let funcresulttype = fexpr.funcresulttype;
+
+    // C: expand named/default notation here — a CallStmt never reaches the
+    // planner's expansion.
+    let expanded =
+        clauses::expand_function_arguments(mcx, &fexpr.args, true, funcresulttype, funcid)?;
+
+    let arrays = syscache_seams::pg_proc_result_arrays::call(mcx, funcid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (analyze.c)"));
+
+    let mut outargs = types_nodes::NodeList::nil();
+    let inargs = match arrays.proargmodes {
+        None => expanded,
+        Some(modes) => {
+            if modes.len() != expanded.len() {
+                panic!(
+                    "proargmodes is not a 1-D char array of length {} or it contains nulls",
+                    expanded.len()
+                );
+            }
+            let mut inargs = types_nodes::NodeList::nil();
+            for (i, n) in expanded.iter().enumerate() {
+                match modes[i] {
+                    PROARGMODE_IN | PROARGMODE_VARIADIC => inargs.lappend(mcx, n)?,
+                    PROARGMODE_OUT => outargs.lappend(mcx, n)?,
+                    PROARGMODE_INOUT => {
+                        inargs.lappend(mcx, n)?;
+                        // C copyObject(n); consumers of outargs are read-only
+                        // (exprType, Param dno reads), so the node is shared.
+                        outargs.lappend(mcx, n)?;
+                    }
+                    m => panic!("invalid argmode {m} for procedure"),
+                }
+            }
+            inargs
+        }
+    };
+
+    // SAFETY: parse analysis exclusively owns the just-built tree.
+    unsafe {
+        node.with_mut::<types_nodes::FuncExpr, _>(|f| f.args = inargs)
+            .expect("node checked as FuncExpr");
+        call_node
+            .with_mut::<types_nodes::rawnodes::CallStmt, _>(|cs| {
+                cs.funcexpr = node.as_func_expr();
+                cs.outargs = outargs;
+            })
+            .expect("node checked as CallStmt");
+    }
+
+    let mut result = Query::default();
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(call_node);
     Ok(result)
 }
 

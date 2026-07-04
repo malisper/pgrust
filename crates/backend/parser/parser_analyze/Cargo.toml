@@ -23,6 +23,8 @@ elog = { path = "../../utils/error/elog" }
 parse_relation = { path = "../parse_relation" }
 pg_class_seams = { path = "../../catalog/pg_class_seams" }
 parse_expr = { path = "../parse_expr" }
+parse_func = { path = "../parse_func" }
+clauses = { path = "../../optimizer/util/clauses" }
 analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
