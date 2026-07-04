@@ -1970,7 +1970,15 @@ fn ExplainFunctionTarget<'mcx>(
         .nth(rti as usize - 1)
         .as_range_tbl_entry()
         .expect("rtable holds RTEs");
-    debug_assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
+    if rte.rtekind != RTEKind::RTE_FUNCTION {
+        let kinds: Vec<RTEKind> = es
+            .rtable
+            .unwrap()
+            .iter()
+            .map(|n| n.as_range_tbl_entry().unwrap().rtekind)
+            .collect();
+        panic!("diag ExplainFunctionTarget: scanrelid={rti} flat-rtable kinds={kinds:?}");
+    }
     let mut objectname = None;
     // C reads the plan node's functions list (the flat rtable strips
     // rte->functions).
