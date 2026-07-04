@@ -516,16 +516,14 @@ fn no_partition_error(
 ) -> Box<PgError> {
     let n = pd.key.partnatts as usize;
     let mut keydesc = String::from("(");
-    for i in 0..n {
-        if i > 0 {
-            keydesc.push_str(", ");
-        }
-        let attno = pd.key.partattrs[i];
-        let att = pd.rel.rd_att.attr(attno as usize - 1);
-        keydesc.push_str(
-            core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname"),
-        );
-    }
+    // pg_get_partkeydef_columns handles expression keys (C truncates values at
+    // maxfieldlen=64 and elides the detail under RLS/ACL denial; both are
+    // standing residuals here).
+    let cols = ruleutils_seams::pg_get_partkeydef_columns::call(mcx, pd.rel.rd_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    keydesc.push_str(&cols);
     keydesc.push_str(") = (");
     for i in 0..n {
         if i > 0 {

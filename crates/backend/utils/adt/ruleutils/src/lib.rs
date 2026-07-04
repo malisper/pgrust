@@ -781,6 +781,12 @@ fn pg_get_indexdef_worker_extended(
 pub fn init_seams() {
     genam_seams::pg_get_indexdef_columns_keys_only::set(pg_get_indexdef_columns_keys_only);
     ruleutils_seams::deparse_expression::set(deparse_expression_for_seam);
+    ruleutils_seams::pg_get_partkeydef_columns::set(pg_get_partkeydef_columns_for_seam);
+}
+
+// pg_get_partkeydef_columns (ruleutils.c).
+fn pg_get_partkeydef_columns_for_seam(mcx: Mcx<'_>, relid: Oid) -> PgResult<Option<String>> {
+    pg_get_partkeydef_worker(mcx, relid, PRETTYFLAG_INDENT, true, false)
 }
 
 // looks_like_function (ruleutils.c): node types that deparse as func(...).
