@@ -902,9 +902,9 @@ fn convert_one_string_to_scalar(value: &[u8], rangelo: i32, rangehi: i32) -> f64
 
 // convert_bytea_to_scalar (selfuncs.c); range is always 0..255.
 fn convert_bytea_to_scalar(value: Datum, lobound: Datum, hibound: Datum) -> (f64, f64, f64) {
-    let mut valstr = text_datum_payload(value);
-    let mut lostr = text_datum_payload(lobound);
-    let mut histr = text_datum_payload(hibound);
+    let mut valstr = varlena_datum_payload(value);
+    let mut lostr = varlena_datum_payload(lobound);
+    let mut histr = varlena_datum_payload(hibound);
 
     let minlen = valstr.len().min(lostr.len()).min(histr.len());
     let mut i = 0;
@@ -3805,18 +3805,7 @@ fn gincost_scalararrayopexpr<'mcx>(
     if c.constisnull {
         return Ok(false);
     }
-    let p = c.constvalue.as_usize() as *const u8;
-    // SAFETY: non-null array datum; planner consts carry inline 4-byte
-    // headers (as scalararraysel).
-    let b0 = unsafe { *p };
-    assert!(
-        b0 != 0x01 && b0 & 0x03 == 0,
-        "gincost_scalararrayopexpr: toasted/packed array const"
-    );
-    // SAFETY: 4-byte varlena header verified; image is VARSIZE bytes.
-    let img = unsafe {
-        core::slice::from_raw_parts(p, arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)))
-    };
+    let img = varlena_image_any(mcx, c.constvalue)?;
     let elemtype = arrayfuncs::arr_elemtype(img);
     let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
     let (values, nulls) =
