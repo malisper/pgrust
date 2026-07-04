@@ -786,6 +786,7 @@ pub struct HashState<'mcx> {
     ntuples_est: f64,
     tupwidth: i32,
     inner_desc: Option<Rc<TupleDescData<'static>>>,
+    parallel_aware: bool,
 }
 
 impl<'mcx> HashState<'mcx> {
@@ -829,11 +830,10 @@ pub fn exec_init_hash<'mcx>(
         .expect("Hash without an outer plan")
         .as_plan()
         .expect("Hash outer is a plan node");
-    let ntuples_est = if node.plan.parallel_aware {
-        panic!("ExecHashTableCreate (nodeHash.c): parallel-aware Hash not ported")
-    } else {
-        child.plan_rows
-    };
+    // C sizes a parallel-aware Hash from the undivided total row estimate;
+    // the loud not-ported panic moves to exec_hash_table_create so plain
+    // EXPLAIN (which inits but never runs the tree) still works.
+    let ntuples_est = if node.plan.parallel_aware { node.rows_total } else { child.plan_rows };
 
     Ok(HashState {
         hash_expr,
@@ -843,6 +843,7 @@ pub fn exec_init_hash<'mcx>(
         ntuples_est,
         tupwidth: child.plan_width,
         inner_desc: Some(inner_desc),
+        parallel_aware: node.plan.parallel_aware,
     })
 }
 
@@ -853,6 +854,10 @@ pub fn exec_hash_table_create<'mcx>(
     estate: &mut EStateData<'mcx>,
     want_filter: bool,
 ) -> PgResult<HashJoinTable<'mcx>> {
+    assert!(
+        !hs.parallel_aware,
+        "ExecHashTableCreate (nodeHash.c): parallel-aware (shared-table) Hash not ported"
+    );
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
         exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true, false, 0);
