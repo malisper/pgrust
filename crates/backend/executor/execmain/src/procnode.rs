@@ -2459,6 +2459,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             end_scan(&mut ss.ss);
             ss.release_parallel();
         }
+        PlanStateNode::SampleScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => {
             ::nodevaluesscan::exec_end_values_scan(vs);
@@ -2597,6 +2598,7 @@ pub fn planstate_instr_extra<'mcx>(
         | PlanStateNode::NamedTuplestoreScan(_)
         | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
+        | PlanStateNode::SampleScan(_)
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
@@ -2836,6 +2838,7 @@ pub fn exec_shutdown_node<'mcx>(
         }
         PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
+        | PlanStateNode::SampleScan(_)
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
@@ -3195,7 +3198,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
 );
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
-        Result(x), SeqScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
+        Result(x), SeqScan(x), SampleScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
         IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Group(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), MergeAppend(x), SubqueryScan(x), SetOp(x), LockRows(x),
