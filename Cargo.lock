@@ -1203,9 +1203,12 @@ name = "auth"
 version = "0.0.0"
 dependencies = [
  "acl_seams",
+ "auth_sasl",
+ "auth_scram",
  "auth_seams",
  "backend_startup",
  "be_secure",
+ "crypt",
  "elog",
  "fd",
  "guc_tables",
@@ -1219,12 +1222,19 @@ dependencies = [
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "pg_strong_random",
  "pgstat_seams",
  "postgres_seams",
  "pqcomm",
  "pqcomm_seams",
  "pqformat",
+ "scram_common",
  "stringinfo",
+ "syscache_seams",
+ "transam_xlog",
  "types_core",
  "types_dest",
  "types_error",
@@ -1234,20 +1244,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth_sasl"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "pqcomm",
+ "pqformat",
+ "stringinfo",
+ "types_error",
+ "types_startup",
+]
+
+[[package]]
 name = "auth_scram"
 version = "0.1.0"
 dependencies = [
+ "auth_sasl",
+ "be_secure_seams",
  "elog",
  "guc_tables",
+ "ip",
  "mcx",
  "pg_b64",
+ "pg_hmac",
  "pg_sha2",
  "pg_strong_random",
  "postgres_seams",
  "saslprep",
  "scram_common",
+ "stringinfo",
  "transam_xlog",
  "types_error",
+ "types_startup",
 ]
 
 [[package]]
@@ -3638,6 +3667,8 @@ dependencies = [
  "mcx",
  "pg_md5",
  "postgres_seams",
+ "syscache_seams",
+ "timestamp_seams",
  "types_error",
 ]
 

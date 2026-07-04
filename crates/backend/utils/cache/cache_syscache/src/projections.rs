@@ -66,6 +66,8 @@ const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
 const ANUM_PG_AUTHID_ROLSUPER: i32 = 3;
 const ANUM_PG_AUTHID_ROLCANLOGIN: i32 = 7;
 const ANUM_PG_AUTHID_ROLCONNLIMIT: i32 = 10;
+const ANUM_PG_AUTHID_ROLPASSWORD: i32 = 11;
+const ANUM_PG_AUTHID_ROLVALIDUNTIL: i32 = 12;
 const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const ANUM_PG_COLLATION_OID: i32 = 1;
@@ -611,6 +613,24 @@ fn lookup_authid_session_by_rolname(
         return Ok(None);
     };
     let shape = authid_session_shape(&tuple.tuple(), AUTHNAME);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_authid_rolpassword<'mcx>(
+    mcx: Mcx<'mcx>,
+    rolname: &str,
+) -> PgResult<Option<syscache_seams::AuthIdPasswordShape<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(AUTHNAME, SysCacheKey::Str(rolname))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::AuthIdPasswordShape {
+        rolpassword: text_attr(mcx, &t, AUTHNAME, ANUM_PG_AUTHID_ROLPASSWORD)?,
+        rolvaliduntil: getattr_nullable(&t, AUTHNAME, ANUM_PG_AUTHID_ROLVALIDUNTIL)
+            .map(|d| d.as_i64()),
+    };
+    drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
 }
@@ -2610,6 +2630,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_authid_by_rolname::set(lookup_authid_by_rolname);
     syscache_seams::lookup_authid_session_by_rolname::set(lookup_authid_session_by_rolname);
     syscache_seams::lookup_authid_session_by_oid::set(lookup_authid_session_by_oid);
+    syscache_seams::lookup_authid_rolpassword::set(lookup_authid_rolpassword);
     syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
     syscache_seams::lookup_pg_range_by_multirange::set(lookup_pg_range_by_multirange);
     syscache_seams::pg_proc_result_arrays::set(pg_proc_result_arrays);

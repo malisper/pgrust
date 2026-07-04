@@ -43,6 +43,13 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("xlog.c", 0, func)
 }
 
+// Test-only: marks the zeroed in-process image as read so control-file
+// consumers (e.g. scram_mock_salt) run without a datadir.
+#[doc(hidden)]
+pub fn control_file_mark_read_for_tests() {
+    CONTROL_FILE_READ.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn incompatible(detail: String, hint: &str) -> PgResult<()> {
     ereport(FATAL)
         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)

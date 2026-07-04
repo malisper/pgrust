@@ -1,5 +1,4 @@
-//! crypt.c minus get_role_password (loud: needs an AUTHNAME rolpassword/
-//! rolvaliduntil syscache projection that doesn't exist yet).
+//! crypt.c.
 
 use mcx::{Mcx, PgString};
 use pg_md5::{pg_md5_encrypt, MD5_PASSWD_CHARSET, MD5_PASSWD_LEN};
@@ -49,11 +48,23 @@ fn set_md5_password_warnings(v: bool) {
     MD5_PASSWORD_WARNINGS.with(|c| c.set(v));
 }
 
-pub fn get_role_password(_role: &str, _logdetail: &mut Option<String>) -> PgResult<Option<String>> {
-    unimplemented!(
-        "crypt.c get_role_password: AUTHNAME rolpassword/rolvaliduntil projection unported \
-         (cache_syscache projections.rs)"
-    )
+pub fn get_role_password(role: &str, logdetail: &mut Option<String>) -> PgResult<Option<String>> {
+    let scratch = mcx::MemoryContext::new("get_role_password");
+    let Some(shape) = syscache_seams::lookup_authid_rolpassword::call(scratch.mcx(), role)? else {
+        *logdetail = Some(format!("Role \"{role}\" does not exist."));
+        return Ok(None);
+    };
+    let Some(shadow_pass) = shape.rolpassword else {
+        *logdetail = Some(format!("User \"{role}\" has no password assigned."));
+        return Ok(None);
+    };
+    if let Some(vuntil) = shape.rolvaliduntil {
+        if vuntil < timestamp_seams::get_current_timestamp::call() {
+            *logdetail = Some(format!("User \"{role}\" has an expired password."));
+            return Ok(None);
+        }
+    }
+    Ok(Some(shadow_pass.as_str().to_owned()))
 }
 
 pub fn get_password_type(shadow_pass: &str) -> PasswordType {

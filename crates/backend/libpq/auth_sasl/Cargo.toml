@@ -1,0 +1,18 @@
+[package]
+name = "auth_sasl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auth_sasl"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+mcx = { path = "../../../_support/mcx" }
+pqcomm = { path = "../pqcomm" }
+pqformat = { path = "../pqformat" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }

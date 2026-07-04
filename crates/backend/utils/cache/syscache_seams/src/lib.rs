@@ -127,6 +127,21 @@ seam_core::seam!(
     pub fn lookup_authid_session_by_oid(roleid: Oid) -> PgResult<Option<AuthIdSessionShape>>
 );
 
+#[derive(Debug)]
+pub struct AuthIdPasswordShape<'mcx> {
+    pub rolpassword: Option<mcx::PgString<'mcx>>,
+    pub rolvaliduntil: Option<types_core::TimestampTz>,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(AUTHNAME, role) projected to the two nullable columns
+    // get_role_password reads; None mirrors !HeapTupleIsValid.
+    pub fn lookup_authid_rolpassword<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rolname: &str,
+    ) -> PgResult<Option<AuthIdPasswordShape<'mcx>>>
+);
+
 use datum::Datum;
 use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
