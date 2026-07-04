@@ -119,7 +119,44 @@ pub fn PrepareQuery(
         plancache::DropCachedPlan(plansource);
         return Err(e);
     }
+    plancache::SetCachedPlanReanalyze(plansource, reanalyze_prepared, stmt_location);
     Ok(())
+}
+
+// C retains the raw parse tree and re-analyzes with the resolved (fixed)
+// param types; here the retained query_string re-parses to the same tree.
+fn reanalyze_prepared(
+    qmcx: Mcx<'static>,
+    query_string: &'static str,
+    param_types: &'static [types_core::Oid],
+    stmt_location: i32,
+) -> PgResult<mcx::PgVec<'static, types_nodes::parsenodes::Query<'static>>> {
+    let raw_list = parser_seams::raw_parser::call(
+        qmcx,
+        query_string,
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )?;
+    let reparsed = raw_list
+        .iter()
+        .find(|r| {
+            r.stmt_location == stmt_location
+                && r.stmt.map(|s| s.node_tag()) == Some(types_nodes::NodeTag::T_PrepareStmt)
+        })
+        .and_then(|r| r.stmt)
+        .and_then(|s| s.as_prepare_stmt())
+        .expect("re-parse reproduces the PREPARE statement");
+    let inner = RawStmt {
+        stmt: Some(reparsed.query.expect("PREPARE has a query")),
+        stmt_location,
+        stmt_len: 0,
+    };
+    postgres::pg_analyze_and_rewrite_fixedparams(
+        qmcx,
+        &inner,
+        query_string,
+        param_types,
+        QueryEnvHandle::NULL,
+    )
 }
 
 fn fill_plansource(

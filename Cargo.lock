@@ -8601,6 +8601,7 @@ dependencies = [
  "pquery_seams",
  "snapmgr",
  "syscache_seams",
+ "tupdesc",
  "types_core",
  "types_error",
  "types_nodes",

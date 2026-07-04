@@ -211,10 +211,12 @@ pub fn CreateTableAsRelExists<'mcx>(
         }
         // checkMembershipInCurrentExtension: creating_extension is always
         // false (no extension lane), so the C check is a no-op.
-        elog_seams::ereport_msg::call(
-            NOTICE,
-            format!("relation \"{relname}\" already exists, skipping"),
-            None,
+        elog_seams::ereport::call(
+            types_error::PgError::new(
+                NOTICE,
+                format!("relation \"{relname}\" already exists, skipping"),
+            )
+            .with_sqlstate(ERRCODE_DUPLICATE_TABLE),
         )?;
         return Ok(true);
     }
