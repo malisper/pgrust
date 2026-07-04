@@ -111,6 +111,8 @@ pub fn ExecVacuum<'mcx>(
     let mut disable_page_skipping = false;
     let mut process_main = true;
     let mut process_toast = true;
+    let mut skip_database_stats = false;
+    let mut only_database_stats = false;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
@@ -142,8 +144,13 @@ pub fn ExecVacuum<'mcx>(
             }
             "process_main" => process_main = explain::defGetBoolean(opt)?,
             "process_toast" => process_toast = explain::defGetBoolean(opt)?,
-            name @ ("parallel" | "buffer_usage_limit" | "skip_database_stats"
-            | "only_database_stats") => unported_option(name),
+            "skip_database_stats" => skip_database_stats = explain::defGetBoolean(opt)?,
+            "only_database_stats" => only_database_stats = explain::defGetBoolean(opt)?,
+            name @ ("parallel" | "buffer_usage_limit") => {
+                if explain::defGetBoolean(opt).unwrap_or(true) {
+                    unported_option(name);
+                }
+            }
             name => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_SYNTAX_ERROR)
@@ -166,7 +173,9 @@ pub fn ExecVacuum<'mcx>(
         | (if freeze { VACOPT_FREEZE } else { 0 })
         | (if disable_page_skipping { VACOPT_DISABLE_PAGE_SKIPPING } else { 0 })
         | (if full { VACOPT_FULL } else { 0 })
-        | (if analyze { VACOPT_ANALYZE } else { 0 });
+        | (if analyze { VACOPT_ANALYZE } else { 0 })
+        | (if skip_database_stats { VACOPT_SKIP_DATABASE_STATS } else { 0 })
+        | (if only_database_stats { VACOPT_ONLY_DATABASE_STATS } else { 0 });
 
     if full && disable_page_skipping {
         return Err(ereport(ERROR)
