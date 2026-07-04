@@ -99,6 +99,17 @@ fn copy_stmt<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
                 },
             )
         }
+        NodeTag::T_VacuumStmt => {
+            let s = node.as_vacuum_stmt().expect("VacuumStmt");
+            Node::mk(
+                mcx,
+                types_nodes::parsenodes::VacuumStmt {
+                    options: copy_raw_list(mcx, &s.options)?,
+                    rels: copy_raw_list(mcx, &s.rels)?,
+                    is_vacuumcmd: s.is_vacuumcmd,
+                },
+            )
+        }
         other => panic!(
             "copyObject (copyfuncs.c): utility statement {other:?} copy arm unported \
              (standard_ProcessUtility readOnlyTree, cached-plan execution)"
@@ -255,6 +266,48 @@ fn copy_raw<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
         NodeTag::T_FuncCall => {
             let fc = node.as_variant::<FuncCall>().expect("FuncCall");
             Node::mk(mcx, copy_func_call(mcx, fc)?)
+        }
+        NodeTag::T_VacuumRelation => {
+            let v = node
+                .as_variant::<types_nodes::parsenodes::VacuumRelation>()
+                .expect("VacuumRelation");
+            Node::mk(
+                mcx,
+                types_nodes::parsenodes::VacuumRelation {
+                    relation: copy_raw_opt(mcx, v.relation)?,
+                    oid: v.oid,
+                    va_cols: copy_raw_list(mcx, &v.va_cols)?,
+                },
+            )
+        }
+        NodeTag::T_RangeVar => {
+            let r = node.as_range_var().expect("RangeVar");
+            let alias = match r.alias {
+                Some(a) => Some(
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::Alias {
+                            aliasname: opt_str_in(mcx, a.aliasname)?,
+                            colnames: copy_raw_list(mcx, &a.colnames)?,
+                        },
+                    )?
+                    .as_variant::<types_nodes::primnodes::Alias>()
+                    .expect("Alias"),
+                ),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RangeVar {
+                    catalogname: opt_str_in(mcx, r.catalogname)?,
+                    schemaname: opt_str_in(mcx, r.schemaname)?,
+                    relname: opt_str_in(mcx, r.relname)?,
+                    inh: r.inh,
+                    relpersistence: r.relpersistence,
+                    alias,
+                    location: r.location,
+                },
+            )
         }
         NodeTag::T_List => {
             let l = node.as_list().expect("List");
