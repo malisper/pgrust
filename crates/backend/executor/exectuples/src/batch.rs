@@ -173,7 +173,9 @@ pub fn soa_deform_columns(
             let kinds = &soa.kinds[..n];
             macro_rules! col_loop {
                 (|$p:ident| $load:expr) => {
-                    for i in 0..n {
+                    // Reverse row order = ascending tuple addresses (see
+                    // heap_batch_deform_soa); writes are positional.
+                    for i in (0..n).rev() {
                         if *kinds.get_unchecked(i) == 0 {
                             let $p: *const u8 = *tps.get_unchecked(i);
                             *values.get_unchecked_mut(i) = $load;
