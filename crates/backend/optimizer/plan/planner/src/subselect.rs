@@ -1844,7 +1844,7 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_Append => {
             for sub in &plan.as_append().unwrap().appendplans {
-                let child = finalize_plan(run, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
