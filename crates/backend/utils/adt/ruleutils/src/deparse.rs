@@ -15,7 +15,7 @@ use types_nodes::primnodes::{
     FuncExpr, MinMaxExpr, MinMaxOp, NullTest, NullTestType, OpExpr, Param, ParamKind,
     ScalarArrayOpExpr, SubLink, SubLinkType, Var, VarReturningType,
 };
-use types_nodes::{Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
+use types_nodes::{BoolTestType, Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
 
 use crate::query::{self, DeparseNamespace};
 use crate::{gap, generate_function_name, generate_operator_name, quote_identifier};
@@ -208,7 +208,7 @@ pub(crate) fn get_rule_expr<'mcx>(
     showimplicit: bool,
 ) -> PgResult<()> {
     match node.node_tag() {
-        NodeTag::T_Var => get_variable(node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
+        NodeTag::T_Var => get_variable(node, node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
         NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),
         NodeTag::T_Param => get_parameter(node.as_param().unwrap(), ctx),
         NodeTag::T_Aggref => get_agg_expr(node.as_aggref().unwrap(), ctx),
@@ -258,6 +258,148 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_CoalesceExpr => get_coalesce_expr(node.as_coalesce_expr().unwrap(), ctx),
         NodeTag::T_MinMaxExpr => get_minmax_expr(node.as_min_max_expr().unwrap(), ctx),
         NodeTag::T_NullTest => get_null_test(node, node.as_null_test().unwrap(), ctx),
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            ctx.buf.push_str("GROUPING(");
+            let mut first = true;
+            for arg in g.args.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(arg, ctx, true)?;
+            }
+            ctx.buf.push(')');
+            Ok(())
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(d.args.nth(0), ctx, true, Some(node))?;
+            ctx.buf.push_str(" IS DISTINCT FROM ");
+            get_rule_expr_paren(d.args.nth(1), ctx, true, Some(node))?;
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_BooleanTest => {
+            let btest = node.as_boolean_test().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(btest.arg.expect("BooleanTest.arg"), ctx, false, Some(node))?;
+            ctx.buf.push_str(match btest.booltesttype {
+                BoolTestType::IS_TRUE => " IS TRUE",
+                BoolTestType::IS_NOT_TRUE => " IS NOT TRUE",
+                BoolTestType::IS_FALSE => " IS FALSE",
+                BoolTestType::IS_NOT_FALSE => " IS NOT FALSE",
+                BoolTestType::IS_UNKNOWN => " IS UNKNOWN",
+                BoolTestType::IS_NOT_UNKNOWN => " IS NOT UNKNOWN",
+            });
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::primnodes::SQLValueFunctionOp as Op;
+            let svf = node.as_sql_value_function().unwrap();
+            match svf.op {
+                Op::SVFOP_CURRENT_DATE => ctx.buf.push_str("CURRENT_DATE"),
+                Op::SVFOP_CURRENT_TIME => ctx.buf.push_str("CURRENT_TIME"),
+                Op::SVFOP_CURRENT_TIME_N => {
+                    ctx.buf.push_str(&format!("CURRENT_TIME({})", svf.typmod));
+                }
+                Op::SVFOP_CURRENT_TIMESTAMP => ctx.buf.push_str("CURRENT_TIMESTAMP"),
+                Op::SVFOP_CURRENT_TIMESTAMP_N => {
+                    ctx.buf.push_str(&format!("CURRENT_TIMESTAMP({})", svf.typmod));
+                }
+                Op::SVFOP_LOCALTIME => ctx.buf.push_str("LOCALTIME"),
+                Op::SVFOP_LOCALTIME_N => ctx.buf.push_str(&format!("LOCALTIME({})", svf.typmod)),
+                Op::SVFOP_LOCALTIMESTAMP => ctx.buf.push_str("LOCALTIMESTAMP"),
+                Op::SVFOP_LOCALTIMESTAMP_N => {
+                    ctx.buf.push_str(&format!("LOCALTIMESTAMP({})", svf.typmod));
+                }
+                Op::SVFOP_CURRENT_ROLE => ctx.buf.push_str("CURRENT_ROLE"),
+                Op::SVFOP_CURRENT_USER => ctx.buf.push_str("CURRENT_USER"),
+                Op::SVFOP_USER => ctx.buf.push_str("USER"),
+                Op::SVFOP_SESSION_USER => ctx.buf.push_str("SESSION_USER"),
+                Op::SVFOP_CURRENT_CATALOG => ctx.buf.push_str("CURRENT_CATALOG"),
+                Op::SVFOP_CURRENT_SCHEMA => ctx.buf.push_str("CURRENT_SCHEMA"),
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sbsref = node.as_subscripting_ref().unwrap();
+            let refexpr = sbsref.refexpr.expect("SubscriptingRef.refexpr");
+            if refexpr.node_tag() == NodeTag::T_CaseTestExpr {
+                gap("get_rule_expr", "SubscriptingRef inside FieldStore");
+            }
+            let need_parens = !matches!(refexpr.node_tag(), NodeTag::T_Var | NodeTag::T_FieldSelect);
+            if need_parens {
+                ctx.buf.push('(');
+            }
+            get_rule_expr(refexpr, ctx, showimplicit)?;
+            if need_parens {
+                ctx.buf.push(')');
+            }
+            if sbsref.refassgnexpr.is_some() {
+                gap("get_rule_expr", "SubscriptingRef store (processIndirection)");
+            }
+            print_subscripts(sbsref, ctx)?;
+            Ok(())
+        }
+        NodeTag::T_SubPlan => {
+            let subplan = node.as_sub_plan().unwrap();
+            ctx.buf.push_str(match subplan.subLinkType {
+                SubLinkType::EXISTS_SUBLINK => "EXISTS(",
+                SubLinkType::ALL_SUBLINK => "(ALL ",
+                SubLinkType::ANY_SUBLINK => "(ANY ",
+                SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::EXPR_SUBLINK => "(",
+                SubLinkType::MULTIEXPR_SUBLINK => "(rescan ",
+                SubLinkType::ARRAY_SUBLINK => "ARRAY(",
+                SubLinkType::CTE_SUBLINK => "CTE(",
+            });
+            if let Some(testexpr) = subplan.testexpr {
+                let dpns = Rc::clone(&ctx.namespaces[0]);
+                dpns.plan
+                    .borrow_mut()
+                    .ancestors
+                    .insert(0, crate::plan::AncestorEntry::Sub(subplan));
+                let r = get_rule_expr(testexpr, ctx, showimplicit);
+                dpns.plan.borrow_mut().ancestors.remove(0);
+                r?;
+                ctx.buf.push(')');
+            } else {
+                if subplan.useHashTable {
+                    ctx.buf.push_str("hashed ");
+                }
+                ctx.buf.push_str(subplan.plan_name.expect("planned SubPlan has a name"));
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let asplan = node.as_alternative_sub_plan().unwrap();
+            ctx.buf.push_str("(alternatives: ");
+            let mut first = true;
+            for sp_node in asplan.subplans.iter() {
+                let splan = sp_node.as_sub_plan().expect("AlternativeSubPlan cell");
+                if !first {
+                    ctx.buf.push_str(" or ");
+                }
+                first = false;
+                if splan.useHashTable {
+                    ctx.buf.push_str("hashed ");
+                }
+                ctx.buf.push_str(splan.plan_name.expect("planned SubPlan has a name"));
+            }
+            ctx.buf.push(')');
+            Ok(())
+        }
         NodeTag::T_List => {
             let mut first = true;
             for item in node.as_list().unwrap().iter() {
@@ -458,6 +600,7 @@ fn simple_under_parent(parent: Node<'_>) -> bool {
 // get_variable (ruleutils.c): returns the attname, or None for a whole-row
 // Var (used by get_target_list for the implicit AS label).
 pub(crate) fn get_variable<'mcx>(
+    node: Node<'mcx>,
     var: &Var<'mcx>,
     levelsup: u32,
     istoplevel: bool,
@@ -468,24 +611,35 @@ pub(crate) fn get_variable<'mcx>(
         panic!("bogus varlevelsup: {} offset {levelsup}", var.varlevelsup);
     }
     let dpns = Rc::clone(&ctx.namespaces[netlevelsup]);
+    let plan_active = dpns.plan.borrow().plan.is_some();
 
-    if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
-        gap("get_variable", "OLD/NEW RETURNING variable");
-    }
-
-    let (varno, varattno) = if var.varnosyn > 0 {
+    let (varno, varattno) = if var.varnosyn > 0 && !plan_active {
         (var.varnosyn as usize, var.varattnosyn)
     } else {
         (var.varno as usize, var.varattno)
     };
 
     if varno < 1 || varno > dpns.rtable.len() {
-        gap("get_variable", "special varno (plan-tree deparse)");
+        crate::plan::get_variable_special(node, ctx)?;
+        return Ok(None);
     }
     let rte: &RangeTblEntry<'_> = dpns.rtable[varno - 1];
-    let mut refname = dpns.rtable_names[varno - 1].clone();
+    let mut refname = match var.varreturningtype {
+        VarReturningType::VAR_RETURNING_OLD => {
+            dpns.plan.borrow().ret_old_alias.map(str::to_owned)
+        }
+        VarReturningType::VAR_RETURNING_NEW => {
+            dpns.plan.borrow().ret_new_alias.map(str::to_owned)
+        }
+        VarReturningType::VAR_RETURNING_DEFAULT => dpns.rtable_names[varno - 1].clone(),
+    };
     let colinfo = &dpns.rtable_columns[varno - 1];
     let attnum = varattno;
+
+    if crate::plan::inner_plan_drilldown(var, rte, &dpns, ctx)? {
+        debug_assert!(netlevelsup == 0);
+        return Ok(None);
+    }
 
     if rte.rtekind == RTEKind::RTE_JOIN && rte.alias.is_none() {
         if rte.joinaliasvars.is_nil() {
@@ -494,7 +648,7 @@ pub(crate) fn get_variable<'mcx>(
         if attnum > 0 {
             let aliasvar = rte.joinaliasvars.nth(attnum as usize - 1);
             if let Some(av) = aliasvar.as_var() {
-                return get_variable(av, var.varlevelsup + levelsup, istoplevel, ctx);
+                return get_variable(aliasvar, av, var.varlevelsup + levelsup, istoplevel, ctx);
             }
         }
         refname = None;
@@ -515,7 +669,9 @@ pub(crate) fn get_variable<'mcx>(
         gap("get_variable", "system column deparse");
     };
 
-    let mut need_prefix = ctx.varprefix || attname.is_none();
+    let mut need_prefix = ctx.varprefix
+        || attname.is_none()
+        || var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT;
 
     if ctx.var_in_order_by && !ctx.in_group_by && !need_prefix {
         if let (Some(tlist), Some(att)) = (ctx.target_list, attname.as_deref()) {
@@ -570,14 +726,66 @@ fn same_var(expr: Node<'_>, var: &Var<'_>) -> bool {
     }
 }
 
-fn get_parameter(param: &Param, ctx: &mut DeparseContext<'_>) -> PgResult<()> {
+fn get_parameter<'mcx>(param: &Param, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if let Some((expr, dpns, ancestor_idx)) = crate::plan::find_param_referent(param, ctx) {
+        let save = crate::plan::push_ancestor_plan(&dpns, ancestor_idx);
+        let save_varprefix = ctx.varprefix;
+        ctx.varprefix = true;
+        let need_paren = !matches!(
+            expr.node_tag(),
+            NodeTag::T_Var | NodeTag::T_Aggref | NodeTag::T_GroupingFunc | NodeTag::T_Param
+        );
+        if need_paren {
+            ctx.buf.push('(');
+        }
+        let r = get_rule_expr(expr, ctx, false);
+        if need_paren {
+            ctx.buf.push(')');
+        }
+        ctx.varprefix = save_varprefix;
+        crate::plan::pop_ancestor_plan(&dpns, save);
+        return r;
+    }
+    if let Some((subplan, column)) = crate::plan::find_param_generator(param, ctx) {
+        ctx.buf.push_str(&format!(
+            "({}{}).col{}",
+            if subplan.useHashTable { "hashed " } else { "" },
+            subplan.plan_name.expect("planned SubPlan has a name"),
+            column + 1
+        ));
+        return Ok(());
+    }
     match param.paramkind {
-        ParamKind::PARAM_EXTERN => {
+        ParamKind::PARAM_EXTERN | ParamKind::PARAM_EXEC => {
+            // The C argnames leg (function-body deparse) is unported; plain $n
+            // matches every context this engine reaches.
             ctx.buf.push_str(&format!("${}", param.paramid));
             Ok(())
         }
         other => gap("get_parameter", &format!("{other:?} deparse")),
     }
+}
+
+fn print_subscripts<'mcx>(
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let mut low = sbsref.reflowerindexpr.iter();
+    let has_lower = !sbsref.reflowerindexpr.is_nil();
+    for up in sbsref.refupperindexpr.iter() {
+        ctx.buf.push('[');
+        if has_lower {
+            if let Some(Some(l)) = low.next() {
+                get_rule_expr(l, ctx, false)?;
+            }
+            ctx.buf.push(':');
+        }
+        if let Some(u) = up {
+            get_rule_expr(u, ctx, false)?;
+        }
+        ctx.buf.push(']');
+    }
+    Ok(())
 }
 
 fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, value: Datum) -> PgResult<String> {
@@ -841,7 +1049,17 @@ fn get_windowfunc_expr<'mcx>(
     ctx.buf.push_str(") OVER ");
 
     let Some(wclauses) = ctx.window_clause else {
-        gap("get_windowfunc_expr", "plan-tree OVER (WindowAgg namespace search)");
+        for dpns in &ctx.namespaces {
+            let ps = dpns.plan.borrow();
+            if let Some(wagg) = ps.plan.and_then(Node::as_window_agg) {
+                if wagg.winref == wfunc.winref {
+                    let name = wagg.winname.expect("planned WindowAgg has a winname");
+                    ctx.buf.push_str(&quote_identifier(name));
+                    return Ok(());
+                }
+            }
+        }
+        panic!("could not find window clause for winref {}", wfunc.winref);
     };
     let wc = wclauses
         .iter()

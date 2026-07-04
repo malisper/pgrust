@@ -190,6 +190,27 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
+    fn read_opt_node_list(
+        &mut self,
+        name: &str,
+    ) -> PgResult<types_nodes::list::OptNodeList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(types_nodes::list::OptNodeList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
+        let mut l = types_nodes::list::OptNodeList::nil();
+        loop {
+            let tok = self.token("list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            let elem = self.node_read_token(tok)?;
+            l.lappend(self.mcx, elem)?;
+        }
+    }
+
     fn read_node_list(&mut self, name: &str) -> PgResult<NodeList<'mcx>> {
         self.label(name);
         let t = self.token(name);
@@ -372,6 +393,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"ARRAYEXPR" => self.read_array_expr(),
             b"SETTODEFAULT" => self.read_set_to_default(),
             b"BOOLEANTEST" => self.read_boolean_test(),
+            b"DISTINCTEXPR" => self.read_distinct_expr(),
+            b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
             b"COMMONTABLEEXPR" => self.read_common_table_expr(),
@@ -382,6 +405,35 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 String::from_utf8_lossy(other)
             ),
         }
+    }
+
+    fn read_distinct_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::primnodes::DistinctExpr>(mcx)?;
+        d.opno = self.read_u32("opno");
+        d.opfuncid = self.read_u32("opfuncid");
+        d.opresulttype = self.read_u32("opresulttype");
+        d.opretset = self.read_bool("opretset");
+        d.opcollid = self.read_u32("opcollid");
+        d.inputcollid = self.read_u32("inputcollid");
+        d.args = self.read_node_list("args")?;
+        d.location = self.read_location("location");
+        Ok(d.seal())
+    }
+
+    fn read_subscripting_ref(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut sr = Node::build::<types_nodes::primnodes::SubscriptingRef>(mcx)?;
+        sr.refcontainertype = self.read_u32("refcontainertype");
+        sr.refelemtype = self.read_u32("refelemtype");
+        sr.refrestype = self.read_u32("refrestype");
+        sr.reftypmod = self.read_i32("reftypmod");
+        sr.refcollid = self.read_u32("refcollid");
+        sr.refupperindexpr = self.read_opt_node_list("refupperindexpr")?;
+        sr.reflowerindexpr = self.read_opt_node_list("reflowerindexpr")?;
+        sr.refexpr = self.read_node("refexpr")?;
+        sr.refassgnexpr = self.read_node("refassgnexpr")?;
+        Ok(sr.seal())
     }
 
     fn read_boolean_test(&mut self) -> PgResult<Node<'mcx>> {

@@ -7,6 +7,7 @@
 pub mod builtins;
 mod deparse;
 mod functiondef;
+mod plan;
 mod query;
 mod ruledef;
 mod viewdef;
@@ -15,6 +16,10 @@ mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
 pub use deparse::deparse_expression_pretty;
+pub use plan::{
+    deparse_context_for_plan_tree, deparse_expression, select_rtable_names_for_explain,
+    set_deparse_context_plan, AncestorEntry, PlanDeparse,
+};
 pub use functiondef::{
     pg_get_function_arg_default_worker, pg_get_function_arguments_worker,
     pg_get_function_identity_arguments_worker, pg_get_function_result_worker,
@@ -434,7 +439,7 @@ fn get_opclass_name(
         return Err(cache_lookup_failed("opclass", opclass));
     };
     if actual_datatype == InvalidOid
-        || indexcmds::GetDefaultOpClass(actual_datatype, opcmethod)? != opclass
+        || indexcmds_seams::get_default_opclass::call(actual_datatype, opcmethod)? != opclass
     {
         buf.push(' ');
         if !opclass_is_visible(opclass, &opcname, opcmethod)? {

@@ -11,7 +11,7 @@ catcache = { path = "../../cache/catcache" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../format_type" }
-indexcmds = { path = "../../../commands/indexcmds" }
+indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 mcx = { path = "../../../../_support/mcx" }
 parse_expr = { path = "../../../parser/parse_expr" }
