@@ -44,6 +44,9 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+lock = { path = "../../storage/lmgr/lock" }
+procarray = { path = "../../storage/ipc/procarray" }
+types_storage = { path = "../../../_support/types/types_storage" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 partcache = { path = "../../utils/cache/partcache" }
 partdesc = { path = "../../partitioning/partdesc" }

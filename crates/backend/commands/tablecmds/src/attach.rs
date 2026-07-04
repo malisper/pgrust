@@ -1,7 +1,8 @@
 // ATTACH/DETACH PARTITION exec slice of tablecmds.c: ATExecAttachPartition,
 // AttachPartitionEnsureIndexes, QueuePartitionConstraintValidation +
 // implication proof, CreateInheritance/RemoveInheritance (partition arm),
-// ATExecDetachPartition + DetachPartitionFinalize (plain; CONCURRENTLY loud).
+// ATExecDetachPartition (plain + CONCURRENTLY) + MarkInheritDetached +
+// DetachAddConstraintIfNeeded + DetachPartitionFinalize + FINALIZE verb.
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
@@ -125,7 +126,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     cmd: &PartitionCmd<'mcx>,
     query_string: &str,
 ) -> PgResult<()> {
-    let pdesc = partdesc::RelationGetPartitionDesc(rel)?;
+    let pdesc = partdesc::RelationGetPartitionDesc(rel, true)?;
     let default_part_oid = pdesc
         .boundinfo
         .as_ref()
@@ -991,7 +992,7 @@ fn QueuePartitionConstraintValidation<'mcx>(
         tab.validate_default = validate_default;
         wqueue.push(tab);
     } else if scanrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
-        let pdesc = partdesc::RelationGetPartitionDesc(scanrel)?;
+        let pdesc = partdesc::RelationGetPartitionDesc(scanrel, true)?;
         for &part_oid in pdesc.oids.iter() {
             let part_rel = table::table_open(mcx, part_oid, AccessExclusiveLock)?;
             assert_identity_attmap(mcx, &part_rel, scanrel)?;
@@ -1008,15 +1009,20 @@ fn QueuePartitionConstraintValidation<'mcx>(
     Ok(())
 }
 
+// The concurrent strategy runs in two transactions (tablecmds.c:20893-20910):
+// first mark the pg_inherits row detach-pending and commit so every new
+// snapshot omits the partition, then wait out lockers that could have planned
+// with it and finish the detach.
 pub(crate) fn ATExecDetachPartition<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    rel: Relation<'mcx>,
     cmd: &PartitionCmd<'mcx>,
-) -> PgResult<()> {
-    if cmd.concurrent {
-        unported("ATExecDetachPartition CONCURRENTLY");
-    }
-    let pdesc = partdesc::RelationGetPartitionDesc(rel)?;
+    query_string: &str,
+) -> PgResult<Relation<'mcx>> {
+    let concurrent = cmd.concurrent;
+    let pdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;
+    let strategy = pdesc.boundinfo.as_ref().map(|b| b.strategy as u8);
     let default_part_oid = pdesc
         .boundinfo
         .as_ref()
@@ -1024,19 +1030,245 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
         .map(|b| pdesc.oids[b.default_index as usize])
         .unwrap_or(InvalidOid);
     if default_part_oid != InvalidOid {
+        if concurrent {
+            return Err(err(
+                "cannot detach partitions concurrently when a default partition exists"
+                    .to_string(),
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ));
+        }
         lmgr::LockRelationOid(default_part_oid, AccessExclusiveLock)?;
     }
 
-    let part_rel =
-        open_by_rangevar(mcx, cmd.name.expect("PartitionCmd.name"), AccessExclusiveLock)?;
+    let mut part_rel = open_by_rangevar(
+        mcx,
+        cmd.name.expect("PartitionCmd.name"),
+        if concurrent { types_rel::ShareUpdateExclusiveLock } else { AccessExclusiveLock },
+    )?;
 
-    RemoveInheritance(mcx, &part_rel, rel)?;
+    if !concurrent {
+        RemoveInheritance(mcx, &part_rel, &rel, false)?;
+    } else {
+        MarkInheritDetached(mcx, &part_rel, &rel)?;
+    }
 
     ATDetachCheckNoForeignKeyRefs(mcx, &part_rel)?;
 
-    DetachPartitionFinalize(mcx, rel, &part_rel, default_part_oid)?;
+    let mut rel = rel;
+    if concurrent {
+        if strategy != Some(partbounds::PARTITION_STRATEGY_HASH) {
+            DetachAddConstraintIfNeeded(mcx, wqueue, &part_rel, query_string)?;
+        }
 
+        let partrelid = part_rel.rd_id;
+        let parentrelid = rel.rd_id;
+        let parentrelname = rel.name().to_string();
+        let partrelname = part_rel.name().to_string();
+
+        inval::invalidate::CacheInvalidateRelcache(&rel)?;
+        part_rel.close(NoLock)?;
+        rel.close(NoLock)?;
+
+        if snapmgr::ActiveSnapshotSet() {
+            snapmgr::PopActiveSnapshot()?;
+        }
+        xact::CommitTransactionCommand()?;
+        xact::StartTransactionCommand()?;
+
+        let tag = types_storage::lock::LOCKTAG::relation(
+            init_small::globals::MyDatabaseId(),
+            parentrelid,
+        );
+        lmgr::WaitForLockersMultiple(mcx, &[tag], AccessExclusiveLock)?;
+
+        let reopened = relation_seams::try_relation_open::call(
+            mcx,
+            parentrelid,
+            types_rel::ShareUpdateExclusiveLock,
+        )?;
+        let part_reopened =
+            relation_seams::try_relation_open::call(mcx, partrelid, AccessExclusiveLock)?;
+        let Some(r) = reopened else {
+            if part_reopened.is_some() {
+                elog_seams::ereport_msg::call(
+                    types_error::WARNING,
+                    format!("dangling partition \"{partrelname}\" remains, can't fix"),
+                    None,
+                )?;
+            }
+            return Err(err(
+                format!("partitioned table \"{parentrelname}\" was removed concurrently"),
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ));
+        };
+        rel = r;
+        let Some(p) = part_reopened else {
+            return Err(err(
+                format!("partition \"{partrelname}\" was removed concurrently"),
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ));
+        };
+        part_rel = p;
+    }
+
+    // Detaching may involve TOAST access, which needs a valid snapshot.
+    let snap = snapmgr::GetTransactionSnapshot()?;
+    snapmgr::PushActiveSnapshot(&snap)?;
+    let res = DetachPartitionFinalize(mcx, &rel, &part_rel, concurrent, default_part_oid);
+    snapmgr::PopActiveSnapshot()?;
+    res?;
+
+    part_rel.close(NoLock)?;
+    Ok(rel)
+}
+
+pub(crate) fn ATExecDetachPartitionFinalize<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    name: &types_nodes::primnodes::RangeVar<'_>,
+) -> PgResult<()> {
+    let snap = snapmgr::GetActiveSnapshot();
+    let part_rel = open_by_rangevar(mcx, name, AccessExclusiveLock)?;
+    // A canceled second transaction of DETACH CONCURRENTLY may leave snapshots
+    // that still see the partition as attached; wait them out before
+    // completing (tablecmds.c:21436-21448).
+    indexcmds_seams::wait_for_older_snapshots::call(snap.xmin)?;
+    DetachPartitionFinalize(mcx, rel, &part_rel, true, InvalidOid)?;
     part_rel.close(NoLock)
+}
+
+// MarkInheritDetached (tablecmds.c:17867).
+fn MarkInheritDetached<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
+    let catrel = table::table_open(mcx, InheritsRelationId, RowExclusiveLock)?;
+    let keys = [oid_scankey(
+        pg_inherits::Anum_pg_inherits_inhparent as usize,
+        parent_rel.rd_id,
+    )];
+    let mut scan =
+        genam::systable_beginscan(mcx, &catrel, InheritsParentIndexId, true, None, &keys)?;
+    let desc = catrel.descr();
+    let mut found = false;
+    let mut update: Option<types_tuple::ItemPointerData> = None;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let (pending, _) =
+            getattr(tup, desc, pg_inherits::Anum_pg_inherits_inhdetachpending as usize);
+        let (inhrelid, _) =
+            getattr(tup, desc, pg_inherits::Anum_pg_inherits_inhrelid as usize);
+        if pending.as_bool() {
+            let relname = lsyscache::get_rel_name(mcx, inhrelid.as_oid())?
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let nspname =
+                lsyscache::get_namespace_name(mcx, parent_rel.rd_rel.relnamespace)?
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "partition \"{relname}\" already pending detach in partitioned \
+                         table \"{nspname}.{}\"",
+                        parent_rel.name()
+                    ),
+                )
+                .with_hint(
+                    "Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the \
+                     pending detach operation.",
+                )
+                .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
+        if inhrelid.as_oid() == child_rel.rd_id {
+            update = Some(tup.t_self);
+            found = true;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    if let Some(otid) = update {
+        let keys = [oid_scankey(
+            pg_inherits::Anum_pg_inherits_inhparent as usize,
+            parent_rel.rd_id,
+        )];
+        let mut scan =
+            genam::systable_beginscan(mcx, &catrel, InheritsParentIndexId, true, None, &keys)?;
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            if tup.t_self != otid {
+                continue;
+            }
+            let natts = desc.natts as usize;
+            let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[pg_inherits::Anum_pg_inherits_inhdetachpending as usize - 1] =
+                Datum::from_bool(true);
+            replace[pg_inherits::Anum_pg_inherits_inhdetachpending as usize - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &catrel, &otid, &mut newtup)?;
+            break;
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+    catrel.close(RowExclusiveLock)?;
+    if !found {
+        return Err(err(
+            format!(
+                "relation \"{}\" is not a partition of relation \"{}\"",
+                child_rel.name(),
+                parent_rel.name()
+            ),
+            ERRCODE_UNDEFINED_TABLE,
+        ));
+    }
+    Ok(())
+}
+
+// DetachAddConstraintIfNeeded (tablecmds.c:21464): supplant the partition
+// constraint with an equivalent CHECK constraint unless already implied.
+fn DetachAddConstraintIfNeeded<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    part_rel: &Relation<'mcx>,
+    query_string: &str,
+) -> PgResult<()> {
+    let mut constraint_expr = NodeList::nil();
+    for q in partdesc::RelationGetPartitionQual(mcx, part_rel)?.iter() {
+        constraint_expr.lappend(mcx, clauses::eval_const_expressions(mcx, q)?)?;
+    }
+    if PartConstraintImpliedByRelConstraint(mcx, part_rel, &constraint_expr)? {
+        return Ok(());
+    }
+    let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, part_rel);
+    let explicit = partbounds::make_ands_explicit(mcx, constraint_expr)?;
+    let cooked = outfuncs::nodeToString(mcx, explicit)?;
+    let mut n = Node::build::<types_nodes::rawnodes::Constraint>(mcx)?;
+    n.contype = types_nodes::rawnodes::ConstrType::CONSTR_CHECK;
+    n.conname = None;
+    n.is_no_inherit = false;
+    n.raw_expr = None;
+    n.cooked_expr = Some(crate::constraints::str_in(mcx, cooked.as_str())?);
+    n.is_enforced = true;
+    n.initially_valid = true;
+    n.skip_validation = true;
+    crate::alter::ATAddCheckNNConstraint(
+        mcx,
+        wqueue,
+        tabidx,
+        part_rel,
+        n.seal(),
+        true,
+        false,
+        types_rel::ShareUpdateExclusiveLock,
+        query_string,
+    )
 }
 
 // RemoveInheritance (tablecmds.c:17950), partition direction.
@@ -1044,13 +1276,14 @@ fn RemoveInheritance<'mcx>(
     mcx: Mcx<'mcx>,
     child_rel: &Relation<'mcx>,
     parent_rel: &Relation<'mcx>,
+    expect_detached: bool,
 ) -> PgResult<()> {
     debug_assert!(parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
     let found = pg_inherits::DeleteInheritsTuple(
         mcx,
         child_rel.rd_id,
         parent_rel.rd_id,
-        false,
+        expect_detached,
         Some(child_rel.name()),
     )?;
     if !found {
@@ -1315,13 +1548,18 @@ fn ATDetachCheckNoForeignKeyRefs<'mcx>(mcx: Mcx<'mcx>, partition: &Relation<'mcx
     Ok(())
 }
 
-// DetachPartitionFinalize (tablecmds.c:21095), non-concurrent arm.
+// DetachPartitionFinalize (tablecmds.c:21095).
 fn DetachPartitionFinalize<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     part_rel: &Relation<'mcx>,
+    concurrent: bool,
     default_part_oid: Oid,
 ) -> PgResult<()> {
+    if concurrent {
+        RemoveInheritance(mcx, part_rel, rel, true)?;
+    }
+
     DropClonedTriggersFromPartition(mcx, part_rel.rd_id)?;
 
     check_no_inherited_fks(mcx, part_rel)?;

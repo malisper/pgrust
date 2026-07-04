@@ -1,7 +1,7 @@
 // partdesc.c: RelationGetPartitionDesc / RelationBuildPartitionDesc.
-// C divergences: descriptors cached in a partdesc-owned map keyed by relid
-// (cleared by the same relcache inval that clears C's rd_partdesc); the
-// DETACH CONCURRENTLY omit/retry protocol is unported (loud in pg_inherits).
+// C divergence: descriptors cached in partdesc-owned maps keyed by relid
+// (cleared by the same relcache inval that clears C's rd_partdesc /
+// rd_partdesc_nodetached); nodetached mirrors C's xmin-validity rule.
 #![allow(non_snake_case)]
 
 use core::cell::{Cell, RefCell};
@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
-use types_core::{InvalidOid, Oid};
+use types_core::{InvalidOid, InvalidTransactionId, Oid, TransactionId};
 use types_error::PgResult;
 use types_nodes::rawnodes::PartitionBoundSpec;
 use types_nodes::NodeList;
@@ -23,6 +23,7 @@ const Anum_pg_class_relpartbound: i32 = 34;
 
 pub struct PartitionDescData {
     pub nparts: usize,
+    pub detached_exist: bool,
     pub oids: PgVec<'static, Oid>,
     pub is_leaf: PgVec<'static, bool>,
     pub boundinfo: Option<PartitionBoundInfoData<'static>>,
@@ -35,6 +36,7 @@ pub struct PartitionDescData {
 struct PartDescState {
     mcx: Mcx<'static>,
     descs: PgHashMap<'static, Oid, Rc<PartitionDescData>>,
+    descs_nodetached: PgHashMap<'static, Oid, (Rc<PartitionDescData>, TransactionId)>,
     // C rd_partcheck: cached partition constraint per partition relid.
     quals: PgHashMap<'static, Oid, NodeList<'static>>,
     callbacks_registered: bool,
@@ -52,6 +54,7 @@ fn with_state<R>(f: impl FnOnce(&mut PartDescState) -> R) -> R {
             ManuallyDrop::new(PartDescState {
                 mcx,
                 descs: PgHashMap::with_capacity_in(8, mcx),
+                descs_nodetached: PgHashMap::with_capacity_in(8, mcx),
                 quals: PgHashMap::with_capacity_in(8, mcx),
                 callbacks_registered: false,
             })
@@ -64,21 +67,39 @@ fn PartDescRelCallback(_arg: Datum, relid: Oid) {
     with_state(|st| {
         if relid != InvalidOid {
             st.descs.remove(&relid);
+            st.descs_nodetached.remove(&relid);
             st.quals.remove(&relid);
         } else {
             st.descs.clear();
+            st.descs_nodetached.clear();
             st.quals.clear();
         }
     });
 }
 
-pub fn RelationGetPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescData>> {
+pub fn RelationGetPartitionDesc(
+    rel: &Relation<'_>,
+    omit_detached: bool,
+) -> PgResult<Rc<PartitionDescData>> {
     debug_assert!(rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
     let relid = rel.rd_id;
     if let Some(d) = with_state(|st| st.descs.get(&relid).map(Rc::clone)) {
-        return Ok(d);
+        if !d.detached_exist || !omit_detached {
+            return Ok(d);
+        }
     }
-    RelationBuildPartitionDesc(rel)
+    if omit_detached && snapmgr::ActiveSnapshotSet() {
+        if let Some((d, xmin)) =
+            with_state(|st| st.descs_nodetached.get(&relid).map(|(d, x)| (Rc::clone(d), *x)))
+        {
+            debug_assert!(xmin != InvalidTransactionId);
+            let snap = snapmgr::GetActiveSnapshot();
+            if !snapmgr::XidInMVCCSnapshot(xmin, &snap)? {
+                return Ok(d);
+            }
+        }
+    }
+    RelationBuildPartitionDesc(rel, omit_detached)
 }
 
 // text varlena -> &str, inline images only (relpartbound is written inline).
@@ -105,7 +126,10 @@ fn text_to_str(d: Datum) -> &'static str {
 }
 
 #[inline(never)]
-fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescData>> {
+fn RelationBuildPartitionDesc(
+    rel: &Relation<'_>,
+    omit_detached: bool,
+) -> PgResult<Rc<PartitionDescData>> {
     let relid = rel.rd_id;
     if !with_state(|st| st.callbacks_registered) {
         inval::invalidate::CacheRegisterRelcacheCallback(
@@ -119,7 +143,16 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
     let scratch = MemoryContext::new("partition descriptor scratch");
     let smcx = scratch.mcx();
 
-    let inhoids = pg_inherits::find_inheritance_children(smcx, relid, types_rel::NoLock)?;
+    let mut detached_exist = false;
+    let mut detached_xmin = InvalidTransactionId;
+    let inhoids = pg_inherits::find_inheritance_children_extended(
+        smcx,
+        relid,
+        omit_detached,
+        types_rel::NoLock,
+        Some(&mut detached_exist),
+        Some(&mut detached_xmin),
+    )?;
     let nparts = inhoids.len();
 
     let mut oids: PgVec<'_, Oid> = mcx::vec_with_capacity_in(smcx, nparts)?;
@@ -162,6 +195,7 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
         }
         PartitionDescData {
             nparts,
+            detached_exist,
             oids: mapped_oids,
             is_leaf: mapped_leaf,
             boundinfo: Some(boundinfo),
@@ -172,6 +206,7 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
     } else {
         PartitionDescData {
             nparts: 0,
+            detached_exist,
             oids: PgVec::new_in(cmcx),
             is_leaf: PgVec::new_in(cmcx),
             boundinfo: None,
@@ -182,7 +217,14 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
     };
 
     let desc = Rc::new(desc);
-    with_state(|st| st.descs.insert(relid, Rc::clone(&desc)));
+    // A snapshot-dependent descriptor (a pending row was omitted by xmin
+    // visibility) may only live in the nodetached slot keyed by that xmin
+    // (partdesc.c:363-402).
+    if omit_detached && detached_exist && detached_xmin != InvalidTransactionId {
+        with_state(|st| st.descs_nodetached.insert(relid, (Rc::clone(&desc), detached_xmin)));
+    } else {
+        with_state(|st| st.descs.insert(relid, Rc::clone(&desc)));
+    }
     Ok(desc)
 }
 
@@ -218,7 +260,7 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     let parent = table::table_open(cmcx, parent_oid, types_rel::AccessShareLock)?;
     let spec = partbounds::read_boundspec(cmcx, relid)?;
     let key = partcache::RelationGetPartitionKey(&parent)?;
-    let pdesc = RelationGetPartitionDesc(&parent)?;
+    let pdesc = RelationGetPartitionDesc(&parent, false)?;
     let my_qual = partbounds::get_qual_from_partbound(
         cmcx,
         &key,

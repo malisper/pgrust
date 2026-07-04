@@ -962,7 +962,7 @@ fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<&'mcx [u8]> {
     Ok(v.leak())
 }
 
-fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(core::str::from_utf8(bytes_in(mcx, s.as_bytes())?).expect("was UTF-8"))
 }
 

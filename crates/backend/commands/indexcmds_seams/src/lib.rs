@@ -56,3 +56,9 @@ seam_core::seam!(
         parent_oid: Oid,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // WaitForOlderSnapshots (indexcmds.c); seam because indexcmds depends on
+    // tablecmds.
+    pub fn wait_for_older_snapshots(limit_xmin: types_core::TransactionId) -> PgResult<()>
+);

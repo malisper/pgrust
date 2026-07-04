@@ -623,7 +623,7 @@ pub fn DefineIndex<'mcx>(
         // every partition gains an attached index.
         if let Some(rv) = stmt.relation {
             if !rv.inh {
-                let pd = partdesc::RelationGetPartitionDesc(&rel)?;
+                let pd = partdesc::RelationGetPartitionDesc(&rel, true)?;
                 if pd.nparts != 0 {
                     flags |= catalog_index::INDEX_CREATE_INVALID;
                 }
@@ -669,7 +669,7 @@ pub fn DefineIndex<'mcx>(
 
     if partitioned {
         let recurse = stmt.relation.map(|rv| rv.inh).unwrap_or(true);
-        let partdesc = partdesc::RelationGetPartitionDesc(&rel)?;
+        let partdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;
         if recurse && partdesc.nparts > 0 {
             let nparts = partdesc.nparts;
             let mut part_oids: PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, nparts)?;

@@ -55,6 +55,22 @@ pub fn DescribeLockTag(tag: LOCKTAG) -> String {
     }
 }
 
+// WaitForLockersMultiple (lmgr.c:986): wait for current lock holders to
+// finish without acquiring the lock ourselves; progress reporting unported.
+pub fn WaitForLockersMultiple(
+    mcx: mcx::Mcx<'_>,
+    locktags: &[LOCKTAG],
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    for locktag in locktags {
+        let holders = lock::GetLockConflicts(mcx, locktag, lockmode)?;
+        for &vxid in holders.iter() {
+            lock::VirtualXactLock(vxid, true)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn RelationInitLockInfo(relid: Oid, relisshared: bool) -> LockInfoData {
     let dbId = if relisshared { 0 } else { init_small::globals::MyDatabaseId() };
     LockInfoData { lockRelId: LockRelId { relId: relid, dbId } }

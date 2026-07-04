@@ -29,10 +29,44 @@ const TYPCATEGORY_INVALID: i8 = 0;
 
 pub fn init_seams() {
     indexcmds_seams::get_default_opclass::set(GetDefaultOpClass);
+    indexcmds_seams::wait_for_older_snapshots::set(WaitForOlderSnapshots);
     indexcmds_seams::define_index_for_alter::set(define::define_index_for_alter);
     indexcmds_seams::define_index::set(define::DefineIndex);
     indexcmds_seams::index_set_parent_index::set(define::IndexSetParentIndex);
     indexcmds_seams::check_index_compatible::set(define::CheckIndexCompatible);
+}
+
+// WaitForOlderSnapshots (indexcmds.c:431): wait out transactions that might
+// still see catalog state older than limit_xmin; progress reporting unported.
+pub fn WaitForOlderSnapshots(limit_xmin: types_core::TransactionId) -> PgResult<()> {
+    use types_core::InvalidLocalTransactionId;
+    use types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
+    let scratch = MemoryContext::new("WaitForOlderSnapshots");
+    let mcx = scratch.mcx();
+    let exclude = PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC;
+    let mut old_snapshots =
+        procarray::GetCurrentVirtualXIDs(mcx, limit_xmin, true, false, exclude)?;
+    for i in 0..old_snapshots.len() {
+        if old_snapshots[i].localTransactionId == InvalidLocalTransactionId {
+            continue;
+        }
+        if i > 0 {
+            let newer =
+                procarray::GetCurrentVirtualXIDs(mcx, limit_xmin, true, false, exclude)?;
+            for j in i..old_snapshots.len() {
+                if old_snapshots[j].localTransactionId == InvalidLocalTransactionId {
+                    continue;
+                }
+                if !newer.iter().any(|n| *n == old_snapshots[j]) {
+                    old_snapshots[j].localTransactionId = InvalidLocalTransactionId;
+                }
+            }
+        }
+        if old_snapshots[i].localTransactionId != InvalidLocalTransactionId {
+            lock::VirtualXactLock(old_snapshots[i], true)?;
+        }
+    }
+    Ok(())
 }
 
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {

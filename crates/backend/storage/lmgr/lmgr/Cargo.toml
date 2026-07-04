@@ -18,9 +18,10 @@ init_small = { path = "../../../utils/init/init_small" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 inval_seams = { path = "../../../utils/cache/inval_seams" }
 lmgr_seams = { path = "../lmgr_seams" }
+lock = { path = "../lock" }
+mcx = { path = "../../../../_support/mcx" }
 lock_seams = { path = "../lock_seams" }
 procarray_seams = { path = "../../ipc/procarray_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 
 [dev-dependencies]
-mcx = { path = "../../../../_support/mcx" }

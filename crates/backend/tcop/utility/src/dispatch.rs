@@ -795,7 +795,7 @@ fn slow_switch<'mcx>(
                         let atstmt = stmt
                             .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
                             .expect("AlterTableStmt");
-                        exec_alter_table_stmt(mcx, atstmt, stmt, source_text)?;
+                        exec_alter_table_stmt(mcx, atstmt, stmt, source_text, is_top_level)?;
                     }
                     T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
                     T_CommentStmt => {
@@ -847,7 +847,7 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::AlterTableStmt<'mcx>,
                 >(stmt)
             };
-            exec_alter_table_stmt(mcx, stmt, parsetree, source_text)?;
+            exec_alter_table_stmt(mcx, stmt, parsetree, source_text, is_top_level)?;
             // ALTER TABLE stashes commands internally.
             Ok(None)
         }
@@ -1564,9 +1564,24 @@ fn exec_alter_table_stmt<'mcx>(
     stmt: &types_nodes::parsenodes::AlterTableStmt<'mcx>,
     parsetree: Node<'_>,
     source_text: &str,
+    is_top_level: bool,
 ) -> PgResult<()> {
-    // DETACH CONCURRENTLY transaction-block fence: unported subtypes
-    // are loud inside AlterTableGetLockLevel.
+    for cnode in stmt.cmds.iter() {
+        let cmd = cnode
+            .as_variant::<types_nodes::parsenodes::AlterTableCmd>()
+            .expect("AlterTableCmd");
+        if cmd.subtype == types_nodes::parsenodes::AlterTableType::AT_DetachPartition
+            && cmd
+                .def
+                .and_then(|d| d.as_variant::<types_nodes::rawnodes::PartitionCmd>())
+                .is_some_and(|p| p.concurrent)
+        {
+            xact::PreventInTransactionBlock(
+                is_top_level,
+                "ALTER TABLE ... DETACH CONCURRENTLY",
+            )?;
+        }
+    }
     let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
     let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
     if relid != types_core::InvalidOid {

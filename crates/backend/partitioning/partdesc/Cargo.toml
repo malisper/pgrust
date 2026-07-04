@@ -22,3 +22,4 @@ cache_syscache = { path = "../../utils/cache/cache_syscache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
 table = { path = "../../access/table/table" }
+snapmgr = { path = "../../utils/time/snapmgr" }

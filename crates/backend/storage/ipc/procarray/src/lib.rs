@@ -1251,6 +1251,55 @@ pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
     result
 }
 
+pub fn GetCurrentVirtualXIDs<'mcx>(
+    mcx: Mcx<'mcx>,
+    limitXmin: TransactionId,
+    excludeXmin0: bool,
+    allDbs: bool,
+    excludeVacuum: u8,
+) -> PgResult<PgVec<'mcx, types_core::VirtualTransactionId>> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+    let my_dbid = init_small::globals::MyDatabaseId();
+    let mut vxids: PgVec<'mcx, types_core::VirtualTransactionId> = PgVec::new_in(mcx);
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+
+        if pgprocno == my_procno {
+            continue;
+        }
+        if excludeVacuum & hdr.statusFlags[index].load(Relaxed) != 0 {
+            continue;
+        }
+        if allDbs || proc.databaseId.load(Relaxed) == my_dbid {
+            // Fetch xmin just once - might change on us.
+            let pxmin = proc.xmin.read();
+            if excludeXmin0 && !TransactionIdIsValid(pxmin) {
+                continue;
+            }
+            // InvalidTransactionId precedes all other XIDs: a proc that has
+            // not set xmin yet is never rejected by this test.
+            if !TransactionIdIsValid(limitXmin)
+                || TransactionIdPrecedesOrEquals(pxmin, limitXmin)
+            {
+                let vxid = types_core::VirtualTransactionId {
+                    procNumber: proc.vxid.procNumber.load(Relaxed),
+                    localTransactionId: proc.vxid.lxid.load(Relaxed),
+                };
+                if vxid.localTransactionId != InvalidLocalTransactionId {
+                    vxids.push(vxid);
+                }
+            }
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(vxids)
+}
+
 pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
