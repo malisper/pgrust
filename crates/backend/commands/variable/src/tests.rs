@@ -270,7 +270,7 @@ fn build_gate_checks() {
     let mut on = true;
     assert!(!check_bonjour(&mut on, &mut None, PGC_S_SESSION).unwrap());
     let mut on = true;
-    assert!(!check_ssl(&mut on, &mut None, PGC_S_SESSION).unwrap());
+    assert!(check_ssl(&mut on, &mut None, PGC_S_SESSION).unwrap());
     let mut on = true;
     assert!(!check_default_with_oids(&mut on, &mut None, PGC_S_SESSION).unwrap());
     let mut off = false;

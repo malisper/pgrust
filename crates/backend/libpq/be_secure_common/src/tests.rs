@@ -15,6 +15,7 @@ fn setup() {
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         pgstat_seams::pgstat_report_tempfile::set(|_| {});
+        pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
     });
     fd::InitFileAccess();
 }
@@ -31,8 +32,15 @@ fn scratch_file(tag: &str, mode: u32) -> String {
     path.to_str().unwrap().to_owned()
 }
 
-fn set_passphrase_command(cmd: &str) {
+// The GUC backing is process-global; passphrase tests must not interleave.
+static PASSPHRASE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn set_passphrase_command(cmd: &str) -> std::sync::MutexGuard<'static, ()> {
+    let guard = PASSPHRASE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guc_tables::vars::ssl_passphrase_command.write(Some(cmd.to_string()));
+    guard
 }
 
 #[test]
@@ -75,7 +83,7 @@ fn key_file_not_regular_rejected() {
 #[test]
 fn passphrase_command_substitutes_prompt_and_strips_crlf() {
     setup();
-    set_passphrase_command("echo \"got:%p\"");
+    let _g = set_passphrase_command("echo \"got:%p\"");
     let mut buf = [0u8; 256];
     let len = crate::run_ssl_passphrase_command("Enter PEM pass phrase:", true, &mut buf).unwrap();
     assert_eq!(&buf[..len], b"got:Enter PEM pass phrase:");
@@ -84,7 +92,7 @@ fn passphrase_command_substitutes_prompt_and_strips_crlf() {
 #[test]
 fn passphrase_command_percent_escape() {
     setup();
-    set_passphrase_command("echo '100%%'");
+    let _g = set_passphrase_command("echo '100%%'");
     let mut buf = [0u8; 64];
     let len = crate::run_ssl_passphrase_command("p", true, &mut buf).unwrap();
     assert_eq!(&buf[..len], b"100%");
@@ -93,16 +101,16 @@ fn passphrase_command_percent_escape() {
 #[test]
 fn passphrase_command_failure_is_error_at_server_start() {
     setup();
-    set_passphrase_command("exit 3");
+    let _g = set_passphrase_command("exit 3");
     let mut buf = [0u8; 64];
     let err = crate::run_ssl_passphrase_command("p", true, &mut buf).unwrap_err();
-    assert!(err.message.contains("failed"));
+    assert!(err.message.contains("failed"), "unexpected error: {err:?}");
 }
 
 #[test]
 fn passphrase_command_failure_is_soft_on_reload() {
     setup();
-    set_passphrase_command("exit 3");
+    let _g = set_passphrase_command("exit 3");
     let mut buf = [0u8; 64];
     assert_eq!(
         crate::run_ssl_passphrase_command("p", false, &mut buf).unwrap(),
@@ -113,7 +121,7 @@ fn passphrase_command_failure_is_soft_on_reload() {
 #[test]
 fn passphrase_bad_placeholder_errors() {
     setup();
-    set_passphrase_command("echo %q");
+    let _g = set_passphrase_command("echo %q");
     let mut buf = [0u8; 64];
     let err = crate::run_ssl_passphrase_command("p", true, &mut buf).unwrap_err();
     assert_eq!(err.sqlstate, types_error::ERRCODE_INVALID_PARAMETER_VALUE);
