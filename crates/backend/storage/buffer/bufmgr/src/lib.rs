@@ -222,8 +222,9 @@ pub use write::FlushDatabaseBuffers;
 
 unported! {
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
-    fn PrefetchBuffer(RelFileLocatorBackend, ForkNumber, BlockNumber) -> (), "PrefetchBuffer";
 }
+
+pub use read::{PrefetchBuffer, PrefetchOutcome};
 
 pub fn BufferIsPermanent(buffer: Buffer) -> bool {
     if buffer < 0 {
