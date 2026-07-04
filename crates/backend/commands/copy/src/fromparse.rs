@@ -1,6 +1,7 @@
-// copyfromparse.c, text + CSV formats: raw_buf -> input_buf -> line_buf ->
-// attribute_buf pipeline, file or frontend source. Binary and the callback
-// source are loud before this module is reached.
+// copyfromparse.c: text/CSV raw_buf -> input_buf -> line_buf -> attribute_buf
+// pipeline, plus the binary format (raw_buf -> binary_attr_buf, typreceive per
+// field), file or frontend source. The callback source is loud before this
+// module is reached.
 
 use core::ffi::CStr;
 
@@ -185,9 +186,11 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         Ok(bytesread)
     }
 
-    // CopyLoadRawBuf.
+    // CopyLoadRawBuf. In binary mode input_buf is never used, matching C's
+    // raw_buf == input_buf guard (text-only aliasing).
     fn copy_load_raw_buf(&mut self) -> PgResult<()> {
-        if !self.need_transcoding {
+        let bufs_alias = !self.need_transcoding && !self.opts.binary;
+        if bufs_alias {
             debug_assert!(self.raw_buf_index == self.input_buf_index);
             debug_assert!(self.input_buf_len <= self.raw_buf_len);
         }
@@ -198,7 +201,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         }
         self.raw_buf_len -= self.raw_buf_index;
         self.raw_buf_index = 0;
-        if !self.need_transcoding {
+        if bufs_alias {
             self.input_buf_len -= self.input_buf_index;
             self.input_buf_index = 0;
         }
@@ -790,6 +793,21 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             *d = false;
         }
 
+        if self.opts.binary {
+            if !self.copy_from_binary_one_row(row_mcx, values, nulls)? {
+                return Ok(false);
+            }
+            for k in 0..self.defmap.len() {
+                let m = self.defmap[k];
+                let state = self.defexprs[m].as_mut().expect("defmap entry sans defexpr");
+                let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+                let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                values[m] = r.value;
+                nulls[m] = r.isnull;
+            }
+            return Ok(true);
+        }
+
         // C's COPY_HEADER_TRUE arm: consume and discard the header line.
         if self.cur_lineno == 0 && self.opts.header_line {
             self.cur_lineno += 1;
@@ -925,6 +943,179 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         &bytes[..nul] == self.opts.null_print.as_bytes()
     }
+
+    // CopyReadBinaryData: short count only at EOF.
+    fn copy_read_binary_data(&mut self, dest: &mut [u8]) -> PgResult<usize> {
+        let nbytes = dest.len();
+        let avail = self.raw_buf_len - self.raw_buf_index;
+        if avail >= nbytes {
+            dest.copy_from_slice(&self.raw_buf[self.raw_buf_index..self.raw_buf_index + nbytes]);
+            self.raw_buf_index += nbytes;
+            return Ok(nbytes);
+        }
+        let mut copied = 0usize;
+        loop {
+            if self.raw_buf_len - self.raw_buf_index == 0 {
+                self.copy_load_raw_buf()?;
+                if self.raw_reached_eof {
+                    break;
+                }
+            }
+            let chunk = (nbytes - copied).min(self.raw_buf_len - self.raw_buf_index);
+            dest[copied..copied + chunk]
+                .copy_from_slice(&self.raw_buf[self.raw_buf_index..self.raw_buf_index + chunk]);
+            self.raw_buf_index += chunk;
+            copied += chunk;
+            if copied >= nbytes {
+                break;
+            }
+        }
+        Ok(copied)
+    }
+
+    // CopyGetInt32/CopyGetInt16: network byte order; None at EOF.
+    fn copy_get_int32(&mut self) -> PgResult<Option<i32>> {
+        let mut b = [0u8; 4];
+        if self.copy_read_binary_data(&mut b)? != 4 {
+            return Ok(None);
+        }
+        Ok(Some(i32::from_be_bytes(b)))
+    }
+
+    fn copy_get_int16(&mut self) -> PgResult<Option<i16>> {
+        let mut b = [0u8; 2];
+        if self.copy_read_binary_data(&mut b)? != 2 {
+            return Ok(None);
+        }
+        Ok(Some(i16::from_be_bytes(b)))
+    }
+
+    /// `ReceiveCopyBinaryHeader` (copyfromparse.c).
+    pub(crate) fn receive_copy_binary_header(&mut self) -> PgResult<()> {
+        const BINARY_SIGNATURE: [u8; 11] = *b"PGCOPY\n\xff\r\n\0";
+        let mut sig = [0u8; 11];
+        if self.copy_read_binary_data(&mut sig)? != 11 || sig != BINARY_SIGNATURE {
+            return Err(bad_copy_format("COPY file signature not recognized"));
+        }
+        let Some(mut flags) = self.copy_get_int32()? else {
+            return Err(bad_copy_format("invalid COPY file header (missing flags)"));
+        };
+        if flags & (1 << 16) != 0 {
+            return Err(bad_copy_format("invalid COPY file header (WITH OIDS)"));
+        }
+        flags &= !(1 << 16);
+        if flags >> 16 != 0 {
+            return Err(bad_copy_format(
+                "unrecognized critical flags in COPY file header",
+            ));
+        }
+        let ext_len = match self.copy_get_int32()? {
+            Some(n) if n >= 0 => n,
+            _ => return Err(bad_copy_format("invalid COPY file header (missing length)")),
+        };
+        let mut skip = [0u8; 1];
+        for _ in 0..ext_len {
+            if self.copy_read_binary_data(&mut skip)? != 1 {
+                return Err(bad_copy_format("invalid COPY file header (wrong length)"));
+            }
+        }
+        Ok(())
+    }
+
+    // CopyReadBinaryAttribute's data load: fld_size bytes into binary_attr_buf.
+    fn read_binary_attr_data(&mut self, fld_size: usize) -> PgResult<()> {
+        self.binary_attr_buf.reset();
+        let mut remaining = fld_size;
+        loop {
+            if self.raw_buf_len - self.raw_buf_index == 0 {
+                self.copy_load_raw_buf()?;
+                if self.raw_reached_eof {
+                    break;
+                }
+            }
+            let chunk = remaining.min(self.raw_buf_len - self.raw_buf_index);
+            self.binary_attr_buf
+                .append_bytes(&self.raw_buf[self.raw_buf_index..self.raw_buf_index + chunk])?;
+            self.raw_buf_index += chunk;
+            remaining -= chunk;
+            if remaining == 0 {
+                return Ok(());
+            }
+        }
+        Err(unexpected_eof_in_copy_data())
+    }
+
+    /// `CopyFromBinaryOneRow` + `CopyReadBinaryAttribute` (copyfromparse.c).
+    fn copy_from_binary_one_row(
+        &mut self,
+        row_mcx: Mcx<'mcx>,
+        values: &mut [Datum],
+        nulls: &mut [bool],
+    ) -> PgResult<bool> {
+        let attr_count = self.attnumlist.len();
+        self.cur_lineno += 1;
+
+        let Some(fld_count) = self.copy_get_int16()? else {
+            return Ok(false);
+        };
+        if fld_count == -1 {
+            // EOF marker: the protocol-level EOF must follow immediately.
+            let mut dummy = [0u8; 1];
+            if self.copy_read_binary_data(&mut dummy)? > 0 {
+                return Err(bad_copy_format("received copy data after EOF marker"));
+            }
+            return Ok(false);
+        }
+        if fld_count as i64 != attr_count as i64 {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "row field count is {fld_count}, expected {attr_count}"
+                ))
+                .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+            ));
+        }
+
+        for i in 0..attr_count {
+            let attnum = self.attnumlist[i];
+            let m = attnum as usize - 1;
+            self.cur_attidx = Some(m);
+            self.cur_attval_off = None;
+            let Some(fld_size) = self.copy_get_int32()? else {
+                return Err(unexpected_eof_in_copy_data());
+            };
+            if fld_size == -1 {
+                nulls[m] = true;
+                values[m] = types_fmgr::receive_function_call(
+                    &mut self.in_functions[i],
+                    None,
+                    self.typioparams[i],
+                    self.atttypmods[i],
+                    row_mcx,
+                )?;
+            } else {
+                if fld_size < 0 {
+                    return Err(bad_copy_format("invalid field size"));
+                }
+                self.read_binary_attr_data(fld_size as usize)?;
+                values[m] = types_fmgr::receive_function_call(
+                    &mut self.in_functions[i],
+                    Some(&mut self.binary_attr_buf),
+                    self.typioparams[i],
+                    self.atttypmods[i],
+                    row_mcx,
+                )?;
+                if self.binary_attr_buf.cursor != self.binary_attr_buf.len() {
+                    return Err(Box::new(
+                        PgError::error("incorrect binary data format")
+                            .with_sqlstate(types_error::ERRCODE_INVALID_BINARY_REPRESENTATION),
+                    ));
+                }
+                nulls[m] = false;
+            }
+            self.cur_attidx = None;
+        }
+        Ok(true)
+    }
 }
 
 #[inline]
@@ -979,6 +1170,12 @@ fn literal_nl(is_csv: bool) -> Box<PgError> {
 #[inline(never)]
 fn marker_not_alone() -> Box<PgError> {
     bad_copy_format("end-of-copy marker is not alone on its line")
+}
+
+#[cold]
+#[inline(never)]
+fn unexpected_eof_in_copy_data() -> Box<PgError> {
+    bad_copy_format("unexpected EOF in COPY data")
 }
 
 #[cold]
@@ -1047,6 +1244,7 @@ pub mod bench_internals {
             line_buf: PgVec::new_in(mcx),
             line_buf_valid: false,
             attribute_buf: PgVec::new_in(mcx),
+            binary_attr_buf: stringinfo::StringInfo::new_in(mcx).unwrap(),
             raw_fields: PgVec::new_in(mcx),
             max_fields,
             eol_type: EolType::Unknown,

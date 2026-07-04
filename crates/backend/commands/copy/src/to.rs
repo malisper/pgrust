@@ -1,5 +1,5 @@
-// copyto.c, text/CSV format to file or frontend. The callback destination and
-// binary routines are loud in lib.rs before this module is reached.
+// copyto.c, text/CSV/binary formats to file or frontend. The callback
+// destination is loud in lib.rs before this module is reached.
 
 use core::ffi::CStr;
 
@@ -10,7 +10,7 @@ use stringinfo::StringInfo;
 use types_core::primitive::InvalidOid;
 use types_dest::CommandDest;
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_NAME, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
-use types_fmgr::{function_call1_coll_in, FmgrInfo};
+use types_fmgr::{function_call1_coll_in, send_function_call, FmgrInfo, PackedVarlena};
 use types_nodes::NodeList;
 use types_rel::Relation;
 use types_scan::ForwardScanDirection;
@@ -61,9 +61,6 @@ pub fn BeginCopyTo<'mcx, 's>(
     }
 
     let opts = ProcessCopyOptions(false, options, source_text)?;
-    if opts.binary {
-        unported("FORMAT binary (text-only lane)");
-    }
     let attnumlist = CopyGetAttnums(mcx, &rel.rd_att, rel, attnamelist)?;
     let force_quote_flags = force_flags(
         mcx,
@@ -82,7 +79,7 @@ pub fn BeginCopyTo<'mcx, 's>(
     };
     let need_transcoding = !(file_encoding == mbutils::GetDatabaseEncoding()
         || file_encoding == wchar::PG_SQL_ASCII);
-    if file_encoding >= wchar::PG_SJIS {
+    if !opts.binary && file_encoding >= wchar::PG_SJIS {
         unported("TO with a client-only encoding (pg_encoding_mblen escape walk)");
     }
 
@@ -160,12 +157,23 @@ pub fn DoCopyTo<'mcx>(
     })?;
     for &attnum in cstate.attnumlist.iter() {
         let attr = tup_desc.attr(attnum as usize - 1);
-        let (func_oid, _is_varlena) = lsyscache::typ::getTypeOutputInfo(attr.atttypid)?;
+        let (func_oid, _is_varlena) = if cstate.opts.binary {
+            lsyscache::typ::getTypeBinaryOutputInfo(attr.atttypid)?
+        } else {
+            lsyscache::typ::getTypeOutputInfo(attr.atttypid)?
+        };
         out_functions.push(fmgr_core::fmgr_info(func_oid)?);
     }
 
     if matches!(cstate.dest, CopyDest::Frontend) {
-        send_copy_begin(mcx, cstate.attnumlist.len())?;
+        send_copy_begin(mcx, cstate.attnumlist.len(), cstate.opts.binary)?;
+    }
+
+    if cstate.opts.binary {
+        // CopyToBinaryStart: signature, flags, no header extension.
+        cstate.fe_msgbuf.append_bytes(&BINARY_SIGNATURE)?;
+        cstate.fe_msgbuf.append_bytes(&0i32.to_be_bytes())?;
+        cstate.fe_msgbuf.append_bytes(&0i32.to_be_bytes())?;
     }
 
     if cstate.opts.header_line {
@@ -208,6 +216,11 @@ pub fn DoCopyTo<'mcx>(
     }
 
     tableam::table_endscan(scandesc)?;
+    if cstate.opts.binary {
+        // CopyToBinaryEnd: -1 tuple-count trailer, then flush.
+        cstate.fe_msgbuf.append_bytes(&(-1i16).to_be_bytes())?;
+        send_end_of_row(cstate)?;
+    }
     match cstate.dest {
         CopyDest::File { .. } => flush_to_file(cstate)?,
         CopyDest::Frontend => {
@@ -219,16 +232,19 @@ pub fn DoCopyTo<'mcx>(
     Ok(processed)
 }
 
-// SendCopyBegin (copyto.c): CopyOutResponse, text format.
-fn send_copy_begin(mcx: Mcx<'_>, natts: usize) -> PgResult<()> {
+// SendCopyBegin (copyto.c): CopyOutResponse.
+fn send_copy_begin(mcx: Mcx<'_>, natts: usize, binary: bool) -> PgResult<()> {
+    let format: u16 = if binary { 1 } else { 0 };
     let mut buf = pqformat::pq_beginmessage(mcx, b'H')?;
-    pqformat::pq_sendbyte(&mut buf, 0)?;
+    pqformat::pq_sendbyte(&mut buf, format as u8)?;
     pqformat::pq_sendint16(&mut buf, natts as u16)?;
     for _ in 0..natts {
-        pqformat::pq_sendint16(&mut buf, 0)?;
+        pqformat::pq_sendint16(&mut buf, format)?;
     }
     pqformat::pq_endmessage(buf)
 }
+
+const BINARY_SIGNATURE: [u8; 11] = *b"PGCOPY\n\xff\r\n\0";
 
 /// `CopyOneRowTo` + `CopyToTextLikeOneRow` (copyto.c).
 fn CopyOneRowTo<'mcx>(
@@ -249,8 +265,27 @@ fn CopyOneRowTo<'mcx>(
     rowcx.reset();
     let rmcx = rowcx.mcx();
 
-    let single_attr = attnumlist.len() == 1;
     let base = slot.base();
+    if opts.binary {
+        fe_msgbuf.append_bytes(&(attnumlist.len() as i16).to_be_bytes())?;
+        for (i, &attnum) in attnumlist.iter().enumerate() {
+            let m = attnum as usize - 1;
+            if base.tts_isnull[m] {
+                fe_msgbuf.append_bytes(&(-1i32).to_be_bytes())?;
+                continue;
+            }
+            let out = send_function_call(&mut out_functions[i], base.tts_values[m], rmcx)?;
+            // SAFETY: send fns return an untoasted bytea image (C's
+            // DatumGetByteaP); external/compressed panics in from_ptr.
+            let v = unsafe { PackedVarlena::from_ptr(out.as_usize() as *const u8) };
+            let data = v.data();
+            fe_msgbuf.append_bytes(&(data.len() as i32).to_be_bytes())?;
+            fe_msgbuf.append_bytes(data)?;
+        }
+        return send_end_of_row(cstate);
+    }
+
+    let single_attr = attnumlist.len() == 1;
     let mut need_delim = false;
     for (i, &attnum) in attnumlist.iter().enumerate() {
         let m = attnum as usize - 1;
@@ -335,9 +370,14 @@ pub(crate) fn copy_attribute_out_csv(
     Ok(())
 }
 
-// CopySendTextLikeEndOfRow + CopySendEndOfRow.
+// CopySendTextLikeEndOfRow.
 fn end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     cstate.fe_msgbuf.append_byte(b'\n')?;
+    send_end_of_row(cstate)
+}
+
+// CopySendEndOfRow.
+fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     match cstate.dest {
         CopyDest::File { .. } => {
             if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
