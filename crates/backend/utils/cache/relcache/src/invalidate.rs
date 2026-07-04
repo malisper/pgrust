@@ -191,7 +191,9 @@ fn RelationReloadIndexInfo(
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: support,
-        rd_supportinfo: Default::default(),
+        // Preserved like rd_support: resolving a support proc scans
+        // pg_amproc, which needs these very indexes searchable.
+        rd_supportinfo: core::cell::RefCell::new(held.rd_supportinfo.borrow().clone()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
