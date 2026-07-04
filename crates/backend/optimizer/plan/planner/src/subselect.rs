@@ -1745,7 +1745,7 @@ pub fn ss_finalize_plan<'mcx>(
     // Planner-arena set -> nodes-side bitmapset, converted once at the boundary.
     let mut valid = types_nodes::bitmapset::Bitmapset::empty();
     if let Some(b) = outer_params {
-        for (i, w) in b.words.iter().enumerate() {
+        for (i, w) in b.word_slice().iter().enumerate() {
             let mut w = *w;
             while w != 0 {
                 let bit = w.trailing_zeros();

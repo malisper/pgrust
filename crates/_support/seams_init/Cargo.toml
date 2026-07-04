@@ -64,6 +64,8 @@ execmain = { path = "../../backend/executor/execmain" }
 execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
 nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
+nodetidscan = { path = "../../backend/executor/nodetidscan" }
+nodetidrangescan = { path = "../../backend/executor/nodetidrangescan" }
 nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
 nodeagg = { path = "../../backend/executor/nodeagg" }
 nodewindowagg = { path = "../../backend/executor/nodewindowagg" }

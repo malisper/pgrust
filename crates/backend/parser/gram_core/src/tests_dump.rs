@@ -1069,6 +1069,27 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
+        out.push_str("{ALTERDOMAINSTMT :subtype ");
+        out.push(a.subtype as char);
+        list_field(out, "typeName", &a.typeName);
+        string_field(out, "name", a.name);
+        node_field(out, "def", a.def);
+        int_field(out, "behavior", a.behavior as i32);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>() {
+        out.push_str("{ALTEROBJECTSCHEMASTMT");
+        int_field(out, "objectType", a.objectType as i32);
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", a.object);
+        string_field(out, "newschema", a.newschema);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
     } else if let Some(a) = n.as_alter_function_stmt() {
         out.push_str("{ALTERFUNCTIONSTMT");
         int_field(out, "objtype", a.objtype as i32);
@@ -1101,6 +1122,36 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str("{RETURNINGCLAUSE");
         list_field(out, "options", &rc.options);
         list_field(out, "exprs", &rc.exprs);
+        out.push('}');
+    } else if let Some(d) = n.as_delete_stmt() {
+        out.push_str("{DELETESTMT");
+        node_field(out, "relation", d.relation);
+        list_field(out, "usingClause", &d.usingClause);
+        node_field(out, "whereClause", d.whereClause);
+        node_field(out, "returningClause", d.returningClause);
+        node_field(out, "withClause", d.withClause);
+        out.push('}');
+    } else if let Some(u) = n.as_update_stmt() {
+        out.push_str("{UPDATESTMT");
+        node_field(out, "relation", u.relation);
+        list_field(out, "targetList", &u.targetList);
+        node_field(out, "whereClause", u.whereClause);
+        list_field(out, "fromClause", &u.fromClause);
+        node_field(out, "returningClause", u.returningClause);
+        node_field(out, "withClause", u.withClause);
+        out.push('}');
+    } else if let Some(st) = n.as_set_to_default() {
+        out.push_str("{SETTODEFAULT");
+        int_field(out, "typeId", st.typeId as i32);
+        int_field(out, "typeMod", st.typeMod);
+        int_field(out, "collation", st.collation as i32);
+        int_field(out, "location", st.location);
+        out.push('}');
+    } else if let Some(c) = n.as_current_of_expr() {
+        out.push_str("{CURRENTOFEXPR");
+        int_field(out, "cvarno", c.cvarno as i32);
+        string_field(out, "cursor_name", c.cursor_name);
+        int_field(out, "cursor_param", c.cursor_param);
         out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());

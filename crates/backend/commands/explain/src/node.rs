@@ -11,6 +11,7 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::plannodes::{Plan, PlannedStmt};
+use types_nodes::primnodes::{BoolExpr, BoolExprType};
 use types_nodes::{Node, NodeTag};
 
 use crate::format::{
@@ -101,6 +102,13 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_IndexScan => {
             rels_used.add_member(mcx, node.as_index_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_TidScan => {
+            rels_used.add_member(mcx, node.as_tid_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_TidRangeScan => {
+            rels_used
+                .add_member(mcx, node.as_tid_range_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_IndexOnlyScan => {
             rels_used
                 .add_member(mcx, node.as_index_only_scan().unwrap().scan.scanrelid as i32)?;
@@ -123,6 +131,17 @@ fn ExplainPreScanNode<'mcx>(
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
             ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, rels_used)?;
+        }
+        NodeTag::T_ModifyTable => {
+            let mt = node.as_modify_table().unwrap();
+            rels_used.add_member(mcx, mt.nominalRelation as i32)?;
+            if mt.exclRelRTI != 0 {
+                rels_used.add_member(mcx, mt.exclRelRTI as i32)?;
+            }
+            // Vars in RETURNING need refnames.
+            if !mt.plan.targetlist.is_nil() {
+                rels_used.add_member(mcx, mt.resultRelations.as_slice()[0])?;
+            }
         }
         NodeTag::T_Append => {
             let a = node.as_append().unwrap();
@@ -319,6 +338,8 @@ pub fn ExplainNode<'mcx>(
             other => node_gap("ExplainNode", &format!("SetOp strategy {other} unrecognized")),
         },
         NodeTag::T_SeqScan => "Seq Scan",
+        NodeTag::T_TidScan => "Tid Scan",
+        NodeTag::T_TidRangeScan => "Tid Range Scan",
         NodeTag::T_IndexScan => "Index Scan",
         NodeTag::T_IndexOnlyScan => "Index Only Scan",
         NodeTag::T_BitmapIndexScan => "Bitmap Index Scan",
@@ -359,6 +380,20 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
         NodeTag::T_LockRows => "LockRows",
+        NodeTag::T_ModifyTable => {
+            let mt = node.as_modify_table().expect("ModifyTable plan node");
+            assert!(
+                mt.onConflictAction == 0,
+                "ExplainNode (explain.c): ON CONFLICT display; upsert-explain lane"
+            );
+            match mt.operation {
+                types_nodes::CmdType::CMD_INSERT => "Insert",
+                types_nodes::CmdType::CMD_UPDATE => "Update",
+                types_nodes::CmdType::CMD_DELETE => "Delete",
+                types_nodes::CmdType::CMD_MERGE => "Merge",
+                other => node_gap("ExplainNode", &format!("ModifyTable operation {other:?}")),
+            }
+        }
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
     };
 
@@ -422,6 +457,16 @@ pub fn ExplainNode<'mcx>(
 
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
+    }
+    if let Some(ts) = node.as_tid_scan() {
+        ExplainScanTarget(ts.scan.scanrelid, es)?;
+    }
+    if let Some(trs) = node.as_tid_range_scan() {
+        ExplainScanTarget(trs.scan.scanrelid, es)?;
+    }
+    // ExplainModifyTarget.
+    if let Some(mt) = node.as_modify_table() {
+        ExplainTargetRel(mt.nominalRelation, es)?;
     }
     if let Some(is) = node.as_index_scan() {
         ExplainIndexScanDetails(is.indexid, is.indexorderdir, es)?;
@@ -556,6 +601,25 @@ pub fn ExplainNode<'mcx>(
             show_scan_qual(&s.indexqualorig, "Index Cond", node, ancestors, es)?;
             show_indexsearches_info(node, es);
         }
+        NodeTag::T_TidScan => {
+            // tidquals has OR semantics: multiple entries display as one OR.
+            let s = node.as_tid_scan().unwrap();
+            let tidquals = wrap_multi_quals(es, &s.tidquals, BoolExprType::OR_EXPR)?;
+            show_scan_qual(&tidquals, "TID Cond", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+        }
+        NodeTag::T_TidRangeScan => {
+            let s = node.as_tid_range_scan().unwrap();
+            let tidquals = wrap_multi_quals(es, &s.tidrangequals, BoolExprType::AND_EXPR)?;
+            show_scan_qual(&tidquals, "TID Cond", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+        }
         NodeTag::T_BitmapHeapScan => {
             let s = node.as_bitmap_heap_scan().unwrap();
             show_scan_qual(&s.bitmapqualorig, "Recheck Cond", node, ancestors, es)?;
@@ -673,6 +737,9 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
         | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
         | NodeTag::T_ProjectSet | NodeTag::T_RecursiveUnion => {}
+        // show_modifytable_info: FDW/ON CONFLICT/MERGE legs absent (asserted
+        // at the name arm); nothing prints without ANALYZE.
+        NodeTag::T_ModifyTable => {}
         _ => unreachable!(),
     }
 
@@ -1543,6 +1610,31 @@ fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
             "Rows Removed by Filter needs nfiltered counting (InstrCountFiltered, execScan.c)",
         );
     }
+}
+
+// make_orclause/make_andclause over multi-entry tid quals (explain.c wraps
+// them so the display carries the list's implicit OR/AND semantics).
+fn wrap_multi_quals<'mcx>(
+    es: &ExplainState<'mcx>,
+    quals: &NodeList<'mcx>,
+    boolop: BoolExprType,
+) -> PgResult<NodeList<'mcx>> {
+    let mcx = es.str.allocator();
+    if quals.len() <= 1 {
+        let mut out = NodeList::nil();
+        for q in quals {
+            out.lappend(mcx, q)?;
+        }
+        return Ok(out);
+    }
+    let mut args = NodeList::nil();
+    for q in quals {
+        args.lappend(mcx, q)?;
+    }
+    let wrapped = Node::mk(mcx, BoolExpr { boolop, args, location: -1 })?;
+    let mut out = NodeList::nil();
+    out.lappend(mcx, wrapped)?;
+    Ok(out)
 }
 
 // C: scan quals prefix only under VERBOSE (or SubqueryScan, loud elsewhere).

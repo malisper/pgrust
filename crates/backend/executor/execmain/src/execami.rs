@@ -25,6 +25,8 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
         // loud-panics on any other relam before a plan can carry it).
         NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan => true,
         NodeTag::T_SeqScan
+        | NodeTag::T_TidScan
+        | NodeTag::T_TidRangeScan
         | NodeTag::T_FunctionScan
         | NodeTag::T_ValuesScan
         | NodeTag::T_CteScan
@@ -78,6 +80,10 @@ pub fn exec_re_scan<'mcx>(
             exec_re_scan_with_chg(&mut ru.inner, ru.state.inner_plan, estate, &ru.state.wt_chg)
         }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_rescan_tid_scan(ts, estate),
+        PlanStateNode::TidRangeScan(ts) => {
+            ::nodetidrangescan::exec_rescan_tid_range_scan(ts, estate)
+        }
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
         }
@@ -321,6 +327,10 @@ pub fn exec_re_scan_with_chg<'mcx>(
             exec_re_scan_with_chg(&mut ru.inner, ru.state.inner_plan, estate, &inner_chg)?;
         }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate)?,
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_rescan_tid_scan(ts, estate)?,
+        PlanStateNode::TidRangeScan(ts) => {
+            ::nodetidrangescan::exec_rescan_tid_range_scan(ts, estate)?
+        }
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)?
         }

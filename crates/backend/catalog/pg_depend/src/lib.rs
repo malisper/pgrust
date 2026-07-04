@@ -349,6 +349,73 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     Ok(count)
 }
 
+// changeDependencyFor (pg_depend.c).
+pub fn changeDependencyFor<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    refClassId: Oid,
+    oldRefObjectId: Oid,
+    newRefObjectId: Oid,
+) -> PgResult<i64> {
+    let old_is_pinned = isObjectPinned(&ObjectAddress::set(refClassId, oldRefObjectId));
+    let new_is_pinned = isObjectPinned(&ObjectAddress::set(refClassId, newRefObjectId));
+    if old_is_pinned {
+        if new_is_pinned {
+            return Ok(1);
+        }
+        recordDependencyOn(
+            mcx,
+            &ObjectAddress::set(classId, objectId),
+            &ObjectAddress::set(refClassId, newRefObjectId),
+            DependencyType::Normal,
+        )?;
+        return Ok(1);
+    }
+    let mut count = 0i64;
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    let natts = desc.natts as usize;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
+        let refclassid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_refclassid as i32, desc, &mut isnull)
+        }
+        .as_oid();
+        // SAFETY: as above.
+        let refobjid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_refobjid as i32, desc, &mut isnull)
+        }
+        .as_oid();
+        if refclassid != refClassId || refobjid != oldRefObjectId {
+            continue;
+        }
+        let tid = tup.t_self;
+        if new_is_pinned {
+            catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+        } else {
+            let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[Anum_pg_depend_refobjid - 1] = Datum::from_oid(newRefObjectId);
+            replace[Anum_pg_depend_refobjid - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtup)?;
+        }
+        count += 1;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}
+
 // creating_extension / CurrentExtensionObject (extension.c:79-80) are hosted
 // here, one layer below their C home: extension depends on this crate, and
 // recordDependencyOnCurrentExtension reads them per row.

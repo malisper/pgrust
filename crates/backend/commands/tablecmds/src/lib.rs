@@ -10,7 +10,10 @@ mod drop;
 mod oncommit;
 mod rename;
 mod truncate;
-pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
+pub use alter::{
+    find_composite_type_dependencies, AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation,
+};
+pub use constraints::cook_default;
 pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use partition::SetRelationHasSubclass;

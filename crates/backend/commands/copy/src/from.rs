@@ -169,11 +169,10 @@ pub fn BeginCopyFrom<'mcx, 's>(
             continue;
         }
         let in_list = attnumlist.contains(&(i as i16 + 1));
-        if (opts.default_print.is_some() || !in_list)
-            && att.attgenerated == 0
-            && (att.atthasdef || att.attidentity != 0)
-        {
-            let defexpr = rewrite_handler::build_column_default(mcx, rel, i + 1)?;
+        if (opts.default_print.is_some() || !in_list) && att.attgenerated == 0 {
+            let Some(defexpr) = rewrite_handler::build_column_default(mcx, rel, i + 1)? else {
+                continue;
+            };
             let defexpr = clauses::eval_const_expressions(mcx, defexpr)?;
             nodes_core::fix_opfuncids(defexpr)?;
             let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
