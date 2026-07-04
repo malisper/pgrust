@@ -425,10 +425,15 @@ fn eval_qual_subplan_aware<'mcx>(
     which: Qual,
     inner_id: ExecSlotId,
 ) -> PgResult<bool> {
-    let has_sub = match which {
-        Qual::Join => node.joinqual.as_deref().is_some_and(|q| q.has_subplan()),
-        Qual::Other => node.otherqual.as_deref().is_some_and(|q| q.has_subplan()),
+    // C ExecQual(NULL) returns true before any slot access.
+    let qual = match which {
+        Qual::Join => node.joinqual.as_deref(),
+        Qual::Other => node.otherqual.as_deref(),
     };
+    let Some(qual) = qual else {
+        return Ok(true);
+    };
+    let has_sub = qual.has_subplan();
     if has_sub {
         let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
         let ecxt = node.ps_ExprContext;
