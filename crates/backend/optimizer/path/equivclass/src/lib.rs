@@ -242,7 +242,7 @@ pub fn process_equivalence<'mcx>(
     Ok(true)
 }
 
-pub(crate) fn canonicalize_ec_expression<'mcx>(
+pub fn canonicalize_ec_expression<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     expr: Node<'mcx>,
     req_type: u32,
