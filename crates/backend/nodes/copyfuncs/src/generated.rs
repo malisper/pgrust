@@ -21,11 +21,11 @@ use types_nodes::primnodes::{
     CoerceViaIO, CollateClause, CollateExpr, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr,
     FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, InferenceElem, JoinExpr,
     JsonBehavior, JsonConstructorExpr, JsonExpr, JsonFormat, JsonIsPredicate, JsonReturning,
-    JsonValueExpr, MergeAction, MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest,
-    OnConflictExpr, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType,
-    RowCompareExpr, RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink,
-    SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition,
-    XmlExpr,
+    JsonTablePath, JsonTablePathScan, JsonTableSiblingJoin, JsonValueExpr, MergeAction,
+    MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest, OnConflictExpr, OpExpr,
+    Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
+    SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan, SubscriptingRef,
+    TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
 };
 use types_nodes::parsenodes::{
     AccessPriv, AlterDatabaseRefreshCollStmt, AlterDatabaseSetStmt, AlterDatabaseStmt,
@@ -60,12 +60,12 @@ use types_nodes::rawnodes::{
     JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
     JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
     JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonScalarExpr, JsonSerializeExpr,
-    LockingClause, MergeStmt, MergeWhenClause, OnConflictClause, PLAssignStmt, ParamRef,
-    PartitionBoundSpec, PartitionCmd, PartitionElem, PartitionRangeDatum, PartitionSpec,
-    RangeFunction, RangeSubselect, RangeTableFunc, RangeTableFuncCol, RawStmt,
-    RefreshMatViewStmt, ResTarget, ReturningClause, RuleStmt, SelectStmt, SortBy, StatsElem,
-    TableLikeClause, TriggerTransition, TypeCast, TypeName, UpdateStmt, ViewStmt, WindowDef,
-    XmlSerialize,
+    JsonTable, JsonTableColumn, JsonTablePathSpec, LockingClause, MergeStmt, MergeWhenClause,
+    OnConflictClause, PLAssignStmt, ParamRef, PartitionBoundSpec, PartitionCmd, PartitionElem,
+    PartitionRangeDatum, PartitionSpec, RangeFunction, RangeSubselect, RangeTableFunc,
+    RangeTableFuncCol, RawStmt, RefreshMatViewStmt, ResTarget, ReturningClause, RuleStmt,
+    SelectStmt, SortBy, StatsElem, TableLikeClause, TriggerTransition, TypeCast, TypeName,
+    UpdateStmt, ViewStmt, WindowDef, XmlSerialize,
 };
 use types_nodes::plannodes::{
     Agg, Append, AppendRelInfo, BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, CteScan,
@@ -739,6 +739,30 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_JsonSerializeExpr => {
             let s = node.as_variant::<JsonSerializeExpr>().expect("JsonSerializeExpr");
             Node::mk(mcx, copy_JsonSerializeExpr(mcx, s)?)?
+        }
+        NodeTag::T_JsonTable => {
+            let s = node.as_variant::<JsonTable>().expect("JsonTable");
+            Node::mk(mcx, copy_JsonTable(mcx, s)?)?
+        }
+        NodeTag::T_JsonTableColumn => {
+            let s = node.as_variant::<JsonTableColumn>().expect("JsonTableColumn");
+            Node::mk(mcx, copy_JsonTableColumn(mcx, s)?)?
+        }
+        NodeTag::T_JsonTablePath => {
+            let s = node.as_variant::<JsonTablePath>().expect("JsonTablePath");
+            Node::mk(mcx, copy_JsonTablePath(mcx, s)?)?
+        }
+        NodeTag::T_JsonTablePathScan => {
+            let s = node.as_variant::<JsonTablePathScan>().expect("JsonTablePathScan");
+            Node::mk(mcx, copy_JsonTablePathScan(mcx, s)?)?
+        }
+        NodeTag::T_JsonTablePathSpec => {
+            let s = node.as_variant::<JsonTablePathSpec>().expect("JsonTablePathSpec");
+            Node::mk(mcx, copy_JsonTablePathSpec(mcx, s)?)?
+        }
+        NodeTag::T_JsonTableSiblingJoin => {
+            let s = node.as_variant::<JsonTableSiblingJoin>().expect("JsonTableSiblingJoin");
+            Node::mk(mcx, copy_JsonTableSiblingJoin(mcx, s)?)?
         }
         NodeTag::T_JsonValueExpr => {
             let s = node.as_variant::<JsonValueExpr>().expect("JsonValueExpr");
@@ -2918,6 +2942,68 @@ pub(crate) fn copy_JsonSerializeExpr<'d>(mcx: Mcx<'d>, s: &JsonSerializeExpr<'_>
     })
 }
 
+pub(crate) fn copy_JsonTable<'d>(mcx: Mcx<'d>, s: &JsonTable<'_>) -> PgResult<JsonTable<'d>> {
+    Ok(JsonTable {
+        context_item: copy_node_opt(mcx, s.context_item)?,
+        pathspec: copy_node_opt(mcx, s.pathspec)?,
+        passing: copy_node_list(mcx, &s.passing)?,
+        columns: copy_node_list(mcx, &s.columns)?,
+        on_error: copy_node_opt(mcx, s.on_error)?,
+        alias: match s.alias { Some(v) => Some(mk_ref(mcx, copy_Alias(mcx, v)?)?), None => None },
+        lateral: s.lateral,
+        location: s.location,
+    })
+}
+
+pub(crate) fn copy_JsonTableColumn<'d>(mcx: Mcx<'d>, s: &JsonTableColumn<'_>) -> PgResult<JsonTableColumn<'d>> {
+    Ok(JsonTableColumn {
+        coltype: s.coltype,
+        name: opt_str_in(mcx, s.name)?,
+        typeName: copy_node_opt(mcx, s.typeName)?,
+        pathspec: copy_node_opt(mcx, s.pathspec)?,
+        format: match s.format { Some(v) => Some(mk_ref(mcx, copy_JsonFormat(mcx, v)?)?), None => None },
+        wrapper: s.wrapper,
+        quotes: s.quotes,
+        columns: copy_node_list(mcx, &s.columns)?,
+        on_empty: copy_node_opt(mcx, s.on_empty)?,
+        on_error: copy_node_opt(mcx, s.on_error)?,
+        location: s.location,
+    })
+}
+
+pub(crate) fn copy_JsonTablePath<'d>(mcx: Mcx<'d>, s: &JsonTablePath<'_>) -> PgResult<JsonTablePath<'d>> {
+    Ok(JsonTablePath {
+        value: copy_node_opt(mcx, s.value)?,
+        name: opt_str_in(mcx, s.name)?,
+    })
+}
+
+pub(crate) fn copy_JsonTablePathScan<'d>(mcx: Mcx<'d>, s: &JsonTablePathScan<'_>) -> PgResult<JsonTablePathScan<'d>> {
+    Ok(JsonTablePathScan {
+        path: copy_node_opt(mcx, s.path)?,
+        errorOnError: s.errorOnError,
+        child: copy_node_opt(mcx, s.child)?,
+        colMin: s.colMin,
+        colMax: s.colMax,
+    })
+}
+
+pub(crate) fn copy_JsonTablePathSpec<'d>(mcx: Mcx<'d>, s: &JsonTablePathSpec<'_>) -> PgResult<JsonTablePathSpec<'d>> {
+    Ok(JsonTablePathSpec {
+        string: copy_node_opt(mcx, s.string)?,
+        name: opt_str_in(mcx, s.name)?,
+        name_location: s.name_location,
+        location: s.location,
+    })
+}
+
+pub(crate) fn copy_JsonTableSiblingJoin<'d>(mcx: Mcx<'d>, s: &JsonTableSiblingJoin<'_>) -> PgResult<JsonTableSiblingJoin<'d>> {
+    Ok(JsonTableSiblingJoin {
+        lplan: copy_node_opt(mcx, s.lplan)?,
+        rplan: copy_node_opt(mcx, s.rplan)?,
+    })
+}
+
 pub(crate) fn copy_JsonValueExpr<'d>(mcx: Mcx<'d>, s: &JsonValueExpr<'_>) -> PgResult<JsonValueExpr<'d>> {
     Ok(JsonValueExpr {
         raw_expr: copy_node_opt(mcx, s.raw_expr)?,
@@ -3967,7 +4053,7 @@ pub(crate) fn copy_TableFunc<'d>(mcx: Mcx<'d>, s: &TableFunc<'_>) -> PgResult<Ta
         colcollations: OidList::from_slice(mcx, s.colcollations.as_slice())?,
         colexprs: copy_opt_node_list(mcx, &s.colexprs)?,
         coldefexprs: copy_opt_node_list(mcx, &s.coldefexprs)?,
-        colvalexprs: copy_node_list(mcx, &s.colvalexprs)?,
+        colvalexprs: copy_opt_node_list(mcx, &s.colvalexprs)?,
         passingvalexprs: copy_node_list(mcx, &s.passingvalexprs)?,
         notnulls: copy_bms(mcx, &s.notnulls)?,
         plan: copy_node_opt(mcx, s.plan)?,
