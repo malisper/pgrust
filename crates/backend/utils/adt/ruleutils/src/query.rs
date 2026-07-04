@@ -2005,8 +2005,11 @@ fn get_from_clause_item<'mcx>(
                     ctx.buf.push_str(&quote_identifier(name));
                 }
                 ctx.buf.push(')');
-                if j.join_using_alias.is_some() {
-                    gap("get_from_clause_item", "JOIN ... USING ... AS alias");
+                if let Some(jua) = j.join_using_alias {
+                    ctx.buf.push_str(&format!(
+                        " AS {}",
+                        quote_identifier(jua.aliasname.expect("USING alias has a name"))
+                    ));
                 }
             } else if let Some(quals) = j.quals {
                 ctx.buf.push_str(" ON ");
