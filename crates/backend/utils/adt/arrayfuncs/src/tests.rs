@@ -386,14 +386,22 @@ mod expanded {
         let parent = MemoryContext::new("t");
         let img = int4_array(parent.mcx(), &[42], None);
         unsafe {
-            let p1 =
-                datum_get_expanded_array(Datum::from_usize(img.as_ptr() as usize), &parent)
-                    .unwrap();
+            // Flat-source expansion via the metacache variant (the bare
+            // variant's catalog lookup needs an installed syscache seam).
+            let mut meta = int4_meta();
+            let p1 = datum_get_expanded_array_x(
+                Datum::from_usize(img.as_ptr() as usize),
+                &parent,
+                Some(&mut meta),
+            )
+            .unwrap();
             assert_eq!((*p1).ea_magic, EA_MAGIC);
             let rw = ::datum::expandeddatum::eohp_get_rw_datum(&raw const (*p1).hdr);
-            let mut meta = ArrayMetaState::invalid();
-            let p2 = datum_get_expanded_array_x(rw, &parent, Some(&mut meta)).unwrap();
+            let p2 = datum_get_expanded_array(rw, &parent).unwrap();
             assert_eq!(p1, p2);
+            let mut meta = ArrayMetaState::invalid();
+            let p3 = datum_get_expanded_array_x(rw, &parent, Some(&mut meta)).unwrap();
+            assert_eq!(p1, p3);
             assert_eq!(meta.element_type, INT4OID);
             assert_eq!(meta.typlen, 4);
         }
