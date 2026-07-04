@@ -253,6 +253,12 @@ pub unsafe fn UtfToLocal(
             let rem2 = src.len() - pos2;
             let l2 = pg_utf_mblen(&src[pos2..]);
             if rem2 < l2 as usize {
+                // C backs up to the first char but keeps the reduced length,
+                // so the reported byte sequence is clipped to the truncated
+                // tail's length.
+                if !no_error {
+                    return Err(report_invalid_encoding(PG_UTF8, &src[pos..pos + rem2]));
+                }
                 break;
             }
             if !pg_utf8_islegal(&src[pos2..], l2) {
