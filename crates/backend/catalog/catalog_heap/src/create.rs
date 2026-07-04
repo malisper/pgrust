@@ -438,7 +438,7 @@ pub fn heap_create_with_catalog<'mcx>(
 
     let old_type_oid =
         syscache_seams::lookup_pg_type_oid_by_name::call(p.relname, p.relnamespace)?;
-    if old_type_oid != InvalidOid && !pg_type::moveArrayTypeName(old_type_oid, p.relname, p.relnamespace)? {
+    if old_type_oid != InvalidOid && !pg_type::moveArrayTypeName(mcx, old_type_oid, p.relname, p.relnamespace)? {
         return Err(err(
             format!("type \"{}\" already exists", p.relname),
             types_error::ERRCODE_DUPLICATE_OBJECT,
@@ -559,6 +559,7 @@ pub fn heap_create_with_catalog<'mcx>(
             typNDims: 0,
             typeNotNull: false,
             typeCollation: InvalidOid,
+            defaultValue: None,
         },
     )?;
     }
@@ -655,6 +656,7 @@ fn AddNewRelationType<'mcx>(
             typNDims: 0,
             typeNotNull: false,
             typeCollation: InvalidOid,
+            defaultValue: None,
         },
     )
 }

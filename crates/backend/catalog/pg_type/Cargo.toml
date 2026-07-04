@@ -26,6 +26,8 @@ catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 aclchk_seams = { path = "../aclchk_seams" }
+pg_shdepend = { path = "../pg_shdepend" }
+varlena = { path = "../../utils/adt/varlena" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

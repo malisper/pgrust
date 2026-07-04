@@ -1,6 +1,6 @@
-// pg_type.c TypeCreate insert-arm slice (+ AssignTypeArrayOid from
-// typecmds.c and makeObjectName from indexcmds.c). Loud: shell-type replace,
-// type defaults, RenameTypeInternal.
+// pg_type.c TypeCreate insert/shell-replace arms + TypeShellMake (+
+// AssignTypeArrayOid from typecmds.c and makeObjectName from indexcmds.c).
+// Loud: typdefaultbin defaults, RenameTypeInternal.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -28,8 +28,11 @@ pub const TYPTYPE_BASE: i8 = b'b' as i8;
 pub const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 pub const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
 pub const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+pub const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 pub const TYPCATEGORY_ARRAY: i8 = b'A' as i8;
 pub const TYPCATEGORY_COMPOSITE: i8 = b'C' as i8;
+pub const TYPCATEGORY_PSEUDOTYPE: i8 = b'P' as i8;
+pub const TYPCATEGORY_USER: i8 = b'U' as i8;
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;
 
 pub const F_RECORD_IN: Oid = 2290;
@@ -42,6 +45,9 @@ pub const F_ARRAY_RECV: Oid = 2400;
 pub const F_ARRAY_SEND: Oid = 2401;
 pub const F_ARRAY_TYPANALYZE: Oid = 3816;
 pub const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+pub const F_RAW_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
+const F_SHELL_IN: Oid = 2398;
+const F_SHELL_OUT: Oid = 2399;
 
 pub struct TypeCreateParams<'a> {
     pub newTypeOid: Oid,
@@ -74,6 +80,7 @@ pub struct TypeCreateParams<'a> {
     pub typNDims: i32,
     pub typeNotNull: bool,
     pub typeCollation: Oid,
+    pub defaultValue: Option<&'a str>,
 }
 
 #[cold]
@@ -170,7 +177,14 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     values[27] = Datum::from_i32(p.typNDims);
     values[28] = Datum::from_oid(p.typeCollation);
     nulls[29] = true; // typdefaultbin
-    nulls[30] = true; // typdefault
+    let default_text = match p.defaultValue {
+        Some(d) => Some(varlena::cstring_to_text(mcx, d.as_bytes())?),
+        None => None,
+    };
+    match &default_text {
+        Some(t) => values[30] = Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        None => nulls[30] = true,
+    }
     match typacl.as_deref() {
         Some(img) => values[31] = Datum::from_usize(img.as_ptr() as usize),
         None => nulls[31] = true,
@@ -178,36 +192,150 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
 
     let pg_type_desc = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
 
+    let mut rebuildDeps = false;
     let old_oid = syscache_seams::lookup_pg_type_oid_by_name::call(p.typeName, p.typeNamespace)?;
-    if old_oid != InvalidOid {
-        if syscache_seams::pg_type_isdefined::call(old_oid)?.unwrap_or(false) {
+    let typeObjectId = if old_oid != InvalidOid {
+        const Anum_pg_type_typowner: i32 = 4;
+        const Anum_pg_type_typisdefined: i32 = 10;
+        let mut key = types_scan::scankey::ScanKeyData::empty();
+        key.sk_attno = Anum_pg_type_oid;
+        key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+        key.sk_collation = 0;
+        key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+            .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+        key.sk_argument = Datum::from_oid(old_oid);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_type_desc, TypeOidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for type {old_oid}"));
+        let desc = pg_type_desc.descr();
+        let mut isnull = false;
+        // SAFETY (both): fixed NOT NULL pg_type columns under its descriptor.
+        let isdefined = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_type_typisdefined, desc, &mut isnull)
+        }
+        .as_bool();
+        let typowner =
+            unsafe { types_tuple::heap_getattr(tup, Anum_pg_type_typowner, desc, &mut isnull) }
+                .as_oid();
+        if isdefined {
             return Err(err(
                 format!("type \"{}\" already exists", p.typeName),
                 ERRCODE_DUPLICATE_OBJECT,
             ));
         }
-        panic!(
-            "TypeCreate (pg_type.c): shell type replacement unported (type \"{}\")",
-            p.typeName
+        if typowner != p.ownerId {
+            return Err(err(
+                format!("must be owner of type {}", p.typeName),
+                types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            ));
+        }
+        assert!(
+            p.newTypeOid == InvalidOid,
+            "cannot assign new OID to existing shell type"
         );
+        let mut replaces = [true; Natts_pg_type];
+        replaces[0] = false;
+        let mut newtup =
+            heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replaces)?;
+        let otid = tup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &pg_type_desc, &otid, &mut newtup)?;
+        rebuildDeps = true;
+        old_oid
+    } else {
+        let typeObjectId = if p.newTypeOid != InvalidOid {
+            p.newTypeOid
+        } else {
+            catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?
+        };
+        values[0] = Datum::from_oid(typeObjectId);
+        let mut tup = heaptuple::heap_form_tuple(mcx, pg_type_desc.descr(), &values, &nulls)?;
+        catalog_indexing::CatalogTupleInsert(mcx, &pg_type_desc, &mut tup)?;
+        typeObjectId
+    };
+
+    if !miscinit_seams::is_bootstrap_processing_mode::call() {
+        GenerateTypeDependencies(mcx, typeObjectId, p, isDependentType, typacl.as_deref(), rebuildDeps)?;
     }
 
-    let typeObjectId = if p.newTypeOid != InvalidOid {
-        p.newTypeOid
-    } else {
-        catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?
-    };
-    values[0] = Datum::from_oid(typeObjectId);
+    pg_type_desc.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, typeObjectId))
+}
+
+// TypeShellMake (pg_type.c): shell row with int4-shaped dummies, typisdefined
+// false, typtype pseudo.
+pub fn TypeShellMake<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeName: &str,
+    typeNamespace: Oid,
+    ownerId: Oid,
+) -> PgResult<ObjectAddress> {
+    let mut name = NameData::default();
+    name.namestrcpy(typeName);
+    let mut values = [Datum::null(); Natts_pg_type];
+    let mut nulls = [false; Natts_pg_type];
+    values[1] = Datum::from_usize(name.data.as_ptr() as usize);
+    values[2] = Datum::from_oid(typeNamespace);
+    values[3] = Datum::from_oid(ownerId);
+    values[4] = Datum::from_i16(4);
+    values[5] = Datum::from_bool(true);
+    values[6] = Datum::from_char(TYPTYPE_PSEUDO);
+    values[7] = Datum::from_char(TYPCATEGORY_PSEUDOTYPE);
+    values[8] = Datum::from_bool(false);
+    values[9] = Datum::from_bool(false); // typisdefined
+    values[10] = Datum::from_char(DEFAULT_TYPDELIM);
+    values[11] = Datum::from_oid(InvalidOid);
+    values[12] = Datum::from_oid(InvalidOid);
+    values[13] = Datum::from_oid(InvalidOid);
+    values[14] = Datum::from_oid(InvalidOid);
+    values[15] = Datum::from_oid(F_SHELL_IN);
+    values[16] = Datum::from_oid(F_SHELL_OUT);
+    values[17] = Datum::from_oid(InvalidOid);
+    values[18] = Datum::from_oid(InvalidOid);
+    values[19] = Datum::from_oid(InvalidOid);
+    values[20] = Datum::from_oid(InvalidOid);
+    values[21] = Datum::from_oid(InvalidOid);
+    values[22] = Datum::from_char(b'i' as i8);
+    values[23] = Datum::from_char(b'p' as i8);
+    values[24] = Datum::from_bool(false);
+    values[25] = Datum::from_oid(InvalidOid);
+    values[26] = Datum::from_i32(-1);
+    values[27] = Datum::from_i32(0);
+    values[28] = Datum::from_oid(InvalidOid);
+    nulls[29] = true;
+    nulls[30] = true;
+    nulls[31] = true;
+
+    let pg_type_desc = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_type: binary-upgrade type-OID override (TypeShellMake) unported");
+    }
+    let typoid = catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?;
+    values[0] = Datum::from_oid(typoid);
 
     let mut tup = heaptuple::heap_form_tuple(mcx, pg_type_desc.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &pg_type_desc, &mut tup)?;
 
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
-        GenerateTypeDependencies(mcx, typeObjectId, p, isDependentType, typacl.as_deref())?;
+        let myself = ObjectAddress::set(TYPE_RELATION_ID, typoid);
+        let mut addrs = [
+            ObjectAddress::set(catalog::NamespaceRelationId, typeNamespace),
+            ObjectAddress::set(PROCEDURE_RELATION_ID, F_SHELL_IN),
+            ObjectAddress::set(PROCEDURE_RELATION_ID, F_SHELL_OUT),
+        ];
+        pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, typoid, ownerId)?;
+        pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+        pg_depend::record_object_address_dependencies(
+            mcx,
+            &myself,
+            &mut addrs,
+            DependencyType::Normal,
+        )?;
     }
 
     pg_type_desc.close(RowExclusiveLock)?;
-    Ok(ObjectAddress::set(TYPE_RELATION_ID, typeObjectId))
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, typoid))
 }
 
 fn GenerateTypeDependencies<'mcx>(
@@ -216,7 +344,12 @@ fn GenerateTypeDependencies<'mcx>(
     p: &TypeCreateParams<'_>,
     isDependentType: bool,
     typacl: Option<&[u8]>,
+    rebuild: bool,
 ) -> PgResult<()> {
+    if rebuild {
+        pg_depend::deleteDependencyRecordsFor(mcx, TYPE_RELATION_ID, typeObjectId, true)?;
+        pg_shdepend::deleteSharedDependencyRecordsFor(mcx, TYPE_RELATION_ID, typeObjectId, 0)?;
+    }
     let myself = ObjectAddress::set(TYPE_RELATION_ID, typeObjectId);
     let mut addrs_normal = [ObjectAddress::set(InvalidOid, InvalidOid); 11];
     let mut n = 0;
@@ -239,8 +372,8 @@ fn GenerateTypeDependencies<'mcx>(
         }
     }
     // C: makeExtensionDep is true on every TypeCreate path (dependent types
-    // get explicit membership too); rebuild is false for fresh rows.
-    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+    // get explicit membership too).
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, rebuild)?;
     for proc in [
         p.inputProcedure,
         p.outputProcedure,
@@ -442,7 +575,12 @@ pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
     relation.close(RowExclusiveLock)
 }
 
-pub fn moveArrayTypeName(typeOid: Oid, typeName: &str, typeNamespace: Oid) -> PgResult<bool> {
+pub fn moveArrayTypeName<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeOid: Oid,
+    typeName: &str,
+    typeNamespace: Oid,
+) -> PgResult<bool> {
     if !syscache_seams::pg_type_isdefined::call(typeOid)?.unwrap_or(false) {
         return Ok(true);
     }
@@ -453,10 +591,9 @@ pub fn moveArrayTypeName(typeOid: Oid, typeName: &str, typeNamespace: Oid) -> Pg
     {
         return Ok(false);
     }
-    let _ = typeNamespace;
-    panic!(
-        "moveArrayTypeName (pg_type.c): RenameTypeInternal lane unported \
-         (autogenerated array type {typeOid} shadows \"{typeName}\")"
-    );
+    let newname = makeArrayTypeName(typeName, typeNamespace)?;
+    let newname_str = core::str::from_utf8(newname.name_str()).expect("array type name UTF-8");
+    RenameTypeInternal(mcx, typeOid, newname_str, typeNamespace)?;
+    Ok(true)
 }
 

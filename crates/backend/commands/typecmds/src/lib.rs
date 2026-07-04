@@ -173,7 +173,7 @@ pub fn DefineDomain<'mcx>(
     let old_type_oid =
         syscache_seams::lookup_pg_type_oid_by_name::call(domain_name, domain_namespace)?;
     if old_type_oid != InvalidOid
-        && !pg_type::moveArrayTypeName(old_type_oid, domain_name, domain_namespace)?
+        && !pg_type::moveArrayTypeName(mcx, old_type_oid, domain_name, domain_namespace)?
     {
         return Err(type_already_exists(domain_name));
     }
@@ -397,6 +397,7 @@ pub fn DefineDomain<'mcx>(
             typNDims: typ_ndims,
             typeNotNull: typ_not_null,
             typeCollation: domaincoll,
+            defaultValue: None,
         },
     )?;
 
@@ -435,6 +436,7 @@ pub fn DefineDomain<'mcx>(
             typNDims: 0,
             typeNotNull: false,
             typeCollation: domaincoll,
+            defaultValue: None,
         },
     )?;
 
@@ -496,6 +498,606 @@ fn creation_namespace<'mcx, 'a>(
     Ok((namespace, name))
 }
 
+const TYPALIGN_DOUBLE: i8 = b'd' as i8;
+const TYPALIGN_SHORT: i8 = b's' as i8;
+const TYPALIGN_CHAR: i8 = b'c' as i8;
+const TYPSTORAGE_EXTERNAL: i8 = b'e' as i8;
+const TYPSTORAGE_MAIN: i8 = b'm' as i8;
+const TYPTYPE_PSEUDO: i8 = b'p' as i8;
+const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
+const CSTRINGARRAYOID: Oid = 1263;
+
+#[cold]
+#[inline(never)]
+fn objdef_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION))
+}
+
+#[cold]
+#[inline(never)]
+fn param_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE))
+}
+
+fn function_does_not_exist<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+    argtypes: &[Oid],
+) -> PgResult<Box<PgError>> {
+    let mut sig = commands_define::NameListToString(mcx, procname)?.as_str().to_string();
+    sig.push('(');
+    for (i, &t) in argtypes.iter().enumerate() {
+        if i > 0 {
+            sig.push_str(", ");
+        }
+        sig.push_str(&format_type::format_type_be(t)?);
+    }
+    sig.push(')');
+    Ok(Box::new(
+        PgError::new(ERROR, format!("function {sig} does not exist"))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION),
+    ))
+}
+
+fn volatile_warning<'mcx>(
+    mcx: Mcx<'mcx>,
+    what: &str,
+    procname: &types_nodes::NodeList<'mcx>,
+) -> PgResult<()> {
+    let name = commands_define::NameListToString(mcx, procname)?;
+    elog::ereport(types_error::WARNING)
+        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+        .errmsg(format!("type {} function {} should not be volatile", what, name.as_str()))
+        .finish(types_error::ErrorLocation::new("typecmds.c", 0, "DefineType"))
+}
+
+fn io_func_rettype_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc_oid: Oid,
+    want: Oid,
+    what: &str,
+    want_name: Option<&str>,
+    procname: &types_nodes::NodeList<'mcx>,
+) -> PgResult<()> {
+    if lsyscache::get_func_rettype(proc_oid)? != want {
+        let name = commands_define::NameListToString(mcx, procname)?;
+        let tname = match want_name {
+            Some(s) => s.to_string(),
+            None => format_type::format_type_be(want)?,
+        };
+        return Err(objdef_err(format!(
+            "{what} function {} must return type {tname}",
+            name.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn findTypeInputFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+    typeOid: Oid,
+    receive: bool,
+) -> PgResult<Oid> {
+    let first = if receive { types_core::INTERNALOID } else { types_core::CSTRINGOID };
+    let arglist = [first, types_core::OIDOID, types_core::INT4OID];
+    let proc1 = parse_func::LookupFuncName(procname, 1, &arglist, true)?;
+    let proc3 = parse_func::LookupFuncName(procname, 3, &arglist, true)?;
+    let what = if receive { "receive" } else { "input" };
+    let proc_oid = if proc1 != InvalidOid {
+        if proc3 != InvalidOid {
+            let name = commands_define::NameListToString(mcx, procname)?;
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("type {what} function {} has multiple matches", name.as_str()),
+                )
+                .with_sqlstate(types_error::ERRCODE_AMBIGUOUS_FUNCTION),
+            ));
+        }
+        proc1
+    } else {
+        if proc3 == InvalidOid {
+            return Err(function_does_not_exist(mcx, procname, &arglist[..1])?);
+        }
+        proc3
+    };
+    io_func_rettype_check(mcx, proc_oid, typeOid, &format!("type {what}"), None, procname)?;
+    if lsyscache::func_volatile(proc_oid)? == PROVOLATILE_VOLATILE {
+        volatile_warning(mcx, what, procname)?;
+    }
+    Ok(proc_oid)
+}
+
+fn findTypeOutputFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+    typeOid: Oid,
+    send: bool,
+) -> PgResult<Oid> {
+    let arglist = [typeOid];
+    let proc_oid = parse_func::LookupFuncName(procname, 1, &arglist, true)?;
+    if proc_oid == InvalidOid {
+        return Err(function_does_not_exist(mcx, procname, &arglist)?);
+    }
+    let (what, want, want_name) = if send {
+        ("send", types_core::BYTEAOID, "bytea")
+    } else {
+        ("output", types_core::CSTRINGOID, "cstring")
+    };
+    io_func_rettype_check(mcx, proc_oid, want, &format!("type {what}"), Some(want_name), procname)?;
+    if lsyscache::func_volatile(proc_oid)? == PROVOLATILE_VOLATILE {
+        volatile_warning(mcx, what, procname)?;
+    }
+    Ok(proc_oid)
+}
+
+fn findTypeTypmodFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+    output: bool,
+) -> PgResult<Oid> {
+    let arglist = [if output { types_core::INT4OID } else { CSTRINGARRAYOID }];
+    let proc_oid = parse_func::LookupFuncName(procname, 1, &arglist, true)?;
+    if proc_oid == InvalidOid {
+        return Err(function_does_not_exist(mcx, procname, &arglist)?);
+    }
+    let (tag, want, want_name, warnwhat) = if output {
+        ("typmod_out", types_core::CSTRINGOID, "cstring", "modifier output")
+    } else {
+        ("typmod_in", types_core::INT4OID, "integer", "modifier input")
+    };
+    io_func_rettype_check(mcx, proc_oid, want, tag, Some(want_name), procname)?;
+    if lsyscache::func_volatile(proc_oid)? == PROVOLATILE_VOLATILE {
+        volatile_warning(mcx, warnwhat, procname)?;
+    }
+    Ok(proc_oid)
+}
+
+fn findTypeAnalyzeFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+) -> PgResult<Oid> {
+    let arglist = [types_core::INTERNALOID];
+    let proc_oid = parse_func::LookupFuncName(procname, 1, &arglist, true)?;
+    if proc_oid == InvalidOid {
+        return Err(function_does_not_exist(mcx, procname, &arglist)?);
+    }
+    io_func_rettype_check(
+        mcx,
+        proc_oid,
+        types_core::BOOLOID,
+        "type analyze",
+        Some("boolean"),
+        procname,
+    )?;
+    Ok(proc_oid)
+}
+
+fn findTypeSubscriptingFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    procname: &types_nodes::NodeList<'mcx>,
+) -> PgResult<Oid> {
+    let arglist = [types_core::INTERNALOID];
+    let proc_oid = parse_func::LookupFuncName(procname, 1, &arglist, true)?;
+    if proc_oid == InvalidOid {
+        return Err(function_does_not_exist(mcx, procname, &arglist)?);
+    }
+    io_func_rettype_check(
+        mcx,
+        proc_oid,
+        types_core::INTERNALOID,
+        "type subscripting",
+        Some("internal"),
+        procname,
+    )?;
+    if proc_oid == pg_type::F_ARRAY_SUBSCRIPT_HANDLER {
+        let name = commands_define::NameListToString(mcx, procname)?;
+        return Err(objdef_err(format!(
+            "user-defined types cannot use subscripting function {}",
+            name.as_str()
+        )));
+    }
+    Ok(proc_oid)
+}
+
+// DefineType (typecmds.c): CREATE TYPE base-type arm + the shell two-phase
+// dance.
+pub fn DefineType<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    names: &types_nodes::NodeList<'mcx>,
+    parameters: &types_nodes::NodeList<'mcx>,
+) -> PgResult<ObjectAddress> {
+    use types_nodes::parsenodes::DefElem;
+
+    if !superuser::superuser()? {
+        return Err(Box::new(
+            PgError::new(ERROR, "must be superuser to create a base type".to_string())
+                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+
+    let mut buf = [""; 4];
+    let nnames = names.len();
+    assert!((1..=3).contains(&nnames), "improper qualified name");
+    for (i, n) in names.iter().enumerate() {
+        buf[i] = n.as_string().expect("qualified name").sval;
+    }
+    let (typeNamespace, typeName) =
+        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &buf[..nnames])?;
+
+    let mut typoid = syscache_seams::lookup_pg_type_oid_by_name::call(typeName, typeNamespace)?;
+    if typoid != InvalidOid && lsyscache::get_typisdefined(typoid)? {
+        if pg_type::moveArrayTypeName(mcx, typoid, typeName, typeNamespace)? {
+            typoid = InvalidOid;
+        } else {
+            return Err(type_already_exists(typeName));
+        }
+    }
+
+    if parameters.is_nil() {
+        if typoid != InvalidOid {
+            return Err(type_already_exists(typeName));
+        }
+        return pg_type::TypeShellMake(mcx, typeName, typeNamespace, miscinit::GetUserId());
+    }
+
+    if typoid == InvalidOid {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("type \"{typeName}\" does not exist"))
+                .with_sqlstate(ERRCODE_DUPLICATE_OBJECT)
+                .with_hint(
+                    "Create the type as a shell type, then create its I/O functions, \
+                     then do a full CREATE TYPE.",
+                ),
+        ));
+    }
+
+    let mut likeTypeEl: Option<&DefElem<'mcx>> = None;
+    let mut internalLengthEl: Option<&DefElem<'mcx>> = None;
+    let mut inputNameEl: Option<&DefElem<'mcx>> = None;
+    let mut outputNameEl: Option<&DefElem<'mcx>> = None;
+    let mut receiveNameEl: Option<&DefElem<'mcx>> = None;
+    let mut sendNameEl: Option<&DefElem<'mcx>> = None;
+    let mut typmodinNameEl: Option<&DefElem<'mcx>> = None;
+    let mut typmodoutNameEl: Option<&DefElem<'mcx>> = None;
+    let mut analyzeNameEl: Option<&DefElem<'mcx>> = None;
+    let mut subscriptNameEl: Option<&DefElem<'mcx>> = None;
+    let mut categoryEl: Option<&DefElem<'mcx>> = None;
+    let mut preferredEl: Option<&DefElem<'mcx>> = None;
+    let mut delimiterEl: Option<&DefElem<'mcx>> = None;
+    let mut elemTypeEl: Option<&DefElem<'mcx>> = None;
+    let mut defaultValueEl: Option<&DefElem<'mcx>> = None;
+    let mut byValueEl: Option<&DefElem<'mcx>> = None;
+    let mut alignmentEl: Option<&DefElem<'mcx>> = None;
+    let mut storageEl: Option<&DefElem<'mcx>> = None;
+    let mut collatableEl: Option<&DefElem<'mcx>> = None;
+
+    for n in parameters.iter() {
+        let defel = n.as_def_elem().expect("CREATE TYPE definition: DefElem list");
+        let slot: &mut Option<&DefElem<'mcx>> = match defel.defname.unwrap_or("") {
+            "like" => &mut likeTypeEl,
+            "internallength" => &mut internalLengthEl,
+            "input" => &mut inputNameEl,
+            "output" => &mut outputNameEl,
+            "receive" => &mut receiveNameEl,
+            "send" => &mut sendNameEl,
+            "typmod_in" => &mut typmodinNameEl,
+            "typmod_out" => &mut typmodoutNameEl,
+            "analyze" | "analyse" => &mut analyzeNameEl,
+            "subscript" => &mut subscriptNameEl,
+            "category" => &mut categoryEl,
+            "preferred" => &mut preferredEl,
+            "delimiter" => &mut delimiterEl,
+            "element" => &mut elemTypeEl,
+            "default" => &mut defaultValueEl,
+            "passedbyvalue" => &mut byValueEl,
+            "alignment" => &mut alignmentEl,
+            "storage" => &mut storageEl,
+            "collatable" => &mut collatableEl,
+            other => {
+                // C: WARNING, not ERROR, for historical backwards-compatibility.
+                let pos = parser_small1::parser_errposition(
+                    pstate,
+                    defel.location,
+                    mbutils::GetDatabaseEncoding(),
+                );
+                elog::ereport(types_error::WARNING)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg(format!("type attribute \"{other}\" not recognized"))
+                    .errposition(pos)
+                    .finish(types_error::ErrorLocation::new("typecmds.c", 0, "DefineType"))?;
+                continue;
+            }
+        };
+        if slot.is_some() {
+            return Err(domain_err(
+                pstate,
+                ERRCODE_SYNTAX_ERROR,
+                "conflicting or redundant options",
+                defel.location,
+            ));
+        }
+        *slot = Some(defel);
+    }
+
+    let mut internalLength: i16 = -1;
+    let mut byValue = false;
+    let mut alignment = TYPALIGN_INT;
+    let mut storage = TYPSTORAGE_PLAIN;
+    if let Some(defel) = likeTypeEl {
+        let tn = commands_define::defGetTypeName(mcx, defel)?;
+        let (likeoid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+        if !lsyscache::get_typisdefined(likeoid)? {
+            let name = type_name_to_string(mcx, tn)?;
+            return Err(Box::new(
+                PgError::new(ERROR, format!("type \"{}\" is only a shell", name.as_str()))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+            ));
+        }
+        let like = base_type_row(mcx, likeoid)?;
+        internalLength = like.typlen;
+        byValue = like.typbyval;
+        alignment = like.typalign;
+        storage = like.typstorage;
+    }
+    if let Some(defel) = internalLengthEl {
+        internalLength = commands_define::defGetTypeLength(defel)? as i16;
+    }
+    let inputName = match inputNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let outputName = match outputNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let receiveName = match receiveNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let sendName = match sendNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let typmodinName = match typmodinNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let typmodoutName = match typmodoutNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let analyzeName = match analyzeNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let subscriptName = match subscriptNameEl {
+        Some(d) => Some(commands_define::defGetQualifiedName(mcx, d)?),
+        None => None,
+    };
+    let mut category = pg_type::TYPCATEGORY_USER;
+    if let Some(defel) = categoryEl {
+        let p = commands_define::defGetString(mcx, defel)?;
+        let c = p.as_bytes().first().copied().unwrap_or(0);
+        if !(32..=126).contains(&c) {
+            return Err(param_err(format!("invalid type category \"{p}\": must be simple ASCII")));
+        }
+        category = c as i8;
+    }
+    let preferred = match preferredEl {
+        Some(d) => commands_define::defGetBoolean(d)?,
+        None => false,
+    };
+    let mut delimiter = DEFAULT_TYPDELIM;
+    if let Some(defel) = delimiterEl {
+        let p = commands_define::defGetString(mcx, defel)?;
+        delimiter = p.as_bytes().first().copied().unwrap_or(0) as i8;
+    }
+    let mut elemType = InvalidOid;
+    if let Some(defel) = elemTypeEl {
+        elemType =
+            parse_utilcmd::LookupTypeNameOid(mcx, commands_define::defGetTypeName(mcx, defel)?)?;
+        if lsyscache::get_typtype(elemType)? == TYPTYPE_PSEUDO {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "array element type cannot be {}",
+                        format_type::format_type_be(elemType)?
+                    ),
+                )
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+            ));
+        }
+    }
+    let defaultValue = match defaultValueEl {
+        Some(d) => Some(commands_define::defGetString(mcx, d)?),
+        None => None,
+    };
+    if let Some(defel) = byValueEl {
+        byValue = commands_define::defGetBoolean(defel)?;
+    }
+    if let Some(defel) = alignmentEl {
+        let a = commands_define::defGetString(mcx, defel)?;
+        alignment = if a.eq_ignore_ascii_case("double")
+            || a.eq_ignore_ascii_case("float8")
+            || a.eq_ignore_ascii_case("pg_catalog.float8")
+        {
+            TYPALIGN_DOUBLE
+        } else if a.eq_ignore_ascii_case("int4") || a.eq_ignore_ascii_case("pg_catalog.int4") {
+            TYPALIGN_INT
+        } else if a.eq_ignore_ascii_case("int2") || a.eq_ignore_ascii_case("pg_catalog.int2") {
+            TYPALIGN_SHORT
+        } else if a.eq_ignore_ascii_case("char") || a.eq_ignore_ascii_case("pg_catalog.bpchar") {
+            TYPALIGN_CHAR
+        } else {
+            return Err(param_err(format!("alignment \"{a}\" not recognized")));
+        };
+    }
+    if let Some(defel) = storageEl {
+        let a = commands_define::defGetString(mcx, defel)?;
+        storage = if a.eq_ignore_ascii_case("plain") {
+            TYPSTORAGE_PLAIN
+        } else if a.eq_ignore_ascii_case("external") {
+            TYPSTORAGE_EXTERNAL
+        } else if a.eq_ignore_ascii_case("extended") {
+            TYPSTORAGE_EXTENDED
+        } else if a.eq_ignore_ascii_case("main") {
+            TYPSTORAGE_MAIN
+        } else {
+            return Err(param_err(format!("storage \"{a}\" not recognized")));
+        };
+    }
+    let collation = match collatableEl {
+        Some(d) => {
+            if commands_define::defGetBoolean(d)? {
+                types_core::DEFAULT_COLLATION_OID
+            } else {
+                InvalidOid
+            }
+        }
+        None => InvalidOid,
+    };
+
+    let Some(inputName) = inputName else {
+        return Err(objdef_err("type input function must be specified".into()));
+    };
+    let Some(outputName) = outputName else {
+        return Err(objdef_err("type output function must be specified".into()));
+    };
+    if typmodinName.is_none() && typmodoutName.is_some() {
+        return Err(objdef_err(
+            "type modifier output function is useless without a type modifier input function"
+                .into(),
+        ));
+    }
+
+    let inputOid = findTypeInputFunction(mcx, inputName, typoid, false)?;
+    let outputOid = findTypeOutputFunction(mcx, outputName, typoid, false)?;
+    let receiveOid = match receiveName {
+        Some(n) => findTypeInputFunction(mcx, n, typoid, true)?,
+        None => InvalidOid,
+    };
+    let sendOid = match sendName {
+        Some(n) => findTypeOutputFunction(mcx, n, typoid, true)?,
+        None => InvalidOid,
+    };
+    let typmodinOid = match typmodinName {
+        Some(n) => findTypeTypmodFunction(mcx, n, false)?,
+        None => InvalidOid,
+    };
+    let typmodoutOid = match typmodoutName {
+        Some(n) => findTypeTypmodFunction(mcx, n, true)?,
+        None => InvalidOid,
+    };
+    let analyzeOid = match analyzeName {
+        Some(n) => findTypeAnalyzeFunction(mcx, n)?,
+        None => InvalidOid,
+    };
+    let subscriptOid = match subscriptName {
+        Some(n) => findTypeSubscriptingFunction(mcx, n)?,
+        None => {
+            if elemType != InvalidOid {
+                if internalLength > 0 && !byValue && lsyscache::get_typlen(elemType)? > 0 {
+                    pg_type::F_RAW_ARRAY_SUBSCRIPT_HANDLER
+                } else {
+                    return Err(param_err(
+                        "element type cannot be specified without a subscripting function".into(),
+                    ));
+                }
+            } else {
+                InvalidOid
+            }
+        }
+    };
+
+    let array_oid = pg_type::AssignTypeArrayOid(mcx)?;
+    let user_id = miscinit::GetUserId();
+
+    let address = pg_type::TypeCreate(
+        mcx,
+        &TypeCreateParams {
+            newTypeOid: InvalidOid,
+            typeName,
+            typeNamespace,
+            relationOid: InvalidOid,
+            relationKind: 0,
+            ownerId: user_id,
+            internalSize: internalLength,
+            typeType: TYPTYPE_BASE,
+            typeCategory: category,
+            typePreferred: preferred,
+            typDelim: delimiter,
+            inputProcedure: inputOid,
+            outputProcedure: outputOid,
+            receiveProcedure: receiveOid,
+            sendProcedure: sendOid,
+            typmodinProcedure: typmodinOid,
+            typmodoutProcedure: typmodoutOid,
+            analyzeProcedure: analyzeOid,
+            subscriptProcedure: subscriptOid,
+            elementType: elemType,
+            isImplicitArray: false,
+            arrayType: array_oid,
+            baseType: InvalidOid,
+            passedByValue: byValue,
+            alignment,
+            storage,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: collation,
+            defaultValue,
+        },
+    )?;
+    debug_assert!(typoid == address.objectId);
+
+    let array_name = pg_type::makeArrayTypeName(typeName, typeNamespace)?;
+    let array_alignment =
+        if alignment == TYPALIGN_DOUBLE { TYPALIGN_DOUBLE } else { TYPALIGN_INT };
+    pg_type::TypeCreate(
+        mcx,
+        &TypeCreateParams {
+            newTypeOid: array_oid,
+            typeName: core::str::from_utf8(array_name.name_str()).expect("array type name"),
+            typeNamespace,
+            relationOid: InvalidOid,
+            relationKind: 0,
+            ownerId: user_id,
+            internalSize: -1,
+            typeType: TYPTYPE_BASE,
+            typeCategory: TYPCATEGORY_ARRAY,
+            typePreferred: false,
+            typDelim: delimiter,
+            inputProcedure: pg_type::F_ARRAY_IN,
+            outputProcedure: pg_type::F_ARRAY_OUT,
+            receiveProcedure: pg_type::F_ARRAY_RECV,
+            sendProcedure: pg_type::F_ARRAY_SEND,
+            typmodinProcedure: typmodinOid,
+            typmodoutProcedure: typmodoutOid,
+            analyzeProcedure: pg_type::F_ARRAY_TYPANALYZE,
+            subscriptProcedure: pg_type::F_ARRAY_SUBSCRIPT_HANDLER,
+            elementType: address.objectId,
+            isImplicitArray: true,
+            arrayType: InvalidOid,
+            baseType: InvalidOid,
+            passedByValue: false,
+            alignment: array_alignment,
+            storage: TYPSTORAGE_EXTENDED,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: collation,
+            defaultValue: None,
+        },
+    )?;
+
+    Ok(address)
+}
+
+
 pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult<ObjectAddress> {
     let (enum_namespace, enum_name) = creation_namespace(mcx, &stmt.typeName, "DefineEnum")?;
     let user_id = miscinit::GetUserId();
@@ -503,7 +1105,7 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
     let old_type_oid =
         syscache_seams::lookup_pg_type_oid_by_name::call(enum_name, enum_namespace)?;
     if old_type_oid != InvalidOid
-        && !pg_type::moveArrayTypeName(old_type_oid, enum_name, enum_namespace)?
+        && !pg_type::moveArrayTypeName(mcx, old_type_oid, enum_name, enum_namespace)?
     {
         return Err(type_already_exists(enum_name));
     }
@@ -543,6 +1145,7 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
             typNDims: 0,
             typeNotNull: false,
             typeCollation: InvalidOid,
+            defaultValue: None,
         },
     )?;
 
@@ -586,6 +1189,7 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
             typNDims: 0,
             typeNotNull: false,
             typeCollation: InvalidOid,
+            defaultValue: None,
         },
     )?;
 
