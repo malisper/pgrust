@@ -30,8 +30,6 @@ var_seams = { path = "../var_seams" }
 stack_depth = { path = "../../../utils/misc/stack_depth" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
-
-readfuncs = { path = "../../../nodes/readfuncs" }
 coerce = { path = "../../../parser/coerce" }
 
 [dev-dependencies]

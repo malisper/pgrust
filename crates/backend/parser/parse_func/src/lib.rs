@@ -24,6 +24,9 @@ use types_nodes::{CoercionForm, FuncExpr, Node, NodeList, NodeTag};
 const FUNC_MAX_ARGS: usize = 100;
 
 pub fn init_seams() {
+    parse_func_seams::LookupFuncWithArgs::set(lookup_func_with_args_seam);
+    parse_func_seams::LookupFuncName::set(lookup_func_name_seam);
+    clauses_seams::recheck_cast_function_args::set(recheck_cast_function_args);
     clauses_seams::make_fn_arguments_nullstate::set(|mcx, args, actual, declared| {
         let pstate = parser_small1::make_parsestate(mcx, None);
         let args = args.clone_in(mcx)?;
@@ -156,7 +159,7 @@ pub fn ParseFuncOrColumn<'mcx>(
             pstate,
             format!(
                 "{} is not a procedure",
-                func_signature_string(parts, actual_arg_types)?
+                func_signature_string(parts, argnames.as_slice(), actual_arg_types)?
             ),
             "To call a function, use SELECT.",
             location,
@@ -176,11 +179,14 @@ pub fn ParseFuncOrColumn<'mcx>(
             location,
         ),
         FuncDetail::Multiple => {
-            Err(ambiguous_function(pstate, parts, actual_arg_types, proc_call, location))
+            Err(ambiguous_function(pstate, parts, argnames.as_slice(), actual_arg_types, proc_call, location))
         }
         FuncDetail::Procedure { .. } if !proc_call => Err(wrong_object_type_hint(
             pstate,
-            format!("{} is a procedure", func_signature_string(parts, actual_arg_types)?),
+            format!(
+                "{} is a procedure",
+                func_signature_string(parts, argnames.as_slice(), actual_arg_types)?
+            ),
             "To call a procedure, use CALL.",
             location,
         )),
@@ -522,6 +528,7 @@ pub fn ParseFuncOrColumn<'mcx>(
         FuncDetail::NotFound => Err(undefined_function(
             pstate,
             parts,
+            argnames.as_slice(),
             actual_arg_types,
             fn_call.agg_order.len() > 1 && !fn_call.agg_within_group,
             proc_call,
@@ -1341,12 +1348,17 @@ fn name_list_to_string(parts: &[&str]) -> String {
     parts.join(".")
 }
 
-fn func_signature_string(parts: &[&str], argtypes: &[Oid]) -> PgResult<String> {
+fn func_signature_string(parts: &[&str], argnames: &[&str], argtypes: &[Oid]) -> PgResult<String> {
     let mut sig = name_list_to_string(parts);
     sig.push('(');
+    let numposargs = argtypes.len() - argnames.len();
     for (i, &t) in argtypes.iter().enumerate() {
         if i > 0 {
             sig.push_str(", ");
+        }
+        if i >= numposargs {
+            sig.push_str(argnames[i - numposargs]);
+            sig.push_str(" => ");
         }
         sig.push_str(&format_type::format_type_be(t)?);
     }
@@ -1483,11 +1495,12 @@ fn wrong_object_type_hint(
 fn ambiguous_function(
     pstate: &ParseState<'_, '_>,
     parts: &[&str],
+    argnames: &[&str],
     argtypes: &[Oid],
     proc_call: bool,
     location: ParseLoc,
 ) -> Box<PgError> {
-    let sig = match func_signature_string(parts, argtypes) {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
         Ok(sig) => sig,
         Err(e) => return e,
     };
@@ -1521,12 +1534,13 @@ fn ambiguous_function(
 fn undefined_function(
     pstate: &ParseState<'_, '_>,
     parts: &[&str],
+    argnames: &[&str],
     argtypes: &[Oid],
     misplaced_order_by: bool,
     proc_call: bool,
     location: ParseLoc,
 ) -> Box<PgError> {
-    let sig = match func_signature_string(parts, argtypes) {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
         Ok(sig) => sig,
         Err(e) => return e,
     };
@@ -1628,7 +1642,7 @@ fn function_does_not_exist(parts: &[&str], argtypes: &[Oid]) -> PgResult<Box<PgE
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
             .errmsg(format!(
                 "function {} does not exist",
-                func_signature_string(parts, argtypes)?
+                func_signature_string(parts, &[], argtypes)?
             ))
             .into_error(),
     ))
@@ -1661,15 +1675,17 @@ pub fn LookupFuncName(
 // (OUT-parameter procedures).
 pub fn LookupFuncWithArgs(
     objtype: ObjectType,
-    objname: &NodeList<'_>,
-    objargs: &NodeList<'_>,
-    args_unspecified: bool,
+    func: &types_nodes::parsenodes::ObjectWithArgs<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
+    use types_nodes::parsenodes::ObjectType::*;
+    debug_assert!(matches!(objtype, OBJECT_AGGREGATE | OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE));
+    let objname = &func.objname;
+    let objargs = &func.objargs;
+    let args_unspecified = func.args_unspecified;
     let argcount = objargs.len();
     if argcount > FUNC_MAX_ARGS {
-        let noun =
-            if objtype == ObjectType::OBJECT_PROCEDURE { "procedures" } else { "functions" };
+        let noun = if objtype == OBJECT_PROCEDURE { "procedures" } else { "functions" };
         return Err(Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
@@ -1695,19 +1711,18 @@ pub fn LookupFuncWithArgs(
     let parts = name_parts(objname, &mut buf);
     // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
     // "object is of wrong type" beats "object doesn't exist".
-    let lookup_objtype =
-        if args_unspecified { objtype } else { ObjectType::OBJECT_ROUTINE };
+    let lookup_objtype = if args_unspecified { objtype } else { OBJECT_ROUTINE };
     match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, missing_ok)? {
         Ok(oid) => {
             let prokind = lsyscache::get_func_prokind(oid)?;
             match objtype {
-                ObjectType::OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
+                OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
                     Err(wrong_prokind("%s is not a function", parts, &argoids[..argcount])?)
                 }
-                ObjectType::OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
+                OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
                     Err(wrong_prokind("%s is not a procedure", parts, &argoids[..argcount])?)
                 }
-                ObjectType::OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
+                OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
                     "function %s is not an aggregate",
                     parts,
                     &argoids[..argcount],
@@ -1715,15 +1730,30 @@ pub fn LookupFuncWithArgs(
                 _ => Ok(oid),
             }
         }
-        Err(true) => Err(func_name_not_unique(parts)),
+        Err(true) => {
+            let noun = match objtype {
+                OBJECT_PROCEDURE => "procedure",
+                OBJECT_AGGREGATE => "aggregate",
+                OBJECT_ROUTINE => "routine",
+                _ => "function",
+            };
+            let mut rpt = ereport(ERROR)
+                .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
+                .errmsg(format!("{noun} name \"{}\" is not unique", name_list_to_string(parts)));
+            if args_unspecified {
+                rpt = rpt.errhint(format!(
+                    "Specify the argument list to select the {noun} unambiguously."
+                ));
+            }
+            Err(Box::new(rpt.into_error()))
+        }
         Err(false) => {
             if missing_ok {
                 return Ok(InvalidOid);
             }
             let (noun, named) = match objtype {
-                ObjectType::OBJECT_PROCEDURE => ("procedure", "a procedure"),
-                ObjectType::OBJECT_AGGREGATE => ("aggregate", "an aggregate"),
-                ObjectType::OBJECT_ROUTINE => ("routine", "a routine"),
+                OBJECT_PROCEDURE => ("procedure", "a procedure"),
+                OBJECT_AGGREGATE => ("aggregate", "an aggregate"),
                 _ => ("function", "a function"),
             };
             if args_unspecified {
@@ -1736,7 +1766,7 @@ pub fn LookupFuncWithArgs(
                         ))
                         .into_error(),
                 ))
-            } else if objtype == ObjectType::OBJECT_AGGREGATE && argcount == 0 {
+            } else if objtype == OBJECT_AGGREGATE && argcount == 0 {
                 Err(Box::new(
                     ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_FUNCTION)
@@ -1752,7 +1782,7 @@ pub fn LookupFuncWithArgs(
                         .errcode(ERRCODE_UNDEFINED_FUNCTION)
                         .errmsg(format!(
                             "{noun} {} does not exist",
-                            func_signature_string(parts, &argoids[..argcount])?
+                            func_signature_string(parts, &[], &argoids[..argcount])?
                         ))
                         .into_error(),
                 ))
@@ -1766,15 +1796,41 @@ fn wrong_prokind(template: &str, parts: &[&str], argtypes: &[Oid]) -> PgResult<B
     Ok(Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(template.replacen("%s", &func_signature_string(parts, argtypes)?, 1))
+            .errmsg(template.replacen("%s", &func_signature_string(parts, &[], argtypes)?, 1))
             .into_error(),
     ))
 }
 
-pub fn init_seams() {
-    parse_func_seams::LookupFuncWithArgs::set(lookup_func_with_args_seam);
-    parse_func_seams::LookupFuncName::set(lookup_func_name_seam);
-    clauses_seams::recheck_cast_function_args::set(recheck_cast_function_args);
+// recheck_cast_function_args' parser tail (clauses.c): re-resolve polymorphics
+// and re-coerce exactly as the parser did; installed behind clauses_seams (a
+// clauses -> parser dependency cycles).
+fn recheck_cast_function_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: NodeList<'mcx>,
+    actual_arg_types: &[Oid],
+    declared_arg_types: &[Oid],
+    result_type: Oid,
+    prorettype: Oid,
+) -> PgResult<NodeList<'mcx>> {
+    if args.len() > FUNC_MAX_ARGS {
+        return Err(Box::new(PgError::error("too many function arguments")));
+    }
+    debug_assert_eq!(args.len(), actual_arg_types.len());
+    let mut declared = mcx::slice_in(mcx, declared_arg_types)?;
+    let rettype = coerce::enforce_generic_type_consistency(
+        actual_arg_types,
+        declared.as_mut_slice(),
+        prorettype,
+        false,
+    )?;
+    // C: just check we got the same answer as the parser did.
+    if rettype != result_type {
+        return Err(Box::new(PgError::error(
+            "function's resolved result type changed during planning",
+        )));
+    }
+    let pstate = parser_small1::make_parsestate(mcx, None);
+    make_fn_arguments(mcx, &pstate, args, actual_arg_types, declared.as_slice())
 }
 
 fn lookup_func_with_args_seam(

@@ -49,7 +49,6 @@ types_tuple = { path = "../../_support/types/types_tuple" }
 wchar = { path = "../../common/wchar" }
 xact = { path = "../../backend/access/transam/xact" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
-funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 init_small = { path = "../../backend/utils/init/init_small" }
 tupdesc = { path = "../../backend/access/common/tupdesc" }
 tuplestore = { path = "../../backend/utils/sort/tuplestore" }
