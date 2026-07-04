@@ -6,6 +6,23 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn guc_boot() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        guc_tables::init_seams();
+        guc::init_seams();
+    });
+    std::thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+    ARMED.with(|armed| {
+        if !armed.get() {
+            guc::store::initialize_guc_options().unwrap();
+            armed.set(true);
+        }
+    });
+}
+
 struct ParallelModeGuard;
 impl ParallelModeGuard {
     fn enter() -> Self {
@@ -54,6 +71,7 @@ fn entrypoint_lookup_and_registration() {
 #[test]
 fn worker_error_clamps_level_and_appends_context() {
     let _s = serial();
+    guc_boot();
     let mut e = PgError::new(FATAL, "worker blew up").with_context("inner frame");
     if e.level > ERROR {
         e.level = ERROR;

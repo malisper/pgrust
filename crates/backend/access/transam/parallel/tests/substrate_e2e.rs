@@ -33,36 +33,259 @@ fn launch_as_if_under_postmaster(
     r
 }
 
-fn setup() {
-    static SETUP: Once = Once::new();
-    SETUP.call_once(|| {
-        // Production seam wiring, then boot: test_boot's stubs are
-        // install-if-absent, so the real implementations win.
-        seams_init::init_all();
-        test_boot::boot_wal("parallel_substrate_e2e");
-        let _ = waiteventset::InitializeWaitEventSupport();
-        let _ = latch::InitializeLatchWaitSet();
-        leader_latch();
-        pmsignal::PMSignalShmemInit(64);
-        bgworker::BackgroundWorkerShmemInit();
-        procsignal::ProcSignalShmemInit();
-        procsignal::ProcSignalInit(&[]).unwrap();
-        miscinit::SetAuthenticatedUserId(10);
-        miscinit::SetSessionAuthorization(10, true).unwrap();
-        parallel::register_parallel_worker_entrypoint("substrate_e2e_main", e2e_worker_main);
-        parallel::register_parallel_worker_entrypoint("substrate_e2e_error", e2e_error_main);
+// insert_select.rs's full-transaction rig, with real latch/waiteventset/
+// miscinit/parallel/combocid seams where that test stubbed them (workers
+// block on real latches here).
+fn thread_guc_boot() {
+    std::thread_local! {
+        static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    ARMED.with(|armed| {
+        if !armed.get() {
+            guc::store::initialize_guc_options().unwrap();
+            armed.set(true);
+        }
     });
 }
 
-fn leader_latch() {
-    let procno = g::MyProcNumber();
-    let h = types_storage::latch::LatchHandle::proc(procno);
-    lmgr_proc::GetPGProcByNumber(procno)
-        .procLatch
-        .owner_pid
-        .store(0, std::sync::atomic::Ordering::SeqCst);
-    latch::OwnLatch(h).unwrap();
-    g::SetMyLatch(Some(h));
+fn thread_globals() {
+    g::SetMaxConnections(16);
+    g::set_max_worker_processes(2);
+    g::SetMaxBackends(16 + 3 + 2 + 2 + 2);
+    g::SetMyDatabaseId(InvalidOid);
+    g::set_transaction_buffers(64);
+    g::set_subtransaction_buffers(64);
+    g::SetDataDir(DATA_DIR.get().unwrap());
+    g::set_enableFsync(false);
+}
+
+fn stub_seams() {
+    pg_sema_seams::pg_semaphore_create::set(|_| {});
+    pg_sema_seams::pg_semaphore_reset::set(|_| {});
+    pg_sema_seams::pg_semaphore_lock::set(|_| {});
+    pg_sema_seams::pg_semaphore_unlock::set(|_| {});
+    s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+    s_lock_seams::finish_spin_delay::set(|_| {});
+    s_lock_seams::set_spins_per_delay::set(|_| {});
+    s_lock_seams::update_spins_per_delay::set(|v| v);
+    waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
+    waitevent_seams::pgstat_report_wait_start::set(|_| {});
+    waitevent_seams::pgstat_report_wait_end::set(|| {});
+    waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
+    ipc_seams::on_shmem_exit::set(|_, _| {});
+    deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
+    pmsignal_seams::register_postmaster_child_active::set(|| {});
+    syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
+    condition_variable_seams::condition_variable_cancel_sleep::set(|| false);
+    autovacuum_seams::wake_autovacuum_launcher::set(|| {});
+    lock_seams::abort_strong_lock_acquire::set(|| {});
+    lock_seams::get_awaited_lock_hashcode::set(|| None);
+    lock_seams::lock_release_all::set(|_, _| lock::VirtualXactLockTableCleanup());
+    lock_seams::lock_acquire_extended::set(|_, _, _, _, _, _| {
+        Ok(types_storage::lock::LOCKACQUIRE_OK)
+    });
+    timeout_seams::disable_timeouts::set(|_| {});
+    aio_seams::pgaio_closing_fd::set(|_| {});
+    aio_seams::pgaio_init_backend::set(|| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::at_eoxact_aio::set(|_| {});
+    aio_seams::pgaio_error_cleanup::set(|| {});
+    sync_seams::register_sync_request::set(|_, _, _| Ok(true));
+    sync_seams::init_sync::set(|| Ok(()));
+    slot_seams::replication_slot_initialize::set(|| Ok(()));
+    sinval_seams::receive_shared_invalid_messages::set(|_, _| Ok(()));
+    logical_worker_seams::at_eoxact_logical_rep_workers::set(|_| {});
+    postgres_seams::check_for_interrupts::set(|| Ok(()));
+
+    timestamp_seams::get_current_timestamp::set(|| 777_000_000);
+    trigger_seams::after_trigger_begin_xact::set(|| Ok(()));
+    trigger_seams::after_trigger_end_xact::set(|_| Ok(()));
+    trigger_seams::after_trigger_fire_deferred::set(|| Ok(()));
+    async_seams::pre_commit_notify::set(|| Ok(()));
+    async_seams::at_commit_notify::set(|| Ok(()));
+    async_seams::at_abort_notify::set(|| {});
+    tablecmds_seams::pre_commit_on_commit_actions::set(|| Ok(()));
+    tablecmds_seams::at_eoxact_on_commit_actions::set(|_| {});
+    spi_seams::at_eoxact_spi::set(|_| Ok(()));
+    spi_seams::spi_inside_nonatomic_context::set(|| false);
+    be_fsstubs_seams::at_eoxact_large_object::set(|_| Ok(()));
+    namespace_seams::at_eoxact_namespace::set(|_, _| {});
+    catalog_index_seams::reset_reindex_state::set(|_| {});
+    catalog_storage_seams::smgr_get_pending_deletes::set(|mcx, _| Ok(mcx::PgVec::new_in(mcx)));
+    catalog_storage_seams::smgr_do_pending_deletes::set(|_| Ok(()));
+    catalog_storage_seams::smgr_do_pending_syncs::set(|_, _| Ok(()));
+    multixact_seams::at_eoxact_multixact::set(|| {});
+    multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
+    relcache_seams::at_eoxact_relation_cache::set(|_| Ok(()));
+    typcache_seams::at_eoxact_type_cache::set(|| {});
+    logical_seams::reset_logical_streaming_state::set(|| {});
+    snapbuild_seams::snap_build_reset_exported_snapshot_state::set(|| {});
+    origin_seams::replorigin_session_origin::set(|| types_core::InvalidRepOriginId);
+    origin_seams::replorigin_session_origin_lsn::set(|| 0);
+    origin_seams::replorigin_session_origin_timestamp::set(|| 0);
+    origin_seams::set_replorigin_session_origin_timestamp::set(|_| {});
+    commit_ts_seams::transaction_tree_set_commit_ts_data::set(|_, _, _, _| Ok(()));
+    commit_ts_seams::extend_commit_ts::set(|_| Ok(()));
+    syncrep_seams::sync_rep_wait_for_lsn::set(|_, _| Ok(()));
+    backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
+    backend_progress_seams::pgstat_progress_end_command::set(|| {});
+    predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
+}
+
+fn setup() {
+    static SETUP: Once = Once::new();
+    SETUP.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("pgrust_par_e2e_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["global", "pg_wal", "pg_xact", "pg_subtrans"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::env::set_current_dir(&dir).unwrap();
+        let dir_str: &'static str =
+            Box::leak(dir.to_str().unwrap().to_string().into_boxed_str());
+        DATA_DIR.set(dir_str).unwrap();
+        thread_globals();
+        g::SetMyProcPid(779);
+
+        stub_seams();
+        shmem::init_seams();
+        fd::init_seams();
+        guc_tables::init_seams();
+        guc::init_seams();
+        adt_bool::init_seams();
+        adt_float::init_seams();
+        transam_xlog::init_seams();
+        xlogutils::init_seams();
+        heapam_visibility::init_seams();
+        clog::init_seams();
+        subtrans::init_seams();
+        transam::init_seams();
+        varsup::init_seams();
+        xact::init_seams();
+        snapmgr::init_seams();
+        resowner::init_seams();
+        procarray::init_seams();
+        inval::init_seams();
+        pgstat::init_seams();
+        waiteventset::init_seams();
+        latch::init_seams();
+        miscinit::init_seams();
+        combocid::init_seams();
+        pg_enum::init_seams();
+        parallel::init_seams();
+        thread_guc_boot();
+
+        lwlock::CreateLWLocks(false).unwrap();
+        lmgr_proc::init_seams();
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        varsup::VarsupShmemInit();
+        procarray::ProcArrayShmemInit();
+        clog::CLOGShmemInit().unwrap();
+        clog::BootStrapCLOG().unwrap();
+        subtrans::SUBTRANSShmemInit().unwrap();
+        subtrans::BootStrapSUBTRANS().unwrap();
+
+        test_boot_control_file(dir_str);
+        transam_xlog::ReadControlFile().unwrap();
+        transam_xlog::XLOGShmemInit();
+        boot_xlog_ctl();
+        subtrans::StartupSUBTRANS(3).unwrap();
+        assert!(transam_xlog::XLogInsertAllowed());
+
+        pmsignal::PMSignalShmemInit(64);
+        bgworker::BackgroundWorkerShmemInit();
+        procsignal::ProcSignalShmemInit();
+        parallel::register_parallel_worker_entrypoint("substrate_e2e_main", e2e_worker_main);
+        parallel::register_parallel_worker_entrypoint("substrate_e2e_error", e2e_error_main);
+    });
+    leader_thread_boot();
+}
+
+// Each #[test] runs on its own thread; give it a backend-shaped identity.
+fn leader_thread_boot() {
+    std::thread_local! {
+        static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    ARMED.with(|armed| {
+        if armed.get() {
+            return;
+        }
+        thread_globals();
+        g::SetMyProcPid(NEXT_PID.fetch_add(1, Relaxed));
+        thread_guc_boot();
+        fd::InitFileAccess();
+        waiteventset::InitializeWaitEventSupport().unwrap();
+        lmgr_proc::InitProcess(types_core::BackendType::Backend).unwrap();
+        procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
+        latch::InitializeLatchWaitSet().unwrap();
+        procsignal::ProcSignalInit(&[]).unwrap();
+        miscinit::SetAuthenticatedUserId(10);
+        miscinit::SetSessionAuthorization(10, true).unwrap();
+        armed.set(true);
+    });
+}
+
+static DATA_DIR: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+const SEG: usize = 16 * 1024 * 1024;
+
+fn test_boot_control_file(dir: &str) {
+    let mut cf = controldata_utils::ControlFileData::ZEROED;
+    cf.system_identifier = 0x5544_3322_1100_AACD;
+    cf.pg_control_version = controldata_utils::PG_CONTROL_VERSION;
+    cf.catalog_version_no = controldata_utils::CATALOG_VERSION_NO;
+    cf.state = transam_xlog::DB_IN_PRODUCTION;
+    cf.checkPoint = SEG as u64 + 40;
+    cf.checkPointCopy.redo = SEG as u64 + 40;
+    cf.checkPointCopy.ThisTimeLineID = 1;
+    cf.checkPointCopy.PrevTimeLineID = 1;
+    cf.checkPointCopy.nextXid = types_core::FullTransactionId::from_epoch_and_xid(0, 3);
+    cf.unloggedLSN = transam_xlog::control_file::FirstNormalUnloggedLSN;
+    cf.maxAlign = 8;
+    cf.floatFormat = transam_xlog::control_file::FLOATFORMAT_VALUE;
+    cf.blcksz = 8192;
+    cf.relseg_size = 131072;
+    cf.xlog_blcksz = 8192;
+    cf.xlog_seg_size = SEG as u32;
+    cf.nameDataLen = 64;
+    cf.indexMaxKeys = 32;
+    cf.toast_max_chunk_size = transam_xlog::control_file::TOAST_MAX_CHUNK_SIZE;
+    cf.loblksize = 2048;
+    cf.float8ByVal = true;
+    cf.crc = controldata_utils::crc_of_image(&cf.to_disk_bytes());
+    let mut image = vec![0u8; transam_xlog::control_file::PG_CONTROL_FILE_SIZE];
+    image[..controldata_utils::SIZEOF_CONTROL_FILE_DATA].copy_from_slice(&cf.to_disk_bytes());
+    std::fs::write(format!("{dir}/global/pg_control"), &image).unwrap();
+}
+
+fn boot_xlog_ctl() {
+    use transam_xlog::XLogRecPtrToBytePos;
+    let end_of_log = 2 * SEG as u64;
+    let prev_rec = SEG as u64 + 40;
+    let ctl = transam_xlog::ctl::XLogCtl();
+    ctl.InsertTimeLineID.store(1, Relaxed);
+    ctl.PrevTimeLineID.store(1, Relaxed);
+    ctl.Insert.CurrBytePos.store(XLogRecPtrToBytePos(end_of_log), Relaxed);
+    ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(prev_rec), Relaxed);
+    ctl.Insert.fullPageWrites.store(true, Relaxed);
+    ctl.Insert.RedoRecPtr.store(prev_rec, Relaxed);
+    ctl.RedoRecPtr.store(prev_rec, Relaxed);
+    ctl.InitializedUpTo.store(end_of_log, Relaxed);
+    ctl.logInsertResult.store(end_of_log, Relaxed);
+    ctl.logWriteResult.store(end_of_log, Relaxed);
+    ctl.logFlushResult.store(end_of_log, Relaxed);
+    ctl.LogwrtRqstWrite.store(end_of_log, Relaxed);
+    ctl.LogwrtRqstFlush.store(end_of_log, Relaxed);
+    ctl.SharedRecoveryState.store(transam_xlog::RECOVERY_STATE_DONE, Relaxed);
+    ctl.InstallXLogFileSegmentActive.store(true, Relaxed);
+    xlogutils::set_in_recovery(false);
 }
 
 struct E2eShared {
@@ -122,25 +345,16 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
         let generation = bgworker::slot_generation(slot);
         bgworker::set_rw_pid(idx, pid);
         bgworker::ReportBackgroundWorkerPID(idx);
-        let data_dir: &'static str =
-            Box::leak(test_boot::data_dir().to_str().unwrap().to_string().into_boxed_str());
         // launch_backend's per-thread GUC boot (the postmaster snapshot).
         let guc_snapshot = guc::store::capture_nondefault_variables();
         let handle = std::thread::Builder::new()
             .name(format!("pg:parallel-e2e-worker:{pid}"))
             .spawn(move || {
-                g::SetDataDir(data_dir);
+                thread_globals();
+                g::SetMyProcPid(pid);
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                     .unwrap();
-                g::SetMaxConnections(64);
-                g::set_max_worker_processes(2);
-                g::SetMaxBackends(64 + 3 + 2 + 2 + 2);
-                g::SetMyProcPid(pid);
-                g::SetMyDatabaseId(InvalidOid);
-                g::set_transaction_buffers(64);
-                g::set_subtransaction_buffers(64);
-                g::set_enableFsync(false);
                 fd::InitFileAccess();
                 waiteventset::InitializeWaitEventSupport().unwrap();
                 latch::InitializeLatchWaitSet().unwrap();
@@ -165,16 +379,17 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
     joins
 }
 
-fn push_test_active_snapshot() {
-    let mcx = Box::leak(Box::new(mcx::MemoryContext::new("e2e-snap"))).mcx();
-    let mut d =
-        types_snapshot::SnapshotData::sentinel(mcx, types_snapshot::SnapshotType::SNAPSHOT_MVCC);
-    d.xmin = 3;
-    d.xmax = 3;
-    d.curcid.set(0);
-    d.vistest = types_core::GlobalVisStateHandle::new(0);
-    let snap: snapmgr::Snapshot = std::rc::Rc::new(d);
+fn begin_parallel_ready_xact() {
+    xact::StartTransactionCommand().unwrap();
+    let snap = snapmgr::GetTransactionSnapshot().unwrap();
     snapmgr::PushActiveSnapshot(&snap).unwrap();
+    xact::EnterParallelMode();
+}
+
+fn end_parallel_ready_xact() {
+    xact::ExitParallelMode();
+    snapmgr::PopActiveSnapshot().unwrap();
+    xact::CommitTransactionCommand().unwrap();
 }
 
 #[test]
@@ -183,8 +398,7 @@ fn substrate_happy_path_with_launch_fewer() {
     setup();
 
     g::SetMyDatabaseId(InvalidOid);
-    push_test_active_snapshot();
-    xact::EnterParallelMode();
+    begin_parallel_ready_xact();
 
     // Ask for 3; only 2 bgworker slots exist (max_worker_processes=2): the
     // third registration fails and C's contract is to run with fewer.
@@ -260,8 +474,7 @@ fn substrate_happy_path_with_launch_fewer() {
     assert_eq!(leader_instr.nloops, 2.0);
 
     parallel::DestroyParallelContext(pcxt).unwrap();
-    xact::ExitParallelMode();
-    snapmgr::PopActiveSnapshot().unwrap();
+    end_parallel_ready_xact();
 
     for j in joins {
         assert_eq!(j.join().unwrap(), 0);
@@ -275,8 +488,7 @@ fn worker_error_rethrows_with_c_shape() {
     setup();
 
     g::SetMyDatabaseId(InvalidOid);
-    push_test_active_snapshot();
-    xact::EnterParallelMode();
+    begin_parallel_ready_xact();
 
     let pcxt = parallel::CreateParallelContext("postgres", "substrate_e2e_error", 1).unwrap();
     parallel::InitializeParallelDSM(pcxt).unwrap();
@@ -293,8 +505,7 @@ fn worker_error_rethrows_with_c_shape() {
     assert!(ctx.contains("inner worker frame"));
 
     parallel::DestroyParallelContext(pcxt).unwrap();
-    xact::ExitParallelMode();
-    snapmgr::PopActiveSnapshot().unwrap();
+    end_parallel_ready_xact();
     for j in joins {
         assert_eq!(j.join().unwrap(), 1);
     }
