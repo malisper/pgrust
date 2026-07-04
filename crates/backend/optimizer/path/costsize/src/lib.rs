@@ -270,6 +270,17 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // C conservatively charges every column's comparison operator.
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for opno in &rc.opnos {
+                planner_seams::add_function_cost::call(lsyscache::get_opcode(opno)?, cost)?;
+            }
+            for arg in rc.largs.iter().chain(rc.rargs.iter()) {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
         // C charges MinMaxExpr a flat cpu_operator_cost ("cost 1").
         NodeTag::T_MinMaxExpr => {
             cost.per_tuple += gucs::cpu_operator_cost();

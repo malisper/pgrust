@@ -13,6 +13,7 @@ fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../format_type" }
 indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
+typcache_seams = { path = "../../cache/typcache_seams" }
 mcx = { path = "../../../../_support/mcx" }
 parse_expr = { path = "../../../parser/parse_expr" }
 genam_seams = { path = "../../../access/index/genam_seams" }

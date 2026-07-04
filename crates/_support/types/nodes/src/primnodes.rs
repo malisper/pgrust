@@ -278,6 +278,23 @@ impl Default for RowExpr<'_> {
     }
 }
 
+pub struct FieldStore<'mcx> {
+    pub arg: Node<'mcx>,
+    pub newvals: NodeList<'mcx>,
+    pub fieldnums: crate::list::IntList<'mcx>,
+    pub resulttype: Oid,
+}
+
+// cmptype is CompareType (cmptype.h); EQ/NE never appear here.
+pub struct RowCompareExpr<'mcx> {
+    pub cmptype: i32,
+    pub opnos: crate::list::OidList<'mcx>,
+    pub opfamilies: crate::list::OidList<'mcx>,
+    pub inputcollids: crate::list::OidList<'mcx>,
+    pub largs: NodeList<'mcx>,
+    pub rargs: NodeList<'mcx>,
+}
+
 pub struct GroupingFunc<'mcx> {
     pub args: NodeList<'mcx>,
     pub refs: crate::list::IntList<'mcx>,
@@ -1022,6 +1039,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Aggref<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for GroupingFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_GroupingFunc;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for FieldStore<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FieldStore;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RowCompareExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RowCompareExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for RowExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_RowExpr;
 }
@@ -1292,6 +1315,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_row_expr(self) -> Option<&'mcx RowExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_field_store(self) -> Option<&'mcx FieldStore<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_row_compare_expr(self) -> Option<&'mcx RowCompareExpr<'mcx>> {
         self.as_variant()
     }
 

@@ -1640,6 +1640,25 @@ fn fix_upper_expr<'mcx>(
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let mut largs = NodeList::nil();
+            for arg in &rc.largs {
+                largs.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            let mut rargs = NodeList::nil();
+            for arg in &rc.rargs {
+                rargs.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(mcx)?,
+                    largs,
+                    rargs,
                 },
             )
         }
@@ -2318,6 +2337,25 @@ fn fix_scan_expr_mutator<'mcx>(
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let mut largs = NodeList::nil();
+            for arg in &rc.largs {
+                largs.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            let mut rargs = NodeList::nil();
+            for arg in &rc.rargs {
+                rargs.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(mcx)?,
+                    largs,
+                    rargs,
                 },
             )
         }
@@ -2561,6 +2599,10 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             for v in &j.passing_values {
                 fix_scan_expr_walker(run, v)?;
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for arg in rc.largs.iter().chain(rc.rargs.iter()) {
+                fix_scan_expr_walker(run, arg)?;
             }
             Ok(())
         }

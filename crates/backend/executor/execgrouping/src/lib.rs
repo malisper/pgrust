@@ -122,7 +122,7 @@ pub fn build_tuple_hash_table<'mcx>(
         nbuckets = hash_mem_limit.max(1);
     }
 
-    let tab_hash_expr = exec_build_hash32_from_attrs(
+    let mut tab_hash_expr = exec_build_hash32_from_attrs(
         metacxt,
         input_desc,
         hashfunctions,
@@ -130,7 +130,7 @@ pub fn build_tuple_hash_table<'mcx>(
         key_col_idx,
         0,
     )?;
-    let tab_eq_func = exec_build_grouping_equal(
+    let mut tab_eq_func = exec_build_grouping_equal(
         metacxt,
         input_desc,
         input_desc,
@@ -138,6 +138,10 @@ pub fn build_tuple_hash_table<'mcx>(
         eqfuncoids,
         collations,
     )?;
+    // DIVERGENCE: C runs hash/eq fns in the caller-reset tempcxt; here their
+    // allocations (record keys deform) live in metacxt to teardown.
+    tab_hash_expr.arm_result_mcx(metacxt);
+    tab_eq_func.arm_result_mcx(metacxt);
     let tableslot = exectuples::make_tuple_table_slot(
         metacxt,
         TupleSlotKind::MinimalTuple,

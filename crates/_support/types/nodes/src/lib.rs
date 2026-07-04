@@ -38,19 +38,19 @@ pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction,
+    CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction,
     MergeMatchKind, NamedArgExpr, NullIfExpr, NullTest, NullTestType,
     JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
     JsonValueExpr, JsonValueType, JsonWrapper,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
-    RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
+    RangeVar, RelabelType, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
     SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TableFunc, TableFuncType,
     TargetEntry, Var, VarReturningType, XmlExpr, XmlExprOp, XmlOptionType,
 };
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
-    A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, AlterEnumStmt,
+    A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, AlterEnumStmt, CompositeTypeStmt,
     AlterSeqStmt, CollateClause, ColumnRef,
     CreateDomainStmt, CreateEnumStmt, CreateSeqStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem, IndexStmt,
     InferClause, InsertStmt, JsonAggConstructor, JsonArgument, JsonArrayAgg,

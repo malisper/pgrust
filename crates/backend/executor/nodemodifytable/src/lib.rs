@@ -1505,6 +1505,9 @@ fn expr_type(node: Node<'_>) -> u32 {
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_ScalarArrayOpExpr => 16,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
+        NodeTag::T_RowCompareExpr => 16,
         other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
     }
 }

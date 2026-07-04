@@ -336,8 +336,11 @@ pub fn get_expr_result_type<'mcx>(
             let funcid = lsyscache::get_opcode(op.opno)?;
             return internal_get_result_type(mcx, funcid, Some(node), None);
         }
-        if node.node_tag() == NodeTag::T_RowExpr {
-            panic!("funcapi get_expr_result_type: RowExpr(RECORD) leg not ported");
+        if let Some(re) = node.as_row_expr() {
+            // Named rowtypes resolve through the generic typid path below.
+            if re.row_typeid == RECORDOID {
+                panic!("funcapi get_expr_result_type: RowExpr(RECORD) leg not ported");
+            }
         }
         if let Some(c) = node.as_const() {
             if c.consttype == RECORDOID && !c.constisnull {

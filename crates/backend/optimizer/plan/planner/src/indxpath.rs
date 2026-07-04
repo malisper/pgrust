@@ -1440,6 +1440,15 @@ fn collect_varattnos(
                 collect_varattnos(run, e, relid, out);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                collect_varattnos(run, a, relid, out);
+            }
+        }
+        NodeTag::T_FieldSelect => {
+            collect_varattnos(run, node.as_field_select().unwrap().arg, relid, out)
+        }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }
 }

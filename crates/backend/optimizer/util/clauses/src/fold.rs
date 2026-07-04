@@ -1066,15 +1066,98 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                     "eval_const_expressions_mutator (clauses.c): FieldSelect over \
                      RowExpr/Const fold; search-cycle lane carries the pass-through only"
                 );
+        // C's generic arm: mutate both sides; the op/family lists never change.
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let largs = mutate_list(cx.mcx, &rc.largs, &mut |n| ece_mutator(n, cx))?;
+            let rargs = mutate_list(cx.mcx, &rc.rargs, &mut |n| ece_mutator(n, cx))?;
+            if largs.is_none() && rargs.is_none() {
+                return Ok(None);
             }
             Ok(Some(Node::mk(
                 cx.mcx,
-                ::types_nodes::primnodes::FieldSelect {
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(cx.mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(cx.mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(cx.mcx)?,
+                    largs: match largs {
+                        Some(l) => l,
+                        None => rc.largs.clone_in(cx.mcx)?,
+                    },
+                    rargs: match rargs {
+                        Some(l) => l,
+                        None => rc.rargs.clone_in(cx.mcx)?,
+                    },
+                },
+            )?))
+        }
+        NodeTag::T_FieldSelect => {
+            let fs = node.as_field_select().unwrap();
+            let arg = ece_mutator(fs.arg, cx)?.unwrap_or(fs.arg);
+            if let Some(v) = arg.as_var() {
+                if v.varattno == types_core::InvalidAttrNumber
+                    && v.varlevelsup == 0
+                    && rowtype_field_matches(
+                        cx.mcx,
+                        v.vartype,
+                        fs.fieldnum as i32,
+                        fs.resulttype,
+                        fs.resulttypmod,
+                        fs.resultcollid,
+                    )?
+                {
+                    let newvar = Node::mk_var(
+                        cx.mcx,
+                        v.varno,
+                        fs.fieldnum,
+                        fs.resulttype,
+                        fs.resulttypmod,
+                        fs.resultcollid,
+                        v.varlevelsup,
+                    )?;
+                    // C copies varreturningtype/varnullingrels from the old Var.
+                    // SAFETY: freshly built node, no other reference.
+                    unsafe {
+                        newvar
+                            .with_mut::<types_nodes::Var, _>(|nv| {
+                                nv.varreturningtype = v.varreturningtype;
+                                nv.varnullingrels = v.varnullingrels.clone_in(cx.mcx).expect("bms clone");
+                            })
+                            .unwrap();
+                    }
+                    return Ok(Some(newvar));
+                }
+            }
+            if let Some(r) = arg.as_row_expr() {
+                let f = fs.fieldnum as usize;
+                if fs.fieldnum > 0 && f <= r.args.len() {
+                    let fld = r.args.nth(f - 1);
+                    if rowtype_field_matches(
+                        cx.mcx,
+                        r.row_typeid,
+                        fs.fieldnum as i32,
+                        fs.resulttype,
+                        fs.resulttypmod,
+                        fs.resultcollid,
+                    )? && fs.resulttype == nodes_core::node_funcs::expr_type(fld)
+                        && fs.resulttypmod == nodes_core::node_funcs::expr_typmod(fld)
+                        && fs.resultcollid == nodes_core::node_funcs::expr_collation(fld)
+                    {
+                        return Ok(Some(fld));
+                    }
+                }
+            }
+            // C also const-folds a Const arg via ece_evaluate_expr — unfolded
+            // here (runtime FieldSelect evaluates it identically).
+            Ok(Some(Node::mk(
+                cx.mcx,
+                types_nodes::FieldSelect {
                     arg,
-                    fieldnum: f.fieldnum,
-                    resulttype: f.resulttype,
-                    resulttypmod: f.resulttypmod,
-                    resultcollid: f.resultcollid,
+                    fieldnum: fs.fieldnum,
+                    resulttype: fs.resulttype,
+                    resulttypmod: fs.resulttypmod,
+                    resultcollid: fs.resultcollid,
                 },
             )?))
         }
@@ -1753,3 +1836,25 @@ pub fn all_arguments_const(node: Node<'_>) -> PgResult<bool> {
     Ok(!crate::walker::expression_tree_walker(node, &mut NonConst)?)
 }
 
+// rowtype_field_matches (clauses.c): whole-row rowtypes only, never RECORD.
+fn rowtype_field_matches(
+    mcx: Mcx<'_>,
+    rowtypeid: Oid,
+    fieldnum: i32,
+    expectedtype: Oid,
+    expectedtypmod: i32,
+    expectedcollation: Oid,
+) -> PgResult<bool> {
+    if rowtypeid == types_core::catalog::RECORDOID {
+        return Ok(true);
+    }
+    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, rowtypeid, -1)?;
+    if fieldnum <= 0 || fieldnum > tupdesc.natts {
+        return Ok(false);
+    }
+    let attr = tupdesc.attr(fieldnum as usize - 1);
+    Ok(!attr.attisdropped
+        && attr.atttypid == expectedtype
+        && attr.atttypmod == expectedtypmod
+        && attr.attcollation == expectedcollation)
+}

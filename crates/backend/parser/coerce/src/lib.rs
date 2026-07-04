@@ -8,7 +8,7 @@ mod tests;
 use datum::Datum;
 use fmgr::FmgrInfo;
 use mcx::Mcx;
-use nodes_core::node_funcs::expr_typmod;
+use nodes_core::node_funcs::{expr_type, expr_typmod};
 use parser_small1::{
     parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
 };
@@ -230,16 +230,143 @@ pub fn coerce_type<'mcx>(
         }
         return Ok(result);
     }
-    if (inputTypeId == RECORDOID && is_complex(targetTypeId)?)
-        || (targetTypeId == RECORDOID && is_complex(inputTypeId)?)
-        || (targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)?)
-    {
-        unported("coerce_type (parse_coerce.c): RECORD/composite arms");
+    if inputTypeId == RECORDOID && is_complex(targetTypeId)? {
+        return coerce_record_to_complex(
+            mcx,
+            pstate,
+            node,
+            targetTypeId,
+            ccontext,
+            cformat,
+            location,
+        );
+    }
+    if targetTypeId == RECORDOID && is_complex(inputTypeId)? {
+        // C: no RelabelType here.
+        return Ok(node);
+    }
+    if targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)? {
+        unported("coerce_type (parse_coerce.c): complex-array-to-RECORDARRAY arm");
     }
     if is_complex(inputTypeId)? && is_complex(targetTypeId)? {
         unported("coerce_type (parse_coerce.c): typeInheritsFrom/ConvertRowtypeExpr arm");
     }
     Err(conversion_not_found(inputTypeId, targetTypeId))
+}
+
+// coerce_record_to_complex (parse_coerce.c), RowExpr-source leg; the
+// whole-row Var source (expandNSItemVars) is loud.
+#[allow(clippy::too_many_arguments)]
+fn coerce_record_to_complex<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    targetTypeId: Oid,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let args = match node.as_row_expr() {
+        Some(r) => &r.args,
+        None => {
+            if node.as_var().is_some_and(|v| v.varattno == types_core::InvalidAttrNumber) {
+                unported("coerce_record_to_complex (parse_coerce.c): whole-row Var source");
+            }
+            return Err(record_cast_error(targetTypeId, Option::None, location));
+        }
+    };
+    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, targetTypeId, -1)?;
+    let mut newargs = NodeList::nil();
+    let mut ucolno = 1usize;
+    let mut argix = 0usize;
+    for i in 0..tupdesc.natts as usize {
+        let attr = tupdesc.attr(i);
+        if attr.attisdropped {
+            newargs.lappend(
+                mcx,
+                Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, Datum::null(), true, true)?,
+            )?;
+            continue;
+        }
+        if argix >= args.len() {
+            return Err(record_cast_error(
+                targetTypeId,
+                Some("Input has too few columns.".to_string()),
+                location,
+            ));
+        }
+        let expr = args.nth(argix);
+        let exprtype = expr_type(expr);
+        let cexpr = coerce_to_target_type(
+            mcx,
+            pstate,
+            expr,
+            exprtype,
+            attr.atttypid,
+            attr.atttypmod,
+            ccontext,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?
+        .ok_or_else(|| {
+            record_cast_column_error(exprtype, attr.atttypid, targetTypeId, ucolno, location)
+        })?;
+        newargs.lappend(mcx, cexpr)?;
+        ucolno += 1;
+        argix += 1;
+    }
+    if argix < args.len() {
+        return Err(record_cast_error(
+            targetTypeId,
+            Some("Input has too many columns.".to_string()),
+            location,
+        ));
+    }
+    Node::mk(
+        mcx,
+        types_nodes::RowExpr {
+            args: newargs,
+            row_typeid: targetTypeId,
+            row_format: cformat,
+            colnames: NodeList::nil(),
+            location,
+        },
+    )
+}
+
+#[cold]
+fn record_cast_error(
+    target: Oid,
+    detail: Option<std::string::String>,
+    location: ParseLoc,
+) -> Box<types_error::PgError> {
+    let tyname = format_type::format_type_be(target).unwrap_or_default();
+    let mut e = types_error::PgError::error(format!("cannot cast type record to {tyname}"))
+        .with_sqlstate(types_error::ERRCODE_CANNOT_COERCE);
+    if let Some(d) = detail {
+        e = e.with_detail(d);
+    }
+    let _ = location;
+    Box::new(e)
+}
+
+#[cold]
+fn record_cast_column_error(
+    from: Oid,
+    to: Oid,
+    target: Oid,
+    ucolno: usize,
+    location: ParseLoc,
+) -> Box<types_error::PgError> {
+    let fname = format_type::format_type_be(from).unwrap_or_default();
+    let toname = format_type::format_type_be(to).unwrap_or_default();
+    let tyname = format_type::format_type_be(target).unwrap_or_default();
+    let _ = location;
+    Box::new(
+        types_error::PgError::error(format!("cannot cast type record to {tyname}"))
+            .with_detail(format!("Cannot cast type {fname} to {toname} in column {ucolno}."))
+            .with_sqlstate(types_error::ERRCODE_CANNOT_COERCE),
+    )
 }
 
 // C's coerce_type CONSTANT arm: typinput through fmgr (stringTypeDatum).
@@ -396,10 +523,13 @@ pub fn can_coerce_type(
         }
         if (inputTypeId == RECORDOID && is_complex(targetTypeId)?)
             || (targetTypeId == RECORDOID && is_complex(inputTypeId)?)
-            || (targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)?)
+        {
+            continue;
+        }
+        if (targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)?)
             || (is_complex(inputTypeId)? && is_complex(targetTypeId)?)
         {
-            unported("can_coerce_type (parse_coerce.c): RECORD/composite/inheritance arms");
+            unported("can_coerce_type (parse_coerce.c): RECORDARRAY/inheritance arms");
         }
         return Ok(false);
     }
@@ -1868,6 +1998,12 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_RowExpr => {
             node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            rc.largs.iter().any(expression_returns_set)
+                || rc.rargs.iter().any(expression_returns_set)
+        }
+        NodeTag::T_FieldSelect => expression_returns_set(node.as_field_select().unwrap().arg),
         NodeTag::T_Const
         | NodeTag::T_Param
         | NodeTag::T_Var

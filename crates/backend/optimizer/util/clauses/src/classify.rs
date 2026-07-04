@@ -466,8 +466,21 @@ impl<'mcx> NodeWalker<'mcx> for ContainLeakedVars {
             // C: SubscriptingRef fetch is leakproof for the array handler;
             // assignment (store) is not, but stores never reach quals.
             NodeTag::T_SubscriptingRef => {}
-            t @ (NodeTag::T_RowCompareExpr
-            | NodeTag::T_MinMaxExpr) => deferred("contain_leaked_vars_walker", t),
+            // C special case: a leaky per-column comparison only matters if
+            // that column pair contains Vars.
+            NodeTag::T_RowCompareExpr => {
+                let rc = node.as_row_compare_expr().unwrap();
+                for (i, opno) in rc.opnos.iter().enumerate() {
+                    let funcid = lsyscache::operator::get_opcode(opno)?;
+                    if !get_func_leakproof(funcid)?
+                        && (var_seams::contain_var_clause::call(rc.largs.nth(i))
+                            || var_seams::contain_var_clause::call(rc.rargs.nth(i)))
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            t @ NodeTag::T_MinMaxExpr => deferred("contain_leaked_vars_walker", t),
             NodeTag::T_CurrentOfExpr => return Ok(false),
             // Unrecognized node: assume it might be leaky (C default arm).
             _ => return Ok(true),

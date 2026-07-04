@@ -1802,4 +1802,52 @@ fn objtype_from_i32(objtype: i32) -> types_nodes::parsenodes::ObjectType {
     );
     // SAFETY: ObjectType is repr(u32) and contiguous over the asserted range.
     unsafe { core::mem::transmute::<u32, types_nodes::parsenodes::ObjectType>(objtype as u32) }
+/// C `ParseComplexProjection` (parse_func.c): Ok(None) = not a column of the
+/// composite; caller decides between function notation and unknown_attribute.
+pub fn ParseComplexProjection<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    funcname: &str,
+    first_arg: Node<'mcx>,
+    location: ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(v) = first_arg.as_var() {
+        if v.varattno == types_core::InvalidAttrNumber {
+            let nsitem =
+                parse_relation::GetNSItemByRangeTablePosn(pstate, v.varno, v.varlevelsup as i32);
+            return parse_relation::scanNSItemForColumn(
+                mcx,
+                pstate,
+                nsitem,
+                v.varlevelsup as i32,
+                funcname,
+                location,
+            );
+        }
+        if v.vartype == RECORDOID {
+            panic!(
+                "ParseComplexProjection (parse_func.c): expandRecordVariable over a \
+                 RECORD Var unported — rowtypes lane"
+            );
+        }
+    }
+    let Some(tupdesc) = funcapi::get_expr_result_tupdesc(mcx, Some(first_arg), true)? else {
+        return Ok(None);
+    };
+    for i in 0..tupdesc.natts as usize {
+        let att = tupdesc.attr(i);
+        if !att.attisdropped && att.attname.name_str() == funcname.as_bytes() {
+            return Ok(Some(Node::mk(
+                mcx,
+                types_nodes::FieldSelect {
+                    arg: first_arg,
+                    fieldnum: (i + 1) as types_core::AttrNumber,
+                    resulttype: att.atttypid,
+                    resulttypmod: att.atttypmod,
+                    resultcollid: att.attcollation,
+                },
+            )?));
+        }
+    }
+    Ok(None)
 }

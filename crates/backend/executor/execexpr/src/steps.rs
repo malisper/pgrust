@@ -269,6 +269,12 @@ pub enum Step {
     // rowcache (cold path; see interp). Kept last: appending preserves the
     // hot variants' discriminants.
     FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
+    // C EEOP_ROWCOMPARE_STEP: per-column btree ORDER proc; strict-NULL input
+    // or NULL result jumps past the expression, nonzero result to FINAL.
+    // Appended last: preserves the hot variants' discriminants.
+    RowCompareStep { call: Call2, strict: bool, jumpnull: u32, jumpdone: u32, out: OutRef },
+    // C EEOP_ROWCOMPARE_FINAL; cmptype is CompareType (EQ/NE never appear).
+    RowCompareFinal { cmptype: i32, out: OutRef },
 }
 
 // C JsonConstructorExprState: resolved-once metadata for the
