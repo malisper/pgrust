@@ -123,6 +123,43 @@ fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid>
     Ok(result)
 }
 
+// GetAttributeCompression (tablecmds.c). CompressionNameToMethod: this build
+// has no lz4, so "lz4" takes C's without-USE_LZ4 invalid-method error.
+pub(crate) fn GetAttributeCompression(
+    atttypid: Oid,
+    compression: Option<&str>,
+) -> PgResult<i8> {
+    let Some(compression) = compression else {
+        return Ok(types_tuple::InvalidCompressionMethod);
+    };
+    if compression == "default" {
+        return Ok(types_tuple::InvalidCompressionMethod);
+    }
+    let typstorage = syscache_seams::lookup_pg_type_shape::call(atttypid)?
+        .expect("pg_type row vanished")
+        .typstorage as u8;
+    if typstorage == b'p' {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column data type {} does not support compression",
+                    format_type::format_type_be(atttypid)?
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    if compression == "pglz" {
+        Ok(b'p' as i8)
+    } else {
+        Err(Box::new(
+            PgError::new(ERROR, format!("invalid compression method \"{compression}\""))
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ))
+    }
+}
+
 // BuildDescForRelation (tablecmds.c in 18.3).
 pub fn BuildDescForRelation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -154,9 +191,7 @@ pub fn BuildDescForRelation<'mcx>(
         att.attinhcount = entry.inhcount;
         att.attidentity = entry.identity as i8;
         att.attgenerated = entry.generated as i8;
-        if entry.compression.is_some() {
-            unported("GetAttributeCompression (per-column COMPRESSION)");
-        }
+        att.attcompression = GetAttributeCompression(atttypid, entry.compression)?;
         if entry.storage != 0 {
             att.attstorage = entry.storage as i8;
         } else if entry.storage_name.is_some() {
