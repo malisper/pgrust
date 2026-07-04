@@ -2684,9 +2684,11 @@ name = "commands_view"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "elog",
  "lsyscache",
  "mcx",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "rewrite_define",
  "tablecmds",
@@ -6793,6 +6795,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nodes_core",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
