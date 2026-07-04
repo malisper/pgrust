@@ -9,8 +9,8 @@ use std::sync::{Mutex, Once};
 use ::datum::Datum;
 use ::mcx::MemoryContext;
 use ::types_core::{
-    BlockNumber, Buffer, ForkNumber, GlobalVisStateHandle, InvalidBlockNumber, InvalidBuffer,
-    Oid, BLCKSZ, BTREE_AM_OID, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    BlockNumber, Buffer, ForkNumber, GlobalVisStateHandle, InvalidBlockNumber, InvalidBuffer, Oid,
+    BLCKSZ, BTREE_AM_OID, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
 use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_LEAF, BTP_META, BTP_ROOT, BTREE_MAGIC, BTREE_VERSION,
@@ -83,7 +83,11 @@ fn install_seams() {
             })
         });
         bufmgr_seams::relation_smgr_locator::set(|rel| RelFileLocatorBackend {
-            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel.rd_id },
+            locator: RelFileLocator {
+                spcOid: 1663,
+                dbOid: 5,
+                relNumber: rel.rd_id,
+            },
             backend: INVALID_PROC_NUMBER,
         });
         bufmgr_seams::read_buffer_extended::set(|rel, fork, blkno, mode, _strategy| {
@@ -166,9 +170,9 @@ fn install_seams() {
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
         predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
 
-        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
-            |_htup, _snap, _buf| Ok(true),
-        );
+        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|_htup, _snap, _buf| {
+            Ok(true)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
         pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
@@ -457,7 +461,9 @@ fn heap_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -467,7 +473,10 @@ fn heap_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: oid, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: oid,
+                dbId: 5,
+            },
         },
         rd_rel,
         rd_att: int4_tupdesc(mcx),
@@ -479,12 +488,15 @@ fn heap_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, None)
 }
@@ -505,7 +517,9 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
     indkey.push(1);
     let mut indoption = PgVec::new_in(mcx);
     indoption.push(0i16);
-    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -515,7 +529,10 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: oid, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: oid,
+                dbId: 5,
+            },
         },
         rd_rel: FormData_pg_class {
             relname,
@@ -556,8 +573,8 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
             indisready: true,
             indkey,
             has_indpred: false,
-        indexprs_src: None,
-        indpred_src: None,
+            indexprs_src: None,
+            indpred_src: None,
         }),
         rd_opcintype: one(INT4OID),
         rd_opfamily: one(INT4_BTREE_OPFAMILY),
@@ -566,19 +583,25 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {
     let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap-test")));
-    Rc::new(SnapshotData::sentinel(ctx.mcx(), SnapshotType::SNAPSHOT_MVCC))
+    Rc::new(SnapshotData::sentinel(
+        ctx.mcx(),
+        SnapshotType::SNAPSHOT_MVCC,
+    ))
 }
 
 static NEXT_OID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(90000);
@@ -622,7 +645,10 @@ fn indexqual<'mcx>(mcx: Mcx<'mcx>, k: i32) -> NodeList<'mcx> {
 fn mk_index_only_scan<'mcx>(mcx: Mcx<'mcx>, k: i32) -> IndexOnlyScan<'mcx> {
     IndexOnlyScan {
         scan: Scan {
-            plan: Plan { targetlist: index_var_tlist(mcx), ..Default::default() },
+            plan: Plan {
+                targetlist: index_var_tlist(mcx),
+                ..Default::default()
+            },
             scanrelid: 1,
         },
         indexid: 0,
@@ -701,7 +727,11 @@ fn all_visible_scan_never_touches_the_heap() {
         let node = mk_index_only_scan(mcx, 20);
         let (heap_oid, mut estate, mut state) = setup(mcx, &[30, 20, 10], &node, &[0]);
         assert_eq!(drain(&mut state, &mut estate), vec![20]);
-        assert_eq!(heap_reads(heap_oid), 0, "heap page fetched on the VM fast path");
+        assert_eq!(
+            heap_reads(heap_oid),
+            0,
+            "heap page fetched on the VM fast path"
+        );
         let scandesc = state.ioss_ScanDesc.as_ref().unwrap();
         assert!(scandesc.xs_want_itup);
         assert!(scandesc.xs_itup.is_some());
@@ -718,7 +748,10 @@ fn vm_clear_falls_back_to_heap_fetch() {
         let node = mk_index_only_scan(mcx, 20);
         let (heap_oid, mut estate, mut state) = setup(mcx, &[30, 20, 10], &node, &[]);
         assert_eq!(drain(&mut state, &mut estate), vec![20]);
-        assert!(heap_reads(heap_oid) >= 1, "VM clear must fall through to the heap");
+        assert!(
+            heap_reads(heap_oid) >= 1,
+            "VM clear must fall through to the heap"
+        );
         teardown(state, &mut estate);
     });
 }
