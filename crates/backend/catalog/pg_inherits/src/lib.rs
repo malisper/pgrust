@@ -114,20 +114,36 @@ pub fn find_all_inheritors<'mcx>(
     parent_rel_id: Oid,
     lockmode: LOCKMODE,
 ) -> PgResult<PgVec<'mcx, Oid>> {
+    Ok(find_all_inheritors_numparents(mcx, parent_rel_id, lockmode)?.0)
+}
+
+// find_all_inheritors with the numparents out-list: per rel, how many of its
+// parents lie inside the returned hierarchy.
+pub fn find_all_inheritors_numparents<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_rel_id: Oid,
+    lockmode: LOCKMODE,
+) -> PgResult<(PgVec<'mcx, Oid>, PgVec<'mcx, i32>)> {
     let mut rels_list: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut rel_numparents: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     rels_list.push(parent_rel_id);
+    rel_numparents.push(0);
     let mut i = 0;
     while i < rels_list.len() {
         let currentrel = rels_list[i];
         let children = find_inheritance_children(mcx, currentrel, lockmode)?;
         for &child in children.iter() {
-            if !rels_list.contains(&child) {
-                rels_list.push(child);
+            match rels_list.iter().position(|&r| r == child) {
+                None => {
+                    rels_list.push(child);
+                    rel_numparents.push(1);
+                }
+                Some(pos) => rel_numparents[pos] += 1,
             }
         }
         i += 1;
     }
-    Ok(rels_list)
+    Ok((rels_list, rel_numparents))
 }
 
 // has_subclass (lsyscache.c): pg_class.relhassubclass via syscache.
