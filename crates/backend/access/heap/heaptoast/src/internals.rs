@@ -192,7 +192,7 @@ pub fn toast_save_datum<'mcx>(
 
         let mut toasttup = heaptuple::heap_form_tuple(mcx, &toasttup_desc, &t_values, &t_isnull)?;
 
-        heapam::dml::heap_insert(&toastrel, toasttup.as_tuple_mut(), mycid, options)?;
+        heapam::dml::heap_insert(&toastrel, toasttup.as_tuple_mut(), mycid, options, None)?;
 
         for idx in toastidxs.iter() {
             let index = idx.rd_index.as_ref().expect("toast index without rd_index");

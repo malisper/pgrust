@@ -10,3 +10,5 @@ types_core = { path = "../types_core" }
 datum = { path = "../datum" }
 types_hash = { path = "../hash" }
 types_nodes = { path = "../nodes" }
+types_error = { path = "../types_error" }
+types_portal = { path = "../portal" }

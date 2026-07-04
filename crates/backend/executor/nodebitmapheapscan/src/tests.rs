@@ -135,10 +135,15 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
             |_htup, _snap, _buf| Ok(true),
         );
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(
+            |_htup, _snap, _buf, _memo| Ok(true),
+        );
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
 
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
         predicate_seams::predicate_lock_page::set(|_rel, _blkno, _snap| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
@@ -425,7 +430,7 @@ fn heap_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, None)
 }
@@ -512,7 +517,7 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }

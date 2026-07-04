@@ -79,6 +79,9 @@ fn install_fixture() {
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == INT4PL_PROC).then_some(PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: PG_CATALOG,
                 prorettype: INT4OID,
                 provariadic: InvalidOid,

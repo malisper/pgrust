@@ -223,7 +223,9 @@ fn install() {
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
 
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
         predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
         predicate_seams::predicate_lock_page::set(|_r, _b, _s| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
@@ -236,6 +238,7 @@ fn install() {
         catalog_seams::is_catalog_relation::set(|_rel| false);
 
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|_h, _s, _b| Ok(true));
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|_h, _s, _b, _m| Ok(true));
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_h, _v| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_h| Ok(false));
 
@@ -394,7 +397,7 @@ fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -453,7 +456,7 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -467,7 +470,7 @@ fn insert_row<'mcx>(
 ) -> ::types_error::PgResult<()> {
     let mut tuple =
         ::heaptuple::heap_form_tuple(mcx, &heap.rd_att, &[Datum::from_i32(val)], &[false])?;
-    ::heapam::heap_insert(heap, tuple.as_tuple_mut(), 0, 0)?;
+    ::heapam::heap_insert(heap, tuple.as_tuple_mut(), 0, 0, None)?;
 
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,

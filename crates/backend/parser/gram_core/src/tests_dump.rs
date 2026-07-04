@@ -198,6 +198,35 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "options", &v.options);
         int_field(out, "withCheckOption", v.withCheckOption as i32);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CreateTableAsStmt>() {
+        out.push_str("{CREATETABLEASSTMT");
+        node_field(out, "query", c.query);
+        node_field(out, "into", c.into);
+        int_field(out, "objtype", c.objtype as i32);
+        bool_field(out, "is_select_into", c.is_select_into);
+        bool_field(out, "if_not_exists", c.if_not_exists);
+        out.push('}');
+    } else if let Some(ic) = n.as_variant::<types_nodes::rawnodes::IntoClause>() {
+        out.push_str("{INTOCLAUSE");
+        node_field(out, "rel", ic.rel);
+        list_field(out, "colNames", &ic.colNames);
+        string_field(out, "accessMethod", ic.accessMethod);
+        list_field(out, "options", &ic.options);
+        int_field(out, "onCommit", ic.onCommit as i32);
+        string_field(out, "tableSpaceName", ic.tableSpaceName);
+        node_field(out, "viewQuery", ic.viewQuery);
+        bool_field(out, "skipData", ic.skipData);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>() {
+        out.push_str("{REFRESHMATVIEWSTMT");
+        bool_field(out, "concurrent", r.concurrent);
+        bool_field(out, "skipData", r.skipData);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);
@@ -365,6 +394,66 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "portalname", f.portalname);
         bool_field(out, "ismove", f.ismove);
         out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DefineStmt>() {
+        out.push_str("{DEFINESTMT");
+        int_field(out, "kind", d.kind as i32);
+        bool_field(out, "oldstyle", d.oldstyle);
+        list_field(out, "defnames", &d.defnames);
+        list_field(out, "args", &d.args);
+        list_field(out, "definition", &d.definition);
+        bool_field(out, "if_not_exists", d.if_not_exists);
+        bool_field(out, "replace", d.replace);
+        out.push('}');
+    } else if let Some(o) = n.as_variant::<types_nodes::parsenodes::ObjectWithArgs>() {
+        out.push_str("{OBJECTWITHARGS");
+        list_field(out, "objname", &o.objname);
+        list_field(out, "objargs", &o.objargs);
+        list_field(out, "objfuncargs", &o.objfuncargs);
+        bool_field(out, "args_unspecified", o.args_unspecified);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpClassStmt>() {
+        out.push_str("{CREATEOPCLASSSTMT");
+        list_field(out, "opclassname", &c.opclassname);
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        node_field(out, "datatype", c.datatype);
+        list_field(out, "items", &c.items);
+        bool_field(out, "isDefault", c.isDefault);
+        out.push('}');
+    } else if let Some(i) = n.as_variant::<types_nodes::parsenodes::CreateOpClassItem>() {
+        out.push_str("{CREATEOPCLASSITEM");
+        int_field(out, "itemtype", i.itemtype);
+        node_field(out, "name", i.name);
+        int_field(out, "number", i.number);
+        list_field(out, "order_family", &i.order_family);
+        list_field(out, "class_args", &i.class_args);
+        node_field(out, "storedtype", i.storedtype);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>() {
+        out.push_str("{CREATEOPFAMILYSTMT");
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>() {
+        out.push_str("{ALTEROPFAMILYSTMT");
+        list_field(out, "opfamilyname", &a.opfamilyname);
+        string_field(out, "amname", a.amname);
+        bool_field(out, "isDrop", a.isDrop);
+        list_field(out, "items", &a.items);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOperatorStmt>() {
+        out.push_str("{ALTEROPERATORSTMT");
+        node_field(out, "opername", a.opername);
+        list_field(out, "options", &a.options);
+        out.push('}');
+    } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::FunctionParameter>() {
+        out.push_str("{FUNCTIONPARAMETER");
+        string_field(out, "name", p.name);
+        node_field(out, "argType", p.argType);
+        int_field(out, "mode", p.mode as i32);
+        node_field(out, "defexpr", p.defexpr);
+        int_field(out, "location", p.location);
+        out.push('}');
     } else if let Some(d) = n.as_drop_stmt() {
         out.push_str("{DROPSTMT");
         list_field(out, "objects", &d.objects);
@@ -418,6 +507,17 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str(&format!(" :ownerId {}", cs.ownerId));
         bool_field(out, "for_identity", cs.for_identity);
         bool_field(out, "if_not_exists", cs.if_not_exists);
+        out.push('}');
+    } else if let Some(ce) = n.as_variant::<types_nodes::rawnodes::CreateExtensionStmt>() {
+        out.push_str("{CREATEEXTENSIONSTMT");
+        string_field(out, "extname", ce.extname);
+        bool_field(out, "if_not_exists", ce.if_not_exists);
+        list_field(out, "options", &ce.options);
+        out.push('}');
+    } else if let Some(ae) = n.as_variant::<types_nodes::rawnodes::AlterExtensionStmt>() {
+        out.push_str("{ALTEREXTENSIONSTMT");
+        string_field(out, "extname", ae.extname);
+        list_field(out, "options", &ae.options);
         out.push('}');
     } else if let Some(j) = n.as_join_expr() {
         out.push_str("{JOINEXPR");
@@ -798,6 +898,29 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "lockedRels", &lc.lockedRels);
         int_field(out, "strength", lc.strength as i32);
         int_field(out, "waitPolicy", lc.waitPolicy as i32);
+        out.push('}');
+    } else if let Some(m) = n.as_merge_stmt() {
+        out.push_str("{MERGESTMT");
+        node_field(out, "relation", m.relation);
+        node_field(out, "sourceRelation", m.sourceRelation);
+        node_field(out, "joinCondition", m.joinCondition);
+        list_field(out, "mergeWhenClauses", &m.mergeWhenClauses);
+        node_field(out, "returningClause", m.returningClause);
+        node_field(out, "withClause", m.withClause);
+        out.push('}');
+    } else if let Some(w) = n.as_merge_when_clause() {
+        out.push_str("{MERGEWHENCLAUSE");
+        int_field(out, "matchKind", w.matchKind as i32);
+        int_field(out, "commandType", w.commandType as i32);
+        int_field(out, "override", w.r#override as i32);
+        node_field(out, "condition", w.condition);
+        list_field(out, "targetList", &w.targetList);
+        list_field(out, "values", &w.values);
+        out.push('}');
+    } else if let Some(rc) = n.as_returning_clause() {
+        out.push_str("{RETURNINGCLAUSE");
+        list_field(out, "options", &rc.options);
+        list_field(out, "exprs", &rc.exprs);
         out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());

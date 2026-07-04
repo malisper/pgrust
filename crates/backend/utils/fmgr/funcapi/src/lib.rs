@@ -10,16 +10,16 @@ use types_core::{AttrNumber, InvalidOid, Oid, RECORDOID, VOIDOID};
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::TupleDescData;
 
-mod srf;
 #[cfg(test)]
 mod tests;
 
-pub use srf::{
+mod srf_mat;
+
+pub use funcapi_srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
-    srf_return_next_null,
-    FuncCallContext, InitMaterializedSRF, MaterializedSRF, MAT_SRF_BLESS,
-    MAT_SRF_USE_EXPECTED_DESC,
+    srf_return_next_null, FuncCallContext,
 };
+pub use srf_mat::{InitMaterializedSRF, MaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC};
 
 pub fn init_seams() {
     fmgr_seams::get_fn_expr_variadic::set(seam_get_fn_expr_variadic);

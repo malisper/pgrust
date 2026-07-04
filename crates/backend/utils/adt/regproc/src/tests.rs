@@ -120,6 +120,9 @@ fn install_fakes() {
             Ok(PROCS.with(|p| {
                 p.borrow().iter().find(|(_, oid, _, _)| *oid == funcid).map(|(_, _, nsp, args)| {
                     syscache_seams::PgProcShape {
+                        prolang: 12,
+                        prosecdef: false,
+                        proconfig_isnull: true,
                         pronamespace: *nsp,
                         prorettype: 25,
                         provariadic: InvalidOid,

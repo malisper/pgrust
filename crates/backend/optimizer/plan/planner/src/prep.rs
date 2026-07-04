@@ -36,19 +36,54 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
     Ok(())
 }
 
-// A lone RangeTblRef under the top FromExpr can never be elided or dropped.
-pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
+// remove_useless_results_recurse, all-RangeTblRef top FromExpr slice: C
+// deletes each RESULT child while more than one child remains (joining to a
+// one-row table changes nothing). remove_result_refs is a no-op here —
+// PlaceHolderVar creation is loud, so no PHV can reference the dropped rel.
+pub fn remove_useless_result_rtes<'mcx>(
+    run: &PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
-    // A FromExpr of plain RangeTblRefs has no RTE_RESULT children to remove
-    // (RTE_RESULT only enters via replace_empty_jointree's single-item form).
-    if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
-        let _ = run;
-        return;
+    if !f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
+        panic!(
+            "remove_useless_results_recurse (prepjointree.c): non-trivial jointree; \
+             M2 join lane"
+        );
     }
-    panic!(
-        "remove_useless_results_recurse (prepjointree.c): non-trivial jointree; \
-         M2 join lane"
+    let is_result = |n: types_nodes::Node<'mcx>| {
+        let rti = n.as_range_tbl_ref().expect("RangeTblRef").rtindex;
+        parse
+            .rtable
+            .nth(rti as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell")
+            .rtekind
+            == RTEKind::RTE_RESULT
+    };
+    let total = f.fromlist.len();
+    let mut dropped = 0usize;
+    let mut fromlist = NodeList::nil();
+    for n in &f.fromlist {
+        if total - dropped > 1 && is_result(n) {
+            dropped += 1;
+            continue;
+        }
+        fromlist.lappend(mcx, n)?;
+    }
+    if dropped == 0 {
+        return Ok(());
+    }
+    // C also drops any PlanRowMark on a RESULT RTE; the rowmark store is
+    // id-indexed here, so removal would dangle ids — loud until a lane needs it.
+    assert!(
+        run.root.rowMarks.is_empty(),
+        "remove_useless_result_rtes (prepjointree.c): PlanRowMark drop on RESULT; \
+         M2 rowmark lane"
     );
+    parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
+    Ok(())
 }
 
 // preprocess_rowmarks (planner.c); UPDATE/DELETE non-target marks stay loud.
@@ -86,6 +121,12 @@ pub fn preprocess_rowmarks<'mcx>(
                 }
                 return Ok(());
             }
+            // C adds non-locking ROW_MARK_REFERENCE marks for every
+            // non-target rel so EPQ re-fetches the exact source row via junk
+            // ctid columns. DIVERGENCE: no marks here — the EPQ recheck
+            // rescans the source under the same snapshot; identical results
+            // unless several source rows join the same rechecked target row.
+            CmdType::CMD_MERGE => return Ok(()),
             other => panic!("preprocess_rowmarks (planner.c): {other:?} rowmarks; M2 DML lane"),
         }
     }
@@ -274,9 +315,6 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     }
     debug_assert!(run.root.rowMarks.is_empty());
     let command_type = parse.commandType;
-    if command_type == CmdType::CMD_MERGE {
-        panic!("preprocess_targetlist (preptlist.c): MERGE action lists; M4 MERGE lane");
-    }
     let rte = parse
         .rtable
         .nth(parse.resultRelation as usize - 1)
@@ -284,7 +322,7 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         .expect("rtable cell");
     debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
     let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
-    let tlist = match command_type {
+    let mut tlist = match command_type {
         CmdType::CMD_INSERT => expand_insert_targetlist(mcx, &parse.targetList, &rel)?,
         _ => {
             if command_type == CmdType::CMD_UPDATE {
@@ -295,27 +333,56 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
             add_row_identity_columns(mcx, run, &parse.targetList, parse.resultRelation, &rel)?
         }
     };
+    if command_type == CmdType::CMD_MERGE {
+        let result_relation = parse.resultRelation;
+        for action_node in &parse.mergeActionList {
+            let action = action_node.as_merge_action().expect("mergeActionList cell");
+            match action.commandType {
+                CmdType::CMD_INSERT => {
+                    let expanded = expand_insert_targetlist(mcx, &action.targetList, &rel)?;
+                    // SAFETY: parse tree is planner-owned; no derived refs live.
+                    unsafe {
+                        action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                            a.targetList = expanded;
+                        })
+                    }
+                    .expect("MergeAction");
+                }
+                CmdType::CMD_UPDATE => {
+                    let colnos = extract_update_targetlist_colnos(mcx, &action.targetList);
+                    let mut il = types_nodes::IntList::nil();
+                    for &c in colnos.iter() {
+                        il.lappend(mcx, c as i32)?;
+                    }
+                    // SAFETY: as above.
+                    unsafe {
+                        action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                            a.updateColnos = il;
+                        })
+                    }
+                    .expect("MergeAction");
+                }
+                _ => {}
+            }
+            let action = action_node.as_merge_action().expect("mergeActionList cell");
+            if let Some(q) = action.qual {
+                add_merge_junk_vars(mcx, &mut tlist, q, result_relation)?;
+            }
+            for tle in &action.targetList {
+                add_merge_junk_vars(mcx, &mut tlist, tle, result_relation)?;
+            }
+        }
+        if let Some(jc) = parse.mergeJoinCondition {
+            add_merge_junk_vars(mcx, &mut tlist, jc, result_relation)?;
+        }
+    }
     table::table_close(rel, types_rel::NoLock)?;
-    // C adds resjunk entries for RETURNING Vars of OTHER relations; the join
-    // DML lane is loud upstream, so only result-rel Vars can appear here.
+    // Resjunk entries for RETURNING Vars of OTHER relations (the MERGE source
+    // or, once join DML lands, UPDATE/DELETE FROM/USING rels).
     if !parse.returningList.is_nil() && parse.rtable.len() > 1 {
         let result_relation = parse.resultRelation;
         for tle_node in &parse.returningList {
-            let vars = vars::pull_var_clause(
-                mcx,
-                tle_node,
-                vars::PVC_RECURSE_AGGREGATES
-                    | vars::PVC_RECURSE_WINDOWFUNCS
-                    | vars::PVC_INCLUDE_PLACEHOLDERS,
-            )?;
-            for var_node in &vars {
-                if var_node.as_var().unwrap().varno != result_relation {
-                    panic!(
-                        "preprocess_targetlist (preptlist.c): RETURNING Var of a \
-                         non-result relation (resjunk tlist addition); M2 join lane"
-                    );
-                }
-            }
+            add_merge_junk_vars(mcx, &mut tlist, tle_node, result_relation)?;
         }
     }
     run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(mcx, tlist)?));
@@ -348,6 +415,33 @@ pub(crate) fn extract_update_targetlist_colnos<'mcx>(
 
 // add_row_identity_columns + add_row_identity_var (appendinfo.c), the
 // non-inherited plain-table leg: append the junk ctid Var to the tlist.
+// The MERGE junk-var stanza of preprocess_targetlist (preptlist.c): resjunk
+// tlist entries for non-target Vars used in action quals/targetlists and the
+// join condition.
+fn add_merge_junk_vars<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &mut NodeList<'mcx>,
+    node: Node<'mcx>,
+    result_relation: i32,
+) -> PgResult<()> {
+    let vars = vars::pull_var_clause(mcx, node, vars::PVC_INCLUDE_PLACEHOLDERS)?;
+    'next_var: for var_node in &vars {
+        if var_node.as_var().is_some_and(|v| v.varno == result_relation) {
+            continue;
+        }
+        for tle_node in tlist.iter() {
+            let tle = tle_node.as_target_entry().expect("tlist cell");
+            if types_nodes::equal(tle.expr, var_node) {
+                continue 'next_var;
+            }
+        }
+        let tle =
+            Node::mk_target_entry(mcx, var_node, tlist.len() as i16 + 1, None, true)?;
+        tlist.lappend(mcx, tle)?;
+    }
+    Ok(())
+}
+
 fn add_row_identity_columns<'mcx>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,

@@ -265,10 +265,6 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
-    if relispartition {
-        unported("RangeVarCallbackForDropRelation: partition parent locking");
-    }
-
     let actual_expected = if relkind == RELKIND_PARTITIONED_TABLE {
         RELKIND_RELATION
     } else if relkind == types_rel::RELKIND_PARTITIONED_INDEX {
@@ -309,6 +305,15 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
         if heap_oid != InvalidOid {
             lmgr::LockRelationOid(heap_oid, AccessExclusiveLock)?;
+        }
+    }
+
+    // Queries lock parents before partitions; same DIVERGENCE note as above
+    // for the retry bookkeeping (state->partParentOid).
+    if relispartition {
+        let part_parent_oid = pg_inherits::get_partition_parent(mcx, relOid, true)?;
+        if part_parent_oid != InvalidOid {
+            lmgr::LockRelationOid(part_parent_oid, AccessExclusiveLock)?;
         }
     }
     let _ = rel;

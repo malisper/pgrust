@@ -1327,6 +1327,45 @@ fn parses_sql_value_functions() {
 }
 
 #[test]
+fn create_materialized_view_stmt() {
+    use types_nodes::rawnodes::{CreateTableAsStmt, IntoClause};
+    let list = parse("CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS s.mv (x) AS SELECT 1 WITH NO DATA");
+    let rs = only_stmt(&list);
+    let c = rs.stmt.expect("stmt").as_variant::<CreateTableAsStmt>().expect("CreateTableAsStmt");
+    assert_eq!(c.objtype, types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW);
+    assert!(c.if_not_exists && !c.is_select_into);
+    let into = c.into.expect("into").as_variant::<IntoClause>().expect("IntoClause");
+    assert!(into.skipData);
+    assert_eq!(into.colNames.len(), 1);
+    let rv = into.rel.expect("rel").as_range_var().expect("RangeVar");
+    assert_eq!(rv.schemaname, Some("s"));
+    assert_eq!(rv.relpersistence, b'u');
+
+    let list = parse("CREATE MATERIALIZED VIEW mv AS SELECT 1");
+    let c = only_stmt(&list).stmt.unwrap().as_variant::<CreateTableAsStmt>().unwrap();
+    let into = c.into.unwrap().as_variant::<IntoClause>().unwrap();
+    assert!(!into.skipData && !c.if_not_exists);
+    assert_eq!(into.rel.unwrap().as_range_var().unwrap().relpersistence, b'p');
+}
+
+#[test]
+fn refresh_materialized_view_stmt() {
+    use types_nodes::rawnodes::RefreshMatViewStmt;
+    for (sql, concurrent, skip) in [
+        ("REFRESH MATERIALIZED VIEW mv", false, false),
+        ("REFRESH MATERIALIZED VIEW CONCURRENTLY mv", true, false),
+        ("REFRESH MATERIALIZED VIEW mv WITH NO DATA", false, true),
+        ("REFRESH MATERIALIZED VIEW mv WITH DATA", false, false),
+    ] {
+        let list = parse(sql);
+        let r = only_stmt(&list).stmt.unwrap().as_variant::<RefreshMatViewStmt>().expect("RefreshMatViewStmt");
+        assert_eq!(r.concurrent, concurrent, "{sql}");
+        assert_eq!(r.skipData, skip, "{sql}");
+        assert_eq!(r.relation.expect("relation").relname, Some("mv"));
+    }
+}
+
+#[test]
 fn parses_qualified_operator() {
     let list = parse("select 'a' operator(pg_catalog.~) 'b'");
     let sel = select_of(only_stmt(&list));
@@ -1515,4 +1554,99 @@ fn create_view_with_check_option_kinds() {
 #[should_panic(expected = "unimplemented grammar action")]
 fn create_recursive_view_is_loud() {
     let _ = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
+}
+
+#[test]
+fn create_rule_full_shape() {
+    let list = parse(
+        "CREATE OR REPLACE RULE r1 AS ON UPDATE TO s.t WHERE old.a = 1 DO INSTEAD \
+         (INSERT INTO log VALUES (new.a); DELETE FROM log2)",
+    );
+    let rs = only_stmt(&list);
+    let r = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<types_nodes::rawnodes::RuleStmt>()
+        .expect("RuleStmt");
+    assert!(r.replace);
+    assert_eq!(r.rulename, "r1");
+    assert_eq!(r.event, types_nodes::nodes_enums::CmdType::CMD_UPDATE);
+    assert!(r.instead);
+    assert!(r.whereClause.is_some());
+    let rel = r.relation.expect("relation");
+    assert_eq!(rel.schemaname, Some("s"));
+    assert_eq!(rel.relname, Some("t"));
+    assert_eq!(r.actions.len(), 2);
+    assert!(r.actions.nth(0).as_insert_stmt().is_some());
+    assert!(r.actions.nth(1).as_delete_stmt().is_some());
+}
+
+#[test]
+fn create_rule_events_and_nothing() {
+    for (sql, event, instead, nact) in [
+        ("CREATE RULE r AS ON INSERT TO t DO ALSO NOTHING",
+         types_nodes::nodes_enums::CmdType::CMD_INSERT, false, 0),
+        ("CREATE RULE r AS ON DELETE TO t DO INSTEAD NOTHING",
+         types_nodes::nodes_enums::CmdType::CMD_DELETE, true, 0),
+        ("CREATE RULE r AS ON SELECT TO t DO INSTEAD SELECT 1",
+         types_nodes::nodes_enums::CmdType::CMD_SELECT, true, 1),
+        ("CREATE RULE r AS ON UPDATE TO t DO UPDATE t2 SET a = 1",
+         types_nodes::nodes_enums::CmdType::CMD_UPDATE, false, 1),
+    ] {
+        let list = parse(sql);
+        let r = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<types_nodes::rawnodes::RuleStmt>()
+            .expect("RuleStmt");
+        assert_eq!(r.event, event, "{sql}");
+        assert_eq!(r.instead, instead, "{sql}");
+        assert_eq!(r.actions.len(), nact, "{sql}");
+        assert!(!r.replace);
+        assert!(r.whereClause.is_none());
+    }
+}
+
+#[test]
+fn drop_rule_shapes() {
+    let list = parse("DROP RULE r1 ON s.t CASCADE");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
+    assert_eq!(d.removeType, types_nodes::parsenodes::ObjectType::OBJECT_RULE);
+    assert!(!d.missing_ok);
+    assert_eq!(d.behavior, types_nodes::parsenodes::DropBehavior::DROP_CASCADE);
+    let names = d.objects.nth(0).as_list().expect("name list");
+    assert_eq!(names.len(), 3);
+    assert_eq!(names.nth(2).as_string().unwrap().sval, "r1");
+
+    let list = parse("DROP RULE IF EXISTS r1 ON t");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert!(d.missing_ok);
+    let names = d.objects.nth(0).as_list().expect("name list");
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.nth(1).as_string().unwrap().sval, "r1");
+}
+
+#[test]
+fn alter_table_enable_disable_rule() {
+    use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
+    for (sql, subtype, name) in [
+        ("ALTER TABLE t ENABLE RULE r", AlterTableType::AT_EnableRule, "r"),
+        ("ALTER TABLE t ENABLE ALWAYS RULE r", AlterTableType::AT_EnableAlwaysRule, "r"),
+        ("ALTER TABLE t ENABLE REPLICA RULE r", AlterTableType::AT_EnableReplicaRule, "r"),
+        ("ALTER TABLE t DISABLE RULE r", AlterTableType::AT_DisableRule, "r"),
+    ] {
+        let list = parse(sql);
+        let a = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+            .expect("AlterTableStmt");
+        let cmd = a.cmds.nth(0).as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+        assert_eq!(cmd.subtype, subtype, "{sql}");
+        assert_eq!(cmd.name, Some(name), "{sql}");
+    }
 }

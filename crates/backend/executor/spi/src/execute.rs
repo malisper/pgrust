@@ -152,7 +152,7 @@ fn execute_plan_common(
 
 // C _SPI_convert_params: the ParamExternData array lives in the SPI exec
 // context (address-stable until _SPI_end_call resets it, after params::free).
-fn convert_params(argtypes: &[types_core::Oid], values: &[Datum], nulls: &[bool]) -> PgResult<ParamListHandle> {
+pub(crate) fn convert_params(argtypes: &[types_core::Oid], values: &[Datum], nulls: &[bool]) -> PgResult<ParamListHandle> {
     if argtypes.is_empty() {
         return Ok(ParamListHandle::NULL);
     }
@@ -172,7 +172,7 @@ fn convert_params(argtypes: &[types_core::Oid], values: &[Datum], nulls: &[bool]
     Ok(unsafe { types_portal::params::register(slice) })
 }
 
-fn command_tag_of(stmt: &PlannedStmt<'_>) -> types_core::CommandTag {
+pub(crate) fn command_tag_of(stmt: &PlannedStmt<'_>) -> types_core::CommandTag {
     match stmt.utilityStmt {
         Some(u) => utility_seams::create_command_tag::call(u),
         None => match stmt.commandType {

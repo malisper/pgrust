@@ -151,8 +151,8 @@ pub fn StartupXLOG() -> PgResult<()> {
     let check_point = control_file().checkPointCopy;
 
     procarray::TransamVariables().nextXid.store(check_point.nextXid.value, Relaxed);
-    // nextOid/oidCount seeding waits on the varsup OID allocator (M1 has no
-    // OID assignment before it lands).
+    varsup::TransamVariables().nextOid.store(check_point.nextOid, Relaxed);
+    varsup::TransamVariables().oidCount.store(0, Relaxed);
     if multixact_seams::multixact_set_next_mxact::is_installed() {
         multixact_seams::multixact_set_next_mxact::call(
             check_point.nextMulti,

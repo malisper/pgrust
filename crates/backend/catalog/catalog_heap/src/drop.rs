@@ -82,6 +82,8 @@ pub fn CheckTableNotInUse(rel: &Relation<'_>, stmt: &str) -> PgResult<()> {
 }
 
 pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let mut parent_oid = types_core::InvalidOid;
+    let mut default_part_oid = types_core::InvalidOid;
     {
         let pg_class = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
         let key = oid_scankey(Anum_pg_class_oid, relid);
@@ -101,8 +103,15 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
             unsafe { types_tuple::heap_getattr(tup, 28, pg_class.descr(), &mut isnull) }.as_bool();
         genam::systable_endscan(mcx, scan)?;
         pg_class.close(types_rel::AccessShareLock)?;
+        // A concurrent query may hold a partition descriptor including this
+        // partition: the parent lock fences it out until our inval commits.
         if relispartition {
-            unported("heap_drop_with_catalog: partition parent locking");
+            parent_oid = pg_inherits::get_partition_parent(mcx, relid, true)?;
+            lmgr::LockRelationOid(parent_oid, AccessExclusiveLock)?;
+            default_part_oid = crate::partition::get_default_partition_oid(mcx, parent_oid)?;
+            if default_part_oid != types_core::InvalidOid && relid != default_part_oid {
+                lmgr::LockRelationOid(default_part_oid, AccessExclusiveLock)?;
+            }
         }
     }
 
@@ -111,17 +120,24 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
 
     CheckTableNotInUse(&rel, "DROP TABLE")?;
 
-    if xact::IsolationIsSerializable() {
-        unported("heap_drop_with_catalog: CheckTableForSerializableConflictIn (predicate.c)");
-    }
+    predicate_seams::check_table_for_serializable_conflict_in::call(&rel)?;
 
     match rel.rd_rel.relkind {
         types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE
-        | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_VIEW => {}
+        | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_VIEW
+        | types_rel::RELKIND_MATVIEW | types_rel::RELKIND_PARTITIONED_TABLE => {}
         other => unported(&format!(
             "heap_drop_with_catalog: relkind {:?} arm",
             other as char
         )),
+    }
+
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        crate::partition::RemovePartitionKeyByRelId(mcx, relid)?;
+    }
+
+    if relid == default_part_oid {
+        unported("heap_drop_with_catalog: update_default_partition_oid (DEFAULT partitions)");
     }
 
     if RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {
@@ -143,6 +159,15 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
     RemoveStatistics(mcx, relid, 0)?;
     DeleteAttributeTuples(mcx, relid)?;
     DeleteRelationTuple(mcx, relid)?;
+
+    if parent_oid != types_core::InvalidOid {
+        if default_part_oid != types_core::InvalidOid && relid != default_part_oid {
+            inval::invalidate::CacheInvalidateRelcacheByRelid(default_part_oid)?;
+        }
+        // Drop the partition from the parent's cached partition descriptor;
+        // the parent lock is held to commit.
+        inval::invalidate::CacheInvalidateRelcacheByRelid(parent_oid)?;
+    }
     Ok(())
 }
 

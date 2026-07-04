@@ -14,6 +14,8 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_slot::SlotData;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 
+const VACOPT_VACUUM: i32 = 0x01;
+const VACOPT_ANALYZE: i32 = 0x02;
 const VACOPT_VERBOSE: i32 = 0x04;
 
 const STATISTIC_RELATION_ID: Oid = 2619;
@@ -105,9 +107,25 @@ pub fn ExecVacuum(mcx: Mcx<'_>, stmt: &VacuumStmt<'_>, is_top_level: bool) -> Pg
         }
     }
     let params = VacuumParams {
-        options: 0x02 | if verbose { VACOPT_VERBOSE } else { 0 },
+        options: VACOPT_ANALYZE | if verbose { VACOPT_VERBOSE } else { 0 },
     };
     vacuum(mcx, &stmt.rels, &params, is_top_level)
+}
+
+fn analyze_rel_seam<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    va_cols: &'a types_nodes::NodeList<'mcx>,
+    options: u32,
+    in_outer_xact: bool,
+) -> PgResult<()> {
+    analyze_rel(
+        mcx,
+        relid,
+        va_cols,
+        &VacuumParams { options: options as i32 },
+        in_outer_xact,
+    )
 }
 
 fn vacuum(
@@ -119,10 +137,34 @@ fn vacuum(
     if rels.is_nil() {
         panic!("vacuum (vacuum.c): get_all_vacuum_rels (database-wide ANALYZE lane)");
     }
+    if commands_vacuum::in_vacuum() {
+        return Err(PgError::error("ANALYZE cannot be executed from VACUUM or ANALYZE")
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .into());
+    }
     let in_outer_xact = xact::IsInTransactionBlock(is_top_level);
     if rels.iter().count() > 1 && !in_outer_xact {
         panic!("vacuum (vacuum.c): use_own_xacts multi-relation ANALYZE lane");
     }
+    commands_vacuum::set_in_vacuum(true);
+    // catch_unwind = C's PG_FINALLY (panics become ERRORs at tcop and the
+    // session survives, so in_vacuum must reset on every exit path).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vacuum_all_rels(mcx, rels, params, in_outer_xact)
+    }));
+    commands_vacuum::set_in_vacuum(false);
+    match result {
+        Ok(r) => r,
+        Err(p) => std::panic::resume_unwind(p),
+    }
+}
+
+fn vacuum_all_rels(
+    mcx: Mcx<'_>,
+    rels: &types_nodes::NodeList<'_>,
+    params: &VacuumParams,
+    in_outer_xact: bool,
+) -> PgResult<()> {
     for reln in rels.iter() {
         let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
         let rv = vrel.relation.expect("ANALYZE relation name");
@@ -174,21 +216,19 @@ pub fn analyze_rel(
     Ok(())
 }
 
-fn do_analyze_rel(
-    _mcx: Mcx<'_>,
-    onerel: &Relation<'_>,
+fn do_analyze_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
     va_cols: &types_nodes::NodeList<'_>,
-    _params: &VacuumParams,
+    params: &VacuumParams,
     relpages: BlockNumber,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
-    let indexes = relcache_seams::relation_get_index_list::call(anl_mcx, onerel.rd_id)?;
-    if !indexes.is_empty() {
-        panic!("do_analyze_rel (analyze.c): vac_open_indexes/compute_index_stats index lane");
-    }
+    let irel = commands_vacuum::vac_open_indexes(mcx, onerel, ROW_EXCLUSIVE_LOCK)?;
+    let hasindex = !irel.is_empty();
 
     let tupdesc = onerel.descr();
     let mut vacattrstats: PgVec<'_, VacAttrStats<'_>> = PgVec::new_in(anl_mcx);
@@ -212,16 +252,42 @@ fn do_analyze_rel(
                 .into());
             }
             seen.push(i);
-            if let Some(s) = examine_attribute(anl_mcx, onerel, i as i32)? {
+            if let Some(s) = examine_attribute(anl_mcx, onerel, i as i32, None)? {
                 vacattrstats.push(s);
             }
         }
     } else {
         for i in 1..=tupdesc.natts {
-            if let Some(s) = examine_attribute(anl_mcx, onerel, i)? {
+            if let Some(s) = examine_attribute(anl_mcx, onerel, i, None)? {
                 vacattrstats.push(s);
             }
         }
+    }
+
+    let mut indexdata: PgVec<'_, AnlIndexData<'_>> = PgVec::new_in(anl_mcx);
+    for ind in irel.iter() {
+        let index_info = execindexing::BuildIndexInfo(anl_mcx, ind)?;
+        let mut thisdata = AnlIndexData {
+            index_info,
+            tuple_fract: 1.0,
+            vacattrstats: PgVec::new_in(anl_mcx),
+        };
+        if !thisdata.index_info.ii_Expressions.is_nil() && va_cols.is_nil() {
+            let mut indexpr_item = thisdata.index_info.ii_Expressions.iter();
+            for i in 0..thisdata.index_info.ii_NumIndexAttrs as usize {
+                if thisdata.index_info.ii_IndexAttrNumbers[i] == 0 {
+                    let indexkey = indexpr_item
+                        .next()
+                        .unwrap_or_else(|| panic!("too few entries in indexprs list"));
+                    if let Some(s) =
+                        examine_attribute(anl_mcx, ind, (i + 1) as i32, Some(indexkey))?
+                    {
+                        thisdata.vacattrstats.push(s);
+                    }
+                }
+            }
+        }
+        indexdata.push(thisdata);
     }
 
     let mut colstats: PgVec<'_, statistics::ColStats> = PgVec::new_in(anl_mcx);
@@ -239,6 +305,11 @@ fn do_analyze_rel(
     let mut targrows: i32 = 100;
     for s in vacattrstats.iter() {
         targrows = targrows.max(s.minrows);
+    }
+    for thisdata in indexdata.iter() {
+        for s in thisdata.vacattrstats.iter() {
+            targrows = targrows.max(s.minrows);
+        }
     }
     targrows = targrows.max(statistics::ComputeExtStatisticsRows(
         anl_mcx,
@@ -259,24 +330,41 @@ fn do_analyze_rel(
     )?;
 
     if numrows > 0 {
-        let mut col_cx = anl.new_child("Analyze Column");
+        // Bump: armed cmp frames detoast packed by-ref args here per comparison,
+        // freed wholesale at the per-column reset (C pfrees per call).
+        let mut col_cx = anl.new_child_bump("Analyze Column");
+        let src = FetchSource::Heap { tupdesc, rows: &rows[..numrows as usize] };
         for s in vacattrstats.iter_mut() {
             match s.compute {
                 ComputeStats::Scalar => {
-                    compute_scalar_stats(anl_mcx, col_cx.mcx(), s, tupdesc, &rows, numrows, totalrows)?
+                    compute_scalar_stats(anl_mcx, col_cx.mcx(), s, &src, numrows, totalrows)?
                 }
                 ComputeStats::Trivial => {
-                    compute_trivial_stats(s, tupdesc, &rows, numrows)?
+                    compute_trivial_stats(s, &src, numrows)?
                 }
                 ComputeStats::Range { is_multirange } => {
                     range_typanalyze::compute_range_stats(
-                        anl_mcx, s, is_multirange, tupdesc, &rows, numrows, totalrows,
+                        anl_mcx, s, is_multirange, &src, numrows, totalrows,
                     )?
                 }
             }
             col_cx.reset();
         }
+        if hasindex {
+            compute_index_stats(
+                anl_mcx,
+                &anl,
+                onerel,
+                totalrows,
+                &mut indexdata,
+                &rows[..numrows as usize],
+                &mut col_cx,
+            )?;
+        }
         update_attstats(onerel.rd_id, false, &vacattrstats)?;
+        for (ind, thisdata) in irel.iter().zip(indexdata.iter()) {
+            update_attstats(ind.rd_id, false, &thisdata.vacattrstats)?;
+        }
 
         statistics::BuildRelationExtStatistics(
             anl_mcx,
@@ -296,11 +384,175 @@ fn do_analyze_rel(
         totalrows,
         relallvisible,
         relallfrozen,
-        false,
+        hasindex,
         in_outer_xact,
     )?;
 
+    for (ind, thisdata) in irel.iter().zip(indexdata.iter()) {
+        let ind_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+            ind,
+            ForkNumber::MAIN_FORKNUM,
+        )?;
+        let totalindexrows = (thisdata.tuple_fract * totalrows).ceil();
+        vacuum_seams::vac_update_relstats::call(
+            ind,
+            ind_pages,
+            totalindexrows,
+            0,
+            0,
+            false,
+            in_outer_xact,
+        )?;
+    }
+
     // pgstat_report_analyze: cumulative-stats lane (autovacuum feeds off it).
+
+    if params.options & VACOPT_VACUUM == 0 {
+        for ind in irel.iter() {
+            let ivinfo = nbtree::IndexVacuumInfo {
+                index: ind,
+                heaprel: &**onerel,
+                analyze_only: true,
+                estimated_count: true,
+                num_heap_tuples: onerel.rd_rel.reltuples as f64,
+                strategy: bufmgr_seams::get_access_strategy::call(
+                    types_storage::buf::BufferAccessStrategyType::BasVacuum,
+                ),
+            };
+            commands_vacuum::vac_cleanup_one_index(mcx, &ivinfo, None)?;
+        }
+    }
+    commands_vacuum::vac_close_indexes(irel, NO_LOCK)?;
+    Ok(())
+}
+
+struct AnlIndexData<'mcx> {
+    index_info: execindexing::IndexInfo<'mcx>,
+    tuple_fract: f64,
+    vacattrstats: PgVec<'mcx, VacAttrStats<'mcx>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_index_stats<'mcx>(
+    anl_mcx: Mcx<'mcx>,
+    anl: &MemoryContext,
+    onerel: &Relation<'mcx>,
+    totalrows: f64,
+    indexdata: &mut [AnlIndexData<'mcx>],
+    rows: &[HeapTupleData<'mcx>],
+    col_cx: &mut MemoryContext,
+) -> PgResult<()> {
+    const MAX_KEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
+    let mut values = [Datum::null(); MAX_KEYS];
+    let mut isnull = [false; MAX_KEYS];
+    let mut ind_cx = anl.new_child_bump("Analyze Index");
+    for thisdata in indexdata.iter_mut() {
+        let attr_cnt = thisdata.vacattrstats.len();
+        if attr_cnt == 0 && thisdata.index_info.ii_Predicate.is_nil() {
+            continue;
+        }
+        {
+            let ind_mcx = ind_cx.mcx();
+            let mut per_tuple = ind_cx.new_child_bump("Analyze Index per-tuple");
+            let mut slot = exectuples::make_tuple_table_slot(
+                anl_mcx,
+                types_slot::TupleSlotKind::HeapTuple,
+                Some(onerel.rd_att.clone()),
+            );
+            let mut exprvals: PgVec<'_, Datum> =
+                mcx::vec_with_capacity_in(ind_mcx, rows.len() * attr_cnt)?;
+            let mut exprnulls: PgVec<'_, bool> =
+                mcx::vec_with_capacity_in(ind_mcx, rows.len() * attr_cnt)?;
+            let mut numindexrows = 0usize;
+            for row in rows {
+                per_tuple.reset();
+                // SAFETY: the sample image lives in anl_mcx across this loop;
+                // the reborrow mirrors C's shouldFree=false ExecStoreHeapTuple.
+                let tuple = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        core::ptr::from_ref(row.t_data()).cast::<u8>(),
+                        row.t_len,
+                        row.t_self,
+                        row.t_tableOid,
+                    )
+                };
+                exectuples::exec_store_heap_tuple(&mut slot, anl_mcx, tuple);
+                if !thisdata.index_info.ii_Predicate.is_nil()
+                    && !execindexing::index_predicate_passes(
+                        anl_mcx,
+                        per_tuple.mcx(),
+                        &mut thisdata.index_info,
+                        &mut slot,
+                    )?
+                {
+                    continue;
+                }
+                numindexrows += 1;
+                if attr_cnt > 0 {
+                    execindexing::FormIndexDatum(
+                        anl_mcx,
+                        per_tuple.mcx(),
+                        &mut thisdata.index_info,
+                        &mut slot,
+                        &mut values,
+                        &mut isnull,
+                    )?;
+                    for stats in thisdata.vacattrstats.iter() {
+                        let attnum = stats.tupattnum as usize;
+                        if isnull[attnum - 1] {
+                            exprvals.push(Datum::null());
+                            exprnulls.push(true);
+                        } else {
+                            exprvals.push(datum_copy_in(
+                                ind_mcx,
+                                values[attnum - 1],
+                                stats.typbyval,
+                                stats.typlen,
+                            )?);
+                            exprnulls.push(false);
+                        }
+                    }
+                }
+            }
+            thisdata.tuple_fract = numindexrows as f64 / rows.len() as f64;
+            let totalindexrows = (thisdata.tuple_fract * totalrows).ceil();
+            if numindexrows > 0 {
+                for (i, stats) in thisdata.vacattrstats.iter_mut().enumerate() {
+                    let src = FetchSource::Expr {
+                        vals: &exprvals,
+                        nulls: &exprnulls,
+                        stride: attr_cnt,
+                        off: i,
+                    };
+                    match stats.compute {
+                        ComputeStats::Scalar => compute_scalar_stats(
+                            anl_mcx,
+                            col_cx.mcx(),
+                            stats,
+                            &src,
+                            numindexrows as i32,
+                            totalindexrows,
+                        )?,
+                        ComputeStats::Trivial => {
+                            compute_trivial_stats(stats, &src, numindexrows as i32)?
+                        }
+                        ComputeStats::Range { is_multirange } => {
+                            range_typanalyze::compute_range_stats(
+                                anl_mcx,
+                                stats,
+                                is_multirange,
+                                &src,
+                                numindexrows as i32,
+                                totalindexrows,
+                            )?
+                        }
+                    }
+                    col_cx.reset();
+                }
+            }
+        }
+        ind_cx.reset();
+    }
     Ok(())
 }
 
@@ -308,6 +560,7 @@ fn examine_attribute<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'_>,
     attnum: i32,
+    index_expr: Option<types_nodes::Node<'_>>,
 ) -> PgResult<Option<VacAttrStats<'mcx>>> {
     let attr: &FormData_pg_attribute = onerel.descr().attr(attnum as usize - 1);
     if attr.attisdropped {
@@ -324,15 +577,27 @@ fn examine_attribute<'mcx>(
     if attstattarget == 0 {
         return Ok(None);
     }
-    let typanalyze = syscache_seams::pg_type_typanalyze::call(attr.atttypid)?;
-    let ty = syscache_seams::lookup_pg_type_shape::call(attr.atttypid)?
+    let (atttypid, attcollid) = match index_expr {
+        Some(e) => {
+            // Explicit index-column collation wins over the expression's.
+            let coll = if onerel.rd_indcollation[attnum as usize - 1] != InvalidOid {
+                onerel.rd_indcollation[attnum as usize - 1]
+            } else {
+                nodes_core::node_funcs::expr_collation(e)
+            };
+            (nodes_core::node_funcs::expr_type(e), coll)
+        }
+        None => (attr.atttypid, attr.attcollation),
+    };
+    let typanalyze = syscache_seams::pg_type_typanalyze::call(atttypid)?;
+    let ty = syscache_seams::lookup_pg_type_shape::call(atttypid)?
         .expect("attribute type row");
 
     let mut stats = VacAttrStats {
         tupattnum: attnum,
         attstattarget,
-        attrtypid: attr.atttypid,
-        attrcollid: attr.attcollation,
+        attrtypid: atttypid,
+        attrcollid: attcollid,
         typlen: ty.typlen,
         typbyval: ty.typbyval,
         typalign: ty.typalign as u8,
@@ -361,7 +626,7 @@ fn examine_attribute<'mcx>(
             PgVec::new_in(mcx),
         ],
         stavalues_set: [false; STATISTIC_NUM_SLOTS],
-        statypid: [attr.atttypid; STATISTIC_NUM_SLOTS],
+        statypid: [atttypid; STATISTIC_NUM_SLOTS],
         statyplen: [ty.typlen; STATISTIC_NUM_SLOTS],
         statypbyval: [ty.typbyval; STATISTIC_NUM_SLOTS],
         statypalign: [ty.typalign as u8; STATISTIC_NUM_SLOTS],
@@ -557,8 +822,7 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, d: Datum, typbyval: bool, typlen: i16) ->
 
 fn compute_trivial_stats(
     stats: &mut VacAttrStats<'_>,
-    tupdesc: &TupleDescData<'_>,
-    rows: &[HeapTupleData<'_>],
+    src: &FetchSource<'_, '_>,
     samplerows: i32,
 ) -> PgResult<()> {
     let is_varlena = !stats.typbyval && stats.typlen == -1;
@@ -566,8 +830,8 @@ fn compute_trivial_stats(
     let mut null_cnt = 0i32;
     let mut nonnull_cnt = 0i32;
     let mut total_width = 0.0f64;
-    for row in &rows[..samplerows as usize] {
-        let (value, isnull) = fetch_attr(row, stats.tupattnum, tupdesc);
+    for rowno in 0..samplerows as usize {
+        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
             continue;
@@ -602,12 +866,37 @@ struct ScalarMCVItem {
     count: i32,
 }
 
+// C's fetchfunc pair (std_fetch_func / ind_fetch_func).
+pub(crate) enum FetchSource<'a, 'd> {
+    Heap {
+        tupdesc: &'a TupleDescData<'d>,
+        rows: &'a [HeapTupleData<'d>],
+    },
+    Expr {
+        vals: &'a [Datum],
+        nulls: &'a [bool],
+        stride: usize,
+        off: usize,
+    },
+}
+
+impl FetchSource<'_, '_> {
+    pub(crate) fn fetch(&self, rowno: usize, attnum: i32) -> (Datum, bool) {
+        match self {
+            FetchSource::Heap { tupdesc, rows } => fetch_attr(&rows[rowno], attnum, tupdesc),
+            FetchSource::Expr { vals, nulls, stride, off } => {
+                let i = rowno * stride + off;
+                (vals[i], nulls[i])
+            }
+        }
+    }
+}
+
 fn compute_scalar_stats<'mcx>(
     anl_mcx: Mcx<'mcx>,
     col_mcx: Mcx<'_>,
     stats: &mut VacAttrStats<'mcx>,
-    tupdesc: &TupleDescData<'_>,
-    rows: &[HeapTupleData<'_>],
+    src: &FetchSource<'_, '_>,
     samplerows: i32,
     totalrows: f64,
 ) -> PgResult<()> {
@@ -621,8 +910,8 @@ fn compute_scalar_stats<'mcx>(
     let num_bins = stats.attstattarget;
 
     let mut values: PgVec<'_, (Datum, i32)> = mcx::vec_with_capacity_in(col_mcx, samplerows as usize)?;
-    for row in &rows[..samplerows as usize] {
-        let (value, isnull) = fetch_attr(row, stats.tupattnum, tupdesc);
+    for rowno in 0..samplerows as usize {
+        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
             continue;
@@ -646,9 +935,11 @@ fn compute_scalar_stats<'mcx>(
     if values_cnt > 0 {
         let entry = typcache::lookup_type_cache(stats.attrtypid, typcache::TYPECACHE_CMP_PROC_FINFO)?;
         let collation = stats.attrcollid;
+        // Armed with col_mcx: packed by-ref args (short numerics) expand there
+        // and die at the per-column reset — C's col_context cadence.
         let cmp = |a: Datum, b: Datum| -> core::cmp::Ordering {
             let mut finfo = entry.cmp_proc_finfo();
-            let r = types_fmgr::function_call2_coll(&mut finfo, collation, a, b)
+            let r = types_fmgr::function_call2_coll_in(&mut finfo, collation, col_mcx, a, b)
                 .unwrap_or_else(|e| panic!("compute_scalar_stats: comparison failed: {e:?}"))
                 .as_i32();
             r.cmp(&0)
@@ -1117,4 +1408,5 @@ pub fn init_seams() {
         get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
         set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
     });
+    commands_analyze_seams::analyze_rel::set(analyze_rel_seam);
 }

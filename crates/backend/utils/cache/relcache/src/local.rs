@@ -104,7 +104,7 @@ pub fn RelationBuildLocalRelation(
         relkind,
         relhassubclass: false,
         relrowsecurity: false,
-        relispopulated: true,
+        relispopulated: relkind != RELKIND_MATVIEW,
         // IsCatalogNamespace || IsToastNamespace (catalog.c): PG_CATALOG(11)/pg_toast(99).
         relreplident: if !(relnamespace == 11 || relnamespace == 99)
             && matches!(
@@ -148,7 +148,7 @@ pub fn RelationBuildLocalRelation(
         rd_supportinfo: core::cell::RefCell::new(Vec::new()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

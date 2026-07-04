@@ -161,9 +161,12 @@ fn install_stub_seams() {
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
-    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
     freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));
@@ -336,7 +339,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -433,7 +436,7 @@ fn index_rel<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     let rel = Relation::open(data, Some(noop_close));
     rel.rd_supportinfo
@@ -814,7 +817,7 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         let mut tup =
             heaptuple::heap_form_tuple(mcx, &tupdesc, &[datum::Datum::from_i32(val)], &[false])
                 .unwrap();
-        heapam::heap_insert(r, tup.as_tuple_mut(), cid, 0).unwrap();
+        heapam::heap_insert(r, tup.as_tuple_mut(), cid, 0, None).unwrap();
         tup.as_tuple().t_self
     };
     let insert = |val: i32, cid: u32| insert_into(&rel, val, cid);
@@ -872,7 +875,7 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         };
         for v in 1u8..=4 {
             let mut tup = wide_tuple(v);
-            heapam::heap_insert(&rel5, &mut tup, 0, 0).unwrap();
+            heapam::heap_insert(&rel5, &mut tup, 0, 0, None).unwrap();
             assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
         }
         let mut lockmode = tableam_vocab::LockTupleMode::LockTupleNoKeyExclusive;

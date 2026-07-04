@@ -14,6 +14,7 @@ pub fn init_all() {
     commands_analyze::init_seams();
     commands_tablespace::init_seams();
     sequence::init_seams();
+    extension::init_seams();
     clog::init_seams();
     multixact::init_seams();
     rmgr::init_seams();
@@ -26,8 +27,11 @@ pub fn init_all() {
     xlogreader::init_seams();
     xlogrecovery::init_seams();
     xlogutils::init_seams();
+    twophase::init_seams();
     twophase_config::init_seams();
     aclchk::init_seams();
+    be_fsstubs::init_seams();
+    large_object::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
@@ -57,6 +61,7 @@ pub fn init_all() {
     nodenestloop::init_seams();
     nodemergejoin::init_seams();
     nodematerial::init_seams();
+    nodememoize::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
     be_secure::init_seams();
@@ -90,6 +95,8 @@ pub fn init_all() {
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
+    rewrite_define::init_seams();
+    opclasscmds::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
@@ -125,6 +132,8 @@ pub fn init_all() {
     postgres::init_seams();
     pquery::init_seams();
     explain::init_seams();
+    commands_createas::init_seams();
+    commands_matview::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
     commands_async::init_seams();
@@ -145,6 +154,7 @@ pub fn init_all() {
     lsyscache::init_seams();
     plancache::init_seams();
     planner::init_seams();
+    costsize::init_seams();
     relcache::init_seams();
     relcache_build::init_seams();
     relmapper::init_seams();
@@ -154,10 +164,14 @@ pub fn init_all() {
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
+    fmgr_core::register_late_builtins(opclasscmds::builtins::OPCLASS_BUILTINS);
+    operatorcmds::init_seams();
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
+    fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
     sql_functions::init_seams();
+    plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);

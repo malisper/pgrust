@@ -5,16 +5,21 @@
 
 #![allow(non_snake_case)]
 
+use core::mem::MaybeUninit;
+
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use ::heapam::{heap_fetch, heap_get_latest_tid, heap_hot_search_buffer, HeapScanDescData};
-use ::mcx::Mcx;
+use ::mcx::{Allocator, Mcx, PgBox};
 use ::tableam_vocab::Snapshot;
+use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
 use ::types_slot::SlotData;
 use ::types_snapshot::{IsMVCCSnapshot, SnapshotData};
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use ::types_tuple::{
-    HeapTupleData, ItemPointerData, ItemPointerGetBlockNumber, ItemPointerIsValid,
+    HeapTupleData, ItemPointerData, ItemPointerGetBlockNumber, ItemPointerGetBlockNumberNoCheck,
+    ItemPointerGetOffsetNumber, ItemPointerGetOffsetNumberNoCheck, ItemPointerIsValid,
 };
 
 #[cfg(test)]
@@ -39,18 +44,66 @@ fn snapshot_any_unported(what: &'static str) -> ! {
 pub struct IndexFetchHeapData<'mcx> {
     pub xs_rel: Relation<'mcx>,
     pub xs_cbuf: Option<BufferPin>,
+    pub xs_batch: Option<PgBox<'mcx, IndexFetchBatch>>,
+}
+
+#[derive(Clone, Copy)]
+struct BatchEntry {
+    index_off: OffsetNumber,
+    resolved_off: OffsetNumber,
+    found: bool,
+    all_dead: bool,
+}
+
+// C divergence (upstream-unshipped heap-batch lever): one LockBuffer + one
+// visibility pass per same-page TID run. MVCC-only — those verdicts are
+// fill-time-independent; consume order must match fill order or the run dies.
+pub struct IndexFetchBatch {
+    block: BlockNumber,
+    n: u16,
+    cursor: u16,
+    entries: [MaybeUninit<BatchEntry>; MaxHeapTuplesPerPage],
+}
+
+const _: () = assert!(!core::mem::needs_drop::<IndexFetchBatch>());
+
+pub const INDEX_FETCH_BATCH_MAX: usize = MaxHeapTuplesPerPage;
+
+pub enum BatchFetch {
+    Miss,
+    NotVisible { all_dead: bool },
+    Stored,
+}
+
+impl IndexFetchBatch {
+    fn alloc_in(mcx: Mcx<'_>) -> PgResult<PgBox<'_, Self>> {
+        let layout = core::alloc::Layout::new::<Self>();
+        let ptr = Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+        let p = ptr.as_ptr() as *mut Self;
+        // SAFETY: fresh allocation of `layout`; entries stay uninit until fill.
+        unsafe {
+            (&raw mut (*p).block).write(InvalidBlockNumber);
+            (&raw mut (*p).n).write(0);
+            (&raw mut (*p).cursor).write(0);
+            Ok(PgBox::from_raw_in(p, mcx))
+        }
+    }
 }
 
 pub fn heapam_index_fetch_begin<'mcx>(rel: &Relation<'mcx>) -> IndexFetchHeapData<'mcx> {
     IndexFetchHeapData {
         xs_rel: rel.alias(),
         xs_cbuf: None,
+        xs_batch: None,
     }
 }
 
 pub fn heapam_index_fetch_reset(hscan: &mut IndexFetchHeapData<'_>) {
     if let Some(pin) = hscan.xs_cbuf.take() {
         pin.release();
+    }
+    if let Some(batch) = hscan.xs_batch.as_mut() {
+        batch.block = InvalidBlockNumber;
     }
 }
 
@@ -146,6 +199,124 @@ pub fn heapam_index_fetch_tuple<'mcx>(
             Ok(false)
         }
     }
+}
+
+/// One share-locked pass over `first_tid` + same-block followers; every
+/// per-TID check still runs, under the one lock.
+pub fn heapam_index_fetch_batch_fill<'mcx>(
+    mcx: Mcx<'mcx>,
+    hscan: &mut IndexFetchHeapData<'mcx>,
+    first_tid: &ItemPointerData,
+    rest: &[ItemPointerData],
+    snapshot: &Snapshot<'mcx>,
+) -> PgResult<()> {
+    let snap: &SnapshotData<'_> = match snapshot.as_deref() {
+        Some(s) => s,
+        None => snapshot_any_unported("index fetch batch"),
+    };
+    debug_assert!(IsMVCCSnapshot(snap));
+    debug_assert!(rest.len() < MaxHeapTuplesPerPage);
+
+    let blkno = ItemPointerGetBlockNumber(first_tid);
+    let same = hscan
+        .xs_cbuf
+        .as_ref()
+        .is_some_and(|pin| pin.block_number() == blkno);
+    if !same {
+        if let Some(prev) = hscan.xs_cbuf.take() {
+            prev.release();
+        }
+        let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(&hscan.xs_rel, blkno)?)
+            .expect("ReadBuffer returned InvalidBuffer");
+        pruneheap_seams::heap_page_prune_opt::call(&hscan.xs_rel, pin.buffer())?;
+        hscan.xs_cbuf = Some(pin);
+    }
+    if hscan.xs_batch.is_none() {
+        hscan.xs_batch = Some(IndexFetchBatch::alloc_in(mcx)?);
+    }
+
+    let IndexFetchHeapData {
+        xs_rel,
+        xs_cbuf,
+        xs_batch,
+    } = hscan;
+    let pin = xs_cbuf.as_ref().expect("pin established above");
+    let batch = xs_batch.as_mut().expect("batch allocated above");
+    batch.block = InvalidBlockNumber;
+
+    let lock = pin.lock_share()?;
+    let mut n = 0usize;
+    for tid in core::iter::once(first_tid).chain(rest.iter()) {
+        debug_assert!(ItemPointerGetBlockNumber(tid) == blkno);
+        let res = heap_hot_search_buffer(*tid, xs_rel, pin, snap, true, true)?;
+        batch.entries[n].write(BatchEntry {
+            index_off: ItemPointerGetOffsetNumber(tid),
+            resolved_off: ItemPointerGetOffsetNumberNoCheck(&res.tid),
+            found: res.found,
+            all_dead: res.all_dead.unwrap_or(false),
+        });
+        n += 1;
+    }
+    drop(lock);
+
+    batch.block = blkno;
+    batch.n = n as u16;
+    batch.cursor = 0;
+    Ok(())
+}
+
+/// Serve `tid` from the batch; a hit strictly means same block, next entry
+/// in fill order. `Miss` invalidates the run.
+pub fn heapam_index_fetch_batch_next<'mcx>(
+    mcx: Mcx<'mcx>,
+    hscan: &mut IndexFetchHeapData<'mcx>,
+    tid: &mut ItemPointerData,
+    slot: &mut SlotData<'mcx>,
+) -> BatchFetch {
+    let Some(batch) = hscan.xs_batch.as_mut() else {
+        return BatchFetch::Miss;
+    };
+    if batch.block == InvalidBlockNumber {
+        return BatchFetch::Miss;
+    }
+    if batch.cursor >= batch.n || batch.block != ItemPointerGetBlockNumberNoCheck(tid) {
+        batch.block = InvalidBlockNumber;
+        return BatchFetch::Miss;
+    }
+    // SAFETY: cursor < n: written by the fill pass.
+    let e = unsafe { batch.entries[batch.cursor as usize].assume_init() };
+    if e.index_off != ItemPointerGetOffsetNumberNoCheck(tid) {
+        batch.block = InvalidBlockNumber;
+        return BatchFetch::Miss;
+    }
+    batch.cursor += 1;
+    let blk = batch.block;
+
+    if !e.found {
+        return BatchFetch::NotVisible {
+            all_dead: e.all_dead,
+        };
+    }
+
+    let pin = hscan
+        .xs_cbuf
+        .as_ref()
+        .expect("batched index fetch without a pinned buffer");
+    debug_assert!(pin.block_number() == blk);
+    let page = pin.page();
+    let lp = page.item_id(e.resolved_off);
+    debug_assert!(lp.is_normal());
+    // SAFETY: normal at the locked fill pass and pinned since — line pointers
+    // only move under a cleanup lock, which the pin blocks; C likewise stores
+    // the slot after LockBuffer(UNLOCK).
+    let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
+    let self_tid = ItemPointerData::new(blk, e.resolved_off);
+    *tid = self_tid;
+    slot.base_mut().tts_tableOid = hscan.xs_rel.rd_id;
+    // SAFETY: image on the page pinned by xs_cbuf; the slot takes its own pin.
+    let tuple = unsafe { HeapTupleData::from_raw_parts(ptr, len, self_tid, hscan.xs_rel.rd_id) };
+    exectuples::exec_store_buffer_heap_tuple(slot, mcx, tuple, pin.buffer());
+    BatchFetch::Stored
 }
 
 pub fn heapam_fetch_row_version<'mcx>(

@@ -1,14 +1,13 @@
 //! joinpath.c nestloop + mergejoin + hashjoin arms (incl. SEMI/ANTI and
 //! unique-ified semijoin inputs) with their pathnode.c/costsize.c join-cost
-//! slices. Lateral-driven parameterized inners are live; Memoize is unported
-//! (enable_memoize=off is the parity envelope).
+//! slices. Lateral-driven parameterized inners and Memoize are live.
 
 use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::NodeTag;
 use types_pathnodes::{
-    HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path, PathId,
-    PathKey, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
+    HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path,
+    PathId, PathKey, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
 };
 
 use crate::gucs;
@@ -18,53 +17,21 @@ use crate::pathkeys::{
     pathkeys_count_contained_in, select_outer_pathkeys_for_merge,
     trim_mergeclauses_for_inner_pathkeys, update_mergeclause_eclasses, PathKeysComparison,
 };
-use crate::pathnode::{compare_path_costs, tag16, CostSelector};
+use crate::costsize::{
+    initial_cost_hashjoin, initial_cost_mergejoin, initial_cost_nestloop, JoinCostWorkspace,
+};
+use crate::pathnode::{
+    add_path_precheck, compare_path_costs, create_hashjoin_path, create_material_path,
+    create_memoize_path, create_mergejoin_path, create_nestloop_path, tag16, CostSelector,
+};
+pub use types_pathnodes::{is_outer_join, SemiAntiJoinFactors};
 use crate::run::PlannerRun;
 
-#[derive(Default)]
-struct JoinCostWorkspace {
-    startup_cost: f64,
-    total_cost: f64,
-    run_cost: f64,
-    disabled_nodes: i32,
-    // hashjoin-only (ExecChooseHashTableSize outputs)
-    numbuckets: i32,
-    numbatches: i32,
-    inner_rows_total: f64,
-    // mergejoin-only (initial_cost_mergejoin outputs)
-    inner_run_cost: f64,
-    outer_rows: f64,
-    inner_rows: f64,
-    outer_skip_rows: f64,
-    inner_skip_rows: f64,
-    // nestloop SEMI/ANTI/inner_unique early-stop private data
-    inner_rescan_run_cost: f64,
-}
-
-// SemiAntiJoinFactors (pathnodes.h).
-#[derive(Clone, Copy, Default)]
-pub struct SemiAntiJoinFactors {
-    pub outer_match_frac: f64,
-    pub match_count: f64,
-}
-
-// IS_OUTER_JOIN (nodes.h) over pathnodes' u32 JoinType.
 // PATH_PARAM_BY_REL (joinpath.c); top_parent legs dead (no appendrels).
 fn path_param_by_rel(run: &PlannerRun<'_>, path: PathId, rel: RelId) -> bool {
     crate::relnode::relids_overlap(
         crate::pathnode::path_req_outer(run.root.path(path).base()),
         &run.root.rel(rel).relids,
-    )
-}
-
-pub fn is_outer_join(jointype: u32) -> bool {
-    matches!(
-        jointype,
-        JOIN_LEFT
-            | types_pathnodes::JOIN_FULL
-            | JOIN_RIGHT
-            | types_pathnodes::JOIN_ANTI
-            | types_pathnodes::JOIN_RIGHT_ANTI
     )
 }
 
@@ -647,14 +614,24 @@ fn match_unsorted_outer<'mcx>(
             let ict = inner_cheapest_total.expect("checked above");
             try_nestloop_path(run, joinrel, outerpath, ict, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
         } else if nestjoin_ok {
-            // get_memoize_path: Memoize is unported; enable_memoize=off is
-            // the documented parity envelope for lateral/param plans.
             let inner_candidates = crate::relnode::pgvec_clone_shallow(
                 run.mcx,
                 &run.root.rel(innerrel).cheapest_parameterized_paths,
             );
             for &innerpath in inner_candidates.iter() {
                 try_nestloop_path(run, joinrel, outerpath, innerpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
+                if let Some(mpath) = get_memoize_path(
+                    run,
+                    innerrel,
+                    outerrel,
+                    innerpath,
+                    outerpath,
+                    jointype,
+                    inner_unique,
+                    restrictlist,
+                )? {
+                    try_nestloop_path(run, joinrel, outerpath, mpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
+                }
             }
             if let Some(mp) = matpath {
                 try_nestloop_path(run, joinrel, outerpath, mp, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist, param_source_rels, semifactors)?;
@@ -693,6 +670,188 @@ fn exec_materializes_output(pathtype: u16) -> bool {
         || pathtype == tag16(NodeTag::T_CteScan)
         || pathtype == tag16(NodeTag::T_NamedTuplestoreScan)
         || pathtype == tag16(NodeTag::T_WorkTableScan)
+}
+
+// extract_lateral_vars_from_PHVs (joinpath.c): placeholder_list is empty
+// tree-wide (loud at creation), so the PHV crawl reduces to its guards.
+fn extract_lateral_vars_from_phvs(run: &PlannerRun<'_>) {
+    debug_assert!(run.root.placeholder_list.is_empty());
+}
+
+// paraminfo_get_equal_hashops (joinpath.c). None = not hashable.
+#[allow(clippy::type_complexity)]
+fn paraminfo_get_equal_hashops<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    inner_path: PathId,
+    outerrel: RelId,
+    innerrel: RelId,
+) -> PgResult<Option<(PgVec<'mcx, types_pathnodes::NodeId>, PgVec<'mcx, u32>, bool)>> {
+    let mcx = run.mcx;
+    let mut param_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut operators: PgVec<'mcx, u32> = PgVec::new_in(mcx);
+    let mut binary_mode = false;
+
+    let ppi_clauses: PgVec<'mcx, RinfoId> =
+        match &run.root.path(inner_path).base().param_info {
+            Some(pi) => crate::relnode::pgvec_clone_shallow(mcx, &pi.ppi_clauses),
+            None => PgVec::new_in(mcx),
+        };
+    for &rid in ppi_clauses.iter() {
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        let Some(opexpr) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+            return Ok(None);
+        };
+        if !clause_sides_match_join(run, rid, outerrel, innerrel) {
+            return Ok(None);
+        }
+        let ri = run.root.rinfo(rid);
+        let (expr, hasheqoperator) = if ri.outer_is_left {
+            (opexpr.args.nth(0), ri.left_hasheqoperator)
+        } else {
+            (opexpr.args.nth(1), ri.right_hasheqoperator)
+        };
+        if hasheqoperator == 0 {
+            return Ok(None);
+        }
+        if !param_exprs.iter().any(|&e| types_nodes::equal(*run.root.expr_node(e), expr)) {
+            operators.push(hasheqoperator);
+            param_exprs.push(run.intern_expr(expr));
+        }
+        // A non-hashable join operator may distinguish values the hash
+        // equality operator cannot (-0.0 vs +0.0): compare bit by bit.
+        if run.root.rinfo(rid).hashjoinoperator == 0 {
+            binary_mode = true;
+        }
+    }
+
+    let lateral_vars =
+        crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(innerrel).lateral_vars);
+    for &id in lateral_vars.iter() {
+        let expr = *run.root.expr_node(id);
+        if clauses::contain_volatile_functions(expr)? {
+            return Ok(None);
+        }
+        let typ = crate::costsize::expr_type_typmod(expr).0;
+        let entry = typcache::lookup_type_cache(
+            typ,
+            typcache::TYPECACHE_HASH_PROC | typcache::TYPECACHE_EQ_OPR,
+        )?;
+        if entry.hash_proc() == 0 || entry.eq_opr() == 0 {
+            return Ok(None);
+        }
+        if !param_exprs.iter().any(|&e| types_nodes::equal(*run.root.expr_node(e), expr)) {
+            operators.push(entry.eq_opr());
+            param_exprs.push(id);
+        }
+        // Lateral Vars flow into opaque expressions: binary mode always.
+        binary_mode = true;
+    }
+    Ok(Some((param_exprs, operators, binary_mode)))
+}
+
+// get_memoize_path (joinpath.c).
+#[allow(clippy::too_many_arguments)]
+fn get_memoize_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    innerrel: RelId,
+    outerrel: RelId,
+    inner_path: PathId,
+    outer_path: PathId,
+    jointype: u32,
+    inner_unique: bool,
+    restrictlist: &[RinfoId],
+) -> PgResult<Option<PathId>> {
+    use types_pathnodes::{JOIN_ANTI, JOIN_SEMI};
+    if !gucs::enable_memoize() {
+        return Ok(None);
+    }
+    // A single expected outer row can never repeat a parameter value.
+    if run.root.rel(run.root.path(outer_path).base().parent).rows < 2.0 {
+        return Ok(None);
+    }
+    extract_lateral_vars_from_phvs(run);
+    let has_ppi_clauses = run
+        .root
+        .path(inner_path)
+        .base()
+        .param_info
+        .as_ref()
+        .is_some_and(|pi| !pi.ppi_clauses.is_empty());
+    if !has_ppi_clauses && run.root.rel(innerrel).lateral_vars.is_empty() {
+        return Ok(None);
+    }
+    // Non-unique SEMI/ANTI nestloops don't scan the inner to completion, so
+    // cache entries could never be marked complete.
+    if !inner_unique && (jointype == JOIN_SEMI || jointype == JOIN_ANTI) {
+        return Ok(None);
+    }
+    // Unique joins skip to the next outer tuple on the first match; singlerow
+    // caching only works when the whole join condition is parameterized.
+    if inner_unique {
+        let serials = {
+            let Some(pi) = &run.root.path(inner_path).base().param_info else {
+                return Ok(None);
+            };
+            crate::relnode::relids_copy(run.mcx, &pi.ppi_serials)
+        };
+        for &rid in restrictlist {
+            if !crate::relnode::relids_is_member(run.root.rinfo(rid).rinfo_serial, &serials) {
+                return Ok(None);
+            }
+        }
+    }
+    // A cache hit would skip volatile-function calls the query expects.
+    {
+        let exprs = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel_reltarget(innerrel).exprs,
+        );
+        for &e in exprs.iter() {
+            if clauses::contain_volatile_functions(*run.root.expr_node(e))? {
+                return Ok(None);
+            }
+        }
+        let base_rinfos = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel(innerrel).baserestrictinfo,
+        );
+        for &rid in base_rinfos.iter() {
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            if clauses::contain_volatile_functions(clause)? {
+                return Ok(None);
+            }
+        }
+        let ppi_clauses: PgVec<'mcx, RinfoId> =
+            match &run.root.path(inner_path).base().param_info {
+                Some(pi) => crate::relnode::pgvec_clone_shallow(run.mcx, &pi.ppi_clauses),
+                None => PgVec::new_in(run.mcx),
+            };
+        for &rid in ppi_clauses.iter() {
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            if clauses::contain_volatile_functions(clause)? {
+                return Ok(None);
+            }
+        }
+    }
+    debug_assert!(crate::relnode::relids_is_empty(
+        &run.root.rel(outerrel).top_parent_relids
+    ));
+    let Some((param_exprs, hash_operators, binary_mode)) =
+        paraminfo_get_equal_hashops(run, inner_path, outerrel, innerrel)?
+    else {
+        return Ok(None);
+    };
+    let calls = run.root.path(outer_path).base().rows;
+    Ok(Some(create_memoize_path(
+        run,
+        innerrel,
+        inner_path,
+        param_exprs,
+        hash_operators,
+        inner_unique,
+        binary_mode,
+        calls,
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -759,7 +918,7 @@ fn try_nestloop_path<'mcx>(
         }
     }
 
-    let workspace = initial_cost_nestloop(run, jointype, inner_unique, outer_path, inner_path);
+    let workspace = initial_cost_nestloop(run, jointype, inner_unique, outer_path, inner_path)?;
 
     if add_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.startup_cost, workspace.total_cost, pathkeys, &required_outer) {
         let path = create_nestloop_path(
@@ -851,339 +1010,6 @@ fn try_mergejoin_path<'mcx>(
         crate::pathnode::add_path(run, joinrel, path);
     }
     Ok(())
-}
-
-// add_path_precheck (pathnode.c).
-#[allow(clippy::too_many_arguments)]
-fn add_path_precheck(
-    run: &PlannerRun<'_>,
-    joinrel: RelId,
-    disabled_nodes: i32,
-    startup_cost: f64,
-    total_cost: f64,
-    pathkeys: &[PathKey],
-    required_outer: &Relids<'_>,
-) -> bool {
-    const STD_FUZZ_FACTOR: f64 = 1.01;
-    let consider_startup = if crate::relnode::relids_is_empty(required_outer) {
-        run.root.rel(joinrel).consider_startup
-    } else {
-        run.root.rel(joinrel).consider_param_startup
-    };
-    for &old_id in run.root.rel(joinrel).pathlist.iter() {
-        let old = run.root.path(old_id).base();
-        if old.disabled_nodes != disabled_nodes {
-            if disabled_nodes < old.disabled_nodes {
-                break;
-            }
-        } else if total_cost <= old.total_cost * STD_FUZZ_FACTOR {
-            break;
-        }
-        if startup_cost > old.startup_cost * STD_FUZZ_FACTOR || !consider_startup {
-            let keyscmp = compare_pathkeys(pathkeys, &old.pathkeys);
-            if (keyscmp == PathKeysComparison::Equal || keyscmp == PathKeysComparison::Better2)
-                && crate::relnode::relids_equal(
-                    required_outer,
-                    crate::pathnode::path_req_outer(old),
-                )
-            {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathId) -> PathId {
-    let sub = run.root.path(subpath).base();
-    debug_assert!(sub.parent == rel);
-    let (sub_disabled, sub_startup, sub_total, sub_rows) =
-        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
-    let sub_parallel_safe = sub.parallel_safe;
-    let sub_parallel_workers = sub.parallel_workers;
-    debug_assert!(sub.pathkeys.is_empty() && sub.param_info.is_none());
-    let width = run.root.path_pathtarget(subpath).width;
-
-    let startup_cost = sub_startup;
-    let mut run_cost = sub_total - sub_startup;
-    run_cost += 2.0 * gucs::cpu_operator_cost() * sub_rows;
-    let nbytes = crate::costsize::relation_byte_size(sub_rows, width);
-    let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
-    if nbytes > work_mem_bytes {
-        let npages = (nbytes / 8192.0).ceil();
-        run_cost += gucs::seq_page_cost() * npages;
-    }
-
-    let path = Path {
-        type_: tag16(NodeTag::T_MaterialPath),
-        pathtype: tag16(NodeTag::T_Material),
-        parent: rel,
-        pathtarget_id: run.root.rel(rel).pathtarget_id,
-        param_info: None,
-        parallel_aware: false,
-        parallel_safe: run.root.rel(rel).consider_parallel && sub_parallel_safe,
-        parallel_workers: sub_parallel_workers,
-        rows: sub_rows,
-        disabled_nodes: sub_disabled + if gucs::enable_material() { 0 } else { 1 },
-        startup_cost,
-        total_cost: startup_cost + run_cost,
-        pathkeys: PgVec::new_in(run.mcx),
-    };
-    run.root
-        .alloc_path(types_pathnodes::PathNode::MaterialPath(MaterialPath {
-            path,
-            subpath: Some(subpath),
-        }))
-}
-
-fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
-    let p = run.root.path(path).base();
-    let pathtype = p.pathtype;
-    if pathtype == tag16(NodeTag::T_Material)
-        || pathtype == tag16(NodeTag::T_Sort)
-        || pathtype == tag16(NodeTag::T_CteScan)
-        || pathtype == tag16(NodeTag::T_WorkTableScan)
-    {
-        // C charges Material/Sort rescans cpu_operator_cost per row and
-        // CteScan/WorkTableScan rescans cpu_tuple_cost per row.
-        let per_row = if pathtype == tag16(NodeTag::T_CteScan)
-            || pathtype == tag16(NodeTag::T_WorkTableScan)
-        {
-            gucs::cpu_tuple_cost()
-        } else {
-            gucs::cpu_operator_cost()
-        };
-        let mut run_cost = per_row * p.rows;
-        let width = run.root.path_pathtarget(path).width;
-        let nbytes = crate::costsize::relation_byte_size(p.rows, width);
-        let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
-        if nbytes > work_mem_bytes {
-            let npages = (nbytes / 8192.0).ceil();
-            run_cost += gucs::seq_page_cost() * npages;
-        }
-        (0.0, run_cost)
-    } else if pathtype == tag16(NodeTag::T_FunctionScan) {
-        // nodeFunctionscan materializes into a tuplestore: function eval is
-        // all startup cost, rescans pay only the per-row freight.
-        (0.0, p.total_cost - p.startup_cost)
-    } else if pathtype == tag16(NodeTag::T_HashJoin) || pathtype == tag16(NodeTag::T_Memoize) {
-        panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");
-    } else {
-        (p.startup_cost, p.total_cost)
-    }
-}
-
-fn initial_cost_nestloop(
-    run: &PlannerRun<'_>,
-    jointype: u32,
-    inner_unique: bool,
-    outer_path: PathId,
-    inner_path: PathId,
-) -> JoinCostWorkspace {
-    let outer = run.root.path(outer_path).base();
-    let inner = run.root.path(inner_path).base();
-    let mut disabled_nodes = if gucs::enable_nestloop() { 0 } else { 1 };
-    disabled_nodes += inner.disabled_nodes + outer.disabled_nodes;
-
-    let (inner_rescan_start, inner_rescan_total) = cost_rescan(run, inner_path);
-
-    let mut startup_cost = 0.0;
-    let mut run_cost = 0.0;
-    let outer_path_rows = outer.rows;
-    startup_cost += outer.startup_cost + inner.startup_cost;
-    run_cost += outer.total_cost - outer.startup_cost;
-    if outer_path_rows > 1.0 {
-        run_cost += (outer_path_rows - 1.0) * inner_rescan_start;
-    }
-    let inner_run_cost = inner.total_cost - inner.startup_cost;
-    let inner_rescan_run_cost = inner_rescan_total - inner_rescan_start;
-
-    let early_stop = matches!(jointype, types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI)
-        || inner_unique;
-    if !early_stop {
-        run_cost += inner_run_cost;
-        if outer_path_rows > 1.0 {
-            run_cost += (outer_path_rows - 1.0) * inner_rescan_run_cost;
-        }
-    }
-
-    JoinCostWorkspace {
-        startup_cost,
-        total_cost: startup_cost + run_cost,
-        run_cost,
-        disabled_nodes,
-        numbatches: 1,
-        inner_run_cost: if early_stop { inner_run_cost } else { 0.0 },
-        inner_rescan_run_cost: if early_stop { inner_rescan_run_cost } else { 0.0 },
-        ..Default::default()
-    }
-}
-
-fn final_cost_nestloop(
-    run: &mut PlannerRun<'_>,
-    path: &mut NestPath<'_>,
-    workspace: &JoinCostWorkspace,
-    semifactors: Option<SemiAntiJoinFactors>,
-) -> PgResult<()> {
-    let outer = run.root.path(path.jpath.outerjoinpath.unwrap()).base();
-    let inner = run.root.path(path.jpath.innerjoinpath.unwrap()).base();
-    let outer_path_rows = if outer.rows <= 0.0 { 1.0 } else { outer.rows };
-    let inner_path_rows = if inner.rows <= 0.0 { 1.0 } else { inner.rows };
-    let mut startup_cost = workspace.startup_cost;
-    let mut run_cost = workspace.run_cost;
-
-    path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
-    debug_assert!(path.jpath.path.parallel_workers == 0);
-
-    let early_stop = matches!(
-        path.jpath.jointype,
-        types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
-    ) || path.jpath.inner_unique;
-    let ntuples;
-    if early_stop {
-        let sf = semifactors.expect("SEMI/ANTI/inner_unique costing has semifactors");
-        let inner_run_cost = workspace.inner_run_cost;
-        let inner_rescan_run_cost = workspace.inner_rescan_run_cost;
-        let mut outer_matched_rows =
-            (outer_path_rows * sf.outer_match_frac).round_ties_even();
-        let mut outer_unmatched_rows = outer_path_rows - outer_matched_rows;
-        let inner_scan_frac = 2.0 / (sf.match_count + 1.0);
-
-        let mut nt = outer_matched_rows * inner_path_rows * inner_scan_frac;
-        // has_indexed_join_quals is constantly false here: it requires a
-        // parameterized inner path, and the param-path lane is loud upstream.
-        nt += outer_unmatched_rows * inner_path_rows;
-        run_cost += inner_run_cost;
-        if outer_unmatched_rows >= 1.0 {
-            outer_unmatched_rows -= 1.0;
-        } else {
-            outer_matched_rows -= 1.0;
-        }
-        if outer_matched_rows > 0.0 {
-            run_cost += outer_matched_rows * inner_rescan_run_cost * inner_scan_frac;
-        }
-        if outer_unmatched_rows > 0.0 {
-            run_cost += outer_unmatched_rows * inner_rescan_run_cost;
-        }
-        ntuples = nt;
-    } else {
-        ntuples = outer_path_rows * inner_path_rows;
-    }
-
-    let quals = crate::relnode::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
-    let restrict_qual_cost = crate::costsize::cost_qual_eval(run, &quals)?;
-    startup_cost += restrict_qual_cost.startup;
-    let cpu_per_tuple = gucs::cpu_tuple_cost() + restrict_qual_cost.per_tuple;
-    run_cost += cpu_per_tuple * ntuples;
-
-    let target = run.root.pathtarget(path.jpath.path.pathtarget_id.unwrap());
-    startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * path.jpath.path.rows;
-
-    path.jpath.path.startup_cost = startup_cost;
-    path.jpath.path.total_cost = startup_cost + run_cost;
-    Ok(())
-}
-
-// create_nestloop_path (pathnode.c).
-#[allow(clippy::too_many_arguments)]
-fn create_nestloop_path<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    joinrel: RelId,
-    jointype: u32,
-    workspace: &JoinCostWorkspace,
-    inner_unique: bool,
-    outer_path: PathId,
-    inner_path: PathId,
-    pathkeys: &[PathKey],
-    restrict_clauses: &[RinfoId],
-    required_outer: &Relids<'mcx>,
-    semifactors: Option<SemiAntiJoinFactors>,
-) -> PgResult<PathId> {
-    use crate::relnode::{relids_copy, relids_overlap, relids_union};
-    let mcx = run.mcx;
-
-    // Clauses that get enforced at the parameterized inner scan are removed
-    // from the join's own restrict list.
-    let mut restrict_vec: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    restrict_vec.extend(restrict_clauses.iter().copied());
-    let inner_req_outer = relids_copy(
-        mcx,
-        crate::pathnode::path_req_outer(run.root.path(inner_path).base()),
-    );
-    let outer_parent_relids = {
-        let r = run.root.path(outer_path).base().parent;
-        relids_copy(mcx, &run.root.rel(r).relids)
-    };
-    if relids_overlap(&inner_req_outer, &outer_parent_relids) {
-        let inner_parent_relids = {
-            let r = run.root.path(inner_path).base().parent;
-            relids_copy(mcx, &run.root.rel(r).relids)
-        };
-        let inner_and_outer = relids_union(mcx, &inner_parent_relids, &inner_req_outer);
-        let mut jclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-        for &rid in restrict_vec.iter() {
-            if !crate::pathnode::join_clause_is_movable_into(
-                run,
-                rid,
-                &inner_parent_relids,
-                &inner_and_outer,
-            ) {
-                jclauses.push(rid);
-            }
-        }
-        restrict_vec = jclauses;
-    }
-
-    let mut restrict_vec_for_ppi =
-        crate::relnode::pgvec_clone_shallow(mcx, &restrict_vec);
-    let param_info = crate::pathnode::get_joinrel_parampathinfo(
-        run,
-        joinrel,
-        required_outer,
-        &mut restrict_vec_for_ppi,
-    )?;
-    debug_assert!(param_info.is_none() || restrict_vec_for_ppi.len() == restrict_vec.len());
-
-    let outer = run.root.path(outer_path).base();
-    let inner = run.root.path(inner_path).base();
-    let parallel_safe =
-        run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
-    let parallel_workers = outer.parallel_workers;
-
-    let joinrestrictinfo = restrict_vec;
-    let mut pks: PgVec<'mcx, PathKey> = PgVec::new_in(mcx);
-    pks.extend(pathkeys.iter().copied());
-
-    let path = Path {
-        type_: tag16(NodeTag::T_NestPath),
-        pathtype: tag16(NodeTag::T_NestLoop),
-        parent: joinrel,
-        pathtarget_id: run.root.rel(joinrel).pathtarget_id,
-        param_info,
-        parallel_aware: false,
-        parallel_safe,
-        parallel_workers,
-        rows: 0.0,
-        disabled_nodes: 0,
-        startup_cost: 0.0,
-        total_cost: 0.0,
-        pathkeys: pks,
-    };
-    let mut node = NestPath {
-        jpath: JoinPath {
-            path,
-            jointype,
-            inner_unique,
-            outerjoinpath: Some(outer_path),
-            innerjoinpath: Some(inner_path),
-            joinrestrictinfo,
-        },
-    };
-    final_cost_nestloop(run, &mut node, workspace, semifactors)?;
-    Ok(run.root.alloc_path(types_pathnodes::PathNode::NestPath(node)))
 }
 
 // hash_inner_and_outer (joinpath.c), non-parallel arm.
@@ -1373,693 +1199,3 @@ fn try_hashjoin_path<'mcx>(
     Ok(())
 }
 
-fn page_size(tuples: f64, width: i32) -> f64 {
-    (crate::costsize::relation_byte_size(tuples, width) / 8192.0).ceil()
-}
-
-fn initial_cost_hashjoin(
-    run: &PlannerRun<'_>,
-    hashclauses: &[RinfoId],
-    outer_path: PathId,
-    inner_path: PathId,
-) -> JoinCostWorkspace {
-    let (o_rows, o_startup, o_total, o_disabled) = {
-        let o = run.root.path(outer_path).base();
-        (o.rows, o.startup_cost, o.total_cost, o.disabled_nodes)
-    };
-    let (i_rows, i_startup, i_total, i_disabled) = {
-        let i = run.root.path(inner_path).base();
-        (i.rows, i.startup_cost, i.total_cost, i.disabled_nodes)
-    };
-    let _ = i_startup;
-    let mut disabled_nodes = if gucs::enable_hashjoin() { 0 } else { 1 };
-    disabled_nodes += i_disabled + o_disabled;
-
-    let num_hashclauses = hashclauses.len() as f64;
-    let mut startup_cost = o_startup;
-    let mut run_cost = o_total - o_startup;
-    startup_cost += i_total;
-    startup_cost += (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost()) * i_rows;
-    run_cost += gucs::cpu_operator_cost() * num_hashclauses * o_rows;
-
-    let inner_width = run.root.path_pathtarget(inner_path).width;
-    let (numbuckets, numbatches, _skew) =
-        ::nodehash::exec_choose_hash_table_size(i_rows, inner_width, true);
-
-    if numbatches > 1 {
-        let outer_width = run.root.path_pathtarget(outer_path).width;
-        let outerpages = page_size(o_rows, outer_width);
-        let innerpages = page_size(i_rows, inner_width);
-        startup_cost += gucs::seq_page_cost() * innerpages;
-        run_cost += gucs::seq_page_cost() * (innerpages + 2.0 * outerpages);
-    }
-
-    JoinCostWorkspace {
-        startup_cost,
-        total_cost: startup_cost + run_cost,
-        run_cost,
-        disabled_nodes,
-        numbuckets: numbuckets as i32,
-        numbatches,
-        inner_rows_total: i_rows,
-        ..Default::default()
-    }
-}
-
-const DISABLE_COST: f64 = 1.0e10;
-
-fn final_cost_hashjoin(
-    run: &mut PlannerRun<'_>,
-    path: &mut HashPath<'_>,
-    workspace: &JoinCostWorkspace,
-    semifactors: Option<SemiAntiJoinFactors>,
-) -> PgResult<()> {
-    let outer_path = path.jpath.outerjoinpath.unwrap();
-    let inner_path = path.jpath.innerjoinpath.unwrap();
-    let outer_path_rows = run.root.path(outer_path).base().rows;
-    let inner_path_rows = run.root.path(inner_path).base().rows;
-    let inner_width = run.root.path_pathtarget(inner_path).width;
-    let inner_parent = run.root.path(inner_path).base().parent;
-    let inner_is_unique_path = matches!(
-        run.root.path(inner_path),
-        types_pathnodes::PathNode::UniquePath(_)
-    );
-    let outer_is_unique_path = matches!(
-        run.root.path(outer_path),
-        types_pathnodes::PathNode::UniquePath(_)
-    );
-
-    let numbuckets = workspace.numbuckets;
-    let numbatches = workspace.numbatches;
-    let mut startup_cost = workspace.startup_cost;
-    let mut run_cost = workspace.run_cost;
-
-    path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
-    debug_assert!(path.jpath.path.parallel_workers == 0);
-
-    path.num_batches = numbatches;
-    path.inner_rows_total = workspace.inner_rows_total;
-
-    let virtualbuckets = numbuckets as f64 * numbatches as f64;
-
-    // No extended stats on this lane: estimate_multivariate_bucketsize is
-    // the identity (returns every hashclause) and each clause's bucketsize
-    // comes from estimate_hash_bucket_stats. A unique-ified inner is assumed
-    // perfectly hashable (C's UniquePath arm).
-    let mut innerbucketsize = 1.0f64;
-    let mut innermcvfreq = 1.0f64;
-    if inner_is_unique_path {
-        innerbucketsize = 1.0 / virtualbuckets;
-        innermcvfreq = 0.0;
-    }
-    let inner_relids = run.root.rel(inner_parent).relids.clone();
-    let hcls = crate::relnode::pgvec_clone_shallow(run.mcx, &path.path_hashclauses);
-    for &hcl in hcls.iter() {
-        if inner_is_unique_path {
-            break;
-        }
-        let right_is_inner = {
-            let r = run.root.rinfo(hcl);
-            crate::relnode::relids_is_subset(&r.right_relids, &inner_relids)
-        };
-        let (thisbucketsize, thismcvfreq) = if right_is_inner {
-            let cached = run.root.rinfo(hcl).right_bucketsize;
-            if cached < 0.0 {
-                let clause = *run.root.expr_node(run.root.rinfo(hcl).clause);
-                let rightop = clause.as_op_expr().unwrap().args.nth(1);
-                let (mcv, bs) =
-                    crate::selfuncs::estimate_hash_bucket_stats(run, rightop, virtualbuckets)?;
-                let r = run.root.rinfo_mut(hcl);
-                r.right_mcvfreq = mcv;
-                r.right_bucketsize = bs;
-                (bs, mcv)
-            } else {
-                (cached, run.root.rinfo(hcl).right_mcvfreq)
-            }
-        } else {
-            let cached = run.root.rinfo(hcl).left_bucketsize;
-            if cached < 0.0 {
-                let clause = *run.root.expr_node(run.root.rinfo(hcl).clause);
-                let leftop = clause.as_op_expr().unwrap().args.nth(0);
-                let (mcv, bs) =
-                    crate::selfuncs::estimate_hash_bucket_stats(run, leftop, virtualbuckets)?;
-                let r = run.root.rinfo_mut(hcl);
-                r.left_mcvfreq = mcv;
-                r.left_bucketsize = bs;
-                (bs, mcv)
-            } else {
-                (cached, run.root.rinfo(hcl).left_mcvfreq)
-            }
-        };
-        if innerbucketsize > thisbucketsize {
-            innerbucketsize = thisbucketsize;
-        }
-        if innermcvfreq > thismcvfreq {
-            innermcvfreq = thismcvfreq;
-        }
-    }
-
-    if crate::costsize::relation_byte_size(
-        crate::costsize::clamp_row_est(inner_path_rows * innermcvfreq),
-        inner_width,
-    ) > ::nodehash::get_hash_memory_limit() as f64
-    {
-        startup_cost += DISABLE_COST;
-    }
-
-    let hash_qual_cost = crate::costsize::cost_qual_eval(run, &hcls)?;
-    let joinrestrict = crate::relnode::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
-    let qp_qual_cost = crate::costsize::cost_qual_eval(run, &joinrestrict)?;
-    let qp_startup = qp_qual_cost.startup - hash_qual_cost.startup;
-    let qp_per_tuple = qp_qual_cost.per_tuple - hash_qual_cost.per_tuple;
-
-    let early_stop = matches!(
-        path.jpath.jointype,
-        types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
-    ) || path.jpath.inner_unique;
-    let hashjointuples;
-    if early_stop {
-        let sf = semifactors.expect("SEMI/ANTI/inner_unique costing has semifactors");
-        let outer_matched_rows =
-            (outer_path_rows * sf.outer_match_frac).round_ties_even();
-        let inner_scan_frac = 2.0 / (sf.match_count + 1.0);
-
-        startup_cost += hash_qual_cost.startup;
-        run_cost += hash_qual_cost.per_tuple
-            * outer_matched_rows
-            * crate::costsize::clamp_row_est(inner_path_rows * innerbucketsize * inner_scan_frac)
-            * 0.5;
-        run_cost += hash_qual_cost.per_tuple
-            * (outer_path_rows - outer_matched_rows)
-            * crate::costsize::clamp_row_est(inner_path_rows / virtualbuckets)
-            * 0.05;
-        hashjointuples = if path.jpath.jointype == types_pathnodes::JOIN_ANTI {
-            outer_path_rows - outer_matched_rows
-        } else {
-            outer_matched_rows
-        };
-    } else {
-        startup_cost += hash_qual_cost.startup;
-        run_cost += hash_qual_cost.per_tuple
-            * outer_path_rows
-            * crate::costsize::clamp_row_est(inner_path_rows * innerbucketsize)
-            * 0.5;
-
-        // approx_tuple_count divergence (plain inner arm): the joinrel size
-        // estimate already applies the (equijoin) hashclause selectivity, so
-        // reuse it for the CPU term. Outer joins and unique-ified inputs
-        // can't reuse it (null-extension clamp / semijoin row estimate), so
-        // take C's approx_tuple_count directly.
-        hashjointuples = if path.jpath.jointype == JOIN_INNER
-            && !inner_is_unique_path
-            && !outer_is_unique_path
-        {
-            path.jpath.path.rows
-        } else {
-            approx_tuple_count(run, outer_path, inner_path, &hcls)?
-        };
-    }
-
-    startup_cost += qp_startup;
-    let cpu_per_tuple = gucs::cpu_tuple_cost() + qp_per_tuple;
-    run_cost += cpu_per_tuple * hashjointuples;
-
-    let target = run.root.pathtarget(path.jpath.path.pathtarget_id.unwrap());
-    startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * path.jpath.path.rows;
-
-    path.jpath.path.startup_cost = startup_cost;
-    path.jpath.path.total_cost = startup_cost + run_cost;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn create_hashjoin_path<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    joinrel: RelId,
-    jointype: u32,
-    workspace: &JoinCostWorkspace,
-    inner_unique: bool,
-    outer_path: PathId,
-    inner_path: PathId,
-    restrict_clauses: &[RinfoId],
-    hashclauses: &[RinfoId],
-    semifactors: Option<SemiAntiJoinFactors>,
-) -> PgResult<PathId> {
-    let mcx = run.mcx;
-    let outer = run.root.path(outer_path).base();
-    let inner = run.root.path(inner_path).base();
-    let parallel_safe =
-        run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
-    let parallel_workers = outer.parallel_workers;
-
-    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    joinrestrictinfo.extend(restrict_clauses.iter().copied());
-    let mut path_hashclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    path_hashclauses.extend(hashclauses.iter().copied());
-
-    let path = Path {
-        type_: tag16(NodeTag::T_HashPath),
-        pathtype: tag16(NodeTag::T_HashJoin),
-        parent: joinrel,
-        pathtarget_id: run.root.rel(joinrel).pathtarget_id,
-        param_info: None,
-        parallel_aware: false,
-        parallel_safe,
-        parallel_workers,
-        rows: 0.0,
-        disabled_nodes: 0,
-        startup_cost: 0.0,
-        total_cost: 0.0,
-        pathkeys: PgVec::new_in(mcx),
-    };
-    let mut node = HashPath {
-        jpath: JoinPath {
-            path,
-            jointype,
-            inner_unique,
-            outerjoinpath: Some(outer_path),
-            innerjoinpath: Some(inner_path),
-            joinrestrictinfo,
-        },
-        path_hashclauses,
-        num_batches: workspace.numbatches,
-        inner_rows_total: workspace.inner_rows_total,
-    };
-    final_cost_hashjoin(run, &mut node, workspace, semifactors)?;
-    Ok(run.root.alloc_path(types_pathnodes::PathNode::HashPath(node)))
-}
-
-// ExecSupportsMarkRestore (execAmi.c), keyed on pathtype like C.
-fn exec_supports_mark_restore(run: &PlannerRun<'_>, path_id: PathId) -> bool {
-    let node = run.root.path(path_id);
-    let pathtype = node.base().pathtype;
-    if pathtype == tag16(NodeTag::T_IndexScan) || pathtype == tag16(NodeTag::T_IndexOnlyScan) {
-        let types_pathnodes::PathNode::IndexPath(ip) = node else {
-            panic!("index pathtype on a non-IndexPath")
-        };
-        return ip.indexinfo.as_ref().expect("indexinfo set").amcanmarkpos;
-    }
-    if pathtype == tag16(NodeTag::T_Material) || pathtype == tag16(NodeTag::T_Sort) {
-        return true;
-    }
-    if pathtype == tag16(NodeTag::T_Result) {
-        return match node {
-            types_pathnodes::PathNode::ProjectionPath(pp) => {
-                exec_supports_mark_restore(run, pp.subpath.expect("projection has a subpath"))
-            }
-            _ => false,
-        };
-    }
-    false
-}
-
-// cached_scansel (costsize.c): mergejoinscansel memoized on the RestrictInfo
-// (leaving scansel_cache unwritten cost fabled 53x on joinplan).
-fn cached_scansel(
-    run: &mut PlannerRun<'_>,
-    rinfo: RinfoId,
-    pathkey: &PathKey,
-) -> PgResult<MergeScanSelCache> {
-    let collation = run
-        .root
-        .ec(pathkey.pk_eclass.expect("canonical pathkey has an eclass"))
-        .ec_collation;
-    for cache in run.root.rinfo(rinfo).scansel_cache.iter() {
-        if cache.opfamily == pathkey.pk_opfamily
-            && cache.collation == collation
-            && cache.cmptype == pathkey.pk_cmptype
-            && cache.nulls_first == pathkey.pk_nulls_first
-        {
-            return Ok(*cache);
-        }
-    }
-    let (leftstartsel, leftendsel, rightstartsel, rightendsel) = crate::selfuncs::mergejoinscansel(
-        run,
-        rinfo,
-        pathkey.pk_opfamily,
-        pathkey.pk_cmptype,
-        pathkey.pk_nulls_first,
-    )?;
-    let cache = MergeScanSelCache {
-        opfamily: pathkey.pk_opfamily,
-        collation,
-        cmptype: pathkey.pk_cmptype,
-        nulls_first: pathkey.pk_nulls_first,
-        leftstartsel,
-        leftendsel,
-        rightstartsel,
-        rightendsel,
-    };
-    run.root.rinfo_mut(rinfo).scansel_cache.push(cache);
-    Ok(cache)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn initial_cost_mergejoin(
-    run: &mut PlannerRun<'_>,
-    jointype: u32,
-    mergeclauses: &[RinfoId],
-    outer_path: PathId,
-    inner_path: PathId,
-    outersortkeys: &[PathKey],
-    innersortkeys: &[PathKey],
-    outer_presorted_keys: usize,
-) -> PgResult<JoinCostWorkspace> {
-    let mut startup_cost = 0.0f64;
-    let mut run_cost = 0.0f64;
-    let outer_path_rows = run.root.path(outer_path).base().rows.max(1.0);
-    let inner_path_rows = run.root.path(inner_path).base().rows.max(1.0);
-
-    let (mut outerstartsel, mut outerendsel, mut innerstartsel, mut innerendsel);
-    if !mergeclauses.is_empty() && jointype != types_pathnodes::JOIN_FULL {
-        let firstclause = mergeclauses[0];
-        let opathkey = if !outersortkeys.is_empty() {
-            outersortkeys[0]
-        } else {
-            run.root.path(outer_path).base().pathkeys[0]
-        };
-        let ipathkey = if !innersortkeys.is_empty() {
-            innersortkeys[0]
-        } else {
-            run.root.path(inner_path).base().pathkeys[0]
-        };
-        assert!(
-            opathkey.pk_opfamily == ipathkey.pk_opfamily
-                && run.root.ec(opathkey.pk_eclass.unwrap()).ec_collation
-                    == run.root.ec(ipathkey.pk_eclass.unwrap()).ec_collation
-                && opathkey.pk_cmptype == ipathkey.pk_cmptype
-                && opathkey.pk_nulls_first == ipathkey.pk_nulls_first,
-            "left and right pathkeys do not match in mergejoin"
-        );
-
-        let cache = cached_scansel(run, firstclause, &opathkey)?;
-        let left_is_outer = crate::relnode::relids_is_subset(
-            &run.root.rinfo(firstclause).left_relids,
-            &run.root.rel(run.root.path(outer_path).base().parent).relids,
-        );
-        if left_is_outer {
-            outerstartsel = cache.leftstartsel;
-            outerendsel = cache.leftendsel;
-            innerstartsel = cache.rightstartsel;
-            innerendsel = cache.rightendsel;
-        } else {
-            outerstartsel = cache.rightstartsel;
-            outerendsel = cache.rightendsel;
-            innerstartsel = cache.leftstartsel;
-            innerendsel = cache.leftendsel;
-        }
-        if jointype == JOIN_LEFT || jointype == types_pathnodes::JOIN_ANTI {
-            outerstartsel = 0.0;
-            outerendsel = 1.0;
-        } else if jointype == JOIN_RIGHT || jointype == types_pathnodes::JOIN_RIGHT_ANTI {
-            innerstartsel = 0.0;
-            innerendsel = 1.0;
-        }
-    } else {
-        outerstartsel = 0.0;
-        innerstartsel = 0.0;
-        outerendsel = 1.0;
-        innerendsel = 1.0;
-    }
-
-    let outer_skip_rows = (outer_path_rows * outerstartsel).round_ties_even();
-    let inner_skip_rows = (inner_path_rows * innerstartsel).round_ties_even();
-    let outer_rows = crate::costsize::clamp_row_est(outer_path_rows * outerendsel);
-    let inner_rows = crate::costsize::clamp_row_est(inner_path_rows * innerendsel);
-    debug_assert!(outer_skip_rows <= outer_rows);
-    debug_assert!(inner_skip_rows <= inner_rows);
-
-    let outerstartsel = outer_skip_rows / outer_path_rows;
-    let innerstartsel = inner_skip_rows / inner_path_rows;
-    let outerendsel = outer_rows / outer_path_rows;
-    let innerendsel = inner_rows / inner_path_rows;
-
-    let mut disabled_nodes = if gucs::enable_mergejoin() { 0 } else { 1 };
-
-    let work_mem = init_small::globals::work_mem();
-    if !outersortkeys.is_empty() {
-        debug_assert!(!pathkeys_contained_in(
-            outersortkeys,
-            &run.root.path(outer_path).base().pathkeys
-        ));
-        let outer = run.root.path(outer_path).base();
-        let (o_disabled, o_startup, o_total) =
-            (outer.disabled_nodes, outer.startup_cost, outer.total_cost);
-        let width = run.root.path_pathtarget(outer_path).width;
-        let (sort_disabled, sort_startup, sort_total) =
-            if gucs::enable_incremental_sort() && outer_presorted_keys > 0 {
-                let (d, s, t, _) = crate::costsize::cost_incremental_sort_shape(
-                    run,
-                    outersortkeys,
-                    outer_presorted_keys,
-                    o_disabled,
-                    o_startup,
-                    o_total,
-                    outer_path_rows,
-                    width,
-                    0.0,
-                    work_mem,
-                    -1.0,
-                )?;
-                (d, s, t)
-            } else {
-                crate::costsize::cost_sort_shape(
-                    o_disabled,
-                    o_total,
-                    outer_path_rows,
-                    width,
-                    0.0,
-                    work_mem,
-                    -1.0,
-                )
-            };
-        disabled_nodes += sort_disabled;
-        startup_cost += sort_startup;
-        startup_cost += (sort_total - sort_startup) * outerstartsel;
-        run_cost += (sort_total - sort_startup) * (outerendsel - outerstartsel);
-    } else {
-        let outer = run.root.path(outer_path).base();
-        disabled_nodes += outer.disabled_nodes;
-        startup_cost += outer.startup_cost;
-        startup_cost += (outer.total_cost - outer.startup_cost) * outerstartsel;
-        run_cost += (outer.total_cost - outer.startup_cost) * (outerendsel - outerstartsel);
-    }
-
-    let inner_run_cost;
-    if !innersortkeys.is_empty() {
-        debug_assert!(!pathkeys_contained_in(
-            innersortkeys,
-            &run.root.path(inner_path).base().pathkeys
-        ));
-        let inner = run.root.path(inner_path).base();
-        let (i_disabled, i_total) = (inner.disabled_nodes, inner.total_cost);
-        let width = run.root.path_pathtarget(inner_path).width;
-        let (sort_disabled, sort_startup, sort_total) = crate::costsize::cost_sort_shape(
-            i_disabled,
-            i_total,
-            inner_path_rows,
-            width,
-            0.0,
-            work_mem,
-            -1.0,
-        );
-        disabled_nodes += sort_disabled;
-        startup_cost += sort_startup;
-        startup_cost += (sort_total - sort_startup) * innerstartsel;
-        inner_run_cost = (sort_total - sort_startup) * (innerendsel - innerstartsel);
-    } else {
-        let inner = run.root.path(inner_path).base();
-        disabled_nodes += inner.disabled_nodes;
-        startup_cost += inner.startup_cost;
-        startup_cost += (inner.total_cost - inner.startup_cost) * innerstartsel;
-        inner_run_cost = (inner.total_cost - inner.startup_cost) * (innerendsel - innerstartsel);
-    }
-
-    Ok(JoinCostWorkspace {
-        disabled_nodes,
-        startup_cost,
-        total_cost: startup_cost + run_cost + inner_run_cost,
-        run_cost,
-        inner_run_cost,
-        outer_rows,
-        inner_rows,
-        outer_skip_rows,
-        inner_skip_rows,
-        ..Default::default()
-    })
-}
-
-// approx_tuple_count (costsize.c).
-fn approx_tuple_count(
-    run: &mut PlannerRun<'_>,
-    outer_path: PathId,
-    inner_path: PathId,
-    quals: &[RinfoId],
-) -> PgResult<f64> {
-    let outer_tuples = run.root.path(outer_path).base().rows;
-    let inner_tuples = run.root.path(inner_path).base().rows;
-    let outer_relids = crate::relnode::relids_copy(
-        run.mcx,
-        &run.root.rel(run.root.path(outer_path).base().parent).relids,
-    );
-    let inner_relids = crate::relnode::relids_copy(
-        run.mcx,
-        &run.root.rel(run.root.path(inner_path).base().parent).relids,
-    );
-    let sjinfo = crate::joinrels::init_dummy_sjinfo(run, outer_relids, inner_relids);
-    let mut selec = 1.0f64;
-    for &q in quals {
-        selec *= crate::clausesel::clause_selectivity(run, q, 0, JOIN_INNER, Some(&sjinfo))?;
-    }
-    Ok(crate::costsize::clamp_row_est(selec * outer_tuples * inner_tuples))
-}
-
-fn final_cost_mergejoin(
-    run: &mut PlannerRun<'_>,
-    path: &mut MergePath<'_>,
-    workspace: &JoinCostWorkspace,
-    inner_unique: bool,
-) -> PgResult<()> {
-    let outer_path = path.jpath.outerjoinpath.unwrap();
-    let inner_path = path.jpath.innerjoinpath.unwrap();
-    let inner_path_rows = run.root.path(inner_path).base().rows.max(1.0);
-    let mut startup_cost = workspace.startup_cost;
-    let mut run_cost = workspace.run_cost;
-    let inner_run_cost = workspace.inner_run_cost;
-    let outer_rows = workspace.outer_rows;
-    let inner_rows = workspace.inner_rows;
-    let outer_skip_rows = workspace.outer_skip_rows;
-    let inner_skip_rows = workspace.inner_skip_rows;
-
-    path.jpath.path.disabled_nodes = workspace.disabled_nodes;
-    debug_assert!(path.jpath.path.param_info.is_none());
-    path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
-    debug_assert!(path.jpath.path.parallel_workers == 0);
-
-    let mergeclauses = crate::relnode::pgvec_clone_shallow(run.mcx, &path.path_mergeclauses);
-    let restrictinfos = crate::relnode::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
-    let merge_qual_cost = crate::costsize::cost_qual_eval(run, &mergeclauses)?;
-    let mut qp_qual_cost = crate::costsize::cost_qual_eval(run, &restrictinfos)?;
-    qp_qual_cost.startup -= merge_qual_cost.startup;
-    qp_qual_cost.per_tuple -= merge_qual_cost.per_tuple;
-
-    let early_stop = matches!(
-        path.jpath.jointype,
-        types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
-    ) || inner_unique;
-    path.skip_mark_restore =
-        early_stop && path.jpath.joinrestrictinfo.len() == path.path_mergeclauses.len();
-
-    let mergejointuples = approx_tuple_count(run, outer_path, inner_path, &mergeclauses)?;
-
-    let rescannedtuples = if path.skip_mark_restore {
-        0.0
-    } else {
-        (mergejointuples - inner_path_rows).max(0.0)
-    };
-    let rescanratio = 1.0 + rescannedtuples / inner_rows;
-
-    let bare_inner_cost = inner_run_cost * rescanratio;
-    let mat_inner_cost = inner_run_cost + gucs::cpu_operator_cost() * inner_rows * rescanratio;
-
-    let inner_width = run.root.path_pathtarget(inner_path).width;
-    path.materialize_inner = if path.skip_mark_restore {
-        false
-    } else if gucs::enable_material() && mat_inner_cost < bare_inner_cost {
-        true
-    } else if path.innersortkeys.is_empty() && !exec_supports_mark_restore(run, inner_path) {
-        true
-    } else if gucs::enable_material()
-        && !path.innersortkeys.is_empty()
-        && crate::costsize::relation_byte_size(inner_path_rows, inner_width)
-            > init_small::globals::work_mem() as f64 * 1024.0
-    {
-        true
-    } else {
-        false
-    };
-
-    run_cost += if path.materialize_inner { mat_inner_cost } else { bare_inner_cost };
-
-    startup_cost += merge_qual_cost.startup;
-    startup_cost += merge_qual_cost.per_tuple * (outer_skip_rows + inner_skip_rows * rescanratio);
-    run_cost += merge_qual_cost.per_tuple
-        * ((outer_rows - outer_skip_rows) + (inner_rows - inner_skip_rows) * rescanratio);
-
-    startup_cost += qp_qual_cost.startup;
-    let cpu_per_tuple = gucs::cpu_tuple_cost() + qp_qual_cost.per_tuple;
-    run_cost += cpu_per_tuple * mergejointuples;
-
-    let target = run.root.pathtarget(path.jpath.path.pathtarget_id.unwrap());
-    startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * path.jpath.path.rows;
-
-    path.jpath.path.startup_cost = startup_cost;
-    path.jpath.path.total_cost = startup_cost + run_cost;
-    Ok(())
-}
-
-// create_mergejoin_path (pathnode.c); required_outer is always NULL.
-#[allow(clippy::too_many_arguments)]
-fn create_mergejoin_path<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    joinrel: RelId,
-    jointype: u32,
-    workspace: &JoinCostWorkspace,
-    inner_unique: bool,
-    outer_path: PathId,
-    inner_path: PathId,
-    restrict_clauses: &[RinfoId],
-    pathkeys: PgVec<'mcx, PathKey>,
-    mergeclauses: PgVec<'mcx, RinfoId>,
-    outersortkeys: PgVec<'mcx, PathKey>,
-    innersortkeys: PgVec<'mcx, PathKey>,
-    outer_presorted_keys: usize,
-) -> PgResult<PathId> {
-    let mcx = run.mcx;
-    let outer = run.root.path(outer_path).base();
-    let inner = run.root.path(inner_path).base();
-    let parallel_safe =
-        run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
-    let parallel_workers = outer.parallel_workers;
-
-    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    joinrestrictinfo.extend(restrict_clauses.iter().copied());
-
-    let path = Path {
-        type_: tag16(NodeTag::T_MergePath),
-        pathtype: tag16(NodeTag::T_MergeJoin),
-        parent: joinrel,
-        pathtarget_id: run.root.rel(joinrel).pathtarget_id,
-        param_info: None,
-        parallel_aware: false,
-        parallel_safe,
-        parallel_workers,
-        rows: 0.0,
-        disabled_nodes: 0,
-        startup_cost: 0.0,
-        total_cost: 0.0,
-        pathkeys,
-    };
-    let mut node = MergePath {
-        jpath: JoinPath {
-            path,
-            jointype,
-            inner_unique,
-            outerjoinpath: Some(outer_path),
-            innerjoinpath: Some(inner_path),
-            joinrestrictinfo,
-        },
-        path_mergeclauses: mergeclauses,
-        outersortkeys,
-        innersortkeys,
-        outer_presorted_keys: outer_presorted_keys as i32,
-        skip_mark_restore: false,
-        materialize_inner: false,
-    };
-    final_cost_mergejoin(run, &mut node, workspace, inner_unique)?;
-    Ok(run.root.alloc_path(types_pathnodes::PathNode::MergePath(node)))
-}

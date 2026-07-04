@@ -56,6 +56,7 @@ const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
+const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
 const TriggerRelationId: Oid = 2620;
 
@@ -304,6 +305,7 @@ fn findDependentObjects<'mcx>(
 
     // Scan what this object depends on (owner detection).
     let mut owningObject = ObjectAddress::set(InvalidOid, InvalidOid);
+    let mut partitionObject = ObjectAddress::set(InvalidOid, InvalidOid);
     {
         let mut keys: Vec<ScanKeyData> = vec![
             oid_key(Anum_pg_depend_classid, object.classId),
@@ -348,7 +350,15 @@ fn findDependentObjects<'mcx>(
                     if deptype == b'e' && flags & PERFORM_DELETION_SKIP_EXTENSIONS != 0 {
                         continue;
                     }
-                    // creating_extension is always false (no extension lane).
+                    // Scripts of the extension being created/altered may drop
+                    // its own member objects.
+                    if deptype == b'e'
+                        && pg_depend::creating_extension()
+                        && otherObject.classId == types_core::EXTENSION_RELATION_ID
+                        && otherObject.objectId == pg_depend::CurrentExtensionObject()
+                    {
+                        continue;
+                    }
                     if stack.is_empty() {
                         if let Some(pending) = pendingObjects {
                             if object_address_present(&otherObject, pending) {
@@ -392,8 +402,17 @@ fn findDependentObjects<'mcx>(
                     }
                     return Ok(());
                 }
-                b'P' | b'S' => {
-                    unported("findDependentObjects: partition dependencies");
+                // After the scan we complain unless some partition dependency
+                // of this object is also being deleted.
+                b'P' => {
+                    objflags |= DEPFLAG_IS_PART;
+                    partitionObject = otherObject;
+                }
+                b'S' => {
+                    if objflags & DEPFLAG_IS_PART == 0 {
+                        partitionObject = otherObject;
+                    }
+                    objflags |= DEPFLAG_IS_PART;
                 }
                 other => panic!(
                     "unrecognized dependency type '{}' for {:?}",
@@ -405,7 +424,13 @@ fn findDependentObjects<'mcx>(
     }
 
     if owningObject.classId != InvalidOid {
-        let otherObjDesc = getObjectDescription(mcx, &owningObject)?
+        // A found PARTITION dependency is preferred in the report.
+        let other = if partitionObject.classId != InvalidOid {
+            &partitionObject
+        } else {
+            &owningObject
+        };
+        let otherObjDesc = getObjectDescription(mcx, other)?
             .expect("owning object was just read from pg_depend");
         let objDesc = getObjectDescription(mcx, object)?
             .expect("drop target exists");
@@ -495,7 +520,7 @@ fn findDependentObjects<'mcx>(
     let extra = ObjectAddressExtra {
         flags: objflags,
         dependee: if objflags & DEPFLAG_IS_PART != 0 {
-            unported("findDependentObjects: partition dependee bookkeeping");
+            partitionObject
         } else if let Some(prev) = stack.last() {
             prev.object
         } else {
@@ -546,14 +571,16 @@ fn reportDependentObjects<'mcx>(
     flags: i32,
     origObject: Option<&ObjectAddress>,
 ) -> PgResult<()> {
+    // A partition-dependent object may be deleted only alongside one of its
+    // partition dependencies (i.e. it was reached via a PARTITION dep).
     for i in 0..targetObjects.refs.len() {
         let extra = &targetObjects.extras[i];
         if extra.flags & DEPFLAG_IS_PART != 0 && extra.flags & DEPFLAG_PARTITION == 0 {
-            let otherObjDesc = getObjectDescription(mcx, &extra.dependee)?
-                .expect("partition dependee is describable");
+            let otherDesc = getObjectDescription(mcx, &extra.dependee)?
+                .expect("partition dependee was just read from pg_depend");
             let objDesc = getObjectDescription(mcx, &targetObjects.refs[i])?
-                .expect("partition member is describable");
-            return Err(cannot_drop_required(&objDesc, &otherObjDesc));
+                .expect("drop target exists");
+            return Err(cannot_drop_required(&objDesc, &otherDesc));
         }
     }
 
@@ -712,7 +739,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
     match object.classId {
         RELATION_RELATION_ID => {
             let relKind = lsyscache::get_rel_relkind(object.objectId)? as u8;
-            if relKind == RELKIND_INDEX {
+            if relKind == RELKIND_INDEX || relKind == types_rel::RELKIND_PARTITIONED_INDEX {
                 debug_assert!(object.objectSubId == 0);
                 catalog_index::index_drop(
                     mcx,
@@ -727,25 +754,56 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                 )?;
             } else if matches!(
                 relKind,
-                RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE | RELKIND_VIEW
+                RELKIND_RELATION
+                    | RELKIND_TOASTVALUE
+                    | RELKIND_SEQUENCE
+                    | RELKIND_VIEW
+                    | types_rel::RELKIND_MATVIEW
+                    | types_rel::RELKIND_PARTITIONED_TABLE
             ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
                 }
             } else {
-                unported("doDeletion: non-table relkind (matview/partition lanes)");
+                unported("doDeletion: non-table relkind (foreign-table/composite lanes)");
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
+        pg_largeobject::LargeObjectRelationId => {
+            pg_largeobject::LargeObjectDrop(mcx, object.objectId)?
+        }
+        types_core::PROCEDURE_RELATION_ID => {
+            functioncmds::RemoveFunctionById(mcx, object.objectId)?
+        }
+        types_core::EXTENSION_RELATION_ID => {
+            extension::RemoveExtensionById(mcx, object.objectId)?
+        }
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
+        TriggerRelationId => trigger::RemoveTriggerById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
-        TriggerRelationId => commands_trigger::RemoveTriggerById(mcx, object.objectId)?,
         types_core::NAMESPACE_RELATION_ID => {
             pg_namespace::RemoveSchemaById(mcx, object.objectId)?
         }
-        RewriteRelationId => rewrite_remove::RemoveRewriteRuleById(mcx, object.objectId)?,
+        RewriteRelationId => {
+            rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
+        }
+        types_core::OPERATOR_RELATION_ID => {
+            dependency_seams::remove_operator_by_id::call(mcx, object.objectId)?
+        }
+        types_core::ACCESS_METHOD_OPERATOR_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
+            types_core::ACCESS_METHOD_OPERATOR_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID,
+            types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
+            object.objectId,
+        )?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
@@ -794,7 +852,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
 
 // deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
 // dependent-object scan.
-fn deleteSharedDependencyRecordsFor<'mcx>(
+pub fn deleteSharedDependencyRecordsFor<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
@@ -908,4 +966,24 @@ fn seam_perform_deletion(
 
 pub fn init_seams() {
     dependency_seams::perform_deletion::set(seam_perform_deletion);
+}
+
+// DropObjectById (dependency.c) reduced to the oid-indexed catalogs above:
+// delete the catalog row addressed by its oid.
+fn drop_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    oid_index_id: Oid,
+    oid: Oid,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, relation_id, RowExclusiveLock)?;
+    let keys = [oid_key(1, oid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, oid_index_id, true, None, &keys)?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        panic!("could not find tuple for object {oid} in catalog {relation_id}");
+    };
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
 }

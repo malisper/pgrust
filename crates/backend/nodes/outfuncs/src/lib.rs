@@ -16,8 +16,8 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    Const, FromExpr, FuncExpr, JoinExpr, OpExpr, RangeTblRef, RelabelType, SubLink, TargetEntry,
-    Var,
+    Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
+    ScalarArrayOpExpr, SubLink, TargetEntry, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
@@ -25,6 +25,13 @@ use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
     let mut out = PgString::new_in(mcx);
     out_node(&mut out, node)?;
+    Ok(out)
+}
+
+// Query reachable only as RangeTblEntry.subquery's &Query (no node handle).
+pub fn queryToString<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<PgString<'mcx>> {
+    let mut out = PgString::new_in(mcx);
+    out_query(&mut out, q)?;
     Ok(out)
 }
 
@@ -64,6 +71,13 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_NullTest => {
+            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        }
+        NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
+            out,
+            node.as_variant::<ScalarArrayOpExpr>().expect("ScalarArrayOpExpr"),
+        )?,
         NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
             out,
             node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),
@@ -72,6 +86,24 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<PartitionRangeDatum>().expect("PartitionRangeDatum"),
         )?,
+        NodeTag::T_BooleanTest => {
+            let bt = node
+                .as_variant::<types_nodes::primnodes::BooleanTest>()
+                .expect("BooleanTest");
+            w!(out, "{{BOOLEANTEST :arg ");
+            out_opt_node(out, bt.arg)?;
+            w!(out, " :booltesttype {} :location -1}}", bt.booltesttype as u32);
+        }
+        NodeTag::T_SetToDefault => {
+            let d = node
+                .as_variant::<types_nodes::primnodes::SetToDefault>()
+                .expect("SetToDefault");
+            w!(
+                out,
+                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location -1}}",
+                d.typeId, d.typeMod, d.collation
+            );
+        }
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
@@ -200,6 +232,15 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
         -1 => {
             // SAFETY: byref const datum points at a live in-line varlena.
             unsafe { varlena_size(p) }
+        }
+        -2 => {
+            // cstring (unknown-type Consts): NUL included, as C's strlen+1.
+            let mut n = 0usize;
+            // SAFETY: byref cstring datum points at a live NUL-terminated string.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
         }
         other => panic!("_outDatum (outfuncs.c): typlen {other} unported"),
     };
@@ -577,6 +618,16 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             w!(out, " :join_using_alias ");
             out_opt_alias(out, r.join_using_alias)?;
         }
+        RTEKind::RTE_VALUES => {
+            w!(out, " :values_lists ");
+            out_list(out, &r.values_lists)?;
+            w!(out, " :coltypes ");
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
+        }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");
             out_list(out, &r.groupexprs)?;
@@ -717,6 +768,31 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     out_list(out, &s.operName)?;
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
+    w!(out, "{{NULLTEST :arg ");
+    match n.arg {
+        Some(a) => out_node(out, a)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
+    out_bool(out, n.argisrow);
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_scalar_array_op_expr(out: &mut PgString<'_>, s: &ScalarArrayOpExpr<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{SCALARARRAYOPEXPR :opno {} :opfuncid {} :hashfuncid {} :negfuncid {} :useOr ",
+        s.opno, s.opfuncid, s.hashfuncid, s.negfuncid
+    );
+    out_bool(out, s.useOr);
+    w!(out, " :inputcollid {} :args ", s.inputcollid);
+    out_list(out, &s.args)?;
     w!(out, " :location -1}}");
     Ok(())
 }

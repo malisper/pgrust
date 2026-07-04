@@ -36,6 +36,7 @@ xact = { path = "../../access/transam/xact" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
+commands_analyze_seams = { path = "../commands_analyze_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

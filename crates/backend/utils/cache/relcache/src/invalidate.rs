@@ -158,7 +158,7 @@ fn RelationReloadIndexInfo(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
@@ -214,7 +214,7 @@ fn RelationReloadNailed(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
