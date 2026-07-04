@@ -429,11 +429,8 @@ pub fn sbsref_fetch_old(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<()
     Ok(())
 }
 
-// C ExprEvalStep d.arraycoerce + ArrayMapState: the elemexpr program reads
-// one source element through its CaseTestVal slot. `elem == None` is C's
-// NULL elemexprstate (binary-compatible element coercion: header relabel).
-// inp_* memoizes get_typlenbyvalalign keyed on the runtime element type
-// (C amstate.inp_extra); ret_* is compile-resolved (resultelemtype is fixed).
+// `elem == None` is C's NULL elemexprstate (header relabel only); inp_* is
+// the runtime-keyed get_typlenbyvalalign memo (C amstate.inp_extra).
 pub struct ArrayCoerceState {
     pub resultelemtype: Oid,
     pub ret_typlen: i16,
@@ -453,8 +450,7 @@ pub struct ArrayCoerceElem {
     pub state: NonNull<crate::steps::ExprState<'static>>,
 }
 
-// ExecEvalArrayCoerce (execExprInterp.c) + array_map (arrayfuncs.c); caller
-// has handled the NULL-array case.
+// Caller has handled the NULL-array case.
 pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<NullableDatum> {
     let mcx = res_mcx(&st.resmcx);
     let img = datum_array_image(arrd, &st.resmcx)?;
@@ -535,8 +531,7 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
         out_nulls.push(r.isnull);
     }
 
-    // Source dims/lbounds preserved exactly; construct_md_array enforces the
-    // MaxAllocSize ceiling (C array_map's ERRCODE_PROGRAM_LIMIT_EXCEEDED).
+    // Source dims/lbounds preserved; construct_md_array owns the size ceiling.
     let result = arrayfuncs::construct_md_array(
         mcx,
         &out_values,

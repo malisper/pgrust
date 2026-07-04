@@ -365,6 +365,16 @@ fn collect_aggrefs<'mcx>(
         | NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_RelabelType => collect_aggrefs(node.as_relabel_type().unwrap().arg, out),
         NodeTag::T_CoerceViaIO => collect_aggrefs(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            collect_aggrefs(a.arg, out);
+            if let Some(e) = a.elemexpr {
+                collect_aggrefs(e, out);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            collect_aggrefs(node.as_convert_rowtype_expr().unwrap().arg, out)
+        }
         NodeTag::T_CoerceToDomain => {
             collect_aggrefs(node.as_coerce_to_domain().unwrap().arg, out)
         }
@@ -863,6 +873,16 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
         | NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_RelabelType => collect_base_var_cols(node.as_relabel_type().unwrap().arg, out),
         NodeTag::T_CoerceViaIO => collect_base_var_cols(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            collect_base_var_cols(a.arg, out);
+            if let Some(e) = a.elemexpr {
+                collect_base_var_cols(e, out);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            collect_base_var_cols(node.as_convert_rowtype_expr().unwrap().arg, out)
+        }
         NodeTag::T_CoerceToDomain => {
             collect_base_var_cols(node.as_coerce_to_domain().unwrap().arg, out)
         }

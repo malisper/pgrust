@@ -2887,8 +2887,7 @@ fn init_coerce_via_io<'mcx>(
     push_step(state, mcx, Step::IoCoerce { calls: p, out })
 }
 
-// C ExecInitExprRec T_ArrayCoerceExpr: arg into this step's out slot; the
-// elemexpr becomes a standalone program reading one element through its
+// The elemexpr becomes a standalone program reading one element through its
 // CaseTestVal slot; a 1-step CASE_TESTVAL program is C's NULL elemexprstate.
 #[allow(clippy::too_many_arguments)]
 fn init_array_coerce<'mcx>(
@@ -2952,9 +2951,6 @@ fn init_array_coerce<'mcx>(
     push_step(state, mcx, Step::ArrayCoerce { state: p, out })
 }
 
-// C ExecInitExprRec T_ConvertRowtypeExpr + convert_tuples_by_name: tupdescs
-// and the by-name attribute map resolve at compile (C defers to first eval;
-// plan invalidation covers DDL in between).
 #[allow(clippy::too_many_arguments)]
 fn init_convert_rowtype<'mcx>(
     node: Node<'mcx>,

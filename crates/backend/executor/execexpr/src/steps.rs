@@ -282,10 +282,8 @@ pub enum Step {
     ConvertRowtype { state: NonNull<ConvertRowtypeState>, frame: u32, out: OutRef },
 }
 
-// C ExprEvalStep d.convert_rowtype: tupdescs + by-name attribute map are
-// compile-resolved (C builds them at first eval; plan invalidation covers
-// DDL in between). `map == None` is C's NULL map: header relabel only.
-// map[out_i] = 1-based input attno, 0 = NULL/dropped column.
+// Tupdescs + by-name map compile-resolved (C: first eval; plan invalidation
+// covers DDL between). map[out_i] = 1-based in attno, 0 = NULL; None = relabel.
 pub struct ConvertRowtypeState {
     pub indesc: NonNull<::types_tuple::TupleDescData<'static>>,
     pub outdesc: NonNull<::types_tuple::TupleDescData<'static>>,

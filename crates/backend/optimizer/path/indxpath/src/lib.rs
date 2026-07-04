@@ -1430,6 +1430,16 @@ fn collect_varattnos(
         NodeTag::T_CoerceViaIO => {
             collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            collect_varattnos(run, a.arg, relid, out);
+            if let Some(e) = a.elemexpr {
+                collect_varattnos(run, e, relid, out);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            collect_varattnos(run, node.as_convert_rowtype_expr().unwrap().arg, relid, out)
+        }
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
             for e in sr.refupperindexpr.iter().flatten() {

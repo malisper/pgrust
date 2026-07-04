@@ -111,6 +111,8 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,

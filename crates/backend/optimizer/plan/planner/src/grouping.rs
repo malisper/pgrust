@@ -661,6 +661,16 @@ fn pull_agg_input_vars<'mcx>(
             }
         }
         NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            pull_agg_input_vars(a.arg, out);
+            if let Some(e) = a.elemexpr {
+                pull_agg_input_vars(e, out);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            pull_agg_input_vars(node.as_convert_rowtype_expr().unwrap().arg, out)
+        }
         NodeTag::T_CoerceToDomain => {
             pull_agg_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
         }

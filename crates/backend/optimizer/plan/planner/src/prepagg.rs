@@ -100,6 +100,17 @@ fn preprocess_aggrefs_walker<'mcx>(
         NodeTag::T_CoerceViaIO => {
             preprocess_aggrefs_walker(run, node.as_coerce_via_io().unwrap().arg)
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            preprocess_aggrefs_walker(run, a.arg)?;
+            match a.elemexpr {
+                Some(e) => preprocess_aggrefs_walker(run, e),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            preprocess_aggrefs_walker(run, node.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_CoerceToDomain => {
             preprocess_aggrefs_walker(run, node.as_coerce_to_domain().unwrap().arg)
         }
