@@ -143,6 +143,15 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         ),
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
+        NodeTag::T_Param => {
+            let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
+            w!(
+                out,
+                "{{PARAM :paramkind {} :paramid {} :paramtype {} :paramtypmod {} \
+                 :paramcollid {} :location -1}}",
+                p.paramkind as u32, p.paramid, p.paramtype, p.paramtypmod, p.paramcollid
+            );
+        }
         NodeTag::T_CommonTableExpr => out_common_table_expr(
             out,
             node.as_variant::<CommonTableExpr>().expect("CommonTableExpr"),
