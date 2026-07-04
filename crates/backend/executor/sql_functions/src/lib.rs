@@ -3,9 +3,9 @@
 // state machine, lazy eval, SETOF materialize + value-per-call).
 // DIVERGENCES: rows for the result statement always route through a
 // tuplestore (C's DR_sqlfunction keeps scalar rows in the junkfilter slot);
-// no ExprContext shutdown callback — a caller that abandons a suspended
-// value-per-call scan and rescans would resume, not restart (C registers
-// ShutdownSQLFunction); cleanup on error is eager instead of resowner-driven.
+// ShutdownSQLFunction rides rsinfo.srf_shutdown (planted on suspension,
+// fired by the SRF node at ExecEnd/ReScan — the ShutdownExprContext moments);
+// cleanup on error is eager instead of resowner-driven.
 #![allow(non_snake_case)]
 
 mod cache;
@@ -332,6 +332,41 @@ impl Drop for SqlFcacheGuard {
     }
 }
 
+pub fn shutdown_sql_srf(flinfo: &mut FmgrInfo) -> PgResult<()> {
+    match flinfo.fn_extra_mut::<SqlFcacheGuard>() {
+        Some(guard) => guard.0.with_mut(|s| shutdown_sql_function(s)),
+        None => Ok(()),
+    }
+}
+
+// ShutdownSQLFunction (functions.c:1967): clean teardown of a suspended
+// lazy-eval execution. Drop stays the abort path (release_query_desc).
+fn shutdown_sql_function(s: &mut SqlFcacheState<'_>) -> PgResult<()> {
+    let readonly =
+        s.entry.as_ref().map_or(true, |e| e.owned.with(|es| es.readonly_func));
+    for i in 0..s.eslist.len() {
+        if s.eslist[i].status != ExecStatus::Run {
+            continue;
+        }
+        let mut pushed = false;
+        if !readonly {
+            let snap = s.eslist[i].snapshot.clone().expect("running es has a snapshot");
+            snapmgr::PushActiveSnapshot(&snap)?;
+            pushed = true;
+        }
+        let r = postquel_end(s, i);
+        if pushed {
+            let popped = snapmgr::PopActiveSnapshot();
+            if r.is_ok() {
+                popped?;
+            }
+        }
+        r?;
+    }
+    release_execution_state(s);
+    Ok(())
+}
+
 fn release_execution_state(s: &mut SqlFcacheState<'_>) {
     for es in s.eslist.drain(..) {
         if !es.qd.is_null() {
@@ -554,6 +589,7 @@ pub fn fmgr_sql(
         FnOutcome::LazyRow(v, isnull) => {
             let rsi = fcinfo.rsinfo_mut().expect("checked at entry");
             rsi.isDone = ExprDoneCond::ExprMultipleResult;
+            rsi.srf_shutdown = Some(shutdown_sql_srf);
             if isnull {
                 Ok(fcinfo.return_null())
             } else {
