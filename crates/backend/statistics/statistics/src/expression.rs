@@ -128,12 +128,11 @@ pub(crate) fn eval_exprs<'mcx, 'b>(
     values: &mut PgVec<'b, PgVec<'b, Datum>>,
     nulls: &mut PgVec<'b, PgVec<'b, bool>>,
 ) -> PgResult<()> {
-    let mut states: PgVec<'mcx, &'mcx mut execexpr::ExprState<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut states: PgVec<'mcx, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>> =
+        PgVec::new_in(mcx);
     for &e in exprs {
-        let st = execexpr::exec_init_expr(mcx, Some(e), execexpr::ParamBind::NONE)?
+        let mut st = execexpr::exec_init_expr(mcx, Some(e), execexpr::ParamBind::NONE)?
             .expect("statistics expression");
-        let st = mcx::leak_in(st);
         // SAFETY: bmcx outlives the StatsBuildData consuming these datums;
         // the build context is reset only after the builders finish.
         unsafe { st.arm_result_mcx_raw(bmcx) };
