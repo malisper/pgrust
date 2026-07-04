@@ -938,13 +938,199 @@ pub fn create_seqscan_path<'mcx>(
     rel_id: RelId,
     parallel_workers: i32,
 ) -> PgResult<PathId> {
-    assert!(parallel_workers == 0, "create_seqscan_path: partial path; M3 parallel lane");
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_SeqScan, rel_id);
-    path.parallel_aware = false;
+    path.parallel_aware = parallel_workers > 0;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = parallel_workers;
     let id = run.root.alloc_path(PathNode::Path(path));
     costsize::cost_seqscan(run, id, rel_id);
     Ok(id)
+}
+
+// add_partial_path (pathnode.c): simpler than add_path — partial paths are
+// never parameterized, row counts all agree, and startup cost is irrelevant
+// (parallel plans always run to completion).
+pub fn add_partial_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) {
+    let mut accept_new = true;
+    let mut insert_at = 0usize;
+
+    debug_assert!(run.root.path(new_id).base().parallel_safe);
+    debug_assert!(run.root.rel(rel_id).consider_parallel);
+
+    let empty: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
+    let mut working = core::mem::replace(&mut run.root.rel_mut(rel_id).partial_pathlist, empty);
+
+    let mut i = 0usize;
+    while i < working.len() {
+        let new_path = run.root.path(new_id).base();
+        let old_path = run.root.path(working[i]).base();
+        let mut remove_old = false;
+
+        let keyscmp = compare_pathkeys(&new_path.pathkeys, &old_path.pathkeys);
+        if keyscmp != PathKeysComparison::Different {
+            if new_path.disabled_nodes != old_path.disabled_nodes {
+                if new_path.disabled_nodes > old_path.disabled_nodes {
+                    accept_new = false;
+                } else {
+                    remove_old = true;
+                }
+            } else if new_path.total_cost > old_path.total_cost * STD_FUZZ_FACTOR {
+                if keyscmp != PathKeysComparison::Better1 {
+                    accept_new = false;
+                }
+            } else if old_path.total_cost > new_path.total_cost * STD_FUZZ_FACTOR {
+                if keyscmp != PathKeysComparison::Better2 {
+                    remove_old = true;
+                }
+            } else if keyscmp == PathKeysComparison::Better1 {
+                remove_old = true;
+            } else if keyscmp == PathKeysComparison::Better2 {
+                accept_new = false;
+            } else if old_path.total_cost > new_path.total_cost * 1.0000000001 {
+                remove_old = true;
+            } else {
+                accept_new = false;
+            }
+        }
+
+        if remove_old {
+            working.remove(i);
+        } else {
+            if new_path.total_cost >= old_path.total_cost {
+                insert_at = i + 1;
+            }
+            i += 1;
+        }
+
+        if !accept_new {
+            break;
+        }
+    }
+
+    if accept_new {
+        let at = insert_at.min(working.len());
+        working.insert(at, new_id);
+    }
+    run.root.rel_mut(rel_id).partial_pathlist = working;
+}
+
+// add_partial_path_precheck (pathnode.c).
+pub fn add_partial_path_precheck(
+    run: &PlannerRun<'_>,
+    rel_id: RelId,
+    disabled_nodes: i32,
+    total_cost: f64,
+    pathkeys: &[PathKey],
+) -> bool {
+    for &old_id in run.root.rel(rel_id).partial_pathlist.iter() {
+        let old = run.root.path(old_id).base();
+        let keyscmp = compare_pathkeys(pathkeys, &old.pathkeys);
+        if keyscmp != PathKeysComparison::Different {
+            if total_cost > old.total_cost * STD_FUZZ_FACTOR
+                && keyscmp != PathKeysComparison::Better1
+            {
+                return false;
+            }
+            if old.total_cost > total_cost * STD_FUZZ_FACTOR
+                && keyscmp != PathKeysComparison::Better2
+            {
+                return true;
+            }
+        }
+    }
+    // Neither clearly better nor worse than another partial path: reject if
+    // it loses to a complete path even before the Gather overhead
+    // (total_cost passed for startup too — partial plans run to completion).
+    add_path_precheck(run, rel_id, disabled_nodes, total_cost, total_cost, pathkeys, &None)
+}
+
+// create_gather_path (pathnode.c); required_outer is empty at every ported
+// call site, so param_info stays None.
+pub fn create_gather_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: Option<PtId>,
+    rows: Option<f64>,
+) -> PathId {
+    let sub = run.root.path(subpath_id).base();
+    debug_assert!(sub.parallel_safe);
+    let mut num_workers = sub.parallel_workers;
+    let mut single_copy = false;
+    let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    if num_workers == 0 {
+        // Gather of a non-partial path: one worker, order preserved.
+        pathkeys = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys);
+        num_workers = 1;
+        single_copy = true;
+    }
+    let path = Path {
+        type_: tag16(NodeTag::T_GatherPath),
+        pathtype: tag16(NodeTag::T_Gather),
+        parent: rel_id,
+        pathtarget_id: target_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: false,
+        parallel_workers: 0,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let id = run.root.alloc_path(PathNode::GatherPath(types_pathnodes::GatherPath {
+        path,
+        subpath: Some(subpath_id),
+        single_copy,
+        num_workers,
+    }));
+    costsize::cost_gather(run, id, rel_id, rows);
+    id
+}
+
+// create_gather_merge_path (pathnode.c); required_outer empty as above.
+pub fn create_gather_merge_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: Option<PtId>,
+    pathkeys: PgVec<'mcx, PathKey>,
+    rows: Option<f64>,
+) -> PathId {
+    let sub = run.root.path(subpath_id).base();
+    debug_assert!(sub.parallel_safe);
+    assert!(!pathkeys.is_empty());
+    // The subpath must already deliver the order: createplan.c cannot add a
+    // sort here (the sort expressions might not be parallel safe).
+    if !types_pathnodes::pathkeys_contained_in(&pathkeys, &sub.pathkeys) {
+        panic!("gather merge input not sufficiently sorted");
+    }
+    let num_workers = sub.parallel_workers;
+    let (input_disabled, input_startup, input_total) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost);
+    let path = Path {
+        type_: tag16(NodeTag::T_GatherMergePath),
+        pathtype: tag16(NodeTag::T_GatherMerge),
+        parent: rel_id,
+        pathtarget_id: target_id.or(run.root.rel(rel_id).pathtarget_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: false,
+        parallel_workers: 0,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let id = run.root.alloc_path(PathNode::GatherMergePath(types_pathnodes::GatherMergePath {
+        path,
+        subpath: Some(subpath_id),
+        num_workers,
+    }));
+    costsize::cost_gather_merge(run, id, rel_id, input_disabled, input_startup, input_total, rows);
+    id
 }
 
 // create_functionscan_path (pathnode.c).

@@ -42,6 +42,8 @@ real_guc!(RANDOM_PAGE_COST, random_page_cost, set_random_page_cost, guc_tables::
 real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST);
 real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
 real_guc!(RECURSIVE_WORKTABLE_FACTOR, recursive_worktable_factor, set_recursive_worktable_factor, guc_tables::consts::DEFAULT_RECURSIVE_WORKTABLE_FACTOR);
+real_guc!(PARALLEL_TUPLE_COST, parallel_tuple_cost, set_parallel_tuple_cost, guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST);
+real_guc!(PARALLEL_SETUP_COST, parallel_setup_cost, set_parallel_setup_cost, guc_tables::consts::DEFAULT_PARALLEL_SETUP_COST);
 int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
 bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
 bool_guc!(ENABLE_TIDSCAN, enable_tidscan, set_enable_tidscan, true);
@@ -61,6 +63,15 @@ bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_dis
 bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partition_pruning, true);
 bool_guc!(ENABLE_PARTITIONWISE_JOIN, enable_partitionwise_join, set_enable_partitionwise_join, false);
 bool_guc!(ENABLE_PARTITIONWISE_AGGREGATE, enable_partitionwise_aggregate, set_enable_partitionwise_aggregate, false);
+bool_guc!(ENABLE_GATHERMERGE, enable_gathermerge, set_enable_gathermerge, true);
+
+// Read through the slot: execmain install_if_absent's a stand-in accessor,
+// whichever install wins must serve every reader.
+bool_guc!(PARALLEL_LEADER_PARTICIPATION, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true);
+
+pub fn parallel_leader_participation() -> bool {
+    guc_tables::vars::parallel_leader_participation.read()
+}
 
 pub fn install() {
     use guc_tables::GucVarAccessors;
@@ -120,4 +131,14 @@ pub fn install() {
         .install(GucVarAccessors { get: enable_distinct_reordering, set: set_enable_distinct_reordering });
     guc_tables::vars::recursive_worktable_factor
         .install(GucVarAccessors { get: recursive_worktable_factor, set: set_recursive_worktable_factor });
+    guc_tables::vars::parallel_tuple_cost
+        .install(GucVarAccessors { get: parallel_tuple_cost, set: set_parallel_tuple_cost });
+    guc_tables::vars::parallel_setup_cost
+        .install(GucVarAccessors { get: parallel_setup_cost, set: set_parallel_setup_cost });
+    guc_tables::vars::enable_gathermerge
+        .install(GucVarAccessors { get: enable_gathermerge, set: set_enable_gathermerge });
+    guc_tables::vars::parallel_leader_participation.install_if_absent(GucVarAccessors {
+        get: parallel_leader_participation_backing,
+        set: set_parallel_leader_participation_backing,
+    });
 }
