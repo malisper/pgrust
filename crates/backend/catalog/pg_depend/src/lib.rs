@@ -689,24 +689,187 @@ pub fn recordDependencyOnCurrentExtension<'mcx>(
             if oldext == CurrentExtensionObject() {
                 return Ok(());
             }
-            // The 55000 report needs getObjectDescription (objectaddress lane).
-            panic!(
-                "recordDependencyOnCurrentExtension (pg_depend.c): object \
-                 {}/{} is already a member of extension {oldext}",
-                object.classId, object.objectId
-            );
+            return Err(Box::new(
+                types_error::PgError::new(
+                    types_error::ERROR,
+                    format!(
+                        "{} is already a member of extension \"{}\"",
+                        describe_object(mcx, object)?,
+                        extension_name_or_lookup_fail(oldext)?
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
         }
-        panic!(
-            "recordDependencyOnCurrentExtension (pg_depend.c): free-standing object \
-             {}/{} replaced by extension {} (needs getObjectDescription for the 55000 report)",
-            object.classId,
-            object.objectId,
-            CurrentExtensionObject()
-        );
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!(
+                    "{} is not a member of extension \"{}\"",
+                    describe_object(mcx, object)?,
+                    extension_name_or_lookup_fail(CurrentExtensionObject())?
+                ),
+            )
+            .with_detail(
+                "An extension is not allowed to replace an object that it does not own.",
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
     }
 
     let extension = ObjectAddress::set(types_core::EXTENSION_RELATION_ID, CurrentExtensionObject());
     recordDependencyOn(mcx, object, &extension, DependencyType::Extension)
+}
+
+fn describe_object(mcx: Mcx<'_>, object: &ObjectAddress) -> PgResult<String> {
+    Ok(objectaddress_seams::get_object_description::call(
+        mcx,
+        object.classId,
+        object.objectId,
+        object.objectSubId,
+        false,
+    )?
+    .expect("missing_ok=false"))
+}
+
+fn extension_name_or_lookup_fail(ext_oid: Oid) -> PgResult<String> {
+    Ok(extension_seams::get_extension_name::call(ext_oid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for extension {ext_oid}")))
+}
+
+pub fn checkMembershipInCurrentExtension(mcx: Mcx<'_>, object: &ObjectAddress) -> PgResult<()> {
+    debug_assert!(object.objectSubId == 0);
+    if !creating_extension() {
+        return Ok(());
+    }
+    let oldext = getExtensionOfObject(mcx, object.classId, object.objectId)?;
+    if oldext == CurrentExtensionObject() {
+        return Ok(());
+    }
+    Err(Box::new(
+        types_error::PgError::new(
+            types_error::ERROR,
+            format!(
+                "{} is not a member of extension \"{}\"",
+                describe_object(mcx, object)?,
+                extension_name_or_lookup_fail(CurrentExtensionObject())?
+            ),
+        )
+        .with_detail(
+            "An extension may only use CREATE ... IF NOT EXISTS to skip object creation \
+             if the conflicting object is one that it already owns.",
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+    ))
+}
+
+pub fn deleteDependencyRecordsForSpecific<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    deptype: i8,
+    refclassId: Oid,
+    refobjectId: Oid,
+) -> PgResult<i64> {
+    let mut count = 0i64;
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid() == refclassId
+            && dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid() == refobjectId
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8() == deptype
+        {
+            let tid = view.t_self;
+            catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            count += 1;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}
+
+pub fn getAutoExtensionsOfObject<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let mut result: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid()
+            == types_core::EXTENSION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
+                == DependencyType::AutoExtension.as_char()
+        {
+            result.push(dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid());
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+pub fn getExtensionType(mcx: Mcx<'_>, extensionOid: Oid, typname: &str) -> PgResult<Oid> {
+    let mut result = types_core::InvalidOid;
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_refclassid, types_core::EXTENSION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, extensionOid),
+        int4_key(Anum_pg_depend_refobjsubid, 0),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_classid, desc).as_oid() == TYPE_CLASS
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
+                == DependencyType::Extension.as_char()
+        {
+            let typoid = dep_attr(&view, Anum_pg_depend_objid, desc).as_oid();
+            let Some((name, _nsp)) = syscache_seams::pg_type_name_namespace::call(typoid)? else {
+                continue;
+            };
+            if name.name_str() == typname.as_bytes() {
+                result = typoid;
+                break;
+            }
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
 }
 
 pub fn recordDependencyOnOwner<'mcx>(
