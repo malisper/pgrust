@@ -3770,10 +3770,27 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
-            2119 => panic!(
-                "gram_core: indirection over a sub-SELECT (A_Indirection) not ported \
-                 (unit backend-parser-gram)"
-            ),
+            // c_expr: select_with_parens indirection
+            2119 => {
+                let subselect = view.v(1).node().expect("select_with_parens");
+                let ind = view.v(2).list();
+                self.check_indirection(&ind)?;
+                let sub = Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: None,
+                        operName: NodeList::nil(),
+                        subselect,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Indirection { arg: Some(sub), indirection: ind },
+                )?));
+            }
             // c_expr: EXISTS select_with_parens
             2120 => {
                 let subselect = view.v(2).node().expect("select_with_parens");
@@ -5091,8 +5108,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = make_a_const(mcx, v, view.l(1))?;
             }
             248 => *yyval = view.v(2),
-            // SetResetClause: VariableResetStmt (node -> vsetstmt cast in C).
-            256 => *yyval = view.v(1),
+            // [Function]SetResetClause: VariableResetStmt (node -> vsetstmt cast in C).
+            256 | 258 => *yyval = view.v(1),
             // reset_rest: TIME ZONE / TRANSACTION ISOLATION LEVEL / SESSION AUTHORIZATION.
             250 | 251 | 252 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -5822,6 +5839,51 @@ impl<'mcx> Parser<'mcx> {
                 n.subtype = AlterTableType::AT_AddColumn;
                 n.def = def.node();
                 n.missing_ok = rule == 303 || rule == 305;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterCompositeTypeStmt: ALTER TYPE_P any_name alter_type_cmds
+            400 => {
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = Some(self.range_var_from_any_name(&view.v(3).list(), view.l(3))?);
+                n.cmds = view.v(4).list();
+                n.objtype = ObjectType::OBJECT_TYPE;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            401 => {
+                let el = view.v(1).node().expect("alter_type_cmd");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            402 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("alter_type_cmd"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            403 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AddColumn;
+                n.def = view.v(3).node();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            404 | 405 => {
+                let name_i = if rule == 404 { 5 } else { 3 };
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropColumn;
+                n.name = Some(view.v(name_i).str_val());
+                n.behavior = drop_behavior(view.v(name_i + 1).ival());
+                n.missing_ok = rule == 404;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            406 => {
+                let mut def = Node::build::<ColumnDef>(mcx)?;
+                def.typeName = view.v(6).node();
+                def.collClause = view.v(7).node();
+                def.location = view.l(3);
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AlterColumnType;
+                n.name = Some(view.v(3).str_val());
+                n.def = Some(def.seal());
+                n.behavior = drop_behavior(view.v(8).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
@@ -9876,6 +9938,39 @@ impl<'mcx> Parser<'mcx> {
             format!("improper qualified name (too many dotted names): {joined}"),
             location,
         )
+    }
+
+    // makeRangeVarFromAnyName: makeNode zero-fill leaves inh=false.
+    fn range_var_from_any_name(
+        &self,
+        names: &NodeList<'mcx>,
+        location: i32,
+    ) -> PgResult<&'mcx RangeVar<'mcx>> {
+        let mut parts = [None; 3];
+        for (i, el) in names.iter().enumerate() {
+            if i < 3 {
+                parts[i] = el.as_string().map(|s| s.sval);
+            }
+        }
+        let (catalogname, schemaname, relname) = match names.len() {
+            1 => (None, None, parts[0]),
+            2 => (None, parts[0], parts[1]),
+            3 => (parts[0], parts[1], parts[2]),
+            _ => return Err(self.improper_qualified_name(None, names, location)),
+        };
+        Ok(Node::mk_mut(
+            self.mcx,
+            RangeVar {
+                catalogname,
+                schemaname,
+                relname,
+                inh: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                alias: None,
+                location,
+            },
+        )?
+        .seal_ref())
     }
 
     // makeRangeVarFromQualifiedName (incl. check_qualified_name).

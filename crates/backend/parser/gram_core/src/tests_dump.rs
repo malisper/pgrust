@@ -184,6 +184,17 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if n.as_a_star().is_some() {
         out.push_str("{A_STAR}");
+    } else if let Some(ai) = n.as_a_indirection() {
+        out.push_str("{A_INDIRECTION");
+        node_field(out, "arg", ai.arg);
+        list_field(out, "indirection", &ai.indirection);
+        out.push('}');
+    } else if let Some(ix) = n.as_variant::<types_nodes::rawnodes::A_Indices>() {
+        out.push_str("{A_INDICES");
+        bool_field(out, "is_slice", ix.is_slice);
+        node_field(out, "lidx", ix.lidx);
+        node_field(out, "uidx", ix.uidx);
+        out.push('}');
     } else if let Some(rv) = n.as_range_var() {
         range_var(out, rv);
     } else if let Some(v) = n.as_variant::<types_nodes::rawnodes::ViewStmt>() {
