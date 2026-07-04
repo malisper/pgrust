@@ -1,8 +1,8 @@
 // nodeIndexscan.c: Var-op-Const quals become ScanKeys at init (rule 5);
-// runtime keys (indexkey op expression) re-evaluate into the same ScanKeys at
-// rescan. Array keys, RowCompare, and ORDER BY (reorder-queue) arms loud-panic
-// pending their lanes. EPQ/parallel arms loud-panic pending EPQState and
-// DSM/shm_toc.
+// runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays)
+// re-evaluate into the same ScanKeys at rescan. Non-amsearcharray array keys,
+// RowCompare, and ORDER BY (reorder-queue) arms loud-panic pending their
+// lanes. EPQ/parallel arms loud-panic pending EPQState and DSM/shm_toc.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -319,8 +319,10 @@ fn scankey_case_unported(what: &str) -> ! {
 }
 
 /// `ExecIndexBuildScanKeys`, cases 1 (indexkey op Const), 2 (runtime key),
-/// and 5 (NullTest). RowCompare and ScalarArrayOp loud-panic; the isorderby
-/// leg is cut off at init (orderby_unported).
+/// 4 (amsearcharray ScalarArrayOp, Const or runtime array), and 5 (NullTest).
+/// RowCompare and non-amsearcharray ScalarArrayOp loud-panic (the planner
+/// only builds saop index quals on amsearcharray AMs — plancat sets it for
+/// btree only); the isorderby leg is cut off at init (orderby_unported).
 pub fn exec_index_build_scan_keys<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -367,18 +369,32 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 if rightop.node_tag() == NodeTag::T_RelabelType {
                     rightop = rightop.as_relabel_type().unwrap().arg;
                 }
-                let Some(con) = rightop.as_const() else {
-                    scankey_case_unported("runtime array key (non-Const array value)");
+                let (flags, scanvalue) = match rightop.as_const() {
+                    Some(con) => (
+                        SK_SEARCHARRAY | if con.constisnull { SK_ISNULL } else { 0 },
+                        con.constvalue,
+                    ),
+                    None => {
+                        runtime_keys.push(IndexRuntimeKeyInfo {
+                            scan_key: scan_keys.len(),
+                            key_expr: exec_init_expr(mcx, Some(rightop), params)?
+                                .expect("runtime key expr compiles"),
+                            // The expr yields an array of op_righttype, not
+                            // op_righttype itself; every array type is toastable.
+                            key_toastable: true,
+                        });
+                        (SK_SEARCHARRAY, ::datum::Datum::from_usize(0))
+                    }
                 };
 
                 let mut key = ScanKeyData::empty();
-                key.sk_flags = SK_SEARCHARRAY | if con.constisnull { SK_ISNULL } else { 0 };
+                key.sk_flags = flags;
                 key.sk_attno = varattno;
                 key.sk_strategy = op_strategy as StrategyNumber;
                 key.sk_subtype = op_righttype;
                 key.sk_collation = saop.inputcollid;
                 fmgr_core::fmgr_info_into(saop.opfuncid, &mut key.sk_func)?;
-                key.sk_argument = con.constvalue;
+                key.sk_argument = scanvalue;
                 scan_keys.push(key);
                 continue;
             }
@@ -575,11 +591,11 @@ fn detoast_datum<'m>(mcx: Mcx<'m>, v: ::datum::Datum) -> PgResult<::datum::Datum
 }
 
 pub fn exec_index_eval_array_keys() -> ! {
-    panic!("nodeindexscan: ExecIndexEvalArrayKeys pending the array-key lane")
+    panic!("nodeindexscan: ExecIndexEvalArrayKeys unreachable (planner emits saop index quals only on amsearcharray AMs)")
 }
 
 pub fn exec_index_advance_array_keys() -> ! {
-    panic!("nodeindexscan: ExecIndexAdvanceArrayKeys pending the array-key lane")
+    panic!("nodeindexscan: ExecIndexAdvanceArrayKeys unreachable (planner emits saop index quals only on amsearcharray AMs)")
 }
 
 pub fn exec_index_scan_estimate(_node: &mut IndexScanState<'_>) -> ! {
