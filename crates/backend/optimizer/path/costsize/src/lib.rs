@@ -427,11 +427,13 @@ pub fn cost_ctescan(
     let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
-    let mut run_cost = cpu_per_tuple * tuples;
+    let run_cost = cpu_per_tuple * tuples;
 
     let target = run.root.path_pathtarget(path_id);
     startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * rows;
+    // Live C contracts `+= a * b` to fmadd on ARM64 (-ffp-contract;
+    // docs/optimizations/adt_float-parity.md).
+    let run_cost = target.cost.per_tuple.mul_add(rows, run_cost);
 
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = rows;
@@ -441,11 +443,56 @@ pub fn cost_ctescan(
     Ok(())
 }
 
-// set_cte_size_estimates (costsize.c); self-reference worktable arm loud upstream.
+// set_cte_size_estimates (costsize.c).
 pub fn set_cte_size_estimates(run: &mut PlannerRun<'_>, rel: RelId, cte_rows: f64) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).relid > 0);
-    run.root.rel_mut(rel).tuples = cte_rows;
+    let rti = run.root.rel(rel).relid as usize;
+    debug_assert!(rti > 0);
+    let self_reference = {
+        let rte = run.rte(rti);
+        debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+        rte.self_reference
+    };
+    run.root.rel_mut(rel).tuples = if self_reference {
+        clamp_row_est(gucs::recursive_worktable_factor() * cte_rows)
+    } else {
+        cte_rows
+    };
     set_baserel_size_estimates(run, rel)
+}
+
+// cost_recursive_union (costsize.c): ~10 recursive iterations assumed.
+pub fn cost_recursive_union(
+    run: &mut PlannerRun<'_>,
+    runion: PathId,
+    nrterm: PathId,
+    rterm: PathId,
+) {
+    let (n_startup, n_total, n_rows, n_disabled, n_width) = {
+        let p = run.root.path(nrterm).base();
+        (
+            p.startup_cost,
+            p.total_cost,
+            p.rows,
+            p.disabled_nodes,
+            run.root.path_pathtarget(nrterm).width,
+        )
+    };
+    let (r_total, r_rows, r_disabled, r_width) = {
+        let p = run.root.path(rterm).base();
+        (p.total_cost, p.rows, p.disabled_nodes, run.root.path_pathtarget(rterm).width)
+    };
+    // Live C contracts each `+= a * b` to fmadd on ARM64 (-ffp-contract;
+    // docs/optimizations/adt_float-parity.md).
+    let total_cost = r_total.mul_add(10.0, n_total);
+    let total_rows = r_rows.mul_add(10.0, n_rows);
+    let total_cost = gucs::cpu_tuple_cost().mul_add(total_rows, total_cost);
+
+    let p = run.root.path_mut(runion).base_mut();
+    p.disabled_nodes = n_disabled + r_disabled;
+    p.startup_cost = n_startup;
+    p.total_cost = total_cost;
+    p.rows = total_rows;
+    run.root.path_pathtarget_mut(runion).width = n_width.max(r_width);
 }
 
 // set_values_size_estimates (costsize.c): tuples = row count of the list.

@@ -32,6 +32,8 @@ execgrouping = { path = "../execgrouping" }
 nodefunctionscan = { path = "../nodefunctionscan" }
 nodevaluesscan = { path = "../nodevaluesscan" }
 nodectescan = { path = "../nodectescan" }
+noderecursiveunion = { path = "../noderecursiveunion" }
+nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
