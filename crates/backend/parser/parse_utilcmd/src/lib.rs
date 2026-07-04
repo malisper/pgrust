@@ -894,6 +894,7 @@ pub fn transformCreateStmt<'mcx>(
                     nnconstraints: &mut nnconstraints,
                     likeclauses: &mut likeclauses,
                     alist: &mut save_alist,
+                    is_foreign,
                 };
                 like::transformTableLikeClause(mcx, &mut cxt, elt, query_string)?;
             }
