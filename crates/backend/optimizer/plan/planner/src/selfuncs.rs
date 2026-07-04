@@ -1682,12 +1682,12 @@ fn gistcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     Ok(AmCostEstimate {
         index_startup_cost: costs.index_startup_cost,
@@ -1736,12 +1736,12 @@ fn spgcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     Ok(AmCostEstimate {
         index_startup_cost: costs.index_startup_cost,
@@ -1866,7 +1866,11 @@ fn genericcostestimate(
 
     let index_startup_cost = qual_arg_cost;
     index_total_cost += qual_arg_cost;
-    index_total_cost += num_index_tuples * num_sa_scans * (gucs::cpu_index_tuple_cost() + qual_op_cost);
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+    // fuses `cost += expr * tuples`); odd numIndexTuples puts the total on a
+    // half-cent display boundary, exposing the one-ulp difference.
+    index_total_cost = (num_index_tuples * num_sa_scans)
+        .mul_add(gucs::cpu_index_tuple_cost() + qual_op_cost, index_total_cost);
 
     costs.index_startup_cost = index_startup_cost;
     costs.index_total_cost = index_total_cost;
@@ -2261,12 +2265,12 @@ fn btcostestimate(
     if index_tuples > 1.0 {
         let descent_cost = (index_tuples.ln() / 2.0f64.ln()).ceil() * cpu_operator_cost;
         costs.index_startup_cost += descent_cost;
-        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+        costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
     }
     let descent_cost =
         (index_tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
     costs.index_startup_cost += descent_cost;
-    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    costs.index_total_cost = costs.num_sa_scans.mul_add(descent_cost, costs.index_total_cost);
 
     // btcost_correlation over the leading column; expression columns read the
     // index's own pg_statistic row (colnum 1, inh false), as C.
