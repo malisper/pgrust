@@ -1133,9 +1133,6 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CoalesceExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for MinMaxExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_MinMaxExpr;
 }
-unsafe impl<'mcx> NodeVariant<'mcx> for NamedArgExpr<'mcx> {
-    const TAG: NodeTag = NodeTag::T_NamedArgExpr;
-}
 unsafe impl NodeVariant<'_> for SQLValueFunction {
     const TAG: NodeTag = NodeTag::T_SQLValueFunction;
 }
@@ -1472,11 +1469,6 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_min_max_expr(self) -> Option<&'mcx MinMaxExpr<'mcx>> {
-        self.as_variant()
-    }
-
-    #[inline]
-    pub fn as_named_arg_expr(self) -> Option<&'mcx NamedArgExpr<'mcx>> {
         self.as_variant()
     }
 
