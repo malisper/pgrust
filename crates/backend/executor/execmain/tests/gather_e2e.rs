@@ -301,6 +301,10 @@ fn leader_thread_boot() {
         procsignal::ProcSignalInit(&[]).unwrap();
         miscinit::SetAuthenticatedUserId(10);
         miscinit::SetSessionAuthorization(10, true).unwrap();
+        // After InitializeLatchWaitSet (so the cached wait set never armed a
+        // postmaster-death watch — no pipe here): RegisterDynamicBackgroundWorker
+        // runs mid-ExecGather and returns None when not under postmaster.
+        g::SetIsUnderPostmaster(true);
         armed.set(true);
     });
 }
@@ -551,9 +555,7 @@ fn spawn_postmaster_standin() -> std::thread::JoinHandle<Vec<std::thread::JoinHa
         let mut joins = Vec::new();
         for _ in 0..600 {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            g::SetIsUnderPostmaster(true);
             let mut new = launch_registered_workers();
-            g::SetIsUnderPostmaster(false);
             if !new.is_empty() {
                 joins.append(&mut new);
                 break;
