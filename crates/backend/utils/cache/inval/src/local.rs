@@ -39,7 +39,6 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
         SharedInvalidationMessage::Relcache(m) => {
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 if m.relId == InvalidOid {
-                    eprintln!("PUBTRACE local relcache-inval-all msg");
                     relcache_seams::relation_cache_invalidate::call(false)?;
                 } else {
                     relcache_seams::relation_cache_invalidate_entry::call(m.relId)?;

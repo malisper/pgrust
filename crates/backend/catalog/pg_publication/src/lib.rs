@@ -173,7 +173,6 @@ fn cannot_add_relation(relname: &str, detail: String) -> Box<PgError> {
 }
 
 fn check_publication_add_relation(targetrel: &Relation<'_>) -> PgResult<()> {
-    eprintln!("PUBTRACE CHKADD enter");
     let relkind = targetrel.rd_rel.relkind as u8;
     if relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE {
         return Err(cannot_add_relation(
@@ -377,11 +376,9 @@ pub fn publication_add_relation<'mcx>(
     pri: &PublicationRelInfo<'_, 'mcx>,
     if_not_exists: bool,
 ) -> PgResult<ObjectAddress> {
-    eprintln!("PUBTRACE ADDREL enter");
     let targetrel = pri.relation;
     let relid = targetrel.rd_id;
     let publication = GetPublication(mcx, pubid)?;
-    eprintln!("PUBTRACE ADDREL got-pub");
 
     let rel = table::table_open(mcx, PublicationRelRelationId, RowExclusiveLock)?;
 
@@ -407,7 +404,6 @@ pub fn publication_add_relation<'mcx>(
     }
 
     check_publication_add_relation(targetrel)?;
-    eprintln!("PUBTRACE ADDREL chk-done");
 
     let attnums = pub_collist_validate(mcx, targetrel, pri.columns)?;
 
@@ -445,9 +441,7 @@ pub fn publication_add_relation<'mcx>(
     }
 
     let mut tup = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
-    eprintln!("PUBTRACE ADDREL formed");
     catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut tup)?;
-    eprintln!("PUBTRACE ADDREL inserted");
 
     let myself = ObjectAddress::set(PublicationRelRelationId, pubreloid);
     recordDependencyOn(
@@ -500,7 +494,6 @@ pub fn pub_collist_validate<'mcx>(
     targetrel: &Relation<'mcx>,
     columns: &NodeList<'_>,
 ) -> PgResult<Bitmapset<'mcx>> {
-    eprintln!("PUBTRACE COLVAL enter");
     let mut set = Bitmapset::empty();
     let tupdesc = targetrel.descr();
     for cell in columns.iter() {
