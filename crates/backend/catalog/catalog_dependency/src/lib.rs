@@ -59,6 +59,8 @@ const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
 const AuthMemRelationId: Oid = 1261;
 const TriggerRelationId: Oid = 2620;
+const EventTriggerRelationId: Oid = 3466;
+const EventTriggerOidIndexId: Oid = 3468;
 
 #[cold]
 #[inline(never)]
@@ -682,7 +684,23 @@ fn deleteObjectsInList<'mcx>(
     depRel: &Relation<'mcx>,
     flags: i32,
 ) -> PgResult<()> {
-    // trackDroppedObjectsNeeded() is false (no event-trigger lane).
+    if event_trigger_seams::track_dropped_objects_needed::call(mcx)?
+        && flags & PERFORM_DELETION_INTERNAL == 0
+    {
+        for i in 0..targetObjects.refs.len() {
+            let thisobj = &targetObjects.refs[i];
+            let extra = &targetObjects.extras[i];
+            let original = extra.flags & DEPFLAG_ORIGINAL != 0;
+            let normal =
+                extra.flags & DEPFLAG_NORMAL != 0 || extra.flags & DEPFLAG_REVERSE != 0;
+            if event_trigger_seams::event_trigger_supports_object::call(thisobj) {
+                event_trigger_seams::event_trigger_sql_drop_add_object::call(
+                    mcx, thisobj, original, normal,
+                )?;
+            }
+        }
+    }
+
     for i in 0..targetObjects.refs.len() {
         let thisobj = &targetObjects.refs[i];
         let thisextra = &targetObjects.extras[i];
@@ -822,6 +840,27 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
             object.objectId,
         )?,
+        // DropObjectById (objectaddress.c) takes the EVENTTRIGGEROID catcache
+        // branch; the unique-index scan reaches the same tuple.
+        EventTriggerRelationId => {
+            let rel = table::table_open(mcx, EventTriggerRelationId, RowExclusiveLock)?;
+            let keys = [oid_key(1, object.objectId)];
+            let mut scan = genam::systable_beginscan(
+                mcx,
+                &rel,
+                EventTriggerOidIndexId,
+                true,
+                None,
+                &keys,
+            )?;
+            let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+                panic!("cache lookup failed for event trigger {}", object.objectId)
+            });
+            let tid = tup.t_self;
+            catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            genam::systable_endscan(mcx, scan)?;
+            rel.close(RowExclusiveLock)?;
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

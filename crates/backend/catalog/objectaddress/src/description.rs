@@ -32,7 +32,7 @@ fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     key
 }
 
-fn name_from_datum(d: Datum) -> String {
+pub(crate) fn name_from_datum(d: Datum) -> String {
     let mut name = NameData::default();
     // SAFETY: a NameData column's datum points at its 64-byte in-tuple buffer.
     unsafe {
@@ -117,7 +117,7 @@ fn format_procedure(mcx: Mcx<'_>, procid: Oid, force_qualify: bool) -> PgResult<
     Ok(Some(out))
 }
 
-fn scan_one_row<'mcx, T>(
+pub(crate) fn scan_one_row<'mcx, T>(
     mcx: Mcx<'mcx>,
     reloid: Oid,
     indexoid: Oid,
@@ -133,7 +133,7 @@ fn scan_one_row<'mcx, T>(
     Ok(result)
 }
 
-fn getattr(tup: &types_tuple::HeapTupleData<'_>, attnum: i32, desc: &types_tuple::TupleDescData<'_>) -> Datum {
+pub(crate) fn getattr(tup: &types_tuple::HeapTupleData<'_>, attnum: i32, desc: &types_tuple::TupleDescData<'_>) -> Datum {
     let mut isnull = false;
     // SAFETY: fixed NOT NULL catalog column under the relation's descriptor.
     let d = unsafe { types_tuple::heap_getattr(tup, attnum, desc, &mut isnull) };

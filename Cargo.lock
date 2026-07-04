@@ -1415,6 +1415,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cache_evtcache"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "cache_syscache",
+ "cmdtag",
+ "datum",
+ "detoast",
+ "genam",
+ "indexam",
+ "inval",
+ "mcx",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "cache_syscache"
 version = "0.1.0"
 dependencies = [
@@ -1471,6 +1492,7 @@ dependencies = [
  "datum",
  "dependency_seams",
  "elog_seams",
+ "event_trigger_seams",
  "extension",
  "fmgr_seams",
  "format_type",
@@ -3070,6 +3092,57 @@ dependencies = [
 name = "error_small_seams"
 version = "0.0.0"
 dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "event_trigger"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "cache_evtcache",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catalog_namespace",
+ "catalog_objectaddress",
+ "cmdtag",
+ "datum",
+ "elog",
+ "event_trigger_seams",
+ "fmgr_core",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_attrdef",
+ "pg_depend",
+ "plancache",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
+name = "event_trigger_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_depend",
  "seam_core",
  "types_error",
 ]
@@ -7624,10 +7697,12 @@ version = "0.0.0"
 dependencies = [
  "cache_syscache",
  "catalog_namespace",
+ "cmdtag",
  "coerce",
  "datum",
  "detoast",
  "elog",
+ "event_trigger",
  "execexpr",
  "fmgr_core",
  "format_type",
@@ -9502,6 +9577,7 @@ dependencies = [
  "detoast",
  "dsm_core",
  "elog",
+ "event_trigger",
  "execexpr",
  "execjunk",
  "execmain",
@@ -10627,6 +10703,7 @@ dependencies = [
  "commands_cluster",
  "datum",
  "elog_seams",
+ "event_trigger",
  "execexpr",
  "exectuples",
  "fmgr_seams",
@@ -11604,6 +11681,7 @@ dependencies = [
  "discard",
  "elog",
  "elog_seams",
+ "event_trigger",
  "explain",
  "extension",
  "functioncmds",

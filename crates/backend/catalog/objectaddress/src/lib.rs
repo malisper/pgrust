@@ -6,7 +6,9 @@
 #![allow(non_upper_case_globals)]
 
 mod description;
+mod identity;
 pub use description::{getObjectDescription, getObjectIdentity};
+pub use identity::{getObjectIdentityParts, getObjectTypeDescription, ObjectIdentity};
 
 use mcx::Mcx;
 use rel_vocab::RangeVar;
@@ -52,6 +54,7 @@ pub const AttrDefaultRelationId: Oid = 2604;
 pub const RewriteRelationId: Oid = 2618;
 pub const TriggerRelationId: Oid = 2620;
 pub const PolicyRelationId: Oid = 3256;
+pub const EventTriggerRelationId: Oid = 3466;
 
 #[cold]
 #[inline(never)]
@@ -301,8 +304,33 @@ fn get_object_address_unqualified(
             EXTENSION_RELATION_ID,
             extension::get_extension_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_EVENT_TRIGGER => Ok(ObjectAddress::set(
+            EventTriggerRelationId,
+            get_event_trigger_oid(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
+}
+
+// get_event_trigger_oid (event_trigger.c); hosted here because event_trigger
+// depends on this crate for identity parts.
+fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {
+    const Anum_pg_event_trigger_oid: i32 = 1;
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::EVENTTRIGGERNAME,
+        Anum_pg_event_trigger_oid,
+        cache_syscache::SysCacheKey::Str(trigname),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("event trigger \"{trigname}\" does not exist"),
+        ));
+    }
+    Ok(oid)
 }
 
 // get_object_address_relobject (objectaddress.c), OBJECT_RULE arm; the
@@ -426,7 +454,7 @@ pub fn get_object_address<'mcx>(
                 let tn = object.as_type_name().expect("type object is a TypeName");
                 (get_object_address_type(objtype, tn, missing_ok)?, None)
             }
-            OBJECT_SCHEMA | OBJECT_EXTENSION => {
+            OBJECT_SCHEMA | OBJECT_EXTENSION | OBJECT_EVENT_TRIGGER => {
                 (get_object_address_unqualified(objtype, object, missing_ok)?, None)
             }
             OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE => {
@@ -523,7 +551,7 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
             .map(|(_, nsp)| nsp)
             .unwrap_or(InvalidOid)),
         NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
-        | RewriteRelationId | TriggerRelationId => Ok(InvalidOid),
+        | RewriteRelationId | TriggerRelationId | EventTriggerRelationId => Ok(InvalidOid),
         ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
             .map(|s| s.pronamespace)
             .unwrap_or(InvalidOid)),

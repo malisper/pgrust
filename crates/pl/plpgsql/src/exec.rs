@@ -270,6 +270,20 @@ impl<'a> Estate<'a> {
         self.set_var(dno, Datum::from_bool(state), false);
     }
 
+    // assign_text_var; the image lives in the invocation datum context and is
+    // reclaimed by its wholesale reset (C pfrees per-value).
+    pub fn assign_text_var(&mut self, dno: Dno, s: &str) -> PgResult<()> {
+        let mcx = self.datum_ctx.mcx();
+        let total = datum::VARHDRSZ + s.len();
+        let mut image = mcx::vec_with_capacity_in(mcx, total)?;
+        mcx::vec_append_bytes(&mut image, &datum::set_varsize_4b(total))?;
+        mcx::vec_append_bytes(&mut image, s.as_bytes())?;
+        let p = image.as_ptr();
+        core::mem::forget(image);
+        self.set_var(dno, Datum::from_usize(p as usize), false);
+        Ok(())
+    }
+
     // exec_eval_cleanup.
     fn exec_eval_cleanup(&mut self) {
         if let Some(t) = self.eval_tuptable.take() {
@@ -292,9 +306,34 @@ impl<'a> Estate<'a> {
     // ------------------------------------------------------------------
 
     fn ensure_plan(&mut self, expr: &PlExpr, cursor_options: i32) -> PgResult<()> {
-        let have = EXPR_PLANS.with(|t| t.borrow().contains_key(&expr.expr_id));
-        if have {
-            return Ok(());
+        let stale = EXPR_PLANS.with(|t| {
+            t.borrow().get(&expr.expr_id).map(|e| {
+                spi::SPI_plan_single_source(e.plan)
+                    .map(|(psrc, _)| !plancache::CachedPlanSourceIsValid(psrc))
+                    .unwrap_or(false)
+            })
+        });
+        match stale {
+            Some(false) => return Ok(()),
+            // C's RevalidateCachedQuery re-analyzes the retained raw tree in
+            // place; this port re-prepares from the retained query text (same
+            // text, fresh analysis). search_path-only invalidation is not
+            // detected here (hook-resolved plpgsql exprs; divergence).
+            Some(true) => {
+                // Release this estate's simple-expr pin before the source is
+                // dropped (handles are generation-checked; a stale probe
+                // panics). Other in-flight estates of the same function would
+                // still hold stale pins — loud, not silent, if ever hit.
+                if let Some(Some(se)) = self.simple_cache.remove(&expr.expr_id) {
+                    plancache::ReleaseCachedPlan(se.cplan);
+                }
+                if let Some(e) =
+                    EXPR_PLANS.with(|t| t.borrow_mut().remove(&expr.expr_id))
+                {
+                    let _ = spi::SPI_freeplan(e.plan);
+                }
+            }
+            None => {}
         }
         let (hooks_names, params_by_dno, recs) = self.build_hook_tables(expr)?;
         let used = core::cell::RefCell::new(Vec::new());

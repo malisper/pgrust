@@ -403,6 +403,12 @@ pub fn CachedPlanIsValid(h: CachedPlanSourceHandle) -> bool {
     with_source(h, |src| src.is_valid)
 }
 
+// Source-validity probe for owners that can rebuild from retained SQL (the
+// plpgsql SPI-plan path): C revalidates in place from the raw tree.
+pub fn CachedPlanSourceIsValid(h: CachedPlanSourceHandle) -> bool {
+    with_cache(|pc| source_mut(pc, h).is_valid)
+}
+
 // C CachedPlanIsSimplyValid (plancache.c) minus the resowner arm: true only
 // while `cplan` is the source's current generic plan, both are valid, and the
 // captured search_path still matches the current environment. Caller must

@@ -38,6 +38,7 @@ pub fn init_all() {
     catalog_dependency::init_seams();
     tablecmds::init_seams();
     commands_cluster::init_seams();
+    event_trigger::init_seams();
     catalog::init_seams();
     catalog_storage::init_seams();
     pg_database::init_seams();
