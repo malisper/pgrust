@@ -106,6 +106,10 @@ fn node_child_lists<'mcx>(node: Node<'mcx>) -> Vec<&'mcx NodeList<'mcx>> {
         NodeTag::T_MergeAppend => vec![&node.as_merge_append().unwrap().mergeplans],
         NodeTag::T_BitmapAnd => vec![&node.as_bitmap_and().unwrap().bitmapplans],
         NodeTag::T_BitmapOr => vec![&node.as_bitmap_or().unwrap().bitmapplans],
+        NodeTag::T_SubqueryScan => {
+            walk_parallel_aware(node.as_subquery_scan().unwrap().subplan);
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -402,7 +406,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         instrument_options,
     )?;
 
-    let run = || -> PgResult<()> {
+    let mut run = || -> PgResult<()> {
         crate::execmain::executor_start_seam(qd, exec.eflags)?;
 
         querydesc::with_qd(qd, |q| {
