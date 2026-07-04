@@ -374,7 +374,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         // C: consider both argument name and value.
         NodeTag::T_NamedArgExpr => {
             let na = node.as_named_arg_expr().unwrap();
-            leftmost_loc(na.location, expr_location(na.arg))
+            leftmost_loc(
+                na.location,
+                expr_location(na.arg.expect("NamedArgExpr has an arg")),
+            )
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();

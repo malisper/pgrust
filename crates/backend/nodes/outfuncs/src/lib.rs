@@ -425,7 +425,7 @@ fn out_func_expr(out: &mut PgString<'_>, f: &FuncExpr<'_>) -> PgResult<()> {
 
 fn out_named_arg_expr(out: &mut PgString<'_>, n: &NamedArgExpr<'_>) -> PgResult<()> {
     w!(out, "{{NAMEDARGEXPR :arg ");
-    out_node(out, n.arg)?;
+    out_opt_node(out, n.arg)?;
     w!(out, " :name ");
     out_str(out, n.name);
     w!(out, " :argnumber {} :location -1}}", n.argnumber);

@@ -153,7 +153,12 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let f = node.as_variant::<FuncExpr>().unwrap();
             walk_list(&f.args, w)
         }
-        NodeTag::T_NamedArgExpr => w.visit(node.as_named_arg_expr().unwrap().arg),
+        NodeTag::T_NamedArgExpr => w.visit(
+            node.as_named_arg_expr()
+                .unwrap()
+                .arg
+                .expect("NamedArgExpr has an arg"),
+        ),
         NodeTag::T_OpExpr => {
             let o = node.as_variant::<OpExpr>().unwrap();
             walk_list(&o.args, w)
@@ -939,12 +944,12 @@ where
         }
         NodeTag::T_NamedArgExpr => {
             let na = node.as_named_arg_expr().unwrap();
-            match m(na.arg)? {
+            match m(na.arg.expect("NamedArgExpr has an arg"))? {
                 None => Ok(None),
                 Some(arg) => Ok(Some(Node::mk(
                     mcx,
                     types_nodes::NamedArgExpr {
-                        arg,
+                        arg: Some(arg),
                         name: na.name,
                         argnumber: na.argnumber,
                         location: na.location,
