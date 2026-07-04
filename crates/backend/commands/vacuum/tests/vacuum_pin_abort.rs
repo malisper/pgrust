@@ -77,6 +77,11 @@ fn install_smgr_disk() {
             d.fork(fork).as_ref().expect("smgr_nblocks on missing fork").len() as BlockNumber
         }))
     });
+    smgr_seams::rel_smgr_nblocks::set(|_rel, fork| {
+        Ok(with_disk(|d| {
+            d.fork(fork).as_ref().expect("rel_smgr_nblocks on missing fork").len() as BlockNumber
+        }))
+    });
     smgr_seams::smgr_zeroextend::set(|_loc, fork, blocknum, nblocks, _skip_fsync| {
         with_disk(|d| {
             let f = d.fork(fork).as_mut().expect("zeroextend on missing fork");

@@ -18,6 +18,14 @@ seam_core::seam!(
     pub fn smgr_nblocks(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> PgResult<BlockNumber>
 );
 seam_core::seam!(
+    // smgrnblocks(RelationGetSmgr(rel), forknum): the rd_smgr pin is required —
+    // unpinned entries die at AtEOXact_SMgr, closing fds (openat+close/query).
+    pub fn rel_smgr_nblocks<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        forknum: ForkNumber,
+    ) -> PgResult<BlockNumber>
+);
+seam_core::seam!(
     // smgrnblocks_cached (smgr.c): recovery-gated cache read.
     pub fn smgr_nblocks_cached(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> BlockNumber
 );
