@@ -386,7 +386,7 @@ fn start_scan(st: &mut OsaGroupState) -> PgResult<()> {
         sort.performsort()?;
         st.sort_done = true;
     } else {
-        sort.rescan();
+        sort.rescan()?;
     }
     Ok(())
 }

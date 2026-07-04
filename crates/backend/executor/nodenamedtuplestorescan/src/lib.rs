@@ -41,7 +41,7 @@ impl<'mcx> ScanNode<'mcx> for NamedTuplestoreScanState<'mcx> {
         let readptr = self.readptr;
         let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
         ::tuplestore::hold::with_store(self.relation, |ts| {
-            ts.select_read_pointer(readptr);
+            ts.select_read_pointer(readptr)?;
             ts.gettupleslot(true, false, slot, mcx)
         })
     }
@@ -85,10 +85,10 @@ pub fn exec_init_named_tuplestore_scan<'mcx>(
     // The new read pointer copies pointer 0's position: rewind it explicitly.
     let readptr = ::tuplestore::hold::with_store(relation, |ts| {
         let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
-        ts.select_read_pointer(p);
-        ts.rescan();
-        p
-    });
+        ts.select_read_pointer(p)?;
+        ts.rescan()?;
+        Ok::<i32, Box<::types_error::PgError>>(p)
+    })?;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
     let ss_ScanTupleSlot =
@@ -117,12 +117,12 @@ pub fn exec_init_named_tuplestore_scan<'mcx>(
 pub fn exec_rescan_named_tuplestore_scan<'mcx>(
     node: &mut NamedTuplestoreScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) {
+) -> PgResult<()> {
     execscan::exec_scan_rescan(&mut node.ss, estate);
     ::tuplestore::hold::with_store(node.relation, |ts| {
-        ts.select_read_pointer(node.readptr);
-        ts.rescan();
-    });
+        ts.select_read_pointer(node.readptr)?;
+        ts.rescan()
+    })
 }
 
 mcx::forget_safe_struct!(

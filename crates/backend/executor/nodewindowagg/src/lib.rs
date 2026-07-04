@@ -1417,20 +1417,20 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
         let mcx = estate.es_query_cxt;
         let buffer = self.buffer.as_mut().unwrap();
-        buffer.select_read_pointer(readptr);
+        buffer.select_read_pointer(readptr)?;
         let mut seekpos = seekpos;
         if seekpos < pos - 1 {
-            if !buffer.skiptuples(pos - 1 - seekpos, true) {
+            if !buffer.skiptuples(pos - 1 - seekpos, true)? {
                 panic!("unexpected end of tuplestore");
             }
             seekpos = pos - 1;
         } else if seekpos > pos + 1 {
-            if !buffer.skiptuples(seekpos - (pos + 1), false) {
+            if !buffer.skiptuples(seekpos - (pos + 1), false)? {
                 panic!("unexpected end of tuplestore");
             }
             seekpos = pos + 1;
         } else if seekpos == pos {
-            buffer.advance(true);
+            buffer.advance(true)?;
             seekpos += 1;
         }
         let slot = match which_slot {
@@ -1459,7 +1459,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
     // WinSetMarkPosition minus the mark read pointer (no trim): the read
     // pointer still advances so later fetches never seek before the mark.
-    fn set_mark_position(&mut self, perfunc_ix: usize, markpos: i64) {
+    fn set_mark_position(&mut self, perfunc_ix: usize, markpos: i64) -> PgResult<()> {
         let pf = &mut self.perfunc[perfunc_ix];
         if markpos < pf.markpos {
             panic!("cannot move WindowObject's mark position backward");
@@ -1467,23 +1467,25 @@ impl<'mcx> WindowAggStateData<'mcx> {
         pf.markpos = markpos;
         if markpos > pf.seekpos {
             let buffer = self.buffer.as_mut().unwrap();
-            buffer.select_read_pointer(pf.readptr);
-            buffer.skiptuples(markpos - pf.seekpos, true);
+            buffer.select_read_pointer(pf.readptr)?;
+            buffer.skiptuples(markpos - pf.seekpos, true)?;
             pf.seekpos = markpos;
         }
+        Ok(())
     }
 
-    fn set_agg_mark_position(&mut self, markpos: i64) {
+    fn set_agg_mark_position(&mut self, markpos: i64) -> PgResult<()> {
         if markpos < self.agg_markpos {
             panic!("cannot move WindowObject's mark position backward");
         }
         self.agg_markpos = markpos;
         if markpos > self.agg_seekpos {
             let buffer = self.buffer.as_mut().unwrap();
-            buffer.select_read_pointer(self.agg_readptr);
-            buffer.skiptuples(markpos - self.agg_seekpos, true);
+            buffer.select_read_pointer(self.agg_readptr)?;
+            buffer.skiptuples(markpos - self.agg_seekpos, true)?;
             self.agg_seekpos = markpos;
         }
+        Ok(())
     }
 
     // WinRowsArePeers over the perfunc's read pointer.
@@ -1532,7 +1534,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             debug_assert!(curpos > 0);
             up = !self.rows_are_peers(estate, fetch, perfunc_ix, curpos - 1, curpos)?;
         }
-        self.set_mark_position(perfunc_ix, curpos);
+        self.set_mark_position(perfunc_ix, curpos)?;
         Ok(up)
     }
 
@@ -1568,7 +1570,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(framehead_ptr);
+                    buffer.select_read_pointer(framehead_ptr)?;
                     if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1599,7 +1601,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(framehead_ptr);
+                    buffer.select_read_pointer(framehead_ptr)?;
                     if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
                         exectuples::exec_clear_tuple(framehead_slot, mcx);
                         break;
@@ -1636,7 +1638,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(framehead_ptr);
+                    buffer.select_read_pointer(framehead_ptr)?;
                     if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1686,7 +1688,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(framehead_ptr);
+                    buffer.select_read_pointer(framehead_ptr)?;
                     if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
                         exectuples::exec_clear_tuple(framehead_slot, mcx);
                         break;
@@ -1705,7 +1707,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(framehead_ptr);
+                    buffer.select_read_pointer(framehead_ptr)?;
                     if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1725,7 +1727,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
                             *self;
                         let buffer = buffer.as_mut().unwrap();
-                        buffer.select_read_pointer(framehead_ptr);
+                        buffer.select_read_pointer(framehead_ptr)?;
                         more_rows && buffer.gettupleslot(true, false, framehead_slot, mcx)?
                     };
                     if !fetched {
@@ -1795,7 +1797,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(frametail_ptr);
+                    buffer.select_read_pointer(frametail_ptr)?;
                     if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1828,7 +1830,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(frametail_ptr);
+                    buffer.select_read_pointer(frametail_ptr)?;
                     if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
                         exectuples::exec_clear_tuple(frametail_slot, mcx);
                         break;
@@ -1865,7 +1867,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(frametail_ptr);
+                    buffer.select_read_pointer(frametail_ptr)?;
                     if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1915,7 +1917,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(frametail_ptr);
+                    buffer.select_read_pointer(frametail_ptr)?;
                     if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
                         exectuples::exec_clear_tuple(frametail_slot, mcx);
                         break;
@@ -1934,7 +1936,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                         *self;
                     let buffer = buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(frametail_ptr);
+                    buffer.select_read_pointer(frametail_ptr)?;
                     if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -1954,7 +1956,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
                             *self;
                         let buffer = buffer.as_mut().unwrap();
-                        buffer.select_read_pointer(frametail_ptr);
+                        buffer.select_read_pointer(frametail_ptr)?;
                         more_rows && buffer.gettupleslot(true, false, frametail_slot, mcx)?
                     };
                     if !fetched {
@@ -2010,7 +2012,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             return Ok(());
         }
         debug_assert!(self.grouptailpos <= self.currentpos);
-        self.buffer.as_mut().unwrap().select_read_pointer(self.grouptail_ptr);
+        self.buffer.as_mut().unwrap().select_read_pointer(self.grouptail_ptr)?;
         loop {
             self.grouptailpos += 1;
             self.spool_tuples(estate, fetch, self.grouptailpos)?;
@@ -2244,7 +2246,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             return Ok((NullableDatum::null(), true));
         }
         if set_mark {
-            self.set_mark_position(perfunc_ix, abs_pos);
+            self.set_mark_position(perfunc_ix, abs_pos)?;
         }
         let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
         Ok((nd, false))
@@ -2377,7 +2379,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             return Ok((NullableDatum::null(), true));
         }
         if set_mark {
-            self.set_mark_position(perfunc_ix, mark_pos);
+            self.set_mark_position(perfunc_ix, mark_pos)?;
         }
         let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
         Ok((nd, false))
@@ -2395,7 +2397,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         let result: NullableDatum = match self.perfunc[perfunc_ix].kind {
             WfKind::RowNumber => {
                 let curpos = self.currentpos;
-                self.set_mark_position(perfunc_ix, curpos);
+                self.set_mark_position(perfunc_ix, curpos)?;
                 NullableDatum::value(Datum::from_i64(curpos + 1))
             }
             WfKind::Rank => {
@@ -3068,7 +3070,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
         self.aggregatedbase = self.frameheadpos;
         if self.agg_mark_active && self.buffer.is_some() {
-            self.set_agg_mark_position(self.frameheadpos);
+            self.set_agg_mark_position(self.frameheadpos)?;
         }
 
         // C resets the shared aggcontext when anything restarts (shared-ctx
@@ -3211,7 +3213,7 @@ where
                 }
                 {
                     let buffer = state.buffer.as_mut().unwrap();
-                    buffer.select_read_pointer(0);
+                    buffer.select_read_pointer(0)?;
                     if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
@@ -3240,7 +3242,7 @@ where
                 exectuples::exec_clear_tuple(&mut state.temp_slot_2, mcx);
             } else {
                 let buffer = state.buffer.as_mut().unwrap();
-                buffer.select_read_pointer(0);
+                buffer.select_read_pointer(0)?;
                 if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
                     panic!("unexpected end of tuplestore");
                 }

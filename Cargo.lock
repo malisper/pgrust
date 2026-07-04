@@ -12386,6 +12386,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sort_storage"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "fd",
+ "mcx",
+ "types_error",
+]
+
+[[package]]
 name = "spgist"
 version = "0.1.0"
 dependencies = [
@@ -13833,6 +13843,7 @@ dependencies = [
  "nbtree",
  "pg_locale",
  "postgres_seams",
+ "sort_storage",
  "tuplesort_seams",
  "types_core",
  "types_error",
@@ -13862,9 +13873,11 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "exectuples",
+ "fd",
  "heaptuple",
  "init_small",
  "mcx",
+ "postgres_seams",
  "tuplestore_hold_seams",
  "types_core",
  "types_error",

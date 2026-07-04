@@ -63,7 +63,7 @@ impl<'mcx> CteScanState<'mcx> {
             matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);
         let mcx = estate.es_query_cxt;
         let ts = &mut shared.tuplestore;
-        ts.select_read_pointer(self.readptr);
+        ts.select_read_pointer(self.readptr)?;
 
         let mut eof_tuplestore = ts.ateof();
         if !forward && eof_tuplestore {
@@ -100,7 +100,7 @@ impl<'mcx> CteScanState<'mcx> {
             };
 
             let ts = &mut shared.tuplestore;
-            ts.select_read_pointer(self.readptr);
+            ts.select_read_pointer(self.readptr)?;
             // Our EOF pointer is active: it advances over this append.
             ts.puttupleslot(estate.slot_mut(sub_slot), mcx)?;
             shared.fills += 1;
@@ -170,8 +170,8 @@ pub fn exec_init_cte_scan<'mcx>(
         Some(shared) => {
             let ts = &mut shared.tuplestore;
             let p = ts.alloc_read_pointer(eflags);
-            ts.select_read_pointer(p);
-            ts.rescan();
+            ts.select_read_pointer(p)?;
+            ts.rescan()?;
             (p, false)
         }
     };
@@ -225,8 +225,8 @@ pub fn exec_rescan_cte_scan<'mcx>(
         .as_mut()
         .unwrap_or_else(|| panic!("ExecReScanCteScan: es_cte_shared[{param}] missing"));
     let ts = &mut shared.tuplestore;
-    ts.select_read_pointer(node.readptr);
-    ts.rescan();
+    ts.select_read_pointer(node.readptr)?;
+    ts.rescan()?;
     Ok(())
 }
 

@@ -16,6 +16,8 @@ types_portal = { path = "../../../../_support/types/portal" }
 types_slot = { path = "../../../../_support/types/types_slot" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 heaptuple = { path = "../../../access/common/heaptuple" }
+fd = { path = "../../../storage/file/fd" }
 exectuples = { path = "../../../executor/exectuples" }
 init_small = { path = "../../init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 tuplestore_hold_seams = { path = "../tuplestore_hold_seams" }

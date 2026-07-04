@@ -292,16 +292,16 @@ pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
             (p.atEnd, p.portalPos)
         };
         if at_end {
-            while tuplestore_hold_seams::tuplestore_skiptuples::call(hold_store, 1_000_000, true) {}
+            while tuplestore_hold_seams::tuplestore_skiptuples::call(hold_store, 1_000_000, true)? {}
         } else {
-            tuplestore_hold_seams::tuplestore_rescan::call(hold_store);
+            tuplestore_hold_seams::tuplestore_rescan::call(hold_store)?;
             // No-scroll: the store starts at the not-yet-fetched rows already.
             if scroll
                 && !tuplestore_hold_seams::tuplestore_skiptuples::call(
                     hold_store,
                     portal_pos as i64,
                     true,
-                )
+                )?
             {
                 return Err(ereport(ERROR)
                     .errmsg_internal("unexpected end of tuple stream")

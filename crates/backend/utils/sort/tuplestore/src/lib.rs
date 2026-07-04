@@ -1,14 +1,19 @@
-// tuplestore.c, TSS_INMEM arms only. Spill to tape (TSS_WRITEFILE/READFILE
-// over BufFile) is a loud panic naming its C lane.
+// tuplestore.c: TSS_INMEM + the TSS_WRITEFILE/TSS_READFILE spill arms over
+// BufFile.
 #![allow(non_snake_case)]
 
 use core::mem;
 
 use ::datum::Datum;
 use ::mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
+use ::types_tuple::htup::MINIMAL_TUPLE_DATA_OFFSET;
 use ::types_tuple::{MinimalTupleData, TupleDescData};
+
+use fd::buffile::SEEK_CUR;
+use fd::buffile::SEEK_SET;
+use fd::BufFile;
 
 pub mod hold;
 
@@ -48,38 +53,67 @@ fn aset_chunk_space(len: usize) -> i64 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TupStoreStatus {
+    InMem,
+    WriteFile,
+    ReadFile,
+}
+
 #[derive(Clone, Copy)]
 struct ReadPointer {
     eflags: i32,
     eof_reached: bool,
     current: usize,
+    // File position, valid in the file states (C TSReadPointer.file/offset).
+    file: i32,
+    offset: i64,
 }
 
 pub struct TuplestoreData<'m> {
+    mcx: Mcx<'m>,
     tuplecontext: MemoryContext,
+    status: TupStoreStatus,
     eflags: i32,
+    backward: bool,
+    inter_xact: bool,
+    truncated: bool,
+    used_disk: bool,
     allowed_mem: i64,
     avail_mem: i64,
     grow_memtuples: bool,
     tuples: i64,
     max_space: i64,
+    myfile: Option<BufFile<'m>>,
+    writepos_file: i32,
+    writepos_offset: i64,
     memtuples: PgVec<'m, *mut MinimalTupleData>,
     memtupdeleted: usize,
     readptrs: PgVec<'m, ReadPointer>,
     activeptr: usize,
+    // Retained flat-image scratch for the READFILE readtup.
+    read_scratch: PgVec<'m, u8>,
 }
 
 bind!(pub TuplestoreTy => TuplestoreData<'mcx>);
 
 pub struct Tuplestore(McxOwned<TuplestoreTy>);
 
+#[inline]
+fn cfi() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}
+
+const RP0: ReadPointer =
+    ReadPointer { eflags: 0, eof_reached: false, current: 0, file: 0, offset: 0 };
+
 #[cold]
 #[inline(never)]
-fn spill_unported(allowed_mem: i64) -> ! {
-    panic!(
-        "tuplestore: work_mem ({allowed_mem}B) exceeded; spill to tape \
-         (TSS_WRITEFILE dumptuples over BufFile, tuplestore.c) not ported"
-    )
+fn seek_failed() -> Box<PgError> {
+    Box::new(PgError::error("could not seek in tuplestore temporary file"))
 }
 
 // C's tuplestore_begin_heap creates no memory context; our two-context shell
@@ -106,8 +140,7 @@ mod ts_pool {
 }
 
 impl Tuplestore {
-    /// `inter_xact` only matters to the BufFile arm, which is loud.
-    pub fn begin_heap(random_access: bool, _inter_xact: bool, max_kbytes: i32) -> Tuplestore {
+    pub fn begin_heap(random_access: bool, inter_xact: bool, max_kbytes: i32) -> Tuplestore {
         let eflags = if random_access {
             EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND
         } else {
@@ -115,16 +148,20 @@ impl Tuplestore {
         };
         if let Some(mut ts) = ts_pool::take() {
             ts.0.with_mut(|st| {
-                debug_assert!(st.tuples == 0 && st.memtuples.is_empty());
+                debug_assert!(st.tuples == 0 && st.memtuples.is_empty() && st.myfile.is_none());
                 let allowed_mem = i64::from(max_kbytes) * 1024;
+                st.status = TupStoreStatus::InMem;
                 st.eflags = eflags;
+                st.inter_xact = inter_xact;
+                st.truncated = false;
+                st.used_disk = false;
                 st.allowed_mem = allowed_mem;
                 st.avail_mem = allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
                 st.grow_memtuples = true;
                 st.max_space = 0;
                 st.memtupdeleted = 0;
                 st.readptrs.clear();
-                st.readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
+                st.readptrs.push(ReadPointer { eflags, ..RP0 });
                 st.activeptr = 0;
             });
             return ts;
@@ -134,21 +171,31 @@ impl Tuplestore {
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
             let avail_mem = allowed_mem - aset_chunk_space(memtuples.capacity() * PTR_SIZE);
             let mut readptrs = PgVec::with_capacity_in(8, mcx);
-            readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
+            readptrs.push(ReadPointer { eflags, ..RP0 });
             Ok(TuplestoreData {
+                mcx,
                 // C: generation context (FIFO pfree); nothing here frees
                 // per-tuple, so a wholesale-reset bump arena matches cost.
                 tuplecontext: mcx.context().new_child_bump("tuplestore tuples"),
+                status: TupStoreStatus::InMem,
                 eflags,
+                backward: false,
+                inter_xact,
+                truncated: false,
+                used_disk: false,
                 allowed_mem,
                 avail_mem,
                 grow_memtuples: true,
                 tuples: 0,
                 max_space: 0,
+                myfile: None,
+                writepos_file: 0,
+                writepos_offset: 0,
                 memtuples,
                 memtupdeleted: 0,
                 readptrs,
                 activeptr: 0,
+                read_scratch: PgVec::new_in(mcx),
             })
         })
         .expect("tuplestore context construction is infallible");
@@ -209,9 +256,19 @@ impl Tuplestore {
         slot_mcx: Mcx<'q>,
     ) -> PgResult<bool> {
         self.0.with_mut(|st| {
-            let Some(tuple) = st.gettuple(forward) else {
-                exectuples::exec_clear_tuple(slot, slot_mcx);
-                return Ok(false);
+            let tuple = match st.gettuple(forward)? {
+                StoreTuple::None => {
+                    exectuples::exec_clear_tuple(slot, slot_mcx);
+                    return Ok(false);
+                }
+                StoreTuple::File => {
+                    // File tuples are always fresh copies (C should_free).
+                    let owned =
+                        heaptuple::heap_copy_minimal_tuple(slot_mcx, &st.read_scratch, 0)?;
+                    exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
+                    return Ok(true);
+                }
+                StoreTuple::Mem(tuple) => tuple,
             };
             if copy {
                 // SAFETY: live tuplecontext image of t_len bytes.
@@ -242,8 +299,14 @@ impl Tuplestore {
     pub fn clear(&mut self) {
         self.0.with_mut(|st| {
             st.updatemax();
+            if let Some(file) = st.myfile.take() {
+                file.close()
+                    .expect("tuplestore_clear: closing temp file failed");
+            }
             st.tuplecontext.reset();
             st.avail_mem = st.allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
+            st.status = TupStoreStatus::InMem;
+            st.truncated = false;
             st.memtuples.clear();
             st.memtupdeleted = 0;
             st.tuples = 0;
@@ -254,24 +317,52 @@ impl Tuplestore {
         })
     }
 
-    pub fn rescan(&mut self) {
+    pub fn rescan(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             let active = st.activeptr;
-            let rp = &mut st.readptrs[active];
-            debug_assert!(rp.eflags & EXEC_FLAG_REWIND != 0);
-            rp.eof_reached = false;
-            rp.current = 0;
+            debug_assert!(st.readptrs[active].eflags & EXEC_FLAG_REWIND != 0);
+            debug_assert!(!st.truncated);
+            match st.status {
+                TupStoreStatus::InMem => {
+                    let rp = &mut st.readptrs[active];
+                    rp.eof_reached = false;
+                    rp.current = 0;
+                }
+                TupStoreStatus::WriteFile => {
+                    let rp = &mut st.readptrs[active];
+                    rp.eof_reached = false;
+                    rp.file = 0;
+                    rp.offset = 0;
+                }
+                TupStoreStatus::ReadFile => {
+                    st.readptrs[active].eof_reached = false;
+                    let file = st.myfile.as_mut().expect("ReadFile without file");
+                    if file.seek(0, 0, SEEK_SET)? != 0 {
+                        return Err(seek_failed());
+                    }
+                }
+            }
+            Ok(())
         })
     }
 
     pub fn end(mut self) {
         // A grown store takes the destroy path so a big result can't pin memory.
         let park = self.0.with_mut(|st| {
-            st.memtuples.capacity() <= INITIAL_MEMTUPSIZE && st.readptrs.capacity() <= 8
+            st.memtuples.capacity() <= INITIAL_MEMTUPSIZE
+                && st.readptrs.capacity() <= 8
+                && st.read_scratch.capacity() == 0
         });
         if park {
             self.clear();
             ts_pool::park(self);
+        } else {
+            self.0.with_mut(|st| {
+                if let Some(file) = st.myfile.take() {
+                    file.close()
+                        .expect("tuplestore_end: closing temp file failed");
+                }
+            })
         }
     }
 
@@ -283,17 +374,21 @@ impl Tuplestore {
         self.0.with(|st| st.readptrs[st.activeptr].eof_reached)
     }
 
-    /// Spill is loud, so always true.
+    /// `tuplestore_in_memory`.
     pub fn in_memory(&self) -> bool {
-        true
+        self.0.with(|st| st.status == TupStoreStatus::InMem)
     }
 
-    /// `tuplestore_get_stats`; usedDisk pinned false (spill is loud).
+    /// `tuplestore_get_stats`.
     pub fn get_stats(&mut self) -> types_core::instrument::TuplestoreInstrumentation {
         self.0.with_mut(|st| {
             st.updatemax();
             types_core::instrument::TuplestoreInstrumentation {
-                space_type: types_core::instrument::TuplesortSpaceType::Memory,
+                space_type: if st.used_disk {
+                    types_core::instrument::TuplesortSpaceType::Disk
+                } else {
+                    types_core::instrument::TuplesortSpaceType::Memory
+                },
                 max_space: st.max_space,
             }
         })
@@ -301,7 +396,10 @@ impl Tuplestore {
 
     pub fn set_eflags(&mut self, eflags: i32) {
         self.0.with_mut(|st| {
-            assert!(st.memtuples.is_empty(), "too late to call tuplestore_set_eflags");
+            assert!(
+                st.status == TupStoreStatus::InMem && st.memtuples.is_empty(),
+                "too late to call tuplestore_set_eflags"
+            );
             st.readptrs[0].eflags = eflags;
             let mut all = eflags;
             for rp in st.readptrs.iter().skip(1) {
@@ -314,7 +412,7 @@ impl Tuplestore {
     /// New pointer copies pointer 0's position (C contract).
     pub fn alloc_read_pointer(&mut self, eflags: i32) -> i32 {
         self.0.with_mut(|st| {
-            if !st.memtuples.is_empty() {
+            if st.status != TupStoreStatus::InMem || !st.memtuples.is_empty() {
                 assert!(
                     (st.eflags | eflags) == st.eflags,
                     "too late to require new tuplestore eflags"
@@ -329,30 +427,40 @@ impl Tuplestore {
     }
 
     /// C `tuplestore_advance`.
-    pub fn advance(&mut self, forward: bool) -> bool {
-        self.0.with_mut(|st| st.gettuple(forward).is_some())
+    pub fn advance(&mut self, forward: bool) -> PgResult<bool> {
+        self.0
+            .with_mut(|st| Ok(!matches!(st.gettuple(forward)?, StoreTuple::None)))
     }
 
-    /// C `tuplestore_skiptuples`, TSS_INMEM arm.
-    pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> bool {
+    /// C `tuplestore_skiptuples`.
+    pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> PgResult<bool> {
         if ntuples <= 0 {
-            return true;
+            return Ok(true);
         }
         let n = ntuples as usize;
         self.0.with_mut(|st| {
+            if st.status != TupStoreStatus::InMem {
+                for _ in 0..ntuples {
+                    if matches!(st.gettuple(forward)?, StoreTuple::None) {
+                        return Ok(false);
+                    }
+                    cfi()?;
+                }
+                return Ok(true);
+            }
             let count = st.memtuples.len();
             let rp = &mut st.readptrs[st.activeptr];
             if forward {
                 if rp.eof_reached {
-                    return false;
+                    return Ok(false);
                 }
                 if rp.current + n <= count {
                     rp.current += n;
-                    return true;
+                    return Ok(true);
                 }
                 rp.current = count;
                 rp.eof_reached = true;
-                false
+                Ok(false)
             } else {
                 debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
                 let cur = if rp.eof_reached { count } else { rp.current };
@@ -361,22 +469,22 @@ impl Tuplestore {
                 if cur > n {
                     rp.eof_reached = false;
                     rp.current = cur - n;
-                    return true;
+                    return Ok(true);
                 }
                 rp.eof_reached = false;
                 rp.current = 0;
-                false
+                Ok(false)
             }
         })
     }
 
-    /// `tuplestore_copy_read_pointer`, TSS_INMEM arm.
-    pub fn copy_read_pointer(&mut self, srcptr: i32, destptr: i32) {
+    /// `tuplestore_copy_read_pointer`.
+    pub fn copy_read_pointer(&mut self, srcptr: i32, destptr: i32) -> PgResult<()> {
         self.0.with_mut(|st| {
             let (s, d) = (srcptr as usize, destptr as usize);
             debug_assert!(s < st.readptrs.len() && d < st.readptrs.len());
             if s == d {
-                return;
+                return Ok(());
             }
             let recompute = st.readptrs[d].eflags != st.readptrs[s].eflags;
             st.readptrs[d] = st.readptrs[s];
@@ -387,6 +495,29 @@ impl Tuplestore {
                 }
                 st.eflags = eflags;
             }
+            if st.status == TupStoreStatus::ReadFile {
+                // The active pointer's position lives in the seek point, not
+                // its variables: assigning TO the active seeks, assigning
+                // FROM the active tells (except at EOF).
+                if d == st.activeptr {
+                    let rp = st.readptrs[d];
+                    let (f, off) = if rp.eof_reached {
+                        (st.writepos_file, st.writepos_offset)
+                    } else {
+                        (rp.file, rp.offset)
+                    };
+                    let file = st.myfile.as_mut().expect("ReadFile without file");
+                    if file.seek(f, off, SEEK_SET)? != 0 {
+                        return Err(seek_failed());
+                    }
+                } else if s == st.activeptr && !st.readptrs[d].eof_reached {
+                    let file = st.myfile.as_mut().expect("ReadFile without file");
+                    let (f, off) = file.tell();
+                    st.readptrs[d].file = f;
+                    st.readptrs[d].offset = off;
+                }
+            }
+            Ok(())
         })
     }
 
@@ -396,6 +527,10 @@ impl Tuplestore {
     pub fn trim(&mut self) {
         self.0.with_mut(|st| {
             if st.eflags & EXEC_FLAG_REWIND != 0 {
+                return;
+            }
+            // C: temp files are not worth trimming.
+            if st.status != TupStoreStatus::InMem {
                 return;
             }
             let count = st.memtuples.len();
@@ -430,40 +565,208 @@ impl Tuplestore {
         })
     }
 
-    /// TSS_INMEM select is a pure index swap; READFILE seek save/restore is
-    /// the spill lane's problem.
-    pub fn select_read_pointer(&mut self, ptr: i32) {
+    /// `tuplestore_select_read_pointer`.
+    pub fn select_read_pointer(&mut self, ptr: i32) -> PgResult<()> {
         self.0.with_mut(|st| {
-            debug_assert!((ptr as usize) < st.readptrs.len());
-            st.activeptr = ptr as usize;
+            let p = ptr as usize;
+            debug_assert!(p < st.readptrs.len());
+            if p == st.activeptr {
+                return Ok(());
+            }
+            if st.status == TupStoreStatus::ReadFile {
+                let old = st.activeptr;
+                if !st.readptrs[old].eof_reached {
+                    let file = st.myfile.as_mut().expect("ReadFile without file");
+                    let (f, off) = file.tell();
+                    st.readptrs[old].file = f;
+                    st.readptrs[old].offset = off;
+                }
+                let rp = st.readptrs[p];
+                let (f, off) = if rp.eof_reached {
+                    (st.writepos_file, st.writepos_offset)
+                } else {
+                    (rp.file, rp.offset)
+                };
+                let file = st.myfile.as_mut().expect("ReadFile without file");
+                if file.seek(f, off, SEEK_SET)? != 0 {
+                    return Err(seek_failed());
+                }
+            }
+            st.activeptr = p;
+            Ok(())
         })
     }
 }
 
+enum StoreTuple {
+    None,
+    Mem(*mut MinimalTupleData),
+    // Flat image staged in read_scratch.
+    File,
+}
+
 impl<'m> TuplestoreData<'m> {
     fn puttuple_common(&mut self, tuple: *mut MinimalTupleData, used: i64) -> PgResult<()> {
-        self.avail_mem -= used;
         self.tuples += 1;
 
-        // Per the C API spec the ACTIVE eof reader stays at EOF (advances
-        // with the write pointer); inactive eof readers point at this tuple.
-        let count = self.memtuples.len();
-        for (i, rp) in self.readptrs.iter_mut().enumerate() {
-            if rp.eof_reached && i != self.activeptr {
-                rp.eof_reached = false;
-                rp.current = count;
+        match self.status {
+            TupStoreStatus::InMem => {
+                self.avail_mem -= used;
+
+                // Per the C API spec the ACTIVE eof reader stays at EOF
+                // (advances with the write pointer); inactive eof readers
+                // point at this tuple.
+                let count = self.memtuples.len();
+                for (i, rp) in self.readptrs.iter_mut().enumerate() {
+                    if rp.eof_reached && i != self.activeptr {
+                        rp.eof_reached = false;
+                        rp.current = count;
+                    }
+                }
+                if self.memtuples.len() >= self.memtuples.capacity() - 1 {
+                    self.grow_memtuples();
+                    debug_assert!(self.memtuples.len() < self.memtuples.capacity());
+                }
+                self.memtuples.push(tuple);
+
+                if self.memtuples.len() < self.memtuples.capacity() && self.avail_mem >= 0 {
+                    return Ok(());
+                }
+
+                // Switch to tape-based operation.
+                let myfile = fd::BufFileCreateTemp(self.mcx, self.inter_xact)?;
+                self.myfile = Some(myfile);
+                self.backward = (self.eflags & EXEC_FLAG_BACKWARD) != 0;
+                self.updatemax();
+                self.status = TupStoreStatus::WriteFile;
+                self.dumptuples()?;
+                // C's WRITETUP pfrees each dumped tuple; the bump arena
+                // releases them wholesale instead.
+                self.tuplecontext.reset();
+                self.avail_mem = self.allowed_mem
+                    - aset_chunk_space(self.memtuples.capacity() * PTR_SIZE);
+                Ok(())
+            }
+            TupStoreStatus::WriteFile => {
+                let file = self.myfile.as_mut().expect("WriteFile without file");
+                for (i, rp) in self.readptrs.iter_mut().enumerate() {
+                    if rp.eof_reached && i != self.activeptr {
+                        rp.eof_reached = false;
+                        let (f, off) = file.tell();
+                        rp.file = f;
+                        rp.offset = off;
+                    }
+                }
+                self.writetup(tuple)?;
+                self.tuplecontext.reset();
+                Ok(())
+            }
+            TupStoreStatus::ReadFile => {
+                // Switch from reading to writing.
+                let active = self.activeptr;
+                let file = self.myfile.as_mut().expect("ReadFile without file");
+                if !self.readptrs[active].eof_reached {
+                    let (f, off) = file.tell();
+                    self.readptrs[active].file = f;
+                    self.readptrs[active].offset = off;
+                }
+                if file.seek(self.writepos_file, self.writepos_offset, SEEK_SET)? != 0 {
+                    return Err(seek_failed());
+                }
+                self.status = TupStoreStatus::WriteFile;
+
+                for (i, rp) in self.readptrs.iter_mut().enumerate() {
+                    if rp.eof_reached && i != self.activeptr {
+                        rp.eof_reached = false;
+                        rp.file = self.writepos_file;
+                        rp.offset = self.writepos_offset;
+                    }
+                }
+                self.writetup(tuple)?;
+                self.tuplecontext.reset();
+                Ok(())
             }
         }
-        if self.memtuples.len() >= self.memtuples.capacity() - 1 {
-            self.grow_memtuples();
-            debug_assert!(self.memtuples.len() < self.memtuples.capacity());
-        }
-        self.memtuples.push(tuple);
+    }
 
-        if self.memtuples.len() < self.memtuples.capacity() && self.avail_mem >= 0 {
-            return Ok(());
+    /// `dumptuples`: write the in-memory tuples out, converting read-pointer
+    /// positions from index to file/offset form as they are passed.
+    fn dumptuples(&mut self) -> PgResult<()> {
+        let count = self.memtuples.len();
+        for i in self.memtupdeleted..=count {
+            let file = self.myfile.as_mut().expect("dumptuples without file");
+            let (f, off) = file.tell();
+            for rp in self.readptrs.iter_mut() {
+                if i == rp.current && !rp.eof_reached {
+                    rp.file = f;
+                    rp.offset = off;
+                }
+            }
+            if i >= count {
+                break;
+            }
+            let tuple = self.memtuples[i];
+            self.writetup(tuple)?;
         }
-        spill_unported(self.allowed_mem)
+        self.memtupdeleted = 0;
+        self.memtuples.clear();
+        Ok(())
+    }
+
+    /// `writetup_heap`; the arena copy is released by the caller's
+    /// tuplecontext reset rather than C's per-tuple pfree.
+    fn writetup(&mut self, tuple: *mut MinimalTupleData) -> PgResult<()> {
+        let file = self.myfile.as_mut().expect("writetup without file");
+        // SAFETY: live tuplecontext image of t_len bytes.
+        let (body, bodylen) = unsafe {
+            let t_len = (*tuple).t_len as usize;
+            (
+                tuple.cast_const().cast::<u8>().add(MINIMAL_TUPLE_DATA_OFFSET),
+                t_len - MINIMAL_TUPLE_DATA_OFFSET,
+            )
+        };
+        let tuplen = (bodylen + mem::size_of::<u32>()) as u32;
+        file.write(&tuplen.to_ne_bytes())?;
+        // SAFETY: body/bodylen bound the live image.
+        file.write(unsafe { core::slice::from_raw_parts(body, bodylen) })?;
+        if self.backward {
+            file.write(&tuplen.to_ne_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// `getlen`.
+    fn getlen(&mut self, eof_ok: bool) -> PgResult<u32> {
+        let file = self.myfile.as_mut().expect("getlen without file");
+        let mut buf = [0u8; 4];
+        let nbytes = file.read_maybe_eof(&mut buf, eof_ok)?;
+        if nbytes == 0 {
+            return Ok(0);
+        }
+        Ok(u32::from_ne_bytes(buf))
+    }
+
+    /// `readtup_heap` into `read_scratch` as a flat minimal-tuple image.
+    fn readtup(&mut self, len: u32) -> PgResult<()> {
+        let bodylen = len as usize - mem::size_of::<u32>();
+        let t_len = bodylen + MINIMAL_TUPLE_DATA_OFFSET;
+        // Bytes 4..10 (header padding) stay zero across reuse: resize only
+        // ever zero-fills growth, and no write below touches them.
+        if self.read_scratch.len() < t_len {
+            self.read_scratch.resize(t_len, 0);
+        } else {
+            self.read_scratch.truncate(t_len);
+        }
+        self.read_scratch[..4].copy_from_slice(&(t_len as u32).to_ne_bytes());
+        let TuplestoreData { myfile, read_scratch, .. } = self;
+        let file = myfile.as_mut().expect("readtup without file");
+        file.read_exact(&mut read_scratch[MINIMAL_TUPLE_DATA_OFFSET..])?;
+        if self.backward {
+            let mut trail = [0u8; 4];
+            let file = self.myfile.as_mut().expect("readtup without file");
+            file.read_exact(&mut trail)?;
+        }
+        Ok(())
     }
 
     fn grow_memtuples(&mut self) -> bool {
@@ -502,38 +805,131 @@ impl<'m> TuplestoreData<'m> {
         true
     }
 
+    /// `tuplestore_updatemax`. C DIVERGENCE: a BufFileSize failure (fstat on
+    /// an open temp fd) panics instead of ereporting.
     fn updatemax(&mut self) {
-        self.max_space = self.max_space.max(self.allowed_mem - self.avail_mem);
+        if self.status == TupStoreStatus::InMem {
+            self.max_space = self.max_space.max(self.allowed_mem - self.avail_mem);
+        } else {
+            let size = self
+                .myfile
+                .as_ref()
+                .expect("file state without file")
+                .size()
+                .expect("tuplestore_updatemax: BufFileSize failed");
+            self.max_space = self.max_space.max(size);
+            self.used_disk = true;
+        }
     }
 
-    fn gettuple(&mut self, forward: bool) -> Option<*mut MinimalTupleData> {
-        let count = self.memtuples.len();
-        let rp = &mut self.readptrs[self.activeptr];
-        if !forward {
-            debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
-            if rp.eof_reached {
-                rp.current = count;
-                rp.eof_reached = false;
-            } else {
-                if rp.current <= self.memtupdeleted {
-                    return None;
+    fn gettuple(&mut self, forward: bool) -> PgResult<StoreTuple> {
+        debug_assert!(
+            forward || self.readptrs[self.activeptr].eflags & EXEC_FLAG_BACKWARD != 0
+        );
+        match self.status {
+            TupStoreStatus::InMem => {
+                let count = self.memtuples.len();
+                let rp = &mut self.readptrs[self.activeptr];
+                if !forward {
+                    if rp.eof_reached {
+                        rp.current = count;
+                        rp.eof_reached = false;
+                    } else {
+                        if rp.current <= self.memtupdeleted {
+                            debug_assert!(!self.truncated);
+                            return Ok(StoreTuple::None);
+                        }
+                        rp.current -= 1;
+                    }
+                    if rp.current <= self.memtupdeleted {
+                        debug_assert!(!self.truncated);
+                        return Ok(StoreTuple::None);
+                    }
+                    return Ok(StoreTuple::Mem(self.memtuples[rp.current - 1]));
                 }
-                rp.current -= 1;
+                if rp.eof_reached {
+                    return Ok(StoreTuple::None);
+                }
+                if rp.current < count {
+                    let t = self.memtuples[rp.current];
+                    rp.current += 1;
+                    return Ok(StoreTuple::Mem(t));
+                }
+                rp.eof_reached = true;
+                Ok(StoreTuple::None)
             }
-            if rp.current <= self.memtupdeleted {
-                return None;
+            TupStoreStatus::WriteFile => {
+                let active = self.activeptr;
+                if self.readptrs[active].eof_reached && forward {
+                    return Ok(StoreTuple::None);
+                }
+                // Switch from writing to reading.
+                let file = self.myfile.as_mut().expect("WriteFile without file");
+                let (f, off) = file.tell();
+                self.writepos_file = f;
+                self.writepos_offset = off;
+                if !self.readptrs[active].eof_reached
+                    && file.seek(
+                        self.readptrs[active].file,
+                        self.readptrs[active].offset,
+                        SEEK_SET,
+                    )? != 0
+                {
+                    return Err(seek_failed());
+                }
+                self.status = TupStoreStatus::ReadFile;
+                self.gettuple_readfile(forward)
             }
-            return Some(self.memtuples[rp.current - 1]);
+            TupStoreStatus::ReadFile => self.gettuple_readfile(forward),
         }
-        if rp.eof_reached {
-            return None;
+    }
+
+    fn gettuple_readfile(&mut self, forward: bool) -> PgResult<StoreTuple> {
+        let active = self.activeptr;
+        if forward {
+            let tuplen = self.getlen(true)?;
+            if tuplen != 0 {
+                self.readtup(tuplen)?;
+                return Ok(StoreTuple::File);
+            }
+            self.readptrs[active].eof_reached = true;
+            return Ok(StoreTuple::None);
         }
-        if rp.current < count {
-            let t = self.memtuples[rp.current];
-            rp.current += 1;
-            return Some(t);
+
+        // Backward: back up to the previously-returned tuple's trailing
+        // length word; a failed seek means start of file.
+        let file = self.myfile.as_mut().expect("ReadFile without file");
+        if file.seek(0, -(mem::size_of::<u32>() as i64), SEEK_CUR)? != 0 {
+            // Even a failed backwards fetch gets you out of eof state.
+            self.readptrs[active].eof_reached = false;
+            debug_assert!(!self.truncated);
+            return Ok(StoreTuple::None);
         }
-        rp.eof_reached = true;
-        None
+        let mut tuplen = self.getlen(false)?;
+
+        if self.readptrs[active].eof_reached {
+            self.readptrs[active].eof_reached = false;
+        } else {
+            let file = self.myfile.as_mut().expect("ReadFile without file");
+            let back = (tuplen as i64) + 2 * mem::size_of::<u32>() as i64;
+            if file.seek(0, -back, SEEK_CUR)? != 0 {
+                // Prev tuple is the first in the file: back up so it becomes
+                // next to read forward (matches the in-memory case).
+                let back = (tuplen as i64) + mem::size_of::<u32>() as i64;
+                if file.seek(0, -back, SEEK_CUR)? != 0 {
+                    return Err(seek_failed());
+                }
+                debug_assert!(!self.truncated);
+                return Ok(StoreTuple::None);
+            }
+            tuplen = self.getlen(false)?;
+        }
+
+        let file = self.myfile.as_mut().expect("ReadFile without file");
+        if file.seek(0, -(tuplen as i64), SEEK_CUR)? != 0 {
+            return Err(seek_failed());
+        }
+        self.readtup(tuplen)?;
+        Ok(StoreTuple::File)
     }
 }

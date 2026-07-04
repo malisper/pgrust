@@ -325,6 +325,33 @@ impl<'mcx> BufFile<'mcx> {
     pub fn tell(&self) -> (i32, i64) {
         (self.cur_file, self.cur_offset + self.pos as i64)
     }
+
+    /// C `BufFileSeekBlock`.
+    pub fn seek_block(&mut self, blknum: i64) -> PgResult<i32> {
+        const BUFFILE_SEG_BLOCKS: i64 = MAX_PHYSICAL_FILESIZE / BLCKSZ as i64;
+        self.seek(
+            (blknum / BUFFILE_SEG_BLOCKS) as i32,
+            (blknum % BUFFILE_SEG_BLOCKS) * BLCKSZ as i64,
+            SEEK_SET,
+        )
+    }
+
+    /// C `BufFileSize`; like C, does not count a dirty write buffer.
+    pub fn size(&self) -> PgResult<i64> {
+        let last = self.files[self.files.len() - 1];
+        let last_size = FileSize(last)?;
+        if last_size < 0 {
+            ereport(ERROR)
+                .with_saved_errno(get_errno())
+                .errcode_for_file_access()
+                .errmsg(format!(
+                    "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
+                    FilePathName(last)
+                ))
+                .finish(loc("BufFileSize"))?;
+        }
+        Ok((self.files.len() as i64 - 1) * MAX_PHYSICAL_FILESIZE + last_size)
+    }
 }
 
 #[cold]
