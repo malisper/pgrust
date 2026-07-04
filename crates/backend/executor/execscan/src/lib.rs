@@ -255,12 +255,16 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
     }
 }
 
-/// `ExecScan`: the EPQ-tolerant entry. es_epq_active lands with execMain;
-/// until then this is the runtime-dispatched qual/proj combination.
+/// `ExecScan`: reads `es_epq_active` per call (execScan.c) — under an EPQ
+/// recheck the fetch substitutes the locked test tuple instead of running
+/// the access method.
 pub fn exec_scan<'mcx, N: ScanNode<'mcx>>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    if estate.es_epq_active {
+        return exec_scan_epq(node, estate);
+    }
     let ss = node.ss_mut();
     match (ss.qual.is_some(), ss.ps_ProjInfo.is_some()) {
         (false, false) => exec_scan_extended::<_, false, false>(node, estate),

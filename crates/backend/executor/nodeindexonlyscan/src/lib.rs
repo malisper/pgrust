@@ -51,6 +51,17 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `IndexOnlyRecheck` (nodeIndexonlyscan.c): always an error.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Err(Box::new(PgError::error(
+            "EvalPlanQual recheck is not supported in index-only scans",
+        )))
+    }
+
     /// `IndexOnlyNext`.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let mcx = estate.es_query_cxt;

@@ -36,6 +36,31 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `BitmapHeapRecheck`: does the EPQ test tuple meet the original quals?
+    fn epq_recheck(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        let ecxt = self.ss.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
+        let passes = {
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            if let Some(q) = self.bitmapqualorig.as_deref_mut() {
+                // SAFETY: reset-only context, outlives the plan.
+                unsafe { q.arm_result_mcx_raw(per_tuple) };
+            }
+            let mut slots = EvalSlots {
+                scan: Some(estate.slot_mut(slot)),
+                inner: None,
+                outer: None,
+            };
+            exec_qual(self.bitmapqualorig.as_deref_mut(), &mut slots)?
+        };
+        estate.ecxt_mut(ecxt).reset();
+        Ok(passes)
+    }
+
     /// `BitmapHeapNext` minus setup (the dispatcher ran MultiExec first).
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         debug_assert!(self.initialized, "scan_next before bitmap_table_scan_setup");

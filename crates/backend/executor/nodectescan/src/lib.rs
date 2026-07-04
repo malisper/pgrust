@@ -32,6 +32,15 @@ impl<'mcx> ScanNode<'mcx> for CteScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `CteScanRecheck`: nothing to check.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+
     // Take-out keeps the tuplestore and slot borrows disjoint.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let param = self.cte_param as usize;

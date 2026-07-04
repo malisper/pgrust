@@ -101,6 +101,15 @@ impl<'mcx> ::execscan::ScanNode<'mcx> for SubqueryScanNode<'mcx> {
         &mut self.ss
     }
 
+    /// `SubqueryRecheck`: nothing to check.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+
     // SubqueryNext: the subplan's slot goes to the driver uncopied, as C.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let Some(id) = exec_proc_node(&mut self.subplan, estate)? else {
