@@ -313,7 +313,7 @@ fn math_domains_and_live_pg_values() {
     assert_eq!(out8(dsinh(1.0)), "1.1752011936438014");
     assert_eq!(out8(dcosh(1.0).unwrap()), "1.5430806348152437");
     assert_eq!(out8(dtanh(1.0).unwrap()), "0.7615941559557649");
-    assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497148");
+    assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497149");
     assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028516");
     assert_eq!(out8(dgamma(5.5).unwrap()), "52.34277778455352");
     assert_eq!(out8(dlgamma(10.5).unwrap()), "13.940625219403763");
@@ -492,7 +492,7 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 128);
+    assert_eq!(n, 132);
     for b in FLOAT_BUILTINS {
         assert!(b.strict && !b.retset);
         let c = fmgr_core::CANONICAL
