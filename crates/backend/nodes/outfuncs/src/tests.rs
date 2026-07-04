@@ -162,3 +162,70 @@ fn domain_check_matches_live_conbin() {
     .unwrap();
     assert_eq!(nodeToString(mcx, op).unwrap().as_str(), CONBIN_POSINT_CHECK);
 }
+
+#[test]
+fn nulltest_saop_write_and_round_trip() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let var = Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: 2,
+            vartype: 23,
+            vartypmod: -1,
+            varcollid: 0,
+            varnullingrels: Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            varnosyn: 1,
+            varattnosyn: 2,
+            location: 25,
+        },
+    )
+    .unwrap();
+    let ntest = Node::mk(
+        mcx,
+        types_nodes::primnodes::NullTest {
+            arg: Some(var),
+            nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+            argisrow: false,
+            location: 25,
+        },
+    )
+    .unwrap();
+    let s = nodeToString(mcx, ntest).unwrap();
+    assert!(s.as_str().starts_with("{NULLTEST :arg {VAR "));
+    assert!(s.as_str().ends_with(":nulltesttype 1 :argisrow false :location -1}"));
+    let back = readfuncs::stringToNode(mcx, s.as_str()).unwrap();
+    let nt = back.as_variant::<types_nodes::primnodes::NullTest>().unwrap();
+    assert!(matches!(nt.nulltesttype, types_nodes::primnodes::NullTestType::IS_NOT_NULL));
+    assert!(!nt.argisrow);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, var).unwrap();
+    args.lappend(mcx, Node::mk(mcx, int4_const(3)).unwrap()).unwrap();
+    let saop = Node::mk(
+        mcx,
+        types_nodes::primnodes::ScalarArrayOpExpr {
+            opno: 96,
+            opfuncid: 65,
+            hashfuncid: 0,
+            negfuncid: 0,
+            useOr: true,
+            inputcollid: 0,
+            args,
+            location: 25,
+        },
+    )
+    .unwrap();
+    let s = nodeToString(mcx, saop).unwrap();
+    assert!(s.as_str().starts_with(
+        "{SCALARARRAYOPEXPR :opno 96 :opfuncid 65 :hashfuncid 0 :negfuncid 0 :useOr true :inputcollid 0 :args ("
+    ));
+    let back = readfuncs::stringToNode(mcx, s.as_str()).unwrap();
+    let sx = back.as_variant::<types_nodes::primnodes::ScalarArrayOpExpr>().unwrap();
+    assert_eq!(sx.opno, 96);
+    assert!(sx.useOr);
+    assert_eq!(sx.args.len(), 2);
+}

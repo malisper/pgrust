@@ -132,6 +132,131 @@ pub fn fc_array_send(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(varlena_result(out))
 }
 
+// array_unnest (arrayfuncs.c): ValuePerCall SRF over a private copy of the
+// detoasted array (C copies into multi_call_memory_ctx; the fn_extra Box is
+// that lifetime here).
+struct ArrayUnnestFctx {
+    image: alloc::vec::Vec<u8>,
+    nextelem: i32,
+    numelems: i32,
+    pos: usize,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+}
+
+impl ArrayUnnestFctx {
+    fn next(&mut self) -> Option<(Datum, bool)> {
+        use crate::foundation::{att_addlength_pointer, att_align_nominal, fetch_att};
+        if self.nextelem >= self.numelems {
+            return None;
+        }
+        let offset = self.nextelem;
+        self.nextelem += 1;
+        let bo = crate::foundation::arr_nullbitmap_off(&self.image);
+        if let Some(bo) = bo {
+            let byte = self.image[bo + offset as usize / 8];
+            if byte & (1 << (offset % 8)) == 0 {
+                return Some((Datum::null(), true));
+            }
+        }
+        let p = self.image[self.pos..].as_ptr();
+        let d = fetch_att(p, self.elmbyval, self.elmlen);
+        self.pos = att_addlength_pointer(self.pos, self.elmlen, p);
+        self.pos = att_align_nominal(self.pos, self.elmalign);
+        Some((d, false))
+    }
+}
+
+pub fn fc_array_unnest(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("array_unnest: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let mcx = fcinfo.result_mcx();
+        let array = arg_array_bytes(fcinfo, 0, mcx)?;
+        let elemtype = crate::foundation::arr_elemtype(&array);
+        let (elmlen, elmbyval, elmalign) = ::lsyscache::get_typlenbyvalalign(elemtype)
+            .map(|(l, b, a)| (l as i32, b, a as u8))?;
+        let ndim = crate::foundation::arr_ndim(&array);
+        let mut dims = [0i32; crate::foundation::MAXDIM];
+        for i in 0..ndim as usize {
+            dims[i] = crate::foundation::arr_dim(&array, i);
+        }
+        let numelems = ::arrayutils::array_get_n_items(ndim, &dims)?;
+        let pos = crate::foundation::arr_data_offset(&array);
+        let state = ArrayUnnestFctx {
+            image: array.as_slice().to_vec(),
+            nextelem: 0,
+            numelems,
+            pos,
+            elmlen,
+            elmbyval,
+            elmalign,
+        };
+        let fctx = ::funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(state));
+    }
+    let next = ::funcapi_srf::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("array_unnest: user_fctx set at first call")
+        .downcast_mut::<ArrayUnnestFctx>()
+        .expect("array_unnest: user_fctx is ArrayUnnestFctx")
+        .next();
+    match next {
+        Some((d, isnull)) => {
+            let r = ::funcapi_srf::srf_return_next(flinfo, fcinfo, d);
+            fcinfo.isnull = isnull;
+            Ok(r)
+        }
+        None => Ok(::funcapi_srf::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+// array_unnest_support (arrayfuncs.c): SupportRequestRows over the argument
+// (Const array nitems / 1-D ArrayExpr length; anything else falls back).
+pub fn fc_array_unnest_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let p = fcinfo.arg(0).as_usize() as *mut ();
+    // SAFETY: prosupport contract — the internal arg points at a live
+    // tag-first support-request node exclusively owned by this call.
+    let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let Some(fe) = req.node.and_then(|n| n.as_func_expr()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let Some(arg1) = fe.args.first() else {
+        return Ok(Datum::from_usize(0));
+    };
+    let rows = if let Some(c) = arg1.as_const() {
+        if c.constisnull {
+            0.0
+        } else {
+            let ap = c.constvalue.as_usize() as *const u8;
+            // SAFETY: non-null array Const addresses a live flat varlena image.
+            let arr = unsafe { core::slice::from_raw_parts(ap, varsize_any(ap)) };
+            let ndim = crate::foundation::arr_ndim(arr);
+            let mut dims = [0i32; crate::foundation::MAXDIM];
+            for i in 0..ndim as usize {
+                dims[i] = crate::foundation::arr_dim(arr, i);
+            }
+            ::arrayutils::array_get_n_items(ndim, &dims)? as f64
+        }
+    } else if let Some(a) = arg1.as_array_expr() {
+        if a.multidims {
+            10.0
+        } else {
+            a.elements.len() as f64
+        }
+    } else {
+        10.0
+    };
+    req.rows = rows;
+    Ok(Datum::from_usize(p as usize))
+}
+
 // array_agg_transfn (array_userfuncs.c): transvalue is a pointer datum to an
 // aggcontext-owned ArrayBuildState (INTERNAL transtype); the element type
 // rides fn_expr (C get_fn_expr_argtype).
@@ -260,6 +385,10 @@ pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     byref_result(mcx, &img)
 }
 
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -285,4 +414,6 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2401, "array_send", 1, fc_array_send),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
     agg(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
+    srf(2331, "array_unnest", 1, fc_array_unnest),
+    b(3996, "array_unnest_support", 1, fc_array_unnest_support),
 ];

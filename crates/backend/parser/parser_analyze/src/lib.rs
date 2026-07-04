@@ -1,7 +1,10 @@
 #![allow(non_snake_case)]
 
 pub mod parse_cte;
+mod parse_merge;
 mod set_op;
+mod rules;
+pub use rules::transformRuleStmt;
 
 #[cfg(test)]
 mod tests;
@@ -34,6 +37,7 @@ pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
     analyze_seams::parse_analyze_sql_fn::set(parse_analyze_sql_fn);
     analyze_seams::parse_analyze_varparams::set(parse_analyze_varparams);
+    analyze_seams::parse_analyze_plpgsql::set(parse_analyze_plpgsql);
     analyze_seams::analyze_requires_snapshot::set(analyze_requires_snapshot);
     analyze_seams::parse_sub_analyze::set(parse_sub_analyze);
 }
@@ -82,6 +86,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
     fname: &'a str,
     argtypes: &'a [Oid],
     argnames: &'a [&'a str],
+    input_collation: Oid,
     query_env: QueryEnvHandle,
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = make_parsestate(mcx, None);
@@ -89,7 +94,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
 
     parser_small1::setup_parse_sql_fn_parameters(
         &mut pstate,
-        parser_small1::SqlFnParamState { fname, argtypes, argnames },
+        parser_small1::SqlFnParamState { fname, argtypes, argnames, input_collation },
     );
 
     if !query_env.is_null() {
@@ -173,6 +178,40 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
     Ok((query, out))
 }
 
+pub fn parse_analyze_plpgsql<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &'a RawStmt<'mcx>,
+    source_text: &'a str,
+    hooks: &'a parser_small1::PlpgsqlHookState<'a>,
+    query_env: QueryEnvHandle,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+    pstate.p_ref_hook_state = parser_small1::ParseRefHookState::PlpgsqlParams(*hooks);
+
+    if !query_env.is_null() {
+        panic!(
+            "parse_analyze_plpgsql (analyze.c): QueryEnvHandle resolution unported \
+             (SPI/trigger transition tables) — unit backend-parser-analyze"
+        );
+    }
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    if is_query_id_enabled() {
+        panic!(
+            "parse_analyze_plpgsql (analyze.c): JumbleQuery (queryjumble.c) unported \
+             — compute_query_id is on"
+        );
+    }
+
+    free_parsestate(pstate)?;
+
+    backend_status::pgstat_report_query_id(query.queryId, false);
+
+    Ok(query)
+}
+
 // C `IsQueryIdEnabled` (queryjumble.h); the AUTO arm reads `query_id_enabled`,
 // which only `EnableQueryId()` (unported jumble consumers) ever sets.
 fn is_query_id_enabled() -> bool {
@@ -219,16 +258,36 @@ fn transformOptionalSelectInto<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
     parse_tree: Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    if let Some(mut stmt) = parse_tree.as_select_stmt() {
-        while stmt.op != types_nodes::parsenodes::SetOperation::SETOP_NONE {
-            stmt = stmt.larg.expect("set-op tree always has a leftmost SelectStmt");
+    let mut parse_tree = parse_tree;
+    if let Some(stmt) = parse_tree.as_select_stmt() {
+        let mut leftmost = stmt;
+        while leftmost.op != types_nodes::parsenodes::SetOperation::SETOP_NONE {
+            leftmost = leftmost.larg.expect("set-op tree always has a leftmost SelectStmt");
         }
-        if stmt.intoClause.is_some() {
-            panic!(
-                "transformOptionalSelectInto (analyze.c): SELECT INTO -> CREATE TABLE AS \
-                 rewrite unported (CreateTableAsStmt vocabulary + \
-                 transformCreateTableAsStmt) — unit backend-parser-analyze"
-            );
+        let has_into = leftmost.intoClause.is_some();
+        let is_setop = stmt.op != types_nodes::parsenodes::SetOperation::SETOP_NONE;
+        if has_into {
+            if is_setop {
+                // C NULLs the leftmost's intoClause through its pointer;
+                // larg is a shared borrow here, so the clear cannot reach it.
+                panic!(
+                    "transformOptionalSelectInto (analyze.c): SELECT INTO on a \
+                     set-operation tree needs mutable larg access — \
+                     unit backend-parser-analyze"
+                );
+            }
+            // SAFETY: raw tree owned by this analysis; no derived reference
+            // is live (leftmost/stmt dropped above).
+            let into = unsafe {
+                parse_tree.with_mut::<SelectStmt, _>(|s| s.intoClause.take())
+            }
+            .expect("node checked as SelectStmt");
+            let mut ctas = Node::build::<types_nodes::rawnodes::CreateTableAsStmt>(mcx)?;
+            ctas.query = Some(parse_tree);
+            ctas.into = into;
+            ctas.objtype = types_nodes::parsenodes::ObjectType::OBJECT_TABLE;
+            ctas.is_select_into = true;
+            parse_tree = ctas.seal();
         }
     }
     transformStmt(mcx, pstate, parse_tree)
@@ -265,10 +324,16 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
         NodeTag::T_DeclareCursorStmt => {
             transformDeclareCursorStmt(mcx, pstate, parse_tree)?
         }
-        t @ (NodeTag::T_MergeStmt
-        | NodeTag::T_ReturnStmt
-        | NodeTag::T_PLAssignStmt
-        | NodeTag::T_CreateTableAsStmt
+        NodeTag::T_CreateTableAsStmt => {
+            transformCreateTableAsStmt(mcx, pstate, parse_tree)?
+        }
+        NodeTag::T_PLAssignStmt => {
+            transformPLAssignStmt(mcx, pstate, parse_tree.as_pl_assign_stmt().unwrap())?
+        }
+        NodeTag::T_MergeStmt => {
+            parse_merge::transformMergeStmt(mcx, pstate, parse_tree.as_merge_stmt().unwrap())?
+        }
+        t @ (NodeTag::T_ReturnStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
              unit backend-parser-analyze"
@@ -284,6 +349,125 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
     result.querySource = QuerySource::QSRC_ORIGINAL;
     result.canSetTag = true;
     Ok(result)
+}
+
+fn transformCreateTableAsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    ctas_node: Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let stmt = ctas_node
+        .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+        .expect("CreateTableAsStmt");
+    let is_matview = stmt.objtype == types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW;
+    if stmt.objtype != types_nodes::parsenodes::ObjectType::OBJECT_TABLE && !is_matview {
+        panic!(
+            "transformCreateTableAsStmt (analyze.c): objtype {:?} arm unported — \
+             unit backend-parser-analyze",
+            stmt.objtype
+        );
+    }
+    let into_node = stmt.into.expect("CreateTableAsStmt.into");
+    let inner = stmt.query.expect("CreateTableAsStmt has a query");
+    let query = transformStmt(mcx, pstate, inner)?;
+    if is_matview {
+        let matview_err = |msg: &'static str| {
+            elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(msg)
+                .into_error()
+        };
+        if query.hasModifyingCTE {
+            return Err(matview_err(
+                "materialized views must not use data-modifying statements in WITH",
+            )
+            .into());
+        }
+        if is_query_using_temp_relation(mcx, &query)? {
+            return Err(
+                matview_err("materialized views must not use temporary tables or views").into()
+            );
+        }
+        // query_contains_extern_params: PARAM_EXTERN is unreachable — every
+        // live analysis entry passes zero fixed params.
+        let into = into_node
+            .as_variant::<types_nodes::rawnodes::IntoClause>()
+            .expect("IntoClause");
+        let rel = into.rel.expect("IntoClause.rel").as_range_var().expect("RangeVar");
+        if rel.relpersistence == types_core::catalog::RELPERSISTENCE_UNLOGGED {
+            return Err(matview_err("materialized views cannot be unlogged").into());
+        }
+    }
+    let query_node = Node::mk(mcx, query)?;
+    if is_matview {
+        // C: into->viewQuery = copyObject(query). The one handle doubles as
+        // the is_matview discriminator; ExecCreateTableAs is the single
+        // consumer and takes the Query exactly once.
+        // SAFETY: raw tree owned by this analysis; no derived reference is live.
+        unsafe {
+            into_node
+                .with_mut::<types_nodes::rawnodes::IntoClause, _>(|ic| {
+                    ic.viewQuery = Some(query_node)
+                })
+                .expect("node built as IntoClause");
+        }
+    }
+    // SAFETY: raw tree owned by this analysis; no derived reference is live.
+    unsafe {
+        ctas_node
+            .with_mut::<types_nodes::rawnodes::CreateTableAsStmt, _>(|c| {
+                c.query = Some(query_node)
+            })
+            .expect("node built as CreateTableAsStmt");
+    }
+
+    let mut result = Query::default();
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(ctas_node);
+    Ok(result)
+}
+
+// isQueryUsingTempRelation (rewriteManip.c). C also walks sublinks via
+// query_tree_walker; that leg is loud, gated on a live temp namespace so it
+// cannot fire while no temp relation can exist in-session.
+fn is_query_using_temp_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+) -> PgResult<bool> {
+    use types_nodes::parsenodes::RTEKind;
+    if query.hasSubLinks && catalog_namespace::my_temp_namespace() != types_core::InvalidOid {
+        panic!(
+            "isQueryUsingTempRelation (rewriteManip.c): sublink walk unported \
+             (query_tree_walker) — unit backend-commands-matview"
+        );
+    }
+    for node in query.rtable.iter() {
+        let rte = node.as_range_tbl_entry().expect("rtable holds RangeTblEntry nodes");
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                if lsyscache::get_rel_persistence(rte.relid)?
+                    == types_core::catalog::RELPERSISTENCE_TEMP as i8
+                {
+                    return Ok(true);
+                }
+            }
+            RTEKind::RTE_SUBQUERY => {
+                let sub = rte.subquery.expect("subquery RTE carries a Query");
+                if is_query_using_temp_relation(mcx, sub)? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    for cte in query.cteList.iter() {
+        let cte = cte.as_common_table_expr().expect("cteList holds CommonTableExpr");
+        let q = cte.ctequery.expect("analyzed CTE query");
+        if is_query_using_temp_relation(mcx, q.as_query().expect("Query"))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn transformDeclareCursorStmt<'mcx>(
@@ -414,6 +598,262 @@ pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
     stmt_requires_parse_analysis(parse_tree)
 }
 
+// transformPLAssignStmt (analyze.c). Unported louds: indirection beyond the
+// dotted-name prefix (transformAssignmentIndirection / SubscriptingRef) and
+// DISTINCT ON.
+fn transformPLAssignStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    stmt: &types_nodes::PLAssignStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERRCODE_SYNTAX_ERROR, ERROR};
+    use types_nodes::primnodes::TargetEntry;
+
+    let sstmt = stmt
+        .val
+        .expect("PLAssignStmt.val")
+        .as_select_stmt()
+        .expect("PLAssignStmt.val is a SelectStmt");
+
+    let mut fields = types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, stmt.name)?)?;
+    let mut nnames = stmt.nnames;
+    let mut rest = 0usize;
+    for ind in &stmt.indirection {
+        if nnames > 1 {
+            if ind.as_string().is_none() {
+                return Err(Box::new(types_error::PgError::error(
+                    "invalid name count in PLAssignStmt".to_string(),
+                )));
+            }
+            fields.lappend(mcx, ind)?;
+            nnames -= 1;
+        } else {
+            rest += 1;
+        }
+    }
+    if rest > 0 {
+        panic!(
+            "transformPLAssignStmt (analyze.c): transformAssignmentIndirection \
+             (subscripted/field assignment target) unported — unit backend-parser-analyze"
+        );
+    }
+
+    let cref = Node::mk_column_ref(mcx, fields, stmt.location)?;
+    let target =
+        parse_expr::transformExpr(mcx, pstate, cref, ParseExprKind::EXPR_KIND_UPDATE_TARGET)?;
+    let targettype = parse_expr::expr_type(target);
+    let targettypmod = parse_expr::expr_typmod(target);
+
+    let mut qry = Query::default();
+    qry.commandType = CmdType::CMD_SELECT;
+    pstate.p_is_insert = false;
+
+    if !sstmt.lockingClause.is_nil() {
+        pstate.p_locking_clause = sstmt.lockingClause.clone_in(mcx)?;
+    }
+    if !sstmt.windowClause.is_nil() {
+        pstate.p_windowdefs = sstmt.windowClause.clone_in(mcx)?;
+    }
+
+    transformFromClause(mcx, pstate, &sstmt.fromClause)?;
+
+    let mut tlist = transformTargetList(
+        mcx,
+        pstate,
+        &sstmt.targetList,
+        ParseExprKind::EXPR_KIND_SELECT_TARGET,
+    )?;
+
+    if tlist.len() != 1 {
+        let n = tlist.len();
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg_plural(
+                    format!("assignment source returned {n} column"),
+                    format!("assignment source returned {n} columns"),
+                    n as u64,
+                )
+                .into_error()
+                .with_error_location(ErrorLocation::new("analyze.c", 0, "transformPLAssignStmt")),
+        ));
+    }
+
+    let tle = tlist.first().expect("one tlist entry");
+    let type_id = {
+        let te = tle.as_variant::<TargetEntry>().expect("TargetEntry");
+        parse_expr::expr_type(te.expr)
+    };
+
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_UPDATE_TARGET;
+
+    let composite = |t: Oid| -> PgResult<bool> {
+        Ok(t == types_core::catalog::RECORDOID
+            || types_core::OidIsValid(lsyscache::typ::get_typ_typrelid(t)?))
+    };
+    if targettype != type_id && composite(targettype)? && composite(type_id)? {
+        // C hack: inconsistent composite types pass through as-is; the
+        // PL/pgSQL executor converts its own way.
+    } else {
+        let orig_expr = tle.as_variant::<TargetEntry>().expect("TargetEntry").expr;
+        let coerced = coerce::coerce_to_target_type(
+            mcx,
+            pstate,
+            orig_expr,
+            type_id,
+            targettype,
+            targettypmod,
+            coerce::CoercionContext::COERCION_PLPGSQL,
+            types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        match coerced {
+            Some(newexpr) => {
+                // SAFETY: parser-owned tree; no derived refs live.
+                unsafe {
+                    tle.with_mut::<TargetEntry, _>(|te| te.expr = newexpr)
+                        .expect("TargetEntry");
+                }
+            }
+            None => {
+                let tname = format_type::format_type_be(targettype)?;
+                let ename = format_type::format_type_be(type_id)?;
+                let name = stmt.name;
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(ERRCODE_DATATYPE_MISMATCH)
+                        .errmsg(format!(
+                            "variable \"{name}\" is of type {tname} but expression is of type {ename}"
+                        ))
+                        .errhint("You will need to rewrite or cast the expression.")
+                        .errposition(parser_small1::parser_errposition(
+                            pstate,
+                            parse_expr::expr_location(orig_expr),
+                            mbutils::GetDatabaseEncoding(),
+                        ))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new(
+                            "analyze.c",
+                            0,
+                            "transformPLAssignStmt",
+                        )),
+                ));
+            }
+        }
+    }
+
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_NONE;
+
+    qry.targetList = tlist;
+
+    let qual = transformWhereClause(
+        mcx,
+        pstate,
+        sstmt.whereClause,
+        ParseExprKind::EXPR_KIND_WHERE,
+        "WHERE",
+    )?;
+
+    qry.havingQual = transformWhereClause(
+        mcx,
+        pstate,
+        sstmt.havingClause,
+        ParseExprKind::EXPR_KIND_HAVING,
+        "HAVING",
+    )?;
+
+    qry.sortClause = transformSortClause(
+        mcx,
+        pstate,
+        &sstmt.sortClause,
+        &mut qry.targetList,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )?;
+
+    qry.groupClause = transformGroupClause(
+        mcx,
+        pstate,
+        &sstmt.groupClause,
+        &mut qry.groupingSets,
+        &mut qry.targetList,
+        &qry.sortClause,
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )?;
+    qry.groupDistinct = sstmt.groupDistinct;
+
+    match &sstmt.distinctClause {
+        types_nodes::rawnodes::DistinctClause::None => {
+            qry.hasDistinctOn = false;
+        }
+        types_nodes::rawnodes::DistinctClause::All => {
+            qry.distinctClause = parse_clause::transformDistinctClause(
+                mcx,
+                pstate,
+                &mut qry.targetList,
+                &qry.sortClause,
+                false,
+            )?;
+            qry.hasDistinctOn = false;
+        }
+        types_nodes::rawnodes::DistinctClause::On(_) => panic!(
+            "transformPLAssignStmt (analyze.c): transformDistinctOnClause (DISTINCT ON) \
+             unported — unit backend-parser-clause"
+        ),
+    }
+
+    qry.limitOffset = transformLimitClause(
+        mcx,
+        pstate,
+        sstmt.limitOffset,
+        ParseExprKind::EXPR_KIND_OFFSET,
+        "OFFSET",
+        sstmt.limitOption,
+    )?;
+    qry.limitCount = transformLimitClause(
+        mcx,
+        pstate,
+        sstmt.limitCount,
+        ParseExprKind::EXPR_KIND_LIMIT,
+        "LIMIT",
+        sstmt.limitOption,
+    )?;
+    qry.limitOption = sstmt.limitOption;
+
+    let windowdefs = mem::take(&mut pstate.p_windowdefs);
+    qry.windowClause = transformWindowDefinitions(mcx, pstate, &windowdefs, &mut qry.targetList)?;
+
+    qry.rtable = mem::take(&mut pstate.p_rtable);
+    qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
+    qry.jointree = Some(
+        Node::mk_mut(mcx, FromExpr { fromlist: mem::take(&mut pstate.p_joinlist), quals: qual })?
+            .seal_ref(),
+    );
+
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+    qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
+    qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
+    qry.hasAggs = pstate.p_hasAggs;
+
+    for lc_node in &sstmt.lockingClause {
+        let lc = lc_node.as_locking_clause().expect("lockingClause cell");
+        transformLockingClause(mcx, pstate, &mut qry, lc, false)?;
+    }
+
+    assign_query_collations(mcx, pstate, &qry)?;
+
+    if pstate.p_hasAggs
+        || !qry.groupClause.is_nil()
+        || !qry.groupingSets.is_nil()
+        || qry.havingQual.is_some()
+    {
+        parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
+    }
+
+    Ok(qry)
+}
+
 fn transformSelectStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -428,11 +868,8 @@ fn transformSelectStmt<'mcx>(
         qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
-    if stmt.intoClause.is_some() {
-        panic!(
-            "transformSelectStmt (analyze.c): \"SELECT ... INTO is not allowed here\" \
-             ereport needs IntoClause vocabulary — unit backend-parser-analyze"
-        );
+    if let Some(into) = stmt.intoClause {
+        return Err(select_into_error(pstate, into, "SELECT ... INTO is not allowed here"));
     }
 
     // C aliases the raw lists into pstate; header-clone until a shared-list
@@ -657,14 +1094,20 @@ fn transformValuesClause<'mcx>(
         exprs_lists.lappend(mcx, Node::mk_list(mcx, row)?)?;
     }
 
-    // C marks the RTE LATERAL when NEW/OLD Vars appear (CREATE RULE only);
-    // no rule machinery can put an RTE in this pstate yet.
-    if !pstate.p_rtable.is_nil() {
-        panic!(
-            "transformValuesClause (analyze.c): contain_vars_of_level LATERAL arm \
-             (CREATE RULE NEW/OLD) unported — unit backend-parser-analyze"
-        );
-    }
+    // C marks the RTE LATERAL when it references NEW/OLD (CREATE RULE is the
+    // only way this pstate already holds RTEs).
+    let lateral = !pstate.p_rtable.is_nil() && {
+        let mut w = rules::VarsOfLevel { sublevels_up: 0 };
+        use nodes_core::NodeWalker as _;
+        let mut hit = false;
+        for row in &exprs_lists {
+            if w.visit(row)? {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    };
 
     let nsitem = parse_relation::addRangeTableEntryForValues(
         mcx,
@@ -674,7 +1117,7 @@ fn transformValuesClause<'mcx>(
         coltypmods,
         colcollations,
         None,
-        false,
+        lateral,
         true,
     )?;
     // C calls addNSItemToQuery before expandNSItemAttrs; swapped because the
@@ -761,8 +1204,17 @@ fn transformInsertStmt<'mcx>(
             || !s.lockingClause.is_nil()
             || s.withClause.is_some()
     });
-    // The CREATE RULE rtable pass-down only matters for isGeneralSelect.
-    debug_assert!(pstate.p_rtable.is_nil());
+    // CREATE RULE pass-down: OLD/NEW move out of pstate and ride into the
+    // INSERT ... SELECT sub-analysis (analyze.c isGeneralSelect block).
+    let (sub_rtable, sub_perminfos, sub_namespace) = if is_general_select {
+        (
+            core::mem::replace(&mut pstate.p_rtable, types_nodes::NodeList::nil()),
+            core::mem::replace(&mut pstate.p_rteperminfos, types_nodes::NodeList::nil()),
+            core::mem::replace(&mut pstate.p_namespace, mcx::PgVec::new_in(mcx)),
+        )
+    } else {
+        (types_nodes::NodeList::nil(), types_nodes::NodeList::nil(), mcx::PgVec::new_in(mcx))
+    };
 
     let relation = stmt
         .relation
@@ -779,15 +1231,22 @@ fn transformInsertStmt<'mcx>(
         None => types_nodes::NodeList::nil(),
         Some(_) if is_general_select => {
             // C hands the sub-SELECT an unknowns-unresolved pstate so target
-            // columns drive the coercion below.
-            let select_query = parse_sub_analyze(
-                mcx,
-                stmt.selectStmt.expect("isGeneralSelect implies selectStmt"),
-                pstate,
-                None,
-                false,
-                false,
-            )?;
+            // columns drive the coercion below; the moved-out rtable/namespace
+            // (CREATE RULE OLD/NEW) seed it.
+            let select_query = {
+                let mut sub_pstate = make_parsestate(mcx, Some(&*pstate));
+                sub_pstate.p_rtable = sub_rtable;
+                sub_pstate.p_rteperminfos = sub_perminfos;
+                sub_pstate.p_namespace = sub_namespace;
+                sub_pstate.p_resolve_unknowns = false;
+                let q = transformStmt(
+                    mcx,
+                    &mut sub_pstate,
+                    stmt.selectStmt.expect("isGeneralSelect implies selectStmt"),
+                )?;
+                free_parsestate(sub_pstate)?;
+                q
+            };
             if select_query.commandType != CmdType::CMD_SELECT {
                 return Err(Box::new(types_error::PgError::error(
                     "unexpected non-SELECT command in INSERT ... SELECT".to_string(),
@@ -1268,7 +1727,7 @@ fn transformUpdateStmt<'mcx>(
 
 // C transformUpdateTargetList (analyze.c): resnos become the target attribute
 // numbers; resjunk entries renumber past the relation's column count.
-fn transformUpdateTargetList<'mcx>(
+pub(crate) fn transformUpdateTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     orig_tlist: &types_nodes::NodeList<'mcx>,
@@ -1382,7 +1841,7 @@ fn undefined_update_column(
 
 // C transformInsertRow (analyze.c). strip_indirection is inert: FieldStore/
 // SubscriptingRef construction panics upstream (transformAssignedExpr).
-fn transformInsertRow<'mcx>(
+pub(crate) fn transformInsertRow<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     exprlist: types_nodes::NodeList<'mcx>,
@@ -1426,6 +1885,33 @@ fn transformInsertRow<'mcx>(
     Ok(result)
 }
 
+// exprLocation(IntoClause) resolves to its rel's location (nodeFuncs.c).
+#[cold]
+pub(crate) fn select_into_error(
+    pstate: &ParseState<'_, '_>,
+    into: Node<'_>,
+    msg: &str,
+) -> Box<types_error::PgError> {
+    use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
+    let loc = into
+        .as_variant::<types_nodes::rawnodes::IntoClause>()
+        .and_then(|ic| ic.rel)
+        .and_then(|r| r.as_range_var())
+        .map(|r| r.location)
+        .unwrap_or(-1);
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                loc,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error(),
+    )
+}
+
 #[cold]
 fn insert_row_length_error(
     pstate: &ParseState<'_, '_>,
@@ -1451,7 +1937,7 @@ fn insert_row_length_error(
 // list (PG18 OLD/NEW aliases) is loud, and instead of adding old/new namespace
 // items we panic when a RETURNING expression would resolve through one; the
 // Query alias fields still get C's "old"/"new" defaults when unmasked.
-fn transformReturningClause<'mcx>(
+pub(crate) fn transformReturningClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     qry: &mut Query<'mcx>,
@@ -1552,7 +2038,7 @@ fn returning_no_columns(
 // The INSERT arm's stand-in for C's addNSItemToQuery(p_target_nsitem, ...):
 // p_target_nsitem is a shared borrow here, so the namespace entry is a fresh
 // copy with the visibility flags C would have scribbled in place.
-fn returning_target_nsitem<'mcx>(
+pub(crate) fn returning_target_nsitem<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
 ) -> PgResult<&'mcx mut parser_small1::ParseNamespaceItem<'mcx>> {

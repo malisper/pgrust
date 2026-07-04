@@ -1,13 +1,14 @@
 // dropcmds.c RemoveObjects over the objtypes get_object_address serves
-// (TYPE/DOMAIN/SCHEMA); ownership checks run the superuser fast path only —
-// non-superuser DROP is a named panic (aclchk object_ownercheck unported).
+// (TYPE/DOMAIN/SCHEMA/RULE/EXTENSION/OPERATOR/OPCLASS/OPFAMILY); ownership
+// checks run the superuser fast path only — non-superuser DROP is a named
+// panic (aclchk object_ownercheck unported).
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
 use types_core::primitive::OidIsValid;
 use types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
 use types_error::{PgResult, NOTICE};
-use types_nodes::parsenodes::{DropStmt, ObjectType};
+use types_nodes::parsenodes::{DropStmt, ObjectType, ObjectWithArgs};
 use types_nodes::rawnodes::TypeName;
 use types_nodes::{Node, NodeList};
 use types_rel::AccessExclusiveLock;
@@ -34,6 +35,52 @@ fn schema_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<Strin
     Ok(None)
 }
 
+fn schema_does_not_exist_skipping_parts(parts: &[&str]) -> PgResult<Option<String>> {
+    if parts.len() >= 2 {
+        let schemaname = parts[parts.len() - 2];
+        if catalog_namespace::LookupNamespaceNoError(schemaname)? == types_core::InvalidOid {
+            return Ok(Some(format!("schema \"{schemaname}\" does not exist, skipping")));
+        }
+    }
+    Ok(None)
+}
+
+fn string_parts<'mcx>(names: &NodeList<'mcx>, upto: usize) -> Vec<&'mcx str> {
+    names
+        .iter()
+        .take(upto)
+        .map(|n| n.as_string().expect("qualified name component is a String node").sval)
+        .collect()
+}
+
+fn owningrel_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<String>> {
+    let parent = string_parts(names, names.len() - 1);
+    if let Some(msg) = schema_does_not_exist_skipping_parts(&parent)? {
+        return Ok(Some(msg));
+    }
+    let rv = catalog_objectaddress::makeRangeVarFromParts(&parent);
+    if !OidIsValid(catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, true)?) {
+        return Ok(Some(format!(
+            "relation \"{}\" does not exist, skipping",
+            parent.join(".")
+        )));
+    }
+    Ok(None)
+}
+
+fn type_in_list_does_not_exist_skipping(typenames: &NodeList<'_>) -> PgResult<Option<String>> {
+    for n in typenames.iter() {
+        let tn = n.as_variant::<TypeName>().expect("objargs holds TypeName nodes");
+        if !OidIsValid(catalog_objectaddress::LookupTypeNameOid(tn, true)?) {
+            return Ok(Some(format!(
+                "type \"{}\" does not exist, skipping",
+                catalog_objectaddress::TypeNameToString(tn)
+            )));
+        }
+    }
+    Ok(None)
+}
+
 fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()> {
     let msg = match objtype {
         ObjectType::OBJECT_TYPE | ObjectType::OBJECT_DOMAIN => {
@@ -49,6 +96,66 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
         ObjectType::OBJECT_SCHEMA => {
             let name = object.as_string().expect("schema name is a String node").sval;
             format!("schema \"{name}\" does not exist, skipping")
+        }
+        ObjectType::OBJECT_EXTENSION => {
+            let name = object.as_string().expect("extension name is a String node").sval;
+            format!("extension \"{name}\" does not exist, skipping")
+        }
+        ObjectType::OBJECT_RULE => {
+            let names = object.as_list().expect("rule object is a name list");
+            match owningrel_does_not_exist_skipping(&names)? {
+                Some(msg) => msg,
+                None => {
+                    let rulename = names
+                        .last()
+                        .and_then(|n| n.as_string())
+                        .expect("rule name is a String node")
+                        .sval;
+                    let parent = string_parts(&names, names.len() - 1);
+                    format!(
+                        "rule \"{rulename}\" for relation \"{}\" does not exist, skipping",
+                        parent.join(".")
+                    )
+                }
+            }
+        }
+        ObjectType::OBJECT_OPERATOR => {
+            let owa = object
+                .as_variant::<ObjectWithArgs>()
+                .expect("operator object is an ObjectWithArgs");
+            match schema_does_not_exist_skipping(&owa.objname)? {
+                Some(msg) => msg,
+                None => match type_in_list_does_not_exist_skipping(&owa.objargs)? {
+                    Some(msg) => msg,
+                    None => format!(
+                        "operator {} does not exist, skipping",
+                        catalog_objectaddress::NameListToString(&owa.objname)
+                    ),
+                },
+            }
+        }
+        ObjectType::OBJECT_OPCLASS | ObjectType::OBJECT_OPFAMILY => {
+            let names = object.as_list().expect("opclass object is a name list");
+            let amname = names
+                .first()
+                .and_then(|n| n.as_string())
+                .expect("opclass access method name is a String node")
+                .sval;
+            let tail: Vec<&str> = string_parts(&names, names.len())[1..].to_vec();
+            match schema_does_not_exist_skipping_parts(&tail)? {
+                Some(msg) => msg,
+                None => {
+                    let noun = if objtype == ObjectType::OBJECT_OPCLASS {
+                        "operator class"
+                    } else {
+                        "operator family"
+                    };
+                    format!(
+                        "{noun} \"{}\" does not exist for access method \"{amname}\", skipping",
+                        tail.join(".")
+                    )
+                }
+            }
         }
         other => unported(&format!("does_not_exist_skipping {other:?}")),
     };

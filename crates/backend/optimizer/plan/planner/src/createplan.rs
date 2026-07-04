@@ -65,6 +65,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
         PathNode::IncrementalSortPath(_) => create_incremental_sort_plan(run, path_id, flags),
         PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
+        PathNode::MemoizePath(_) => create_memoize_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
@@ -712,7 +713,7 @@ fn create_indexscan_plan<'mcx>(
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         if !clauses::contain_mutable_functions(clause)?
-            && predicate_implied_by_indexquals(clause, &stripped_indexquals)?
+            && predicate_implied_by_indexquals(mcx, clause, &stripped_indexquals)?
         {
             continue;
         }
@@ -812,7 +813,7 @@ fn create_bitmap_scan_plan<'mcx>(
             continue;
         }
         if !clauses::contain_mutable_functions(clause)?
-            && predicate_implied_by_indexquals(clause, &indexquals)?
+            && predicate_implied_by_indexquals(mcx, clause, &indexquals)?
         {
             continue;
         }
@@ -948,14 +949,14 @@ fn create_bitmap_subplan<'mcx>(
         }
         _ => {}
     }
-    let (indexclauses, indexselectivity, parent, parallel_safe, has_indpred) = {
+    let (indexclauses, indexselectivity, parent, parallel_safe, indpred) = {
         match run.root.path(bitmapqual) {
             PathNode::IndexPath(ip) => (
                 ip.indexclauses.clone(),
                 ip.indexselectivity,
                 ip.path.parent,
                 ip.path.parallel_safe,
-                !ip.indexinfo.as_ref().expect("indexinfo set").indpred.is_empty(),
+                ip.indexinfo.as_ref().expect("indexinfo set").indpred.clone(),
             ),
             other => panic!(
                 "create_bitmap_subplan (createplan.c): pathtype {}",
@@ -963,10 +964,6 @@ fn create_bitmap_subplan<'mcx>(
             ),
         }
     };
-    assert!(
-        !has_indpred,
-        "create_bitmap_subplan (createplan.c): partial-index indpred; M2 predicate lane"
-    );
 
     // C builds a throwaway IndexScan via create_indexscan_plan and moves its
     // qual lists over; the direct fix_indexqual_references call is the same
@@ -1005,97 +1002,28 @@ fn create_bitmap_subplan<'mcx>(
             subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
         }
     }
+    // Index predicate conditions not implied by the pushed-down quals must be
+    // rechecked (C: "We can add any index predicate conditions, too").
+    for &pid in indpred.iter() {
+        let pred = *run.root.expr_node(pid);
+        if !crate::predtest::predicate_implied_by(mcx, &[pred], subquals.as_slice(), false)? {
+            subquals.lappend(mcx, pred)?;
+            subindexquals.lappend(mcx, pred)?;
+        }
+    }
     Ok((plan.seal(), subindexquals, subquals))
 }
 
-// predicate_implied_by (predtest.c), strong form, single restriction clause
-// vs the AND of Var-op-Const indexquals -- the only shape reachable from
-// create_indexscan_plan/create_bitmap_scan_plan on this lane. Arms: a clause
-// implies itself (equal); a strict indexqual over the arg implies IS NOT
-// NULL; operator_predicate_proof with NO matching operand pair is provably
-// false; a matching operand pair (btree strategy proof) is loud.
+// predicate_implied_by (predtest.c), strong form: one restriction clause vs
+// the implicit-AND indexqual list.
 fn predicate_implied_by_indexquals<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     pred: Node<'mcx>,
     indexquals: &NodeList<'mcx>,
 ) -> PgResult<bool> {
-    for iq in indexquals {
-        if types_nodes::equal(pred, iq) {
-            return Ok(true);
-        }
-        let Some(iq_op) = iq.as_op_expr() else {
-            panic!("predicate_implied_by (predtest.c): non-OpExpr indexqual; M2 lane")
-        };
-        debug_assert_eq!(iq_op.args.len(), 2);
-        if let Some(nt) = pred.as_null_test() {
-            if nt.nulltesttype == types_nodes::primnodes::NullTestType::IS_NOT_NULL
-                && !nt.argisrow
-                && lsyscache::op_strict(iq_op.opno)?
-            {
-                let arg = nt.arg.expect("NullTest.arg");
-                if types_nodes::equal(arg, iq_op.args.nth(0))
-                    || types_nodes::equal(arg, iq_op.args.nth(1))
-                {
-                    return Ok(true);
-                }
-            }
-            continue;
-        }
-        let Some(p_op) = pred.as_op_expr() else {
-            // operator_predicate_proof: non-opclause predicate proves nothing.
-            continue;
-        };
-        if p_op.args.len() != 2 || p_op.inputcollid != iq_op.inputcollid {
-            continue;
-        }
-        let (pl, pr) = (p_op.args.nth(0), p_op.args.nth(1));
-        let (cl, cr) = (iq_op.args.nth(0), iq_op.args.nth(1));
-        if types_nodes::equal(pl, cl)
-            || types_nodes::equal(pr, cr)
-            || types_nodes::equal(pl, cr)
-            || types_nodes::equal(pr, cl)
-        {
-            // get_btree_test_op: a predicate operator with no btree
-            // interpretation (pattern/regex ops) proves nothing.
-            if !op_has_btree_interpretation(p_op.opno)? {
-                continue;
-            }
-            panic!(
-                "operator_predicate_proof (predtest.c): matching operand pair needs the \
-                 btree strategy proof; M2 predicate lane"
-            );
-        }
-        // No matching operand pair: C's operator_predicate_proof returns false.
-    }
-    Ok(false)
+    crate::predtest::predicate_implied_by(mcx, &[pred], indexquals.as_slice(), false)
 }
 
-// get_op_btree_interpretation (lsyscache.c) reduced to its existence probe.
-fn op_has_btree_interpretation(opno: u32) -> PgResult<bool> {
-    const BTREE_AM_OID: u32 = 403;
-    const COMPARISON_NE: u32 = 1201;
-    let mut found = false;
-    lsyscache::amop::with_amop_members(opno, |aform| {
-        if aform.amopmethod == BTREE_AM_OID {
-            found = true;
-        }
-    })?;
-    if found {
-        return Ok(true);
-    }
-    // C's <>-via-negator leg.
-    let negator = lsyscache::get_negator(opno)?;
-    if negator != 0 {
-        lsyscache::amop::with_amop_members(negator, |aform| {
-            if aform.amopmethod == BTREE_AM_OID {
-                found = true;
-            }
-        })?;
-    }
-    let _ = COMPARISON_NE;
-    Ok(found)
-}
-
-// fix_indexqual_references (createplan.c) -> (stripped, fixed) qual lists.
 fn fix_indexqual_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -1321,11 +1249,7 @@ fn create_modifytable_plan<'mcx>(
     let mcx = run.mcx;
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(
-            p.withCheckOptionLists.is_empty()
-                && p.rowMarks.is_empty()
-                && p.mergeActionLists.is_empty()
-        );
+        debug_assert!(p.withCheckOptionLists.is_empty() && p.rowMarks.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1342,7 +1266,8 @@ fn create_modifytable_plan<'mcx>(
         x if x == CmdType::CMD_INSERT as u32 => CmdType::CMD_INSERT,
         x if x == CmdType::CMD_UPDATE as u32 => CmdType::CMD_UPDATE,
         x if x == CmdType::CMD_DELETE as u32 => CmdType::CMD_DELETE,
-        other => panic!("make_modifytable (createplan.c): operation {other}; M4 MERGE lane"),
+        x if x == CmdType::CMD_MERGE as u32 => CmdType::CMD_MERGE,
+        other => panic!("make_modifytable (createplan.c): operation {other} unported"),
     };
 
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
@@ -1417,6 +1342,44 @@ fn create_modifytable_plan<'mcx>(
         plan.arbiterIndexes = crate::plancat::infer_arbiter_indexes(run, oc)?;
         plan.exclRelRTI = oc.exclRelIndex as u32;
         plan.exclRelTlist = oc.exclRelTlist.clone_in(mcx)?;
+    }
+    {
+        let (action_lists, join_conds) = {
+            let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+            debug_assert!(p.mergeActionLists.len() <= 1);
+            let mut lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for al in p.mergeActionLists.iter() {
+                lists.push(crate::relnode::pgvec_clone_shallow(mcx, al));
+            }
+            let mut conds: mcx::PgVec<'mcx, Option<types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for &c in p.mergeJoinConditions.iter() {
+                conds.push(c);
+            }
+            (lists, conds)
+        };
+        let mut mal = types_nodes::list::NodeList::nil();
+        for al in action_lists.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in al.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            mal.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        plan.mergeActionLists = mal;
+        let mut mjc = types_nodes::list::NodeList::nil();
+        for &c in join_conds.iter() {
+            // A None condition (no BY SOURCE actions) rides as an empty
+            // implicit-AND list: ExecQual over it is constant true, matching
+            // C's NULL-condition semantics.
+            let cell = match c {
+                Some(id) => *run.root.expr_node(id),
+                None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+            };
+            mjc.lappend(mcx, cell)?;
+        }
+        plan.mergeJoinConditions = mjc;
     }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
@@ -1760,16 +1723,25 @@ fn create_groupingsets_plan<'mcx>(
 
     let mut chain = NodeList::nil();
     if rollups.len() > 1 {
-        debug_assert!(!rollups[0].is_hashed);
+        let mut is_first_sort = rollups[0].is_hashed;
         for rollup in rollups[1..].iter() {
-            assert!(
-                !rollup.is_hashed,
-                "create_groupingsets_plan (createplan.c): hashed rollup; grouping-sets lane"
-            );
             let new_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
-            let sort_plan =
-                make_sort_from_groupcols(run, &rollup.groupClause, &new_grp_col_idx, subplan)?;
-            let strat = if rollup.gsets[0].is_empty() {
+            let sort_plan = if !rollup.is_hashed && !is_first_sort {
+                Some(make_sort_from_groupcols(
+                    run,
+                    &rollup.groupClause,
+                    &new_grp_col_idx,
+                    subplan,
+                )?)
+            } else {
+                None
+            };
+            if !rollup.is_hashed {
+                is_first_sort = false;
+            }
+            let strat = if rollup.is_hashed {
+                types_pathnodes::AGG_HASHED
+            } else if rollup.gsets[0].is_empty() {
                 types_pathnodes::AGG_PLAIN
             } else {
                 types_pathnodes::AGG_SORTED
@@ -1778,7 +1750,7 @@ fn create_groupingsets_plan<'mcx>(
             let mut agg = Node::build::<Agg>(mcx)?;
             agg.plan.targetlist = NodeList::nil();
             agg.plan.qual = NodeList::nil();
-            agg.plan.lefttree = Some(sort_plan);
+            agg.plan.lefttree = sort_plan;
             agg.aggstrategy = strat;
             agg.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
             agg.numCols = rollup.gsets[0].len() as i32;
@@ -1790,13 +1762,15 @@ fn create_groupingsets_plan<'mcx>(
             agg.transitionSpace = transition_space;
             // C strips the vestigial Sort after make_agg.
             // SAFETY: sort_plan was freshly built above; no other handle.
-            unsafe {
-                sort_plan.with_plan_mut(|p| {
-                    p.targetlist = NodeList::nil();
-                    p.lefttree = None;
-                })
+            if let Some(sp) = sort_plan {
+                unsafe {
+                    sp.with_plan_mut(|p| {
+                        p.targetlist = NodeList::nil();
+                        p.lefttree = None;
+                    })
+                }
+                .expect("Sort embeds a Plan base");
             }
-            .expect("Sort embeds a Plan base");
             chain.lappend(mcx, agg.seal())?;
         }
     }
@@ -2019,7 +1993,9 @@ fn expr_collation(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
-        tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported here"),
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
+        _ => nodes_core::expr_collation(node),
     }
 }
 
@@ -2374,6 +2350,84 @@ fn create_material_plan<'mcx>(
     plan.plan.righttree = None;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
+}
+
+// create_memoize_plan + make_memoize (createplan.c).
+fn create_memoize_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath, hash_ops, param_expr_ids, singlerow, binary_mode, est_entries) =
+        match run.root.path(path_id) {
+            PathNode::MemoizePath(mp) => (
+                mp.subpath.expect("Memoize subpath"),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.hash_operators),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.param_exprs),
+                mp.singlerow,
+                mp.binary_mode,
+                mp.est_entries,
+            ),
+            other => {
+                panic!("create_memoize_plan (createplan.c): pathtype {}", other.base().pathtype)
+            }
+        };
+    let subplan = create_plan_recurse(run, subpath, flags | CP_SMALL_TLIST)?;
+
+    let mut param_exprs = NodeList::nil();
+    for &e in param_expr_ids.iter() {
+        let node = *run.root.expr_node(e);
+        param_exprs.lappend(mcx, replace_nestloop_params(run, node)?)?;
+    }
+    let nkeys = param_exprs.len();
+    debug_assert!(nkeys > 0 && hash_ops.len() == nkeys);
+
+    let mut collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for e in &param_exprs {
+        collations.push(crate::pathkeys::expr_collation(e));
+    }
+    let mut keyparamids = types_nodes::bitmapset::Bitmapset::empty();
+    for e in &param_exprs {
+        pull_paramids(run.mcx, e, &mut keyparamids)?;
+    }
+
+    let mut tlist = NodeList::nil();
+    for te in subplan.as_plan().expect("subplan").targetlist.iter() {
+        tlist.lappend(mcx, te)?;
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Memoize>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.plan.righttree = None;
+    plan.numKeys = nkeys as i32;
+    plan.hashOperators = mcx::slice_borrow_in(mcx, &hash_ops)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
+    plan.param_exprs = param_exprs;
+    plan.singlerow = singlerow;
+    plan.binary_mode = binary_mode;
+    plan.est_entries = est_entries;
+    plan.keyparamids = keyparamids;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// pull_paramids (createplan.c) over the replaced (plan-side) exprs.
+fn pull_paramids<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    out: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    if let Some(p) = node.as_param() {
+        out.add_member(mcx, p.paramid)?;
+        return Ok(());
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        pull_paramids(mcx, n, out)?;
+        Ok(None)
+    })?;
+    Ok(())
 }
 
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {

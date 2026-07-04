@@ -213,6 +213,8 @@ fn install_seams() {
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_rel| false);
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     });
 }
 
@@ -290,7 +292,7 @@ fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -317,7 +319,7 @@ fn insert(payload: usize) -> ItemPointerData {
     let ctx = MemoryContext::new("fsm_reuse");
     let rel = test_relation(ctx.mcx());
     let mut tup = make_tuple(payload);
-    heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
     tup.t_self
 }
 

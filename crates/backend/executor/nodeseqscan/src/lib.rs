@@ -64,23 +64,76 @@ impl<'mcx> ScanNode<'mcx> for SeqScanState<'mcx> {
         let mcx = estate.es_query_cxt;
         let direction = estate.es_direction;
 
-        if self.ss.ss_currentScanDesc.is_none() {
-            let snapshot = estate.es_snapshot.clone();
-            self.ss.ss_currentScanDesc = Some(table_beginscan(
-                mcx,
-                self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation"),
-                snapshot,
-                0,
-                PgVec::new_in(mcx),
-            )?);
-        }
+        self.ensure_scandesc(estate)?;
 
-        // SAFETY: written just above when None; single test+branch like C's
-        // scandesc == NULL check.
+        // SAFETY: written by ensure_scandesc when None; single test+branch
+        // like C's scandesc == NULL check.
         let scandesc = unsafe { self.ss.ss_currentScanDesc.as_mut().unwrap_unchecked() };
         let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
         table_scan_getnextslot(mcx, scandesc, direction, slot)
     }
+}
+
+impl<'mcx> SeqScanState<'mcx> {
+    // Hot per-row check stays a single inlined test+branch (C's scandesc ==
+    // NULL check); the once-per-scan open is outlined.
+    #[inline(always)]
+    fn ensure_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.ss.ss_currentScanDesc.is_none() {
+            self.open_scandesc(estate)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let snapshot = estate.es_snapshot.clone();
+        self.ss.ss_currentScanDesc = Some(table_beginscan(
+            mcx,
+            self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation"),
+            snapshot,
+            0,
+            PgVec::new_in(mcx),
+        )?);
+        Ok(())
+    }
+}
+
+/// Fused page-batch drive support (upstream batch scan, CF 6176). The caller
+/// owns qual evaluation and must have verified `seq_scan_batch_supported`.
+pub fn seq_scan_batch_supported<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !matches!(node.variant, SeqScanVariant::Plain | SeqScanVariant::WithQual) {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    let scandesc = node.ss.ss_currentScanDesc.as_ref().unwrap();
+    Ok(::tableam::table_scan_supports_pagebatch(scandesc))
+}
+
+pub fn seq_scan_next_pagebatch<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<u32> {
+    node.ensure_scandesc(estate)?;
+    // SAFETY: written by ensure_scandesc when None.
+    let scandesc = unsafe { node.ss.ss_currentScanDesc.as_mut().unwrap_unchecked() };
+    ::tableam::table_scan_getnextpagebatch(scandesc)
+}
+
+pub fn seq_scan_batch_store<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    i: u32,
+) {
+    let mcx = estate.es_query_cxt;
+    let scandesc =
+        node.ss.ss_currentScanDesc.as_mut().expect("batch store before batch fetch");
+    let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
+    ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
 }
 
 /// `ExecSeqScan` + its four specialized variants, dispatched on the enum

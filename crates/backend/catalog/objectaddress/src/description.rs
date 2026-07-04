@@ -9,8 +9,9 @@ use format_type::quote_identifier;
 use mcx::Mcx;
 use types_core::primitive::OidIsValid;
 use types_core::{
-    AttrNumber, Oid, AUTH_ID_RELATION_ID, DATABASE_RELATION_ID,
-    NAMESPACE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+    AttrNumber, Oid, AUTH_ID_RELATION_ID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
+    NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID,
+    OPERATOR_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::PgResult;
 use types_rel::{AccessShareLock, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
@@ -267,8 +268,109 @@ pub fn getObjectDescription(
             };
             Ok(Some(format!("database {datname}")))
         }
+        EXTENSION_RELATION_ID => {
+            let Some(extname) = extension::get_extension_name(mcx, object.objectId)? else {
+                if !missing_ok {
+                    panic!("cache lookup failed for extension {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!("extension {}", extname.as_str())))
+        }
+        OPERATOR_RELATION_ID => {
+            // FORMAT_OPERATOR_INVALID_AS_NULL.
+            if syscache_seams::pg_operator_oprname::call(object.objectId)?.is_none() {
+                if !missing_ok {
+                    panic!("cache lookup failed for operator {}", object.objectId);
+                }
+                return Ok(None);
+            }
+            Ok(Some(format!(
+                "operator {}",
+                adt_regproc::format_operator(mcx, object.objectId)?
+            )))
+        }
+        OPERATOR_CLASS_RELATION_ID => {
+            let Some((opcmethod, opcname, opcnamespace)) = opclass_or_opfamily_row(
+                cache_syscache::cacheinfo::CLAOID,
+                object.objectId,
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for opclass {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let amname = am_name(opcmethod)?;
+            let nspname =
+                if catalog_namespace::OpclassnameGetOpcid(opcmethod, &opcname)? == object.objectId
+                {
+                    None
+                } else {
+                    get_namespace_name(opcnamespace)?
+                };
+            Ok(Some(format!(
+                "operator class {} for access method {amname}",
+                quote_qualified(nspname.as_deref(), &opcname)
+            )))
+        }
+        OPERATOR_FAMILY_RELATION_ID => {
+            let Some((opfmethod, opfname, opfnamespace)) = opclass_or_opfamily_row(
+                cache_syscache::cacheinfo::OPFAMILYOID,
+                object.objectId,
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for opfamily {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let amname = am_name(opfmethod)?;
+            let nspname = if catalog_namespace::OpfamilynameGetOpfid(opfmethod, &opfname)?
+                == object.objectId
+            {
+                None
+            } else {
+                get_namespace_name(opfnamespace)?
+            };
+            Ok(Some(format!(
+                "operator family {} for access method {amname}",
+                quote_qualified(nspname.as_deref(), &opfname)
+            )))
+        }
         other => unported(&format!("getObjectDescription object class {other}")),
     }
+}
+
+// pg_opclass and pg_opfamily share the (method, name, namespace) column
+// layout at attnums 2/3/4.
+fn opclass_or_opfamily_row(cacheid: i32, objid: Oid) -> PgResult<Option<(Oid, String, Oid)>> {
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cacheid,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(objid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let method = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?.as_oid();
+    let name = name_from_datum(cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 3)?);
+    let nsp = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 4)?.as_oid();
+    cache_syscache::ReleaseSysCache(tup);
+    Ok(Some((method, name, nsp)))
+}
+
+fn am_name(amoid: Oid) -> PgResult<String> {
+    let cacheid = cache_syscache::cacheinfo::AMOID;
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cacheid,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(amoid)),
+    )?
+    else {
+        panic!("cache lookup failed for access method {amoid}");
+    };
+    let name = name_from_datum(cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?);
+    cache_syscache::ReleaseSysCache(tup);
+    Ok(name)
 }
 
 // getObjectIdentity (objectaddress.c getObjectIdentityParts), same class

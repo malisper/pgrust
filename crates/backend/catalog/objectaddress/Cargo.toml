@@ -33,3 +33,9 @@ lmgr = { path = "../../storage/lmgr/lmgr" }
 sinval = { path = "../../storage/ipc/sinval" }
 miscinit = { path = "../../utils/init/miscinit" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+extension = { path = "../../commands/extension" }
+parse_oper = { path = "../../parser/parse_oper" }
+opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+adt_regproc = { path = "../../utils/adt/regproc" }

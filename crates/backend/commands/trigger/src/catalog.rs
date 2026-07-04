@@ -145,6 +145,46 @@ fn set_relation_has_triggers<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     relrel.close(RowExclusiveLock)
 }
 
+// RemoveTriggerById (trigger.c): relhastriggers stays true per C; the
+// relcache inval rides the pg_trigger CatalogTupleDelete's SI on the rel.
+pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trig_oid: Oid) -> PgResult<()> {
+    let tgrel = table::table_open(mcx, TRIGGER_RELATION_ID, RowExclusiveLock)?;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = Anum_pg_trigger_oid;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(trig_oid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &tgrel,
+        TRIGGER_OID_INDEX_ID,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("could not find tuple for trigger {trig_oid}"));
+    let mut isnull = false;
+    // SAFETY: tgrelid is a fixed NOT NULL pg_trigger column under its descriptor.
+    let relid =
+        unsafe { types_tuple::heap_getattr(tup, 2, tgrel.descr(), &mut isnull) }.as_oid();
+    let rel = table::table_open(mcx, relid, types_rel::AccessExclusiveLock)?;
+    if rel.rd_rel.relkind != types_rel::RELKIND_RELATION {
+        panic!("unported: RemoveTriggerById non-plain-table relkind");
+    }
+    if catalog::IsCatalogRelationOid(relid) && !init_small::globals::allowSystemTableMods() {
+        panic!("unported: RemoveTriggerById on a system catalog");
+    }
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&tgrel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    tgrel.close(RowExclusiveLock)?;
+    inval::invalidate::CacheInvalidateRelcacheByRelid(relid)?;
+    rel.close(types_rel::NoLock)
+}
+
 fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
     let n = NAMEDATALEN as usize;
     assert!(name.len() < n, "trigger name overflows NAMEDATALEN: {name:?}");

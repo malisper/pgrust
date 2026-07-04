@@ -40,7 +40,14 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
+commands_vacuum = { path = "../vacuum" }
+commands_analyze_seams = { path = "../commands_analyze_seams" }
+nbtree = { path = "../../access/nbtree/nbtree" }
+types_storage = { path = "../../../_support/types/types_storage" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
+execindexing = { path = "../../executor/execindexing" }
+exectuples = { path = "../../executor/exectuples" }
+nodes_core = { path = "../../nodes/nodes_core" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }

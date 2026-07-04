@@ -12,14 +12,15 @@ use mcx::Mcx;
 use rel_vocab::RangeVar;
 use types_core::primitive::OidIsValid;
 use types_core::{
-    InvalidOid, Oid, AUTH_ID_RELATION_ID, DATABASE_RELATION_ID, NAMESPACE_RELATION_ID,
-    RELATION_RELATION_ID, TYPE_RELATION_ID,
+    InvalidOid, Oid, AUTH_ID_RELATION_ID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
+    NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID,
+    OPERATOR_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_nodes::parsenodes::ObjectType;
+use types_nodes::parsenodes::{ObjectType, ObjectWithArgs};
 use types_nodes::rawnodes::TypeName;
 use types_nodes::{Node, NodeList};
 use types_rel::{
@@ -70,6 +71,10 @@ fn fill_range_var<'mcx>(parts: &[&'mcx str]) -> RangeVar<'mcx> {
         _ => panic!("improper relation name (too many dotted names)"),
     }
     rv
+}
+
+pub fn makeRangeVarFromParts<'mcx>(parts: &[&'mcx str]) -> RangeVar<'mcx> {
+    fill_range_var(parts)
 }
 
 pub fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
@@ -276,7 +281,84 @@ fn get_object_address_unqualified(
             NAMESPACE_RELATION_ID,
             catalog_namespace::get_namespace_oid(name, missing_ok)?,
         )),
+        ObjectType::OBJECT_EXTENSION => Ok(ObjectAddress::set(
+            EXTENSION_RELATION_ID,
+            extension::get_extension_oid(name, missing_ok)?,
+        )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
+    }
+}
+
+// get_object_address_relobject (objectaddress.c), OBJECT_RULE arm; the
+// TRIGGER/POLICY/TABCONSTRAINT forms wait on their grammar lanes.
+fn get_object_address_relobject<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    object: NodeList<'mcx>,
+    missing_ok: bool,
+) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
+    let nnames = object.len();
+    if nnames < 2 {
+        return Err(err(
+            ERRCODE_SYNTAX_ERROR,
+            "must specify relation and object name".into(),
+        ));
+    }
+    let depname = object
+        .last()
+        .and_then(|n| n.as_string())
+        .expect("dependent object name is a String node")
+        .sval;
+    let relparts: Vec<&'mcx str> = object
+        .iter()
+        .take(nnames - 1)
+        .map(|n| n.as_string().expect("qualified name component is a String node").sval)
+        .collect();
+    let rv = fill_range_var(&relparts);
+    let reloid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, missing_ok)?;
+    if !OidIsValid(reloid) {
+        debug_assert!(missing_ok);
+        return Ok((ObjectAddress::set(RewriteRelationId, InvalidOid), None));
+    }
+    let relation = relation::relation_open(mcx, reloid, types_rel::NoLock)?;
+    let address = match objtype {
+        ObjectType::OBJECT_RULE => ObjectAddress::set(
+            RewriteRelationId,
+            rewrite_define_seams::get_rewrite_oid::call(mcx, reloid, depname, missing_ok)?,
+        ),
+        other => unported(&format!("get_object_address_relobject {other:?}")),
+    };
+    if !OidIsValid(address.objectId) {
+        relation.close(types_rel::AccessShareLock)?;
+        return Ok((address, None));
+    }
+    Ok((address, Some(relation)))
+}
+
+// get_object_address_opcf (objectaddress.c).
+fn get_object_address_opcf<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    object: NodeList<'mcx>,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let amname = object
+        .first()
+        .and_then(|n| n.as_string())
+        .expect("opclass access method name is a String node")
+        .sval;
+    let amoid = opclasscmds_seams::get_index_am_oid::call(amname)?;
+    let name = NodeList::from_slice(mcx, &object.as_slice()[1..])?;
+    match objtype {
+        ObjectType::OBJECT_OPCLASS => Ok(ObjectAddress::set(
+            OPERATOR_CLASS_RELATION_ID,
+            opclasscmds_seams::get_opclass_oid::call(amoid, &name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_OPFAMILY => Ok(ObjectAddress::set(
+            OPERATOR_FAMILY_RELATION_ID,
+            opclasscmds_seams::get_opfamily_oid::call(amoid, &name, missing_ok)?,
+        )),
+        other => unported(&format!("get_object_address_opcf {other:?}")),
     }
 }
 
@@ -309,13 +391,40 @@ pub fn get_object_address<'mcx>(
                 lockmode,
                 missing_ok,
             )?,
+            OBJECT_RULE => get_object_address_relobject(
+                mcx,
+                objtype,
+                object.as_list().expect("rule object is a name list"),
+                missing_ok,
+            )?,
             OBJECT_TYPE | OBJECT_DOMAIN => {
                 let tn = object.as_type_name().expect("type object is a TypeName");
                 (get_object_address_type(objtype, tn, missing_ok)?, None)
             }
-            OBJECT_SCHEMA => {
+            OBJECT_SCHEMA | OBJECT_EXTENSION => {
                 (get_object_address_unqualified(objtype, object, missing_ok)?, None)
             }
+            OBJECT_OPERATOR => {
+                let owa = object
+                    .as_variant::<ObjectWithArgs>()
+                    .expect("operator object is an ObjectWithArgs");
+                (
+                    ObjectAddress::set(
+                        OPERATOR_RELATION_ID,
+                        parse_oper::LookupOperWithArgs(&owa.objname, &owa.objargs, missing_ok)?,
+                    ),
+                    None,
+                )
+            }
+            OBJECT_OPCLASS | OBJECT_OPFAMILY => (
+                get_object_address_opcf(
+                    mcx,
+                    objtype,
+                    object.as_list().expect("opclass object is a name list"),
+                    missing_ok,
+                )?,
+                None,
+            ),
             other => unported(&format!("get_object_address {other:?}")),
         };
 
@@ -370,10 +479,45 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
         TYPE_RELATION_ID => Ok(syscache_seams::pg_type_name_namespace::call(address.objectId)?
             .map(|(_, nsp)| nsp)
             .unwrap_or(InvalidOid)),
-        NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID => Ok(InvalidOid),
+        NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
+        | RewriteRelationId => Ok(InvalidOid),
         ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
             .map(|s| s.pronamespace)
             .unwrap_or(InvalidOid)),
+        EXTENSION_RELATION_ID => extension::get_extension_schema(address.objectId),
+        OPERATOR_RELATION_ID => syscache_oid_field(
+            cache_syscache::cacheinfo::OPEROID,
+            address.objectId,
+            Anum_pg_operator_oprnamespace,
+        ),
+        OPERATOR_CLASS_RELATION_ID => syscache_oid_field(
+            cache_syscache::cacheinfo::CLAOID,
+            address.objectId,
+            Anum_pg_opclass_opcnamespace,
+        ),
+        OPERATOR_FAMILY_RELATION_ID => syscache_oid_field(
+            cache_syscache::cacheinfo::OPFAMILYOID,
+            address.objectId,
+            Anum_pg_opfamily_opfnamespace,
+        ),
         other => unported(&format!("get_object_namespace class {other}")),
     }
+}
+
+const Anum_pg_operator_oprnamespace: i32 = 3;
+const Anum_pg_opclass_opcnamespace: i32 = 4;
+const Anum_pg_opfamily_opfnamespace: i32 = 4;
+
+fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cacheid,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(objid)),
+    )?
+    else {
+        return Ok(InvalidOid);
+    };
+    let d = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, attnum)?;
+    let oid = d.as_oid();
+    cache_syscache::ReleaseSysCache(tup);
+    Ok(oid)
 }

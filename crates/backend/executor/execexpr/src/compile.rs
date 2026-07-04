@@ -352,6 +352,19 @@ enum PergroupMode<'a> {
     Fixed,
     Indirect(NonNull<NonNull<AggPerGroup>>),
     Sets(&'a [NonNull<AggPerGroup>]),
+    // C's dosort+dohash program: Sets bases plus one Indirect cell per hash set.
+    Mixed(&'a [NonNull<AggPerGroup>], &'a [NonNull<NonNull<AggPerGroup>>]),
+}
+
+pub fn exec_build_agg_trans_mixed<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    cells: &[NonNull<NonNull<AggPerGroup>>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Mixed(set_bases, cells), agg_node, params)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -497,6 +510,40 @@ fn build_agg_trans<'mcx>(
                 }
             }
         };
+        let indirect_step = |base: NonNull<NonNull<AggPerGroup>>| -> Step {
+            if spec.transtype_byval {
+                match (fn_strict, init_strict) {
+                    (_, true) => Step::AggTransInitStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (true, false) => Step::AggTransStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (false, false) => {
+                        Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+                    }
+                }
+            } else {
+                let byref = crate::steps::AggByRef {
+                    agg: agg_state_node(agg_node),
+                    translen: spec.transtype_len,
+                };
+                let transno = transno as u16;
+                match (fn_strict, spec.init_value_is_null) {
+                    (true, true) => {
+                        Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (true, false) => {
+                        Step::AggTransStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
+                }
+            }
+        };
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
@@ -509,40 +556,18 @@ fn build_agg_trans<'mcx>(
                 }
             }
             PergroupMode::Indirect(base) => {
-                let base = *base;
-                let step = if spec.transtype_byval {
-                    match (fn_strict, init_strict) {
-                        (_, true) => Step::AggTransInitStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (true, false) => Step::AggTransStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (false, false) => {
-                            Step::AggTransByValIndirect { call, base, transno: transno as u16 }
-                        }
-                    }
-                } else {
-                    let byref = crate::steps::AggByRef {
-                        agg: agg_state_node(agg_node),
-                        translen: spec.transtype_len,
-                    };
-                    let transno = transno as u16;
-                    match (fn_strict, spec.init_value_is_null) {
-                        (true, true) => {
-                            Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (true, false) => {
-                            Step::AggTransStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
-                    }
-                };
-                push_step(&mut state, mcx, step)?;
+                push_step(&mut state, mcx, indirect_step(*base))?;
+            }
+            PergroupMode::Mixed(bases, cells) => {
+                for &base in bases.iter() {
+                    // SAFETY: as PergroupMode::Sets.
+                    let pergroup =
+                        unsafe { NonNull::new_unchecked(base.as_ptr().add(transno)) };
+                    push_step(&mut state, mcx, fixed_step(pergroup))?;
+                }
+                for &cell in cells.iter() {
+                    push_step(&mut state, mcx, indirect_step(cell))?;
+                }
             }
         }
         let target = state.steps.len() as u32;
@@ -794,6 +819,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_NextValueExpr => {
             node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
@@ -810,6 +836,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             }
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
@@ -955,6 +982,21 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(e, info);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                setup_walker(a, info);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                setup_walker(a, info);
+            }
+            if let Some(a) = sr.refexpr {
+                setup_walker(a, info);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                setup_walker(a, info);
+            }
+        }
         NodeTag::T_RowExpr => {
             for e in node.as_row_expr().unwrap().args.iter() {
                 setup_walker(e, info);
@@ -962,6 +1004,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CoalesceExpr => {
+            for e in node.as_coalesce_expr().unwrap().args.iter() {
+                setup_walker(e, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -1281,9 +1328,14 @@ pub(crate) fn init_expr_rec<'mcx>(
         }
         NodeTag::T_ArrayExpr => {
             let arr = node.as_array_expr().unwrap();
-            let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
-            push_step(state, mcx, step)
+            if arr.multidims {
+                init_array_expr_multidim(node, state, mcx, out, agg, params, sub)
+            } else {
+                let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
+                push_step(state, mcx, step)
+            }
         }
+        NodeTag::T_SubscriptingRef => init_subscripting_ref(node, state, mcx, out, agg, params, sub),
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
             let step = init_row_expr(r, state, mcx, out, agg, params, sub)?;
@@ -1296,6 +1348,28 @@ pub(crate) fn init_expr_rec<'mcx>(
                 "EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside a domain-check compile)",
             ),
         },
+        // Each arg evaluates into the result slot; a non-null short-circuits.
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            debug_assert!(!co.args.is_nil());
+            let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+            for e in co.args.iter() {
+                init_expr_rec(e, state, mcx, out, agg, params, sub)?;
+                adjust_jumps.push(state.steps.len());
+                push_step(state, mcx, Step::JumpIfNotNull { jumpdone: u32::MAX, out })?;
+            }
+            let done = state.steps.len() as u32;
+            for ix in adjust_jumps.iter() {
+                match &mut state.steps[*ix] {
+                    Step::JumpIfNotNull { jumpdone, .. } => {
+                        debug_assert_eq!(*jumpdone, u32::MAX);
+                        *jumpdone = done;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -1313,13 +1387,13 @@ fn init_scalar_array_op<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    if saop.hashfuncid != 0 {
-        unported("EEOP_HASHED_SCALARARRAYOP (convert_saop_to_hashed_saop lane)");
-    }
     debug_assert!(saop.args.len() == 2);
     let scalararg = saop.args.nth(0);
     let arrayarg = saop.args.nth(1);
-    let opfuncid = if saop.opfuncid != 0 {
+    // C: hash probes use the equality function (negfuncid) for NOT IN.
+    let opfuncid = if saop.hashfuncid != 0 && saop.negfuncid != 0 {
+        saop.negfuncid
+    } else if saop.opfuncid != 0 {
         saop.opfuncid
     } else {
         // set_sa_opfuncid (nodeFuncs.c).
@@ -1355,6 +1429,46 @@ fn init_scalar_array_op<'mcx>(
         init_expr_rec(scalararg, state, mcx, arg_out, agg, params, sub)?;
     }
     init_expr_rec(arrayarg, state, mcx, out, agg, params, sub)?;
+
+    if saop.hashfuncid != 0 {
+        let mut hash_flinfo = fmgr_core::fmgr_info(saop.hashfuncid)?;
+        hash_flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
+        let hash_frame = FuncFrame::new_in(mcx, hash_flinfo, 1, saop.inputcollid)?;
+        let hash_frame_ix = state.frames.len() as u32;
+        let hashcall = FuncCall {
+            fcinfo: hash_frame.fcinfo,
+            flinfo: hash_frame.flinfo,
+            frame: hash_frame_ix,
+            nargs: 1,
+        };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(hash_frame);
+
+        let table = state.saop_tables.len() as u32;
+        state
+            .saop_tables
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<crate::steps::SaopTable<'_>>()))?;
+        state.saop_tables.push(crate::steps::SaopTable {
+            hashcall,
+            built: false,
+            has_nulls: false,
+            map: ::mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
+        });
+
+        return Ok(Step::HashedScalarArrayOp {
+            call,
+            inclause: saop.useOr,
+            typlen,
+            typbyval,
+            typalign: typalign as u8,
+            table,
+            out,
+        });
+    }
 
     Ok(Step::ScalarArrayOp {
         call,
@@ -1411,6 +1525,245 @@ fn init_array_expr<'mcx>(
         elmalign: elmalign as u8,
         out,
     })
+}
+
+
+// C ExecInitExprRec T_ArrayExpr, multidims leg (ExecEvalArrayExpr concat arm).
+fn init_array_expr_multidim<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let a = node.as_array_expr().unwrap();
+    let nelems = a.elements.len();
+    let (elemlength, elembyval, elemalign) = lsyscache::get_typlenbyvalalign(a.element_typeid)
+        .map(|(l, b, al)| (l as i32, b, al as u8))?;
+
+    let elemvalues: NonNull<::datum::NullableDatum> = alloc_array(mcx, nelems)?;
+    let scratch_values: NonNull<::datum::Datum> = alloc_array(mcx, nelems)?;
+    let scratch_nulls: NonNull<bool> = alloc_array(mcx, nelems)?;
+
+    for (i, e) in a.elements.iter().enumerate() {
+        // SAFETY: i < nelems freshly allocated slots.
+        let arg_out = OutRef(unsafe { NonNull::new_unchecked(elemvalues.as_ptr().add(i)) });
+        init_expr_rec(e, state, mcx, arg_out, agg, params, sub)?;
+    }
+
+    let st = crate::arrayops::ArrayExprState {
+        elemtype: a.element_typeid,
+        elemlength,
+        elembyval,
+        elemalign,
+        multidims: a.multidims,
+        nelems: nelems as u32,
+        elemvalues,
+        scratch_values,
+        scratch_nulls,
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+    push_step(state, mcx, Step::ArrayExprEval { state: stp, out })
+}
+
+fn alloc_array<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    let layout = core::alloc::Layout::array::<T>(n.max(1)).expect("array layout");
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    // SAFETY: fresh allocation; zero-init keeps padding deterministic.
+    unsafe { core::ptr::write_bytes(raw.as_ptr().cast::<u8>(), 0, layout.size()) };
+    Ok(raw.cast())
+}
+
+fn alloc_state<'mcx, T>(mcx: Mcx<'mcx>, v: T) -> PgResult<NonNull<T>> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    let layout = core::alloc::Layout::new::<T>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<T> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(v) };
+    Ok(p)
+}
+
+// The state's resmcx field is the first-arm target of arm_result_mcx.
+fn register_alloc_state<'mcx, T>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    stp: NonNull<T>,
+) -> PgResult<()>
+where
+    T: HasResMcx,
+{
+    // SAFETY: stp is a live compile-allocated state; the field pointer stays
+    // valid for 'mcx.
+    let slot = unsafe { NonNull::new_unchecked(T::resmcx_ptr(stp.as_ptr())) };
+    let _ = mcx;
+    state.alloc_mcx_slots.push(slot);
+    Ok(())
+}
+
+trait HasResMcx {
+    /// # Safety
+    /// `p` points at a live value.
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx;
+}
+impl HasResMcx for crate::arrayops::ArrayExprState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+impl HasResMcx for crate::arrayops::SbsRefState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+
+// C ExecInitSubscriptingRef over the closed array handler (arraysubs.c
+// array_exec_setup inlined: fetch_strict = true).
+fn init_subscripting_ref<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    use crate::arrayops::MAXDIM;
+    let sbsref = node.as_subscripting_ref().unwrap();
+    let is_assignment = sbsref.refassgnexpr.is_some();
+    let nupper = sbsref.refupperindexpr.len();
+    let nlower = sbsref.reflowerindexpr.len();
+    assert!(nupper <= MAXDIM && nlower <= MAXDIM, "too many subscripts");
+    assert!(
+        nlower == 0 || nupper == nlower,
+        "upper and lower index lists are not same length"
+    );
+    let is_slice = nlower != 0;
+
+    let refattrlength = lsyscache::get_typlen(sbsref.refcontainertype)? as i32;
+    let (refelemlength, refelembyval, refelemalign) =
+        lsyscache::get_typlenbyvalalign(sbsref.refelemtype)
+            .map(|(l, b, al)| (l as i32, b, al as u8))?;
+
+    let st = crate::arrayops::SbsRefState {
+        isassignment: is_assignment,
+        numupper: nupper as u8,
+        numlower: nlower as u8,
+        upperprovided: [false; MAXDIM],
+        lowerprovided: [false; MAXDIM],
+        upperindex: [::datum::NullableDatum::null(); MAXDIM],
+        lowerindex: [::datum::NullableDatum::null(); MAXDIM],
+        replace: ::datum::NullableDatum::null(),
+        prev: ::datum::NullableDatum::null(),
+        refelemtype: sbsref.refelemtype,
+        refattrlength,
+        refelemlength,
+        refelembyval,
+        refelemalign,
+        upperidx: [0; MAXDIM],
+        loweridx: [0; MAXDIM],
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+
+    // Container value evaluates into `out` (overwritten by the final step).
+    init_expr_rec(sbsref.refexpr.expect("SubscriptingRef.refexpr"), state, mcx, out, agg, params, sub)?;
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    if !is_assignment {
+        // fetch_strict: NULL container => NULL result.
+        adjust_jumps.push(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out })?;
+    }
+
+    for (i, e) in sbsref.refupperindexpr.iter().enumerate() {
+        // SAFETY: compile-owned state; i < MAXDIM.
+        let stref = unsafe { &mut *stp.as_ptr() };
+        match e {
+            None => {
+                stref.upperprovided[i] = false;
+                stref.upperindex[i].isnull = true;
+            }
+            Some(e) => {
+                stref.upperprovided[i] = true;
+                let slot = unsafe {
+                    NonNull::new_unchecked(
+                        core::ptr::addr_of_mut!((*stp.as_ptr()).upperindex[i]),
+                    )
+                };
+                init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+        }
+    }
+    for (i, e) in sbsref.reflowerindexpr.iter().enumerate() {
+        let stref = unsafe { &mut *stp.as_ptr() };
+        match e {
+            None => {
+                stref.lowerprovided[i] = false;
+                stref.lowerindex[i].isnull = true;
+            }
+            Some(e) => {
+                stref.lowerprovided[i] = true;
+                let slot = unsafe {
+                    NonNull::new_unchecked(
+                        core::ptr::addr_of_mut!((*stp.as_ptr()).lowerindex[i]),
+                    )
+                };
+                init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+        }
+    }
+
+    adjust_jumps.push(state.steps.len());
+    push_step(state, mcx, Step::SbsrefSubscripts { state: stp, jumpdone: u32::MAX, out })?;
+
+    if is_assignment {
+        if is_slice {
+            unported("EEOP_SBSREF_ASSIGN slice (array_set_slice lane)");
+        }
+        let assgn = sbsref.refassgnexpr.unwrap();
+        if assgn_needs_old(assgn) {
+            unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
+        }
+        let replace_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
+        };
+        init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        push_step(state, mcx, Step::SbsrefAssign { state: stp, out })?;
+    } else {
+        push_step(state, mcx, Step::SbsrefFetch { state: stp, slice: is_slice, out })?;
+    }
+
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+// isAssignmentIndirectionExpr: does the replacement value reference the old
+// element (CaseTestExpr under FieldStore/SubscriptingRef)?
+fn assgn_needs_old(expr: Node<'_>) -> bool {
+    match expr.node_tag() {
+        NodeTag::T_SubscriptingRef => {
+            let sr = expr.as_subscripting_ref().unwrap();
+            sr.refexpr.is_some_and(|e| e.node_tag() == NodeTag::T_CaseTestExpr)
+        }
+        NodeTag::T_RelabelType => assgn_needs_old(expr.as_relabel_type().unwrap().arg),
+        _ => false,
+    }
 }
 
 // exprTypmod (nodeFuncs.c) over the families RowExpr args carry.
@@ -2039,8 +2392,13 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             | Step::AggStrictInputCheck1 { jumpnull, .. } => {
                 assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
             }
-            Step::Jump { jumpdone } | Step::JumpIfNotTrue { jumpdone, .. } => {
+            Step::Jump { jumpdone }
+            | Step::JumpIfNotTrue { jumpdone, .. }
+            | Step::JumpIfNotNull { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "case jump target out of range");
+            }
+            Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "sbsref jump target out of range");
             }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }

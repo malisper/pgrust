@@ -540,6 +540,36 @@ pub struct Material<'mcx> {
     pub plan: Plan<'mcx>,
 }
 
+/// Per-key arrays as in [`Sort`].
+#[repr(C)]
+pub struct Memoize<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub numKeys: i32,
+    pub hashOperators: &'mcx [Oid],
+    pub collations: &'mcx [Oid],
+    pub param_exprs: NodeList<'mcx>,
+    pub singlerow: bool,
+    pub binary_mode: bool,
+    pub est_entries: u32,
+    pub keyparamids: Bitmapset<'mcx>,
+}
+
+impl Default for Memoize<'_> {
+    fn default() -> Self {
+        Memoize {
+            plan: Plan::default(),
+            numKeys: 0,
+            hashOperators: &[],
+            collations: &[],
+            param_exprs: NodeList::nil(),
+            singlerow: false,
+            binary_mode: false,
+            est_entries: 0,
+            keyparamids: Bitmapset::empty(),
+        }
+    }
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct LockRows<'mcx> {
@@ -698,6 +728,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Hash<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Material<'mcx> {
     const TAG: NodeTag = NodeTag::T_Material;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Memoize<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Memoize;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for LockRows<'mcx> {
     const TAG: NodeTag = NodeTag::T_LockRows;
 }
@@ -756,6 +789,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for HashJoin<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for Hash<'mcx> {}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Material<'mcx> {}
+// SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Memoize<'mcx> {}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for LockRows<'mcx> {}
 
@@ -850,6 +885,8 @@ const _: () = {
     assert!(offset_of!(NodeRep<Hash>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(LockRows, plan) == 0);
     assert!(offset_of!(NodeRep<LockRows>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Memoize, plan) == 0);
+    assert!(offset_of!(NodeRep<Memoize>, payload) == offset_of!(NodeRep<Plan>, payload));
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
@@ -882,6 +919,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_HashJoin
             | NodeTag::T_Hash
             | NodeTag::T_Material
+            | NodeTag::T_Memoize
             | NodeTag::T_LockRows
     )
 }
@@ -964,6 +1002,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_material(self) -> Option<&'mcx Material<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_memoize(self) -> Option<&'mcx Memoize<'mcx>> {
         self.as_variant()
     }
 

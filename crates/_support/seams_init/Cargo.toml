@@ -9,7 +9,10 @@ name = "seams_init"
 path = "src/lib.rs"
 
 [dependencies]
+operatorcmds = { path = "../../backend/commands/operatorcmds" }
+opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
+extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
@@ -36,6 +39,8 @@ xlogreader = { path = "../../backend/access/transam/xlogreader" }
 xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
+be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
+large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 commands_cluster = { path = "../../backend/commands/cluster" }
@@ -66,6 +71,7 @@ nodelockrows = { path = "../../backend/executor/nodelockrows" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 nodematerial = { path = "../../backend/executor/nodematerial" }
+nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
@@ -90,6 +96,7 @@ bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
+rewrite_define = { path = "../../backend/rewrite/rewrite_define" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 fd = { path = "../../backend/storage/file/fd" }
 dsm_core = { path = "../../backend/storage/ipc/dsm_core" }
@@ -111,6 +118,7 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
@@ -125,6 +133,8 @@ tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
+commands_createas = { path = "../../backend/commands/createas" }
+commands_matview = { path = "../../backend/commands/matview" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
@@ -150,6 +160,7 @@ catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+costsize = { path = "../../backend/optimizer/path/costsize" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }
@@ -180,6 +191,7 @@ snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
 regex_core = { path = "../../backend/regex/regex_core" }
 adt_regexp = { path = "../../backend/utils/adt/regexp" }
+twophase = { path = "../../backend/access/transam/twophase" }
 twophase_config = { path = "../../backend/access/transam/twophase_config" }
 pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }

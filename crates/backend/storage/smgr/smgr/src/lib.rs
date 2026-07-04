@@ -761,6 +761,14 @@ pub fn smgrnblocks_h(h: SmgrHandle, forknum: ForkNumber) -> PgResult<BlockNumber
     })
 }
 
+pub fn smgrgettargblock_h(h: SmgrHandle) -> BlockNumber {
+    with_handle(h, |r, _| r.smgr_targblock)
+}
+
+pub fn smgrsettargblock_h(h: SmgrHandle, targblock: BlockNumber) {
+    with_handle(h, |r, _| r.smgr_targblock = targblock);
+}
+
 pub fn smgrclose_h(h: SmgrHandle) -> PgResult<()> {
     let key = with_handle(h, |r, _| r.smgr_rlocator);
     smgrrelease(key)
@@ -1036,7 +1044,7 @@ mod tests {
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         }
     }
 
