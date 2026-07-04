@@ -4,6 +4,7 @@ use ::types_core::Oid;
 const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_bool::builtins::BOOL_BUILTINS,
     ::arrayfuncs::builtins::ARRAYFUNCS_BUILTINS,
+    ::array_userfuncs::builtins::ARRAY_USERFUNCS_BUILTINS,
     ::adt_cash::builtins::CASH_BUILTINS,
     ::adt_char::builtins::CHAR_BUILTINS,
     ::adt_domains::DOMAINS_BUILTINS,

@@ -310,27 +310,23 @@ pub(crate) fn generate_function_name(
     let proname = proname.as_str().to_owned();
     // C threads use_variadic into func_get_detail: expand_variadic is off
     // when the call prints with the VARIADIC keyword.
-    let cands = catalog_namespace::FuncnameGetCandidates(
+    let cands = catalog_namespace::FuncnameGetCandidatesExtended(
         mcx,
         &[&proname],
         argtypes.len() as i16,
         argnames,
         !has_variadic,
         true,
+        false,
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
-    if best.is_none() && !cands.is_empty() && argnames.is_empty() {
+    if best.is_none() && !cands.is_empty() {
         let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
         best = match matched.len() {
             0 => None,
             1 => Some(matched[0].oid),
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
-    }
-    if best.is_none() && !argnames.is_empty() {
-        // C's MatchNamedCall leg is unported; in-order named args resolve on
-        // the exact-argtypes match above.
-        gap("generate_function_name", "out-of-order named-argument resolution");
     }
     if best.is_none() && argtypes.len() == 1 {
         // func_get_detail falls back to the FuncNameAsType coercion arm only
@@ -396,7 +392,7 @@ struct PgIndexRow {
     indoption: Vec<i16>,
     has_exprs: bool,
     indexprs_src: Option<String>,
-    has_pred: bool,
+    indpred: Option<String>,
 }
 
 fn pg_index_row(indexrelid: Oid) -> PgResult<Option<PgIndexRow>> {
@@ -419,7 +415,7 @@ fn pg_index_row(indexrelid: Oid) -> PgResult<Option<PgIndexRow>> {
         indoption: i16_array_at(notnull(ANUM_PG_INDEX_INDOPTION)),
         has_exprs: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDEXPRS).is_some(),
         indexprs_src: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDEXPRS).map(text_at),
-        has_pred: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDPRED).is_some(),
+        indpred: getattr_null(&t, INDEXRELID, ANUM_PG_INDEX_INDPRED).map(text_at),
     };
     drop(t);
     ReleaseSysCache(ht);
@@ -439,7 +435,7 @@ fn pg_am_name(amid: Oid) -> PgResult<String> {
 
 // get_opclass_name (ruleutils.c): emit " opclass" only when not the default
 // for actual_datatype.
-fn get_opclass_name(
+pub(crate) fn get_opclass_name(
     mcx: Mcx<'_>,
     opclass: Oid,
     actual_datatype: Oid,
@@ -509,12 +505,13 @@ pub fn pg_get_indexdef_worker(
     mcx: Mcx<'_>,
     indexrelid: Oid,
     colno: i32,
+    exclude_ops: Option<&[Oid]>,
     attrs_only: bool,
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
     pg_get_indexdef_worker_extended(
-        mcx, indexrelid, colno, attrs_only, false, pretty_flags, missing_ok,
+        mcx, indexrelid, colno, exclude_ops, attrs_only, false, pretty_flags, missing_ok,
     )
 }
 
@@ -528,6 +525,7 @@ pub fn pg_get_indexdef_columns_keys_only(
         mcx,
         indexrelid,
         0,
+        None,
         true,
         true,
         PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA,
@@ -540,11 +538,13 @@ fn pg_get_indexdef_worker_extended(
     mcx: Mcx<'_>,
     indexrelid: Oid,
     colno: i32,
+    exclude_ops: Option<&[Oid]>,
     attrs_only: bool,
     keys_only: bool,
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
+    let is_constraint = exclude_ops.is_some();
     let Some(idx) = pg_index_row(indexrelid)? else {
         if missing_ok {
             return Ok(None);
@@ -568,19 +568,23 @@ fn pg_get_indexdef_worker_extended(
 
     let mut buf = String::new();
     if !attrs_only {
-        let relname = if pretty_flags & PRETTYFLAG_SCHEMA != 0 {
-            generate_relation_name(mcx, idx.indrelid)?
+        if !is_constraint {
+            let relname = if pretty_flags & PRETTYFLAG_SCHEMA != 0 {
+                generate_relation_name(mcx, idx.indrelid)?
+            } else {
+                generate_qualified_relation_name(mcx, idx.indrelid)?
+            };
+            buf.push_str(&format!(
+                "CREATE {}INDEX {} ON {}{} USING {} (",
+                if idx.indisunique { "UNIQUE " } else { "" },
+                quote_identifier(&idxrel.relname),
+                if idxrel.relkind == RELKIND_PARTITIONED_INDEX { "ONLY " } else { "" },
+                relname,
+                quote_identifier(&amname),
+            ));
         } else {
-            generate_qualified_relation_name(mcx, idx.indrelid)?
-        };
-        buf.push_str(&format!(
-            "CREATE {}INDEX {} ON {}{} USING {} (",
-            if idx.indisunique { "UNIQUE " } else { "" },
-            quote_identifier(&idxrel.relname),
-            if idxrel.relkind == RELKIND_PARTITIONED_INDEX { "ONLY " } else { "" },
-            relname,
-            quote_identifier(&amname),
-        ));
+            buf.push_str(&format!("EXCLUDE USING {} (", quote_identifier(&amname)));
+        }
     }
 
     let mut sep = "";
@@ -648,6 +652,10 @@ fn pg_get_indexdef_worker_extended(
             } else if opt & INDOPTION_NULLS_FIRST != 0 {
                 buf.push_str(" NULLS FIRST");
             }
+            if let Some(ops) = exclude_ops {
+                let opname = generate_operator_name(mcx, ops[keyno], keycoltype, keycoltype)?;
+                buf.push_str(&format!(" WITH {opname}"));
+            }
         }
     }
 
@@ -659,8 +667,15 @@ fn pg_get_indexdef_worker_extended(
         if idxrel.has_reloptions {
             gap("pg_get_indexdef", "index reloptions (WITH ...)");
         }
-        if idx.has_pred {
-            gap("pg_get_indexdef", "partial index predicate");
+        if let Some(predsrc) = &idx.indpred {
+            let node = readfuncs::stringToNode(mcx, predsrc)?;
+            let predstr =
+                deparse::deparse_expression_pretty(mcx, node, idx.indrelid, false, pretty_flags)?;
+            if is_constraint {
+                buf.push_str(&format!(" WHERE ({predstr})"));
+            } else {
+                buf.push_str(&format!(" WHERE {predstr}"));
+            }
         }
     }
     Ok(Some(buf))
@@ -689,6 +704,7 @@ const CONSTRAINT_UNIQUE: i8 = b'u' as i8;
 const CONSTRAINT_CHECK: i8 = b'c' as i8;
 const CONSTRAINT_NOTNULL: i8 = b'n' as i8;
 const CONSTRAINT_TRIGGER: i8 = b't' as i8;
+const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
 
 const FKCONSTR_MATCH_FULL: i8 = b'f' as i8;
 const FKCONSTR_MATCH_PARTIAL: i8 = b'p' as i8;
@@ -716,6 +732,7 @@ const ANUM_PG_CONSTRAINT_CONPERIOD: i32 = 20;
 const ANUM_PG_CONSTRAINT_CONKEY: i32 = 21;
 const ANUM_PG_CONSTRAINT_CONFKEY: i32 = 22;
 const ANUM_PG_CONSTRAINT_CONFDELSETCOLS: i32 = 26;
+const ANUM_PG_CONSTRAINT_CONEXCLOP: i32 = 27;
 const ANUM_PG_CONSTRAINT_CONBIN: i32 = 28;
 
 fn decompile_column_index_array(
@@ -776,6 +793,7 @@ pub fn pg_get_constraintdef_worker(
     let confkey = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFKEY).map(i16_array_at);
     let confdelsetcols =
         getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELSETCOLS).map(i16_array_at);
+    let conexclop = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONEXCLOP).map(oid_array_at);
     let conbin = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONBIN).map(text_at);
     drop(t);
     ReleaseSysCache(ht);
@@ -867,6 +885,21 @@ pub fn pg_get_constraintdef_worker(
             }
         }
         CONSTRAINT_TRIGGER => buf.push_str("TRIGGER"),
+        CONSTRAINT_EXCLUSION => {
+            let operators = conexclop.expect("EXCLUDE constraint has conexclop");
+            // C suppresses the tablespace here (pg_dump wants it that way).
+            let indexdef = pg_get_indexdef_worker(
+                mcx,
+                conindid,
+                0,
+                Some(&operators),
+                false,
+                pretty_flags,
+                false,
+            )?
+            .expect("missing_ok=false");
+            buf.push_str(&indexdef);
+        }
         other => gap(
             "pg_get_constraintdef",
             &format!("constraint type '{}'", (other as u8) as char),

@@ -1,8 +1,7 @@
 //! Plan-tree deparse contexts (ruleutils.c): deparse_context_for_plan_tree,
 //! set_deparse_plan, push/pop child and ancestor plans, resolve_special_varno,
-//! PARAM_EXEC referent/generator search. Divergence: appendRelations stays NIL
-//! in this engine (setrefs), so the appendrels/appendparents machinery is a
-//! loud gap instead of dead code.
+//! appendrels/appendparents child-Var mapping, PARAM_EXEC referent/generator
+//! search.
 
 use std::rc::Rc;
 
@@ -51,17 +50,27 @@ pub fn deparse_context_for_plan_tree<'mcx>(
     pstmt: &'mcx PlannedStmt<'mcx>,
     rtable_names: Vec<Option<String>>,
 ) -> PgResult<PlanDeparse<'mcx>> {
-    if !pstmt.appendRelations.is_nil() {
-        gap("deparse_context_for_plan_tree", "appendRelations (appendrel deparse)");
-    }
     let rtable: Vec<&RangeTblEntry<'_>> = pstmt
         .rtable
         .iter()
         .map(|n| n.as_range_tbl_entry().expect("rtable entry"))
         .collect();
+    let ntables = rtable.len();
     let mut dpns = DeparseNamespace::empty(rtable);
     dpns.rtable_names = rtable_names;
     dpns.subplans = Some(&pstmt.subplans);
+    if !pstmt.appendRelations.is_nil() {
+        let mut appendrels: Vec<Option<&'mcx types_nodes::plannodes::AppendRelInfo<'mcx>>> =
+            vec![None; ntables + 1];
+        for n in pstmt.appendRelations.iter() {
+            let appinfo = n.as_append_rel_info().expect("appendRelations cell");
+            let crelid = appinfo.child_relid as usize;
+            assert!(crelid > 0 && crelid <= ntables);
+            assert!(appendrels[crelid].is_none());
+            appendrels[crelid] = Some(appinfo);
+        }
+        dpns.appendrels = Some(appendrels);
+    }
     query::set_simple_column_names(mcx, &mut dpns)?;
     Ok(PlanDeparse { ns: Rc::new(dpns) })
 }
@@ -205,14 +214,24 @@ pub(crate) fn resolve_special_varno<'mcx>(
     if var.varno == types_nodes::primnodes::OUTER_VAR && ps.outer_tlist.is_some() {
         let tle = get_tle_by_resno(ps.outer_tlist.unwrap(), var.varattno)
             .unwrap_or_else(|| panic!("bogus varattno for OUTER_VAR var: {}", var.varattno));
-        // C unions Append.apprelids into context->appendparents here; its only
-        // consumer needs dpns->appendrels, which this engine never builds (the
-        // loud gate is in deparse_context_for_plan_tree).
+        // Descending to an Append's first child: union apprelids into
+        // appendparents for every Var in the resolved subexpression.
+        // (MergeAppend has no node vocabulary; plan_of louds on it first.)
+        let save_appendparents = if let Some(a) = ps.plan.and_then(|p| p.as_append()) {
+            let cur = core::mem::replace(&mut ctx.appendparents, Bitmapset::empty());
+            ctx.appendparents = cur.union(&a.apprelids, ctx.mcx)?;
+            Some(cur)
+        } else {
+            None
+        };
         let outer = ps.outer_plan.unwrap();
         drop(ps);
         let save = push_child_plan(&dpns, outer);
         let r = resolve_special_varno(tle.expr, ctx, callback);
         pop_child_plan(&dpns, save);
+        if let Some(s) = save_appendparents {
+            ctx.appendparents = s;
+        }
         return r;
     }
     if var.varno == types_nodes::primnodes::INNER_VAR && ps.inner_tlist.is_some() {

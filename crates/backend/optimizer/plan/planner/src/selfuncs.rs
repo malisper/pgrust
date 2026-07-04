@@ -1150,7 +1150,13 @@ pub fn examine_variable<'mcx>(
             vardata.var = Some(node_id);
             vardata.rel = Some(rel);
             vardata.isunique = crate::plancat::has_unique_index(run, rel, var.varattno);
-            let simple = examine_simple_variable(run, &run.root, var.varno, var.varattno)?;
+            let simple = examine_simple_variable(
+                run,
+                RootAncestors::Suspended(&run.suspended_roots),
+                &run.root,
+                var.varno,
+                var.varattno,
+            )?;
             vardata.stats = simple.stats;
             vardata.isunique |= simple.force_unique;
             vardata.acl_ok = simple.acl_ok;
@@ -1302,10 +1308,49 @@ fn examine_expression_index_stats<'mcx>(
     Ok(())
 }
 
+// C's parent_root chain for a root under examination: the live planning
+// chain is suspended_roots; drilled subroots hang off the root that owns
+// their RTE (rel_subroots) or the resolved cteroot (glob subroots).
+#[derive(Clone, Copy)]
+enum RootAncestors<'a, 'mcx> {
+    Suspended(&'a [crate::run::SubrootState<'mcx>]),
+    Link {
+        parent: &'a types_pathnodes::PlannerInfo<'mcx>,
+        up: &'a RootAncestors<'a, 'mcx>,
+    },
+}
+
+impl<'a, 'mcx> RootAncestors<'a, 'mcx> {
+    fn ancestor(
+        &self,
+        lvl: usize,
+    ) -> Option<(&'a types_pathnodes::PlannerInfo<'mcx>, RootAncestors<'a, 'mcx>)> {
+        debug_assert!(lvl >= 1);
+        match *self {
+            RootAncestors::Suspended(s) => {
+                if lvl <= s.len() {
+                    let i = s.len() - lvl;
+                    Some((&s[i].root, RootAncestors::Suspended(&s[..i])))
+                } else {
+                    None
+                }
+            }
+            RootAncestors::Link { parent, up } => {
+                if lvl == 1 {
+                    Some((parent, *up))
+                } else {
+                    up.ancestor(lvl - 1)
+                }
+            }
+        }
+    }
+}
+
 // examine_simple_variable (selfuncs.c): the STATRELATTINH probe plus the
 // subquery/CTE drill into the already-planned subroot's targetlist.
 fn examine_simple_variable<'mcx>(
     run: &PlannerRun<'mcx>,
+    up: RootAncestors<'_, 'mcx>,
     root: &types_pathnodes::PlannerInfo<'mcx>,
     varno: i32,
     varattno: i16,
@@ -1336,34 +1381,44 @@ fn examine_simple_variable<'mcx>(
             let Some(idx) = root.rel(rel).subroot_idx else {
                 return Ok(SimpleVarStats::none());
             };
-            examine_subroot_output(run, rte, &run.rel_subroots[idx].root, varattno)
+            let sub_up = RootAncestors::Link { parent: root, up: &up };
+            examine_subroot_output(run, sub_up, rte, &run.rel_subroots[idx].root, varattno)
         }
         RTEKind::RTE_CTE if !rte.self_reference => {
             if varattno == 0 {
                 return Ok(SimpleVarStats::none());
             }
             let ctename = rte.ctename.expect("CTE rte has a ctename");
-            assert!(
-                rte.ctelevelsup == 0,
-                "examine_simple_variable (selfuncs.c): ctelevelsup {} for CTE \
-                 \"{ctename}\"; M2 nested-CTE lane",
-                rte.ctelevelsup
-            );
-            let cparse = run.queries[root.parse.0 as usize];
-            let ndx = cparse
-                .cteList
+            let levelsup = rte.ctelevelsup as usize;
+            let (cteroot, cte_up): (&types_pathnodes::PlannerInfo<'mcx>, _) = if levelsup == 0 {
+                (root, up)
+            } else {
+                up.ancestor(levelsup)
+                    .unwrap_or_else(|| panic!("bad levelsup for CTE \"{ctename}\""))
+            };
+            // cte_list is SS_process_ctes' snapshot: a mid-preprocessing
+            // ancestor (CTE cross-reference) has no sealed parse yet.
+            let ndx = cteroot
+                .cte_list
                 .iter()
                 .position(|c| {
                     c.as_common_table_expr().expect("cteList cell").ctename == Some(ctename)
                 })
                 .unwrap_or_else(|| panic!("could not find CTE \"{ctename}\""));
             assert!(
-                ndx < root.cte_plan_ids.len(),
+                ndx < cteroot.cte_plan_ids.len(),
                 "could not find plan for CTE \"{ctename}\""
             );
-            let plan_id = root.cte_plan_ids[ndx];
+            let plan_id = cteroot.cte_plan_ids[ndx];
             assert!(plan_id > 0, "no plan was made for CTE \"{ctename}\"");
-            examine_subroot_output(run, rte, &run.subroots[(plan_id - 1) as usize].root, varattno)
+            let sub_up = RootAncestors::Link { parent: cteroot, up: &cte_up };
+            examine_subroot_output(
+                run,
+                sub_up,
+                rte,
+                &run.subroots[(plan_id - 1) as usize].root,
+                varattno,
+            )
         }
         // C falls through with no stats for these RTE kinds (appendrel
         // subqueries and self-referencing CTEs included).
@@ -1380,6 +1435,7 @@ fn examine_simple_variable<'mcx>(
 // planner-mangled subquery parsetree.
 fn examine_subroot_output<'mcx>(
     run: &PlannerRun<'mcx>,
+    up: RootAncestors<'_, 'mcx>,
     rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
     subroot: &types_pathnodes::PlannerInfo<'mcx>,
     varattno: i16,
@@ -1423,7 +1479,7 @@ fn examine_subroot_output<'mcx>(
     }
     if let Some(v) = ste.expr.as_var() {
         if v.varlevelsup == 0 {
-            return examine_simple_variable(run, subroot, v.varno, v.varattno);
+            return examine_simple_variable(run, up, subroot, v.varno, v.varattno);
         }
     }
     Ok(SimpleVarStats::none())

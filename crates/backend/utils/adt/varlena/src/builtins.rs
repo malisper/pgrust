@@ -575,4 +575,6 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(6198, "unistr", 1, fc_unistr),
     b(6393, "bytea_larger", 2, fc_bytea_larger),
     b(6394, "bytea_smaller", 2, fc_bytea_smaller),
+    n(394, "text_to_array", 2, crate::split_text::fc_text_to_array),
+    n(376, "text_to_array_null", 3, crate::split_text::fc_text_to_array),
 ];

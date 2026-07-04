@@ -1343,6 +1343,110 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     }
 }
 
+impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)
+    }
+
+    #[inline]
+    fn slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+}
+
+// Fused hash-build gate: uninstrumented bare SeqScan (Instrumented is a
+// different variant), forward, no EPQ, allocation-free kernel qual only,
+// subplan/param-free projection (C shrinks the hash inner to the key
+// columns, so the projected shape IS the join-lane shape).
+fn hash_build_fusible<'mcx>(
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    use ::execexpr::{Kernel, SlotSrc};
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return false;
+    }
+    if let Some(p) = ss.ss.ps_ProjInfo.as_ref() {
+        if p.pi_state.has_subplan() || !p.pi_state.param_exec_deps().is_empty() {
+            return false;
+        }
+    }
+    match ss.variant() {
+        ::nodeseqscan::SeqScanVariant::Plain
+        | ::nodeseqscan::SeqScanVariant::WithProject => true,
+        ::nodeseqscan::SeqScanVariant::WithQual
+        | ::nodeseqscan::SeqScanVariant::WithQualProject => {
+            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
+                Some(Kernel::QualScanVarCmpConst { .. }) => true,
+                Some(Kernel::QualVarCmpVar { a_src, b_src, .. }) => {
+                    a_src == SlotSrc::Scan && b_src == SlotSrc::Scan
+                }
+                _ => false,
+            }
+        }
+        ::nodeseqscan::SeqScanVariant::Epq => false,
+    }
+}
+
+// Deform prefix the fused hash-build drive reads from the scan slot: the
+// projection's FETCHSOME bound (projected shape) or the build-side hash keys
+// (bare shape; the minimal-tuple copy reads the buffer tuple image, not the
+// deformed prefix), plus the kernel qual.
+fn hash_build_soa_prefix<'mcx>(
+    hs: &::nodehash::HashState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<i32> {
+    let mut p = match ss.ss.ps_ProjInfo.as_ref() {
+        Some(pr) => pr.pi_state.max_fetch(::execexpr::SlotSrc::Scan)?,
+        None => hs.build_prefix()?,
+    };
+    if let Some(q) = ss.ss.qual.as_deref() {
+        p = p.max(q.max_fetch(::execexpr::SlotSrc::Scan)?);
+    }
+    Some(p)
+}
+
+struct SeqScanProjBatchSource<'a, 'mcx> {
+    ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+    result_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanProjBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        estate.ecxt_mut(self.ss.ss.ps_ExprContext).reset();
+        if !::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)? {
+            return Ok(false);
+        }
+        let scan_id = self.ss.ss.ss_ScanTupleSlot;
+        estate.ecxt_mut(self.ss.ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
+        let mcx = estate.es_query_cxt;
+        let proj = self.ss.ss.ps_ProjInfo.as_mut().expect("projected batch source");
+        let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, self.result_slot);
+        let mut slots = EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
+        ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+        Ok(true)
+    }
+
+    #[inline]
+    fn slot(&self) -> ExecSlotId {
+        self.result_slot
+    }
+}
+
 struct IndexScanBatchSource<'a, 'mcx> {
     is: &'a mut ::nodeindexscan::IndexScanState<'mcx>,
     outer_slot: ExecSlotId,
@@ -2252,6 +2356,39 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
 impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
         exec_proc_node(self, estate)
+    }
+
+    // Fused hash-build page-batch drive: Instrumented children never match,
+    // so EXPLAIN ANALYZE keeps the per-tuple drive and its counters.
+    fn multi_exec(
+        &mut self,
+        hs: &mut ::nodehash::HashState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if let PlanStateNode::SeqScan(ss) = self {
+            if hash_build_fusible(ss, estate)
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+            {
+                ::nodeseqscan::seq_scan_batch_soa_prepare(
+                    ss,
+                    estate,
+                    hash_build_soa_prefix(hs, ss).unwrap_or(0),
+                    false,
+                );
+                match ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot) {
+                    Some(result_slot) => {
+                        let src = SeqScanProjBatchSource { ss, result_slot };
+                        return ::nodehash::multi_exec_hash_batched(hs, src, estate);
+                    }
+                    None => {
+                        let outer_slot = ss.ss.ss_ScanTupleSlot;
+                        let src = SeqScanBatchSource { ss, outer_slot };
+                        return ::nodehash::multi_exec_hash_batched(hs, src, estate);
+                    }
+                }
+            }
+        }
+        ::nodehash::multi_exec_hash(hs, self, estate)
     }
 }
 

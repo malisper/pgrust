@@ -34,6 +34,7 @@ sinval = { path = "../sinval" }
 pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
+syncscan = { path = "../../../access/common/syncscan" }
 procarray = { path = "../procarray" }
 ipci_seams = { path = "../ipci_seams" }
 pmchild_seams = { path = "../../../postmaster/pmchild_seams" }

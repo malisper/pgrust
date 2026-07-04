@@ -50,6 +50,8 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub unique_using: bool,
     pub using_names: Vec<String>,
     pub subplans: Option<&'mcx NodeList<'mcx>>,
+    // Indexed by child relid (0 unused), as C's palloc0'd array.
+    pub appendrels: Option<Vec<Option<&'mcx types_nodes::plannodes::AppendRelInfo<'mcx>>>>,
     pub plan: core::cell::RefCell<crate::plan::DpnsPlan<'mcx>>,
 }
 
@@ -62,6 +64,7 @@ impl<'mcx> DeparseNamespace<'mcx> {
             unique_using: false,
             using_names: Vec::new(),
             subplans: None,
+            appendrels: None,
             plan: core::cell::RefCell::new(crate::plan::DpnsPlan::default()),
         }
     }
@@ -1031,8 +1034,49 @@ fn get_insert_query_def<'mcx>(
         ctx.buf.push_str("DEFAULT VALUES");
     }
 
-    if query.onConflict.is_some() {
-        gap("get_insert_query_def", "ON CONFLICT deparse");
+    if let Some(confl_node) = query.onConflict {
+        let confl = confl_node.as_on_conflict_expr().expect("Query.onConflict");
+        ctx.buf.push_str(" ON CONFLICT");
+        if !confl.arbiterElems.is_nil() {
+            ctx.buf.push('(');
+            let mut first = true;
+            for e in confl.arbiterElems.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(e, ctx, false)?;
+            }
+            ctx.buf.push(')');
+            if let Some(arbiter_where) = confl.arbiterWhere {
+                // C: force non-prefixed Vars; the parser binds them to the
+                // target relation and this clause has no InferenceElem wrap.
+                let save_varprefix = ctx.varprefix;
+                ctx.varprefix = false;
+                append_context_keyword(ctx, " WHERE ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
+                get_rule_expr(arbiter_where, ctx, false)?;
+                ctx.varprefix = save_varprefix;
+            }
+        } else if confl.constraint != types_core::InvalidOid {
+            let constraint = lsyscache::get_constraint_name(ctx.mcx, confl.constraint)?
+                .unwrap_or_else(|| {
+                    panic!("cache lookup failed for constraint {}", confl.constraint)
+                });
+            ctx.buf.push_str(&format!(
+                " ON CONSTRAINT {}",
+                quote_identifier(constraint.as_str())
+            ));
+        }
+        if confl.action == types_nodes::OnConflictAction::ONCONFLICT_NOTHING {
+            ctx.buf.push_str(" DO NOTHING");
+        } else {
+            ctx.buf.push_str(" DO UPDATE SET ");
+            get_update_query_targetlist_def(query, &confl.onConflictSet, rte, ctx)?;
+            if let Some(conflict_where) = confl.onConflictWhere {
+                append_context_keyword(ctx, " WHERE ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
+                get_rule_expr(conflict_where, ctx, false)?;
+            }
+        }
     }
     get_returning_clause(query, ctx)
 }
@@ -1069,19 +1113,26 @@ fn get_update_query_targetlist_def<'mcx>(
     rte: &RangeTblEntry<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
+    // MULTIEXPR source SubLinks appear, in subLinkId order, as resjunk tlist
+    // entries (C collects them the same way before the main loop).
+    let mut ma_sublinks: Vec<Node<'mcx>> = Vec::new();
     if query.hasSubLinks {
         for tle_node in target_list.iter() {
             let tle = tle_node.as_target_entry().expect("targetList entry");
-            if tle.resjunk
-                && tle
-                    .expr
-                    .as_sub_link()
-                    .is_some_and(|sl| sl.subLinkType == SubLinkType::MULTIEXPR_SUBLINK)
-            {
-                gap("get_update_query_targetlist_def", "MULTIEXPR assignment deparse");
+            if tle.resjunk {
+                if let Some(sl) = tle.expr.as_sub_link() {
+                    if sl.subLinkType == SubLinkType::MULTIEXPR_SUBLINK {
+                        ma_sublinks.push(tle.expr);
+                        assert_eq!(sl.subLinkId as usize, ma_sublinks.len());
+                    }
+                }
             }
         }
     }
+    let mut next_ma = 0usize;
+    let mut cur_ma_sublink: Option<Node<'mcx>> = None;
+    let mut remaining_ma_columns = 0i32;
+
     let mut sep = "";
     for tle_node in target_list.iter() {
         let tle = tle_node.as_target_entry().expect("targetList entry");
@@ -1090,10 +1141,67 @@ fn get_update_query_targetlist_def<'mcx>(
         }
         ctx.buf.push_str(sep);
         sep = ", ";
+
+        if next_ma < ma_sublinks.len() && cur_ma_sublink.is_none() {
+            // Dig for a PARAM_MULTIEXPR Param under assignment decoration and
+            // implicit coercions (C tolerates FieldStores here; that
+            // vocabulary is absent, so only the two live wrappers descend).
+            let mut expr = Some(tle.expr);
+            while let Some(e) = expr {
+                match e.node_tag() {
+                    NodeTag::T_SubscriptingRef => {
+                        let sbsref = e.as_subscripting_ref().unwrap();
+                        match sbsref.refassgnexpr {
+                            Some(a) => expr = Some(a),
+                            None => break,
+                        }
+                    }
+                    NodeTag::T_CoerceToDomain => {
+                        let cd = e.as_coerce_to_domain().unwrap();
+                        if cd.coercionformat != CoercionForm::COERCE_IMPLICIT_CAST {
+                            break;
+                        }
+                        expr = Some(cd.arg);
+                    }
+                    _ => break,
+                }
+            }
+            let expr = expr.map(crate::deparse::strip_implicit_coercions);
+            if let Some(p) = expr.and_then(|e| e.as_param()) {
+                if p.paramkind == types_nodes::ParamKind::PARAM_MULTIEXPR {
+                    let sl_node = ma_sublinks[next_ma];
+                    let sl = sl_node.as_sub_link().unwrap();
+                    cur_ma_sublink = Some(sl_node);
+                    next_ma += 1;
+                    remaining_ma_columns = sl
+                        .subselect
+                        .as_query()
+                        .expect("MULTIEXPR subselect is a Query")
+                        .targetList
+                        .iter()
+                        .filter(|n| !n.as_target_entry().expect("tlist entry").resjunk)
+                        .count() as i32;
+                    assert_eq!(p.paramid, (sl.subLinkId << 16) | 1);
+                    ctx.buf.push('(');
+                }
+            }
+        }
+
         let attname = lsyscache::get_attname(ctx.mcx, rte.relid, tle.resno, false)?
             .expect("get_attname missing_ok=false");
         ctx.buf.push_str(&quote_identifier(attname.as_str()));
-        let expr = process_indirection(tle.expr, ctx)?;
+        let mut expr = process_indirection(tle.expr, ctx)?;
+
+        if let Some(sl_node) = cur_ma_sublink {
+            remaining_ma_columns -= 1;
+            if remaining_ma_columns > 0 {
+                continue;
+            }
+            ctx.buf.push(')');
+            expr = sl_node;
+            cur_ma_sublink = None;
+        }
+
         ctx.buf.push_str(" = ");
         get_rule_expr(expr, ctx, false)?;
     }
@@ -1235,22 +1343,42 @@ fn get_merge_query_def<'mcx>(
     get_returning_clause(query, ctx)
 }
 
-// processIndirection (ruleutils.c): FieldStore/assignment-SubscriptingRef
-// stripping is loud; only the implicit-CoerceToDomain descent is live.
-fn process_indirection<'mcx>(
+// processIndirection (ruleutils.c): FieldStore stripping stays loud (no
+// FieldSelect/FieldStore node vocabulary yet).
+pub(crate) fn process_indirection<'mcx>(
     node: Node<'mcx>,
-    _ctx: &mut DeparseContext<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    match node.node_tag() {
-        NodeTag::T_FieldStore => gap("processIndirection", "FieldStore deparse"),
-        NodeTag::T_SubscriptingRef => {
-            gap("processIndirection", "subscript assignment deparse")
+    let mut node = node;
+    let mut cdomain: Option<Node<'mcx>> = None;
+    loop {
+        match node.node_tag() {
+            NodeTag::T_FieldStore => gap("processIndirection", "FieldStore deparse"),
+            NodeTag::T_SubscriptingRef => {
+                let sbsref = node.as_subscripting_ref().unwrap();
+                let Some(refassgnexpr) = sbsref.refassgnexpr else {
+                    break;
+                };
+                crate::deparse::print_subscripts(sbsref, ctx)?;
+                node = refassgnexpr;
+            }
+            NodeTag::T_CoerceToDomain => {
+                let cd = node.as_coerce_to_domain().unwrap();
+                if cd.coercionformat != CoercionForm::COERCE_IMPLICIT_CAST {
+                    break;
+                }
+                cdomain = Some(node);
+                node = cd.arg;
+            }
+            _ => break,
         }
-        NodeTag::T_CoerceToDomain => {
-            gap("processIndirection", "CoerceToDomain assignment deparse")
-        }
-        _ => Ok(node),
     }
+    if let Some(cd_node) = cdomain {
+        if cd_node.as_coerce_to_domain().unwrap().arg.ptr_eq(node) {
+            node = cd_node;
+        }
+    }
+    Ok(node)
 }
 
 fn get_simple_values_rte<'a, 'mcx>(

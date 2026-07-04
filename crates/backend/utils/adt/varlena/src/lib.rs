@@ -13,6 +13,7 @@ pub mod abbrev;
 pub mod bytea;
 pub mod concat_format;
 pub mod levenshtein;
+pub mod split_text;
 pub mod string_agg;
 #[cfg(test)]
 mod tests;

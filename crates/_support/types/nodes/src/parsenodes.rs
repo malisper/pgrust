@@ -483,6 +483,11 @@ pub struct VariableShowStmt<'mcx> {
     pub name: Option<&'mcx str>,
 }
 
+#[derive(Default)]
+pub struct DoStmt<'mcx> {
+    pub args: NodeList<'mcx>,
+}
+
 // C: raw grammar output holds the untransformed statement in `query`;
 // transformExplainStmt replaces it with the analyzed Query node in place.
 #[derive(Default)]
@@ -1398,6 +1403,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ReassignOwnedStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableShowStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for DoStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DoStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ExplainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ExplainStmt;
 }
@@ -1763,6 +1771,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_variable_show_stmt(self) -> Option<&'mcx VariableShowStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_do_stmt(self) -> Option<&'mcx DoStmt<'mcx>> {
         self.as_variant()
     }
 

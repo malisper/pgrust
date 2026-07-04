@@ -22,6 +22,27 @@ pub fn init_seams() {}
 /// The build side pulls its tuples from this child (C's `outerPlan(hashNode)`).
 pub trait HashBuildInput<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
+
+    /// `MultiExecHash` entry; the dispatcher overrides this to batch-consume
+    /// fusible children (same per-row hash+insert, node recursion elided).
+    fn multi_exec(
+        &mut self,
+        hs: &mut HashState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+    where
+        Self: Sized,
+    {
+        multi_exec_hash(hs, self, estate)
+    }
+}
+
+/// Page-batch feed for the fused hash-build drive; same contract as the agg
+/// drive's source (store staged tuple `i` into the slot, apply the scan qual).
+pub trait HashBuildBatchSource<'mcx> {
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
+    fn slot(&self) -> ExecSlotId;
 }
 
 /// C `HashJoinTupleData` (16 = HJTUPLE_OVERHEAD; image at +16).
@@ -526,6 +547,14 @@ pub struct HashState<'mcx> {
     inner_desc: Option<Rc<TupleDescData<'static>>>,
 }
 
+impl<'mcx> HashState<'mcx> {
+    /// Slot deform prefix the build-side hash reads per row (its FETCHSOME
+    /// bound); None = shape unknown to the batch-deform planner.
+    pub fn build_prefix(&self) -> Option<i32> {
+        self.hash_expr.max_fetch(::execexpr::SlotSrc::Inner)
+    }
+}
+
 /// `ExecInitHash`.
 pub fn exec_init_hash<'mcx>(
     node: &'mcx Hash<'mcx>,
@@ -583,6 +612,28 @@ pub fn exec_hash_table_create<'mcx>(
     HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed)
 }
 
+#[inline(always)]
+fn hash_insert_slot<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    estate.reset_expr_context(hs.ps_ExprContext);
+    let hashvalue = {
+        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
+        let r = exec_eval_expr(&mut hs.hash_expr, &mut slots)?;
+        // Non-strict fold keeps NULL-key tuples: they never match the
+        // recheck, so results equal C for every jointype.
+        r.value.as_u32()
+    };
+    let ecxt = hs.ps_ExprContext;
+    let table = hs.table.as_mut().expect("hash table created");
+    table.insert(estate, slot_id, ecxt, hashvalue)?;
+    table.total_tuples += 1.0;
+    Ok(())
+}
+
 /// `MultiExecHash`/`MultiExecPrivateHash`.
 pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
     hs: &mut HashState<'mcx>,
@@ -595,19 +646,34 @@ pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
         let Some(slot_id) = child.exec_proc(estate)? else {
             break;
         };
-        estate.reset_expr_context(hs.ps_ExprContext);
-        let hashvalue = {
-            let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-            let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-            let r = exec_eval_expr(&mut hs.hash_expr, &mut slots)?;
-            // Non-strict fold keeps NULL-key tuples: they never match the
-            // recheck, so results equal C for every jointype.
-            r.value.as_u32()
-        };
-        let ecxt = hs.ps_ExprContext;
-        let table = hs.table.as_mut().expect("hash table created");
-        table.insert(estate, slot_id, ecxt, hashvalue)?;
-        table.total_tuples += 1.0;
+        hash_insert_slot(hs, estate, slot_id)?;
+    }
+    hs.table.as_mut().expect("hash table created").finish_build(mcx)?;
+    Ok(())
+}
+
+/// `MultiExecPrivateHash` over a page-batch source: identical per-row hash +
+/// `ExecHashTableInsert` order (spill/growth arms included), minus the
+/// per-tuple node recursion.
+pub fn multi_exec_hash_batched<'mcx, S: HashBuildBatchSource<'mcx>>(
+    hs: &mut HashState<'mcx>,
+    mut src: S,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    debug_assert!(hs.table.is_some(), "table created in HJ_BUILD_HASHTABLE");
+    let slot_id = src.slot();
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            break;
+        }
+        for i in 0..n {
+            if !src.fetch_tuple(i, estate)? {
+                continue;
+            }
+            hash_insert_slot(hs, estate, slot_id)?;
+        }
     }
     hs.table.as_mut().expect("hash table created").finish_build(mcx)?;
     Ok(())

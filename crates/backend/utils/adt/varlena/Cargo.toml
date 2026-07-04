@@ -30,3 +30,5 @@ numutils = { path = "../numutils" }
 
 [dev-dependencies]
 detoast = { path = "../../../access/common/detoast" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

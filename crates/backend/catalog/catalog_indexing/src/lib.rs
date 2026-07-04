@@ -9,6 +9,9 @@ use types_tuple::{HeapTupleData, ItemPointerData};
 
 pub type CatalogIndexState<'mcx> = execindexing::ResultRelIndexState<'mcx>;
 
+// MAX_CATALOG_MULTI_INSERT_BYTES (indexing.h).
+pub const MAX_CATALOG_MULTI_INSERT_BYTES: usize = 65535;
+
 pub fn CatalogOpenIndexes<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: &Relation<'mcx>,
@@ -89,6 +92,40 @@ pub fn CatalogTupleUpdate<'mcx>(
 
 pub fn CatalogTupleDelete(heap_rel: &Relation<'_>, tid: &ItemPointerData) -> PgResult<()> {
     heapam::simple_heap_delete(heap_rel.data_rc(), tid)
+}
+
+pub fn CatalogTuplesMultiInsertWithInfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    tuples: std::vec::Vec<HeapTuple<'mcx>>,
+    indstate: &mut CatalogIndexState<'mcx>,
+) -> PgResult<()> {
+    if tuples.is_empty() {
+        return Ok(());
+    }
+    // std Vec: SlotData owns droppy state (no-drop arena rule).
+    let mut slots: std::vec::Vec<types_slot::SlotData<'mcx>> =
+        std::vec::Vec::with_capacity(tuples.len());
+    for tup in tuples {
+        let mut slot = exectuples::make_tuple_table_slot(
+            mcx,
+            types_slot::TupleSlotKind::HeapTuple,
+            Some(heap_rel.rd_att.clone()),
+        );
+        exectuples::exec_store_heap_tuple_owned(&mut slot, mcx, tup);
+        slots.push(slot);
+    }
+    let cid = xact_seams::get_current_command_id::call(true)?;
+    let mut refs: std::vec::Vec<&mut types_slot::SlotData<'mcx>> = slots.iter_mut().collect();
+    heapam::heap_multi_insert(mcx, heap_rel, &mut refs, cid, 0, None)?;
+    for slot in slots.iter() {
+        let types_slot::SlotData::Heap(h) = slot else {
+            unreachable!()
+        };
+        let tup = h.tuple.as_ref().expect("multi-insert slot holds a tuple");
+        CatalogIndexInsert(mcx, indstate, heap_rel, tup)?;
+    }
+    Ok(())
 }
 
 pub fn CatalogTupleInsertWithInfo<'mcx>(

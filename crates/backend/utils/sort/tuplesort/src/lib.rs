@@ -40,7 +40,34 @@ pub use ssup::{
 use mgetattr::minimal_getattr;
 use qsort::qsort_tuple;
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    tuplesort_seams::tuplesort_datums::set(
+        |mcx, datum_type, sort_operator, collation, nulls_first, work_mem, values| {
+            let mut ts = Tuplesort::begin_datum(
+                datum_type, sort_operator, collation, nulls_first, work_mem, TUPLESORT_NONE,
+            )?;
+            for v in values {
+                ts.putdatum(v.value, v.isnull)?;
+            }
+            ts.performsort()?;
+            let byref = ts.datum_sort_is_byref();
+            let mut out: PgVec<'_, NullableDatum> = mcx::vec_with_capacity_in(mcx, values.len())?;
+            while let Some(mut nd) = ts.getdatum(true)? {
+                if byref && !nd.isnull {
+                    let p = nd.value.as_usize() as *const u8;
+                    // SAFETY: by-ref sorted datum points at a live plain image
+                    // owned by the tuplesort, copied out before ts drops.
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+                    };
+                    nd.value = Datum::from_usize(mcx::slice_borrow_in(mcx, bytes)?.as_ptr() as usize);
+                }
+                out.push(nd);
+            }
+            Ok(out)
+        },
+    );
+}
 
 pub const TUPLESORT_NONE: i32 = 0;
 pub const TUPLESORT_RANDOMACCESS: i32 = 1 << 0;

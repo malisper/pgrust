@@ -49,7 +49,13 @@ pub fn accum_array_result<'mcx>(
         };
         // SAFETY: by-ref datum points at n live bytes.
         let bytes = unsafe { core::slice::from_raw_parts(p, n) };
-        astate.copy_byref(bytes)?
+        // C accumArrayResult PG_DETOAST_DATUMs varlena elements before copy.
+        if astate.typlen == -1 && (bytes[0] == 0x01 || (bytes[0] & 0x03) == 0x02) {
+            let flat = ::detoast_seams::detoast_attr::call(mcx, bytes)?;
+            astate.copy_byref(&flat)?
+        } else {
+            astate.copy_byref(bytes)?
+        }
     } else {
         dvalue
     };
