@@ -59,6 +59,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 hashfn = { path = "../../../common/hashfn" }
 tupdesc = { path = "../../access/common/tupdesc" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
