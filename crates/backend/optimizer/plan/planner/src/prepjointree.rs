@@ -1112,6 +1112,69 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
+        NodeTag::T_CaseTestExpr => {
+            Node::mk(mcx, *node.as_case_test_expr().expect("CaseTestExpr"))
+        }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().expect("JsonValueExpr");
+            let raw = match j.raw_expr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            let formatted = match j.formatted_expr {
+                Some(e) => Some(copy_expr(mcx, e, levels_delta)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::JsonValueExpr {
+                    raw_expr: raw,
+                    formatted_expr: formatted,
+                    format: j.format,
+                },
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().expect("JsonConstructorExpr");
+            let mut args = NodeList::nil();
+            for a in &c.args {
+                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
+            }
+            let func = match c.func {
+                Some(f) => Some(copy_expr(mcx, f, levels_delta)?),
+                None => None,
+            };
+            let coercion = match c.coercion {
+                Some(co) => Some(copy_expr(mcx, co, levels_delta)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::JsonConstructorExpr {
+                    r#type: c.r#type,
+                    args,
+                    func,
+                    coercion,
+                    returning: c.returning,
+                    absent_on_null: c.absent_on_null,
+                    unique: c.unique,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().expect("JsonIsPredicate");
+            Node::mk(
+                mcx,
+                types_nodes::JsonIsPredicate {
+                    expr: Some(copy_expr(mcx, p.expr.expect("expr"), levels_delta)?),
+                    format: p.format,
+                    item_type: p.item_type,
+                    unique_keys: p.unique_keys,
+                    location: p.location,
+                },
+            )
+        }
         other => panic!(
             "copyObject (pullup_replace_vars): {other:?} copy arm unported \
              (simple-view expression set)"

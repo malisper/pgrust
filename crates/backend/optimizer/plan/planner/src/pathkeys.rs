@@ -534,6 +534,17 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
+        NodeTag::T_JsonValueExpr => {
+            expr_collation(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            match node.as_json_constructor_expr().unwrap().coercion {
+                Some(c) => expr_collation(c),
+                None => 0,
+            }
+        }
+        NodeTag::T_JsonIsPredicate => 0,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().collation,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

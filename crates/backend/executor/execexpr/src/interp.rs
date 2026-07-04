@@ -1274,7 +1274,8 @@ fn eval_is_json_step(
 ) -> PgResult<()> {
     let nd = read_out(out);
     if nd.isnull {
-        write_out(out, Datum::from_bool(false), false);
+        // C writes false into resvalue but leaves resnull set: NULL result.
+        write_out(out, Datum::from_bool(false), true);
         return Ok(());
     }
     let res = eval_is_json(frames, nd.value, exprtype, item_type, unique_keys, frame)?;
