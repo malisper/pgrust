@@ -224,7 +224,12 @@ fn cfi_ok() -> PgResult<()> {
 }
 
 fn sqlstate(err: &types_error::PgError) -> String {
-    format!("{err:?}")
+    let mut s = err.message.clone();
+    if let Some(h) = &err.hint {
+        s.push(' ');
+        s.push_str(h);
+    }
+    s
 }
 
 fn code(err: &types_error::PgError) -> [u8; 5] {
@@ -315,7 +320,7 @@ fn similar_escape_family() {
     let r = similar_to_escape_1(m, b"x\\\"y\\\"z").unwrap();
     assert_eq!(r.as_slice(), b"^(?:x){1,1}?(y){1,1}(?:z)$");
     let r = similar_to_escape_1(m, b"a(b)c").unwrap();
-    assert_eq!(r.as_slice(), b"^(?:a(?:b\\)c)$");
+    assert_eq!(r.as_slice(), b"^(?:a(?:b)c)$");
     let r = similar_to_escape_1(m, b"[a^b]c").unwrap();
     assert_eq!(r.as_slice(), b"^(?:[a^b]c)$");
 
@@ -339,7 +344,7 @@ fn count_instr_like() {
     use crate::matches::{regexp_count, regexp_instr, regexp_like};
 
     assert_eq!(regexp_count(m, b"ABCABCAXYaxy", b"A.", None, None, C).unwrap(), 3);
-    assert_eq!(regexp_count(m, b"ABCABCAXYaxy", b"A.", Some(5), None, C).unwrap(), 2);
+    assert_eq!(regexp_count(m, b"ABCABCAXYaxy", b"A.", Some(5), None, C).unwrap(), 1);
     assert_eq!(regexp_count(m, b"ABCABCAXYaxy", b"A.", Some(1), Some(b"i"), C).unwrap(), 4);
     assert_eq!(regexp_count(m, b"abc", b"", None, None, C).unwrap(), 4);
     let err = regexp_count(m, b"x", b"x", Some(0), None, C).unwrap_err();
