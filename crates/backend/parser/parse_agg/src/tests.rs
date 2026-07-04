@@ -431,3 +431,144 @@ fn grouping_func_sets_hasaggs_and_levelsup() {
     assert_eq!((grp.agglevelsup, grp.location, grp.args.len()), (0, 9, 1));
     assert!(grp.refs.is_nil() && grp.cols.is_nil());
 }
+
+fn expr_sublink<'mcx>(mcx: Mcx<'mcx>, sub_tlist: NodeList<'mcx>) -> Node<'mcx> {
+    let mut subq = Query::default();
+    subq.targetList = sub_tlist;
+    Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: Node::mk(mcx, subq).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn outer_var_in_sublink_counts_at_agg_level() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let tle = Node::mk_target_entry(mcx, outer_var, 1, None, false).unwrap();
+    let sublink = expr_sublink(mcx, NodeList::make1(mcx, tle).unwrap());
+    let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+        .unwrap();
+    assert_eq!(agg.agglevelsup, 0);
+}
+
+#[test]
+fn subquery_local_var_in_sublink_is_ignored() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let local_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
+    let sublink = expr_sublink(mcx, NodeList::make1(mcx, tle).unwrap());
+    let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+        .unwrap();
+    assert_eq!(agg.agglevelsup, 0);
+}
+
+#[test]
+fn nested_agg_via_sublink_is_42803() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let mut inner = count_aggref(mcx);
+    inner.agglevelsup = 1;
+    let tle = Node::mk_target_entry(mcx, inner.seal(), 1, None, false).unwrap();
+    let sublink = expr_sublink(mcx, NodeList::make1(mcx, tle).unwrap());
+    let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    let err = transformAggregateCall(
+        mcx,
+        &mut pstate,
+        &mut agg,
+        &args,
+        &[INT4OID],
+        &NodeList::nil(),
+        false,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("aggregate function calls cannot be nested"),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
+fn grouped_outer_var_in_sublink_passes_check() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        gtle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let stle = Node::mk_target_entry(mcx, outer_var, 1, None, false).unwrap();
+    let sublink = expr_sublink(mcx, NodeList::make1(mcx, stle).unwrap());
+    let tle2 = Node::mk_target_entry(mcx, sublink, 2, Some("s"), false).unwrap();
+
+    let mut tlist = NodeList::make1(mcx, gtle).unwrap();
+    tlist.lappend(mcx, tle2).unwrap();
+    let mut qry = query_with_rtable(mcx, tlist);
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+}
+
+#[test]
+fn ungrouped_outer_var_in_sublink_is_42803() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let stle = Node::mk_target_entry(mcx, outer_var, 1, None, false).unwrap();
+    let sublink = expr_sublink(mcx, NodeList::make1(mcx, stle).unwrap());
+    let tle = Node::mk_target_entry(mcx, sublink, 1, Some("s"), false).unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+
+    let err = parseCheckAggregates(mcx, &pstate, &mut qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("column \"t.x\" must appear in the GROUP BY clause"),
+        "{}",
+        err.message()
+    );
+}

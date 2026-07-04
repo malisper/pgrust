@@ -64,6 +64,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 _ => types_core::catalog::BOOLOID,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_type(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprType", other),
     }
 }
@@ -187,6 +190,9 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_typmod(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprTypmod", other),
     }
 }
@@ -246,6 +252,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 _ => 0,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_collation(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprCollation", other),
     }
 }

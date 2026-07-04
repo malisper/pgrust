@@ -1234,6 +1234,34 @@ where
                 },
             }
         }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            let new_qual = match a.qual {
+                Some(q) => m(q)?,
+                None => None,
+            };
+            let new_tl = mutate_list(mcx, &a.targetList, m)?;
+            if new_qual.is_none() && new_tl.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::MergeAction {
+                    matchKind: a.matchKind,
+                    commandType: a.commandType,
+                    r#override: a.r#override,
+                    qual: match new_qual {
+                        Some(q) => Some(q),
+                        None => a.qual,
+                    },
+                    targetList: match new_tl {
+                        Some(l) => l,
+                        None => a.targetList.clone_in(mcx)?,
+                    },
+                    updateColnos: a.updateColnos.clone_in(mcx)?,
+                },
+            )?))
+        }
         other => deferred("expression_tree_mutator", other),
     }
 }
