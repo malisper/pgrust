@@ -285,7 +285,7 @@ pub(crate) fn bt_pagedel<'s>(
     scx: Mcx<'s>,
     rel: &Relation<'_>,
     mut leafbuf: BufferPin,
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
 ) -> PgResult<()> {
     let scanblkno = leafbuf.block_number();
     let mut stack: PgVec<'s, StackEntry> = PgVec::new_in(scx);
@@ -385,7 +385,7 @@ pub(crate) fn bt_pagedel<'s>(
 fn bt_mark_page_halfdead(
     scx: Mcx<'_>,
     rel: &Relation<'_>,
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
     leafbuf: &BufferPin,
     stack: &mut [StackEntry],
     frame: &mut OrderProcFrame,
@@ -532,7 +532,7 @@ fn bt_unlink_halfdead_page(
     leafbuf: BufferPin,
     scanblkno: BlockNumber,
     rightsib_empty: &mut bool,
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
 ) -> PgResult<Option<BufferPin>> {
     let leafblkno = leafbuf.block_number();
 
@@ -944,7 +944,7 @@ const MAX_ALLOC_SIZE: usize = 0x3fffffff;
 
 /// _bt_pendingfsm_init.
 pub(crate) fn bt_pendingfsm_init(
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
     cleanuponly: bool,
 ) -> PgResult<()> {
     if cleanuponly {
@@ -961,7 +961,7 @@ pub(crate) fn bt_pendingfsm_init(
 }
 
 /// _bt_pendingfsm_finalize.
-pub(crate) fn bt_pendingfsm_finalize(vstate: &mut BTVacState<'_, '_>) -> PgResult<()> {
+pub(crate) fn bt_pendingfsm_finalize(vstate: &mut BTVacState<'_, '_, '_>) -> PgResult<()> {
     let rel = vstate.info.index;
     let heaprel = vstate.info.heaprel;
     debug_assert!(vstate.stats.pages_newly_deleted >= vstate.pendingpages.len() as u32);
@@ -986,7 +986,7 @@ pub(crate) fn bt_pendingfsm_finalize(vstate: &mut BTVacState<'_, '_>) -> PgResul
 }
 
 fn bt_pendingfsm_add(
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
     target: BlockNumber,
     safexid: FullTransactionId,
 ) {
