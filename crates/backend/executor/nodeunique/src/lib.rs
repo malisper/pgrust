@@ -97,6 +97,13 @@ where
         if !node.have_prev {
             break node.store_and_return(estate, outer_id)?;
         }
+        // SAFETY: the per-tuple context outlives this evaluation and is reset
+        // right after (C: ExecQual under ecxt_per_tuple_memory; packed-capable
+        // eq procs detoast-expand into it).
+        unsafe {
+            node.eq
+                .arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
+        };
         let outer_slot = estate.slot_mut(outer_id);
         let mut slots = EvalSlots {
             scan: None,
