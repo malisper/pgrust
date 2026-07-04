@@ -53,7 +53,8 @@ pub struct TSDictionaryCacheEntry {
     pub isvalid: Cell<bool>,
     pub lexize_oid: Oid,
     // Owns dict_data and everything the init method allocated.
-    _dict_ctx: Option<MemoryContext>,
+    // Heap-pinned: Mcx handles into it live inside dict_data (PgVec allocators).
+    _dict_ctx: Option<std::boxed::Box<MemoryContext>>,
     pub dict_data: usize,
     lexize: RefCell<FmgrInfo>,
 }
@@ -259,10 +260,12 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
         return Ok(hit);
     }
 
-    let ctx = MemoryContext::new("TS dictionary");
+    let ctx = std::boxed::Box::new(MemoryContext::new("TS dictionary"));
     let (template_oid, init_oid, lexize_oid, dict_data);
     {
-        let dmcx = ctx.mcx();
+        // SAFETY: 'static stands for "as long as the Box in _dict_ctx lives";
+        // the box pins the context address across the move into the entry.
+        let dmcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
         let dict = syscache_seams::lookup_pg_ts_dict_shape::call(dmcx, dictId)?
             .ok_or_else(|| cache_lookup_failed("dictionary", dictId))?;
         template_oid = dict.dicttemplate;
