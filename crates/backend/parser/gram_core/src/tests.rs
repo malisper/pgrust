@@ -1870,6 +1870,117 @@ fn grant_on_function_shapes() {
 fn aggregate_output_args_rejected() {
     let err = parse_err("DROP AGGREGATE a(OUT x int)");
     assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
+fn create_fdw_and_server() {
+    use types_nodes::parsenodes::DefElemAction;
+    use types_nodes::rawnodes::{CreateFdwStmt, CreateForeignServerStmt};
+    let list =
+        parse("CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator OPTIONS (debug 'true');");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.expect("stmt").as_variant::<CreateFdwStmt>().expect("CreateFdwStmt");
+    assert_eq!(n.fdwname, Some("postgresql"));
+    assert_eq!(n.func_options.len(), 1);
+    let v = n.func_options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(v.defname, Some("validator"));
+    let names = v.arg.expect("arg").as_list().expect("handler_name");
+    assert_eq!(names.nth(0).as_string().expect("name").sval, "postgresql_fdw_validator");
+    assert_eq!(n.options.len(), 1);
+    let o = n.options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(o.defname, Some("debug"));
+    assert_eq!(o.defaction, DefElemAction::DEFELEM_UNSPEC);
+    assert_eq!(o.arg.expect("arg").as_string().expect("val").sval, "true");
+
+    let list = parse(
+        "CREATE SERVER s1 TYPE 'oracle' VERSION '1.0' FOREIGN DATA WRAPPER postgresql OPTIONS (host 'h', dbname 'db');",
+    );
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateForeignServerStmt>()
+        .expect("CreateForeignServerStmt");
+    assert_eq!(n.servername, Some("s1"));
+    assert_eq!(n.servertype, Some("oracle"));
+    assert_eq!(n.version, Some("1.0"));
+    assert_eq!(n.fdwname, Some("postgresql"));
+    assert!(!n.if_not_exists);
+    assert_eq!(n.options.len(), 2);
+}
+
+#[test]
+fn alter_fdw_and_server_option_actions() {
+    use types_nodes::parsenodes::DefElemAction;
+    use types_nodes::rawnodes::{AlterFdwStmt, AlterForeignServerStmt};
+    let list = parse(
+        "ALTER FOREIGN DATA WRAPPER foo NO VALIDATOR OPTIONS (ADD x '1', SET y '2', DROP z);",
+    );
+    let rs = only_stmt(&list);
+    let n = rs.stmt.expect("stmt").as_variant::<AlterFdwStmt>().expect("AlterFdwStmt");
+    assert_eq!(n.fdwname, Some("foo"));
+    let v = n.func_options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(v.defname, Some("validator"));
+    assert!(v.arg.is_none());
+    let actions: Vec<DefElemAction> =
+        n.options.iter().map(|o| o.as_def_elem().expect("DefElem").defaction).collect();
+    assert_eq!(
+        actions,
+        [DefElemAction::DEFELEM_ADD, DefElemAction::DEFELEM_SET, DefElemAction::DEFELEM_DROP]
+    );
+    assert!(n.options.nth(2).as_def_elem().expect("DefElem").arg.is_none());
+
+    let list = parse("ALTER SERVER s1 VERSION NULL;");
+    let rs = only_stmt(&list);
+    let n =
+        rs.stmt.expect("stmt").as_variant::<AlterForeignServerStmt>().expect("AlterForeignServerStmt");
+    assert_eq!(n.servername, Some("s1"));
+    assert!(n.has_version && n.version.is_none() && n.options.is_nil());
+}
+
+#[test]
+fn user_mapping_and_foreign_table() {
+    use types_nodes::parsenodes::RoleSpecType;
+    use types_nodes::rawnodes::{
+        CreateForeignTableStmt, CreateUserMappingStmt, DropUserMappingStmt,
+        ImportForeignSchemaStmt, ImportForeignSchemaType,
+    };
+    let list = parse("CREATE USER MAPPING FOR public SERVER s1 OPTIONS (\"user\" 'guest');");
+    let rs = only_stmt(&list);
+    let n =
+        rs.stmt.expect("stmt").as_variant::<CreateUserMappingStmt>().expect("CreateUserMappingStmt");
+    assert_eq!(n.user.expect("RoleSpec").roletype, RoleSpecType::ROLESPEC_PUBLIC);
+    assert_eq!(n.servername, Some("s1"));
+    assert_eq!(n.options.len(), 1);
+
+    let list = parse("DROP USER MAPPING IF EXISTS FOR USER SERVER s1;");
+    let rs = only_stmt(&list);
+    let n =
+        rs.stmt.expect("stmt").as_variant::<DropUserMappingStmt>().expect("DropUserMappingStmt");
+    assert_eq!(n.user.expect("RoleSpec").roletype, RoleSpecType::ROLESPEC_CURRENT_USER);
+    assert!(n.missing_ok);
+
+    let list = parse("CREATE FOREIGN TABLE ft1 (c1 int NOT NULL, c2 text) SERVER s1 OPTIONS (delimiter ',');");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateForeignTableStmt>()
+        .expect("CreateForeignTableStmt");
+    assert_eq!(n.base.relation.expect("rv").relname, Some("ft1"));
+    assert_eq!(n.base.tableElts.len(), 2);
+    assert_eq!(n.servername, Some("s1"));
+    assert_eq!(n.options.len(), 1);
+
+    let list = parse("IMPORT FOREIGN SCHEMA rs LIMIT TO (t1, t2) FROM SERVER s1 INTO public;");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<ImportForeignSchemaStmt>()
+        .expect("ImportForeignSchemaStmt");
+    assert_eq!(n.server_name, Some("s1"));
+    assert_eq!(n.remote_schema, Some("rs"));
+    assert_eq!(n.local_schema, Some("public"));
+    assert_eq!(n.list_type, ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO);
+    assert_eq!(n.table_list.len(), 2);
 }
 
 #[test]
