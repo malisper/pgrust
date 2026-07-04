@@ -202,6 +202,7 @@ fn install_bufmgr_seams() {
     smgr_seams::smgr_exists::set(|_loc, fork| Ok(fork_nblocks(fork as u8) > 0));
     smgr_seams::smgr_nblocks::set(|_loc, fork| Ok(fork_nblocks(fork as u8)));
 
+    xloginsert_seams::xlog_check_buffer_needs_backup::set(|_| false);
     xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
         xloginsert::insert_record(rmid, info, 0, fragments, &[])
     });
