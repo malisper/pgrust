@@ -1253,15 +1253,20 @@ fn build_index_paths<'mcx>(
 
     let index_only_scan = !bitmap && check_index_only(run, rel, index);
 
+    let backward_arm = index_is_ordered && pathkeys_possibly_useful;
     if !index_clauses.is_empty()
         || !useful_pathkeys.is_empty()
         || useful_predicate
         || index_only_scan
     {
-        let forward_clauses = {
+        // C shares one clause list across both scan directions; clone only if
+        // the backward arm still needs it.
+        let forward_clauses = if backward_arm {
             let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
             v.extend(index_clauses.iter().cloned());
             v
+        } else {
+            core::mem::replace(&mut index_clauses, PgVec::new_in(mcx))
         };
         let ipath = crate::pathnode::create_index_path(
             run,
@@ -1278,7 +1283,7 @@ fn build_index_paths<'mcx>(
         debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
     }
 
-    if index_is_ordered && pathkeys_possibly_useful {
+    if backward_arm {
         let index_pathkeys = crate::pathkeys::build_index_pathkeys(
             run,
             index,
