@@ -855,8 +855,6 @@ pub fn index_constraint_create<'mcx>(
         )?;
     }
 
-    // Deferrable was rejected above, so only the mark-as-primary arm of the
-    // UPDATE_INDEX block is live.
     if constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX != 0
         && constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY != 0
     {
@@ -892,6 +890,28 @@ pub fn index_constraint_create<'mcx>(
         pg_index.close(RowExclusiveLock)?;
     }
 
+    if deferrable {
+        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
+        trigger::CreateTriggerInternal(
+            mcx,
+            &trigger::InternalTriggerArgs {
+                trigname_base: if constraintType == pg_constraint::CONSTRAINT_PRIMARY {
+                    "PK_ConstraintTrigger"
+                } else {
+                    "Unique_ConstraintTrigger"
+                },
+                relid: heapRelation.rd_id,
+                constrrelid: InvalidOid,
+                constraint_oid: con_oid,
+                index_oid: indexRelationId,
+                funcoid: F_UNIQUE_KEY_RECHECK,
+                tgtype: types_trigger::TRIGGER_TYPE_ROW
+                    | types_trigger::TRIGGER_TYPE_INSERT
+                    | types_trigger::TRIGGER_TYPE_UPDATE,
+                deferrable: true,
+                initdeferred,
+            },
+        )?;
     }
     Ok(con_oid)
 }
