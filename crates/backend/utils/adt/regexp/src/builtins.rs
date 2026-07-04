@@ -495,7 +495,7 @@ pub fn fc_regexp_split_to_array_no_flags(
 }
 
 // Cross-call SRF rows are owned (std) allocations: per-call memory resets
-// between SRF calls, and the fn_extra carrier is a Box<dyn Any>.
+// between SRF calls, and the fn_extra carrier is heap-boxed.
 enum SrfRows {
     Matches(Vec<Vec<Option<Vec<u8>>>>),
     Texts(Vec<Vec<u8>>),

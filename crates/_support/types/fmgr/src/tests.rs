@@ -23,7 +23,7 @@ fn frame_layout_matches_c_budget() {
     assert_eq!(core::mem::size_of::<NullableDatum>(), 16);
     assert_eq!(core::mem::offset_of!(LocalFcinfo<0>, args), 32);
     assert_eq!(core::mem::size_of::<LocalFcinfo<2>>(), 32 + 2 * 16);
-    assert_eq!(core::mem::size_of::<FmgrInfo>(), 56);
+    assert_eq!(core::mem::size_of::<FmgrInfo>(), 48);
     assert!(core::mem::size_of::<FmgrInfo>() <= 128);
 }
 
@@ -159,7 +159,7 @@ fn fn_extra_cache_roundtrip_and_clone_reset() {
 }
 
 #[test]
-#[should_panic(expected = "downcast_ref")]
+#[should_panic(expected = "downcast to u64 failed")]
 fn fn_extra_wrong_type_panics() {
     let mut flinfo = FmgrInfo::new(int4pl, 177, 2, true, false);
     flinfo.set_fn_extra(3u32);

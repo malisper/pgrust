@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::format;
-use core::any::Any;
+use core::any::{Any, TypeId};
 use core::ptr::NonNull;
 
 use ::datum::{Datum, NullableDatum};
@@ -36,8 +36,96 @@ pub struct FmgrInfo {
     pub fn_stats: u8,
     // C's `void *fn_extra`; std Box justified: open-set slot written once per
     // resolved FmgrInfo (its lifetime replaces fn_mcxt), never per row.
-    pub fn_extra: Option<Box<dyn Any>>,
+    pub fn_extra: Option<FnExtra>,
     pub fn_expr: Option<FnExprErased>,
+}
+
+// C's thin `void *fn_extra` shape: one pointer in FmgrInfo; the pointee leads
+// with (TypeId, dropper) so the memo hit path is a dependent load + compare
+// instead of `Box<dyn Any>`'s vtable load + indirect type_id() call + two
+// 128-bit inline constants (~35-45 insns/hit vs C's 4-insn pointer read).
+// Lifetime contract (the repo invariant C relies on): fn_extra lives exactly
+// as long as its FmgrInfo; the memo type is statically bound to the resolved
+// function, so a TypeId mismatch is the wiring bug C corrupts memory on.
+pub struct FnExtra {
+    ptr: NonNull<FnExtraHeader>,
+}
+
+#[repr(C)]
+struct FnExtraHeader {
+    type_id: TypeId,
+    drop_fn: unsafe fn(*mut FnExtraHeader),
+}
+
+#[repr(C)]
+struct FnExtraBox<T> {
+    header: FnExtraHeader,
+    value: T,
+}
+
+unsafe fn drop_fn_extra_box<T>(p: *mut FnExtraHeader) {
+    // SAFETY: `p` was minted by FnExtra::new::<T> from a Box<FnExtraBox<T>>
+    // (header at offset 0 per repr(C)) and is dropped exactly once.
+    drop(unsafe { Box::from_raw(p.cast::<FnExtraBox<T>>()) });
+}
+
+impl FnExtra {
+    pub fn new<T: Any>(value: T) -> Self {
+        let boxed = Box::new(FnExtraBox {
+            header: FnExtraHeader {
+                type_id: TypeId::of::<T>(),
+                drop_fn: drop_fn_extra_box::<T>,
+            },
+            value,
+        });
+        FnExtra {
+            ptr: NonNull::from(Box::leak(boxed)).cast(),
+        }
+    }
+
+    #[inline]
+    fn check<T: Any>(&self) {
+        // SAFETY: `ptr` points at a live FnExtraBox<_> whose header leads it.
+        if unsafe { self.ptr.as_ref() }.type_id != TypeId::of::<T>() {
+            fn_extra_type_mismatch::<T>();
+        }
+    }
+
+    // Type mismatch = the wiring bug C corrupts memory on: panic loudly.
+    #[inline]
+    pub fn downcast_ref<T: Any>(&self) -> &T {
+        self.check::<T>();
+        // SAFETY: TypeId just verified the pointee is FnExtraBox<T>; shared
+        // borrow of self keeps it live and un-mutated.
+        unsafe { &self.ptr.cast::<FnExtraBox<T>>().as_ref().value }
+    }
+
+    #[inline]
+    pub fn downcast_mut<T: Any>(&mut self) -> &mut T {
+        self.check::<T>();
+        // SAFETY: as downcast_ref, with unique access through &mut self.
+        unsafe { &mut self.ptr.cast::<FnExtraBox<T>>().as_mut().value }
+    }
+}
+
+impl Drop for FnExtra {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` is the live allocation FnExtra::new minted; drop_fn is
+        // its type's dropper; Drop runs once.
+        unsafe {
+            let drop_fn = self.ptr.as_ref().drop_fn;
+            drop_fn(self.ptr.as_ptr());
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn fn_extra_type_mismatch<T>() -> ! {
+    panic!(
+        "fmgr fn_extra: downcast to {} failed",
+        core::any::type_name::<T>()
+    )
 }
 
 #[repr(C)]
@@ -77,14 +165,14 @@ pub unsafe fn thin_arg(fcinfo: NonNull<ThinFcinfo>, argno: usize) -> NullableDat
 }
 
 // Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 32 == 32
-// (result_mcx rides where C keeps flinfo); fcinfo(2) 64 <= 64; FmgrInfo 56
-// vs 48 (fat erased slots +8 each, fn_mcxt dropped; rule-9 cap 128).
+// (result_mcx rides where C keeps flinfo); fcinfo(2) 64 <= 64; FmgrInfo 48
+// == 48 (thin fn_extra; fat fn_expr +8, fn_mcxt dropped; rule-9 cap 128).
 const _: () = {
     assert!(core::mem::size_of::<NullableDatum>() == 16);
     assert!(core::mem::offset_of!(LocalFcinfo<0>, args) <= 32);
     assert!(core::mem::size_of::<LocalFcinfo<0>>() <= 32);
     assert!(core::mem::size_of::<LocalFcinfo<2>>() <= 64);
-    assert!(core::mem::size_of::<FmgrInfo>() <= 56);
+    assert!(core::mem::size_of::<FmgrInfo>() <= 48);
 };
 
 impl<const N: usize> LocalFcinfo<N> {
@@ -320,34 +408,21 @@ impl FmgrInfo {
     }
 
     pub fn set_fn_extra<T: Any>(&mut self, state: T) {
-        self.fn_extra = Some(Box::new(state));
+        self.fn_extra = Some(FnExtra::new(state));
     }
 
     pub fn has_fn_extra(&self) -> bool {
         self.fn_extra.is_some()
     }
 
-    // Downcast mismatch = the wiring bug C corrupts memory on: panic loudly.
+    #[inline]
     pub fn fn_extra_ref<T: Any>(&self) -> Option<&T> {
-        let any = self.fn_extra.as_ref()?;
-        match any.downcast_ref::<T>() {
-            Some(t) => Some(t),
-            None => panic!(
-                "fmgr fn_extra: downcast_ref to {} failed",
-                core::any::type_name::<T>()
-            ),
-        }
+        Some(self.fn_extra.as_ref()?.downcast_ref::<T>())
     }
 
+    #[inline]
     pub fn fn_extra_mut<T: Any>(&mut self) -> Option<&mut T> {
-        let any = self.fn_extra.as_mut()?;
-        match any.downcast_mut::<T>() {
-            Some(t) => Some(t),
-            None => panic!(
-                "fmgr fn_extra: downcast_mut to {} failed",
-                core::any::type_name::<T>()
-            ),
-        }
+        Some(self.fn_extra.as_mut()?.downcast_mut::<T>())
     }
 }
 

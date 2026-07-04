@@ -26,7 +26,7 @@ struct ColumnIOData {
 struct RecordIOData {
     record_type: Oid,
     record_typmod: i32,
-    // std Vec justified: rides FmgrInfo.fn_extra (Box<dyn Any>), same
+    // std Vec justified: rides FmgrInfo.fn_extra, same
     // open-set slot the C fn_mcxt allocation fills.
     columns: Vec<Option<ColumnIOData>>,
 }
@@ -365,7 +365,7 @@ struct RecordCompareData {
     record1_typmod: i32,
     record2_type: Oid,
     record2_typmod: i32,
-    // std Vec justified: rides FmgrInfo.fn_extra (Box<dyn Any>), the same
+    // std Vec justified: rides FmgrInfo.fn_extra, the same
     // open-set slot the C fn_mcxt allocation fills.
     columns: Vec<Option<Rc<::typcache::TypeCacheEntry>>>,
 }
@@ -883,7 +883,7 @@ struct ColumnInData {
 struct RecordInData {
     record_type: Oid,
     record_typmod: i32,
-    // std Vec justified: rides FmgrInfo.fn_extra (Box<dyn Any>).
+    // std Vec justified: rides FmgrInfo.fn_extra.
     columns: Vec<Option<ColumnInData>>,
 }
 
@@ -1122,7 +1122,7 @@ struct ColumnRecvData {
 struct RecordRecvData {
     record_type: Oid,
     record_typmod: i32,
-    // std Vec justified: rides FmgrInfo.fn_extra (Box<dyn Any>).
+    // std Vec justified: rides FmgrInfo.fn_extra.
     columns: Vec<Option<ColumnRecvData>>,
 }
 

@@ -929,7 +929,7 @@ fn default_violated(mcx: Mcx<'_>, default_rel: &Relation<'_>) -> Box<PgError> {
 struct ColumnsHashData {
     relid: Oid,
     nkeys: usize,
-    // std Vec justified: rides FmgrInfo.fn_extra (Box<dyn Any>), same
+    // std Vec justified: rides FmgrInfo.fn_extra, same
     // open-set slot the C fn_mcxt allocation fills.
     partcollid: Vec<Oid>,
     partsupfunc: Vec<FmgrInfo>,
