@@ -3154,8 +3154,8 @@ fn label_incrementalsort_with_costsize<'mcx>(
 }
 
 // create_mergejoin_plan + make_mergejoin (createplan.c), JOIN_INNER arm:
-// otherclauses is NIL; the materialize_inner arm is loud (nodeMaterial
-// unported); replace_nestloop_params is dead (param_info always None).
+// otherclauses is NIL; replace_nestloop_params is dead (param_info always
+// None).
 fn create_mergejoin_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -3262,10 +3262,32 @@ fn create_mergejoin_plan<'mcx>(
         );
     }
 
-    assert!(
-        !materialize_inner,
-        "create_mergejoin_plan (createplan.c): materialize_inner; nodeMaterial.c unported"
-    );
+    if materialize_inner {
+        // make_material shielding the inner from mark/restore; costed as
+        // never spilling — cpu_operator_cost per tuple, in sync with
+        // final_cost_mergejoin.
+        let mut tlist = NodeList::nil();
+        for te in inner_plan.as_plan().expect("inner plan").targetlist.iter() {
+            tlist.lappend(mcx, te)?;
+        }
+        let mut mat = Node::build::<types_nodes::plannodes::Material>(mcx)?;
+        mat.plan.targetlist = tlist;
+        mat.plan.qual = NodeList::nil();
+        mat.plan.lefttree = Some(inner_plan);
+        mat.plan.righttree = None;
+        {
+            let inner = inner_plan.as_plan().expect("inner plan");
+            mat.plan.disabled_nodes = inner.disabled_nodes;
+            mat.plan.startup_cost = inner.startup_cost;
+            mat.plan.total_cost =
+                inner.total_cost + crate::gucs::cpu_operator_cost() * inner.plan_rows;
+            mat.plan.plan_rows = inner.plan_rows;
+            mat.plan.plan_width = inner.plan_width;
+            mat.plan.parallel_aware = false;
+            mat.plan.parallel_safe = inner.parallel_safe;
+        }
+        inner_plan = mat.seal();
+    }
 
     let n_clauses = merge_rinfos.len();
     let mut merge_families: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
