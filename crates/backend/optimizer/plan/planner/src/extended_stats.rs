@@ -9,7 +9,7 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{
-    Bitmapset, JoinType, RelId, Relids, RinfoId, SpecialJoinInfo, StatisticExtInfo,
+    JoinType, RelId, Relids, RinfoId, SpecialJoinInfo, StatisticExtInfo,
 };
 
 use crate::relnode::{relids_is_member, relids_is_subset, relids_num_members};
@@ -97,11 +97,7 @@ pub fn get_relation_statistics<'mcx>(
 }
 
 fn clone_relids<'mcx>(run: &PlannerRun<'mcx>, r: &Relids<'mcx>) -> Relids<'mcx> {
-    r.as_ref().map(|b| {
-        let mut words = PgVec::new_in(run.mcx);
-        words.extend_from_slice(&b.words);
-        mcx::box_new_in(run.mcx, Bitmapset { words })
-    })
+    crate::relnode::relids_copy(run.mcx, r)
 }
 
 fn has_stats_of_kind(run: &PlannerRun<'_>, rel: RelId, requiredkind: i8) -> bool {
@@ -319,7 +315,7 @@ fn choose_best_statistics(
                 continue;
             }
             if let Some(b) = ca {
-                for (i, w) in b.words.iter().enumerate() {
+                for (i, w) in b.word_slice().iter().enumerate() {
                     let mut w = *w;
                     while w != 0 {
                         let m = (i * 64) as i32 + w.trailing_zeros() as i32;
@@ -463,7 +459,7 @@ fn mcv_clauselist_selectivity<'mcx>(
 fn bms_member_index(keys: &Relids<'_>, attnum: i16) -> usize {
     let Some(b) = keys else { panic!("mcv_match_expression: empty keys") };
     let mut idx = 0usize;
-    for (i, w) in b.words.iter().enumerate() {
+    for (i, w) in b.word_slice().iter().enumerate() {
         let mut w = *w;
         while w != 0 {
             let m = (i * 64) as i32 + w.trailing_zeros() as i32;
@@ -821,7 +817,7 @@ fn dependencies_clauselist_selectivity<'mcx>(
         }
         let mut nmatched = 0;
         if let Some(b) = &keys {
-            for (i, w) in b.words.iter().enumerate() {
+            for (i, w) in b.word_slice().iter().enumerate() {
                 let mut w = *w;
                 while w != 0 {
                     let m = (i * 64) as i32 + w.trailing_zeros() as i32;
@@ -925,7 +921,7 @@ fn relids_del_member<'mcx>(
 ) -> Relids<'mcx> {
     let cloned = clone_relids(run, r);
     if let Some(mut b) = cloned {
-        if let Some(w) = b.words.get_mut(x as usize / 64) {
+        if let Some(w) = b.word_slice_mut().get_mut(x as usize / 64) {
             *w &= !(1u64 << (x % 64));
         }
         return Some(b);
