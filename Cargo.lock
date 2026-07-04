@@ -10648,9 +10648,11 @@ dependencies = [
  "detoast",
  "elog",
  "execmain_seams",
+ "execscan",
  "exectuples",
  "fmgr_core",
  "format_type",
+ "funcapi",
  "guc_tables",
  "init_small",
  "lsyscache",
@@ -10664,10 +10666,14 @@ dependencies = [
  "planner",
  "readfuncs",
  "rewrite_handler_seams",
+ "rustc-hash",
  "snapmgr",
+ "sql_functions_seams",
  "stack_depth",
  "tcop_dest",
+ "tupdesc",
  "tuplestore",
+ "typcache_seams",
  "types_array",
  "types_core",
  "types_dest",
@@ -10681,6 +10687,19 @@ dependencies = [
  "utility",
  "utility_seams",
  "xact",
+]
+
+[[package]]
+name = "sql_functions_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_portal",
+ "types_slot",
+ "types_tuple",
 ]
 
 [[package]]
@@ -11204,6 +11223,7 @@ dependencies = [
  "pqformat",
  "printtup",
  "spi_seams",
+ "sql_functions_seams",
  "tstore_receiver",
  "types_core",
  "types_dest",

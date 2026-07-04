@@ -1241,6 +1241,7 @@ fn exec_check_plan_output<'mcx>(
 fn expr_type(node: Node<'_>) -> u32 {
     match node.node_tag() {
         NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_Var => node.as_var().unwrap().vartype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
