@@ -1651,3 +1651,111 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 }
+#[derive(Default)]
+pub struct CreateFdwStmt<'mcx> {
+    pub fdwname: Option<&'mcx str>,
+    pub func_options: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterFdwStmt<'mcx> {
+    pub fdwname: Option<&'mcx str>,
+    pub func_options: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct CreateForeignServerStmt<'mcx> {
+    pub servername: Option<&'mcx str>,
+    pub servertype: Option<&'mcx str>,
+    pub version: Option<&'mcx str>,
+    pub fdwname: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterForeignServerStmt<'mcx> {
+    pub servername: Option<&'mcx str>,
+    pub version: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub has_version: bool,
+}
+
+#[derive(Default)]
+pub struct CreateForeignTableStmt<'mcx> {
+    pub base: CreateStmt<'mcx>,
+    pub servername: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct CreateUserMappingStmt<'mcx> {
+    pub user: Option<&'mcx crate::parsenodes::RoleSpec<'mcx>>,
+    pub servername: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterUserMappingStmt<'mcx> {
+    pub user: Option<&'mcx crate::parsenodes::RoleSpec<'mcx>>,
+    pub servername: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropUserMappingStmt<'mcx> {
+    pub user: Option<&'mcx crate::parsenodes::RoleSpec<'mcx>>,
+    pub servername: Option<&'mcx str>,
+    pub missing_ok: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ImportForeignSchemaType {
+    #[default]
+    FDW_IMPORT_SCHEMA_ALL = 0,
+    FDW_IMPORT_SCHEMA_LIMIT_TO = 1,
+    FDW_IMPORT_SCHEMA_EXCEPT = 2,
+}
+
+#[derive(Default)]
+pub struct ImportForeignSchemaStmt<'mcx> {
+    pub server_name: Option<&'mcx str>,
+    pub remote_schema: Option<&'mcx str>,
+    pub local_schema: Option<&'mcx str>,
+    pub list_type: ImportForeignSchemaType,
+    pub table_list: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateFdwStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateFdwStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterFdwStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterFdwStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateForeignServerStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateForeignServerStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterForeignServerStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterForeignServerStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateForeignTableStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateForeignTableStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateUserMappingStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateUserMappingStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterUserMappingStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterUserMappingStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropUserMappingStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropUserMappingStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ImportForeignSchemaStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ImportForeignSchemaStmt;
+}
+
