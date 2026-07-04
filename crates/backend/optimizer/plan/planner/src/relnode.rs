@@ -20,7 +20,20 @@ pub fn setup_simple_rel_arrays<'mcx>(root: &mut PlannerInfo<'mcx>, nrtable: usiz
         root.simple_rte_array
             .push(RangeTblEntryId::Parse { query: root.parse, index: i as u32 });
     }
-    debug_assert!(root.append_rel_list.is_empty());
+    // setup_append_rel_array (relnode.c): pre-planning appendrels (UNION ALL
+    // pull-up) index by child relid; inheritance expansion appends its own.
+    root.append_rel_array.clear();
+    if !root.append_rel_list.is_empty() {
+        for _ in 0..size {
+            root.append_rel_array.push(None);
+        }
+        for i in 0..root.append_rel_list.len() {
+            let child = root.append_rel_list[i].child_relid as usize;
+            assert!(root.append_rel_array[child].is_none(), "child relation already exists");
+            let a = root.append_rel_list[i].clone();
+            root.append_rel_array[child] = Some(a);
+        }
+    }
 }
 
 // build_simple_rel (relnode.c), parentless arm (inheritance children are the
@@ -97,7 +110,14 @@ pub fn build_simple_rel_child<'mcx>(
     parent: RelId,
 ) -> types_error::PgResult<RelId> {
     let rte = run.rte(relid as usize);
-    debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+    let rtekind = rte.rtekind;
+    let eref_max_attr = match rtekind {
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES
+        | RTEKind::RTE_CTE | RTEKind::RTE_SUBQUERY => {
+            rte.eref.expect("RTE has eref").colnames.len() as i16
+        }
+        _ => 0,
+    };
     let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
@@ -108,12 +128,31 @@ pub fn build_simple_rel_child<'mcx>(
     rel.relids = relids_singleton(mcx, relid);
     rel.consider_startup = root.tuple_fraction > 0.0;
     rel.relid = relid;
-    rel.rtekind = RTEKind::RTE_RELATION as u32;
+    rel.rtekind = rtekind as u32;
     rel.rel_parallel_workers = -1;
     rel.nparts = -1;
     rel.baserestrict_min_security = u32::MAX;
     rel.pathtarget_id = Some(empty_pathtarget_id(root));
     rel.userid = root.rel(parent).userid;
+    match rtekind {
+        RTEKind::RTE_RELATION => {}
+        RTEKind::RTE_RESULT => {
+            rel.min_attr = 0;
+            rel.max_attr = -1;
+        }
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES
+        | RTEKind::RTE_CTE | RTEKind::RTE_SUBQUERY => {
+            rel.min_attr = 0;
+            rel.max_attr = eref_max_attr;
+            let span = (rel.max_attr - rel.min_attr + 1) as usize;
+            rel.attr_widths = mcx::vec_from_elem_in(mcx, 0i32, span);
+            rel.attr_needed = mcx::PgVec::new_in(mcx);
+            for _ in 0..span {
+                rel.attr_needed.push(None);
+            }
+        }
+        other => panic!("build_simple_rel (relnode.c): child rtekind {other:?}"),
+    }
     rel.parent = Some(parent);
     let top = root.rel(parent).top_parent.unwrap_or(parent);
     rel.top_parent = Some(top);
@@ -129,7 +168,9 @@ pub fn build_simple_rel_child<'mcx>(
     let id = root.alloc_rel(rel);
     run.root.simple_rel_array[relid as usize] = Some(id);
 
-    crate::plancat::get_relation_info(run, rte.relid, rte.inh, id)?;
+    if rtekind == RTEKind::RTE_RELATION {
+        crate::plancat::get_relation_info(run, rte.relid, rte.inh, id)?;
+    }
 
     let appinfo = run.root.append_rel_array[relid as usize]
         .clone()

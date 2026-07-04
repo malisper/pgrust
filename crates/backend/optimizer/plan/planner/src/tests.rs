@@ -4463,8 +4463,9 @@ mod setops {
         assert_eq!(a.appendplans.nth(0).node_tag(), NodeTag::T_Result);
         assert_eq!(a.appendplans.nth(1).node_tag(), NodeTag::T_Result);
         assert_eq!(a.plan.plan_rows, 2.0);
-        // Parent rtable (2 subquery RTEs) + each child's RTE_RESULT.
-        assert_eq!(stmt.rtable.len(), 4);
+        // flatten_simple_union_all: 2 leaf RTEs + the leftmost-leaf copy +
+        // each pulled-up leaf's RTE_RESULT (C 18.3 lays out the same 5).
+        assert_eq!(stmt.rtable.len(), 5);
         let c0 = a.appendplans.nth(0).as_result().unwrap();
         assert!(c0.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_const().is_some());
     }

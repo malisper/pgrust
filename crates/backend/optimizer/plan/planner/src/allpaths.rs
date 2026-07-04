@@ -653,13 +653,15 @@ pub(crate) fn add_paths_to_append_rel(
         }
         // generate_orderedappend_paths / parameterized appends: without
         // add_child_rel_equivalences child index paths never carry pathkeys,
-        // so a MergeAppend C might pick is invisible here — stay loud when
-        // ordering is requested and a child has indexes to order by.
-        if !run.root.query_pathkeys.is_empty() {
+        // so a MergeAppend C might pick is invisible here — stay loud when a
+        // requested pathkey maps onto a child index's leading column.
+        if !run.root.query_pathkeys.is_empty()
+            && !run.root.rel(childrel).indexlist.is_empty()
+        {
             assert!(
-                run.root.rel(childrel).indexlist.is_empty(),
-                "generate_orderedappend_paths (allpaths.c): indexed child under \
-                 query_pathkeys; MergeAppend/child-EC lane"
+                !child_index_could_order(run, rel, childrel),
+                "generate_orderedappend_paths (allpaths.c): query pathkey maps to a \
+                 child index leading column; MergeAppend/child-EC lane"
             );
         }
     }
@@ -671,6 +673,46 @@ pub(crate) fn add_paths_to_append_rel(
         add_path(run, rel, pid);
     }
     Ok(())
+}
+
+// Overapproximates C's MergeAppend opportunity (opfamily/direction ignored —
+// louder than C ever diverges, never quieter): a query pathkey EC member that
+// is a parent Var whose child translation is the leading column of some child
+// index.
+fn child_index_could_order(run: &PlannerRun<'_>, rel: RelId, childrel: RelId) -> bool {
+    let parent_rti = run.root.rel(rel).relid as i32;
+    let child_rti = run.root.rel(childrel).relid;
+    let Some(appinfo) = run.root.append_rel_array.get(child_rti as usize).and_then(|a| a.as_ref())
+    else {
+        return true;
+    };
+    for pk in run.root.query_pathkeys.iter() {
+        let Some(ec) = pk.pk_eclass else { continue };
+        for &emid in run.root.ec(ec).ec_members.iter() {
+            let em = run.root.em(emid);
+            let expr = *run.root.expr_node(em.em_expr);
+            let Some(v) = expr.as_var() else { continue };
+            if v.varlevelsup != 0 || v.varno != parent_rti || v.varattno <= 0 {
+                continue;
+            }
+            let Some(&tid) = appinfo.translated_vars.get(v.varattno as usize - 1) else {
+                continue;
+            };
+            if tid == types_pathnodes::NodeId::default() {
+                continue;
+            }
+            let Some(cv) = run.root.expr_node(tid).as_var() else { continue };
+            if cv.varno != child_rti as i32 {
+                continue;
+            }
+            for index in run.root.rel(childrel).indexlist.iter() {
+                if index.indexkeys.first() == Some(&(cv.varattno as i32)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // accumulate_append_subpath (allpaths.c), non-parallel arm: flatten nested
