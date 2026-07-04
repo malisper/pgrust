@@ -1305,13 +1305,41 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
             let nt = node.as_null_test().unwrap();
-            if nt.argisrow {
-                unported("EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL");
-            }
             init_expr_rec(nt.arg.expect("NullTest.arg"), state, mcx, out, agg, params, sub)?;
-            let step = match nt.nulltesttype {
-                NullTestType::IS_NULL => Step::NullTestIsNull { out },
-                NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
+            let step = if nt.argisrow {
+                use crate::steps::RowNullState;
+                let rn_layout = core::alloc::Layout::new::<RowNullState>();
+                let rn: NonNull<RowNullState> =
+                    mcx.allocate(rn_layout).map_err(|_| mcx.oom(rn_layout.size()))?.cast();
+                // SAFETY: fresh exact-layout allocation; the compile mcx
+                // outlives every eval of this step, so the 'static restamp
+                // never escapes it.
+                unsafe {
+                    rn.as_ptr().write(RowNullState {
+                        tup_type: ::types_core::InvalidOid,
+                        tup_typmod: -1,
+                        desc: None,
+                        mcx: core::mem::transmute::<Mcx<'mcx>, Mcx<'static>>(mcx),
+                    })
+                };
+                let frame_ix = state.frames.len() as u32;
+                let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+                state
+                    .frames
+                    .try_reserve(1)
+                    .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+                state.frames.push(frame);
+                match nt.nulltesttype {
+                    NullTestType::IS_NULL => Step::NullTestRowIsNull { rn, frame: frame_ix, out },
+                    NullTestType::IS_NOT_NULL => {
+                        Step::NullTestRowIsNotNull { rn, frame: frame_ix, out }
+                    }
+                }
+            } else {
+                match nt.nulltesttype {
+                    NullTestType::IS_NULL => Step::NullTestIsNull { out },
+                    NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
+                }
             };
             push_step(state, mcx, step)
         }
@@ -2458,7 +2486,10 @@ fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
         | Step::BoolOrStepFirst { jumpdone, .. }
         | Step::BoolOrStep { jumpdone, .. }
         | Step::SbsrefSubscripts { jumpdone, .. }
-        | Step::FuncStrict2Qual { jumpdone, .. } => Some(jumpdone),
+        | Step::FuncStrict2Qual { jumpdone, .. }
+        | Step::FuncStrict2QualThin { jumpdone, .. }
+        | Step::NotDistinctQual { jumpdone, .. }
+        | Step::NotDistinctQualThin { jumpdone, .. } => Some(jumpdone),
         Step::AggStrictInputCheck { jumpnull, .. }
         | Step::AggStrictInputCheck1 { jumpnull, .. } => Some(jumpnull),
         _ => None,
@@ -2481,16 +2512,57 @@ fn arg_index_of(call: &FuncCall, out: OutRef) -> Option<u8> {
     }
 }
 
+// Thin-ABI carrier when the resolved fn has a referee'd thin twin.
+fn thin_call(call: &FuncCall) -> Option<crate::steps::CallThin> {
+    // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
+    let fl = unsafe { call.flinfo.as_ref() };
+    let f = fmgr_core::fmgr_thin_builtin(fl, call.nargs as i16)?;
+    Some(crate::steps::CallThin { fcinfo: call.fcinfo, f })
+}
+
+fn thin2(call: &FuncCall) -> Option<crate::steps::CallThin> {
+    debug_assert!(call.nargs == 2);
+    thin_call(call)
+}
+
+fn thin_single(step: &Step) -> Option<Step> {
+    match step {
+        Step::FuncExprStrict1 { call, out } => {
+            Some(Step::FuncExprStrict1Thin { call: thin_call(call)?, out: *out })
+        }
+        Step::FuncExprStrict2 { call, out } => {
+            Some(Step::FuncExprStrict2Thin { call: thin_call(call)?, out: *out })
+        }
+        Step::AggTransStrictByValIndirect { call, base, transno } => {
+            Some(Step::AggTransStrictByValIndirectThin {
+                call: thin_call(call)?,
+                base: *base,
+                transno: *transno,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
     match (a, b) {
         (Step::ScanVar { attnum, vartype, out }, Step::FuncExprStrict2 { call, out: fout }) => {
             let argno = arg_index_of(call, *out)?;
-            Some(Step::ScanVarFuncStrict2 {
-                attnum: *attnum,
-                vartype: *vartype,
-                argno,
-                call: (*call).into(),
-                out: *fout,
+            Some(match thin2(call) {
+                Some(c) => Step::ScanVarFuncStrict2Thin {
+                    attnum: *attnum,
+                    vartype: *vartype,
+                    argno,
+                    call: c,
+                    out: *fout,
+                },
+                None => Step::ScanVarFuncStrict2 {
+                    attnum: *attnum,
+                    vartype: *vartype,
+                    argno,
+                    call: (*call).into(),
+                    out: *fout,
+                },
             })
         }
         (
@@ -2501,28 +2573,60 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
                 return None;
             }
             let argno = arg_index_of(call2, *out1)?;
-            Some(Step::FuncFuncStrict2 {
-                call1: (*call1).into(),
-                argno,
-                call2: (*call2).into(),
-                out: *fout,
+            Some(match (thin2(call1), thin2(call2)) {
+                (Some(c1), Some(c2)) => {
+                    Step::FuncFuncStrict2Thin { call1: c1, argno, call2: c2, out: *fout }
+                }
+                _ => Step::FuncFuncStrict2 {
+                    call1: (*call1).into(),
+                    argno,
+                    call2: (*call2).into(),
+                    out: *fout,
+                },
             })
         }
         (Step::FuncExprStrict2 { call, out }, Step::Qual { jumpdone }) => {
-            Some(Step::FuncStrict2Qual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
+            Some(match thin2(call) {
+                Some(c) => {
+                    Step::FuncStrict2QualThin { call: c, jumpdone: *jumpdone, out: *out }
+                }
+                None => Step::FuncStrict2Qual {
+                    call: (*call).into(),
+                    jumpdone: *jumpdone,
+                    out: *out,
+                },
+            })
         }
         (Step::OuterVar { attnum, vartype, out }, Step::NotDistinct { call, out: fout }) => {
             let argno = arg_index_of(call, *out)?;
-            Some(Step::OuterVarNotDistinct {
-                attnum: *attnum,
-                vartype: *vartype,
-                argno,
-                call: (*call).into(),
-                out: *fout,
+            Some(match thin2(call) {
+                Some(c) => Step::OuterVarNotDistinctThin {
+                    attnum: *attnum,
+                    vartype: *vartype,
+                    argno,
+                    call: c,
+                    out: *fout,
+                },
+                None => Step::OuterVarNotDistinct {
+                    attnum: *attnum,
+                    vartype: *vartype,
+                    argno,
+                    call: (*call).into(),
+                    out: *fout,
+                },
             })
         }
         (Step::NotDistinct { call, out }, Step::Qual { jumpdone }) if call.nargs == 2 => {
-            Some(Step::NotDistinctQual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
+            Some(match thin2(call) {
+                Some(c) => {
+                    Step::NotDistinctQualThin { call: c, jumpdone: *jumpdone, out: *out }
+                }
+                None => Step::NotDistinctQual {
+                    call: (*call).into(),
+                    jumpdone: *jumpdone,
+                    out: *out,
+                },
+            })
         }
         (
             Step::OuterVar { attnum, vartype, out },
@@ -2558,14 +2662,24 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
 pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     let len = state.steps.len();
     if len < 3 {
+        for s in state.steps.iter_mut() {
+            if let Some(t) = thin_single(s) {
+                *s = t;
+            }
+        }
         return;
     }
-    if !state
+    let has_pair = state
         .steps
         .as_slice()
         .windows(2)
-        .any(|w| try_fuse(&w[0], &w[1]).is_some())
-    {
+        .any(|w| try_fuse(&w[0], &w[1]).is_some());
+    if !has_pair {
+        for s in state.steps.iter_mut() {
+            if let Some(t) = thin_single(s) {
+                *s = t;
+            }
+        }
         return;
     }
     let mcx = *state.steps.allocator();
@@ -2591,7 +2705,7 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
                 continue;
             }
         }
-        out.push(steps[i]);
+        out.push(thin_single(&steps[i]).unwrap_or(steps[i]));
         i += 1;
     }
     debug_assert_eq!(map.len(), len);
@@ -2685,12 +2799,22 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
             Step::AggPlainTransByVal { call, pergroup }
                 if matches!(steps[1], Step::DoneNoReturn) =>
             {
-                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: false }
+                match thin_call(call) {
+                    Some(c) => {
+                        Kernel::AggTransByValThin { call: c, pergroup: *pergroup, strict: false }
+                    }
+                    None => Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: false },
+                }
             }
             Step::AggPlainTransStrictByVal { call, pergroup }
                 if matches!(steps[1], Step::DoneNoReturn) =>
             {
-                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true }
+                match thin_call(call) {
+                    Some(c) => {
+                        Kernel::AggTransByValThin { call: c, pergroup: *pergroup, strict: true }
+                    }
+                    None => Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true },
+                }
             }
             _ => match (var_src(&steps[0]), assign_var_src(&steps[0])) {
                 (Some((src, attnum, out)), _) if state.is_result(out) => {

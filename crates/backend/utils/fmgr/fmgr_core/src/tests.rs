@@ -460,3 +460,51 @@ mod wire_round_trip {
         }
     }
 }
+
+#[test]
+fn thin_tables_sorted_and_refereed() {
+    for t in THIN_TABLES {
+        for w in t.windows(2) {
+            assert!(w[0].foid < w[1].foid, "thin table not oid-ascending at {}", w[1].foid);
+        }
+        for e in *t {
+            let b = fmgr_isbuiltin(e.foid).expect("thin row without builtin row");
+            assert_eq!(b.nargs, e.nargs, "thin arity mismatch ({})", e.foid);
+            assert_eq!(b.func as usize, e.func as usize, "thin referee mismatch ({})", e.foid);
+        }
+    }
+    let f = fmgr_info(177).unwrap();
+    assert!(fmgr_thin_builtin(&f, 2).is_some());
+    assert!(fmgr_thin_builtin(&f, 1).is_none(), "arity mismatch must not get a thin twin");
+    let mut g = fmgr_info(177).unwrap();
+    g.fn_addr = int4pl_body;
+    assert!(fmgr_thin_builtin(&g, 2).is_none(), "diverging fn_addr must not get a thin twin");
+    assert!(fmgr_thin_builtin(&fmgr_info(65).unwrap(), 2).is_some());
+    assert!(fmgr_thin_builtin(&fmgr_info(1219).unwrap(), 1).is_some(), "int8inc thin row");
+}
+
+#[test]
+fn thin_twin_matches_wrapper() {
+    for (oid, a, b) in [(177u32, 40i32, 2i32), (65, 7, 7), (66, -3, 4), (154, 40, 8)] {
+        let mut f = fmgr_info(oid).unwrap();
+        let thin = fmgr_thin_builtin(&f, 2).unwrap();
+        let mut fcinfo = LocalFcinfo::<2>::fresh(0);
+        fcinfo.set_arg(0, Datum::from_i32(a));
+        fcinfo.set_arg(1, Datum::from_i32(b));
+        let want = f.invoke(&mut fcinfo).unwrap();
+        assert!(!fcinfo.isnull);
+        // SAFETY: live 2-arg image; thin contract per the registry.
+        let got = unsafe { thin(core::ptr::NonNull::from(&mut fcinfo).cast()) }.unwrap();
+        assert_eq!(want.as_usize(), got.as_usize(), "oid {oid}");
+    }
+    // Error surface: int4pl overflow through both ABIs.
+    let mut f = fmgr_info(177).unwrap();
+    let thin = fmgr_thin_builtin(&f, 2).unwrap();
+    let mut fcinfo = LocalFcinfo::<2>::fresh(0);
+    fcinfo.set_arg(0, Datum::from_i32(i32::MAX));
+    fcinfo.set_arg(1, Datum::from_i32(1));
+    let e1 = f.invoke(&mut fcinfo).unwrap_err();
+    // SAFETY: as above.
+    let e2 = unsafe { thin(core::ptr::NonNull::from(&mut fcinfo).cast()) }.unwrap_err();
+    assert_eq!(e1.sqlstate(), e2.sqlstate());
+}
