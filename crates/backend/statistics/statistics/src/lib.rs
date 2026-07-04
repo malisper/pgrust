@@ -499,7 +499,9 @@ pub fn build_sorted_items<'mcx>(
     }
     let store = ItemStore { values, isnull, width };
     sortitem::pg_qsort(&mut items, |a, b| store.compare(mss, *a, *b));
-    // Detoasted images live in the bump arena until context teardown.
+    // Detoasted images ride mcx until teardown; from ANALYZE this is an
+    // exact-accounting Aset that is dropped, never reset (reset would trip
+    // the leak assert on these forgotten bytes).
     core::mem::forget(keepalive);
     Ok(Some((items, store)))
 }

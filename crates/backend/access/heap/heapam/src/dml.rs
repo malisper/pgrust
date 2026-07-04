@@ -339,7 +339,7 @@ pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'
     heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0, None)
 }
 
-const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
 const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
 const XLH_INSERT_LAST_IN_MULTI: u8 = 1 << 1;
 const SizeOfHeapMultiInsert: usize = 4;

@@ -1287,3 +1287,103 @@ fn index_delete_sort_orders_by_block_then_offset() {
         .collect();
     assert_eq!(got, vec![(0, 4), (0, 5), (1, 1), (1, 2), (7, 1), (7, 3), (2048, 9)]);
 }
+
+static TOAST_INIT: Once = Once::new();
+static TOAST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+// Stamped small copy in the caller's context (copy-from-toast-readback shape).
+fn install_toast_seam() {
+    TOAST_INIT.call_once(|| {
+        heaptoast_seams::heap_toast_insert_or_update::set(|mcx, _rel, newtup, _oldtup, _opts| {
+            TOAST_CALLS.fetch_add(1, Ordering::Relaxed);
+            let mut t = ::heaptuple::HeapTuple::alloc_zeroed(mcx, 28)?;
+            // SAFETY: 24 header bytes from the live stamped source; 28B image.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    newtup.header_ptr(),
+                    t.image_mut().as_mut_ptr(),
+                    24,
+                );
+            }
+            t.image_mut()[24..28].copy_from_slice(&0x7A7A7A7Ai32.to_ne_bytes());
+            t.as_tuple_mut().t_tableOid = newtup.t_tableOid;
+            Ok(Some(t))
+        });
+    });
+}
+
+fn heap_slot_with<'mcx>(
+    mcx: Mcx<'mcx>,
+    img: &[u8],
+) -> ::types_slot::SlotData<'mcx> {
+    use ::types_slot::TupleSlotKind;
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(int4_tupdesc(mcx)));
+    exectuples::exec_store_heap_tuple(&mut slot, mcx, make_writable_tuple(img));
+    slot
+}
+
+#[test]
+fn multi_insert_places_stamped_tuples() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 41));
+    let mut s2 = heap_slot_with(mcx, &tuple_image(0, 0, 42));
+    let mut slots = [&mut s1, &mut s2];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, 0, None).unwrap();
+
+    for (i, val) in [(1u16, 41i32), (2, 42)] {
+        let stored = page_tuple_at(oid, 0, i);
+        assert_eq!(stored.t_data().xmin_raw(), FAKE_XID, "tuple {i} xmin");
+        assert_eq!(stored.t_data().raw_command_id(), 7);
+        // SAFETY: int4 payload at t_hoff within the placed image.
+        let got = unsafe { stored.header_ptr().add(24).cast::<i32>().read_unaligned() };
+        assert_eq!(got, val);
+        assert_eq!(stored.t_self, ItemPointerData::new(0, i));
+    }
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1, "one MULTI_INSERT record");
+    assert_eq!(recs[0].0 & !dml::XLOG_HEAP_INIT_PAGE, dml::XLOG_HEAP2_MULTI_INSERT);
+    quiesced();
+}
+
+// Drop before RelationPutHeapTuple clobbers xmin (copy-from-toast-readback).
+#[test]
+fn multi_insert_toast_copy_survives_to_placement() {
+    install_dml_seams();
+    install_toast_seam();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut fat = tuple_image(0, 0, 33);
+    fat.resize(2100, 0); // > TOAST_TUPLE_THRESHOLD (2032)
+    let calls0 = TOAST_CALLS.load(Ordering::Relaxed);
+    let mut s1 = heap_slot_with(mcx, &fat);
+    let mut s2 = heap_slot_with(mcx, &tuple_image(0, 0, 44));
+    let mut slots = [&mut s1, &mut s2];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, 0, None).unwrap();
+    assert_eq!(TOAST_CALLS.load(Ordering::Relaxed), calls0 + 1);
+
+    let toasted = page_tuple_at(oid, 0, 1);
+    assert_eq!(toasted.t_data().xmin_raw(), FAKE_XID, "toast copy xmin intact at placement");
+    assert_eq!(toasted.t_len, 28, "replacement image placed, not the source");
+    // SAFETY: sentinel payload at t_hoff within the placed image.
+    let got = unsafe { toasted.header_ptr().add(24).cast::<i32>().read_unaligned() };
+    assert_eq!(got, 0x7A7A7A7A);
+
+    let plain = page_tuple_at(oid, 0, 2);
+    assert_eq!(plain.t_data().xmin_raw(), FAKE_XID);
+    quiesced();
+}

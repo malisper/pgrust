@@ -478,6 +478,9 @@ fn spg_inner_test(
         }
         if !inner_out.traversalValues.is_null() {
             have_traversal = true;
+            // These datums outlive tempCxt.reset(): the opclass must allocate
+            // them in traversalMemoryContext (C contract), never the armed
+            // per-call context. No shipped opclass sets them yet.
             // SAFETY: as above.
             traversal_values.extend_from_slice(unsafe {
                 core::slice::from_raw_parts(inner_out.traversalValues, out_n)

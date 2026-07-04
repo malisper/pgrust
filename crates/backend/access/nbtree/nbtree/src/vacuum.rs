@@ -6,24 +6,24 @@
 //! skipped (C's own XXX: EB_LOCK_FIRST already closes the race); ereport
 //! DEBUG/LOG chatter elided.
 
-use ::bufmgr_seams::{self as bufmgr, BufferPin};
-use ::mcx::{Mcx, MemoryContext, PgVec};
-use ::types_core::{BlockNumber, ForkNumber, OffsetNumber};
-use ::types_error::PgResult;
-use ::types_nbtree::{
+use bufmgr_seams::{self as bufmgr, BufferPin};
+use mcx::{Mcx, MemoryContext, PgVec};
+use types_core::{BlockNumber, ForkNumber, OffsetNumber};
+use types_error::PgResult;
+use types_nbtree::{
     BTCycleId, IndexBulkDeleteResult, BTP_SPLIT_END, BTREE_METAPAGE, P_FIRSTDATAKEY, P_ISDELETED,
     P_ISHALFDEAD, P_ISLEAF, P_NONE, P_RIGHTMOST,
 };
-use ::types_rel::Relation;
-use ::types_storage::buf::BufferAccessStrategy;
-use ::types_storage::bufpage::MaxIndexTuplesPerPage;
-use ::types_storage::ReadBufferMode;
-use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
+use types_rel::Relation;
+use types_storage::buf::BufferAccessStrategy;
+use types_storage::bufpage::MaxIndexTuplesPerPage;
+use types_storage::ReadBufferMode;
+use types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
 
 use crate::itup::{
-    bt_tuple_get_nposting, bt_tuple_get_posting_n, bt_tuple_get_posting_offset,
-    bt_tuple_is_pivot, bt_tuple_is_posting, bt_tuple_set_posting, copy_index_tuple,
-    maxalign, set_t_info, t_info, t_tid, ITup, ItupBuf, INDEX_SIZE_MASK,
+    bt_tuple_get_nposting, bt_tuple_get_posting_n, bt_tuple_get_posting_offset, bt_tuple_is_pivot,
+    bt_tuple_is_posting, bt_tuple_set_posting, copy_index_tuple, maxalign, set_t_info, t_info,
+    t_tid, ITup, ItupBuf, INDEX_SIZE_MASK,
 };
 use crate::page::{
     bt_checkpage, bt_lockbuf, bt_page_is_recyclable, bt_relbuf, bt_upgradelockbufcleanup,
@@ -400,56 +400,59 @@ unsafe fn btreevacuumposting<'s>(
 /// _bt_update_posting (nbtdedup.c): replace `vacposting.itup` with the image
 /// lacking the deleted TIDs.
 pub(crate) fn bt_update_posting<'s>(scx: Mcx<'s>, vacposting: &mut VacPosting<'s>) -> PgResult<()> {
-    let orig = vacposting.itup.as_ptr();
-    // SAFETY: owned image captured by btreevacuumposting.
-    unsafe {
-        let norig = bt_tuple_get_nposting(orig);
-        let nhtids = norig - vacposting.deletetids.len();
-        debug_assert!(nhtids > 0 && nhtids < norig);
+    // orig dangles at the itup swap: its block ends first.
+    let itup = {
+        let orig = vacposting.itup.as_ptr();
+        // SAFETY: owned image captured by btreevacuumposting.
+        unsafe {
+            let norig = bt_tuple_get_nposting(orig);
+            let nhtids = norig - vacposting.deletetids.len();
+            debug_assert!(nhtids > 0 && nhtids < norig);
 
-        let keysize = bt_tuple_get_posting_offset(orig);
-        let newsize = if nhtids > 1 {
-            maxalign(keysize + nhtids * core::mem::size_of::<ItemPointerData>())
-        } else {
-            keysize
-        };
-        debug_assert!(newsize <= INDEX_SIZE_MASK as usize);
-        debug_assert!(newsize == maxalign(newsize));
+            let keysize = bt_tuple_get_posting_offset(orig);
+            let newsize = if nhtids > 1 {
+                maxalign(keysize + nhtids * core::mem::size_of::<ItemPointerData>())
+            } else {
+                keysize
+            };
+            debug_assert!(newsize <= INDEX_SIZE_MASK as usize);
+            debug_assert!(newsize == maxalign(newsize));
 
-        let mut itup = ItupBuf::with_size(scx, newsize)?;
-        core::ptr::copy_nonoverlapping(orig, itup.as_mut_ptr(), keysize);
-        let info = (t_info(itup.as_ptr()) & !INDEX_SIZE_MASK) | newsize as u16;
-        set_t_info(itup.as_mut_ptr(), info);
+            let mut itup = ItupBuf::with_size(scx, newsize)?;
+            core::ptr::copy_nonoverlapping(orig, itup.as_mut_ptr(), keysize);
+            let info = (t_info(itup.as_ptr()) & !INDEX_SIZE_MASK) | newsize as u16;
+            set_t_info(itup.as_mut_ptr(), info);
 
-        let htids_off = if nhtids > 1 {
-            bt_tuple_set_posting(itup.as_mut_ptr(), nhtids as u16, keysize);
-            keysize
-        } else {
-            set_t_info(
-                itup.as_mut_ptr(),
-                t_info(itup.as_ptr()) & !::types_nbtree::INDEX_ALT_TID_MASK,
-            );
-            0
-        };
+            let htids_off = if nhtids > 1 {
+                bt_tuple_set_posting(itup.as_mut_ptr(), nhtids as u16, keysize);
+                keysize
+            } else {
+                set_t_info(
+                    itup.as_mut_ptr(),
+                    t_info(itup.as_ptr()) & !::types_nbtree::INDEX_ALT_TID_MASK,
+                );
+                0
+            };
 
-        let mut ui = 0usize;
-        let mut d = 0usize;
-        for i in 0..norig {
-            if d < vacposting.deletetids.len() && vacposting.deletetids[d] as usize == i {
-                d += 1;
-                continue;
+            let mut ui = 0usize;
+            let mut d = 0usize;
+            for i in 0..norig {
+                if d < vacposting.deletetids.len() && vacposting.deletetids[d] as usize == i {
+                    d += 1;
+                    continue;
+                }
+                let tid = bt_tuple_get_posting_n(orig, i);
+                itup.as_mut_ptr()
+                    .add(htids_off + ui * core::mem::size_of::<ItemPointerData>())
+                    .cast::<ItemPointerData>()
+                    .write_unaligned(tid);
+                ui += 1;
             }
-            let tid = bt_tuple_get_posting_n(orig, i);
-            itup.as_mut_ptr()
-                .add(htids_off + ui * core::mem::size_of::<ItemPointerData>())
-                .cast::<ItemPointerData>()
-                .write_unaligned(tid);
-            ui += 1;
+            debug_assert!(ui == nhtids);
+            debug_assert!(d == vacposting.deletetids.len());
+            itup
         }
-        debug_assert!(ui == nhtids);
-        debug_assert!(d == vacposting.deletetids.len());
-
-        vacposting.itup = itup;
-    }
+    };
+    vacposting.itup = itup;
     Ok(())
 }

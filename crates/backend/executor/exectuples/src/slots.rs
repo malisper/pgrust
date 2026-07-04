@@ -68,6 +68,8 @@ unsafe fn free_minimal_image(mcx: Mcx<'_>, p: NonNull<MinimalTupleData>) {
 // Ownership transfer into the slot: leak the owner, keep the raw view; the
 // SHOULDFREE flag records the free obligation (C's shouldFree bool).
 fn forget_heap(t: HeapTuple<'_>) -> HeapTupleData<'_> {
+    // free_heap_image frees by t_len: a t_len shrink desyncs the layout.
+    debug_assert_eq!(t.alloc_size(), t.t_len);
     // SAFETY: same live image; the owner is forgotten so the view is unique.
     let view =
         unsafe { HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid) };
