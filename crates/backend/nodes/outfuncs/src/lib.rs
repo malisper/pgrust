@@ -88,6 +88,18 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_int_list(out, &f.fieldnums);
             w!(out, " :resulttype {}}}", f.resulttype);
         }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            w!(
+                out,
+                "{{ARRAYEXPR :array_typeid {} :array_collid {} :element_typeid {} :elements ",
+                a.array_typeid, a.array_collid, a.element_typeid
+            );
+            out_list(out, &a.elements)?;
+            w!(out, " :multidims ");
+            out_bool(out, a.multidims);
+            w!(out, " :list_start -1 :list_end -1 :location -1}}");
+        }
         NodeTag::T_CaseTestExpr => {
             let c = node.as_case_test_expr().expect("CaseTestExpr");
             w!(

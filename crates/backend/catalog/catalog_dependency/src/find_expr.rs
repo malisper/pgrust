@@ -192,6 +192,20 @@ fn walker<'w, 'mcx: 'w>(
             }
             walker(relab.arg, context)
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let ac = node.as_array_coerce_expr().unwrap();
+            context.add(TYPE_RELATION_ID, ac.resulttype, 0);
+            if ac.resultcollid != InvalidOid && ac.resultcollid != DEFAULT_COLLATION_OID {
+                context.add(CollationRelationId, ac.resultcollid, 0);
+            }
+            walker(ac.arg, context)?;
+            walk_opt(ac.elemexpr, context)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let cvt = node.as_convert_rowtype_expr().unwrap();
+            context.add(TYPE_RELATION_ID, cvt.resulttype, 0);
+            walker(cvt.arg, context)
+        }
         // C has no find_expr_references_walker case for SQLValueFunction: it
         // falls through to expression_tree_walker as a leaf (built-in pinned
         // result types; no dependency recorded).
