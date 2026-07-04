@@ -1034,22 +1034,89 @@ fn agg_arm<'mcx>(
 ) -> ProcResult {
     let aps = &mut **aps;
     let AggPlanState { agg, outer } = aps;
-    if let PlanStateNode::SeqScan(ss) = outer {
-        if seq_agg_fusible(agg, ss, estate)
-            && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
-        {
-            ::nodeseqscan::seq_scan_batch_soa_prepare(
-                ss,
-                estate,
-                fused_soa_prefix(agg, ss).unwrap_or(0),
-                false,
-            );
-            let outer_slot = ss.ss.ss_ScanTupleSlot;
-            let src = SeqScanBatchSource { ss, outer_slot };
-            return ::nodeagg::exec_agg_batched(agg, estate, src);
+    match outer {
+        PlanStateNode::SeqScan(ss) => {
+            if seq_agg_fusible(agg, ss, estate)
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+            {
+                ::nodeseqscan::seq_scan_batch_soa_prepare(
+                    ss,
+                    estate,
+                    fused_soa_prefix(agg, ss).unwrap_or(0),
+                    false,
+                );
+                let outer_slot = ss.ss.ss_ScanTupleSlot;
+                let src = SeqScanBatchSource { ss, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
         }
+        PlanStateNode::IndexScan(is) => {
+            if agg_fusible_common(agg, estate)
+                && is.ss.qual.is_none()
+                && is.ss.ps_ProjInfo.is_none()
+                && is.iss_RuntimeKeys.is_empty()
+                && ::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir)
+                && is
+                    .iss_RelationDesc
+                    .as_ref()
+                    .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+            {
+                let outer_slot = is.ss.ss_ScanTupleSlot;
+                let src = IndexScanBatchSource { is, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        PlanStateNode::IndexOnlyScan(ios) => {
+            if agg_fusible_common(agg, estate)
+                && ios.ss.qual.is_none()
+                && ios.ss.ps_ProjInfo.is_none()
+                && ios.ioss_RuntimeKeys.is_empty()
+                && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
+                && ios
+                    .ioss_RelationDesc
+                    .as_ref()
+                    .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+            {
+                let ios = &mut **ios;
+                let outer_slot = ios.ss.ss_ScanTupleSlot;
+                let src = IndexOnlyScanBatchSource { ios, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if agg_fusible_common(agg, estate)
+                && b.scan.ss.qual.is_none()
+                && b.scan.ss.ps_ProjInfo.is_none()
+            {
+                if !b.scan.initialized {
+                    let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
+                    ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
+                }
+                let outer_slot = b.scan.ss.ss_ScanTupleSlot;
+                let src = BitmapScanBatchSource { bhs: &mut b.scan, outer_slot };
+                return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
+}
+
+// Shared gate for the fused agg-over-index/bitmap arms: uninstrumented
+// (Instrumented children are a different variant), forward, no EPQ, MVCC
+// snapshot, batch-drainable agg shape.
+fn agg_fusible_common<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    !estate.es_epq_active
+        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        && estate
+            .es_snapshot
+            .as_deref()
+            .is_some_and(::types_snapshot::IsMVCCSnapshot)
+        && ::nodeagg::agg_batch_drainable(agg)
 }
 
 // Fused agg-over-seqscan page-batch drive (upstream batch executor, CF 6176):
@@ -1121,6 +1188,100 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     #[inline]
     fn has_qual(&self) -> bool {
         self.ss.ss.qual.is_some()
+    }
+}
+
+struct IndexScanBatchSource<'a, 'mcx> {
+    is: &'a mut ::nodeindexscan::IndexScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for IndexScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeindexscan::index_scan_next_tidrun(self.is, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeindexscan::index_scan_batch_fetch(self.is, estate, i)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+
+    // Visibility resolves in fetch_tuple.
+    #[inline]
+    fn storeless_ok(&self) -> bool {
+        false
+    }
+}
+
+struct IndexOnlyScanBatchSource<'a, 'mcx> {
+    ios: &'a mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for IndexOnlyScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeindexonlyscan::index_only_scan_batch_next(self.ios, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, _i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeindexonlyscan::index_only_scan_batch_store(self.ios, estate)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    // next_batch returns visible rows only: the storeless drain is sound.
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+}
+
+struct BitmapScanBatchSource<'a, 'mcx> {
+    bhs: &'a mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for BitmapScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodebitmapheapscan::bitmap_scan_next_pagebatch(self.bhs, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodebitmapheapscan::bitmap_scan_batch_fetch(self.bhs, estate, i)
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    #[inline]
+    fn has_qual(&self) -> bool {
+        false
+    }
+
+    // Lossy/recheck pages apply bitmapqualorig in fetch_tuple.
+    #[inline]
+    fn storeless_ok(&self) -> bool {
+        false
     }
 }
 

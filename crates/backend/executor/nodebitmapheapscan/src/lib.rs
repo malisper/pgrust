@@ -98,6 +98,72 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
     }
 }
 
+/// Fused agg-over-bitmapscan page-batch drive: stage the next page's visible
+/// tuples; 0 = exhausted. `node.recheck` carries the page's recheck flag.
+pub fn bitmap_scan_next_pagebatch<'mcx>(
+    node: &mut BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<u32> {
+    debug_assert!(node.initialized, "pagebatch before bitmap_table_scan_setup");
+    check_for_interrupts()?;
+    let _ = estate;
+    let scandesc = node
+        .ss
+        .ss_currentScanDesc
+        .as_mut()
+        .expect("bitmap heap scan without a table scan descriptor");
+    let tbm = node.tbm.as_ref().expect("bitmap heap scan without a bitmap");
+    ::tableam::table_scan_bitmap_next_pagebatch(
+        scandesc,
+        tbm,
+        &mut node.tbmiterator,
+        &mut node.recheck,
+        &mut node.stats_lossy_pages,
+        &mut node.stats_exact_pages,
+    )
+}
+
+/// Store staged tuple `i` and apply the page's recheck qual; false = filtered.
+#[inline(always)]
+pub fn bitmap_scan_batch_fetch<'mcx>(
+    node: &mut BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    i: u32,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let slot_id = node.ss.ss_ScanTupleSlot;
+    let scandesc = node
+        .ss
+        .ss_currentScanDesc
+        .as_mut()
+        .expect("bitmap heap scan without a table scan descriptor");
+    ::tableam::table_scan_bitmap_batch_store_slot(mcx, scandesc, i, estate.slot_mut(slot_id));
+    if !node.recheck {
+        return Ok(true);
+    }
+    let ecxt = node.ss.ps_ExprContext;
+    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
+    let passes = {
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+        if let Some(q) = node.bitmapqualorig.as_deref_mut() {
+            // SAFETY: reset-only context, outlives the plan.
+            unsafe { q.arm_result_mcx_raw(per_tuple) };
+        }
+        let mut slots = EvalSlots {
+            scan: Some(estate.slot_mut(slot_id)),
+            inner: None,
+            outer: None,
+        };
+        exec_qual(node.bitmapqualorig.as_deref_mut(), &mut slots)?
+    };
+    estate.ecxt_mut(ecxt).reset();
+    if !passes {
+        exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// `BitmapTableScanSetup` minus MultiExec: the dispatcher passes the bitmap.
 pub fn bitmap_table_scan_setup<'mcx>(
     node: &mut BitmapHeapScanState<'mcx>,
