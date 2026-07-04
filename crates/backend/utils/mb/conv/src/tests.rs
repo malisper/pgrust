@@ -290,12 +290,6 @@ fn non_family_encoding_is_internal_error() {
 }
 
 #[test]
-#[should_panic(expected = "not ported")]
-fn unported_family_member_panics_loudly() {
-    let _ = call(fc_utf8_to_win, PG_UTF8, PG_WIN1250, b"x", false);
-}
-
-#[test]
 fn conv_builtin_lookup() {
     assert_eq!(conv_builtin(4374).unwrap().name, "iso8859_1_to_utf8");
     assert_eq!(conv_builtin(4375).unwrap().name, "utf8_to_iso8859_1");
@@ -303,8 +297,423 @@ fn conv_builtin_lookup() {
     assert_eq!(conv_builtin(4359).unwrap().name, "win_to_utf8");
     assert_eq!(conv_builtin(4372).unwrap().name, "utf8_to_iso8859");
     assert_eq!(conv_builtin(4373).unwrap().name, "iso8859_to_utf8");
+    assert_eq!(conv_builtin(4302).unwrap().name, "koi8r_to_mic");
+    assert_eq!(
+        conv_builtin(4387).unwrap().name,
+        "shift_jis_2004_to_euc_jis_2004"
+    );
+    assert_eq!(CONV_BUILTINS.len(), 84);
     assert!(conv_builtin(1).is_none());
+    assert!(conv_builtin(4350).is_none());
     for w in CONV_BUILTINS.windows(2) {
         assert!(w[0].foid < w[1].foid);
     }
+}
+
+use super::utf8_procs::*;
+use wchar::{
+    PG_BIG5, PG_EUC_CN, PG_EUC_JIS_2004, PG_EUC_JP, PG_EUC_KR, PG_EUC_TW, PG_GB18030, PG_GBK,
+    PG_JOHAB, PG_KOI8R, PG_KOI8U, PG_SHIFT_JIS_2004, PG_SJIS, PG_UHC,
+};
+
+/// Single-byte families: every byte the to-utf8 tree maps must roundtrip
+/// through utf8 back to itself.
+#[test]
+fn single_byte_families_roundtrip_all_mapped_bytes() {
+    let cases: &[(PGFunction, PGFunction, pg_enc)] = &[
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN866),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN874),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1250),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1251),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1253),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1254),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1255),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1256),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1257),
+        (fc_win_to_utf8, fc_utf8_to_win, PG_WIN1258),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN2),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN3),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN4),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN5),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN6),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN7),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN8),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_LATIN10),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_ISO_8859_5),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_ISO_8859_6),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_ISO_8859_7),
+        (fc_iso8859_to_utf8, fc_utf8_to_iso8859, PG_ISO_8859_8),
+        (fc_koi8r_to_utf8, fc_utf8_to_koi8r, PG_KOI8R),
+        (fc_koi8u_to_utf8, fc_utf8_to_koi8u, PG_KOI8U),
+    ];
+    for &(to_utf8, from_utf8, enc) in cases {
+        let mut mapped = 0;
+        for b in 0x80u8..=0xff {
+            let (consumed, utf8) = call(to_utf8, enc, PG_UTF8, &[b], true).unwrap();
+            if consumed == 0 {
+                continue;
+            }
+            mapped += 1;
+            let back = ok(from_utf8, PG_UTF8, enc, &utf8);
+            assert_eq!(back, [b], "enc {enc} byte 0x{b:02x}");
+        }
+        assert!(mapped > 60, "enc {enc}: only {mapped} high bytes mapped");
+    }
+}
+
+/// Double-byte radix families: every verifier-accepted 2-byte code the map
+/// translates must roundtrip.
+#[test]
+fn double_byte_families_roundtrip_all_mapped_codes() {
+    let cases: &[(PGFunction, PGFunction, pg_enc)] = &[
+        (fc_euc_cn_to_utf8, fc_utf8_to_euc_cn, PG_EUC_CN),
+        (fc_euc_kr_to_utf8, fc_utf8_to_euc_kr, PG_EUC_KR),
+        (fc_big5_to_utf8, fc_utf8_to_big5, PG_BIG5),
+        (fc_gbk_to_utf8, fc_utf8_to_gbk, PG_GBK),
+        (fc_uhc_to_utf8, fc_utf8_to_uhc, PG_UHC),
+        (fc_johab_to_utf8, fc_utf8_to_johab, PG_JOHAB),
+        (fc_sjis_to_utf8, fc_utf8_to_sjis, PG_SJIS),
+    ];
+    for &(to_utf8, from_utf8, enc) in cases {
+        let mut mapped = 0usize;
+        let mut asymmetric = 0usize;
+        for b1 in 0x80u16..=0xff {
+            for b2 in 0x00u16..=0xff {
+                let src = [b1 as u8, b2 as u8];
+                if pg_encoding_verifymbchar(enc, &src) != 2 {
+                    continue;
+                }
+                let (consumed, utf8) = call(to_utf8, enc, PG_UTF8, &src, true).unwrap();
+                if consumed != 2 {
+                    continue;
+                }
+                mapped += 1;
+                let (back_consumed, back) = call(from_utf8, PG_UTF8, enc, &utf8, true).unwrap();
+                if back_consumed as usize == utf8.len() && back == src {
+                    continue;
+                }
+                // C maps are not all bijective (e.g. SJIS/BIG5 dual codes);
+                // count rather than fail, and bound the count below.
+                asymmetric += 1;
+            }
+        }
+        assert!(mapped > 5000, "enc {enc}: only {mapped} codes mapped");
+        assert!(
+            asymmetric * 10 <= mapped,
+            "enc {enc}: {asymmetric} asymmetric of {mapped}"
+        );
+    }
+}
+
+#[test]
+fn known_cjk_vectors() {
+    assert_eq!(ok(fc_euc_kr_to_utf8, PG_EUC_KR, PG_UTF8, &[0xb0, 0xa1]), "가".as_bytes());
+    assert_eq!(ok(fc_uhc_to_utf8, PG_UHC, PG_UTF8, &[0xb0, 0xa1]), "가".as_bytes());
+    assert_eq!(ok(fc_big5_to_utf8, PG_BIG5, PG_UTF8, &[0xa4, 0x40]), "一".as_bytes());
+    assert_eq!(ok(fc_gbk_to_utf8, PG_GBK, PG_UTF8, &[0xd6, 0xd0]), "中".as_bytes());
+    assert_eq!(ok(fc_euc_cn_to_utf8, PG_EUC_CN, PG_UTF8, &[0xd6, 0xd0]), "中".as_bytes());
+    assert_eq!(ok(fc_sjis_to_utf8, PG_SJIS, PG_UTF8, &[0x82, 0xa0]), "あ".as_bytes());
+    assert_eq!(ok(fc_euc_jp_to_utf8, PG_EUC_JP, PG_UTF8, &[0xa4, 0xa2]), "あ".as_bytes());
+    assert_eq!(
+        ok(fc_gb18030_to_utf8, PG_GB18030, PG_UTF8, &[0xd6, 0xd0]),
+        "中".as_bytes()
+    );
+    assert_eq!(ok(fc_utf8_to_gbk, PG_UTF8, PG_GBK, "中".as_bytes()), [0xd6, 0xd0]);
+}
+
+#[test]
+fn gb18030_algorithmic_ranges() {
+    // U+10000 is the first algorithmic 4-byte code: 0x90308130.
+    let four = ok(
+        fc_utf8_to_gb18030,
+        PG_UTF8,
+        PG_GB18030,
+        "\u{10000}".as_bytes(),
+    );
+    assert_eq!(four, [0x90, 0x30, 0x81, 0x30]);
+    assert_eq!(
+        ok(fc_gb18030_to_utf8, PG_GB18030, PG_UTF8, &four),
+        "\u{10000}".as_bytes()
+    );
+    // U+0452 -> 0x8130D330 (range table start).
+    let four = ok(fc_utf8_to_gb18030, PG_UTF8, PG_GB18030, "\u{452}".as_bytes());
+    assert_eq!(four, [0x81, 0x30, 0xd3, 0x30]);
+    assert_eq!(
+        ok(fc_gb18030_to_utf8, PG_GB18030, PG_UTF8, &four),
+        "\u{452}".as_bytes()
+    );
+    // U+10FFFF, the top of the linear range.
+    let four = ok(
+        fc_utf8_to_gb18030,
+        PG_UTF8,
+        PG_GB18030,
+        "\u{10FFFF}".as_bytes(),
+    );
+    assert_eq!(four, [0xe3, 0x32, 0x9a, 0x35]);
+    assert_eq!(
+        ok(fc_gb18030_to_utf8, PG_GB18030, PG_UTF8, &four),
+        "\u{10FFFF}".as_bytes()
+    );
+}
+
+#[test]
+fn euc_jis_2004_combined_maps() {
+    // 0xa4f7 <-> U+304B U+309A (first LUmap/ULmap combined row).
+    let utf8 = ok(
+        fc_euc_jis_2004_to_utf8,
+        PG_EUC_JIS_2004,
+        PG_UTF8,
+        &[0xa4, 0xf7],
+    );
+    assert_eq!(utf8, "\u{304B}\u{309A}".as_bytes());
+    assert_eq!(
+        ok(fc_utf8_to_euc_jis_2004, PG_UTF8, PG_EUC_JIS_2004, &utf8),
+        [0xa4, 0xf7]
+    );
+    // Truncated second char of a potential combined pair errors as invalid.
+    let mut src = "\u{304B}".as_bytes().to_vec();
+    src.push(0xe3);
+    let e = err(fc_utf8_to_euc_jis_2004, PG_UTF8, PG_EUC_JIS_2004, &src);
+    assert_eq!(
+        e.sqlstate(),
+        types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+    );
+}
+
+#[test]
+fn shift_jis_2004_combined_roundtrip() {
+    let sjis = ok(
+        fc_utf8_to_shift_jis_2004,
+        PG_UTF8,
+        PG_SHIFT_JIS_2004,
+        "\u{304B}\u{309A}".as_bytes(),
+    );
+    assert_eq!(
+        ok(fc_shift_jis_2004_to_utf8, PG_SHIFT_JIS_2004, PG_UTF8, &sjis),
+        "\u{304B}\u{309A}".as_bytes()
+    );
+}
+
+#[test]
+fn euc_jp_sjis_direct() {
+    use super::euc_jp_and_sjis::{fc_euc_jp_to_sjis, fc_sjis_to_euc_jp};
+    assert_eq!(
+        ok(fc_sjis_to_euc_jp, PG_SJIS, PG_EUC_JP, &[0x82, 0xa0]),
+        [0xa4, 0xa2]
+    );
+    assert_eq!(
+        ok(fc_euc_jp_to_sjis, PG_EUC_JP, PG_SJIS, &[0xa4, 0xa2]),
+        [0x82, 0xa0]
+    );
+    // 1-byte kana: SJIS 0xb1 <-> EUC 0x8e 0xb1.
+    assert_eq!(ok(fc_sjis_to_euc_jp, PG_SJIS, PG_EUC_JP, &[0xb1]), [0x8e, 0xb1]);
+    assert_eq!(ok(fc_euc_jp_to_sjis, PG_EUC_JP, PG_SJIS, &[0x8e, 0xb1]), [0xb1]);
+    // Full JIS X0208 roundtrip through SJIS.
+    let mut count = 0;
+    for c1 in 0xa1u8..=0xf4 {
+        for c2 in 0xa1u8..=0xfe {
+            let euc = [c1, c2];
+            let (consumed, sjis) = call(fc_euc_jp_to_sjis, PG_EUC_JP, PG_SJIS, &euc, true).unwrap();
+            if consumed != 2 {
+                continue;
+            }
+            let (bc, back) = call(fc_sjis_to_euc_jp, PG_SJIS, PG_EUC_JP, &sjis, true).unwrap();
+            if bc as usize == sjis.len() && back == euc {
+                count += 1;
+            }
+        }
+    }
+    assert!(count > 7000, "only {count} X0208 codes roundtrip");
+}
+
+#[test]
+fn euc_jp_sjis_ibm_kanji() {
+    use super::euc_jp_and_sjis::{fc_euc_jp_to_sjis, fc_sjis_to_euc_jp};
+    // First ibmkanji row: NEC 0xEEEF -> SJIS 0xfa40 -> EUC 0x8f 0xf3 0xf3.
+    assert_eq!(
+        ok(fc_sjis_to_euc_jp, PG_SJIS, PG_EUC_JP, &[0xfa, 0x40]),
+        [0x8f, 0xf3, 0xf3]
+    );
+    assert_eq!(
+        ok(fc_euc_jp_to_sjis, PG_EUC_JP, PG_SJIS, &[0x8f, 0xf3, 0xf3]),
+        [0xfa, 0x40]
+    );
+    assert_eq!(
+        ok(fc_sjis_to_euc_jp, PG_SJIS, PG_EUC_JP, &[0xee, 0xef]),
+        [0x8f, 0xf3, 0xf3]
+    );
+}
+
+#[test]
+fn mic_roundtrips() {
+    use super::cyrillic_and_mic::{fc_koi8r_to_mic, fc_mic_to_koi8r};
+    use super::euc_cn_and_mic::{fc_euc_cn_to_mic, fc_mic_to_euc_cn};
+    use super::euc_kr_and_mic::{fc_euc_kr_to_mic, fc_mic_to_euc_kr};
+    use super::euc_tw_and_big5::{fc_euc_tw_to_mic, fc_mic_to_euc_tw};
+    let mic = ok(fc_koi8r_to_mic, PG_KOI8R, PG_MULE_INTERNAL, &[b'a', 0xc1]);
+    assert_eq!(mic, [b'a', LC_KOI8_R, 0xc1]);
+    assert_eq!(
+        ok(fc_mic_to_koi8r, PG_MULE_INTERNAL, PG_KOI8R, &mic),
+        [b'a', 0xc1]
+    );
+    let mic = ok(fc_euc_cn_to_mic, PG_EUC_CN, PG_MULE_INTERNAL, &[0xd6, 0xd0]);
+    assert_eq!(mic, [LC_GB2312_80, 0xd6, 0xd0]);
+    assert_eq!(
+        ok(fc_mic_to_euc_cn, PG_MULE_INTERNAL, PG_EUC_CN, &mic),
+        [0xd6, 0xd0]
+    );
+    let mic = ok(fc_euc_kr_to_mic, PG_EUC_KR, PG_MULE_INTERNAL, &[0xb0, 0xa1]);
+    assert_eq!(mic, [LC_KS5601, 0xb0, 0xa1]);
+    assert_eq!(
+        ok(fc_mic_to_euc_kr, PG_MULE_INTERNAL, PG_EUC_KR, &mic),
+        [0xb0, 0xa1]
+    );
+    let mic = ok(fc_euc_tw_to_mic, PG_EUC_TW, PG_MULE_INTERNAL, &[0xc4, 0xe3]);
+    assert_eq!(mic, [LC_CNS11643_1, 0xc4, 0xe3]);
+    assert_eq!(
+        ok(fc_mic_to_euc_tw, PG_MULE_INTERNAL, PG_EUC_TW, &mic),
+        [0xc4, 0xe3]
+    );
+    // SS2 plane-2 EUC_TW char through MIC.
+    let src = [SS2, 0xa2, 0xa1, 0xa1];
+    let mic = ok(fc_euc_tw_to_mic, PG_EUC_TW, PG_MULE_INTERNAL, &src);
+    assert_eq!(mic, [LC_CNS11643_2, 0xa1, 0xa1]);
+    assert_eq!(ok(fc_mic_to_euc_tw, PG_MULE_INTERNAL, PG_EUC_TW, &mic), src);
+}
+
+#[test]
+fn cyrillic_local2local_roundtrip() {
+    use super::cyrillic_and_mic::*;
+    let pairs: &[(PGFunction, PGFunction, pg_enc, pg_enc)] = &[
+        (fc_koi8r_to_win1251, fc_win1251_to_koi8r, PG_KOI8R, PG_WIN1251),
+        (fc_koi8r_to_win866, fc_win866_to_koi8r, PG_KOI8R, PG_WIN866),
+        (fc_koi8r_to_iso, fc_iso_to_koi8r, PG_KOI8R, PG_ISO_8859_5),
+        (fc_win1251_to_iso, fc_iso_to_win1251, PG_WIN1251, PG_ISO_8859_5),
+        (fc_win866_to_iso, fc_iso_to_win866, PG_WIN866, PG_ISO_8859_5),
+        (fc_win866_to_win1251, fc_win1251_to_win866, PG_WIN866, PG_WIN1251),
+    ];
+    for &(fwd, back, src_enc, dst_enc) in pairs {
+        let mut mapped = 0;
+        for b in 0x80u8..=0xff {
+            let (consumed, out) = call(fwd, src_enc, dst_enc, &[b], true).unwrap();
+            if consumed != 1 {
+                continue;
+            }
+            let (bc, round) = call(back, dst_enc, src_enc, &out, true).unwrap();
+            if bc == 1 && round == [b] {
+                mapped += 1;
+            }
+        }
+        assert!(mapped > 60, "{src_enc}<->{dst_enc}: {mapped} roundtrip");
+    }
+}
+
+#[test]
+fn latin2_win1250_roundtrip() {
+    use super::latin2_and_win1250::*;
+    // 0xa1 in LATIN2 (Aogonek) is 0xa5 in WIN1250.
+    assert_eq!(
+        ok(fc_latin2_to_win1250, PG_LATIN2, PG_WIN1250, &[0xa1]),
+        [0xa5]
+    );
+    assert_eq!(
+        ok(fc_win1250_to_latin2, PG_WIN1250, PG_LATIN2, &[0xa5]),
+        [0xa1]
+    );
+    let mic = ok(fc_win1250_to_mic, PG_WIN1250, PG_MULE_INTERNAL, &[0xa5]);
+    assert_eq!(mic, [LC_ISO8859_2, 0xa1]);
+    assert_eq!(
+        ok(fc_mic_to_win1250, PG_MULE_INTERNAL, PG_WIN1250, &mic),
+        [0xa5]
+    );
+}
+
+#[test]
+fn latin_mic_passthrough() {
+    use super::latin_and_mic::*;
+    let mic = ok(fc_latin1_to_mic, PG_LATIN1, PG_MULE_INTERNAL, &[b'x', 0xe9]);
+    assert_eq!(mic, [b'x', LC_ISO8859_1, 0xe9]);
+    assert_eq!(
+        ok(fc_mic_to_latin1, PG_MULE_INTERNAL, PG_LATIN1, &mic),
+        [b'x', 0xe9]
+    );
+    let e = err(fc_mic_to_latin3, PG_MULE_INTERNAL, PG_LATIN3, &mic);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_UNTRANSLATABLE_CHARACTER);
+}
+
+#[test]
+fn euc2004_sjis2004_direct() {
+    use super::euc2004_sjis2004::*;
+    assert_eq!(
+        ok(
+            fc_euc_jis_2004_to_shift_jis_2004,
+            PG_EUC_JIS_2004,
+            PG_SHIFT_JIS_2004,
+            &[0xa4, 0xa2]
+        ),
+        [0x82, 0xa0]
+    );
+    assert_eq!(
+        ok(
+            fc_shift_jis_2004_to_euc_jis_2004,
+            PG_SHIFT_JIS_2004,
+            PG_EUC_JIS_2004,
+            &[0x82, 0xa0]
+        ),
+        [0xa4, 0xa2]
+    );
+    // Exhaustive plane-1 roundtrip EUC -> SJIS -> EUC.
+    let mut count = 0;
+    for c1 in 0xa1u8..=0xfe {
+        for c2 in 0xa1u8..=0xfe {
+            let euc = [c1, c2];
+            let (consumed, sjis) = call(
+                fc_euc_jis_2004_to_shift_jis_2004,
+                PG_EUC_JIS_2004,
+                PG_SHIFT_JIS_2004,
+                &euc,
+                true,
+            )
+            .unwrap();
+            if consumed != 2 {
+                continue;
+            }
+            let back = ok(
+                fc_shift_jis_2004_to_euc_jis_2004,
+                PG_SHIFT_JIS_2004,
+                PG_EUC_JIS_2004,
+                &sjis,
+            );
+            assert_eq!(back, euc, "euc_jis_2004 0x{c1:02x}{c2:02x}");
+            count += 1;
+        }
+    }
+    assert_eq!(count, 94 * 94);
+}
+
+#[test]
+fn new_module_error_texts_are_c_exact() {
+    let e = err(fc_big5_to_utf8, PG_BIG5, PG_UTF8, &[0xa1]);
+    assert_eq!(
+        e.message(),
+        "invalid byte sequence for encoding \"BIG5\": 0xa1"
+    );
+    let e = err(fc_utf8_to_gbk, PG_UTF8, PG_GBK, "\u{1F600}".as_bytes());
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_UNTRANSLATABLE_CHARACTER);
+    let e = err(fc_utf8_to_big5, PG_UTF8, PG_BIG5, "\u{1F600}".as_bytes());
+    assert_eq!(
+        e.message(),
+        "character with byte sequence 0xf0 0x9f 0x98 0x80 in encoding \"UTF8\" has no equivalent in encoding \"BIG5\""
+    );
+    use super::euc_cn_and_mic::fc_mic_to_euc_cn;
+    let e = err(
+        fc_mic_to_euc_cn,
+        PG_MULE_INTERNAL,
+        PG_EUC_CN,
+        &[LC_KS5601, 0xb0, 0xa1],
+    );
+    assert_eq!(
+        e.message(),
+        "character with byte sequence 0x93 0xb0 0xa1 in encoding \"MULE_INTERNAL\" has no equivalent in encoding \"EUC_CN\""
+    );
 }
