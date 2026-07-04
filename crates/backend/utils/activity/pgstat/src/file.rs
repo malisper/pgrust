@@ -17,7 +17,10 @@ use crate::pending::{
 };
 use crate::shmem::SharedEntry;
 
-pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x01A5BCB7;
+// Deliberately NOT C's 0x01A5BCB7: a C-initdb'd datadir carries a C-format
+// pgstat.stat whose payloads we can't parse; a distinct id rejects it at the
+// header (C's own incorrect-format path) instead of mid-entry.
+pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x51A5BCB7;
 
 const PGSTAT_FILE_ENTRY_END: u8 = b'E';
 const PGSTAT_FILE_ENTRY_HASH: u8 = b'S';
