@@ -2,6 +2,8 @@
 //! live PostgreSQL 18.3 (PGHOST=/tmp port 5432). Values compare byte-exact;
 //! errors compare SQLSTATE + primary message via plpgsql SQLSTATE/SQLERRM.
 //! Skips silently if PG is unreachable.
+//! Not miri-runnable: shells out to psql.
+#![cfg(not(miri))]
 
 use std::io::Write;
 use std::process::Command;
