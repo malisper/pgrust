@@ -30,7 +30,6 @@ use crate::page::{
     page_item, page_of_mut, page_opaque, write_opaque,
 };
 use crate::pagedel::{bt_pagedel, bt_pendingfsm_finalize, bt_pendingfsm_init};
-use crate::unported_phase2;
 use crate::utils::{bt_end_vacuum, bt_start_vacuum};
 
 // IndexVacuumInfo (access/genam.h); message_level/report_progress dropped
@@ -57,8 +56,13 @@ pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
 
 fn vacuum_delay_point() -> PgResult<()> {
     crate::check_for_interrupts()?;
+    // Cost-based delay (autovacuum runs with VacuumCostActive) lives in
+    // commands_vacuum::vacuum_delay_point, reached via seam (dependency
+    // direction: commands_vacuum depends on nbtree). The uncosted path skips
+    // the seam call, so unit rigs without seams_init never need it; config
+    // reloads are picked up at the heap-phase delay points as before.
     if init_small::globals::VacuumCostActive() {
-        unported_phase2("vacuum_delay_point cost-based delay (VacuumCostActive)");
+        vacuum_seams::vacuum_delay_point::call(false)?;
     }
     Ok(())
 }
