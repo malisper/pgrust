@@ -1128,6 +1128,8 @@ vacuum_guc_int! {
 }
 
 static VACUUM_TRUNCATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0.03f64.to_bits());
 
 pub fn init_seams() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1135,6 +1137,10 @@ pub fn init_seams() {
     guc_tables::vars::vacuum_truncate.install(guc_tables::GucVarAccessors {
         get: || VACUUM_TRUNCATE.load(Relaxed),
         set: |v| VACUUM_TRUNCATE.store(v, Relaxed),
+    });
+    guc_tables::vars::vacuum_max_eager_freeze_failure_rate.install(guc_tables::GucVarAccessors {
+        get: || f64::from_bits(VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE.load(Relaxed)),
+        set: |v| VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE.store(v.to_bits(), Relaxed),
     });
     // Fixture tests pre-install a relstats sink (no pg_class there); keep it.
     if !vacuum_seams::vac_update_relstats::is_installed() {
