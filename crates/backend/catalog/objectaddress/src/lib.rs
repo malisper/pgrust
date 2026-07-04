@@ -464,13 +464,7 @@ pub fn get_object_address<'mcx>(
                 (
                     ObjectAddress::set(
                         ProcedureRelationId,
-                        parse_func::LookupFuncWithArgs(
-                            objtype,
-                            &owa.objname,
-                            &owa.objargs,
-                            owa.args_unspecified,
-                            missing_ok,
-                        )?,
+                        parse_func::LookupFuncWithArgs(objtype, owa, missing_ok)?,
                     ),
                     None,
                 )

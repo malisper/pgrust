@@ -8,6 +8,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_database_oid (dbcommands.c).
+    pub fn get_database_oid<'a, 'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        dbname: &'a str,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // dbase_redo (dbcommands.c) — the Database rmgr rm_redo callback; rmgr's
     // table row delegates here (a direct rmgr -> dbcommands dep would cycle
     // through checkpointer/transam_xlog).

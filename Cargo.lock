@@ -22,16 +22,23 @@ dependencies = [
  "catalog_namespace",
  "catcache",
  "datum",
+ "dbcommands_seams",
  "elog",
+ "genam",
  "guc",
+ "guc_tables",
  "heaptuple",
  "init_small",
+ "lmgr",
  "lock_seams",
  "mcx",
  "miscinit",
+ "parse_func_seams",
+ "parse_utilcmd_seams",
  "pg_depend",
  "pg_largeobject",
  "rel_vocab",
+ "snapmgr",
  "superuser",
  "table",
  "types_core",
@@ -58,10 +65,12 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "adt_regproc",
  "cache_syscache",
  "catalog_namespace",
  "catcache",
  "datum",
+ "dbcommands_seams",
  "elog",
  "init_small",
  "inval",
@@ -640,6 +649,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "parse_utilcmd_seams",
  "pqformat",
  "rel_vocab",
  "syscache_seams",
@@ -6735,10 +6745,21 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_agg",
+ "parse_func_seams",
  "parse_utilcmd",
  "parser_small1",
  "readfuncs",
  "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
+name = "parse_func_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
  "types_core",
  "types_error",
  "types_nodes",
@@ -6847,6 +6868,7 @@ dependencies = [
  "miscinit",
  "nodes_core",
  "outfuncs",
+ "parse_utilcmd_seams",
  "parser_seams",
  "parser_small1",
  "pg_constraint",
@@ -6867,6 +6889,17 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+]
+
+[[package]]
+name = "parse_utilcmd_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -9765,6 +9798,8 @@ dependencies = [
  "parse_clause",
  "parse_collate",
  "parse_expr",
+ "parse_func",
+ "parse_utilcmd",
  "parser_analyze",
  "parser_driver",
  "partbounds",

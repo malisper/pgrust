@@ -5934,6 +5934,33 @@ impl<'mcx> Parser<'mcx> {
                 n.objects = view.v(2).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // privilege_target DATABASE/DOMAIN/LANGUAGE/LARGE OBJECT/SCHEMA/
+            // TYPE forms (FDW 1049 / SERVER 1050 / PARAMETER 1058 /
+            // TABLESPACE 1060 stay louds: fdw/tablespace lanes).
+            1054 | 1055 | 1056 | 1057 | 1059 | 1061 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = match rule {
+                    1054 => ObjectType::OBJECT_DATABASE,
+                    1055 => ObjectType::OBJECT_DOMAIN,
+                    1056 => ObjectType::OBJECT_LANGUAGE,
+                    1057 => ObjectType::OBJECT_LARGEOBJECT,
+                    1059 => ObjectType::OBJECT_SCHEMA,
+                    _ => ObjectType::OBJECT_TYPE,
+                };
+                n.objects = view.v(if rule == 1057 { 3 } else { 2 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // NumericOnly_list.
+            664 => {
+                let n = view.v(1).node().expect("NumericOnly");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            665 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("NumericOnly"))?;
+                *yyval = YYSTYPE::List(list);
+            }
             1064..=1066 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA;
@@ -5946,7 +5973,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // privilege_target: [TABLE] qualified_name_list | SEQUENCE ...
-            // (other target forms 1049-1063 stay louds).
             1046 | 1047 | 1048 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;

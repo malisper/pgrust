@@ -1,7 +1,11 @@
 use adt_acl::{
     acl_grant_option_for, acl_option_to_privs, aclconcat, acldefault, aclitem_set_privs_goptions,
     aclmembers, aclupdate, select_best_grantor, varlena::acl_image, AclItem, AclObjectType,
-    ACL_ALL_RIGHTS_COLUMN, ACL_ALL_RIGHTS_RELATION, ACL_ALL_RIGHTS_SEQUENCE, ACL_ALTER_SYSTEM,
+    ACL_ALL_RIGHTS_COLUMN, ACL_ALL_RIGHTS_DATABASE, ACL_ALL_RIGHTS_FDW,
+    ACL_ALL_RIGHTS_FOREIGN_SERVER, ACL_ALL_RIGHTS_FUNCTION, ACL_ALL_RIGHTS_LANGUAGE,
+    ACL_ALL_RIGHTS_LARGEOBJECT, ACL_ALL_RIGHTS_PARAMETER_ACL, ACL_ALL_RIGHTS_RELATION,
+    ACL_ALL_RIGHTS_SCHEMA, ACL_ALL_RIGHTS_SEQUENCE, ACL_ALL_RIGHTS_TABLESPACE,
+    ACL_ALL_RIGHTS_TYPE, ACL_ALTER_SYSTEM,
     ACL_CONNECT, ACL_CREATE, ACL_CREATE_TEMP, ACL_DELETE, ACL_EXECUTE, ACL_ID_PUBLIC, ACL_INSERT,
     ACL_MAINTAIN, ACL_MODECHG_ADD, ACL_MODECHG_DEL, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT,
     ACL_SET, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
@@ -13,7 +17,10 @@ use cache_syscache::{
 };
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use types_core::catalog::{ATTRIBUTE_RELATION_ID, RELATION_RELATION_ID};
+use types_core::catalog::{
+    ATTRIBUTE_RELATION_ID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID,
+    PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+};
 use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
@@ -32,7 +39,7 @@ use types_tuple::ItemPointerData;
 
 use crate::{
     aclcheck_error, pg_aclmask_for_grant, with_acl_datum, ACLCHECK_NO_PRIV,
-    ANUM_PG_CLASS_RELACL, ANUM_PG_CLASS_RELNATTS,
+    ANUM_PG_CLASS_RELACL, ANUM_PG_CLASS_RELNATTS, ANUM_PG_TYPE_TYPTYPE,
 };
 
 const ANUM_PG_CLASS_RELNAME: i32 = 2;
@@ -170,8 +177,7 @@ fn merge_acl_with_grant<'mcx>(
     Ok(new_acl)
 }
 
-// restrict_and_check_grant (aclchk.c), the arms reachable via GRANT/REVOKE ON
-// TABLE/SEQUENCE (plus the implicit column expansion).
+// restrict_and_check_grant (aclchk.c).
 #[allow(clippy::too_many_arguments)]
 fn restrict_and_check_grant(
     is_grant: bool,
@@ -189,8 +195,15 @@ fn restrict_and_check_grant(
         ObjectType::OBJECT_COLUMN => ACL_ALL_RIGHTS_COLUMN,
         ObjectType::OBJECT_TABLE => ACL_ALL_RIGHTS_RELATION,
         ObjectType::OBJECT_SEQUENCE => ACL_ALL_RIGHTS_SEQUENCE,
+        ObjectType::OBJECT_DATABASE => ACL_ALL_RIGHTS_DATABASE,
+        ObjectType::OBJECT_FUNCTION => ACL_ALL_RIGHTS_FUNCTION,
+        ObjectType::OBJECT_LANGUAGE => ACL_ALL_RIGHTS_LANGUAGE,
+        ObjectType::OBJECT_LARGEOBJECT => ACL_ALL_RIGHTS_LARGEOBJECT,
+        ObjectType::OBJECT_SCHEMA => ACL_ALL_RIGHTS_SCHEMA,
+        ObjectType::OBJECT_TYPE => ACL_ALL_RIGHTS_TYPE,
         other => panic!(
-            "restrict_and_check_grant (aclchk.c): object type {} arm unported",
+            "restrict_and_check_grant (aclchk.c): object type {} arm unported \
+             (tablespace/fdw/parameter lanes)",
             other as i32
         ),
     };
@@ -296,14 +309,24 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
         grantees.push(uid);
     }
 
-    let all_privileges = match stmt.objtype {
+    let (all_privileges, errnoun) = match stmt.objtype {
         // GRANT TABLE may target a sequence: test the union, refine later.
-        ObjectType::OBJECT_TABLE => ACL_ALL_RIGHTS_RELATION | ACL_ALL_RIGHTS_SEQUENCE,
-        ObjectType::OBJECT_SEQUENCE => ACL_ALL_RIGHTS_SEQUENCE,
-        other => panic!(
-            "ExecuteGrantStmt (aclchk.c): object type {} unported (non-table grant lane)",
-            other as i32
-        ),
+        ObjectType::OBJECT_TABLE => (ACL_ALL_RIGHTS_RELATION | ACL_ALL_RIGHTS_SEQUENCE, "relation"),
+        ObjectType::OBJECT_SEQUENCE => (ACL_ALL_RIGHTS_SEQUENCE, "sequence"),
+        ObjectType::OBJECT_DATABASE => (ACL_ALL_RIGHTS_DATABASE, "database"),
+        ObjectType::OBJECT_DOMAIN => (ACL_ALL_RIGHTS_TYPE, "domain"),
+        ObjectType::OBJECT_FUNCTION => (ACL_ALL_RIGHTS_FUNCTION, "function"),
+        ObjectType::OBJECT_LANGUAGE => (ACL_ALL_RIGHTS_LANGUAGE, "language"),
+        ObjectType::OBJECT_LARGEOBJECT => (ACL_ALL_RIGHTS_LARGEOBJECT, "large object"),
+        ObjectType::OBJECT_SCHEMA => (ACL_ALL_RIGHTS_SCHEMA, "schema"),
+        ObjectType::OBJECT_PROCEDURE => (ACL_ALL_RIGHTS_FUNCTION, "procedure"),
+        ObjectType::OBJECT_ROUTINE => (ACL_ALL_RIGHTS_FUNCTION, "routine"),
+        ObjectType::OBJECT_TABLESPACE => (ACL_ALL_RIGHTS_TABLESPACE, "tablespace"),
+        ObjectType::OBJECT_TYPE => (ACL_ALL_RIGHTS_TYPE, "type"),
+        ObjectType::OBJECT_FDW => (ACL_ALL_RIGHTS_FDW, "foreign-data wrapper"),
+        ObjectType::OBJECT_FOREIGN_SERVER => (ACL_ALL_RIGHTS_FOREIGN_SERVER, "foreign server"),
+        ObjectType::OBJECT_PARAMETER_ACL => (ACL_ALL_RIGHTS_PARAMETER_ACL, "parameter"),
+        other => panic!("ExecuteGrantStmt (aclchk.c): unrecognized objtype {}", other as i32),
     };
 
     let mut istmt = InternalGrant {
@@ -339,7 +362,7 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
             if privilege & !all_privileges != 0 {
                 return Err(err(
                     format!(
-                        "invalid privilege type {} for relation",
+                        "invalid privilege type {} for {errnoun}",
                         privilege_to_string(privilege)
                     ),
                     ERRCODE_INVALID_GRANT_OPERATION,
@@ -349,31 +372,181 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
         }
     }
 
-    exec_grant_relation(mcx, &mut istmt)
+    exec_grant_stmt_oids(mcx, &mut istmt)
 }
 
+// ExecGrantStmt_oids (aclchk.c). EventTriggerCollectGrant is unported (the
+// utility dispatcher runs no event-trigger context yet).
+fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
+    match istmt.objtype {
+        ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE => exec_grant_relation(mcx, istmt),
+        ObjectType::OBJECT_DATABASE => exec_grant_common(mcx, istmt, &CLASS_DATABASE, None),
+        ObjectType::OBJECT_DOMAIN | ObjectType::OBJECT_TYPE => {
+            exec_grant_common(mcx, istmt, &CLASS_TYPE, Some(exec_grant_type_check))
+        }
+        ObjectType::OBJECT_FUNCTION | ObjectType::OBJECT_PROCEDURE | ObjectType::OBJECT_ROUTINE => {
+            exec_grant_common(mcx, istmt, &CLASS_PROC, None)
+        }
+        ObjectType::OBJECT_LANGUAGE => {
+            exec_grant_common(mcx, istmt, &CLASS_LANGUAGE, Some(exec_grant_language_check))
+        }
+        ObjectType::OBJECT_LARGEOBJECT => exec_grant_largeobject(mcx, istmt),
+        ObjectType::OBJECT_SCHEMA => exec_grant_common(mcx, istmt, &CLASS_NAMESPACE, None),
+        other => panic!(
+            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (tablespace/fdw/parameter lanes)",
+            other as i32
+        ),
+    }
+}
+
+// objectNamesToOids (aclchk.c) + the get_object_address arms it reaches
+// (objectaddress.c); every resolved object takes C's AccessShareLock
+// (LockDatabaseObject / LockSharedObject), without the C post-lock existence
+// recheck loop.
 fn object_names_to_oids<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
     objnames: &types_nodes::list::NodeList<'_>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    if !matches!(objtype, ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE) {
-        panic!("object_names_to_oids (aclchk.c): objtype {objtype:?} unported (function-grant lane)");
-    }
     let mut objects: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
-    for cell in objnames.iter() {
-        let relvar = cell.as_range_var().expect("RangeVar");
-        let rv = rel_vocab::RangeVar {
-            catalogname: relvar.catalogname,
-            schemaname: relvar.schemaname,
-            relname: relvar.relname.unwrap_or_default(),
-            inh: relvar.inh,
-            relpersistence: relvar.relpersistence,
-            location: relvar.location,
-        };
-        objects.push(catalog_namespace::RangeVarGetRelid(&rv, AccessShareLock, false)?);
+    match objtype {
+        ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE => {
+            for cell in objnames.iter() {
+                let relvar = cell.as_range_var().expect("RangeVar");
+                let rv = rel_vocab::RangeVar {
+                    catalogname: relvar.catalogname,
+                    schemaname: relvar.schemaname,
+                    relname: relvar.relname.unwrap_or_default(),
+                    inh: relvar.inh,
+                    relpersistence: relvar.relpersistence,
+                    location: relvar.location,
+                };
+                objects.push(catalog_namespace::RangeVarGetRelid(&rv, AccessShareLock, false)?);
+            }
+        }
+        ObjectType::OBJECT_FUNCTION | ObjectType::OBJECT_PROCEDURE | ObjectType::OBJECT_ROUTINE => {
+            for cell in objnames.iter() {
+                let owa = cell.as_object_with_args().expect("ObjectWithArgs");
+                let oid =
+                    parse_func_seams::LookupFuncWithArgs::call(objtype as i32, owa, false)?;
+                lmgr::LockDatabaseObject(PROCEDURE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_DOMAIN | ObjectType::OBJECT_TYPE => {
+            for cell in objnames.iter() {
+                let typname = cell.as_list().expect("type name List");
+                // makeTypeNameFromNameList (makefuncs.c).
+                // SAFETY: read-only re-view of the parse tree's arena cells.
+                let names = unsafe {
+                    types_nodes::list::NodeList::from_raw_parts(
+                        typname.as_slice().as_ptr().cast_mut(),
+                        typname.len() as u32,
+                    )
+                };
+                let tn = types_nodes::rawnodes::TypeName {
+                    names,
+                    typemod: -1,
+                    location: -1,
+                    ..Default::default()
+                };
+                let oid = parse_utilcmd_seams::LookupTypeNameOid::call(mcx, &tn)?;
+                if objtype == ObjectType::OBJECT_DOMAIN {
+                    check_is_domain(oid, typname)?;
+                }
+                lmgr::LockDatabaseObject(TYPE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_DATABASE => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("database name").sval;
+                let oid = dbcommands_seams::get_database_oid::call(mcx, name, false)?;
+                lmgr::LockSharedObject(DATABASE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_LANGUAGE => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("language name").sval;
+                let oid = adt_acl::get_language_oid(name, false)?;
+                lmgr::LockDatabaseObject(LANGUAGE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_LARGEOBJECT => {
+            let scratch = mcx::MemoryContext::new("objectNamesToOids");
+            for cell in objnames.iter() {
+                let oid = oidparse(cell)?;
+                if !pg_largeobject::LargeObjectExists(scratch.mcx(), oid)? {
+                    return Err(err(
+                        format!("large object {oid} does not exist"),
+                        types_error::ERRCODE_UNDEFINED_OBJECT,
+                    ));
+                }
+                lmgr::LockDatabaseObject(pg_largeobject::LargeObjectRelationId, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_SCHEMA => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("schema name").sval;
+                let oid = catalog_namespace::get_namespace_oid(name, false)?;
+                lmgr::LockDatabaseObject(NAMESPACE_RELATION_ID, oid, 0, AccessShareLock)?;
+                objects.push(oid);
+            }
+        }
+        other => panic!(
+            "objectNamesToOids (aclchk.c): objtype {} unported (tablespace/fdw/parameter lanes)",
+            other as i32
+        ),
     }
     Ok(objects)
+}
+
+// get_object_address_type's OBJECT_DOMAIN restriction (objectaddress.c).
+fn check_is_domain(type_oid: Oid, typname: &types_nodes::list::NodeList<'_>) -> PgResult<()> {
+    const TYPTYPE_DOMAIN: u8 = b'd';
+    let Some(tuple) = cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::TYPEOID,
+        SysCacheKey::Value(Datum::from_oid(type_oid)),
+    )?
+    else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for type {type_oid}"
+        ))));
+    };
+    let typtype =
+        SysCacheGetAttrNotNull(cache_syscache::cacheinfo::TYPEOID, &tuple, ANUM_PG_TYPE_TYPTYPE)?
+            .as_u8();
+    ReleaseSysCache(tuple);
+    if typtype != TYPTYPE_DOMAIN {
+        let mut name = String::new();
+        for (i, part) in typname.iter().enumerate() {
+            if i > 0 {
+                name.push('.');
+            }
+            name.push_str(part.as_string().expect("type name part").sval);
+        }
+        return Err(err(format!("\"{name}\" is not a domain"), ERRCODE_WRONG_OBJECT_TYPE));
+    }
+    Ok(())
+}
+
+// oidparse (oid.c).
+fn oidparse(node: types_nodes::Node<'_>) -> PgResult<Oid> {
+    if let Some(i) = node.as_integer() {
+        return Ok(i.ival as Oid);
+    }
+    if let Some(f) = node.as_float() {
+        return f.fval.parse::<u32>().map_err(|_| {
+            err(
+                format!("invalid input syntax for type {}: \"{}\"", "oid", f.fval),
+                types_error::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            )
+        });
+    }
+    panic!("oidparse: unexpected node type");
 }
 
 fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
@@ -734,5 +907,383 @@ fn exec_grant_attribute<'mcx>(
     }
 
     ReleaseSysCache(attr_tuple);
+    Ok(())
+}
+
+struct GrantClass {
+    classid: Oid,
+    cacheid: i32,
+    owner_attnum: i32,
+    acl_attnum: i32,
+    name_attnum: i32,
+    objtype: ObjectType,
+    acl_objtype: AclObjectType,
+    default_privs: u64,
+    descr: &'static str,
+}
+
+const CLASS_DATABASE: GrantClass = GrantClass {
+    classid: types_core::catalog::DATABASE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::DATABASEOID,
+    owner_attnum: 3,
+    acl_attnum: 18,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_DATABASE,
+    acl_objtype: AclObjectType::Database,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_DATABASE,
+    descr: "database",
+};
+
+const CLASS_TYPE: GrantClass = GrantClass {
+    classid: types_core::catalog::TYPE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::TYPEOID,
+    owner_attnum: 4,
+    acl_attnum: 32,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_TYPE,
+    acl_objtype: AclObjectType::Type,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_TYPE,
+    descr: "type",
+};
+
+const CLASS_PROC: GrantClass = GrantClass {
+    classid: types_core::catalog::PROCEDURE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::PROCOID,
+    owner_attnum: 4,
+    acl_attnum: 30,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_FUNCTION,
+    acl_objtype: AclObjectType::Function,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_FUNCTION,
+    descr: "function",
+};
+
+const CLASS_LANGUAGE: GrantClass = GrantClass {
+    classid: types_core::catalog::LANGUAGE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::LANGOID,
+    owner_attnum: 3,
+    acl_attnum: 9,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_LANGUAGE,
+    acl_objtype: AclObjectType::Language,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_LANGUAGE,
+    descr: "language",
+};
+
+const CLASS_NAMESPACE: GrantClass = GrantClass {
+    classid: types_core::catalog::NAMESPACE_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::NAMESPACEOID,
+    owner_attnum: 3,
+    acl_attnum: 4,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_SCHEMA,
+    acl_objtype: AclObjectType::Schema,
+    default_privs: adt_acl::ACL_ALL_RIGHTS_SCHEMA,
+    descr: "schema",
+};
+
+fn unlock_catalog_tuple(cls: &GrantClass, tid: &ItemPointerData) -> PgResult<()> {
+    let dbid = if catcache::cache_relisshared(cls.cacheid) {
+        0
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    let tag = LOCKTAG::tuple(
+        dbid,
+        cls.classid,
+        types_tuple::ItemPointerGetBlockNumber(tid),
+        types_tuple::ItemPointerGetOffsetNumber(tid),
+    );
+    lock_seams::lock_release::call(tag, InplaceUpdateTupleLock, false)?;
+    Ok(())
+}
+
+// ExecGrant_Language_check (aclchk.c).
+fn exec_grant_language_check(cls: &GrantClass, tuple: &catcache::CatCTuple) -> PgResult<()> {
+    const ANUM_PG_LANGUAGE_LANPLTRUSTED: i32 = 5;
+    let trusted =
+        SysCacheGetAttrNotNull(cls.cacheid, tuple, ANUM_PG_LANGUAGE_LANPLTRUSTED)?.as_bool();
+    if !trusted {
+        let lanname = name_attr(cls.cacheid, tuple, 2)?;
+        return Err(Box::new(
+            elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("language \"{lanname}\" is not trusted"))
+                .errdetail(
+                    "GRANT and REVOKE are not allowed on untrusted languages, because only \
+                     superusers can use untrusted languages."
+                        .to_string(),
+                )
+                .into_error(),
+        ));
+    }
+    Ok(())
+}
+
+// ExecGrant_Type_check (aclchk.c).
+fn exec_grant_type_check(cls: &GrantClass, tuple: &catcache::CatCTuple) -> PgResult<()> {
+    const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+    const TYPTYPE_MULTIRANGE: u8 = b'm';
+    let typelem = SysCacheGetAttrNotNull(cls.cacheid, tuple, 14)?.as_oid();
+    let typsubscript = SysCacheGetAttrNotNull(cls.cacheid, tuple, 13)?.as_oid();
+    if typelem != Oid::default() && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
+        return Err(Box::new(
+            elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                .errmsg("cannot set privileges of array types".to_string())
+                .errhint("Set the privileges of the element type instead.".to_string())
+                .into_error(),
+        ));
+    }
+    let typtype = SysCacheGetAttrNotNull(cls.cacheid, tuple, 7)?.as_u8();
+    if typtype == TYPTYPE_MULTIRANGE {
+        return Err(Box::new(
+            elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                .errmsg("cannot set privileges of multirange types".to_string())
+                .errhint("Set the privileges of the range type instead.".to_string())
+                .into_error(),
+        ));
+    }
+    Ok(())
+}
+
+// ExecGrant_common (aclchk.c). recordExtensionInitPriv: no-op outside
+// CREATE EXTENSION, which is unported.
+fn exec_grant_common<'mcx>(
+    mcx: Mcx<'mcx>,
+    istmt: &mut InternalGrant<'_, '_>,
+    cls: &GrantClass,
+    object_check: Option<fn(&GrantClass, &catcache::CatCTuple) -> PgResult<()>>,
+) -> PgResult<()> {
+    if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
+        istmt.privileges = cls.default_privs;
+    }
+
+    let relation = table::table_open(mcx, cls.classid, RowExclusiveLock)?;
+
+    for i in 0..istmt.objects.len() {
+        let objectid = istmt.objects[i];
+        let Some(tuple) =
+            SearchSysCacheLocked1(cls.cacheid, SysCacheKey::Value(Datum::from_oid(objectid)))?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for {} {objectid}",
+                cls.descr
+            ))));
+        };
+
+        if let Some(check) = object_check {
+            check(cls, &tuple)?;
+        }
+
+        let owner_id = SysCacheGetAttrNotNull(cls.cacheid, &tuple, cls.owner_attnum)?.as_oid();
+        let (acl_datum, acl_is_null) = SysCacheGetAttr(cls.cacheid, &tuple, cls.acl_attnum)?;
+        let old_acl: PgVec<'mcx, AclItem> = if acl_is_null {
+            adt_acl::aclcopy(mcx, acldefault(cls.acl_objtype, owner_id).as_slice())?
+        } else {
+            with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?
+        };
+        let old_members: Option<PgVec<'mcx, Oid>> =
+            if acl_is_null { None } else { Some(aclmembers(mcx, &old_acl)?) };
+
+        let (grantor_id, avail_goptions) =
+            select_best_grantor(miscinit::GetUserId(), istmt.privileges, &old_acl, owner_id)?;
+
+        let objname = name_attr(cls.cacheid, &tuple, cls.name_attnum)?;
+
+        let this_privileges = restrict_and_check_grant(
+            istmt.is_grant,
+            avail_goptions,
+            istmt.all_privs,
+            istmt.privileges,
+            objectid,
+            grantor_id,
+            cls.objtype,
+            &objname,
+            0,
+            None,
+        )?;
+
+        let new_acl = merge_acl_with_grant(
+            mcx,
+            &old_acl,
+            istmt.is_grant,
+            istmt.grant_option,
+            istmt.behavior,
+            &istmt.grantees,
+            this_privileges,
+            grantor_id,
+            owner_id,
+        )?;
+        let new_members = aclmembers(mcx, &new_acl)?;
+
+        let natts = relation.descr().natts as usize;
+        let mut values: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        nulls.resize(natts, false);
+        replaces.resize(natts, false);
+        let aidx = (cls.acl_attnum - 1) as usize;
+        let acl_img = acl_image(mcx, &new_acl)?;
+        values[aidx] = Datum::from_usize(acl_img.as_ptr() as usize);
+        replaces[aidx] = true;
+
+        let otid = tuple.tuple().t_self;
+        let mut newtuple = heaptuple::heap_modify_tuple(
+            mcx,
+            &tuple.tuple(),
+            relation.descr(),
+            &values,
+            &nulls,
+            &replaces,
+        )?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
+        unlock_catalog_tuple(cls, &otid)?;
+
+        pg_depend::updateAclDependencies(
+            mcx,
+            cls.classid,
+            objectid,
+            0,
+            owner_id,
+            old_members.as_deref().unwrap_or(&[]),
+            &new_members,
+        )?;
+
+        ReleaseSysCache(tuple);
+
+        xact::CommandCounterIncrement()?;
+    }
+
+    relation.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+// ExecGrant_Largeobject (aclchk.c); pg_largeobject_metadata has no syscache.
+fn exec_grant_largeobject<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
+    use pg_largeobject::{
+        Anum_pg_largeobject_metadata_lomacl, Anum_pg_largeobject_metadata_lomowner,
+        Anum_pg_largeobject_metadata_oid, LargeObjectMetadataOidIndexId,
+        LargeObjectMetadataRelationId, LargeObjectRelationId,
+    };
+
+    if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
+        istmt.privileges = adt_acl::ACL_ALL_RIGHTS_LARGEOBJECT;
+    }
+
+    let relation = table::table_open(mcx, LargeObjectMetadataRelationId, RowExclusiveLock)?;
+
+    for i in 0..istmt.objects.len() {
+        let loid = istmt.objects[i];
+        let skey = [pg_largeobject::oid_key(Anum_pg_largeobject_metadata_oid, loid)];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &relation,
+            LargeObjectMetadataOidIndexId,
+            true,
+            None,
+            &skey,
+        )?;
+        let Some(tuple) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(Box::new(PgError::error(format!(
+                "could not find tuple for large object {loid}"
+            ))));
+        };
+
+        let desc = relation.descr();
+        let mut isnull = false;
+        // SAFETY: fixed catalog columns under the relation's own descriptor.
+        let owner_id = unsafe {
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_largeobject_metadata_lomowner as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_oid();
+        let mut acl_is_null = false;
+        // SAFETY: as above.
+        let acl_datum = unsafe {
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_largeobject_metadata_lomacl as i32,
+                desc,
+                &mut acl_is_null,
+            )
+        };
+        let old_acl: PgVec<'mcx, AclItem> = if acl_is_null {
+            adt_acl::aclcopy(mcx, acldefault(AclObjectType::LargeObject, owner_id).as_slice())?
+        } else {
+            with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?
+        };
+        let old_members: Option<PgVec<'mcx, Oid>> =
+            if acl_is_null { None } else { Some(aclmembers(mcx, &old_acl)?) };
+
+        let (grantor_id, avail_goptions) =
+            select_best_grantor(miscinit::GetUserId(), istmt.privileges, &old_acl, owner_id)?;
+
+        let loname = format!("large object {loid}");
+        let this_privileges = restrict_and_check_grant(
+            istmt.is_grant,
+            avail_goptions,
+            istmt.all_privs,
+            istmt.privileges,
+            loid,
+            grantor_id,
+            ObjectType::OBJECT_LARGEOBJECT,
+            &loname,
+            0,
+            None,
+        )?;
+
+        let new_acl = merge_acl_with_grant(
+            mcx,
+            &old_acl,
+            istmt.is_grant,
+            istmt.grant_option,
+            istmt.behavior,
+            &istmt.grantees,
+            this_privileges,
+            grantor_id,
+            owner_id,
+        )?;
+        let new_members = aclmembers(mcx, &new_acl)?;
+
+        let natts = desc.natts as usize;
+        let mut values: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        nulls.resize(natts, false);
+        replaces.resize(natts, false);
+        let aidx = (Anum_pg_largeobject_metadata_lomacl - 1) as usize;
+        let acl_img = acl_image(mcx, &new_acl)?;
+        values[aidx] = Datum::from_usize(acl_img.as_ptr() as usize);
+        replaces[aidx] = true;
+
+        let otid = tuple.t_self;
+        let mut newtuple =
+            heaptuple::heap_modify_tuple(mcx, tuple, desc, &values, &nulls, &replaces)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
+
+        pg_depend::updateAclDependencies(
+            mcx,
+            LargeObjectRelationId,
+            loid,
+            0,
+            owner_id,
+            old_members.as_deref().unwrap_or(&[]),
+            &new_members,
+        )?;
+
+        genam::systable_endscan(mcx, scan)?;
+
+        xact::CommandCounterIncrement()?;
+    }
+
+    relation.close(RowExclusiveLock)?;
     Ok(())
 }
