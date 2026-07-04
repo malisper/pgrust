@@ -26,7 +26,8 @@ use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclu
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
-use catalog_dependency::{deleteSharedDependencyRecordsFor, recordDependencyOnExpr};
+use catalog_dependency::recordDependencyOnExpr;
+use pg_shdepend::deleteSharedDependencyRecordsFor;
 use parse_clause::transformWhereClause;
 use parse_collate::assign_expr_collations;
 use parse_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
