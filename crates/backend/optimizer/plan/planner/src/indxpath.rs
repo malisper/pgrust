@@ -1425,6 +1425,21 @@ fn collect_varattnos(
         NodeTag::T_CoerceViaIO => {
             collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                collect_varattnos(run, e, relid, out);
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                collect_varattnos(run, e, relid, out);
+            }
+            if let Some(e) = sr.refexpr {
+                collect_varattnos(run, e, relid, out);
+            }
+            if let Some(e) = sr.refassgnexpr {
+                collect_varattnos(run, e, relid, out);
+            }
+        }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }
 }
