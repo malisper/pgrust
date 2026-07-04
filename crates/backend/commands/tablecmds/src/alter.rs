@@ -450,7 +450,7 @@ fn ATRewriteCatalogs<'mcx>(
                         ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
                             let (istmt, nnconstraints) =
                                 parse_utilcmd::transformIndexConstraintForAlter(
-                                    mcx, &rel, defnode,
+                                    mcx, &rel, defnode, query_string,
                                 )?;
                             let is_existing = istmt
                                 .as_variant::<types_nodes::rawnodes::IndexStmt>()
@@ -1825,8 +1825,64 @@ fn ATExecAddNotNullConstraint<'mcx>(
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
     }
-    if pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?.is_some() {
-        unported("ATAddCheckNNConstraint: merge with an existing not-null constraint");
+    // AdjustNotNullInheritance (pg_constraint.c:742), is_local slice: an
+    // existing constraint absorbs the new one after compatibility checks.
+    if let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? {
+        if constr.is_no_inherit != con.connoinherit {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{relname}\"",
+                        con.name_str()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint(
+                    "You might need to make the existing constraint inheritable using \
+                     ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                        .to_string(),
+                ),
+            ));
+        }
+        if !constr.skip_validation && !con.convalidated {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "incompatible NOT VALID constraint \"{}\" on relation \"{relname}\"",
+                        con.name_str()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint(
+                    "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT."
+                        .to_string(),
+                ),
+            ));
+        }
+        if let Some(new_conname) = constr.conname {
+            if new_conname != con.name_str() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot create not-null constraint \"{new_conname}\" on column \
+                             \"{col_name}\" of table \"{relname}\""
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .with_detail(format!(
+                        "A not-null constraint named \"{}\" already exists for this column.",
+                        con.name_str()
+                    )),
+                ));
+            }
+        }
+        if !con.conislocal {
+            unported("AdjustNotNullInheritance conislocal flip (inheritance lane)");
+        }
+        return Ok(());
     }
     if constr.is_no_inherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
         unported("ATAddCheckNNConstraint inheritance recursion");
@@ -2974,7 +3030,8 @@ fn ATExecAddOf<'mcx>(
     of_typename: &TypeName<'_>,
 ) -> PgResult<()> {
     let relid = rel.rd_id;
-    let (typeid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, of_typename)?;
+    let (typeid, _typmod) =
+        parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, None, of_typename)?;
     check_of_type(mcx, typeid)?;
 
     if pg_inherits::has_superclass(mcx, relid)? {
