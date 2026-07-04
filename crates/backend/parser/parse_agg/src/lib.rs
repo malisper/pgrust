@@ -361,7 +361,75 @@ fn check_agg_arguments_walker<'mcx>(
             }
             Ok(())
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            for w in &c.args {
+                check_agg_arguments_walker(pstate, w, ctx)?;
+            }
+            match c.defresult {
+                Some(d) => check_agg_arguments_walker(pstate, d, ctx),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            check_agg_arguments_walker(pstate, cw.expr.expect("CaseWhen.expr"), ctx)?;
+            check_agg_arguments_walker(pstate, cw.result.expect("CaseWhen.result"), ctx)
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                check_agg_arguments_walker(pstate, elem, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            check_agg_arguments_walker(pstate, node.as_coerce_via_io().unwrap().arg, ctx)
+        }
+        NodeTag::T_CoerceToDomain => {
+            check_agg_arguments_walker(pstate, node.as_coerce_to_domain().unwrap().arg, ctx)
+        }
         other => panic!(
             "check_agg_arguments_walker (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg (Query recursion needs query_tree_walker)"
@@ -851,6 +919,77 @@ fn finalize_grouping_exprs<'mcx>(
             Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SQLValueFunction | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            for w in &c.args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, w)?;
+            }
+            match c.defresult {
+                Some(d) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, cw.expr.expect("CaseWhen.expr"))?;
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, cw.result.expect("CaseWhen.result"))
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_List => {
+            for elem in node.as_list().unwrap() {
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "finalize_grouping_exprs (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"
@@ -1047,7 +1186,65 @@ fn check_ungrouped_columns<'mcx>(
             }
             Ok(())
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            for w in &c.args {
+                check_ungrouped_columns(pstate, qry, hnvg, w)?;
+            }
+            match c.defresult {
+                Some(d) => check_ungrouped_columns(pstate, qry, hnvg, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            check_ungrouped_columns(pstate, qry, hnvg, cw.expr.expect("CaseWhen.expr"))?;
+            check_ungrouped_columns(pstate, qry, hnvg, cw.result.expect("CaseWhen.result"))
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_List => {
+            for elem in node.as_list().unwrap() {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "check_ungrouped_columns (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"

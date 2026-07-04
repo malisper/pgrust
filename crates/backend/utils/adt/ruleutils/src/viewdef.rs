@@ -53,7 +53,7 @@ pub fn pg_get_viewdef_worker(
 
 // RelationGetDescr(ev_relation) reduced to the attname-by-position slice
 // get_target_list consults.
-fn view_attnames(relid: Oid) -> PgResult<Vec<String>> {
+pub(crate) fn view_attnames(relid: Oid) -> PgResult<Vec<String>> {
     let natts = lsyscache::get_relnatts(relid)?;
     let mut out = Vec::with_capacity(natts.max(0) as usize);
     for attno in 1..=natts {

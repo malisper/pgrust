@@ -293,10 +293,9 @@ fn upper_level_error(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("Upper-level {what} found where not expected")))
 }
 
-// PVC flags are consulted only by the Aggref/WindowFunc/PHV arms, all
-// deferred with their payloads; the struct carries no flags until then.
 struct PullVarClause<'mcx> {
     mcx: Mcx<'mcx>,
+    flags: u32,
     varlist: NodeList<'mcx>,
 }
 
@@ -310,12 +309,46 @@ impl<'mcx> NodeWalker<'mcx> for PullVarClause<'mcx> {
                 self.varlist.lappend(self.mcx, node)?;
                 return Ok(false);
             }
-            // INCLUDE/RECURSE/error all need these payloads (levelsup
-            // checks, argument lists) to stay faithful — deferred together.
-            t @ (NodeTag::T_Aggref
-            | NodeTag::T_GroupingFunc
-            | NodeTag::T_WindowFunc
-            | NodeTag::T_PlaceHolderVar) => deferred("pull_var_clause_walker", t),
+            NodeTag::T_Aggref => {
+                if node.as_aggref().unwrap().agglevelsup != 0 {
+                    return Err(upper_level_error("Aggref"));
+                }
+                if self.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_AGGREGATES == 0 {
+                    return Err(Box::new(PgError::error(
+                        "Aggref found where not expected".to_string(),
+                    )));
+                }
+            }
+            NodeTag::T_GroupingFunc => {
+                if node.as_grouping_func().unwrap().agglevelsup != 0 {
+                    return Err(upper_level_error("GROUPING"));
+                }
+                if self.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_AGGREGATES == 0 {
+                    return Err(Box::new(PgError::error(
+                        "GROUPING found where not expected".to_string(),
+                    )));
+                }
+            }
+            NodeTag::T_WindowFunc => {
+                if self.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
+                    self.varlist.lappend(self.mcx, node)?;
+                    return Ok(false);
+                }
+                if self.flags & PVC_RECURSE_WINDOWFUNCS == 0 {
+                    return Err(Box::new(PgError::error(
+                        "WindowFunc found where not expected".to_string(),
+                    )));
+                }
+            }
+            t @ NodeTag::T_PlaceHolderVar => deferred("pull_var_clause_walker", t),
             _ => {}
         }
         expression_tree_walker(node, self)
@@ -340,8 +373,7 @@ pub fn pull_var_clause<'mcx>(
         flags & (PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS)
             != (PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS)
     );
-    let _ = flags;
-    let mut cx = PullVarClause { mcx, varlist: NodeList::nil() };
+    let mut cx = PullVarClause { mcx, flags, varlist: NodeList::nil() };
     cx.visit(node)?;
     Ok(cx.varlist)
 }

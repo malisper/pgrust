@@ -83,16 +83,46 @@ fn eval_plan_qual_begin<'mcx>(
         panic!("EvalPlanQualStart (execMain.c): instrumented recheck not ported");
     }
     let plan = epq.plan.expect("ModifyTable has a subplan");
-    if plan.node_tag() != NodeTag::T_SeqScan {
-        panic!(
-            "EvalPlanQualStart (execMain.c): {:?} recheck plan \
-             (join/subquery/index-scan EPQ) not exercised",
-            plan.node_tag()
-        );
-    }
+    check_epq_plan(plan);
     debug_assert!(estate.es_epq.is_some(), "EvalPlanQualSlot precedes EvalPlanQual");
     epq.recheck = Some(exec_init_node(Some(plan), estate, 0)?.expect("recheck subplan"));
     Ok(())
+}
+
+// The recheck tree re-runs against the parent estate; every node in it must
+// have exercised EPQ rescan semantics. Scans substitute the test tuple via
+// ExecScanFetch; joins/sorts/materials rescan their children.
+fn check_epq_plan(plan: Node<'_>) {
+    let ok = matches!(
+        plan.node_tag(),
+        NodeTag::T_SeqScan
+            | NodeTag::T_IndexScan
+            | NodeTag::T_IndexOnlyScan
+            | NodeTag::T_BitmapHeapScan
+            | NodeTag::T_BitmapIndexScan
+            | NodeTag::T_NestLoop
+            | NodeTag::T_MergeJoin
+            | NodeTag::T_HashJoin
+            | NodeTag::T_Hash
+            | NodeTag::T_Sort
+            | NodeTag::T_Material
+            | NodeTag::T_Result
+    );
+    if !ok {
+        panic!(
+            "EvalPlanQualStart (execMain.c): {:?} recheck plan \
+             (subquery/aggregate EPQ) not exercised",
+            plan.node_tag()
+        );
+    }
+    if let Some(p) = plan.as_plan() {
+        if let Some(l) = p.lefttree {
+            check_epq_plan(l);
+        }
+        if let Some(r) = p.righttree {
+            check_epq_plan(r);
+        }
+    }
 }
 
 fn slot_pair_mut<'a, 'mcx>(

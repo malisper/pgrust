@@ -9,6 +9,7 @@ use crate::pathnode::{add_existing_path, create_pathtarget, create_projection_pa
 use crate::planmain::{fetch_final_rel, query_planner};
 use crate::prep::preprocess_targetlist;
 use crate::run::PlannerRun;
+pub(crate) use types_pathnodes::run::sortgrouplist_exprs;
 use crate::{is_parallel_safe_exprs, is_parallel_safe_opt};
 
 pub fn grouping_planner<'mcx>(
@@ -294,9 +295,6 @@ fn grouping_planner_tail<'mcx>(
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            if parse.commandType == CmdType::CMD_MERGE {
-                panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
-            }
             debug_assert!(run.root.rowMarks.is_empty());
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
             let update_colnos = (parse.commandType == CmdType::CMD_UPDATE).then(|| {
@@ -318,6 +316,16 @@ fn grouping_planner_tail<'mcx>(
                 }
                 ids
             });
+            let merge_action_list = (!parse.mergeActionList.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for action in &parse.mergeActionList {
+                    ids.push(run.root.alloc_expr_node(action));
+                }
+                ids
+            });
+            let merge_join_condition = (parse.commandType == CmdType::CMD_MERGE)
+                .then(|| parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -329,6 +337,8 @@ fn grouping_planner_tail<'mcx>(
                 with_check_options,
                 returning_list,
                 onconflict,
+                merge_action_list,
+                merge_join_condition,
             );
             path_id = run.root.alloc_path(mtpath);
         }
@@ -514,6 +524,16 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(f, out);
             }
         }
+        // PVC_RECURSE_WINDOWFUNCS: window args feed the grouped input target.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_agg_input_vars(f, out);
+            }
+        }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
@@ -547,6 +567,21 @@ fn pull_agg_input_vars<'mcx>(
         }
         NodeTag::T_RelabelType => {
             pull_agg_input_vars(node.as_relabel_type().unwrap().arg, out)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_agg_input_vars(a, out);
+            }
         }
         NodeTag::T_Param => {}
         NodeTag::T_NullTest => {
@@ -582,6 +617,48 @@ fn pull_agg_input_vars<'mcx>(
             for a in &sp.args {
                 pull_agg_input_vars(a, out);
             }
+        }
+        NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_agg_input_vars(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_agg_input_vars(cw.expr.expect("CaseWhen.expr"), out);
+                pull_agg_input_vars(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_agg_input_vars(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            pull_agg_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
         }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
@@ -768,13 +845,16 @@ fn create_grouping_paths<'mcx>(
 
     if can_hash {
         if !parse.groupingSets.is_nil() {
-            // C's hash-only consider_groupingsets_paths(is_sorted=false) arm.
-            if crate::gucs::enable_hashagg() {
-                panic!(
-                    "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
-                     strategy unported — set enable_hashagg=off; grouping-sets lane"
-                );
-            }
+            crate::groupingsets::consider_groupingsets_paths(
+                run,
+                grouped_rel,
+                cheapest,
+                false,
+                true,
+                &agg_costs,
+                &having_qual,
+                num_groups,
+            )?;
         } else {
             let group_clause =
                 crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
@@ -813,33 +893,7 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
     )
 }
 
-// get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
-pub(crate) fn sortgrouplist_exprs<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    clauses: &[types_pathnodes::NodeId],
-    tlist: &types_nodes::list::NodeList<'mcx>,
-) -> mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> {
-    let mut exprs = mcx::PgVec::new_in(run.mcx);
-    for &gc_id in clauses {
-        let sgref = run
-            .root
-            .expr_node(gc_id)
-            .as_sort_group_clause()
-            .expect("sortgroup clause cell")
-            .tleSortGroupRef;
-        let tle_node = tlist
-            .iter()
-            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
-            .expect("sortgroupref has a tlist entry");
-        let expr = tle_node.as_target_entry().unwrap().expr;
-        let id = run.intern_expr(expr);
-        exprs.push((id, expr));
-    }
-    exprs
-}
-
-// get_number_of_groups (planner.c); the hash_sets leg needs the unported
-// hashed strategy and stays loud.
+// get_number_of_groups (planner.c).
 fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
     let parse = run.parse();
     let path_rows = {
@@ -849,12 +903,6 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
     if !parse.groupClause.is_nil() {
         if !parse.groupingSets.is_nil() {
             let mut gd = run.gset_data.take().expect("grouping sets preprocessed");
-            if !gd.unsortable_sets.is_empty() {
-                panic!(
-                    "get_number_of_groups (planner.c): unsortable grouping sets need the \
-                     hashed strategy (unported); grouping-sets lane"
-                );
-            }
             let tlist = run.processed_tlist();
             let mut dnum_groups = 0.0;
             for rollup in gd.rollups.iter_mut() {
@@ -873,6 +921,25 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
                     rollup.numGroups += num_groups;
                 }
                 dnum_groups += rollup.numGroups;
+            }
+            if !gd.hash_sets_idx.is_empty() {
+                gd.dNumHashGroups = 0.0;
+                let clauses = crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.processed_groupClause,
+                );
+                let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
+                for (gset, gs) in gd.hash_sets_idx.iter().zip(gd.unsortable_sets.iter_mut()) {
+                    let num_groups = crate::selfuncs::estimate_num_groups_pgset(
+                        run,
+                        &group_exprs,
+                        path_rows,
+                        Some(gset),
+                    )?;
+                    gs.numGroups = num_groups;
+                    gd.dNumHashGroups += num_groups;
+                }
+                dnum_groups += gd.dNumHashGroups;
             }
             run.gset_data = Some(gd);
             return Ok(dnum_groups);

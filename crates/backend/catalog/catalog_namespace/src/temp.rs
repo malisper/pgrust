@@ -185,6 +185,34 @@ pub fn RangeVarGetCreationNamespace(mcx: Mcx<'_>, rv: &rel_vocab::RangeVar<'_>) 
     Ok(namespace_id)
 }
 
+// QualifiedNameGetCreationNamespace + LookupCreationNamespace (namespace.c).
+pub fn QualifiedNameGetCreationNamespace<'a>(
+    mcx: Mcx<'_>,
+    names: &[&'a str],
+) -> PgResult<(Oid, &'a str)> {
+    let (schemaname, objname) = crate::DeconstructQualifiedName(names)?;
+    if let Some(schemaname) = schemaname {
+        if schemaname == "pg_temp" {
+            AccessTempTableNamespace(mcx, false)?;
+            return Ok((my_temp_namespace(), objname));
+        }
+        return Ok((get_namespace_oid(schemaname, false)?, objname));
+    }
+    crate::path::recomputeNamespacePath()?;
+    if crate::BASE_TEMP_CREATION_PENDING.with(Cell::get) {
+        AccessTempTableNamespace(mcx, true)?;
+        return Ok((my_temp_namespace(), objname));
+    }
+    let namespace_id = crate::BASE_CREATION_NAMESPACE.with(Cell::get);
+    if !OidIsValid(namespace_id) {
+        return Err(Box::new(
+            PgError::new(ERROR, "no schema has been selected to create in".to_string())
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
+        ));
+    }
+    Ok((namespace_id, objname))
+}
+
 // C mutates newRelation->relpersistence in place; the adjusted value is
 // returned instead (callers hold the RangeVar immutably).
 pub fn RangeVarAdjustRelationPersistence(relpersistence: u8, nspid: Oid) -> PgResult<u8> {

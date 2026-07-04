@@ -9,6 +9,7 @@
 // revalidation), rebuilding the fcache on mismatch.
 #![allow(non_snake_case)]
 
+mod inline_fn;
 mod retval;
 
 use datum::Datum;
@@ -39,6 +40,7 @@ pub use retval::check_sql_stmt_retval;
 
 const ANUM_PG_PROC_PRONAME: i32 = 2;
 const ANUM_PG_PROC_PROLANG: i32 = 5;
+const ANUM_PG_PROC_PROISSTRICT: i32 = 13;
 const ANUM_PG_PROC_PRORETSET: i32 = 14;
 const ANUM_PG_PROC_PROVOLATILE: i32 = 15;
 const ANUM_PG_PROC_PRONARGS: i32 = 17;
@@ -52,6 +54,7 @@ const ANUM_PG_PROC_PROSQLBODY: i32 = 28;
 pub fn init_seams() {
     fmgr_core::register_sql_language_handler(fmgr_sql);
     fmgr_core::register_late_builtins(FUNCTIONS_BUILTINS);
+    inline_fn::init_seams();
 }
 
 const fn vb(foid: Oid, name: &'static str, func: fmgr::PGFunction) -> FmgrBuiltin {
@@ -275,6 +278,7 @@ fn analyze_and_rewrite(
     fname: &str,
     argtypes: &[Oid],
     argnames: &[&str],
+    input_collation: Oid,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
     let query = analyze_seams::parse_analyze_sql_fn::call(
         qmcx,
@@ -283,6 +287,7 @@ fn analyze_and_rewrite(
         fname,
         argtypes,
         argnames,
+        input_collation,
         QueryEnvHandle::NULL,
     )?;
     if query.commandType == CmdType::CMD_UTILITY {
@@ -306,6 +311,7 @@ fn build_sources<'mcx>(
     argtypes: &[Oid],
     argnames: &[&str],
     rettype: Oid,
+    input_collation: Oid,
 ) -> PgResult<PgVec<'mcx, plancache::CachedPlanSourceHandle>> {
     let scratch = MemoryContext::new("fmgr_sql parse");
     let raw_list = parser_seams::raw_parser::call(
@@ -330,7 +336,8 @@ fn build_sources<'mcx>(
                 parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
             )?;
             let raw2 = reparsed.get(i).expect("re-parse reproduces the statement");
-            let mut query_list = analyze_and_rewrite(qmcx, raw2, src, fname, argtypes, argnames)?;
+            let mut query_list =
+                analyze_and_rewrite(qmcx, raw2, src, fname, argtypes, argnames, input_collation)?;
             for q in query_list.iter() {
                 check_body_utility_query(q)?;
             }
@@ -418,7 +425,7 @@ fn check_body_utility_node(u: types_nodes::Node<'_>) -> PgResult<()> {
     Ok(())
 }
 
-fn build_fcache(fn_oid: Oid, fn_retset: bool) -> PgResult<SqlFcacheGuard> {
+fn build_fcache(fn_oid: Oid, fn_retset: bool, input_collation: Oid) -> PgResult<SqlFcacheGuard> {
     let owned = McxOwned::<SqlFcacheTy>::try_new(MemoryContext::new("SQL function cache"), |mcx| {
         let row = read_proc_row(mcx, fn_oid)?;
         if row.proretset || fn_retset {
@@ -438,6 +445,7 @@ fn build_fcache(fn_oid: Oid, fn_retset: bool) -> PgResult<SqlFcacheGuard> {
             &row.argtypes,
             &name_refs,
             row.rettype,
+            input_collation,
         )?;
         let (typlen, typbyval) = if row.rettype == VOIDOID {
             (4, true)
@@ -561,7 +569,7 @@ pub fn fmgr_sql(
         }
     };
     if rebuild {
-        let guard = build_fcache(flinfo.fn_oid, flinfo.fn_retset)?;
+        let guard = build_fcache(flinfo.fn_oid, flinfo.fn_retset, fcinfo.fncollation)?;
         flinfo.set_fn_extra(guard);
     }
     let nargs = fcinfo.nargs();
@@ -906,6 +914,7 @@ fn fc_fmgr_sql_validator(
                 proname.as_str(),
                 &argtypes,
                 &name_refs,
+                types_core::InvalidOid,
                 QueryEnvHandle::NULL,
             )?;
             let list = if query.commandType == CmdType::CMD_UTILITY {

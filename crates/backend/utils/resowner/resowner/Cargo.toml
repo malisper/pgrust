@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../error/elog" }
 hashfn = { path = "../../../../common/hashfn" }

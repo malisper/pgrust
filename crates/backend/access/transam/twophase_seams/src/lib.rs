@@ -1,4 +1,4 @@
-use types_core::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use types_core::{Oid, ProcNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 
 // StartPrepare's inputs, pre-serialized to the 2PC state-file segment images
@@ -86,4 +86,15 @@ seam_core::seam!(
 seam_core::seam!(
     // FinishPreparedTransaction(gid, isCommit) (twophase.c).
     pub fn finish_prepared_transaction<'a>(gid: &'a str, is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn register_two_phase_record<'a>(rmid: u8, info: u16, data: &'a [u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn two_phase_get_dummy_proc_number(
+        xid: TransactionId,
+        lock_held: bool,
+    ) -> PgResult<ProcNumber>
 );

@@ -1,6 +1,6 @@
 //! sequence.c write half: DefineSequence, nextval/currval/lastval/setval,
-//! the backend SeqTable cache, and OWNED BY. Loud (named panics): temp and
-//! unlogged sequences, IF NOT EXISTS, ALTER SEQUENCE beyond the serial
+//! the backend SeqTable cache, and OWNED BY. Loud (named panics): unlogged
+//! sequences, IF NOT EXISTS, ALTER SEQUENCE beyond the serial
 //! OWNED BY form, ResetSequence/SequenceChangePersistence consumers.
 
 #![allow(non_snake_case)]
@@ -29,7 +29,7 @@ use types_rel::{
     ShareRowExclusiveLock, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELKIND_SEQUENCE, RELKIND_VIEW,
 };
-use types_core::RELPERSISTENCE_PERMANENT;
+use types_core::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_UNLOGGED};
 use types_storage::bufpage::{PageMut, PageRef};
 use types_tuple::{
     HeapTupleHeaderData, ItemPointerSet, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
@@ -246,8 +246,8 @@ fn rd_locator_bytes(rel: &Relation<'_>) -> [u8; SizeOfXlSeqRec] {
 }
 
 fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) -> PgResult<()> {
-    if rel.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT {
-        unported("temp/unlogged sequences (init-fork lane)");
+    if rel.rd_rel.relpersistence == RELPERSISTENCE_UNLOGGED {
+        unported("unlogged sequences (init-fork lane)");
     }
 
     let (buf, _) = bufmgr::ExtendBufferedRelBy(
@@ -582,8 +582,8 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
         unported("CREATE SEQUENCE IF NOT EXISTS");
     }
     let rv = seq.sequence.expect("CreateSeqStmt.sequence");
-    if rv.relpersistence != RELPERSISTENCE_PERMANENT {
-        unported("temp/unlogged sequences");
+    if rv.relpersistence == RELPERSISTENCE_UNLOGGED {
+        unported("unlogged sequences");
     }
 
     let p = init_params(mcx, &seq.options, seq.for_identity)?;

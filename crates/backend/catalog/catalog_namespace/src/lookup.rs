@@ -411,6 +411,23 @@ pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+pub fn OpfamilynameGetOpfid(amid: Oid, opfname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespaceId = base_path_nth(i);
+        if namespaceId == mtn {
+            continue;
+        }
+        let opfid =
+            syscache_seams::lookup_pg_opfamily_oid_exact::call(amid, opfname, namespaceId)?;
+        if OidIsValid(opfid) {
+            return Ok(opfid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
     recomputeNamespacePath()?;
     let mtn = my_temp_namespace();
@@ -581,7 +598,7 @@ pub fn FuncnameGetCandidates<'mcx>(
     expand_variadic: bool,
     expand_defaults: bool,
 ) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
-    debug_assert!(nargs >= 0);
+    // nargs == -1: any arity, no variadic/default expansion (C convention).
     let (schemaname, funcname) = DeconstructQualifiedName(names)?;
 
     let namespace_id = match schemaname {
@@ -641,7 +658,7 @@ pub fn FuncnameGetCandidates<'mcx>(
             true
         };
 
-        if pronargs != nargs && !variadic && !use_defaults {
+        if nargs >= 0 && pronargs != nargs && !variadic && !use_defaults {
             continue;
         }
 

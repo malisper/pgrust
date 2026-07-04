@@ -252,9 +252,12 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
-    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
     predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
     predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));

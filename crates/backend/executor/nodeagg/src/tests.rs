@@ -1818,3 +1818,228 @@ fn grouping_sets_two_phases_resort() {
         ]
     );
 }
+
+// GROUPING SETS ((a),(b)), both hashed: top AGG_HASHED + AGG_HASHED chain
+// entry, no sorts. Output order is per-table insertion order (first-seen).
+fn mk_hashed_gsets_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let mut outer_tl = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, a, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    outer_tl
+        .lappend(mcx, Node::mk_target_entry(mcx, b, 2, Some("b"), false).unwrap())
+        .unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        r.plan.targetlist = outer_tl;
+        r.plan.plan_width = 8;
+        r.seal()
+    };
+
+    let ga = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let gb = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+    let mut count = Node::build::<Aggref>(mcx).unwrap();
+    count.aggfnoid = COUNT_STAR_OID;
+    count.aggtype = INT8OID;
+    count.aggtranstype = INT8OID;
+    count.aggstar = true;
+    count.aggno = 0;
+    count.aggtransno = 0;
+    let grouping = {
+        let mut g = Node::build::<types_nodes::primnodes::GroupingFunc>(mcx).unwrap();
+        g.cols = types_nodes::list::IntList::from_slice(mcx, &[1, 2]).unwrap();
+        g.seal()
+    };
+    let mut tlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, ga, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, gb, 2, Some("b"), false).unwrap())
+        .unwrap();
+    tlist
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, count.seal(), 3, Some("count"), false).unwrap(),
+        )
+        .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, grouping, 4, Some("grouping"), false).unwrap())
+        .unwrap();
+
+    let one_set = |mcx| {
+        NodeList::make1(
+            mcx,
+            Node::mk_int_list(
+                mcx,
+                types_nodes::list::IntList::from_slice(mcx, &[0]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let chain_agg = {
+        let mut c = Node::build::<Agg>(mcx).unwrap();
+        c.aggstrategy = 2;
+        c.numCols = 1;
+        c.grpColIdx = mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+        c.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        c.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        c.numGroups = 4;
+        c.groupingSets = one_set(mcx);
+        c.seal()
+    };
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 2;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    agg.groupingSets = one_set(mcx);
+    agg.chain = NodeList::make1(mcx, chain_agg).unwrap();
+    agg.seal_ref()
+}
+
+#[test]
+fn hashed_grouping_sets_two_tables() {
+    install_seams();
+    let agg = mk_hashed_gsets_agg(leaked_mcx());
+    let got = run_rollup(agg, &[(1, 10), (1, 20), (2, 10)]);
+    assert_eq!(
+        got,
+        vec![
+            (Some(1), None, 2, 1),
+            (Some(2), None, 1, 1),
+            (None, Some(10), 2, 2),
+            (None, Some(20), 1, 2),
+        ]
+    );
+}
+
+#[test]
+fn hashed_grouping_sets_empty_input() {
+    install_seams();
+    let agg = mk_hashed_gsets_agg(leaked_mcx());
+    let got = run_rollup(agg, &[]);
+    assert_eq!(got, vec![]);
+}
+
+// AGG_MIXED: hashed (b) on top, sorted (a) chain entry consuming the shared
+// (pre-sorted) input directly — sorted groups first, then the hash table.
+fn mk_mixed_gsets_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let mut outer_tl = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, a, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    outer_tl
+        .lappend(mcx, Node::mk_target_entry(mcx, b, 2, Some("b"), false).unwrap())
+        .unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        r.plan.targetlist = outer_tl;
+        r.plan.plan_width = 8;
+        r.seal()
+    };
+
+    let ga = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let gb = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+    let mut count = Node::build::<Aggref>(mcx).unwrap();
+    count.aggfnoid = COUNT_STAR_OID;
+    count.aggtype = INT8OID;
+    count.aggtranstype = INT8OID;
+    count.aggstar = true;
+    count.aggno = 0;
+    count.aggtransno = 0;
+    let grouping = {
+        let mut g = Node::build::<types_nodes::primnodes::GroupingFunc>(mcx).unwrap();
+        g.cols = types_nodes::list::IntList::from_slice(mcx, &[1, 2]).unwrap();
+        g.seal()
+    };
+    let mut tlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, ga, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, gb, 2, Some("b"), false).unwrap())
+        .unwrap();
+    tlist
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, count.seal(), 3, Some("count"), false).unwrap(),
+        )
+        .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, grouping, 4, Some("grouping"), false).unwrap())
+        .unwrap();
+
+    let one_set = |mcx| {
+        NodeList::make1(
+            mcx,
+            Node::mk_int_list(
+                mcx,
+                types_nodes::list::IntList::from_slice(mcx, &[0]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let chain_agg = {
+        let mut c = Node::build::<Agg>(mcx).unwrap();
+        c.aggstrategy = 1;
+        c.numCols = 1;
+        c.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        c.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        c.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        c.groupingSets = one_set(mcx);
+        c.seal()
+    };
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 3;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    agg.groupingSets = one_set(mcx);
+    agg.chain = NodeList::make1(mcx, chain_agg).unwrap();
+    agg.seal_ref()
+}
+
+#[test]
+fn mixed_grouping_sets_sorted_then_hashed() {
+    install_seams();
+    let agg = mk_mixed_gsets_agg(leaked_mcx());
+    let got = run_rollup(agg, &[(1, 10), (1, 20), (2, 10)]);
+    assert_eq!(
+        got,
+        vec![
+            (Some(1), None, 2, 1),
+            (Some(2), None, 1, 1),
+            (None, Some(10), 2, 2),
+            (None, Some(20), 1, 2),
+        ]
+    );
+}
+
+#[test]
+fn mixed_grouping_sets_empty_input() {
+    install_seams();
+    let agg = mk_mixed_gsets_agg(leaked_mcx());
+    let got = run_rollup(agg, &[]);
+    assert_eq!(got, vec![]);
+}

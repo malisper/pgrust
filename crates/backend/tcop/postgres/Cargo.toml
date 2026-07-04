@@ -27,6 +27,7 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
 pqcomm = { path = "../../libpq/pqcomm" }
 pqformat = { path = "../../libpq/pqformat" }
+fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 latch = { path = "../../storage/ipc/latch" }

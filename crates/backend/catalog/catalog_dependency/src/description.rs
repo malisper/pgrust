@@ -1,8 +1,9 @@
-// getObjectDescription (objectaddress.c), pg_class + pg_policy arms only;
-// every other object class is loud.
+// getObjectDescription (objectaddress.c), pg_class + pg_constraint + pg_policy
+// arms only; every other object class is loud.
+use datum::Datum;
 use mcx::Mcx;
 use pg_depend::ObjectAddress;
-use types_core::{AttrNumber, Oid, RELATION_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult};
 use types_rel::pg_class::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
@@ -41,6 +42,18 @@ pub fn getObjectDescription<'mcx>(
             let rel = getRelationDescription(mcx, polrelid)?;
             Ok(Some(format!("policy {polname} on {rel}")))
         }
+        ConstraintRelationId => {
+            let (conname, conrelid) = constraint_name_and_rel(mcx, object.objectId)?;
+            if conrelid != InvalidOid {
+                Ok(Some(format!(
+                    "constraint {} on {}",
+                    conname,
+                    getRelationDescription(mcx, conrelid)?
+                )))
+            } else {
+                Ok(Some(format!("constraint {conname}")))
+            }
+        }
         other => panic!("unported: objectaddress.c getObjectDescription class {other}"),
     }
 }
@@ -76,6 +89,60 @@ fn policy_name_rel<'mcx>(mcx: Mcx<'mcx>, policy_id: Oid) -> PgResult<(String, Oi
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
     Ok((polname, polrelid))
+}
+
+const ConstraintRelationId: Oid = 2606;
+
+fn constraint_name_and_rel<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<(String, Oid)> {
+    let con_rel = table::table_open(mcx, ConstraintRelationId, types_rel::AccessShareLock)?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = pg_constraint::Anum_pg_constraint_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(oideq) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(con_id);
+    let keys = [key];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::CONSTRAINT_OID_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let desc = con_rel.descr();
+    let mut isnull = false;
+    // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
+    let name_d = unsafe {
+        types_tuple::heap_getattr(
+            tup,
+            pg_constraint::Anum_pg_constraint_conname as i32,
+            desc,
+            &mut isnull,
+        )
+    };
+    // SAFETY: conname is an inline NameData (64 NUL-padded bytes).
+    let namebytes = unsafe { core::slice::from_raw_parts(name_d.as_usize() as *const u8, 64) };
+    let len = namebytes.iter().position(|&b| b == 0).unwrap_or(64);
+    let conname = core::str::from_utf8(&namebytes[..len])
+        .expect("conname UTF-8")
+        .to_string();
+    // SAFETY: as above.
+    let conrelid = unsafe {
+        types_tuple::heap_getattr(
+            tup,
+            pg_constraint::Anum_pg_constraint_conrelid as i32,
+            desc,
+            &mut isnull,
+        )
+    }
+    .as_oid();
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok((conname, conrelid))
 }
 
 fn getRelationDescription<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {

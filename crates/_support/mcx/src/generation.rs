@@ -378,7 +378,7 @@ mod tests {
 
     fn acct() -> Acct {
         Acct {
-            name: "gen-test",
+            name: Cell::new("gen-test"),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),

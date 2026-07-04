@@ -15,12 +15,19 @@ pub trait ListFlavor {
 }
 
 pub enum PtrFlavor {}
+pub enum OptPtrFlavor {}
 pub enum IntFlavor {}
 pub enum OidFlavor {}
 pub enum XidFlavor {}
 
 impl ListFlavor for PtrFlavor {
     type Cell<'mcx> = Node<'mcx>;
+    const TAG: NodeTag = NodeTag::T_List;
+}
+// C lists may hold NULL cells (e.g. SubscriptingRef index lists with omitted
+// slice bounds); this flavor is that shape.
+impl ListFlavor for OptPtrFlavor {
+    type Cell<'mcx> = Option<Node<'mcx>>;
     const TAG: NodeTag = NodeTag::T_List;
 }
 impl ListFlavor for IntFlavor {
@@ -47,6 +54,7 @@ pub struct List<'mcx, F: ListFlavor> {
 }
 
 pub type NodeList<'mcx> = List<'mcx, PtrFlavor>;
+pub type OptNodeList<'mcx> = List<'mcx, OptPtrFlavor>;
 pub type IntList<'mcx> = List<'mcx, IntFlavor>;
 pub type OidList<'mcx> = List<'mcx, OidFlavor>;
 pub type XidList<'mcx> = List<'mcx, XidFlavor>;

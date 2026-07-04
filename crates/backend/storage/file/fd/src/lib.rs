@@ -47,6 +47,9 @@ pub use vfd::{
 
 pub fn init_seams() {
     file_seams::open_transient_file::set(desc::OpenTransientFile);
+    file_seams::basic_open_file::set(|name, flags| {
+        vfd::BasicOpenFile(name, flags).expect("BasicOpenFile: fd table poisoned")
+    });
     file_seams::close_transient_file::set(desc::CloseTransientFile);
     file_seams::pg_fsync::set(sync::pg_fsync);
     file_seams::fsync_fname::set(|fname, isdir| sync::fsync_fname(fname, isdir));

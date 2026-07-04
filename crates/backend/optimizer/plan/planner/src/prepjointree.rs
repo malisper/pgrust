@@ -364,6 +364,28 @@ fn pull_up_simple_subquery<'mcx>(
     })? {
         parse.returningList = l;
     }
+    // perform_pullup_replace_vars: MERGE action targetlists/quals and the
+    // join condition reference the source rel too.
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = replace_opt(mcx, action.qual, varno, &off_tlist)?;
+        let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &off_tlist)
+        })? {
+            Some(l) => l,
+            None => action.targetList.clone_in(mcx)?,
+        };
+        // SAFETY: pre-seal tree owned by this planner invocation.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.qual = new_qual;
+                a.targetList = new_tlist;
+            })
+        }
+        .expect("MergeAction");
+    }
+    parse.mergeJoinCondition =
+        replace_opt(mcx, parse.mergeJoinCondition, varno, &off_tlist)?;
 
     // pullup_replace_vars over the jointree: substitute Vars in every qual
     // and splice the offset sub-jointree in place of the RangeTblRef.
@@ -724,7 +746,7 @@ fn offset_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>, rtoffset: i32) -> PgResult<Va
         },
         varlevelsup: v.varlevelsup,
         varreturningtype: v.varreturningtype,
-        varnosyn: if v.varnosyn > 0 { v.varnosyn + rtoffset as u32 } else { v.varnosyn },
+        varnosyn: if v.varnosyn > 0 { v.varnosyn.wrapping_add(rtoffset as u32) } else { v.varnosyn },
         varattnosyn: v.varattnosyn,
         location: v.location,
     })
@@ -1341,6 +1363,15 @@ fn reduce_outer_joins_pass1<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<
         NodeTag::T_RangeTblRef => {
             result.relids.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
         }
+        NodeTag::T_FromExpr => {
+            let f = node.as_variant::<FromExpr>().unwrap();
+            for child in &f.fromlist {
+                let sub = reduce_outer_joins_pass1(mcx, child)?;
+                result.relids.add_members(mcx, &sub.relids)?;
+                result.contains_outer |= sub.contains_outer;
+                result.sub_states.push(sub);
+            }
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().unwrap();
             if j.jointype.is_outer_join() {
@@ -1368,6 +1399,33 @@ fn reduce_outer_joins_pass2<'mcx>(
     nonnullable_rels: &types_nodes::Bitmapset<'mcx>,
     forced_null_vars: &clauses::MultiBitmapset<'mcx>,
 ) -> PgResult<Node<'mcx>> {
+    if let Some(f) = node.as_variant::<FromExpr>() {
+        let mut pass_nonnullable = clauses::find_nonnullable_rels(mcx, f.quals)?;
+        pass_nonnullable.add_members(mcx, nonnullable_rels)?;
+        let mut pass_forced = clauses::find_forced_null_vars(mcx, f.quals)?;
+        clauses::mbms_add_members(mcx, &mut pass_forced, forced_null_vars)?;
+        debug_assert_eq!(f.fromlist.len(), state1.sub_states.len());
+        let mut fromlist = NodeList::nil();
+        for (child, sub) in f.fromlist.iter().zip(state1.sub_states.iter()) {
+            if sub.contains_outer {
+                fromlist.lappend(
+                    mcx,
+                    reduce_outer_joins_pass2(
+                        mcx,
+                        parse,
+                        child,
+                        sub,
+                        inner_reduced,
+                        &pass_nonnullable,
+                        &pass_forced,
+                    )?,
+                )?;
+            } else {
+                fromlist.lappend(mcx, child)?;
+            }
+        }
+        return Node::mk(mcx, FromExpr { fromlist, quals: f.quals });
+    }
     let j = node
         .as_join_expr()
         .unwrap_or_else(|| panic!("reduce_outer_joins_pass2: reached {:?}", node.node_tag()));
@@ -1558,6 +1616,12 @@ fn remove_nulling_relids<'mcx>(
     }
     for te in &parse.returningList {
         w.visit(te)?;
+    }
+    for a in &parse.mergeActionList {
+        w.visit(a)?;
+    }
+    if let Some(jc) = parse.mergeJoinCondition {
+        w.visit(jc)?;
     }
     if let Some(h) = parse.havingQual {
         w.visit(h)?;
@@ -1912,4 +1976,101 @@ mod tests {
         let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
         assert_eq!((out_var.varno, out_var.varattno), (3, 1));
     }
+}
+
+// transform_MERGE_to_join (prepjointree.c): replace the MERGE jointree (the
+// bare source) with a join between the target and the source. WHEN NOT
+// MATCHED BY SOURCE is the loud arm: it needs the outer-target join with
+// source-var nulling marks and the executor's join-condition recheck.
+pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    use types_nodes::jointype::JoinType;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::primnodes::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
+
+    if parse.commandType != CmdType::CMD_MERGE {
+        return Ok(());
+    }
+
+    let mut have_action = [false; NUM_MERGE_MATCH_KINDS];
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        if action.commandType != CmdType::CMD_NOTHING {
+            have_action[action.matchKind as usize] = true;
+        }
+    }
+    if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize] {
+        panic!(
+            "transform_MERGE_to_join (prepjointree.c): WHEN NOT MATCHED BY SOURCE \
+             (outer-target join + add_nulling_relids + executor join-condition \
+             recheck) unported — MERGE by-source lane"
+        );
+    }
+    let jointype =
+        if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize] {
+            JoinType::JOIN_RIGHT
+        } else {
+            JoinType::JOIN_INNER
+        };
+
+    let eref = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("*MERGE*"), colnames: NodeList::nil() },
+    )?);
+    let joinrte = RangeTblEntry {
+        rtekind: RTEKind::RTE_JOIN,
+        jointype,
+        eref: Some(eref),
+        inFromCl: true,
+        ..Default::default()
+    };
+    parse.rtable.lappend(mcx, Node::mk(mcx, joinrte)?)?;
+    let joinrti = parse.rtable.len() as i32;
+
+    let jt = parse.jointree.expect("MERGE jointree is a FromExpr");
+    let rtr = Node::mk(
+        mcx,
+        types_nodes::primnodes::RangeTblRef { rtindex: parse.mergeTargetRelation },
+    )?;
+    let target = Node::mk(
+        mcx,
+        FromExpr { fromlist: NodeList::make1(mcx, rtr)?, quals: jt.quals },
+    )?;
+    assert_eq!(jt.fromlist.len(), 1, "MERGE jointree carries exactly the source");
+    let source = jt.fromlist.nth(0);
+    debug_assert!(matches!(
+        source.node_tag(),
+        NodeTag::T_RangeTblRef | NodeTag::T_JoinExpr
+    ));
+
+    let joinexpr = Node::mk(
+        mcx,
+        types_nodes::primnodes::JoinExpr {
+            jointype,
+            isNatural: false,
+            larg: target,
+            rarg: source,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: parse.mergeJoinCondition,
+            alias: None,
+            rtindex: joinrti,
+        },
+    )?;
+    parse.jointree = Some(
+        Node::mk_mut(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, joinexpr)?, quals: None },
+        )?
+        .seal_ref(),
+    );
+
+    // A non-empty targetList here means a trigger-updatable view target
+    // (add_nulling_relids over its wholerow Var) — the view lane is loud
+    // upstream in the rewriter.
+    debug_assert!(parse.targetList.is_nil());
+
+    // Without BY SOURCE actions the executor never rechecks the join
+    // condition; C drops it to save planning/execution cycles.
+    parse.mergeJoinCondition = None;
+    Ok(())
 }

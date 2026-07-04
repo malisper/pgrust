@@ -40,6 +40,7 @@ nodebitmapheapscan = { path = "../nodebitmapheapscan" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
 nodematerial = { path = "../nodematerial" }
+nodememoize = { path = "../nodememoize" }
 nodesort = { path = "../nodesort" }
 nodeincrementalsort = { path = "../nodeincrementalsort" }
 nodeunique = { path = "../nodeunique" }
