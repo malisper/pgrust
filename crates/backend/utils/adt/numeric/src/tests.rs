@@ -879,17 +879,17 @@ fn generate_series_numeric_walk() {
     assert_eq!(got, ["3", "2", "1"]);
     let mut g = GenerateSeriesNumeric::new(n("5").num(), n("4").num(), None).unwrap();
     assert!(g.next().unwrap().is_none());
-    let e = GenerateSeriesNumeric::new(n("nan").num(), n("1").num(), None).unwrap_err();
+    let e = GenerateSeriesNumeric::new(n("nan").num(), n("1").num(), None).err().unwrap();
     assert_eq!(e.message(), "start value cannot be NaN");
-    let e = GenerateSeriesNumeric::new(n("inf").num(), n("1").num(), None).unwrap_err();
+    let e = GenerateSeriesNumeric::new(n("inf").num(), n("1").num(), None).err().unwrap();
     assert_eq!(e.message(), "start value cannot be infinity");
-    let e = GenerateSeriesNumeric::new(n("1").num(), n("nan").num(), None).unwrap_err();
+    let e = GenerateSeriesNumeric::new(n("1").num(), n("nan").num(), None).err().unwrap();
     assert_eq!(e.message(), "stop value cannot be NaN");
     let e =
-        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("0.0").num())).unwrap_err();
+        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("0.0").num())).err().unwrap();
     assert_eq!(e.message(), "step size cannot equal zero");
     let e =
-        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("-inf").num())).unwrap_err();
+        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("-inf").num())).err().unwrap();
     assert_eq!(e.message(), "step size cannot be infinity");
 }
 
