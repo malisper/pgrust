@@ -234,7 +234,7 @@ pub fn build_expression_pathkey<'mcx>(
     Ok(pathkeys)
 }
 
-fn make_pathkey_from_sortop<'mcx>(
+pub fn make_pathkey_from_sortop<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
     ordering_op: u32,
@@ -475,7 +475,7 @@ pub fn make_canonical_pathkey(
     pk
 }
 
-fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[PathKey]) -> bool {
+pub fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[PathKey]) -> bool {
     // EC_MUST_BE_REDUNDANT: a const EC admits only one key value.
     if run.root.ec(new_pathkey.pk_eclass.unwrap()).ec_has_const {
         return true;

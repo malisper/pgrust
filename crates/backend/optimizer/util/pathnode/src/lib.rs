@@ -1956,37 +1956,72 @@ pub fn create_unique_path<'mcx>(
     }
 
     let mcx = run.mcx;
+    let is_other_rel = matches!(
+        run.root.rel(rel_id).reloptkind,
+        types_pathnodes::RELOPT_OTHER_MEMBER_REL
+            | types_pathnodes::RELOPT_OTHER_JOINREL
+            | types_pathnodes::RELOPT_OTHER_UPPER_REL
+    );
     let mut uniq_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
     let mut in_operators: PgVec<'mcx, types_pathnodes::Oid> = PgVec::new_in(mcx);
-    for (i, &expr_id) in sjinfo.semi_rhs_exprs.iter().enumerate() {
-        let in_oper = sjinfo.semi_operators[i];
-        let sortop = lsyscache::amop::get_ordering_op_for_equality_op(in_oper, false)?;
-        if sortop != 0 {
-            let eqop = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
-                .map(|(op, _)| op)
-                .unwrap_or(0);
-            assert!(
-                eqop != 0,
-                "could not find equality operator for ordering operator {sortop}"
-            );
-            let expr = *run.root.expr_node(expr_id);
-            let dup = uniq_exprs.iter().any(|&kept| {
-                types_nodes::equal(*run.root.expr_node(kept), expr)
-            });
-            if dup {
-                continue;
+    if is_other_rel {
+        // Parent punt: all RHS columns equated to constants leaves nothing
+        // to unique-ify at the child either.
+        let top = run.root.rel(rel_id).top_parent.expect("other rel has a top_parent");
+        let Some(parent_upath) = run.root.rel(top).cheapest_unique_path else {
+            return Ok(None);
+        };
+        let parent_exprs = match run.root.path(parent_upath) {
+            PathNode::UniquePath(pp) => {
+                in_operators = types_pathnodes::relids::pgvec_clone_shallow(mcx, &pp.in_operators);
+                types_pathnodes::relids::pgvec_clone_shallow(mcx, &pp.uniq_exprs)
             }
-        } else {
-            assert!(
-                !sjinfo.semi_can_btree,
-                "could not find ordering operator for equality operator {in_oper}"
-            );
+            _ => panic!("cheapest_unique_path is a UniquePath"),
+        };
+        for &eid in parent_exprs.iter() {
+            let node = *run.root.expr_node(eid);
+            let adjusted =
+                planner_seams::adjust_appendrel_attrs_multilevel::call(run, node, rel_id, top)?;
+            let id = run.intern_expr(adjusted);
+            uniq_exprs.push(id);
         }
-        uniq_exprs.push(expr_id);
-        in_operators.push(in_oper);
-    }
-    if uniq_exprs.is_empty() {
-        return Ok(None);
+    } else {
+        // C detects redundant columns (duplicates or equated to constants)
+        // by re-running make_pathkeys_for_sortclauses per candidate; the
+        // incremental pathkey check below is equivalent.
+        let mut sort_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+        for (i, &expr_id) in sjinfo.semi_rhs_exprs.iter().enumerate() {
+            let in_oper = sjinfo.semi_operators[i];
+            let sortop = lsyscache::amop::get_ordering_op_for_equality_op(in_oper, false)?;
+            if sortop != 0 {
+                let eqop = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
+                    .map(|(op, _)| op)
+                    .unwrap_or(0);
+                assert!(
+                    eqop != 0,
+                    "could not find equality operator for ordering operator {sortop}"
+                );
+                let expr = *run.root.expr_node(expr_id);
+                let sortref = sort_pathkeys.len() as u32 + 1;
+                let pathkey = planner_seams::make_pathkey_from_sortop::call(
+                    run, expr, sortop, false, false, sortref,
+                )?;
+                if planner_seams::pathkey_is_redundant::call(run, pathkey, &sort_pathkeys) {
+                    continue;
+                }
+                sort_pathkeys.push(pathkey);
+            } else {
+                assert!(
+                    !sjinfo.semi_can_btree,
+                    "could not find ordering operator for equality operator {in_oper}"
+                );
+            }
+            uniq_exprs.push(expr_id);
+            in_operators.push(in_oper);
+        }
+        if uniq_exprs.is_empty() {
+            return Ok(None);
+        }
     }
 
     let sub = run.root.path(subpath_id).base();
@@ -2018,10 +2053,43 @@ pub fn create_unique_path<'mcx>(
         pathkeys: PgVec::new_in(mcx),
     };
 
-    if rel_rtekind == types_pathnodes::RTE_RELATION
-        && sjinfo.semi_can_btree
-        && relation_has_unique_index_for(run, rel_id, &[], &uniq_exprs, &in_operators)?
-    {
+    let noop = if rel_rtekind == types_pathnodes::RTE_RELATION {
+        sjinfo.semi_can_btree
+            && relation_has_unique_index_for(run, rel_id, &[], &uniq_exprs, &in_operators)?
+    } else if rel_rtekind == types_pathnodes::RTE_SUBQUERY {
+        // translate_sub_tlist (pathnode.c): punt unless every uniq expr is a
+        // simple Var of this rel.
+        let rel_relid = run.root.rel(rel_id).relid;
+        let mut colnos: PgVec<'_, i16> = PgVec::new_in(mcx);
+        let mut all_vars = true;
+        for &uid in uniq_exprs.iter() {
+            match run.root.expr_node(uid).as_var() {
+                Some(v) if v.varno == rel_relid as i32 => colnos.push(v.varattno),
+                _ => {
+                    all_vars = false;
+                    break;
+                }
+            }
+        }
+        if all_vars && !colnos.is_empty() {
+            match run.rte(rel_relid as usize).subquery {
+                Some(subquery) => {
+                    planner_seams::query_supports_distinctness::call(subquery)
+                        && planner_seams::query_is_distinct_for::call(
+                            subquery,
+                            &colnos,
+                            &in_operators,
+                        )?
+                }
+                None => false,
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if noop {
         path.rows = rel_rows;
         path.disabled_nodes = sub_disabled;
         path.startup_cost = sub_startup;
@@ -2037,10 +2105,6 @@ pub fn create_unique_path<'mcx>(
         run.root.rel_mut(rel_id).cheapest_unique_path = Some(id);
         return Ok(Some(id));
     }
-    assert!(
-        rel_rtekind != types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32,
-        "create_unique_path (pathnode.c): un-flattened subquery RHS; subquery-scan lane"
-    );
 
     let group_exprs: PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> = {
         let mut v = PgVec::new_in(mcx);
