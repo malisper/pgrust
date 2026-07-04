@@ -3237,6 +3237,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "copyfuncs"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "outfuncs",
+ "readfuncs",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "costsize"
 version = "0.1.0"
 dependencies = [
@@ -13255,6 +13266,7 @@ dependencies = [
  "commands_vacuum",
  "commands_view",
  "copy_cmd",
+ "copyfuncs",
  "dbcommands",
  "discard",
  "elog",
