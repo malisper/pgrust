@@ -5503,6 +5503,7 @@ name = "nbtree"
 version = "0.1.0"
 dependencies = [
  "aio_seams",
+ "arrayfuncs",
  "autovacuum_seams",
  "bufmgr_seams",
  "condition_variable_seams",
