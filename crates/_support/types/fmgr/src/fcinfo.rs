@@ -235,25 +235,27 @@ impl<const N: usize> LocalFcinfo<N> {
                     == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 6
             );
         }
-        let word = (collation as u64) | ((N as u16 as u64) << 48);
+        // isnull must be covered by EXACTLY ONE store, a byte store (C's
+        // `strb`), or the post-call `ldrb` reload misses V2 store-to-load
+        // forwarding (measured: that reload+cmp carried 80% of fmgr_call2's
+        // cycles — 0.79x instr but 2.07x ns). Two refuted shapes: field-wise
+        // inits (LLVM merges them into a store covering isnull mid-span) and
+        // one 8B header word + trailing volatile byte (LLVM legally sinks the
+        // word's pieces PAST the volatile, leaving a misaligned `stur`
+        // covering isnull as its last byte). Splitting the word around a
+        // volatile isnull byte is stable: no pass may synthesize another
+        // store covering a volatile-written byte.
         // SAFETY: asserted above — (fncollation, isnull, pad, nargs) is an
-        // 8-aligned 8B span; the pad byte's value is unobserved. Pointer is
-        // derived from `self` so its provenance covers the whole 8B span
-        // (a field-raw pointer would carry 4B provenance: Miri SB violation).
+        // 8-aligned 8B span. Pointer is derived from `self` so its provenance
+        // covers the whole span (a field-raw pointer would carry 4B
+        // provenance: Miri SB violation).
         unsafe {
             let p = (self as *mut Self)
                 .cast::<u8>()
                 .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation));
-            p.cast::<u64>().write(word);
-            // Re-store isnull=false as a DEDICATED byte store (C's `strb`):
-            // LLVM pairs the word store with an adjacent zero store into a
-            // 16B `stp`, which puts isnull at byte 12 of the pair — a shape
-            // the V2 store buffer will not forward to the post-call `ldrb`
-            // (measured: that reload+cmp carried 80% of fmgr_call2's cycles,
-            // 0.79x instr but 2.07x ns). A byte store forwards to a byte
-            // load; volatile so the merge/DSE passes cannot fold it back
-            // into the word store.
+            p.cast::<u32>().write(collation);
             p.add(4).write_volatile(0u8);
+            p.add(6).cast::<u16>().write(N as u16);
         }
     }
 }
