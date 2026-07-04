@@ -108,16 +108,7 @@ pub fn ExecVacuum<'mcx>(
                 };
             }
             "full" => full = explain::defGetBoolean(opt)?,
-            "freeze" => {
-                freeze = explain::defGetBoolean(opt)?;
-                // Silent no-freeze is worse than loud: vacuumlazy never passes
-                // HEAP_PAGE_PRUNE_FREEZE (pruneheap freeze lane unported), so
-                // FREEZE would run as a plain vacuum and diverge on
-                // relallfrozen/relfrozenxid.
-                if freeze {
-                    unported("ExecVacuum FREEZE: heap_page_prune_and_freeze freeze lane (pruneheap)");
-                }
-            }
+            "freeze" => freeze = explain::defGetBoolean(opt)?,
             "disable_page_skipping" => {
                 disable_page_skipping = explain::defGetBoolean(opt)?
             }
@@ -687,6 +678,8 @@ const Anum_pg_class_reltuples: usize = 11;
 const Anum_pg_class_relallvisible: usize = 12;
 const Anum_pg_class_relallfrozen: usize = 13;
 const Anum_pg_class_relhasindex: usize = 15;
+const Anum_pg_class_relfrozenxid: usize = 30;
+const Anum_pg_class_relminmxid: usize = 31;
 const Anum_pg_class_relhasrules: usize = 21;
 const Anum_pg_class_relhastriggers: usize = 22;
 const RowExclusiveLock: LOCKMODE = 3;
@@ -704,9 +697,9 @@ fn getattr(
     d
 }
 
-/// vac_update_relstats (vacuum.c), ANALYZE subset: the seam carries no
-/// frozenxid/minmulti (C's ANALYZE passes Invalid); the VACUUM freeze arm
-/// rides with its lane.
+/// vac_update_relstats (vacuum.c). `frozenxid`/`minmulti` advance
+/// relfrozenxid/relminmxid (Invalid = leave alone, C's ANALYZE shape).
+#[allow(clippy::too_many_arguments)]
 pub fn vac_update_relstats(
     relation: &RelationData<'_>,
     num_pages: BlockNumber,
@@ -714,6 +707,8 @@ pub fn vac_update_relstats(
     num_all_visible_pages: BlockNumber,
     num_all_frozen_pages: BlockNumber,
     hasindex: bool,
+    frozenxid: ::types_core::TransactionId,
+    minmulti: MultiXactId,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     let relid = relation.rd_id;
@@ -777,6 +772,38 @@ pub fn vac_update_relstats(
         }
     }
 
+    // relfrozenxid advances only forward, except a stored value in the future
+    // (corruption) is overwritten with a WARNING; same for relminmxid.
+    let oldfrozenxid = getattr(old, Anum_pg_class_relfrozenxid, desc).as_u32();
+    let mut futurexid = false;
+    if TransactionIdIsNormal(frozenxid) && oldfrozenxid != frozenxid {
+        let mut update = false;
+        if TransactionIdPrecedes(oldfrozenxid, frozenxid) {
+            update = true;
+        } else if TransactionIdPrecedes(varsup::ReadNextTransactionId()?, oldfrozenxid) {
+            futurexid = true;
+            update = true;
+        }
+        if update {
+            set(Anum_pg_class_relfrozenxid, ::datum::Datum::from_u32(frozenxid), &mut values, &mut replaces, &mut dirty);
+        }
+    }
+
+    let oldminmulti = getattr(old, Anum_pg_class_relminmxid, desc).as_u32();
+    let mut futuremxid = false;
+    if MultiXactIdIsValid(minmulti) && oldminmulti != minmulti {
+        let mut update = false;
+        if MultiXactIdPrecedes(oldminmulti, minmulti) {
+            update = true;
+        } else if MultiXactIdPrecedes(ReadNextMultiXactId()?, oldminmulti) {
+            futuremxid = true;
+            update = true;
+        }
+        if update {
+            set(Anum_pg_class_relminmxid, ::datum::Datum::from_u32(minmulti), &mut values, &mut replaces, &mut dirty);
+        }
+    }
+
     if dirty {
         let newtup =
             heaptuple::heap_modify_tuple(mcx, old, desc, &values, &nulls, &replaces)?;
@@ -785,6 +812,25 @@ pub fn vac_update_relstats(
         genam::systable_inplace_update_cancel(mcx, inplace_state)?;
     }
     table::table_close(rd, RowExclusiveLock)?;
+
+    if futurexid {
+        ereport(WARNING)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "overwrote invalid relfrozenxid value {oldfrozenxid} with new value {frozenxid} for table \"{}\"",
+                relation.name()
+            ))
+            .finish(loc("vac_update_relstats"))?;
+    }
+    if futuremxid {
+        ereport(WARNING)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "overwrote invalid relminmxid value {oldminmulti} with new value {minmulti} for table \"{}\"",
+                relation.name()
+            ))
+            .finish(loc("vac_update_relstats"))?;
+    }
     Ok(())
 }
 

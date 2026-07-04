@@ -266,6 +266,8 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
             MultiXactCutoff: 1,
         },
         vistest: GlobalVisStateHandle::new(0),
+        NewRelfrozenXid: 1000,
+        NewRelminMxid: 1,
         skippedallvis: false,
         rel_pages: 1,
         scanned_pages: 0,

@@ -890,9 +890,12 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
         buf1,
         vistest,
         HEAP_PAGE_PRUNE_MARK_UNUSED_NOW,
+        None,
         &mut presult,
         PruneReason::PruneVacuumScan,
         &mut off_loc,
+        None,
+        None,
     )
     .unwrap();
     bufmgr_seams::lock_buffer::call(buf1, bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
@@ -913,9 +916,12 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
         buf2,
         vistest,
         0,
+        None,
         &mut presult,
         PruneReason::PruneVacuumScan,
         &mut off_loc,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(page_ref(2).item_id(4).lp_flags(), LP_DEAD);
@@ -933,6 +939,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
         types_core::InvalidTransactionId,
         false,
         PruneReason::PruneVacuumCleanup,
+        &mut [],
         &[],
         &[],
         &[4],
@@ -940,8 +947,8 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     .unwrap();
     assert_eq!(page_ref(2).max_offset_number(), 3);
 
-    // Freeze plans: the C-writer shape our freeze lane does not emit yet,
-    // applied to (2,1) and (2,2) and hand-encoded per heapam_xlog.h.
+    // Freeze plans, hand-encoded per heapam_xlog.h (the emit side is covered
+    // by pruneheap's own tests), applied to (2,1) and (2,2).
     let (frz_im, frz_im2) = {
         let htup = tuple_hdr(2, 1);
         let im = (htup.t_infomask & !(HEAP_XMAX_BITS | HEAP_MOVED))

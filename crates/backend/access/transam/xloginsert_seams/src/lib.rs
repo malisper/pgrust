@@ -74,3 +74,8 @@ seam_core::seam!(
         buffer_std: bool,
     ) -> PgResult<XLogRecPtr>
 );
+
+seam_core::seam!(
+    // XLogCheckBufferNeedsBackup(buffer) (xloginsert.c).
+    pub fn xlog_check_buffer_needs_backup(buffer: types_core::Buffer) -> bool
+);

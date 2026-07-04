@@ -57,6 +57,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pgWalUsage.wal_fpi reader (xlog.c increments it per inserted record).
+    pub fn wal_usage_fpi() -> i64
+);
+
+seam_core::seam!(
     // GetFlushRecPtr(&insertTLI) (xlog.c): (flush ptr, insert TLI).
     pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
 );

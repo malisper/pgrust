@@ -6,7 +6,7 @@ pub mod sampling;
 
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::{AttrNumber, BlockNumber, ForkNumber, InvalidOid, Oid};
+use types_core::{AttrNumber, BlockNumber, ForkNumber, InvalidOid, InvalidTransactionId, Oid};
 use types_core::fmgr::{F_BOOLEQ, F_INT2EQ, F_OIDEQ};
 use types_error::{PgError, PgResult};
 use types_nodes::parsenodes::{VacuumRelation, VacuumStmt};
@@ -460,6 +460,8 @@ fn do_analyze_rel<'mcx>(
             relallvisible,
             relallfrozen,
             hasindex,
+            InvalidTransactionId,
+            0,
             in_outer_xact,
         )?;
 
@@ -476,6 +478,8 @@ fn do_analyze_rel<'mcx>(
                 0,
                 0,
                 false,
+                InvalidTransactionId,
+                0,
                 in_outer_xact,
             )?;
         }
@@ -490,6 +494,8 @@ fn do_analyze_rel<'mcx>(
             0,
             0,
             hasindex,
+            InvalidTransactionId,
+            0,
             in_outer_xact,
         )?;
     }
