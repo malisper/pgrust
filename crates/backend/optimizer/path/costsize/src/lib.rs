@@ -424,6 +424,86 @@ pub fn get_parameterized_baserel_size<'mcx>(
     }
     Ok(nrows)
 }
+// get_parallel_divisor (costsize.c).
+pub fn get_parallel_divisor(parallel_workers: i32) -> f64 {
+    let mut parallel_divisor = parallel_workers as f64;
+    if gucs::parallel_leader_participation() {
+        let leader_contribution = 1.0 - (0.3 * parallel_workers as f64);
+        if leader_contribution > 0.0 {
+            parallel_divisor += leader_contribution;
+        }
+    }
+    parallel_divisor
+}
+
+// compute_gather_rows (costsize.c).
+pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
+    debug_assert!(parallel_workers > 0);
+    clamp_row_est(rows * get_parallel_divisor(parallel_workers))
+}
+
+// cost_gather (costsize.c); no parameterized Gather paths exist (required
+// outer is empty at every ported call site).
+pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId, rows: Option<f64>) {
+    let rel_rows = run.root.rel(rel).rows;
+    let (sub_startup, sub_total, sub_disabled) = {
+        let PathNode::GatherPath(g) = run.root.path(path_id) else {
+            panic!("cost_gather: not a GatherPath")
+        };
+        let sub = run.root.path(g.subpath.expect("Gather subpath")).base();
+        (sub.startup_cost, sub.total_cost, sub.disabled_nodes)
+    };
+    let p = run.root.path_mut(path_id).base_mut();
+    debug_assert!(p.param_info.is_none());
+    p.rows = rows.unwrap_or(rel_rows);
+    let mut startup_cost = sub_startup;
+    let mut run_cost = sub_total - sub_startup;
+    startup_cost += gucs::parallel_setup_cost();
+    run_cost += gucs::parallel_tuple_cost() * p.rows;
+    p.disabled_nodes = sub_disabled;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+}
+
+// cost_gather_merge (costsize.c).
+pub fn cost_gather_merge(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    rows: Option<f64>,
+) {
+    let rel_rows = run.root.rel(rel).rows;
+    let num_workers = {
+        let PathNode::GatherMergePath(g) = run.root.path(path_id) else {
+            panic!("cost_gather_merge: not a GatherMergePath")
+        };
+        g.num_workers
+    };
+    debug_assert!(num_workers > 0);
+    let p = run.root.path_mut(path_id).base_mut();
+    debug_assert!(p.param_info.is_none());
+    p.rows = rows.unwrap_or(rel_rows);
+
+    let mut startup_cost = 0.0;
+    let mut run_cost = 0.0;
+    // One extra for the leader, per C's admittedly overgenerous estimate.
+    let n = (num_workers + 1) as f64;
+    let log_n = n.log2();
+    let comparison_cost = 2.0 * gucs::cpu_operator_cost();
+    startup_cost += comparison_cost * n * log_n;
+    run_cost += p.rows * comparison_cost * log_n;
+    run_cost += gucs::cpu_operator_cost() * p.rows;
+    startup_cost += gucs::parallel_setup_cost();
+    run_cost += gucs::parallel_tuple_cost() * p.rows * 1.05;
+
+    p.disabled_nodes = input_disabled_nodes + if gucs::enable_gathermerge() { 0 } else { 1 };
+    p.startup_cost = startup_cost + input_startup_cost;
+    p.total_cost = startup_cost + run_cost + input_total_cost;
+}
+
 pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
     let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
         let baserel = run.root.rel(rel);
@@ -441,7 +521,7 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
         run.root.path(path_id).base().param_info.is_none(),
         "cost_seqscan (costsize.c): parameterized path; M2 lateral lane"
     );
-    let rows = base_rows;
+    let mut rows = base_rows;
 
     let mut startup_cost = 0.0;
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
@@ -457,7 +537,15 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     let target = run.root.path_pathtarget(path_id);
     startup_cost += target.cost.startup;
     cpu_run_cost += target.cost.per_tuple * rows;
-    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+
+    let parallel_workers = run.root.path(path_id).base().parallel_workers;
+    if parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(parallel_workers);
+        // CPU splits across workers; disk cost doesn't amortize (the OS
+        // already prefetches). rows becomes the per-worker tuple count.
+        cpu_run_cost /= parallel_divisor;
+        rows = clamp_row_est(rows / parallel_divisor);
+    }
 
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = rows;
