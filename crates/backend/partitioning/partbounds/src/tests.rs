@@ -29,6 +29,7 @@ fn test_key(strategy: u8) -> PartitionKeyData {
         strategy: strategy as i8,
         partnatts: 1,
         partattrs,
+        partexprs: types_nodes::NodeList::nil(),
         partopfamily: one_oid(0),
         partopcintype: one_oid(23),
         partsupfunc: vec![RefCell::new(FmgrInfo::unresolved())],
