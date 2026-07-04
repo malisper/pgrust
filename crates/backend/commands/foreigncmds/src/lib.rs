@@ -246,7 +246,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
         let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, func.fdwvalidator);
         pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     }
-    pg_depend::recordDependencyOnOwner(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, owner_id);
+    pg_depend::recordDependencyOnOwner(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, owner_id)?;
     // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
     // outside extension scripts.
 
@@ -456,7 +456,7 @@ pub fn CreateForeignServer<'mcx>(
     let myself = ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id);
     let referenced = ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw.fdwid);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
-    pg_depend::recordDependencyOnOwner(FOREIGN_SERVER_RELATION_ID, srv_id, owner_id);
+    pg_depend::recordDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, owner_id)?;
 
     rel.close(RowExclusiveLock)
 }
@@ -650,7 +650,7 @@ pub fn CreateUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateUserMappingStmt<'mcx
     let referenced = ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv.serverid);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     if use_id != InvalidOid {
-        pg_depend::recordDependencyOnOwner(USER_MAPPING_RELATION_ID, um_id, use_id);
+        pg_depend::recordDependencyOnOwner(mcx, USER_MAPPING_RELATION_ID, um_id, use_id)?;
     }
     // No recordDependencyOnCurrentExtension: user mappings are not extension
     // members (C comment, foreigncmds.c:1217).
