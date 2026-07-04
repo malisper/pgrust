@@ -1224,7 +1224,7 @@ fn ApplyRetrieveRule<'mcx>(
     } else {
         relation.rd_rel.relowner
     };
-    set_rule_check_as_user(rule_action, check_as_user);
+    set_rule_check_as_user(rule_action, check_as_user)?;
 
     AcquireRewriteLocks(mcx, rule_action, true, false)?;
 
@@ -1264,7 +1264,7 @@ fn ApplyRetrieveRule<'mcx>(
 }
 
 // setRuleCheckAsUser_Query (rewriteDefine.c).
-fn set_rule_check_as_user(qry: &Query<'_>, userid: Oid) {
+fn set_rule_check_as_user<'mcx>(qry: &'mcx Query<'mcx>, userid: Oid) -> PgResult<()> {
     for pnode in qry.rteperminfos.iter() {
         // SAFETY: the tree was just read by stringToNode; exclusively ours.
         unsafe { pnode.with_mut::<RTEPermissionInfo, _>(|p| p.checkAsUser = userid) }
@@ -1273,15 +1273,36 @@ fn set_rule_check_as_user(qry: &Query<'_>, userid: Oid) {
     for rnode in qry.rtable.iter() {
         let rte = rte_of(rnode);
         if rte.rtekind == RTEKind::RTE_SUBQUERY {
-            set_rule_check_as_user(rte.subquery.expect("subquery RTE"), userid);
+            set_rule_check_as_user(rte.subquery.expect("subquery RTE"), userid)?;
         }
     }
-    debug_assert!(qry.cteList.is_nil());
+    for cnode in qry.cteList.iter() {
+        let cte = cnode.as_common_table_expr().expect("cteList holds CommonTableExpr");
+        let ctequery = cte
+            .ctequery
+            .and_then(|n| n.as_query())
+            .expect("ctequery is a Query");
+        set_rule_check_as_user(ctequery, userid)?;
+    }
     if qry.hasSubLinks {
-        panic!(
-            "setRuleCheckAsUser (rewriteDefine.c): sublink descent needs the \
-             walker's T_SubLink arm (SubLink vocabulary unported)"
-        );
+        let mut w = RuleCheckAsUser { userid };
+        nodes_core::query_tree_walker(qry, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
+    }
+    Ok(())
+}
+
+// setRuleCheckAsUser_walker (rewriteDefine.c).
+struct RuleCheckAsUser {
+    userid: Oid,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for RuleCheckAsUser {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(q) = node.as_query() {
+            set_rule_check_as_user(q, self.userid)?;
+            return Ok(false);
+        }
+        nodes_core::expression_tree_walker(node, self)
     }
 }
 
@@ -1447,13 +1468,28 @@ pub fn AcquireRewriteLocks<'mcx>(
     }
 
     if parsetree.hasSubLinks {
-        panic!(
-            "AcquireRewriteLocks (rewriteHandler.c): sublink descent needs the \
-             walker's T_SubLink arm (SubLink vocabulary unported)"
-        );
+        let mut w = LocksOnSubLinks { mcx, for_execute: forExecute };
+        nodes_core::query_tree_walker(parsetree, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
     }
 
     Ok(())
+}
+
+// acquireLocksOnSubLinks (rewriteHandler.c).
+struct LocksOnSubLinks<'mcx> {
+    mcx: Mcx<'mcx>,
+    for_execute: bool,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for LocksOnSubLinks<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(sl) = node.as_sub_link() {
+            if let Some(q) = sl.subselect.as_query() {
+                AcquireRewriteLocks(self.mcx, q, self.for_execute, false)?;
+            }
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
 }
 
 fn rte_of<'mcx>(node: Node<'mcx>) -> &'mcx RangeTblEntry<'mcx> {

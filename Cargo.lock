@@ -878,6 +878,7 @@ dependencies = [
  "cache_syscache",
  "catcache",
  "datum",
+ "hash_validate",
  "heaptuple",
  "mcx",
  "nbt_validate",
@@ -1589,6 +1590,7 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds_seams",
+ "trigger_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -3838,12 +3840,15 @@ dependencies = [
  "bufmgr_seams",
  "catalog_seams",
  "freespace_seams",
+ "guc_tables",
  "heapam",
+ "init_small",
  "mcx",
  "miscinit_seams",
  "predicate_seams",
  "smgr_seams",
  "test_boot",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -3852,6 +3857,7 @@ dependencies = [
  "xact_seams",
  "xloginsert_seams",
  "xlogutils",
+ "xlogutils_seams",
 ]
 
 [[package]]
@@ -4308,6 +4314,19 @@ dependencies = [
  "xact",
  "xloginsert",
  "xloginsert_seams",
+]
+
+[[package]]
+name = "hash_validate"
+version = "0.0.0"
+dependencies = [
+ "index_amvalidate",
+ "lsyscache",
+ "types_core",
+ "types_error",
+ "types_hash",
+ "types_relscan",
+ "xact",
 ]
 
 [[package]]
@@ -12062,6 +12081,7 @@ name = "vacuumlazy"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_storage",
  "commands_vacuum",
  "freespace",
  "guc_tables",
@@ -12069,8 +12089,10 @@ dependencies = [
  "heapam_visibility_seams",
  "indexam",
  "init_small",
+ "lmgr",
  "mcx",
  "nbtree",
+ "postgres_seams",
  "procarray_seams",
  "pruneheap",
  "relcache_seams",
