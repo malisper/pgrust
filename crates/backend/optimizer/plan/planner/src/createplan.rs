@@ -2470,10 +2470,9 @@ fn build_path_tlist<'mcx>(
     for i in 0..n {
         let target = run.root.pathtarget(target_id);
         let expr = *run.root.expr_node(target.exprs[i]);
+        let ressortgroupref = target.sortgrouprefs.get(i).copied().unwrap_or(0);
         // Parameterized path: lateral references become nestloop Params.
         let expr = if has_param { replace_nestloop_params(run, expr)? } else { expr };
-        let target = run.root.pathtarget(target_id);
-        let ressortgroupref = target.sortgrouprefs.get(i).copied().unwrap_or(0);
         let tle = Node::mk(
             mcx,
             TargetEntry {
