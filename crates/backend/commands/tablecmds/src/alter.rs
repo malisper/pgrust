@@ -1633,10 +1633,21 @@ fn ATExecAddColumn<'mcx>(
     let elts = NodeList::make1(mcx, defnode)?;
     let mut tupdesc = crate::BuildDescForRelation(mcx, &elts)?;
     tupdesc.attr_mut(0).attnum = newattnum as AttrNumber;
-    // CheckAttributeType surrogate; the name half re-proves what the
-    // collision check established.
-    catalog_heap::CheckAttributeNamesTypes(&tupdesc, RELKIND_RELATION)?;
     let attribute = tupdesc.attrs[0];
+    {
+        let attname = core::str::from_utf8(attribute.attname.name_str())
+            .expect("non-UTF-8 attname");
+        let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+        rowtypes.push(rel.rd_rel.reltype);
+        catalog_heap::CheckAttributeType(
+            mcx,
+            attname,
+            attribute.atttypid,
+            attribute.attcollation,
+            &mut rowtypes,
+            if attribute.attgenerated == b'v' as i8 { catalog_heap::CHKATYPE_IS_VIRTUAL } else { 0 },
+        )?;
+    }
 
     let attrdesc = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     catalog_heap::InsertPgAttributeTuples(
@@ -3720,6 +3731,20 @@ fn ATPrepAlterColumnType<'mcx>(
         return Err(Box::new(e));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+
+    let targetcollid = crate::GetColumnDefCollation(def, targettype)?;
+    {
+        let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+        rowtypes.push(rel.rd_rel.reltype);
+        catalog_heap::CheckAttributeType(
+            mcx,
+            col_name,
+            targettype,
+            targetcollid,
+            &mut rowtypes,
+            if att.attgenerated == b'v' as i8 { catalog_heap::CHKATYPE_IS_VIRTUAL } else { 0 },
+        )?;
+    }
 
     if att.attgenerated == b'v' as i8 {
         // C builds no transform for virtual generated columns: no newval,

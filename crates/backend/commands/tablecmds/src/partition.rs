@@ -71,7 +71,7 @@ pub(crate) fn compute_partition_key<'mcx>(
     )?;
     parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
 
-    for pnode in partspec.partParams.iter() {
+    for (attn, pnode) in partspec.partParams.iter().enumerate() {
         let pelem = pnode.as_variant::<PartitionElem>().expect("PartitionElem");
         let atttype: Oid;
         let mut attcollation: Oid;
@@ -129,8 +129,15 @@ pub(crate) fn compute_partition_key<'mcx>(
             parse_collate::assign_expr_collations(mcx, &mut pstate, transformed)?;
             atttype = nodes_core::expr_type(transformed);
             attcollation = nodes_core::expr_collation(transformed);
-            // CheckAttributeType(CHKATYPE_IS_PARTKEY) rides the repo-wide
-            // stub divergence (catalog_heap::create.rs).
+            let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+            catalog_heap::CheckAttributeType(
+                mcx,
+                &(attn + 1).to_string(),
+                atttype,
+                attcollation,
+                &mut rowtypes,
+                catalog_heap::CHKATYPE_IS_PARTKEY,
+            )?;
             let mut expr = transformed;
             while let Some(ce) = expr.as_variant::<types_nodes::primnodes::CollateExpr>() {
                 expr = ce.arg;

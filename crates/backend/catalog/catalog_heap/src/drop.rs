@@ -8,7 +8,7 @@ use types_core::{
 };
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_IN_USE, ERROR};
 use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, RELKIND_HAS_STORAGE};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_scan::scankey::{BTEqualStrategyNumber, BTLessEqualStrategyNumber, ScanKeyData};
 
 const InheritsRelationId: Oid = 2611;
 const InheritsRelidSeqnoIndexId: Oid = 2680;
@@ -267,6 +267,35 @@ pub fn CopyStatistics<'mcx>(mcx: Mcx<'mcx>, fromrelid: Oid, torelid: Oid) -> PgR
         catalog_indexing::CatalogCloseIndexes(st)?;
     }
     rel.close(RowExclusiveLock)
+}
+
+const F_INT2LE: types_core::primitive::RegProcedure = 148;
+
+fn int2le_scankey(attno: usize, v: i16) -> ScanKeyData {
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = attno as AttrNumber;
+    key.sk_strategy = BTLessEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(F_INT2LE)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_INT2LE) failed: {e:?}"));
+    key.sk_argument = Datum::from_i16(v);
+    key
+}
+
+pub fn DeleteSystemAttributeTuples<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let attrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let keys = [
+        oid_scankey(Anum_pg_attribute_attrelid, relid),
+        int2le_scankey(Anum_pg_attribute_attnum, 0),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &keys)?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&attrel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    attrel.close(RowExclusiveLock)
 }
 
 pub fn DeleteAttributeTuples<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
