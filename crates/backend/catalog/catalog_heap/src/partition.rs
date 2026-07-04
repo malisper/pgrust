@@ -56,13 +56,15 @@ pub fn StorePartitionKey<'mcx>(
     values[4] = Datum::from_usize(partattrs_vec.as_ptr() as usize);
     values[5] = Datum::from_usize(partclass_vec.as_ptr() as usize);
     values[6] = Datum::from_usize(partcollation_vec.as_ptr() as usize);
+    // exprs_text must outlive heap_form_tuple below (values[7] borrows it).
+    let mut exprs_text = None;
     let exprs_node = if partexprs.is_nil() {
         nulls[7] = true;
         None
     } else {
         let node = types_nodes::Node::mk_list(mcx, partexprs.clone_in(mcx)?)?;
         let s = outfuncs::nodeToString(mcx, node)?;
-        let text = varlena::cstring_to_text(mcx, s.as_bytes())?;
+        let text = exprs_text.insert(varlena::cstring_to_text(mcx, s.as_bytes())?);
         values[7] = Datum::from_usize(text.as_bytes().as_ptr() as usize);
         Some(node)
     };
