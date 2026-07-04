@@ -118,7 +118,8 @@ fn visible_fxid_linear_and_bsearch() {
         assert!(is_visible_fxid(x + 1, &s));
     }
     assert!(is_visible_fxid(99, &s));
-    assert!(!is_visible_fxid(999, &s));
+    assert!(is_visible_fxid(999, &s));
+    assert!(!is_visible_fxid(1000, &s));
 }
 
 #[test]
