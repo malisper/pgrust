@@ -15,6 +15,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 tableam = { path = "../../access/table/tableam" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
 detoast = { path = "../../access/common/detoast" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }

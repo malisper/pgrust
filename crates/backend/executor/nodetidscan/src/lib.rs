@@ -118,6 +118,41 @@ fn datum_array_bytes<'m>(mcx: Mcx<'m>, v: ::datum::Datum) -> PgResult<&'m [u8]> 
     }
 }
 
+// fetch_cursor_param_value (execCurrent.c). Params are materialized
+// (no paramFetch hook), so the REFCURSOR type check cannot fail without a
+// planner bug — that arm is a loud panic, not C's 42804.
+fn fetch_cursor_param_value<'m>(
+    mcx: Mcx<'m>,
+    estate: &EStateData<'m>,
+    param_id: i32,
+) -> PgResult<&'m str> {
+    const REFCURSOROID: ::types_core::Oid = 1790;
+    if let Some(params) = estate.es_param_list_info {
+        if param_id > 0 && (param_id as usize) <= params.len() {
+            let prm = &params[param_id as usize - 1];
+            if prm.ptype != ::types_core::InvalidOid && !prm.isnull {
+                if prm.ptype != REFCURSOROID {
+                    panic!(
+                        "fetch_cursor_param_value (execCurrent.c): parameter {param_id} \
+                         has type {} not refcursor",
+                        prm.ptype
+                    );
+                }
+                let image = datum_array_bytes(mcx, prm.value)?;
+                let payload = ::varlena::open_image(mcx, image)?;
+                let bytes = payload.as_bytes();
+                let mut owned = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
+                ::mcx::vec_append_bytes(&mut owned, bytes)?;
+                return Ok(core::str::from_utf8(owned.leak()).expect("refcursor value utf8"));
+            }
+        }
+    }
+    Err(Box::new(
+        PgError::error(format!("no value found for parameter {param_id}"))
+            .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT),
+    ))
+}
+
 impl<'mcx> TidScanState<'mcx> {
     fn ensure_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         if self.ss.ss_currentScanDesc.is_none() {
@@ -192,8 +227,12 @@ impl<'mcx> TidScanState<'mcx> {
                 }
                 TidExprKind::CurrentOf { cursor_name, cursor_param } => {
                     let table_name = self.ss.ss_currentRelation.as_ref().unwrap().name();
+                    let name = match cursor_name {
+                        Some(n) => n,
+                        None => fetch_cursor_param_value(mcx, estate, cursor_param)?,
+                    };
                     if let Some(tid) = execmain_seams::exec_current_of::call(
-                        cursor_name,
+                        Some(name),
                         cursor_param,
                         table_oid,
                         table_name,
