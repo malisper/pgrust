@@ -18,3 +18,4 @@ pg_inherits = { path = "../../catalog/pg_inherits" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 relcache = { path = "../../utils/cache/relcache" }
 inval = { path = "../../utils/cache/inval" }
+execreplication_seams = { path = "../execreplication_seams" }

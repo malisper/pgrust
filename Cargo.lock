@@ -1827,6 +1827,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bufmask"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_storage",
+]
+
+[[package]]
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
@@ -4456,6 +4464,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "execreplication"
+version = "0.1.0"
+dependencies = [
+ "commands_publicationcmds",
+ "datum",
+ "execreplication_seams",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "pg_inherits",
+ "pg_publication",
+ "relcache",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
+name = "execreplication_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "execscan"
 version = "0.1.0"
 dependencies = [
@@ -5157,6 +5195,7 @@ version = "0.1.0"
 dependencies = [
  "aio_seams",
  "autovacuum_seams",
+ "bufmask",
  "bufmgr_seams",
  "condition_variable_seams",
  "controldata_utils",
@@ -5270,6 +5309,7 @@ dependencies = [
 name = "gin_xlog"
 version = "0.1.0"
 dependencies = [
+ "bufmask",
  "bufmgr_seams",
  "gin_vocab",
  "types_core",
@@ -5331,6 +5371,7 @@ dependencies = [
 name = "gist_xlog"
 version = "0.1.0"
 dependencies = [
+ "bufmask",
  "bufmgr_seams",
  "types_core",
  "types_error",
@@ -5551,6 +5592,7 @@ dependencies = [
 name = "hash_xlog"
 version = "0.1.0"
 dependencies = [
+ "bufmask",
  "bufmgr_seams",
  "types_core",
  "types_error",
@@ -7665,6 +7707,7 @@ dependencies = [
  "execmain",
  "execmain_seams",
  "execpartition",
+ "execreplication_seams",
  "execscan",
  "exectuples",
  "executils",
@@ -12171,6 +12214,7 @@ dependencies = [
  "execexpr",
  "execjunk",
  "execmain",
+ "execreplication",
  "execscan",
  "executils",
  "explain",
@@ -12897,6 +12941,7 @@ dependencies = [
 name = "spgist_xlog"
 version = "0.1.0"
 dependencies = [
+ "bufmask",
  "bufmgr_seams",
  "types_core",
  "types_error",
@@ -14286,8 +14331,10 @@ version = "0.1.0"
 dependencies = [
  "catalog_seams",
  "datum",
+ "format_type",
  "hashfn",
  "mcx",
+ "namespace_seams",
  "syscache_seams",
  "types_core",
  "types_error",
