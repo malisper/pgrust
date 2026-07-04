@@ -38,6 +38,7 @@ pub fn QueryRewrite<'mcx>(
     let mut results = RewriteQuery(mcx, parsetree, &mut rewrite_events, 0, 0)?;
 
     for query in results.iter_mut() {
+        rewrite_dml_view_with_instead_trigger(mcx, query)?;
         let mut active_rirs: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
         let rir = fireRIRrules(mcx, query, &mut active_rirs)?;
         query.hasRowSecurity |= rir.has_row_security;
@@ -125,10 +126,15 @@ fn RewriteQuery<'mcx>(
 
         let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
         if rel.rd_rel.relkind == RELKIND_VIEW {
-            panic!(
-                "RewriteQuery (rewriteHandler.c): DML on view needs \
-                 rewriteTargetView (auto-updatable view lane)"
-            );
+            if event == CmdType::CMD_MERGE {
+                panic!("RewriteQuery (rewriteHandler.c): MERGE on a view not ported");
+            }
+            if !view_has_instead_trigger(&rel, event)? {
+                panic!(
+                    "RewriteQuery (rewriteHandler.c): DML on view needs \
+                     rewriteTargetView (auto-updatable view lane)"
+                );
+            }
         }
 
         match event {
@@ -1182,6 +1188,69 @@ fn infinite_recursion_policy(relname: &str) -> Box<PgError> {
     )
 }
 
+// view_has_instead_trigger (rewriteHandler.c); MERGE arm unported.
+fn view_has_instead_trigger(rel: &Relation<'_>, event: CmdType) -> PgResult<bool> {
+    if !rel.rd_hastriggers {
+        return Ok(false);
+    }
+    let Some(td) = relcache::RelationGetTriggerDesc(rel.rd_id)? else {
+        return Ok(false);
+    };
+    Ok(match event {
+        CmdType::CMD_INSERT => td.trig_insert_instead_row,
+        CmdType::CMD_UPDATE => td.trig_update_instead_row,
+        CmdType::CMD_DELETE => td.trig_delete_instead_row,
+        _ => false,
+    })
+}
+
+// The fireRIRrules/ApplyRetrieveRule result-relation view arm
+// (rewriteHandler.c:1737-1805), hoisted to run on the owned Query before
+// fireRIRrules: UPDATE/DELETE on an INSTEAD OF view append an unexpanded
+// target copy of the view RTE, re-point RETURNING at it, and add the resjunk
+// wholerow Var over the original (soon-expanded) RTE. C copyObject-deep-copies
+// RETURNING before ChangeVarNodes; the tree here is query-owned, mutate in
+// place.
+fn rewrite_dml_view_with_instead_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: &mut Query<'mcx>,
+) -> PgResult<()> {
+    if q.resultRelation == 0
+        || !matches!(q.commandType, CmdType::CMD_UPDATE | CmdType::CMD_DELETE)
+    {
+        return Ok(());
+    }
+    let old_rti = q.resultRelation;
+    let rte_node = q.rtable.nth(old_rti as usize - 1);
+    let rte = rte_of(rte_node);
+    if rte.rtekind != RTEKind::RTE_RELATION || rte.relkind != RELKIND_VIEW {
+        return Ok(());
+    }
+    // SAFETY: shallow bitwise copy; the copy stays unexpanded and its shared
+    // subtrees are read-only from here on.
+    let newrte: RangeTblEntry<'mcx> = unsafe { core::ptr::read(rte) };
+    q.rtable.lappend(mcx, Node::mk(mcx, newrte)?)?;
+    let new_rti = q.rtable.len() as i32;
+    q.resultRelation = new_rti;
+
+    for tle_node in &q.returningList {
+        rewrite_manip::ChangeVarNodes(mcx, tle_node, old_rti, new_rti, 0)?;
+    }
+
+    let var = nodes_core::makefuncs::make_whole_row_var(mcx, rte, old_rti as u32, 0, false)?;
+    let tle = types_nodes::primnodes::TargetEntry {
+        expr: Node::mk(mcx, var)?,
+        resno: (q.targetList.len() + 1) as i16,
+        resname: Some("wholerow"),
+        ressortgroupref: 0,
+        resorigtbl: types_core::InvalidOid,
+        resorigcol: 0,
+        resjunk: true,
+    };
+    q.targetList.lappend(mcx, Node::mk(mcx, tle)?)?;
+    Ok(())
+}
+
 // ApplyRetrieveRule (rewriteHandler.c), SELECT-only arm: the DML-on-view
 // result-relation branch and FOR UPDATE/SHARE (markQueryForLocking) are loud.
 // The restrict_nonsystem_relation_kind GUC is unported; its boot default (no
@@ -1201,10 +1270,10 @@ fn ApplyRetrieveRule<'mcx>(
         return Err(internal_error("cannot handle qualified ON SELECT rule"));
     }
     if rt_index == parsetree.resultRelation {
-        panic!(
-            "ApplyRetrieveRule (rewriteHandler.c): DML on view (result-relation \
-             INSTEAD OF arms) not ported"
-        );
+        // The INSTEAD OF target stays an unexpanded RTE_RELATION: INSERT needs
+        // no source data; UPDATE/DELETE were re-pointed at a target copy by
+        // rewrite_dml_view_with_instead_trigger, so this is that copy.
+        return Ok(());
     }
     if !parsetree.rowMarks.is_nil() {
         panic!(

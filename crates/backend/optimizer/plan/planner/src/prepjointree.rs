@@ -887,10 +887,32 @@ fn replace_var_expr_su<'mcx>(
                 );
             }
             if v.varattno == 0 {
-                panic!(
-                    "ReplaceVarFromTargetList (rewriteManip.c): whole-row Var expansion \
-                     (expandRTE/RowExpr) not ported"
-                );
+                // ReplaceVarFromTargetList's whole-row arm, named-rowtype leg:
+                // RowExpr over the subquery outputs (RECORD/join legs stay loud).
+                if v.vartype == types_core::catalog::RECORDOID {
+                    panic!(
+                        "ReplaceVarFromTargetList (rewriteManip.c): RECORD whole-row \
+                         Var expansion not ported"
+                    );
+                }
+                let mut args = NodeList::nil();
+                for tle_node in tlist {
+                    let tle = tle_node.as_target_entry().expect("tlist cell");
+                    if tle.resjunk {
+                        continue;
+                    }
+                    args.lappend(mcx, copy_expr(mcx, tle.expr, sublevels_up)?)?;
+                }
+                return Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args,
+                        row_typeid: v.vartype,
+                        row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                        colnames: NodeList::nil(),
+                        location: v.location,
+                    },
+                )?));
             }
             let Some(tle) = get_tle_by_resno(tlist, v.varattno) else {
                 return Err(missing_attribute(v.varattno));

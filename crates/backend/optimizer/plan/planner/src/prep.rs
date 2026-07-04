@@ -450,6 +450,11 @@ fn add_row_identity_columns<'mcx>(
     rel: &types_rel::Relation<'mcx>,
 ) -> PgResult<NodeList<'mcx>> {
     debug_assert!(run.root.rowMarks.is_empty());
+    if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
+        // INSTEAD OF views: the rewriter already appended the wholerow junk
+        // TLE; no ctid exists (appendinfo.c adds nothing for views).
+        return tlist.clone_in(mcx);
+    }
     if rel.rd_rel.relkind != types_rel::RELKIND_RELATION {
         panic!(
             "add_row_identity_columns (appendinfo.c): relkind '{}' (wholerow/FDW \

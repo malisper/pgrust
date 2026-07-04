@@ -2008,30 +2008,34 @@ fn init_row_expr<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    if r.row_typeid != ::types_core::catalog::RECORDOID {
-        unported("EEOP_ROWEXPR named-rowtype leg");
-    }
     let nelems = r.args.len();
-    let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, nelems as i32)?;
-    for (i, e) in r.args.iter().enumerate() {
-        let colname = r
-            .colnames
-            .nth(i)
-            .as_string()
-            .expect("RowExpr colnames are String nodes")
-            .sval;
-        ::tupdesc::TupleDescInitEntry(
-            &mut desc,
-            (i + 1) as i16,
-            Some(colname),
-            expr_type(e),
-            expr_typmod_closed(e),
-            0,
-        )?;
-    }
-    desc.tdtypeid = ::types_core::catalog::RECORDOID;
-    desc.tdtypmod = -1;
-    ::typcache::assign_record_type_typmod(&mut desc)?;
+    let desc = if r.row_typeid == ::types_core::catalog::RECORDOID {
+        let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, nelems as i32)?;
+        for (i, e) in r.args.iter().enumerate() {
+            let colname = r
+                .colnames
+                .nth(i)
+                .as_string()
+                .expect("RowExpr colnames are String nodes")
+                .sval;
+            ::tupdesc::TupleDescInitEntry(
+                &mut desc,
+                (i + 1) as i16,
+                Some(colname),
+                expr_type(e),
+                expr_typmod_closed(e),
+                0,
+            )?;
+        }
+        desc.tdtypeid = ::types_core::catalog::RECORDOID;
+        desc.tdtypmod = -1;
+        ::typcache::assign_record_type_typmod(&mut desc)?;
+        desc
+    } else {
+        let desc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, r.row_typeid, -1)?;
+        assert_eq!(desc.natts as usize, nelems, "RowExpr args do not match named rowtype");
+        desc
+    };
 
     let layout = core::alloc::Layout::array::<::datum::NullableDatum>(nelems.max(1))
         .expect("elem scratch layout");

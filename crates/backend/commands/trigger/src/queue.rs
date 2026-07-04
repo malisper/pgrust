@@ -1,8 +1,8 @@
 // The afterTriggers machinery (trigger.c): per-query event lists, the
 // transaction-level deferred list, SET CONSTRAINTS state, and subxact
 // save/restore. Events re-fetch tuples by ctid under SnapshotAny as C's
-// table_tuple_fetch_row_version does. LOUD: transition tables, statement
-// triggers, WHEN/UPDATE-OF on the AFTER save path.
+// table_tuple_fetch_row_version does (statement events carry no tuples).
+// LOUD: transition tables, WHEN/UPDATE-OF on the AFTER save path.
 use std::cell::{Cell, RefCell};
 
 use mcx::Mcx;
@@ -16,7 +16,7 @@ use types_trigger::{
     RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_DISABLED, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT,
     TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, TRIGGER_EVENT_UPDATE, TRIGGER_FIRES_ON_REPLICA,
     TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_LEVEL_MASK,
-    TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK, TRIGGER_TYPE_UPDATE,
+    TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK, TRIGGER_TYPE_UPDATE,
 };
 use types_tuple::{HeapTupleData, ItemPointerData};
 
@@ -77,6 +77,22 @@ thread_local! {
     static XACT_EVENTS: RefCell<Vec<AfterTriggerEvent>> = const { RefCell::new(Vec::new()) };
     static CON_STATE: RefCell<Option<SetConstraintState>> = const { RefCell::new(None) };
     static TRANS_STACK: RefCell<Vec<SavedTrans>> = const { RefCell::new(Vec::new()) };
+    // AfterTriggersTableData.before_trig_done, flattened to (depth, rel, op).
+    static BEFORE_TRIG_DONE: RefCell<Vec<(i32, Oid, u32)>> = const { RefCell::new(Vec::new()) };
+}
+
+// before_stmt_triggers_fired (trigger.c): check-and-mark, once per rel+op per
+// query level.
+pub fn before_stmt_triggers_fired(relid: Oid, cmd_event: u32) -> bool {
+    let depth = QUERY_DEPTH.with(|c| c.get());
+    BEFORE_TRIG_DONE.with(|b| {
+        let mut done = b.borrow_mut();
+        if done.iter().any(|&(d, r, e)| d == depth && r == relid && e == cmd_event) {
+            return true;
+        }
+        done.push((depth, relid, cmd_event));
+        false
+    })
 }
 
 pub(crate) fn query_depth() -> i32 {
@@ -277,6 +293,7 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
         st[d].clear();
         st.truncate(d);
     });
+    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd < depth));
     QUERY_DEPTH.with(|c| c.set(depth - 1));
     Ok(())
 }
@@ -313,6 +330,7 @@ pub fn AfterTriggerEndXact(_is_commit: bool) -> PgResult<()> {
     QUERY_STACK.with(|s| s.borrow_mut().clear());
     CON_STATE.with(|c| *c.borrow_mut() = None);
     TRANS_STACK.with(|s| s.borrow_mut().clear());
+    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().clear());
     QUERY_DEPTH.with(|c| c.set(-1));
     Ok(())
 }
@@ -367,6 +385,7 @@ pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
         st.truncate(keep);
     });
     QUERY_DEPTH.with(|c| c.set(saved.query_depth));
+    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd <= saved.query_depth));
     XACT_EVENTS.with(|s| s.borrow_mut().truncate(saved.events_len));
     if saved.state_saved {
         CON_STATE.with(|c| *c.borrow_mut() = saved.state);
@@ -445,6 +464,18 @@ fn AfterTriggerExecute<'mcx>(
         return Ok(());
     };
     let rel = table::table_open(mcx, relid, NoLock)?;
+
+    if event & TRIGGER_EVENT_ROW == 0 {
+        let tg_event = event & TRIGGER_EVENT_OPMASK;
+        let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
+        let mut tdata =
+            types_trigger_call::TriggerData::new(tg_event, &rel, None, None, trigger);
+        // AFTER triggers: any returned tuple is discarded (C L4559-4567).
+        let result =
+            crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ());
+        rel.close(NoLock)?;
+        return result;
+    }
 
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
     let r1 = heapam::heap_fetch(&rel, &snap, ctid1, false)?;
@@ -600,6 +631,108 @@ fn after_trigger_save_event<'mcx>(
         });
     }
     Ok(())
+}
+
+// cancel_prior_stmt_triggers (trigger.c): a re-queued statement-trigger set
+// replaces the earlier unfired set for the same rel+op at this query level.
+fn cancel_prior_stmt_triggers(relid: Oid, op: u32) {
+    let depth = QUERY_DEPTH.with(|c| c.get());
+    if depth < 0 {
+        return;
+    }
+    with_list(EvList::Query(depth as usize), |evs| {
+        for ev in evs.iter_mut() {
+            if ev.relid == relid
+                && ev.event & TRIGGER_EVENT_OPMASK == op
+                && ev.event & TRIGGER_EVENT_ROW == 0
+                && ev.flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS) == 0
+            {
+                ev.flags |= AFTER_TRIGGER_DONE;
+            }
+        }
+    });
+}
+
+// AfterTriggerSaveEvent, statement-level arm (row_trigger=false): no tuples,
+// both ctids invalid.
+fn save_stmt_event(
+    rel: &Relation<'_>,
+    trigdesc: &TriggerDesc<'static>,
+    event: u32,
+    tgtype_event: i16,
+    transition_capture_possible: bool,
+) -> PgResult<()> {
+    let depth = QUERY_DEPTH.with(|c| c.get());
+    if depth < 0 {
+        return Err(outside_query());
+    }
+    let d = depth as usize;
+    cancel_prior_stmt_triggers(rel.rd_id, event & TRIGGER_EVENT_OPMASK);
+    for trigger in trigdesc.triggers.iter() {
+        if trigger.tgtype
+            & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
+            != TRIGGER_TYPE_STATEMENT | TRIGGER_TYPE_AFTER | tgtype_event
+        {
+            continue;
+        }
+        if !trigger_enabled(trigger) {
+            continue;
+        }
+        if transition_capture_possible
+            && (trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some())
+        {
+            panic!(
+                "AfterTriggerSaveEvent (trigger.c): transition tables unported \
+                 (trigger {})",
+                trigger.tgname.as_str()
+            );
+        }
+        let ats_event = (event & TRIGGER_EVENT_OPMASK)
+            | if trigger.tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 }
+            | if trigger.tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 };
+        with_list(EvList::Query(d), |evs| {
+            evs.push(AfterTriggerEvent {
+                flags: 0,
+                ctid1: ItemPointerData::default(),
+                ctid2: ItemPointerData::default(),
+                event: ats_event,
+                tgoid: trigger.tgoid,
+                relid: rel.rd_id,
+                firing_id: 0,
+            });
+        });
+    }
+    Ok(())
+}
+
+pub fn ExecASInsertTriggers<'mcx>(
+    rel: &Relation<'mcx>,
+    trigdesc: &TriggerDesc<'static>,
+) -> PgResult<()> {
+    if !trigdesc.trig_insert_after_statement {
+        return Ok(());
+    }
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_INSERT, true)
+}
+
+pub fn ExecASDeleteTriggers<'mcx>(
+    rel: &Relation<'mcx>,
+    trigdesc: &TriggerDesc<'static>,
+) -> PgResult<()> {
+    if !trigdesc.trig_delete_after_statement {
+        return Ok(());
+    }
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_DELETE, TRIGGER_TYPE_DELETE, true)
+}
+
+pub fn ExecASUpdateTriggers<'mcx>(
+    rel: &Relation<'mcx>,
+    trigdesc: &TriggerDesc<'static>,
+) -> PgResult<()> {
+    if !trigdesc.trig_update_after_statement {
+        return Ok(());
+    }
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_UPDATE, TRIGGER_TYPE_UPDATE, true)
 }
 
 pub fn ExecARInsertTriggers<'mcx>(
