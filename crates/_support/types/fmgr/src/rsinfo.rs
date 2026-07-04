@@ -1,6 +1,13 @@
 use core::ptr::NonNull;
 
-use crate::fcinfo::{FmNode, FmNodePtr, FunctionCallInfoBaseData};
+use crate::fcinfo::{FmNode, FmNodePtr, FmgrInfo, FunctionCallInfoBaseData};
+use types_error::PgResult;
+
+// C RegisterExprContextCallback(ShutdownSQLFunction): the callee plants the
+// hook on suspension; the SRF-driving node fires it at its ExecEnd/ReScan
+// (the port's ShutdownExprContext(isCommit=true) moments), before resowner
+// checks. Abort paths never fire it (C isCommit=false).
+pub type SrfShutdownHook = fn(&mut FmgrInfo) -> PgResult<()>;
 
 // NodeTag::T_ReturnSetInfo; parity with types_nodes asserted in funcapi tests
 // (this crate sits below the nodes crate and cannot name the enum).
@@ -40,6 +47,7 @@ pub struct ReturnSetInfo {
     pub expectedDesc: Option<NonNull<core::ffi::c_void>>,
     // C's `Tuplestorestate *setResult`, taken by the executor post-call.
     pub setResult: Option<alloc::boxed::Box<dyn core::any::Any>>,
+    pub srf_shutdown: Option<SrfShutdownHook>,
 }
 
 impl core::fmt::Debug for ReturnSetInfo {
@@ -63,6 +71,7 @@ impl ReturnSetInfo {
             isDone: ExprDoneCond::ExprSingleResult,
             expectedDesc: None,
             setResult: None,
+            srf_shutdown: None,
         }
     }
 

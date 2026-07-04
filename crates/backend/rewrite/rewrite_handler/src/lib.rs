@@ -21,6 +21,7 @@ mod tests;
 
 pub fn init_seams() {
     rewrite_handler_seams::query_rewrite::set(QueryRewrite);
+    rewrite_handler_seams::acquire_rewrite_locks::set(AcquireRewriteLocks);
 }
 
 pub fn QueryRewrite<'mcx>(
