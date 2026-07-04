@@ -1814,8 +1814,8 @@ impl<'a> Estate<'a> {
         Ok(())
     }
 
-    // exec_assign_value (Var arm; Rec/RecField assignment is a named loud).
-    fn exec_assign_value(
+    // exec_assign_value.
+    pub(crate) fn exec_assign_value(
         &mut self,
         target: Dno,
         value: Datum,
