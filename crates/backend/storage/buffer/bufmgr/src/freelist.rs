@@ -330,6 +330,13 @@ pub fn FreeAccessStrategy(strategy: BufferAccessStrategy) {
     drop(strategy);
 }
 
+pub fn GetAccessStrategyBufferCount(strategy: &BufferAccessStrategy) -> i32 {
+    match strategy {
+        None => 0,
+        Some(s) => s.borrow().nbuffers,
+    }
+}
+
 /// Header lock held on success.
 fn GetBufferFromRing(s: &mut BufferAccessStrategyData) -> Option<Victim> {
     s.current += 1;

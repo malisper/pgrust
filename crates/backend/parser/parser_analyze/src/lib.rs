@@ -12,9 +12,6 @@ mod tests;
 
 use core::mem;
 
-use guc_tables::consts::{
-    COMPUTE_QUERY_ID_OFF, COMPUTE_QUERY_ID_ON, COMPUTE_QUERY_ID_REGRESS,
-};
 use mcx::Mcx;
 use parse_clause::{
     transformFromClause, transformGroupClause, transformLimitClause, transformSortClause,
@@ -63,13 +60,10 @@ pub fn parse_analyze_fixedparams<'a, 'mcx>(
         pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
-    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+    let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if is_query_id_enabled() {
-        panic!(
-            "parse_analyze_fixedparams (analyze.c): JumbleQuery (queryjumble.c) unported \
-             — compute_query_id is on"
-        );
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
     free_parsestate(pstate)?;
@@ -102,13 +96,10 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
         pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
-    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+    let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if is_query_id_enabled() {
-        panic!(
-            "parse_analyze_sql_fn (analyze.c): JumbleQuery (queryjumble.c) unported \
-             — compute_query_id is on"
-        );
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
     free_parsestate(pstate)?;
@@ -152,13 +143,10 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
         unsafe { &*slot },
         mbutils::GetDatabaseEncoding(),
     )?;
-    let query = mem::take(unsafe { &mut *slot });
+    let mut query = mem::take(unsafe { &mut *slot });
 
-    if is_query_id_enabled() {
-        panic!(
-            "parse_analyze_varparams (analyze.c): JumbleQuery (queryjumble.c) unported \
-             — compute_query_id is on"
-        );
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
     free_parsestate(pstate)?;
@@ -190,13 +178,10 @@ pub fn parse_analyze_plpgsql<'a, 'mcx>(
         pstate.p_queryEnv = Some(unsafe { queryenvironment::hold::resolve(query_env) });
     }
 
-    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+    let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if is_query_id_enabled() {
-        panic!(
-            "parse_analyze_plpgsql (analyze.c): JumbleQuery (queryjumble.c) unported \
-             — compute_query_id is on"
-        );
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
     free_parsestate(pstate)?;
@@ -204,16 +189,6 @@ pub fn parse_analyze_plpgsql<'a, 'mcx>(
     backend_status::pgstat_report_query_id(query.queryId, false);
 
     Ok(query)
-}
-
-// C `IsQueryIdEnabled` (queryjumble.h); the AUTO arm reads `query_id_enabled`,
-// which only `EnableQueryId()` (unported jumble consumers) ever sets.
-fn is_query_id_enabled() -> bool {
-    match guc_tables::backing::compute_query_id() {
-        COMPUTE_QUERY_ID_OFF => false,
-        COMPUTE_QUERY_ID_ON | COMPUTE_QUERY_ID_REGRESS => true,
-        _ => false,
-    }
 }
 
 pub fn parse_sub_analyze<'mcx>(

@@ -203,6 +203,32 @@ fn am_name(tuple: &catcache::CatCTuple) -> PgResult<String> {
     })
 }
 
+// vacuum.h VACUUM_OPTION_* — the amparallelvacuumoptions vocabulary.
+pub const VACUUM_OPTION_NO_PARALLEL: u8 = 0;
+pub const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 0;
+pub const VACUUM_OPTION_PARALLEL_COND_CLEANUP: u8 = 1 << 1;
+pub const VACUUM_OPTION_PARALLEL_CLEANUP: u8 = 1 << 2;
+pub const VACUUM_OPTION_MAX_VALID_VALUE: u8 = (1 << 3) - 1;
+
+/// IndexAmRoutine.amparallelvacuumoptions per each AM's handler function.
+pub fn amparallelvacuumoptions(kind: IndexAmKind) -> u8 {
+    match kind {
+        IndexAmKind::Btree | IndexAmKind::Gist | IndexAmKind::Spgist => {
+            VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP
+        }
+        IndexAmKind::Hash => VACUUM_OPTION_PARALLEL_BULKDEL,
+        IndexAmKind::Gin => VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP,
+        IndexAmKind::Brin => VACUUM_OPTION_PARALLEL_CLEANUP,
+        #[allow(unreachable_patterns)]
+        _ => VACUUM_OPTION_NO_PARALLEL,
+    }
+}
+
+/// IndexAmRoutine.amusemaintenanceworkmem: true only for GIN.
+pub fn amusemaintenanceworkmem(kind: IndexAmKind) -> bool {
+    matches!(kind, IndexAmKind::Gin)
+}
+
 #[cold]
 #[inline(never)]
 fn unported_handler(amhandler: Oid) -> ! {

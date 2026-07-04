@@ -1,11 +1,5 @@
 // ExecReindex/ReindexIndex/ReindexTable + ReindexMultipleTables/Partitions/
 // MultipleInternal + ReindexRelationConcurrently (indexcmds.c).
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: indexcmds {what}")
-}
-
 use catalog_index::{
     reindex_index, reindex_relation, ReindexParams, REINDEXOPT_CONCURRENTLY,
     REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
@@ -582,16 +576,27 @@ struct ReindexIndexInfo {
     safe: bool,
 }
 
-// ReindexRelationConcurrently (indexcmds.c:3568). VERBOSE output and progress
-// reporting are unported; the six-phase protocol is C-exact.
+// ReindexRelationConcurrently (indexcmds.c:3568). Progress reporting is
+// unported; the six-phase protocol is C-exact.
 fn ReindexRelationConcurrently<'mcx>(
     mcx: Mcx<'mcx>,
     relationOid: Oid,
     params: &ReindexParams,
 ) -> PgResult<bool> {
-    if params.options & REINDEXOPT_VERBOSE != 0 {
-        unported("ReindexRelationConcurrently: VERBOSE (pg_rusage lane)");
-    }
+    let verbose = params.options & REINDEXOPT_VERBOSE != 0;
+    let (ru0, relation_name, relation_namespace) = if verbose {
+        (
+            pg_rusage::pg_rusage_init(),
+            lsyscache::get_rel_name(mcx, relationOid)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default(),
+            lsyscache::get_namespace_name(mcx, lsyscache::get_rel_namespace(relationOid)?)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default(),
+        )
+    } else {
+        (pg_rusage::PgRUsage::default(), String::new(), String::new())
+    };
     let missing_ok = params.options & REINDEXOPT_MISSING_OK != 0;
 
     let mut heap_relation_ids: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
@@ -925,6 +930,52 @@ fn ReindexRelationConcurrently<'mcx>(
     }
 
     xact::StartTransactionCommand()?;
+
+    if verbose {
+        if relkind == RELKIND_INDEX {
+            elog::ereport(types_error::INFO)
+                .errmsg(format!(
+                    "index \"{relation_namespace}.{relation_name}\" was reindexed"
+                ))
+                .errdetail(format!("{}.", pg_rusage::pg_rusage_show(&ru0).as_str()))
+                .finish(types_error::ErrorLocation::new(
+                    "indexcmds.c",
+                    0,
+                    "ReindexRelationConcurrently",
+                ))?;
+        } else {
+            for idx in new_index_ids.iter() {
+                elog::ereport(types_error::INFO)
+                    .errmsg(format!(
+                        "index \"{}.{}\" was reindexed",
+                        lsyscache::get_namespace_name(
+                            mcx,
+                            lsyscache::get_rel_namespace(idx.index_id)?
+                        )?
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default(),
+                        lsyscache::get_rel_name(mcx, idx.index_id)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default()
+                    ))
+                    .finish(types_error::ErrorLocation::new(
+                        "indexcmds.c",
+                        0,
+                        "ReindexRelationConcurrently",
+                    ))?;
+            }
+            elog::ereport(types_error::INFO)
+                .errmsg(format!(
+                    "table \"{relation_namespace}.{relation_name}\" was reindexed"
+                ))
+                .errdetail(format!("{}.", pg_rusage::pg_rusage_show(&ru0).as_str()))
+                .finish(types_error::ErrorLocation::new(
+                    "indexcmds.c",
+                    0,
+                    "ReindexRelationConcurrently",
+                ))?;
+        }
+    }
 
     Ok(true)
 }

@@ -22,6 +22,9 @@ catalog = { path = "../catalog" }
 pg_parameter_acl = { path = "../pg_parameter_acl" }
 commands_amcmds = { path = "../../commands/amcmds" }
 catalog_namespace = { path = "../catalog_namespace" }
+aclchk = { path = "../aclchk" }
+pg_conversion = { path = "../pg_conversion" }
+proclang = { path = "../../commands/proclang" }
 pg_depend = { path = "../pg_depend" }
 pg_attrdef = { path = "../pg_attrdef" }
 pg_constraint = { path = "../pg_constraint" }
@@ -50,5 +53,4 @@ rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 objectaddress_seams = { path = "../objectaddress_seams" }
 adt_acl = { path = "../../utils/adt/acl" }
-aclchk = { path = "../aclchk" }
 adt_regproc = { path = "../../utils/adt/regproc" }

@@ -131,7 +131,6 @@ const UNPORTED_INTERNAL_WORKERS: &[&str] = &[
     "_bt_parallel_build_main",
     "_brin_parallel_build_main",
     "_gin_parallel_build_main",
-    "parallel_vacuum_main",
 ];
 
 pub fn ParallelWorkerNumber() -> i32 {
@@ -334,6 +333,10 @@ pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
 
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
+}
+
+pub fn context_nworkers(id: ParallelContextId) -> i32 {
+    with_pcxt(id, |p| p.nworkers)
 }
 
 pub fn ReinitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
@@ -920,6 +923,7 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
 
 pub fn init_seams() {
     parallel_seams::is_parallel_worker::set(IsParallelWorker);
+    parallel_seams::initializing_parallel_worker::set(InitializingParallelWorker);
     parallel_seams::at_eoxact_parallel::set(AtEOXact_Parallel);
     parallel_seams::at_eosubxact_parallel::set(AtEOSubXact_Parallel);
     parallel_seams::parallel_worker_report_last_rec_end::set(ParallelWorkerReportLastRecEnd);

@@ -9,6 +9,7 @@ name = "variable"
 path = "src/lib.rs"
 
 [dependencies]
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 pg_string = { path = "../../../common/string" }

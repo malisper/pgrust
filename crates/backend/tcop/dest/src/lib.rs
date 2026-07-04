@@ -30,6 +30,7 @@ pub enum DestReceiver<'mcx> {
     IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
     TransientRel(matview_seams::TransientRelState<'mcx>), // CreateTransientRelDestReceiver (matview.c)
     SqlFunction(sql_functions_seams::SqlFunctionDestState<'mcx>), // CreateSQLFunctionDestReceiver (functions.c)
+    ExplainSerialize(explain_dr::SerializeDestReceiver<'mcx>), // CreateExplainSerializeDestReceiver (explain_dr.c)
 }
 
 impl<'mcx> DestReceiver<'mcx> {
@@ -48,6 +49,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::SqlFunction(state) => {
                 sql_functions_seams::sqlfunction_receive::call(state, slot)
             }
+            DestReceiver::ExplainSerialize(dr) => dr.receive_slot(slot),
             other => other.unported("receiveSlot"),
         }
     }
@@ -65,6 +67,7 @@ impl<'mcx> DestReceiver<'mcx> {
                 matview_seams::transientrel_startup::call(state, operation, typeinfo)
             }
             DestReceiver::SqlFunction(_) => Ok(()),
+            DestReceiver::ExplainSerialize(dr) => dr.startup(operation, typeinfo),
             other => other.unported("rStartup"),
         }
     }
@@ -86,6 +89,10 @@ impl<'mcx> DestReceiver<'mcx> {
             }
             DestReceiver::IntoRel(state) => createas_seams::intorel_shutdown::call(state),
             DestReceiver::TransientRel(state) => matview_seams::transientrel_shutdown::call(state),
+            DestReceiver::ExplainSerialize(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
         }
     }
 
@@ -103,6 +110,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::IntoRel(_) => CommandDest::IntoRel,
             DestReceiver::TransientRel(_) => CommandDest::TransientRel,
             DestReceiver::SqlFunction(_) => CommandDest::SqlFunction,
+            DestReceiver::ExplainSerialize(_) => CommandDest::ExplainSerialize,
         }
     }
 
@@ -154,8 +162,10 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
         CommandDest::Debug => DestReceiver::DebugTup,
         CommandDest::Spi => DestReceiver::SpiPrintTup,
         CommandDest::Tuplestore => DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR()),
-        // Constructors owned by unported units (DestSqlFunction is built
-        // directly by sql_functions; its state needs junkfilter params).
+        // Constructors owned by unported units or built directly by their
+        // owner (DestSqlFunction by sql_functions — junkfilter params;
+        // DestExplainSerialize by explain — C's case here passes es=NULL,
+        // which any real use would deref-crash on, so it stays loud).
         CommandDest::IntoRel
         | CommandDest::CopyOut
         | CommandDest::SqlFunction

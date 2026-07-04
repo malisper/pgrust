@@ -67,15 +67,15 @@ pub fn ExecCreateTableAs<'mcx>(
         return Ok(());
     }
 
-    if is_query_id_enabled() {
-        panic!("ExecCreateTableAs (createas.c): JumbleQuery unported — compute_query_id is on");
-    }
-
     let query_node = stmt.query.expect("CreateTableAsStmt.query");
     // C rewrites/plans the contained Query and never reads stmt->query again.
     // SAFETY: this call holds the only live access to the CTAS tree.
-    let query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+    let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("CreateTableAsStmt.query is an analyzed Query");
+
+    if queryjumble::IsQueryIdEnabled() {
+        queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
+    }
 
     if query.commandType == CmdType::CMD_UTILITY {
         debug_assert!(!is_matview);
@@ -339,13 +339,7 @@ fn too_many_column_names() -> Box<types_error::PgError> {
     )
 }
 
-fn is_query_id_enabled() -> bool {
-    use guc_tables::consts::{COMPUTE_QUERY_ID_ON, COMPUTE_QUERY_ID_REGRESS};
-    matches!(
-        guc_tables::backing::compute_query_id(),
-        COMPUTE_QUERY_ID_ON | COMPUTE_QUERY_ID_REGRESS
-    )
-}
+
 
 fn intorel_startup<'mcx>(
     state: &mut IntoRelState<'mcx>,

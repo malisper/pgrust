@@ -1,0 +1,27 @@
+[package]
+name = "conversioncmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "conversioncmds"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_conversion = { path = "../../catalog/pg_conversion" }
+pg_depend = { path = "../../catalog/pg_depend" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
+miscinit = { path = "../../utils/init/miscinit" }
+parse_func = { path = "../../parser/parse_func" }

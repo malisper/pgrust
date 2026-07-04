@@ -98,6 +98,20 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
             let name = object.as_string().expect("schema name is a String node").sval;
             format!("schema \"{name}\" does not exist, skipping")
         }
+        ObjectType::OBJECT_CONVERSION => {
+            let names = object.as_list().expect("conversion object is a name list");
+            match schema_does_not_exist_skipping(names)? {
+                Some(msg) => msg,
+                None => {
+                    let parts = string_parts(names, names.len());
+                    format!("conversion \"{}\" does not exist, skipping", parts.join("."))
+                }
+            }
+        }
+        ObjectType::OBJECT_LANGUAGE => {
+            let name = object.as_string().expect("language name is a String node").sval;
+            format!("language \"{name}\" does not exist, skipping")
+        }
         ObjectType::OBJECT_EXTENSION => {
             let name = object.as_string().expect("extension name is a String node").sval;
             format!("extension \"{name}\" does not exist, skipping")

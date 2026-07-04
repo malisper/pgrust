@@ -1587,6 +1587,17 @@ fn lookup_pg_ts_config_row(cfgid: Oid) -> PgResult<Option<syscache_seams::PgTsOb
     Ok(Some(row))
 }
 
+fn lookup_pg_conversion_oid_by_name_nsp(conname: &str, connamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        crate::cacheinfo::CONNAMENSP,
+        ANUM_PG_CONVERSION_OID,
+        SysCacheKey::Str(conname),
+        SysCacheKey::Value(Datum::from_oid(connamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn lookup_pg_ts_dict_oid_by_name_nsp(dictname: &str, dictnamespace: Oid) -> PgResult<Oid> {
     GetSysCacheOid(
         TSDICTNAMENSP,
@@ -2498,6 +2509,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::set(lookup_pg_ts_config_oid_by_name_nsp);
     syscache_seams::lookup_pg_ts_config_row::set(lookup_pg_ts_config_row);
     syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::set(lookup_pg_ts_dict_oid_by_name_nsp);
+    syscache_seams::lookup_pg_conversion_oid_by_name_nsp::set(lookup_pg_conversion_oid_by_name_nsp);
     syscache_seams::lookup_pg_ts_dict_row::set(lookup_pg_ts_dict_row);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);
@@ -2571,6 +2583,7 @@ const ANUM_PG_TS_CONFIG_CFGNAME: i32 = 2;
 const ANUM_PG_TS_CONFIG_CFGNAMESPACE: i32 = 3;
 const ANUM_PG_TS_CONFIG_CFGPARSER: i32 = 5;
 const ANUM_PG_TS_DICT_OID: i32 = 1;
+const ANUM_PG_CONVERSION_OID: i32 = 1;
 const ANUM_PG_TS_CONFIG_MAP_MAPTOKENTYPE: i32 = 2;
 const ANUM_PG_TS_CONFIG_MAP_MAPSEQNO: i32 = 3;
 const ANUM_PG_TS_CONFIG_MAP_MAPDICT: i32 = 4;

@@ -7,6 +7,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // InitializingParallelWorker (parallel.c): true between worker start and
+    // the entrypoint call.
+    pub fn initializing_parallel_worker() -> bool
+);
+
+seam_core::seam!(
     pub fn at_eoxact_parallel(is_commit: bool) -> PgResult<()>
 );
 

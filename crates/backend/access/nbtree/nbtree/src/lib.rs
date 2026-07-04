@@ -60,7 +60,9 @@ fn non_btree_opaque() -> ! {
 
 pub(crate) fn check_for_interrupts() {
     if init_small::globals::InterruptPending() {
-        unported_phase2("ProcessInterrupts (tcop/postgres.c)");
+        if let Err(e) = postgres_seams::check_for_interrupts::call() {
+            std::panic::panic_any(e);
+        }
     }
 }
 

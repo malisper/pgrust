@@ -4317,6 +4317,15 @@ impl<'mcx> Parser<'mcx> {
             1267 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_TABLE as i32),
             1268 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_SYSTEM as i32),
             1269 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_DATABASE as i32),
+            1548 => {
+                let mut n = Node::build::<types_nodes::parsenodes::CreateConversionStmt>(mcx)?;
+                n.conversion_name = view.v(4).list();
+                n.for_encoding_name = Some(view.v(6).str_val());
+                n.to_encoding_name = Some(view.v(8).str_val());
+                n.func_name = view.v(10).list();
+                n.def = view.v(2).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1549 => {
                 let mut n = Node::build::<ClusterStmt>(mcx)?;
                 n.relation = view.v(5).node();
@@ -4406,6 +4415,8 @@ impl<'mcx> Parser<'mcx> {
                 let s = view.v(1).str_val();
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
             }
+            // utility_option_arg: NumericOnly passthrough.
+            1569 => *yyval = view.v(1),
             1571 | 1573 | 1575 | 1577 => *yyval = YYSTYPE::Boolean(true),
             1572 | 1574 | 1576 | 1578 => *yyval = YYSTYPE::Boolean(false),
             // PREPARE/EXECUTE/DEALLOCATE, incl. CREATE TABLE AS EXECUTE.
@@ -6189,6 +6200,28 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = def_elem(mcx, view.v(1).str_val(), view.v(2).node(), view.l(1))?;
             }
             734 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?)),
+            // CreatePLangStmt: parameterless form is CREATE EXTENSION (OR
+            // REPLACE read as IF NOT EXISTS, TRUSTED ignored — gram.y 5102).
+            666 => {
+                let mut n = Node::build::<types_nodes::rawnodes::CreateExtensionStmt>(mcx)?;
+                n.if_not_exists = view.v(2).boolean();
+                n.extname = Some(view.v(6).str_val());
+                n.options = NodeList::nil();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            667 => {
+                let mut n = Node::build::<types_nodes::parsenodes::CreatePLangStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                n.plname = Some(view.v(6).str_val());
+                n.plhandler = view.v(8).list();
+                n.plinline = view.v(9).list();
+                n.plvalidator = view.v(10).list();
+                n.pltrusted = view.v(3).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_trusted.
+            668 => *yyval = YYSTYPE::Boolean(true),
+            669 => *yyval = YYSTYPE::Boolean(false),
             // handler_name: name | name attrs.
             670 => {
                 let s = Node::mk_string(mcx, view.v(1).str_val())?;

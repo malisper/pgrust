@@ -130,13 +130,19 @@ pub fn SetUserIdAndContext(userid: Oid, sec_def_context: bool) -> PgResult<()> {
     Ok(())
 }
 
-// InitializeSessionUserId (miscinit.c). C's InitializingParallelWorker
-// early-return is absent: parallel workers cannot start in this tree.
 pub fn InitializeSessionUserId(
     rolename: Option<&str>,
     roleid: Oid,
     bypass_login_check: bool,
 ) -> PgResult<()> {
+    // ParallelWorkerMain already set the user-id state; no catalog lookup
+    // (the role may have been dropped) and no rolcanlogin/rolconnlimit.
+    if parallel_seams::initializing_parallel_worker::is_installed()
+        && parallel_seams::initializing_parallel_worker::call()
+    {
+        debug_assert!(bypass_login_check);
+        return Ok(());
+    }
     debug_assert!(!crate::IsBootstrapProcessingMode());
 
     inval_seams::accept_invalidation_messages::call()?;

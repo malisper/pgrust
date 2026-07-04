@@ -142,9 +142,7 @@ pub fn reindex_index<'mcx>(
     persistence: u8,
     params: &ReindexParams,
 ) -> PgResult<()> {
-    if params.options & REINDEXOPT_VERBOSE != 0 {
-        unported("reindex_index: VERBOSE (pg_rusage lane)");
-    }
+    let ru0 = pg_rusage::pg_rusage_init();
     let missing_ok = params.options & REINDEXOPT_MISSING_OK != 0;
     let heapId = IndexGetRelation(mcx, indexId, missing_ok)?;
     if heapId == InvalidOid {
@@ -263,6 +261,18 @@ pub fn reindex_index<'mcx>(
 
     if !skipped_constraint {
         reindex_index_flags_fixup(mcx, &heapRelation, indexId, indexInfo.ii_BrokenHotChain)?;
+    }
+
+    if params.options & REINDEXOPT_VERBOSE != 0 {
+        elog::ereport(types_error::INFO)
+            .errmsg(format!(
+                "index \"{}\" was reindexed",
+                lsyscache::get_rel_name(mcx, indexId)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default()
+            ))
+            .errdetail_internal(pg_rusage::pg_rusage_show(&ru0).as_str().to_string())
+            .finish(types_error::ErrorLocation::new("index.c", 0, "reindex_index"))?;
     }
 
     guc::AtEOXact_GUC(false, save_nestlevel);

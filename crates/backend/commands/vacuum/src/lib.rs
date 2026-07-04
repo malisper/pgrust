@@ -40,9 +40,21 @@ use multixact::{
     ReadNextMultiXactId,
 };
 
+/// The two shared counters C keeps in PVShared and points
+/// VacuumSharedCostBalance/VacuumActiveNWorkers at (vacuum.h externs).
+/// Thread-native home: one Arc shared by leader and workers.
+pub struct VacuumSharedCost {
+    pub cost_balance: std::sync::atomic::AtomicU32,
+    pub active_nworkers: std::sync::atomic::AtomicU32,
+}
+
 thread_local! {
     static IN_VACUUM: Cell<bool> = const { Cell::new(false) };
     static VACUUM_FAILSAFE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    // Some = VacuumSharedCostBalance/VacuumActiveNWorkers non-NULL in C.
+    static VACUUM_SHARED_COST: std::cell::RefCell<Option<std::sync::Arc<VacuumSharedCost>>> =
+        const { std::cell::RefCell::new(None) };
+    static VACUUM_COST_BALANCE_LOCAL: Cell<i32> = const { Cell::new(0) };
     // C's working copies (vacuum.c `vacuum_cost_delay`/`vacuum_cost_limit`),
     // distinct from the VacuumCostDelay/VacuumCostLimit GUC storage:
     // VacuumUpdateCosts writes these, never the GUC vars.
@@ -72,6 +84,18 @@ pub fn VacuumFailsafeActive() -> bool {
 
 pub fn SetVacuumFailsafeActive(v: bool) {
     VACUUM_FAILSAFE_ACTIVE.set(v);
+}
+
+pub fn vacuum_shared_cost() -> Option<std::sync::Arc<VacuumSharedCost>> {
+    VACUUM_SHARED_COST.with(|c| c.borrow().clone())
+}
+
+pub fn set_vacuum_shared_cost(v: Option<std::sync::Arc<VacuumSharedCost>>) {
+    VACUUM_SHARED_COST.with(|c| *c.borrow_mut() = v);
+}
+
+pub fn set_vacuum_cost_balance_local(v: i32) {
+    VACUUM_COST_BALANCE_LOCAL.set(v);
 }
 
 // C's static in_vacuum (vacuum.c); commands_analyze's ANALYZE entry shares it.
@@ -146,7 +170,31 @@ pub fn ExecVacuum<'mcx>(
             "process_toast" => process_toast = explain::defGetBoolean(opt)?,
             "skip_database_stats" => skip_database_stats = explain::defGetBoolean(opt)?,
             "only_database_stats" => only_database_stats = explain::defGetBoolean(opt)?,
-            name @ ("parallel" | "buffer_usage_limit") => {
+            "parallel" => {
+                // MAX_PARALLEL_WORKER_LIMIT (bgworker_internals.h)
+                const MAX_PARALLEL_WORKER_LIMIT: i32 = 1024;
+                if opt.arg.is_none() {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg(format!(
+                            "parallel option requires a value between 0 and {MAX_PARALLEL_WORKER_LIMIT}"
+                        ))
+                        .into_error()
+                        .into());
+                }
+                let nworkers = commands_define::defGetInt32(opt)?;
+                if !(0..=MAX_PARALLEL_WORKER_LIMIT).contains(&nworkers) {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg(format!(
+                            "parallel workers for vacuum must be between 0 and {MAX_PARALLEL_WORKER_LIMIT}"
+                        ))
+                        .into_error()
+                        .into());
+                }
+                params.nworkers = if nworkers == 0 { -1 } else { nworkers };
+            }
+            name @ "buffer_usage_limit" => {
                 if explain::defGetBoolean(opt).unwrap_or(true) {
                     unported_option(name);
                 }
@@ -189,6 +237,14 @@ pub fn ExecVacuum<'mcx>(
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("PROCESS_TOAST required with VACUUM FULL")
+            .into_error()
+            .into());
+    }
+
+    if full && params.nworkers > 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("VACUUM FULL cannot be performed in parallel")
             .into_error()
             .into());
     }
@@ -1222,9 +1278,10 @@ pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {
         return Ok(());
     }
 
-    // VacuumSharedCostBalance parallel arm: vacuumparallel unported.
     let mut msec = 0.0f64;
-    if g::VacuumCostBalance() >= vacuum_cost_limit() {
+    if let Some(shared) = vacuum_shared_cost() {
+        msec = compute_parallel_delay(&shared);
+    } else if g::VacuumCostBalance() >= vacuum_cost_limit() {
         msec = vacuum_cost_delay() * g::VacuumCostBalance() as f64 / vacuum_cost_limit() as f64;
     }
 
@@ -1239,6 +1296,37 @@ pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {
         postgres_seams::check_for_interrupts::call()?;
     }
     Ok(())
+}
+
+// compute_parallel_delay (vacuum.c): balance accumulates into the shared
+// counter; a worker sleeps only once its own contribution passes half its
+// fair share of the limit.
+fn compute_parallel_delay(shared: &VacuumSharedCost) -> f64 {
+    use init_small::globals as g;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let mut msec = 0.0f64;
+    let nworkers = shared.active_nworkers.load(SeqCst) as i32;
+    debug_assert!(nworkers >= 1);
+
+    let shared_balance = shared
+        .cost_balance
+        .fetch_add(g::VacuumCostBalance() as u32, SeqCst)
+        .wrapping_add(g::VacuumCostBalance() as u32);
+
+    let local = VACUUM_COST_BALANCE_LOCAL.get() + g::VacuumCostBalance();
+    VACUUM_COST_BALANCE_LOCAL.set(local);
+
+    if shared_balance >= vacuum_cost_limit() as u32
+        && local as f64 > 0.5 * (vacuum_cost_limit() as f64 / nworkers as f64)
+    {
+        msec = vacuum_cost_delay() * local as f64 / vacuum_cost_limit() as f64;
+        shared.cost_balance.fetch_sub(local as u32, SeqCst);
+        VACUUM_COST_BALANCE_LOCAL.set(0);
+    }
+
+    g::SetVacuumCostBalance(0);
+    msec
 }
 
 #[cold]

@@ -166,9 +166,6 @@ pub fn cluster_rel<'mcx>(
     let table_oid = old_heap.rd_id;
     let verbose = params.options & CLUOPT_VERBOSE != 0;
     let recheck = params.options & CLUOPT_RECHECK != 0;
-    if verbose {
-        unported("cluster_rel: VERBOSE (pg_rusage lane)");
-    }
     postgres_seams::check_for_interrupts::call()?;
 
     let guard = miscinit::SecContextGuard::security_restricted(old_heap.rd_rel.relowner);
@@ -381,7 +378,10 @@ fn copy_table_data<'mcx>(
     verbose: bool,
 ) -> PgResult<(u32, u32)> {
     debug_assert!(new_heap.rd_att.natts == old_heap.rd_att.natts);
-    let _ = verbose;
+    let ru0 = pg_rusage::pg_rusage_init();
+    let nspname = lsyscache::get_namespace_name(mcx, old_heap.namespace())?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
 
     if old_heap.rd_rel.reltoastrelid != InvalidOid
         || new_heap.rd_rel.reltoastrelid != InvalidOid
@@ -429,7 +429,26 @@ fn copy_table_data<'mcx>(
         _ => false,
     };
 
-    let (num_tuples, _tups_vacuumed, _tups_recently_dead) = crate::copy::copy_for_cluster(
+    let elevel = if verbose { types_error::INFO } else { types_error::DEBUG2 };
+    let what = match old_index {
+        Some(index) if !use_sort => format!(
+            "clustering \"{}.{}\" using index scan on \"{}\"",
+            nspname,
+            old_heap.name(),
+            index.name()
+        ),
+        _ if use_sort => format!(
+            "clustering \"{}.{}\" using sequential scan and sort",
+            nspname,
+            old_heap.name()
+        ),
+        _ => format!("vacuuming \"{}.{}\"", nspname, old_heap.name()),
+    };
+    elog::ereport(elevel)
+        .errmsg(what)
+        .finish(types_error::ErrorLocation::new("cluster.c", 0, "copy_table_data"))?;
+
+    let (num_tuples, tups_vacuumed, tups_recently_dead) = crate::copy::copy_for_cluster(
         mcx,
         old_heap,
         new_heap,
@@ -444,6 +463,26 @@ fn copy_table_data<'mcx>(
         new_heap,
         types_core::ForkNumber::MAIN_FORKNUM,
     )?;
+
+    let old_pages = bufmgr::RelationGetNumberOfBlocksInFork(
+        old_heap,
+        types_core::ForkNumber::MAIN_FORKNUM,
+    )?;
+    elog::ereport(elevel)
+        .errmsg(format!(
+            "\"{}.{}\": found {:.0} removable, {:.0} nonremovable row versions in {} pages",
+            nspname,
+            old_heap.name(),
+            tups_vacuumed,
+            num_tuples,
+            old_pages,
+        ))
+        .errdetail(format!(
+            "{:.0} dead row versions cannot be removed yet.\n{}.",
+            tups_recently_dead,
+            pg_rusage::pg_rusage_show(&ru0).as_str(),
+        ))
+        .finish(types_error::ErrorLocation::new("cluster.c", 0, "copy_table_data"))?;
 
     // Update the transient rel's pg_class stats (not for pg_class itself).
     assert!(old_heap.rd_id != types_core::RELATION_RELATION_ID);
