@@ -70,8 +70,11 @@ fn bloom_init<'mcx>(mcx: Mcx<'mcx>, ndistinct: i32, false_positive_rate: f64) ->
     debug_assert!(false_positive_rate > 0.0 && false_positive_rate < 1.0);
     let (nbytes, nbits, nhashes) = bloom_filter_size(ndistinct, false_positive_rate);
 
+    // Reachable via large pages_per_range reloptions; C elog(ERROR).
     if nbytes > BLOOM_MAX_FILTER_SIZE {
-        panic!("the bloom filter is too large ({nbytes} > {BLOOM_MAX_FILTER_SIZE})");
+        return Err(Box::new(PgError::error(format!(
+            "the bloom filter is too large ({nbytes} > {BLOOM_MAX_FILTER_SIZE})"
+        ))));
     }
 
     let len = OFF_DATA + nbytes;
