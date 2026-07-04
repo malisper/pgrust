@@ -12,6 +12,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 funcapi = { path = "../../fmgr/funcapi" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 arrayfuncs = { path = "../arrayfuncs" }
 arrayutils = { path = "../arrayutils" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
