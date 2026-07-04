@@ -374,6 +374,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
         | NodeTag::T_FuncExpr
+        | NodeTag::T_NamedArgExpr
         | NodeTag::T_RelabelType
         | NodeTag::T_CoerceViaIO
         | NodeTag::T_BoolExpr
@@ -457,6 +458,15 @@ fn assign_collations_walker<'mcx>(
                     for arg in &node.as_func_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
+                }
+                NodeTag::T_NamedArgExpr => {
+                    assign_collations_walker(
+                        node.as_named_arg_expr()
+                            .unwrap()
+                            .arg
+                            .expect("NamedArgExpr has an arg"),
+                        &mut loccontext,
+                    )?;
                 }
                 NodeTag::T_RelabelType => {
                     assign_collations_walker(
@@ -679,6 +689,11 @@ fn assign_collations_walker<'mcx>(
                     | NodeTag::T_GroupingFunc
                     | NodeTag::T_BooleanTest => {
                         debug_assert!(!OidIsValid(set_coll))
+                    }
+                    // exprSetCollation(NamedArgExpr) is assert-only in C: the
+                    // collation lives on the wrapped arg.
+                    NodeTag::T_NamedArgExpr => {
+                        debug_assert_eq!(set_coll, expr_collation(node))
                     }
                     NodeTag::T_DistinctExpr => node
                         .with_mut::<types_nodes::DistinctExpr, _>(|d| {

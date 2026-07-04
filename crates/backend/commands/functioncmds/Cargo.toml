@@ -10,6 +10,8 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }

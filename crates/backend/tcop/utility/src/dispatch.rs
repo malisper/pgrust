@@ -917,7 +917,7 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::CreateFunctionStmt<'mcx>,
                 >(stmt)
             };
-            let address = functioncmds::CreateFunction(mcx, stmt)?;
+            let address = functioncmds::CreateFunction(mcx, stmt, source_text)?;
             Ok(Some(address))
         }
 

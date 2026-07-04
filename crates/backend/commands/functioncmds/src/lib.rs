@@ -57,10 +57,16 @@ fn conflicting_options() -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
-fn invalid_procedure_attribute() -> Box<PgError> {
-    err(
-        "invalid attribute in procedure definition".to_string(),
-        ERRCODE_INVALID_FUNCTION_DEFINITION,
+fn invalid_procedure_attribute(source_text: &str, location: types_core::ParseLoc) -> Box<PgError> {
+    let pos = parser_small1::parser_errposition_source(
+        Some(source_text.as_bytes()),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    );
+    Box::new(
+        PgError::new(ERROR, "invalid attribute in procedure definition".to_string())
+            .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+            .with_cursor_position(pos),
     )
 }
 
@@ -136,6 +142,7 @@ fn interpret_func_parallel(defel: &DefElem<'_>) -> PgResult<i8> {
 // compute_function_attributes + compute_common_attribute (functioncmds.c).
 fn compute_function_attributes<'mcx>(
     stmt: &CreateFunctionStmt<'mcx>,
+    source_text: &str,
 ) -> PgResult<FunctionAttrs<'mcx>> {
     let mut as_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut language_item: Option<&'mcx DefElem<'mcx>> = None;
@@ -159,7 +166,7 @@ fn compute_function_attributes<'mcx>(
                     | "parallel"
             )
         {
-            return Err(invalid_procedure_attribute());
+            return Err(invalid_procedure_attribute(source_text, defel.location));
         }
         let slot: &mut Option<&'mcx DefElem<'mcx>> = match name {
             "as" => &mut as_item,
@@ -556,6 +563,7 @@ fn qualified_name_get_creation_namespace<'mcx>(
 pub fn CreateFunction<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
+    source_text: &str,
 ) -> PgResult<ObjectAddress> {
     let (namespaceId, funcname) = qualified_name_get_creation_namespace(mcx, &stmt.funcname)?;
 
@@ -572,7 +580,7 @@ pub fn CreateFunction<'mcx>(
         aclchk_seams::aclcheck_error::call(aclresult, ObjectType::OBJECT_SCHEMA as i32, &nspname)?;
     }
 
-    let attrs = compute_function_attributes(stmt)?;
+    let attrs = compute_function_attributes(stmt, source_text)?;
 
     let language = match attrs.language {
         Some(l) => l,
