@@ -22,6 +22,17 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(9000);
 
+// The fleet log filters captured test stdout; diagnostics ride the asserts.
+static WORKER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn wlog(s: String) {
+    WORKER_LOG.lock().unwrap_or_else(|e| e.into_inner()).push(s);
+}
+
+fn wlog_dump() -> String {
+    WORKER_LOG.lock().unwrap_or_else(|e| e.into_inner()).join(" | ")
+}
+
 // A hang here otherwise burns the whole fleet job deadline.
 struct Watchdog(Arc<std::sync::atomic::AtomicBool>);
 impl Watchdog {
@@ -367,7 +378,7 @@ fn e2e_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 }
 
 fn e2e_error_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
-    eprintln!("e2e_error_main reached in worker {}", parallel::ParallelWorkerNumber());
+    wlog(format!("e2e_error_main reached in worker {}", parallel::ParallelWorkerNumber()));
     Err(Box::new(
         PgError::new(types_error::FATAL, "worker exploded on purpose")
             .with_sqlstate(types_error::ERRCODE_DIVISION_BY_ZERO)
@@ -387,7 +398,7 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
         let pid = NEXT_PID.fetch_add(1, Relaxed);
         let slot = bgworker::rw_shmem_slot(idx);
         let generation = bgworker::slot_generation(slot);
-        eprintln!("stand-in launch: idx={idx} slot={slot} gen={generation} pid={pid}");
+        wlog(format!("stand-in launch: idx={idx} slot={slot} gen={generation} pid={pid}"));
         bgworker::set_rw_pid(idx, pid);
         bgworker::ReportBackgroundWorkerPID(idx);
         // launch_backend's per-thread GUC boot (the postmaster snapshot).
@@ -419,7 +430,9 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                         .map(|s| s.to_string())
                         .or_else(|| payload.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "non-string panic".to_string());
-                    eprintln!("e2e worker {pid} died without proc_exit: {msg}");
+                    wlog(format!("e2e worker {pid} died without proc_exit: {msg}"));
+                } else {
+                    wlog(format!("e2e worker {pid} proc_exit({})", code.unwrap()));
                 }
                 // The reaper reports the exit no matter how the worker died —
                 // otherwise a worker crash hangs the leader instead of raising
@@ -556,7 +569,12 @@ fn worker_error_rethrows_with_c_shape() {
     let joins = launch_registered_workers();
 
     let err = parallel::WaitForParallelWorkersToFinish(pcxt).unwrap_err();
-    assert_eq!(err.message(), "worker exploded on purpose", "full error: {err:?}");
+    assert_eq!(
+        err.message(),
+        "worker exploded on purpose",
+        "full error: {err:?}; worker log: {}",
+        wlog_dump()
+    );
     assert_eq!(err.sqlstate(), types_error::ERRCODE_DIVISION_BY_ZERO);
     assert_eq!(err.level, ERROR); // clamped from FATAL per C
     let ctx = err.context().unwrap();
