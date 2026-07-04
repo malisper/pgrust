@@ -134,7 +134,7 @@ struct OnConflictState<'mcx> {
     where_clause: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
-struct CheckExpr<'mcx> {
+pub struct CheckExpr<'mcx> {
     name: mcx::PgString<'mcx>,
     state: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
@@ -3112,7 +3112,7 @@ fn wco_violation(w: &WcoExpr<'_>) -> Box<PgError> {
 }
 
 // ExecConstraints (execMain.c): NOT NULL + CHECK arms live.
-fn exec_constraints<'mcx>(
+pub fn exec_constraints<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
     virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,

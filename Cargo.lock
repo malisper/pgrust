@@ -3141,6 +3141,7 @@ dependencies = [
  "elog",
  "execexpr",
  "execindexing",
+ "execpartition",
  "exectuples",
  "fd",
  "fmgr_core",

@@ -30,6 +30,8 @@ exectuples = { path = "../../executor/exectuples" }
 execindexing = { path = "../../executor/execindexing" }
 nodemodifytable = { path = "../../executor/nodemodifytable" }
 execexpr = { path = "../../executor/execexpr" }
+execpartition = { path = "../../executor/execpartition" }
+nodemodifytable = { path = "../../executor/nodemodifytable" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 clauses = { path = "../../optimizer/util/clauses" }
 vars = { path = "../../optimizer/util/vars" }

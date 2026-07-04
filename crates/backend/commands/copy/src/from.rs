@@ -300,19 +300,28 @@ pub fn CopyFrom<'mcx>(
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
 ) -> PgResult<u64> {
-    if rel.rd_rel.relkind != RELKIND_RELATION {
+    let relkind = rel.rd_rel.relkind;
+    if relkind != RELKIND_RELATION && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
         return Err(cannot_copy_to_relkind(rel));
     }
     // New-in-transaction storage: probing the FSM is a waste of time
-    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
-    let mut ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
-        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
+    // (RELKIND_HAS_STORAGE arm; partitioned roots have none).
+    let mut ti_options = if relkind == RELKIND_RELATION
+        && (rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
+            || rel.rd_firstRelfilelocatorSubid.get()
+                != types_core::xact::InvalidSubTransactionId)
     {
         tableam_vocab::TABLE_INSERT_SKIP_FSM
     } else {
         0
     };
     if cstate.opts.freeze {
+        if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            return Err(Box::new(
+                PgError::error("cannot perform COPY FREEZE on a partitioned table")
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
         snapmgr::InvalidateCatalogSnapshot();
         if !snapmgr::ThereAreNoPriorRegisteredSnapshots() || !portalmem::ThereAreNoReadyPortals()
         {
@@ -337,7 +346,12 @@ pub fn CopyFrom<'mcx>(
     // the relkind + FREEZE checks; buffered-but-unflushed slots on the Err
     // path are simply dropped, as C's are (the aborted xact kills flushed
     // ones).
-    match copy_from_body(mcx, cstate, rel, ti_options) {
+    let body = if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        copy_from_partitioned_body(mcx, cstate, rel, ti_options)
+    } else {
+        copy_from_body(mcx, cstate, rel, ti_options)
+    };
+    match body {
         Ok(n) => Ok(n),
         Err(e) => Err(copy_from_error_context(cstate, rel, e)),
     }
@@ -353,18 +367,7 @@ fn copy_from_body<'mcx>(
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
-    for wc in cstate.where_clause.iter() {
-        if clauses::contain_volatile_functions(wc)? {
-            unported("FROM ... WHERE with volatile functions (CIM_SINGLE lane)");
-        }
-    }
-    let mut qualexpr =
-        execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
-    if let Some(q) = qualexpr.as_mut() {
-        // SAFETY: qual scratch results land in the statement mcx, which
-        // outlives every per-row evaluation.
-        unsafe { q.arm_result_mcx_raw(mcx) };
-    }
+    let mut qualexpr = init_where_qual(mcx, cstate)?;
 
     let has_generated_stored =
         rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored);
@@ -480,6 +483,30 @@ fn copy_from_body<'mcx>(
 
     tableam::table_finish_bulk_insert(rel, ti_options)?;
 
+    skipped_rows_notice(cstate)?;
+    Ok(processed)
+}
+
+fn init_where_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    cstate: &CopyFromState<'mcx, '_>,
+) -> PgResult<Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> {
+    for wc in cstate.where_clause.iter() {
+        if clauses::contain_volatile_functions(wc)? {
+            unported("FROM ... WHERE with volatile functions (CIM_SINGLE lane)");
+        }
+    }
+    let mut qualexpr =
+        execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
+    if let Some(q) = qualexpr.as_mut() {
+        // SAFETY: qual scratch results land in the statement mcx, which
+        // outlives every per-row evaluation.
+        unsafe { q.arm_result_mcx_raw(mcx) };
+    }
+    Ok(qualexpr)
+}
+
+fn skipped_rows_notice(cstate: &CopyFromState<'_, '_>) -> PgResult<()> {
     if cstate.num_errors > 0
         && cstate.opts.log_verbosity >= crate::CopyLogVerbosityChoice::Default
     {
@@ -491,7 +518,205 @@ fn copy_from_body<'mcx>(
         };
         ereport(types_error::NOTICE).errmsg(msg).finish(loc("CopyFrom"))?;
     }
+    Ok(())
+}
+
+// CopyMultiInsertBuffer, plain-table arm (foreign partitions are loud).
+struct PartBuffer<'mcx> {
+    leaf: usize,
+    // std Vec: SlotData owns droppy arena-erased views; the pool lives for
+    // the statement (CopyMultiInsertBuffer.slots).
+    slots: Vec<types_slot::SlotData<'mcx>>,
+    linenos: Vec<u64>,
+    nused: usize,
+    bistate: tableam_vocab::BulkInsertStateData,
+}
+
+// copyfrom.c MAX_PARTITION_BUFFERS: trim to this many after each flush.
+const MAX_PARTITION_BUFFERS: usize = 32;
+
+// CopyFrom, partitioned arm: CIM_MULTI_CONDITIONAL with every CIM_SINGLE
+// fallback loud (triggers, FDW partitions, volatile defaults/WHERE), so each
+// routed leaf batches through its own CopyMultiInsertBuffer.
+fn copy_from_partitioned_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    cstate: &mut CopyFromState<'mcx, '_>,
+    rel: &Relation<'mcx>,
+    ti_options: i32,
+) -> PgResult<u64> {
+    let mycid = xact::GetCurrentCommandId(true)?;
+    if rel.rd_hastriggers {
+        panic!("CopyFrom: triggers on a partitioned COPY target not ported");
+    }
+
+    let mut qualexpr = init_where_qual(mcx, cstate)?;
+    let mut router = execpartition::PartitionTupleRouting::new(mcx, rel)?;
+    let mut rootslot = tableam::table_slot_create(mcx, rel)?;
+    let mut buffers: Vec<PartBuffer<'mcx>> = Vec::new();
+    let mut leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>> = Vec::new();
+    let mut leaf_checks: Vec<Option<mcx::PgVec<'mcx, nodemodifytable::CheckExpr<'mcx>>>> =
+        Vec::new();
+    let mut buffered_tuples = 0usize;
+    let mut buffered_bytes = 0usize;
+    let mut processed: u64 = 0;
+
+    loop {
+        postgres_seams::check_for_interrupts::call()?;
+
+        exectuples::exec_clear_tuple(&mut rootslot, mcx);
+        {
+            let base = rootslot.base_mut();
+            if !cstate.next_copy_from(mcx, &mut base.tts_values, &mut base.tts_isnull)? {
+                break;
+            }
+        }
+        if cstate.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
+            cstate.escontext.as_mut().unwrap().ctx.reset_error_occurred();
+            if cstate.opts.reject_limit > 0 && cstate.num_errors > cstate.opts.reject_limit as u64
+            {
+                return Err(reject_limit_exceeded(cstate.opts.reject_limit));
+            }
+            continue;
+        }
+
+        exectuples::exec_store_virtual_tuple(&mut rootslot);
+        rootslot.base_mut().tts_tableOid = rel.rd_id;
+
+        if qualexpr.is_some() {
+            let mut eval =
+                execexpr::EvalSlots { scan: Some(&mut rootslot), inner: None, outer: None };
+            if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+                continue;
+            }
+        }
+
+        let leaf = router.find_partition(&mut rootslot)?;
+        if leaf_checks.len() <= leaf {
+            leaf_checks.resize_with(leaf + 1, || None);
+            leaf_indexes.resize_with(leaf + 1, || None);
+            let lrel = router.leaf_rel(leaf);
+            if lrel.rd_rel.relkind != RELKIND_RELATION {
+                panic!("CopyFrom: foreign-table partition as COPY target not ported (FDW lane)");
+            }
+            if lrel.rd_hastriggers {
+                panic!("CopyFrom: triggers on a routed-into partition not ported");
+            }
+            if lrel
+                .rd_att
+                .constr
+                .as_deref()
+                .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
+            {
+                panic!("CopyFrom: generated columns on a routed-into partition not ported");
+            }
+        }
+
+        let bidx = match buffers.iter().position(|b| b.leaf == leaf) {
+            Some(i) => i,
+            None => {
+                buffers.push(PartBuffer {
+                    leaf,
+                    slots: Vec::new(),
+                    linenos: Vec::new(),
+                    nused: 0,
+                    bistate: heapam::GetBulkInsertState(),
+                });
+                buffers.len() - 1
+            }
+        };
+        {
+            let lrel = router.leaf_rel(leaf);
+            let buf = &mut buffers[bidx];
+            if buf.nused == buf.slots.len() {
+                buf.slots.push(tableam::table_slot_create(mcx, lrel)?);
+                buf.linenos.push(0);
+            }
+            let slot = &mut buf.slots[buf.nused];
+            exectuples::exec_copy_slot(slot, &mut rootslot, mcx, mcx)?;
+            slot.base_mut().tts_tableOid = lrel.rd_id;
+            nodemodifytable::exec_constraints(mcx, &mut leaf_checks[leaf], lrel, slot)?;
+            // Routed rows skip ExecPartitionCheck (bound proven on descent;
+            // the DEFAULT-partition re-check runs inside find_partition).
+            buf.linenos[buf.nused] = cstate.cur_lineno;
+            buf.nused += 1;
+        }
+        buffered_tuples += 1;
+        buffered_bytes += cstate.line_buf.len();
+        processed += 1;
+
+        if buffered_tuples >= MAX_BUFFERED_TUPLES || buffered_bytes >= MAX_BUFFERED_BYTES {
+            flush_part_buffers(
+                mcx,
+                cstate,
+                &router,
+                &mut buffers,
+                &mut leaf_indexes,
+                mycid,
+                ti_options,
+            )?;
+            buffered_tuples = 0;
+            buffered_bytes = 0;
+            while buffers.len() > MAX_PARTITION_BUFFERS {
+                if buffers[0].leaf == leaf {
+                    let cur = buffers.remove(0);
+                    buffers.push(cur);
+                }
+                let evicted = buffers.remove(0);
+                tableam::table_finish_bulk_insert(router.leaf_rel(evicted.leaf), ti_options)?;
+            }
+        }
+    }
+
+    flush_part_buffers(
+        mcx,
+        cstate,
+        &router,
+        &mut buffers,
+        &mut leaf_indexes,
+        mycid,
+        ti_options,
+    )?;
+    for buf in buffers.iter() {
+        tableam::table_finish_bulk_insert(router.leaf_rel(buf.leaf), ti_options)?;
+    }
+
+    skipped_rows_notice(cstate)?;
     Ok(processed)
+}
+
+// CopyMultiInsertInfoFlush over every tracked buffer, in creation order.
+fn flush_part_buffers<'mcx>(
+    mcx: Mcx<'mcx>,
+    cstate: &mut CopyFromState<'mcx, '_>,
+    router: &execpartition::PartitionTupleRouting<'mcx>,
+    buffers: &mut [PartBuffer<'mcx>],
+    leaf_indexes: &mut [Option<execindexing::ResultRelIndexState<'mcx>>],
+    mycid: types_core::CommandId,
+    ti_options: i32,
+) -> PgResult<()> {
+    for buf in buffers.iter_mut() {
+        if buf.nused == 0 {
+            continue;
+        }
+        let lrel = router.leaf_rel(buf.leaf);
+        if leaf_indexes[buf.leaf].is_none() {
+            leaf_indexes[buf.leaf] = Some(execindexing::ExecOpenIndices(mcx, lrel, false)?);
+        }
+        let index_state = leaf_indexes[buf.leaf].as_mut().expect("just opened");
+        flush_multi_insert(
+            mcx,
+            cstate,
+            lrel,
+            &mut buf.slots[..buf.nused],
+            &buf.linenos[..buf.nused],
+            mycid,
+            ti_options,
+            &mut buf.bistate,
+            index_state,
+        )?;
+        buf.nused = 0;
+    }
+    Ok(())
 }
 
 // CopyMultiInsertBufferFlush (copyfrom.c), single non-partitioned table.
@@ -657,9 +882,7 @@ fn cannot_copy_to_relkind(rel: &Relation<'_>) -> Box<PgError> {
         ),
         b'm' => (format!("cannot copy to materialized view \"{name}\""), None),
         b'S' => (format!("cannot copy to sequence \"{name}\""), None),
-        b'f' | b'p' => {
-            unported("FROM into foreign/partitioned relations (FDW/tuple-routing lanes)")
-        }
+        b'f' => unported("FROM into foreign tables (FDW lane)"),
         _ => (format!("cannot copy to non-table relation \"{name}\""), None),
     };
     let mut e = PgError::error(msg).with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE);
