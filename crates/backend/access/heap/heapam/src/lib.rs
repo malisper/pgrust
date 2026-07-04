@@ -987,8 +987,12 @@ pub fn heap_batch_deform_soa<'mcx>(
     // page_collect_tuples under the per-page bound.
     let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
     // Reverse row order = ascending tuple addresses (pages fill from pd_upper
-    // down); every SoA write is positional, so batch output is order-free.
-    for i in (0..n).rev() {
+    // down), so the first toucher of each line streams forward; every SoA
+    // write is positional, so batch output is order-free. Manual while: the
+    // .rev() form cost ~3 instr/row on this loop's codegen.
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
         let (ptr, len, lineoff) = unsafe {
             let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
             let lpp = page.item_id_unchecked(lineoff);
