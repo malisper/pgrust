@@ -17,6 +17,7 @@ use ::types_tuple::{MinimalTupleData, TupleDescData};
 mod abbrev;
 mod mgetattr;
 mod qsort;
+mod radix;
 mod ssup;
 
 #[cfg(test)]
@@ -27,6 +28,12 @@ pub(crate) mod testhooks {
     thread_local! {
         pub static MKSORT_DISABLE: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+        pub static RADIX_DISABLE: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+        pub static RADIX_ATTEMPTS: std::cell::Cell<u32> =
+            const { std::cell::Cell::new(0) };
+        pub static RADIX_COMPLETED: std::cell::Cell<u32> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -1691,6 +1698,9 @@ impl<'m> TuplesortData<'m> {
     }
 
     fn sort_memtuples_inner(&self, tuples: &mut [SortTuple]) -> PgResult<()> {
+        if self.radix_applies(tuples.len()) && self.radix_sort_abbrev(tuples)? {
+            return Ok(());
+        }
         let ctx = ctx!(self);
         if self.have_datum1 || matches!(self.variant, SortVariant::IndexHash { .. }) {
             if self.mksort_applies(tuples.len()) {

@@ -1359,3 +1359,291 @@ fn numeric_bounded_sort_disarms_abbrev() {
     assert_eq!(got[..], numeric_oracle(&vals, false)[..20]);
     ts.end();
 }
+
+// ---- radix over abbreviated keys ----
+
+fn radix_counters_reset() {
+    crate::testhooks::RADIX_ATTEMPTS.with(|c| c.set(0));
+    crate::testhooks::RADIX_COMPLETED.with(|c| c.set(0));
+}
+
+fn radix_counters() -> (u32, u32) {
+    (
+        crate::testhooks::RADIX_ATTEMPTS.with(|c| c.get()),
+        crate::testhooks::RADIX_COMPLETED.with(|c| c.get()),
+    )
+}
+
+fn text_datum_sort_run(
+    vals: &[Option<Vec<u8>>],
+    nulls_first: bool,
+    reverse: bool,
+    disable_radix: bool,
+) -> Vec<Option<Vec<u8>>> {
+    crate::testhooks::RADIX_DISABLE.with(|c| c.set(disable_radix));
+    let mut ts = Tuplesort::begin_common(
+        8192,
+        TUPLESORT_NONE,
+        &[text_key(nulls_first, reverse)],
+        false,
+        Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
+        SortVariant::Datum { byref_typlen: -1 },
+    );
+    let blobs: Vec<Option<Box<[u64]>>> =
+        vals.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
+    for b in &blobs {
+        match b {
+            Some(blob) => ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap(),
+            None => ts.putdatum(Datum::null(), true).unwrap(),
+        }
+    }
+    ts.performsort().unwrap();
+    let got = drain_text_datums(&mut ts);
+    ts.end();
+    crate::testhooks::RADIX_DISABLE.with(|c| c.set(false));
+    got
+}
+
+// Distinct full strings; group sizes 1-4 via the shared word prefix.
+fn unique_texts(n: usize, seed: u64, group: usize) -> Vec<Option<Vec<u8>>> {
+    let mut s = seed;
+    (0..n)
+        .map(|i| {
+            let _ = lcg(&mut s);
+            Some(format!("{:08x}{:06}", (i / group) as u32, i).into_bytes())
+        })
+        .collect()
+}
+
+#[test]
+fn radix_text_datum_unique_matches_oracle_and_pgqsort() {
+    let vals = unique_texts(5000, 0xace, 1);
+    radix_counters_reset();
+    let got = text_datum_sort_run(&vals, false, false, false);
+    let (attempts, completed) = radix_counters();
+    assert_eq!((attempts, completed), (1, 1), "radix must engage and complete");
+    assert_eq!(got, text_oracle(vals.clone(), false));
+    let got_qsort = text_datum_sort_run(&vals, false, false, true);
+    assert_eq!(got, got_qsort);
+}
+
+#[test]
+fn radix_word_groups_unique_tails() {
+    // Groups of 4 equal abbrev words, distinct tails: group sort decides.
+    let vals = unique_texts(4096, 7, 4);
+    radix_counters_reset();
+    let got = text_datum_sort_run(&vals, false, false, false);
+    assert_eq!(radix_counters(), (1, 1));
+    assert_eq!(got, text_oracle(vals, false));
+}
+
+#[test]
+fn radix_ties_and_nulls_fall_back_bit_identical() {
+    // Duplicate strings and >1 NULL: certificate must trip; output must be
+    // pg_qsort's permutation bit-for-bit (payload col proves it).
+    let vals = random_texts(3000, 0x5add, b"");
+    radix_counters_reset();
+    let got = text_datum_sort_run(&vals, false, false, false);
+    let (attempts, completed) = radix_counters();
+    assert_eq!(attempts, 1);
+    assert_eq!(completed, 0, "duplicates must trip the certificate");
+    let got_qsort = text_datum_sort_run(&vals, false, false, true);
+    assert_eq!(got, got_qsort);
+}
+
+#[test]
+fn radix_reverse_and_nulls_first() {
+    let mut vals = unique_texts(3000, 3, 2);
+    vals[137] = None; // single NULL: null group of 1, no fallback
+    radix_counters_reset();
+    let got = text_datum_sort_run(&vals, true, true, false);
+    assert_eq!(radix_counters(), (1, 1));
+    let got_qsort = text_datum_sort_run(&vals, true, true, true);
+    assert_eq!(got, got_qsort);
+    let mut oracle = text_oracle(vals, false);
+    oracle.reverse(); // DESC NULLS FIRST == reverse of ASC NULLS LAST
+    assert_eq!(got, oracle);
+}
+
+#[test]
+fn radix_presorted_strictly_increasing_short_circuits() {
+    let vals: Vec<Option<Vec<u8>>> =
+        (0..2000).map(|i| Some(format!("{i:08}").into_bytes())).collect();
+    radix_counters_reset();
+    let got = text_datum_sort_run(&vals, false, false, false);
+    assert_eq!(radix_counters(), (1, 1));
+    assert_eq!(got, text_oracle(vals, false));
+}
+
+#[test]
+fn radix_heap_two_key_matches_pgqsort() {
+    let mcx = leaked_mcx();
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    let text_att = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: 25,
+        attlen: -1,
+        attbyval: false,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    compact.push(CompactAttribute::populate_from(&text_att));
+    attrs.push(text_att);
+    let int_att = FormData_pg_attribute {
+        attnum: 2,
+        atttypid: 23,
+        attlen: 4,
+        attbyval: true,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    compact.push(CompactAttribute::populate_from(&int_att));
+    attrs.push(int_att);
+    let desc = Rc::new(TupleDescData {
+        natts: 2,
+        tdtypeid: 2249,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    });
+    let keys = [text_key(false, false), int32_key(2, false, false)];
+
+    let mut s = 41u64;
+    let rows: Vec<(Option<Vec<u8>>, i32)> = (0..3000)
+        .map(|i| {
+            let t = if lcg(&mut s) % 19 == 0 {
+                None
+            } else {
+                // dup texts; (text, i2) pairs include full duplicates
+                Some(format!("w{:07}", lcg(&mut s) % 700).into_bytes())
+            };
+            (t, (i % 5) as i32)
+        })
+        .collect();
+
+    let run = |disable: bool| -> Vec<(Option<Vec<u8>>, i32)> {
+        crate::testhooks::RADIX_DISABLE.with(|c| c.set(disable));
+        let blobs: Vec<(Option<Box<[u64]>>, i32)> = rows
+            .iter()
+            .map(|(t, i)| (t.as_ref().map(|p| text_blob(p)), *i))
+            .collect();
+        let mut ts = Tuplesort::begin_common(
+            8192,
+            TUPLESORT_NONE,
+            &keys,
+            false,
+            Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
+            SortVariant::Heap { tup_desc: desc.clone() },
+        );
+        let mut in_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        for (t, i) in &blobs {
+            exectuples::exec_clear_tuple(&mut in_slot, mcx);
+            let base = in_slot.base_mut();
+            match t {
+                Some(blob) => {
+                    base.tts_values[0] = Datum::from_usize(blob.as_ptr() as usize);
+                    base.tts_isnull[0] = false;
+                }
+                None => {
+                    base.tts_values[0] = Datum::null();
+                    base.tts_isnull[0] = true;
+                }
+            }
+            base.tts_values[1] = Datum::from_i32(*i);
+            base.tts_isnull[1] = false;
+            exectuples::exec_store_virtual_tuple(&mut in_slot);
+            ts.puttupleslot(&mut in_slot, mcx).unwrap();
+        }
+        ts.performsort().unwrap();
+        let mut got = Vec::new();
+        let mut out_slot = exectuples::make_tuple_table_slot(
+            mcx,
+            TupleSlotKind::MinimalTuple,
+            Some(desc.clone()),
+        );
+        while ts.gettupleslot(true, false, &mut out_slot, mcx).unwrap() {
+            let mut n1 = false;
+            let mut n2 = false;
+            let d1 = exectuples::slot_getattr(&mut out_slot, 1, &mut n1);
+            let d2 = exectuples::slot_getattr(&mut out_slot, 2, &mut n2);
+            let t = if n1 {
+                None
+            } else {
+                let p = d1.as_usize() as *const u8;
+                // SAFETY: live minimal-tuple varlena attr.
+                Some(unsafe {
+                    use ::types_tuple::varatt::{varatt_is_1b, varsize_1b, varsize_4b};
+                    if varatt_is_1b(p) {
+                        std::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1).to_vec()
+                    } else {
+                        std::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4).to_vec()
+                    }
+                })
+            };
+            got.push((t, d2.as_i32()));
+        }
+        ts.end();
+        crate::testhooks::RADIX_DISABLE.with(|c| c.set(false));
+        got
+    };
+
+    radix_counters_reset();
+    let got_radix = run(false);
+    let (attempts, _) = radix_counters();
+    assert_eq!(attempts, 1);
+    let got_qsort = run(true);
+    assert_eq!(got_radix, got_qsort);
+}
+
+#[test]
+fn radix_direct_small_covers_unsafe_paths() {
+    // Direct calls below RADIX_MIN: Miri-sized coverage of the scatter /
+    // group / copy-back unsafe blocks, success and fallback legs.
+    let uniq = unique_texts(80, 9, 3);
+    let mut ts = begin_text_datum_abbrev(TUPLESORT_NONE);
+    let blobs: Vec<Option<Box<[u64]>>> =
+        uniq.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
+    for b in &blobs {
+        ts.putdatum(Datum::from_usize(b.as_ref().unwrap().as_ptr() as usize), false).unwrap();
+    }
+    ts.0.with_mut(|st| {
+        let mut tuples = core::mem::replace(&mut st.memtuples, PgVec::new_in(st.mcx));
+        assert!(st.radix_sort_abbrev(&mut tuples).unwrap());
+        st.memtuples = tuples;
+    });
+    ts.performsort().unwrap(); // presorted now; qsort fast path finishes
+    assert_eq!(drain_text_datums(&mut ts), text_oracle(uniq, false));
+    ts.end();
+
+    let dups = random_texts(90, 0xdead, b"");
+    let mut ts = begin_text_datum_abbrev(TUPLESORT_NONE);
+    let blobs: Vec<Option<Box<[u64]>>> =
+        dups.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
+    for b in &blobs {
+        match b {
+            Some(blob) => ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap(),
+            None => ts.putdatum(Datum::null(), true).unwrap(),
+        }
+    }
+    let before: Vec<(u64, bool)> = ts.0.with(|st| {
+        st.memtuples.iter().map(|t| (t.datum1.as_u64(), t.isnull1)).collect()
+    });
+    ts.0.with_mut(|st| {
+        let mut tuples = core::mem::replace(&mut st.memtuples, PgVec::new_in(st.mcx));
+        assert!(!st.radix_sort_abbrev(&mut tuples).unwrap(), "dups must fall back");
+        st.memtuples = tuples;
+    });
+    let after: Vec<(u64, bool)> = ts.0.with(|st| {
+        st.memtuples.iter().map(|t| (t.datum1.as_u64(), t.isnull1)).collect()
+    });
+    assert_eq!(before, after, "fallback must leave the array untouched");
+    ts.performsort().unwrap();
+    assert_eq!(drain_text_datums(&mut ts), text_oracle(dups, false));
+    ts.end();
+}
