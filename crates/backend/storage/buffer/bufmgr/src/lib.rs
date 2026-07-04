@@ -50,7 +50,7 @@ pub use ops::{
     ConditionalLockBuffer, IsBufferCleanupOK, LockBuffer, LockBufferForCleanup, MarkBufferDirty,
     UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
-pub use bgwriter_sync::{bgwriter_writeback_context_init, pending_bgwriter_stats, BgBufferSync};
+pub use bgwriter_sync::{bgwriter_writeback_context_init, BgBufferSync};
 pub use write::{BufferSync, CheckPointBuffers, FlushOneBuffer, PageSetChecksumInplace};
 pub use pin::{
     AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, IncrBufferRefCount, ReleaseBuffer,

@@ -353,6 +353,12 @@ pub(crate) fn AdvanceXLInsertBuffer(upto: XLogRecPtr, tli: TimeLineID, opportuni
                     crate::write::XLogWrite((old_page_rqst_ptr, 0), tli, false)
                         .expect("XLogWrite from AdvanceXLInsertBuffer");
                     LWLockRelease(ctl::WALWriteLock()).expect("AdvanceXLInsertBuffer");
+                    let mut wu = crate::WAL_USAGE.get();
+                    wu.wal_buffers_full += 1;
+                    crate::WAL_USAGE.set(wu);
+                    if pgstat_seams::pgstat_report_fixed_set::is_installed() {
+                        pgstat_seams::pgstat_report_fixed_set::call();
+                    }
                 }
                 LWLockAcquire(ctl::WALBufMappingLock(), LW_EXCLUSIVE, my_proc_number())
                     .expect("AdvanceXLInsertBuffer");
@@ -636,7 +642,14 @@ pub fn XLogInsertRecord(
     PROC_LAST_REC_PTR.set(start_pos);
     XACT_LAST_REC_END.set(end_pos);
     if inserted {
-        crate::WAL_USAGE_FPI.set(crate::WAL_USAGE_FPI.get() + num_fpi as i64);
+        let mut wu = crate::WAL_USAGE.get();
+        wu.wal_bytes = wu.wal_bytes.wrapping_add(xl_tot_len as u64);
+        wu.wal_records += 1;
+        wu.wal_fpi += num_fpi as i64;
+        crate::WAL_USAGE.set(wu);
+        if pgstat_seams::pgstat_report_fixed_set::is_installed() {
+            pgstat_seams::pgstat_report_fixed_set::call();
+        }
     }
 
     Ok(end_pos)

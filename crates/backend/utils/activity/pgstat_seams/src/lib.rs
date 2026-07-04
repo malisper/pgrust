@@ -82,3 +82,40 @@ seam_core::seam!(
     // pgstat_report_wal(force) (pgstat_wal.c).
     pub fn pgstat_report_wal(force: bool)
 );
+
+seam_core::seam!(
+    // pgstat_report_fixed = true (pgstat.c); the xlog insert path's arm.
+    pub fn pgstat_report_fixed_set()
+);
+
+// Discriminants of pgstat's IOObject/IOOp and types_storage's IOContext; the
+// io seams take them raw so callers need no pgstat type dependency.
+pub const IOOBJECT_WAL: u32 = 2;
+pub const IOCONTEXT_INIT: u32 = 2;
+pub const IOCONTEXT_NORMAL: u32 = 3;
+pub const IOOP_FSYNC: u32 = 1;
+pub const IOOP_READ: u32 = 6;
+pub const IOOP_WRITE: u32 = 7;
+
+seam_core::seam!(
+    // pgstat_count_io_op (pgstat_io.c); IOObject/IOContext/IOOp as their enum
+    // discriminants.
+    pub fn pgstat_count_io_op(io_object: u32, io_context: u32, io_op: u32, cnt: u32, bytes: u64)
+);
+
+seam_core::seam!(
+    // pgstat_prepare_io_time (pgstat_io.c); returns ns start, 0 = disabled.
+    pub fn pgstat_prepare_io_time(track_io_guc: bool) -> i64
+);
+
+seam_core::seam!(
+    // pgstat_count_io_op_time (pgstat_io.c).
+    pub fn pgstat_count_io_op_time(
+        io_object: u32,
+        io_context: u32,
+        io_op: u32,
+        start_ns: i64,
+        cnt: u32,
+        bytes: u64,
+    )
+);

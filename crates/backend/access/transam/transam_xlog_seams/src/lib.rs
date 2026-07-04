@@ -62,6 +62,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pgWalUsage reader (instrument.h global, maintained by the xlog insert
+    // and AdvanceXLInsertBuffer paths).
+    pub fn wal_usage() -> types_core::instrument::WalUsage
+);
+
+seam_core::seam!(
     // GetFlushRecPtr(&insertTLI) (xlog.c): (flush ptr, insert TLI).
     pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
 );

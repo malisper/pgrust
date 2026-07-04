@@ -41,14 +41,7 @@ thread_local! {
     static TOTAL_FUNC_TIME: Cell<i64> = const { Cell::new(0) };
 }
 
-// INSTR_TIME_SET_CURRENT: monotonic ns; only same-thread diffs are used.
-fn now_ns() -> i64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ANCHOR: OnceLock<Instant> = OnceLock::new();
-    let anchor = *ANCHOR.get_or_init(Instant::now);
-    anchor.elapsed().as_nanos() as i64 + 1
-}
+use crate::now_ns;
 
 fn function_key(func_oid: Oid) -> PgStat_HashKey {
     PgStat_HashKey {

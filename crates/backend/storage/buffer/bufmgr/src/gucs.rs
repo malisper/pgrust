@@ -14,6 +14,7 @@ thread_local! {
     static IO_COMBINE_LIMIT_GUC: Cell<i32> = const { Cell::new(DEFAULT_IO_COMBINE_LIMIT) };
     static BACKEND_FLUSH_AFTER: Cell<i32> = const { Cell::new(DEFAULT_BACKEND_FLUSH_AFTER) };
     static ZERO_DAMAGED_PAGES: Cell<bool> = const { Cell::new(false) };
+    static TRACK_IO_TIMING: Cell<bool> = const { Cell::new(false) };
     static CHECKPOINT_FLUSH_AFTER: Cell<i32> =
         const { Cell::new(guc_tables::consts::DEFAULT_CHECKPOINT_FLUSH_AFTER) };
     static BGWRITER_FLUSH_AFTER: Cell<i32> =
@@ -44,6 +45,10 @@ pub fn io_combine_limit() -> i32 {
 
 pub fn zero_damaged_pages() -> bool {
     ZERO_DAMAGED_PAGES.with(|c| c.get())
+}
+
+pub fn track_io_timing() -> bool {
+    TRACK_IO_TIMING.with(|c| c.get())
 }
 
 pub fn backend_flush_after() -> i32 {
@@ -96,5 +101,9 @@ pub(crate) fn install_guc_backing() {
     guc_tables::vars::zero_damaged_pages.install(GucVarAccessors {
         get: zero_damaged_pages,
         set: |v| ZERO_DAMAGED_PAGES.with(|c| c.set(v)),
+    });
+    guc_tables::vars::track_io_timing.install(GucVarAccessors {
+        get: track_io_timing,
+        set: |v| TRACK_IO_TIMING.with(|c| c.set(v)),
     });
 }

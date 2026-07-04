@@ -1,16 +1,18 @@
 // pgstat_slru.c — per-backend pending SLRU counters (fixed-numbered kind).
 // Counts happen inside critical sections in C, hence static storage: a
-// thread-local array here. Flush applies to PgStatShared_SLRU under its
-// lwlock: phase 2; the local half drains the pending array.
+// thread-local array here.
 
 use core::cell::{Cell, RefCell};
+use std::sync::Mutex;
 
 use types_core::TimestampTz;
 
 use crate::pending;
 use crate::PgStat_Counter;
 
+// repr(C), all-i64 fields: statsfile serialization copies these as bytes.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[repr(C)]
 pub struct PgStat_SLRUStats {
     pub blocks_zeroed: PgStat_Counter,
     pub blocks_hit: PgStat_Counter,
@@ -103,16 +105,97 @@ pub fn pgstat_get_slru_index(name: &str) -> i32 {
     (SLRU_NUM_ELEMENTS - 1) as i32
 }
 
+static SHARED_SLRU: Mutex<[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]> = Mutex::new(
+    [PgStat_SLRUStats {
+        blocks_zeroed: 0,
+        blocks_hit: 0,
+        blocks_read: 0,
+        blocks_written: 0,
+        blocks_exists: 0,
+        flush: 0,
+        truncate: 0,
+        stat_reset_timestamp: 0,
+    }; SLRU_NUM_ELEMENTS],
+);
+
+thread_local! {
+    static SNAPSHOT_SLRU: Cell<Option<[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]>> =
+        const { Cell::new(None) };
+}
+
 pub(crate) fn pgstat_slru_flush_cb(_nowait: bool) -> bool {
     if !HAVE_SLRUSTATS.with(|c| c.get()) {
         return false;
     }
-    // apply into PgStatShared_SLRU under its lock: pgstat_shmem.c phase 2
     PENDING_SLRU_STATS.with(|s| {
-        *s.borrow_mut() = [PgStat_SLRUStats::default(); SLRU_NUM_ELEMENTS];
+        let mut pending = s.borrow_mut();
+        let mut shared = SHARED_SLRU.lock().unwrap();
+        for (dst, src) in shared.iter_mut().zip(pending.iter()) {
+            dst.blocks_zeroed += src.blocks_zeroed;
+            dst.blocks_hit += src.blocks_hit;
+            dst.blocks_read += src.blocks_read;
+            dst.blocks_written += src.blocks_written;
+            dst.blocks_exists += src.blocks_exists;
+            dst.flush += src.flush;
+            dst.truncate += src.truncate;
+        }
+        *pending = [PgStat_SLRUStats::default(); SLRU_NUM_ELEMENTS];
     });
     HAVE_SLRUSTATS.with(|c| c.set(false));
     false
+}
+
+pub fn pgstat_fetch_slru() -> [PgStat_SLRUStats; SLRU_NUM_ELEMENTS] {
+    pgstat_slru_snapshot_build();
+    SNAPSHOT_SLRU.with(|s| s.get().expect("slru snapshot built above"))
+}
+
+pub(crate) fn pgstat_slru_snapshot_build() {
+    if crate::pgstat_fetch_consistency() == crate::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+        crate::shmem::build_snapshot();
+        return;
+    }
+    let refresh = crate::pgstat_fetch_consistency() == crate::PGSTAT_FETCH_CONSISTENCY_NONE
+        || SNAPSHOT_SLRU.with(|s| s.get().is_none());
+    if refresh {
+        pgstat_slru_snapshot_cb();
+    }
+}
+
+pub(crate) fn pgstat_slru_snapshot_cb() {
+    let shared = *SHARED_SLRU.lock().unwrap();
+    SNAPSHOT_SLRU.with(|s| s.set(Some(shared)));
+}
+
+pub(crate) fn pgstat_slru_snapshot_clear() {
+    SNAPSHOT_SLRU.with(|s| s.set(None));
+}
+
+fn pgstat_reset_slru_counter_internal(index: usize, ts: TimestampTz) {
+    let mut shared = SHARED_SLRU.lock().unwrap();
+    shared[index] = PgStat_SLRUStats::default();
+    shared[index].stat_reset_timestamp = ts;
+}
+
+pub fn pgstat_reset_slru(name: &str) {
+    let ts = timestamp_seams::get_current_timestamp::call();
+    pgstat_reset_slru_counter_internal(pgstat_get_slru_index(name) as usize, ts);
+}
+
+pub(crate) fn pgstat_slru_reset_all_cb(ts: TimestampTz) {
+    let mut shared = SHARED_SLRU.lock().unwrap();
+    for e in shared.iter_mut() {
+        *e = PgStat_SLRUStats::default();
+        e.stat_reset_timestamp = ts;
+    }
+}
+
+pub(crate) fn import_slru_stats(v: [PgStat_SLRUStats; SLRU_NUM_ELEMENTS]) {
+    *SHARED_SLRU.lock().unwrap() = v;
+}
+
+pub(crate) fn export_slru_stats() -> [PgStat_SLRUStats; SLRU_NUM_ELEMENTS] {
+    *SHARED_SLRU.lock().unwrap()
 }
 
 pub fn pgstat_slru_pending(slru_idx: usize) -> PgStat_SLRUStats {

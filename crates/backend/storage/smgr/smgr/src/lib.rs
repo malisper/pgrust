@@ -698,12 +698,23 @@ pub fn mdsyncfiletag(ftag: FileTag) -> PgResult<FileTagOpResult> {
         return Ok(FileTagOpResult { result: -1, path, errno: md::last_errno() });
     }
 
+    let io_start = pgstat::io::pgstat_prepare_io_time(md::track_io_timing());
+
     let result = if md::file_sync_failed(file, md::WAIT_EVENT_DATA_FILE_SYNC)? { -1 } else { 0 };
     let save_errno = md::last_errno();
 
     if need_to_close {
         fd::FileClose(file)?;
     }
+
+    pgstat::io::pgstat_count_io_op_time(
+        pgstat::io::IOObject::Relation,
+        pgstat::io::IOContext::IOCONTEXT_NORMAL,
+        pgstat::io::IOOp::Fsync,
+        io_start,
+        1,
+        0,
+    );
 
     md::set_errno(save_errno);
     Ok(FileTagOpResult { result, path, errno: save_errno })

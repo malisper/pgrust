@@ -16,9 +16,12 @@ use types_core::{
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_RESOURCES, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
+use pgstat::io::{
+    pgstat_count_io_op, pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp,
+};
 use types_storage::buf::{
-    buftag, BM_DIRTY, BM_JUST_DIRTIED, BM_MAX_USAGE_COUNT, BM_TAG_VALID, BM_VALID, BUF_FLAG_MASK,
-    BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
+    buftag, IOContext, BM_DIRTY, BM_JUST_DIRTIED, BM_MAX_USAGE_COUNT, BM_TAG_VALID, BM_VALID,
+    BUF_FLAG_MASK, BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
 };
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
@@ -254,7 +257,16 @@ pub(crate) fn FlushLocalBuffer(buffer: Buffer) -> PgResult<()> {
         locator: RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
         backend: init_small::globals::MyProcNumber(),
     };
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     smgr_seams::smgr_write::call(reln, tag.forkNum, tag.blockNum, &page[..], false)?;
+    pgstat_count_io_op_time(
+        IOObject::TempRelation,
+        IOContext::IOCONTEXT_NORMAL,
+        IOOp::Write,
+        io_start,
+        1,
+        BLCKSZ as u64,
+    );
     TerminateLocalBufferIO(buffer, true, 0);
     counters::local_written();
     Ok(())
@@ -312,6 +324,13 @@ pub(crate) fn GetLocalVictimBuffer() -> PgResult<Buffer> {
     }
     if state & BM_TAG_VALID != 0 {
         InvalidateLocalBuffer(buffer, false)?;
+        pgstat_count_io_op(
+            IOObject::TempRelation,
+            IOContext::IOCONTEXT_NORMAL,
+            IOOp::Evict,
+            1,
+            0,
+        );
     }
     Ok(buffer)
 }
@@ -532,7 +551,18 @@ pub(crate) fn ExtendBufferedRelLocal(
         }
     }
 
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
+
     smgr_seams::smgr_zeroextend::call(smgr, fork, first_block, extend_by as i32, false)?;
+
+    pgstat_count_io_op_time(
+        IOObject::TempRelation,
+        IOContext::IOCONTEXT_NORMAL,
+        IOOp::Extend,
+        io_start,
+        1,
+        extend_by as u64 * BLCKSZ as u64,
+    );
 
     for buf in buffers.iter().take(extend_by as usize) {
         with(|lb| {

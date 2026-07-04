@@ -1,24 +1,27 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
-// model, pgstat_report_stat batching, the relation/xact/database/function/
-// slru/checkpointer counting layers, the shared store the flush paths apply
-// into plus its fetch/snapshot readers and variable-kind reset, and the
-// statsfile persistence half (write on clean shutdown, restore/discard at
-// startup). Still unported: fixed-kind reset and connstat session times
-// (needs MyBackendType); io/wal/backend/replslot/subscription kinds.
+// model, pgstat_report_stat batching, the counting layers for every kind but
+// replslot/subscription, the shared store the flush paths apply into plus its
+// fetch/snapshot readers and reset machinery, and the statsfile persistence
+// half (write on clean shutdown, restore/discard at startup).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
 use core::cell::Cell;
 
+pub mod archiver;
+pub mod backend;
+pub mod bgwriter;
 pub mod checkpointer;
 pub mod database;
 pub mod file;
 pub mod function;
+pub mod io;
 pub mod pending;
 pub mod relation;
 pub mod shmem;
 pub mod slru;
+pub mod wal;
 pub mod xact;
 
 pub use database::{pgstat_fetch_stat_dbentry, pgstat_report_autovac};
@@ -34,6 +37,16 @@ pub use shmem::{
 };
 
 pub type PgStat_Counter = i64;
+
+// INSTR_TIME_SET_CURRENT: monotonic ns; only same-thread diffs are used.
+// +1 keeps 0 free as the "timing disabled" sentinel.
+pub(crate) fn now_ns() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    let anchor = *ANCHOR.get_or_init(Instant::now);
+    anchor.elapsed().as_nanos() as i64 + 1
+}
 
 pub fn pgstat_get_kind_from_str(kind_str: &str) -> types_error::PgResult<pending::PgStat_Kind> {
     use pending::*;
@@ -93,6 +106,7 @@ thread_local! {
 
 pub fn pgstat_initialize() -> types_error::PgResult<()> {
     debug_assert!(!IS_INITIALIZED.with(|c| c.get()));
+    wal::pgstat_wal_init_backend_cb();
     ipc_seams::before_shmem_exit::call(pgstat_shutdown_hook, datum::Datum::from_usize(0))?;
     IS_INITIALIZED.with(|c| c.set(true));
     Ok(())
@@ -104,6 +118,7 @@ fn pgstat_shutdown_hook(_code: i32, _arg: datum::Datum) -> types_error::PgResult
         database::pgstat_report_disconnect(init_small::globals::MyDatabaseId());
     }
     pending::pgstat_report_stat(true);
+    backend::pgstat_backend_shutdown();
     Ok(())
 }
 
@@ -129,6 +144,31 @@ pub fn init_seams() {
     pgstat_seams::pgstat_count_checkpointer_slru_written::set(
         checkpointer::pgstat_count_checkpointer_slru_written,
     );
+
+    pgstat_seams::pgstat_report_checkpointer::set(checkpointer::pgstat_report_checkpointer);
+    pgstat_seams::pgstat_report_bgwriter::set(bgwriter::pgstat_report_bgwriter);
+    pgstat_seams::pgstat_report_wal::set(wal::pgstat_report_wal);
+    pgstat_seams::pgstat_report_fixed_set::set(pending::pgstat_report_fixed_set);
+    pgstat_seams::pgstat_count_io_op::set(|obj, ctx, op, cnt, bytes| {
+        io::pgstat_count_io_op(
+            io::io_object_from_u32(obj),
+            io::io_context_from_index(ctx as usize),
+            io::io_op_from_u32(op),
+            cnt,
+            bytes,
+        )
+    });
+    pgstat_seams::pgstat_prepare_io_time::set(io::pgstat_prepare_io_time);
+    pgstat_seams::pgstat_count_io_op_time::set(|obj, ctx, op, start_ns, cnt, bytes| {
+        io::pgstat_count_io_op_time(
+            io::io_object_from_u32(obj),
+            io::io_context_from_index(ctx as usize),
+            io::io_op_from_u32(op),
+            start_ns,
+            cnt,
+            bytes,
+        )
+    });
 
 
     // pgstat.c owns these GUC variables' backing storage (pgstat.c:204-205).

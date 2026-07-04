@@ -12,6 +12,7 @@ use pgstat::pending::{
 
 mod activity;
 mod backend;
+mod stats;
 pub use activity::fc_pg_stat_get_activity;
 
 fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
@@ -342,16 +343,20 @@ pub fn fc_pg_stat_reset_shared(
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER);
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER);
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO);
-        panic!("pg_stat_reset_shared (pgstatfuncs.c:1884): XLogPrefetchResetStats unported");
+        // C also calls XLogPrefetchResetStats; the recovery-prefetch read
+        // surface is unported, so resetting those counters is vacuous.
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_WAL);
+        return Ok(Datum::from_usize(0));
     }
     match arg_text_str(fcinfo, 0)? {
         "archiver" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_ARCHIVER),
         "bgwriter" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER),
         "checkpointer" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER),
         "io" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO),
-        "recovery_prefetch" => panic!(
-            "pg_stat_reset_shared (pgstatfuncs.c:1884): XLogPrefetchResetStats unported"
-        ),
+        // C calls XLogPrefetchResetStats; the recovery-prefetch read surface
+        // is unported, so resetting those counters is vacuous.
+        "recovery_prefetch" => {}
         "slru" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU),
         "wal" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_WAL),
         target => {
@@ -395,11 +400,7 @@ pub fn fc_pg_stat_reset_slru(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     if fcinfo.argisnull(0) {
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
     } else {
-        let target = arg_text_str(fcinfo, 0)?;
-        panic!(
-            "pg_stat_reset_slru (pgstatfuncs.c:1989): pgstat_reset_slru(\"{target}\") \
-             unported — SLRU shared stats lane"
-        );
+        pgstat::slru::pgstat_reset_slru(arg_text_str(fcinfo, 0)?);
     }
     Ok(Datum::from_usize(0))
 }
@@ -409,17 +410,17 @@ pub fn fc_pg_stat_reset_backend_stats(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let backend_pid = fcinfo.args_n::<1>()[0].value.as_i32();
-    let mut proc = procarray::BackendPidGetProc(backend_pid);
-    if proc.is_none() {
-        proc = activity::aux_pid_get_proc(backend_pid);
-    }
-    if proc.is_none() {
+    let Some(proc_number) = stats::resolve_backend_proc_number(backend_pid) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let Some(beentry) = backend_status::pgstat_get_beentry_by_proc_number(proc_number) else {
+        return Ok(Datum::from_usize(0));
+    };
+    if !pgstat::backend::pgstat_tracks_backend_bktype(beentry.st_backendType) {
         return Ok(Datum::from_usize(0));
     }
-    panic!(
-        "pg_stat_reset_backend_stats (pgstatfuncs.c:1956): PGSTAT_KIND_BACKEND \
-         stats unported — pgstat_backend lane"
-    );
+    pgstat::backend::pgstat_reset_backend(proc_number);
+    Ok(Datum::from_usize(0))
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -594,4 +595,9 @@ pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     ),
     nonstrict(2307, "pg_stat_reset_slru", 1, fc_pg_stat_reset_slru),
     b(6387, "pg_stat_reset_backend_stats", 1, fc_pg_stat_reset_backend_stats),
+    srf(6214, "pg_stat_get_io", 0, stats::fc_pg_stat_get_io),
+    srf(6386, "pg_stat_get_backend_io", 1, stats::fc_pg_stat_get_backend_io),
+    nonstrict(1136, "pg_stat_get_wal", 0, stats::fc_pg_stat_get_wal),
+    b(6313, "pg_stat_get_backend_wal", 1, stats::fc_pg_stat_get_backend_wal),
+    srf_nonstrict(2306, "pg_stat_get_slru", 0, stats::fc_pg_stat_get_slru),
 ];

@@ -663,3 +663,131 @@ fn statsfile_corrupt_body_is_rejected() {
     good_header.push(b'X');
     assert!(crate::file::read_statsfile_body(&good_header).is_none());
 }
+
+fn setup_io() {
+    setup();
+    miscinit::SetMyBackendType(types_core::BackendType::Backend);
+}
+
+#[test]
+fn io_tracks_predicates_match_c_rules() {
+    use crate::io::{self, IOContext, IOObject, IOOp};
+    use types_core::BackendType as B;
+    assert!(io::pgstat_tracks_io_op(B::Backend, IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Hit));
+    assert!(!io::pgstat_tracks_io_bktype(B::Archiver));
+    assert!(!io::pgstat_tracks_io_object(B::Checkpointer, IOObject::Relation, IOContext::IOCONTEXT_VACUUM));
+    assert!(!io::pgstat_tracks_io_op(B::BgWriter, IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Read));
+    assert!(!io::pgstat_tracks_io_op(B::Backend, IOObject::TempRelation, IOContext::IOCONTEXT_NORMAL, IOOp::Fsync));
+    assert!(!io::pgstat_tracks_io_op(B::Backend, IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Reuse));
+    assert!(io::pgstat_tracks_io_op(B::Backend, IOObject::Relation, IOContext::IOCONTEXT_VACUUM, IOOp::Reuse));
+    assert!(io::pgstat_tracks_io_op(B::Backend, IOObject::Wal, IOContext::IOCONTEXT_INIT, IOOp::Fsync));
+    assert!(!io::pgstat_tracks_io_op(B::Backend, IOObject::Wal, IOContext::IOCONTEXT_INIT, IOOp::Read));
+    assert!(!io::pgstat_tracks_io_op(B::Backend, IOObject::Relation, IOContext::IOCONTEXT_VACUUM, IOOp::Fsync));
+}
+
+#[test]
+fn io_count_flush_and_fetch() {
+    use crate::io::{self, IOContext, IOObject, IOOp};
+    setup_io();
+    let base = io::export_io_stats().stats[types_core::BackendType::Backend as usize]
+        .counts[IOObject::Relation as usize][IOContext::IOCONTEXT_NORMAL as usize][IOOp::Hit as usize];
+    io::pgstat_count_io_op(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Hit, 3, 0);
+    io::pgstat_count_io_op(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Read, 1, 8192);
+    assert!(io::pgstat_have_pending_io());
+    assert!(pending::pgstat_report_fixed());
+    io::pgstat_flush_io(false);
+    assert!(!io::pgstat_have_pending_io());
+    let shared = io::export_io_stats().stats[types_core::BackendType::Backend as usize];
+    assert!(shared.counts[IOObject::Relation as usize][IOContext::IOCONTEXT_NORMAL as usize][IOOp::Hit as usize] >= base + 3);
+    assert!(shared.bytes[IOObject::Relation as usize][IOContext::IOCONTEXT_NORMAL as usize][IOOp::Read as usize] >= 8192);
+}
+
+#[test]
+fn io_timed_count_records_time_and_dbstats() {
+    use crate::io::{self, IOContext, IOObject, IOOp};
+    setup_io();
+    let start = io::pgstat_prepare_io_time(true);
+    assert!(start > 0);
+    io::pgstat_count_io_op_time(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Write, start, 1, 8192);
+    let pend = io::pgstat_pending_io();
+    assert!(pend.pending_times_ns[IOObject::Relation as usize][IOCONTEXT_NORMAL_IDX][IOOp::Write as usize] >= 0);
+    assert_eq!(io::pgstat_prepare_io_time(false), 0);
+    io::pgstat_flush_io(false);
+}
+
+const IOCONTEXT_NORMAL_IDX: usize = 3;
+
+#[test]
+fn slru_flush_reset_and_fetch() {
+    setup();
+    slru::pgstat_count_slru_page_hit(2);
+    slru::pgstat_count_slru_page_read(2);
+    assert!(slru::pgstat_have_slrustats());
+    slru::pgstat_slru_flush_cb(false);
+    crate::pgstat_clear_snapshot();
+    let snap = slru::pgstat_fetch_slru();
+    assert!(snap[2].blocks_hit >= 1);
+    slru::pgstat_reset_slru("multixact_offset");
+    crate::pgstat_clear_snapshot();
+    let snap = slru::pgstat_fetch_slru();
+    assert_eq!(snap[2].blocks_hit, 0);
+    assert!(snap[2].stat_reset_timestamp > 0);
+    assert_eq!(slru::pgstat_get_slru_index("nonsense"), 7);
+}
+
+#[test]
+fn backend_kind_flush_fetch_reset_drop() {
+    use crate::io::{IOContext, IOObject, IOOp};
+    setup_io();
+    init_small::globals::SetMyProcNumber(41);
+    crate::backend::pgstat_create_backend(41);
+    crate::io::pgstat_count_io_op(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Hit, 2, 0);
+    crate::backend::pgstat_flush_backend(false, crate::backend::PGSTAT_BACKEND_FLUSH_ALL);
+    crate::pgstat_clear_snapshot();
+    let entry = crate::backend::pgstat_fetch_stat_backend(41).unwrap();
+    assert_eq!(entry.io_stats.counts[IOObject::Relation as usize][IOCONTEXT_NORMAL_IDX][IOOp::Hit as usize], 2);
+    crate::backend::pgstat_reset_backend(41);
+    crate::pgstat_clear_snapshot();
+    let entry = crate::backend::pgstat_fetch_stat_backend(41).unwrap();
+    assert_eq!(entry.io_stats.counts[IOObject::Relation as usize][IOCONTEXT_NORMAL_IDX][IOOp::Hit as usize], 0);
+    assert!(entry.stat_reset_timestamp > 0);
+    crate::io::pgstat_flush_io(false);
+}
+
+#[test]
+fn reset_of_kind_covers_all_fixed_kinds() {
+    setup();
+    for kind in [
+        pending::PGSTAT_KIND_ARCHIVER,
+        pending::PGSTAT_KIND_BGWRITER,
+        pending::PGSTAT_KIND_CHECKPOINTER,
+        pending::PGSTAT_KIND_IO,
+        pending::PGSTAT_KIND_SLRU,
+        pending::PGSTAT_KIND_WAL,
+        pending::PGSTAT_KIND_BACKEND,
+    ] {
+        crate::pgstat_reset_of_kind(kind);
+    }
+    crate::pgstat_clear_snapshot();
+    assert!(crate::wal::pgstat_fetch_stat_wal().stat_reset_timestamp > 0);
+    assert!(crate::io::pgstat_fetch_stat_io().stat_reset_timestamp > 0);
+}
+
+#[test]
+fn checkpointer_and_bgwriter_report_apply_pending() {
+    setup();
+    checkpointer::with_pending_checkpointer_stats(|s| s.num_timed += 1);
+    checkpointer::pgstat_report_checkpointer();
+    crate::pgstat_clear_snapshot();
+    assert!(checkpointer::pgstat_fetch_stat_checkpointer().num_timed >= 1);
+    crate::bgwriter::with_pending_bgwriter_stats(|s| s.buf_alloc += 5);
+    crate::bgwriter::pgstat_report_bgwriter();
+    crate::pgstat_clear_snapshot();
+    assert!(crate::bgwriter::pgstat_fetch_stat_bgwriter().buf_alloc >= 5);
+}
+
+#[test]
+fn wal_flush_without_installed_usage_seam_is_noop() {
+    setup();
+    assert!(!crate::wal::pgstat_wal_flush_cb(false));
+}

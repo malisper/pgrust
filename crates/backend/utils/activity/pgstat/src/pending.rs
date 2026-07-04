@@ -131,7 +131,7 @@ fn pending_is_empty() -> bool {
     STATE.with(|s| s.borrow().as_ref().is_none_or(|st| st.pending.is_empty()))
 }
 
-pub(crate) fn pgstat_report_fixed_set() {
+pub fn pgstat_report_fixed_set() {
     REPORT_FIXED.with(|c| c.set(true));
 }
 
@@ -206,8 +206,12 @@ fn report_stat_slow(mut force: bool) -> i64 {
 
     let nowait = !force;
     let mut partial_flush = pgstat_flush_pending_entries(nowait);
+    // flush_static_cbs in kind order: BACKEND, IO, SLRU, WAL (pgstat.c:783).
     if pgstat_report_fixed() {
+        partial_flush |= crate::backend::pgstat_backend_flush_cb(nowait);
+        partial_flush |= crate::io::pgstat_io_flush_cb(nowait);
         partial_flush |= slru::pgstat_slru_flush_cb(nowait);
+        partial_flush |= crate::wal::pgstat_wal_flush_cb(nowait);
     }
 
     LAST_FLUSH.with(|c| c.set(now));

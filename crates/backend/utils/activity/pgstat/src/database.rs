@@ -1,7 +1,5 @@
 // pgstat_database.c — the per-database pending entry plus the backend-wide
-// accumulators pgstat_report_stat folds into it. Shared-entry paths
-// (drop_database apply, report_autovac, checksum failures, reset timestamps)
-// and connstat session times (need MyBackendType) are phase 2.
+// accumulators pgstat_report_stat folds into it.
 
 use core::cell::Cell;
 
@@ -69,6 +67,7 @@ thread_local! {
         const { Cell::new(SessionEndType::DisconnectNormal) };
     static XACT_COMMIT: Cell<i32> = const { Cell::new(0) };
     static XACT_ROLLBACK: Cell<i32> = const { Cell::new(0) };
+    static LAST_SESSION_REPORT_TIME: Cell<TimestampTz> = const { Cell::new(0) };
 }
 
 pub fn pgstat_count_buffer_read_time(n: PgStat_Counter) {
@@ -106,6 +105,17 @@ pub fn pgstat_set_session_end_cause_fatal() {
 
 fn pgstat_should_report_connstat() -> bool {
     miscinit::GetMyBackendType() == types_core::BackendType::Backend
+}
+
+pub fn pgstat_report_connect(dboid: Oid) {
+    debug_assert_eq!(dboid, MyDatabaseId());
+    if !pgstat_should_report_connstat() {
+        return;
+    }
+    LAST_SESSION_REPORT_TIME.with(|c| c.set(init_small::globals::MyStartTimestamp()));
+    pending::with_state(|st| {
+        pgstat_prep_database_pending_in(st, MyDatabaseId()).sessions += 1;
+    });
 }
 
 pub fn pgstat_report_disconnect(dboid: Oid) {
@@ -172,7 +182,7 @@ pub fn pgstat_update_parallel_workers_stats(
     });
 }
 
-pub(crate) fn pgstat_update_dbstats(_ts: TimestampTz) {
+pub(crate) fn pgstat_update_dbstats(ts: TimestampTz) {
     if MyDatabaseId() == InvalidOid {
         return;
     }
@@ -182,7 +192,19 @@ pub(crate) fn pgstat_update_dbstats(_ts: TimestampTz) {
         dbentry.xact_rollback += XACT_ROLLBACK.with(|c| c.replace(0)) as PgStat_Counter;
         dbentry.blk_read_time += BLOCK_READ_TIME.with(|c| c.replace(0));
         dbentry.blk_write_time += BLOCK_WRITE_TIME.with(|c| c.replace(0));
-        // C's pgstat_should_report_connstat session/active/idle fold: phase 2.
+        if pgstat_should_report_connstat() {
+            let last = LAST_SESSION_REPORT_TIME.with(|c| c.get());
+            if last > 0 && ts > last {
+                dbentry.session_time += ts - last;
+            }
+            if last > 0 {
+                LAST_SESSION_REPORT_TIME.with(|c| c.set(ts));
+            }
+            dbentry.active_time += ACTIVE_TIME.with(|c| c.get());
+            dbentry.idle_in_transaction_time += TRANSACTION_IDLE_TIME.with(|c| c.get());
+        }
+        ACTIVE_TIME.with(|c| c.set(0));
+        TRANSACTION_IDLE_TIME.with(|c| c.set(0));
     });
 }
 
