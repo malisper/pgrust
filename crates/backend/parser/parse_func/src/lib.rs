@@ -23,6 +23,13 @@ use types_nodes::{CoercionForm, FuncExpr, Node, NodeList, NodeTag};
 
 const FUNC_MAX_ARGS: usize = 100;
 
+pub fn init_seams() {
+    clauses_seams::make_fn_arguments_nullstate::set(|mcx, args, actual, declared| {
+        let pstate = parser_small1::make_parsestate(mcx, None);
+        make_fn_arguments(mcx, &pstate, *args, actual, declared)
+    });
+}
+
 const PROKIND_AGGREGATE: i8 = b'a' as i8;
 const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROKIND_PROCEDURE: i8 = b'p' as i8;

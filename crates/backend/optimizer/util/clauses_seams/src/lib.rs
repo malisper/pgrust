@@ -50,3 +50,15 @@ seam_core::seam!(
         args: &'a types_nodes::NodeList<'mcx>,
     ) -> PgResult<Option<Node<'mcx>>>
 );
+
+seam_core::seam!(
+    // recheck_cast_function_args' parser leg (parse_func make_fn_arguments,
+    // null pstate); installed by parse_func — a clauses->parse_func dep
+    // cycles via catalog_namespace->catalog_indexing->execindexing.
+    pub fn make_fn_arguments_nullstate<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        args: &'a types_nodes::NodeList<'mcx>,
+        actual_arg_types: &'a [Oid],
+        declared_arg_types: &'a [Oid],
+    ) -> PgResult<types_nodes::NodeList<'mcx>>
+);
