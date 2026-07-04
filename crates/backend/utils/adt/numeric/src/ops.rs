@@ -1042,3 +1042,14 @@ pub fn in_range_numeric_numeric(
     };
     Ok(result)
 }
+
+pub fn numeric_sign(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_nan() {
+        return Ok(NumericImage::nan());
+    }
+    match numeric_sign_internal(num) {
+        0 => make_result(CONST_ZERO),
+        1 => make_result(CONST_ONE),
+        _ => make_result(crate::var::CONST_MINUS_ONE),
+    }
+}

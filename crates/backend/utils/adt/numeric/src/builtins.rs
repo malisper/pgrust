@@ -633,6 +633,20 @@ pub fn fc_numeric_trim_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     img_result(fcinfo, &img)
 }
 
+fc_num_unary_res! {
+    fc_numeric_ceil: numeric_ceil;
+    fc_numeric_floor: numeric_floor;
+    fc_numeric_sign: numeric_sign;
+}
+
+// C's numeric_support folds no-op typmod coercions into RelabelType; this
+// engine's simplify_function panics on any non-NULL prosupport rewrite, so
+// every request answers NULL (plans keep the coercion FuncExpr — same
+// divergence class as adt_windowfuncs prosupports).
+pub fn fc_numeric_support(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_usize(0))
+}
+
 pub fn fc_hash_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
     let num = unsafe { num_arg(fcinfo, 0) }?;
@@ -865,6 +879,12 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3393, "numeric_poly_stddev_samp", 1, false, fc_numeric_poly_stddev_samp),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
+    b(1705, "abs", 1, true, fc_numeric_abs),
+    b(1706, "sign", 1, true, fc_numeric_sign),
+    b(1711, "ceil", 1, true, fc_numeric_ceil),
+    b(1712, "floor", 1, true, fc_numeric_floor),
+    b(2167, "ceiling", 1, true, fc_numeric_ceil),
+    b(3157, "numeric_support", 1, true, fc_numeric_support),
     b(432, "hash_numeric", 1, true, fc_hash_numeric),
     b(780, "hash_numeric_extended", 2, true, fc_hash_numeric_extended),
     srf(3259, "generate_series", 3, fc_generate_series_numeric),
