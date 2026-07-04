@@ -63,6 +63,13 @@ pub struct ProbeFilterPush<'mcx> {
     pub key_attnum: u16,
 }
 
+#[derive(Clone, Copy)]
+struct DenseCols {
+    o: u16,
+    i: u16,
+}
+mcx::forget_safe_nodrop!(DenseCols);
+
 pub struct HashJoinState<'mcx> {
     pub plan: &'mcx HashJoin<'mcx>,
     pub ps_ExprContext: EcxtId,
@@ -88,7 +95,7 @@ pub struct HashJoinState<'mcx> {
     outer_saved_scratch: PgVec<'mcx, u64>,
     inner_saved_scratch: PgVec<'mcx, u64>,
     hash_instr: Option<u32>,
-    dense_cols: Option<(u16, u16)>,
+    dense_cols: Option<DenseCols>,
     dense_on: bool,
     hj_CurDense: u32,
 }
@@ -126,7 +133,7 @@ impl<'mcx> HashJoinState<'mcx> {
     fn dense_cols_of(
         hashclauses: Option<&ExprState<'_>>,
         outer_hash_expr: &ExprState<'_>,
-    ) -> Option<(u16, u16)> {
+    ) -> Option<DenseCols> {
         use ::execexpr::{CmpOp, Kernel, SlotSrc};
         let Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp: CmpOp::Int4Eq } =
             hashclauses?.kernel()
@@ -138,7 +145,8 @@ impl<'mcx> HashJoinState<'mcx> {
             (SlotSrc::Inner, SlotSrc::Outer) => (b_attnum, a_attnum),
             _ => return None,
         };
-        (outer_hash_expr.hash32var_low32(SlotSrc::Inner) == Some(o)).then_some((o, i))
+        (outer_hash_expr.hash32var_low32(SlotSrc::Inner) == Some(o))
+            .then_some(DenseCols { o, i })
     }
 }
 
@@ -326,13 +334,13 @@ where
                     Some(::nodehash::exec_hash_table_create(hash_state, estate, want_filter)?);
                 // Instrumented plans never engage dense (fusion precedent).
                 if estate.es_instrument == 0 {
-                    if let Some((_, icol)) = node.dense_cols {
-                        if hash_state.build_hash_col() == Some(icol) {
+                    if let Some(dc) = node.dense_cols {
+                        if hash_state.build_hash_col() == Some(dc.i) {
                             hash_state
                                 .table
                                 .as_mut()
                                 .expect("hash table created")
-                                .arm_key_track(icol);
+                                .arm_key_track(dc.i);
                         }
                     }
                 }
@@ -792,11 +800,11 @@ fn get_outer_key<'mcx, O: HashJoinOuter<'mcx>>(
         e.reset();
         e.ecxt_outertuple = Some(slot_id);
     }
-    let (ocol, _) = node.dense_cols.expect("dense gate matched");
+    let dc = node.dense_cols.expect("dense gate matched");
     let mut isnull = false;
     let v = exectuples::slot_getattr(
         &mut estate.es_tupleTable[slot_id.0 as usize],
-        ocol as i32 + 1,
+        dc.o as i32 + 1,
         &mut isnull,
     );
     node.hj_OuterNotEmpty = true;
