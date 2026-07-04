@@ -21,7 +21,11 @@ pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     // SAFETY: caller passes a datum into a held catalog tuple or an mcx image.
     unsafe {
         if !types_tuple::varatt::varatt_is_4b_u(p) && !types_tuple::varatt::varatt_is_1b(p) {
-            panic!("unported: foreigncmds toasted/compressed options varlena");
+            let peek = core::slice::from_raw_parts(p, 24);
+            panic!(
+                "unported: foreigncmds toasted/compressed options varlena (ptr {:#x} bytes {:02x?})",
+                p as usize, peek
+            );
         }
         core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
     }
