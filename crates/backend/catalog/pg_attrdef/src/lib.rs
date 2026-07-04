@@ -312,3 +312,37 @@ fn attr_lookup_failed(attnum: AttrNumber, relid: Oid) -> Box<PgError> {
         "cache lookup failed for attribute {attnum} of relation {relid}"
     )))
 }
+
+// pg_attrdef adbin for (adrelid, adnum), as the stored node string.
+pub fn GetAttrDefaultBin<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<String>> {
+    const AttrDefaultIndexId: Oid = 2656;
+    let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [
+        eq_key(Anum_pg_attrdef_adrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_attrdef_adnum, F_INT2EQ, Datum::from_i16(attnum)),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &adrel, AttrDefaultIndexId, true, None, &keys)?;
+    let mut result: Option<String> = None;
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: adbin under pg_attrdef's descriptor; NOT NULL by catalog contract.
+        let d = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_attrdef_adbin as i32, adrel.descr(), &mut isnull)
+        };
+        assert!(!isnull, "null adbin for relation {relid} attnum {attnum}");
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live varlena text image through its extent.
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(mcx, image)?;
+        result =
+            Some(core::str::from_utf8(payload.as_bytes()).expect("adbin UTF-8").to_string());
+    }
+    genam::systable_endscan(mcx, scan)?;
+    adrel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}

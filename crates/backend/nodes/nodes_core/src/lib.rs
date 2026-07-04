@@ -20,9 +20,12 @@ use types_nodes::{Node, NodeList, NodeTag};
 #[cfg(test)]
 mod tests;
 
+pub mod makefuncs;
 pub mod node_funcs;
+pub mod print;
 pub use node_funcs::{
-    expr_collation, expr_is_null_constant, expr_location, expr_type, expr_typmod,
+    expr_collation, expr_input_collation, expr_is_null_constant, expr_location, expr_type,
+    expr_typmod, relabel_to_typmod, set_opfuncid, set_sa_opfuncid,
 };
 
 pub const QTW_IGNORE_RT_SUBQUERIES: u32 = 0x01;
@@ -400,6 +403,27 @@ pub fn query_or_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         Some(q) => query_tree_walker(q, w, flags),
         None => w.visit(node),
     }
+}
+
+/// C query_or_expression_tree_mutator; the Query arm needs the generic
+/// query_tree_mutator engine (unported — rewrite_manip carries the only
+/// specialized form), so it panics loudly.
+pub fn query_or_expression_tree_mutator<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    m: &mut F,
+    _flags: u32,
+) -> PgResult<Option<Node<'mcx>>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    let _ = mcx;
+    if node.as_query().is_some() {
+        panic!(
+            "query_or_expression_tree_mutator (nodeFuncs.c): generic              query_tree_mutator engine unported — nodes-core lane"
+        );
+    }
+    m(node)
 }
 
 pub fn walk_select_stmt<'mcx, W: NodeWalker<'mcx> + ?Sized>(
@@ -1413,6 +1437,34 @@ where
                     )?)),
                 },
             }
+        }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            let new_qual = match a.qual {
+                Some(q) => m(q)?,
+                None => None,
+            };
+            let new_tl = mutate_list(mcx, &a.targetList, m)?;
+            if new_qual.is_none() && new_tl.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::MergeAction {
+                    matchKind: a.matchKind,
+                    commandType: a.commandType,
+                    r#override: a.r#override,
+                    qual: match new_qual {
+                        Some(q) => Some(q),
+                        None => a.qual,
+                    },
+                    targetList: match new_tl {
+                        Some(l) => l,
+                        None => a.targetList.clone_in(mcx)?,
+                    },
+                    updateColnos: a.updateColnos.clone_in(mcx)?,
+                },
+            )?))
         }
         other => deferred("expression_tree_mutator", other),
     }

@@ -181,8 +181,28 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'mcx>, source_text: &str) ->
         )?
         .expect("clause in, clause out");
         parse_collate::assign_expr_collations(mcx, &pstate, qual)?;
-        // C divergence: the pull_varattnos generated-column screen is elided
-        // (generated-column relations are loud in BeginCopyFrom).
+        // Stored generated columns are not yet computed when the WHERE
+        // filter runs; virtual kept consistent with stored (copy.c:173-185).
+        let mut attnos = types_nodes::Bitmapset::default();
+        vars::pull_varattnos(mcx, qual, 1, &mut attnos)?;
+        for m in attnos.iter() {
+            let attno = m + types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+            if attno <= 0 {
+                continue;
+            }
+            if rel.rd_att.attr(attno as usize - 1).attgenerated != 0 {
+                let name =
+                    lsyscache::attribute::get_attname(mcx, rel.rd_id, attno as i16, false)?
+                        .expect("checked missing_ok=false");
+                return Err(Box::new(
+                    PgError::error(
+                        "generated columns are not supported in COPY FROM WHERE conditions",
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE)
+                    .with_detail(format!("Column \"{name}\" is a generated column.")),
+                ));
+            }
+        }
         let qual = clauses::eval_const_expressions(mcx, qual)?;
         let qual = planner::prepqual::canonicalize_qual(mcx, qual, false)?;
         where_clause = clauses::make_ands_implicit(mcx, Some(qual))?;

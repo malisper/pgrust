@@ -218,6 +218,139 @@ fn chunk_header_page_roundtrip() {
     assert_eq!(pages[0].0, 256);
 }
 
+type Drained = alloc::vec::Vec<(BlockNumber, bool, alloc::vec::Vec<OffsetNumber>)>;
+
+fn drain_shared(tbm: &mut TIDBitmap<'_>) -> Drained {
+    tbm.prepare_shared_iterate().unwrap();
+    let mut iter = tbm.attach_shared_iterate();
+    let mut out = alloc::vec::Vec::new();
+    while let Some(res) = iter.next(tbm) {
+        let mut offs = alloc::vec::Vec::new();
+        if !res.lossy {
+            let mut buf = [0 as OffsetNumber; TBM_MAX_TUPLES_PER_PAGE];
+            let n = res.extract_page_tuples(&mut buf);
+            assert!(n <= TBM_MAX_TUPLES_PER_PAGE);
+            offs.extend_from_slice(&buf[..n]);
+        }
+        out.push((res.blockno, res.lossy, offs));
+    }
+    out
+}
+
+fn build<'a>(
+    ctx: &'a MemoryContext,
+    maxbytes: usize,
+    f: fn(&mut TIDBitmap<'_>),
+) -> TIDBitmap<'a> {
+    let mut tbm = TIDBitmap::new(ctx.mcx(), maxbytes);
+    f(&mut tbm);
+    tbm
+}
+
+#[test]
+fn shared_matches_private_sequences() {
+    let corpora: [fn(&mut TIDBitmap<'_>); 5] = [
+        |t| t.add_tuples(&[tid(7, 3), tid(7, 1), tid(7, 291)], false).unwrap(),
+        |t| t.add_tuples(&[tid(50, 2), tid(3, 9), tid(3, 10), tid(1000, 65)], true).unwrap(),
+        |t| {
+            t.add_tuples(&[tid(700, 4)], false).unwrap();
+            t.add_page(5).unwrap();
+            t.add_page(300).unwrap();
+            t.add_tuples(&[tid(5, 9)], false).unwrap();
+        },
+        |t| {
+            for blk in 256..300u32 {
+                t.add_page(blk).unwrap();
+            }
+            t.add_tuples(&[tid(256, 3)], false).unwrap();
+        },
+        |_| {},
+    ];
+    let ctx = MemoryContext::new("t");
+    for f in corpora {
+        let mut private = build(&ctx, 1024 * 1024, f);
+        let mut shared = build(&ctx, 1024 * 1024, f);
+        assert_eq!(drain(&mut private), drain_shared(&mut shared));
+    }
+}
+
+#[test]
+fn shared_matches_private_under_lossify_pressure() {
+    let ctx = MemoryContext::new("t");
+    let f: fn(&mut TIDBitmap<'_>) = |t| {
+        for blk in 0..200u32 {
+            t.add_tuples(&[tid(blk, 1)], false).unwrap();
+        }
+    };
+    let mut private = build(&ctx, 1, f);
+    let mut shared = build(&ctx, 1, f);
+    assert_eq!(drain(&mut private), drain_shared(&mut shared));
+}
+
+#[test]
+fn shared_one_page_mode() {
+    let ctx = MemoryContext::new("t");
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 1024 * 1024);
+    tbm.add_tuples(&[tid(9, 2), tid(9, 40)], true).unwrap();
+    assert_eq!(drain_shared(&mut tbm), alloc::vec![(9, false, alloc::vec![2, 40])]);
+}
+
+#[test]
+fn shared_two_iterators_partition_the_scan() {
+    let ctx = MemoryContext::new("t");
+    let fill: fn(&mut TIDBitmap<'_>) = |t| {
+        t.add_tuples(&[tid(1, 1), tid(4, 2), tid(9, 3), tid(700, 4), tid(1000, 5)], false)
+            .unwrap();
+        t.add_page(300).unwrap();
+    };
+    let mut solo = build(&ctx, 1024 * 1024, fill);
+    let expected = drain_shared(&mut solo);
+
+    let mut tbm = build(&ctx, 1024 * 1024, fill);
+    tbm.prepare_shared_iterate().unwrap();
+    let mut a = tbm.attach_shared_iterate();
+    let mut b = tbm.attach_shared_iterate();
+    let mut merged: Drained = alloc::vec::Vec::new();
+    loop {
+        let res = if merged.len() % 2 == 0 { a.next(&tbm) } else { b.next(&tbm) };
+        let Some(res) = res else { break };
+        let mut offs = alloc::vec::Vec::new();
+        if !res.lossy {
+            let mut buf = [0 as OffsetNumber; TBM_MAX_TUPLES_PER_PAGE];
+            let n = res.extract_page_tuples(&mut buf);
+            offs.extend_from_slice(&buf[..n]);
+        }
+        merged.push((res.blockno, res.lossy, offs));
+    }
+    assert!(a.next(&tbm).is_none());
+    assert!(b.next(&tbm).is_none());
+    assert_eq!(merged, expected);
+}
+
+#[test]
+fn shared_reprepare_resets_cursor() {
+    let ctx = MemoryContext::new("t");
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 1024 * 1024);
+    tbm.add_tuples(&[tid(2, 1), tid(8, 1)], false).unwrap();
+    let first = drain_shared(&mut tbm);
+    let second = drain_shared(&mut tbm);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn tbm_iterator_shared_arm() {
+    let ctx = MemoryContext::new("t");
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 1024 * 1024);
+    tbm.add_tuples(&[tid(4, 2)], false).unwrap();
+    tbm.prepare_shared_iterate().unwrap();
+    let mut it = TbmIterator::shared(tbm.attach_shared_iterate());
+    assert!(!it.exhausted());
+    assert_eq!(it.next(&tbm).unwrap().blockno, 4);
+    assert!(it.next(&tbm).is_none());
+    it.end_iterate();
+    assert!(it.exhausted());
+}
+
 #[test]
 fn tbm_iterator_wrapper() {
     let ctx = MemoryContext::new("t");

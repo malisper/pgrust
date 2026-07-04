@@ -219,6 +219,37 @@ impl<'mcx> Bitmapset<'mcx> {
         Ok(())
     }
 
+    pub fn add_range(&mut self, mcx: Mcx<'mcx>, lower: i32, upper: i32) -> PgResult<()> {
+        if upper < lower {
+            return Ok(());
+        }
+        if lower < 0 {
+            negative_member();
+        }
+        let uwordnum = wordnum(upper);
+        if uwordnum >= self.nwords as usize {
+            self.enlarge(mcx, uwordnum + 1)?;
+        }
+        let lwordnum = wordnum(lower);
+        let lbitnum = bitnum(lower);
+        let ushiftbits = BITS_PER_BITMAPWORD - (bitnum(upper) + 1);
+        let w = self.words.as_ptr();
+        // SAFETY: lwordnum..=uwordnum < nwords after the enlarge above.
+        unsafe {
+            if lwordnum == uwordnum {
+                *w.add(lwordnum) |=
+                    !(((1 as bitmapword) << lbitnum) - 1) & ((!0 as bitmapword) >> ushiftbits);
+            } else {
+                *w.add(lwordnum) |= !(((1 as bitmapword) << lbitnum) - 1);
+                for i in lwordnum + 1..uwordnum {
+                    *w.add(i) = !0;
+                }
+                *w.add(uwordnum) |= (!0 as bitmapword) >> ushiftbits;
+            }
+        }
+        Ok(())
+    }
+
     pub fn del_member(&mut self, x: i32) {
         if x < 0 {
             negative_member();
@@ -265,6 +296,49 @@ impl<'mcx> Bitmapset<'mcx> {
             // SAFETY: i < other.nwords <= self.nwords.
             unsafe { *dst.add(i) |= w };
         }
+        Ok(())
+    }
+
+    /// bms_join: recycling union — ORs the shorter input into the longer and
+    /// returns the longer (C pfrees the shorter; arena memory just dies).
+    pub fn join(a: Self, b: Self) -> Self {
+        if a.is_empty() {
+            return b;
+        }
+        if b.is_empty() {
+            return a;
+        }
+        let (result, other) = if a.nwords < b.nwords { (b, a) } else { (a, b) };
+        let dst = result.words.as_ptr();
+        for (i, &w) in other.word_slice().iter().enumerate() {
+            // SAFETY: i < other.nwords <= result.nwords.
+            unsafe { *dst.add(i) |= w };
+        }
+        result
+    }
+
+    /// bms_replace_members: recycling assignment of other's members into self.
+    pub fn replace_members(&mut self, mcx: Mcx<'mcx>, other: &Self) -> PgResult<()> {
+        if other.is_empty() {
+            *self = Self::empty();
+            return Ok(());
+        }
+        if self.is_empty() {
+            *self = other.clone_in(mcx)?;
+            return Ok(());
+        }
+        if other.nwords > self.nwords {
+            self.enlarge(mcx, other.nwords as usize)?;
+        }
+        // SAFETY: other.nwords <= self.awords after the enlarge above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                other.words.as_ptr(),
+                self.words.as_ptr(),
+                other.nwords as usize,
+            );
+        }
+        self.nwords = other.nwords;
         Ok(())
     }
 
@@ -399,11 +473,49 @@ impl<'mcx> Bitmapset<'mcx> {
         result
     }
 
+    /// bms_member_index: 0-based index of x among the members, -1 if absent.
+    pub fn member_index(&self, x: i32) -> i32 {
+        if !self.is_member(x) {
+            return -1;
+        }
+        let wn = wordnum(x);
+        let mut result: i32 = 0;
+        for &w in &self.word_slice()[..wn] {
+            if w != 0 {
+                result += w.count_ones() as i32;
+            }
+        }
+        let mask = ((1 as bitmapword) << bitnum(x)) - 1;
+        // SAFETY: wn < nwords since x is a member.
+        result += (unsafe { *self.words.as_ptr().add(wn) } & mask).count_ones() as i32;
+        result
+    }
+
     pub fn overlap(&self, other: &Self) -> bool {
         self.word_slice()
             .iter()
             .zip(other.word_slice())
             .any(|(&a, &b)| a & b != 0)
+    }
+
+
+    pub fn overlap_list(&self, xs: &[i32]) -> bool {
+        if self.is_empty() || xs.is_empty() {
+            return false;
+        }
+        for &x in xs {
+            if x < 0 {
+                negative_member();
+            }
+            let wn = wordnum(x);
+            if wn < self.nwords as usize
+                // SAFETY: wn < nwords.
+                && unsafe { *self.words.as_ptr().add(wn) } & ((1 as bitmapword) << bitnum(x)) != 0
+            {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn num_members(&self) -> i32 {

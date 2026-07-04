@@ -570,6 +570,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn lookup_pg_proc_probin<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<PgProcShape>>
 );
 

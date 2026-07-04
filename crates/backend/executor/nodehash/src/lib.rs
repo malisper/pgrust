@@ -216,9 +216,7 @@ impl<'mcx> HashJoinTable<'mcx> {
             )?;
             tup.data_mut().clear_match();
             let t_len = tup.t_len();
-            let hdr = tup.extra_mut().as_mut_ptr().cast::<HashJoinTupleHdr>();
-            // Bulk-freed at batch reset: forget, never drop (docs/no-drop.md).
-            core::mem::forget(tup);
+            let hdr = tup.forget_base().as_ptr().cast::<HashJoinTupleHdr>();
 
             let hash_tuple_size = HJTUPLE_OVERHEAD + t_len as usize;
             let ntuples = self.total_tuples;
@@ -263,8 +261,9 @@ impl<'mcx> HashJoinTable<'mcx> {
             let fetched =
                 exectuples::exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
             let (ptr, t_len): (*const u8, u32) = match &fetched {
-                exectuples::FetchedMinimalTuple::Slot(m) => {
-                    ((*m as *const MinimalTupleData).cast(), m.t_len)
+                exectuples::FetchedMinimalTuple::Slot(m, _) => {
+                    // SAFETY: live stored image; header read.
+                    (m.as_ptr().cast_const().cast(), unsafe { m.as_ref().t_len })
                 }
                 exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
             };

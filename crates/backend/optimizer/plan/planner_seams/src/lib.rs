@@ -109,6 +109,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn estimate_multivariate_bucketsize<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        inner: types_pathnodes::RelId,
+        hashclauses: &'a [RinfoId],
+    ) -> PgResult<(mcx::PgVec<'mcx, RinfoId>, f64)>
+);
+
+seam_core::seam!(
     pub fn add_function_cost<'a>(funcid: u32, cost: &'a mut QualCost) -> PgResult<()>
 );
 

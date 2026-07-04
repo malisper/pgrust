@@ -231,6 +231,21 @@ pub enum Step {
         scratch: NonNull<u8>,
         out: OutRef,
     },
+    // Ready-time fused pairs (fuse_program): the two source steps back-to-back.
+    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
+    FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinct { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    NotDistinctQual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarAggTransByValIndirect {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: Call2,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
 }
 
 // C JsonConstructorExprState: resolved-once metadata for the
@@ -292,6 +307,20 @@ pub struct IoCoerceCalls {
     pub outcall: FuncCall,
     pub incall: FuncCall,
     pub in_strict: bool,
+}
+
+// FuncCall minus frame/nargs (a constant 2): keeps fused steps inside 64B.
+#[derive(Clone, Copy, Debug)]
+pub struct Call2 {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+impl From<FuncCall> for Call2 {
+    fn from(c: FuncCall) -> Call2 {
+        debug_assert!(c.nargs == 2);
+        Call2 { fcinfo: c.fcinfo, flinfo: c.flinfo }
+    }
 }
 
 // Resolved once at compile; fn_addr rides in the FmgrInfo header line —
@@ -713,6 +742,9 @@ impl<'mcx> ExprState<'mcx> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn force_program_kernel(&mut self) {
-        self.kernel = Kernel::Program;
+        if !matches!(self.kernel, Kernel::Program) {
+            self.kernel = Kernel::Program;
+            crate::compile::fuse_program(self);
+        }
     }
 }

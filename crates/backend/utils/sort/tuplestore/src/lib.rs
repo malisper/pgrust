@@ -210,11 +210,16 @@ impl Tuplestore {
                 let owned = heaptuple::heap_copy_minimal_tuple(slot_mcx, bytes, 0)?;
                 exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
             } else {
-                // SAFETY: lifetime laundered to the slot's, as C stores the
-                // borrowed pointer with shouldFree=false; the image lives in
-                // tuplecontext until clear/end (caller contract above).
-                let mtref: &'q MinimalTupleData = unsafe { &*tuple };
-                exectuples::exec_store_minimal_tuple(slot, slot_mcx, mtref);
+                // SAFETY: live t_len-byte tuplecontext image, held until
+                // clear/end (caller contract above); full-image provenance —
+                // a &MinimalTupleData here would shrink it to the header.
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        slot,
+                        slot_mcx,
+                        core::ptr::NonNull::new_unchecked(tuple),
+                    )
+                };
             }
             Ok(true)
         })

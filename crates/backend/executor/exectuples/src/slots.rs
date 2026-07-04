@@ -301,24 +301,9 @@ fn store_minimal<'mcx>(
     }
 }
 
-/// C `ExecStoreMinimalTuple(mtup, slot, shouldFree=false)`.
-#[inline]
-pub fn exec_store_minimal_tuple<'mcx>(
-    slot: &mut SlotData<'mcx>,
-    mcx: Mcx<'mcx>,
-    mtup: &'mcx MinimalTupleData,
-) {
-    let SlotData::Minimal(m) = slot else {
-        wrong_slot("minimal")
-    };
-    debug_assert!(m.base.tts_tupleDescriptor.is_some());
-    store_minimal(m, mcx, NonNull::from(mtup), false);
-}
-
-/// `exec_store_minimal_tuple` over a raw image pointer. A `&MinimalTupleData`
-/// arg retags provenance down to the 16-byte header, making the later deform
-/// read past it UB (Miri-caught, tuplesort gettupleslot); borrowed whole-image
-/// callers must come through here.
+/// C `ExecStoreMinimalTuple(mtup, slot, shouldFree=false)` over a raw image
+/// pointer. No `&MinimalTupleData`-taking variant: such an arg retags
+/// provenance down to the header — the later deform is UB (Miri-caught).
 ///
 /// # Safety
 /// `mtup` points to a live minimal-tuple image readable for `t_len` bytes for
@@ -708,7 +693,8 @@ pub enum FetchedHeapTuple<'a, 'mcx, 'out> {
 }
 
 pub enum FetchedMinimalTuple<'a, 'out> {
-    Slot(&'a MinimalTupleData),
+    /// Full-image-provenance pointer, live for `'a`; a `&MinimalTupleData` here would shrink provenance to the header (UB on deform).
+    Slot(NonNull<MinimalTupleData>, core::marker::PhantomData<&'a MinimalTupleData>),
     Copied(MinimalTuple<'out>),
 }
 
@@ -757,9 +743,7 @@ pub fn exec_fetch_slot_minimal_tuple<'a, 'mcx, 'out>(
                 minimal_materialize(m, slot_mcx)?;
             }
             let p = m.mintuple.expect("materialize left no tuple");
-            // SAFETY: the borrow of the stored image is bounded by the slot
-            // borrow 'a; the image lives until the slot is cleared/overwritten.
-            Ok(FetchedMinimalTuple::Slot(unsafe { &*p.as_ptr() }))
+            Ok(FetchedMinimalTuple::Slot(p, core::marker::PhantomData))
         }
         other => Ok(FetchedMinimalTuple::Copied(exec_copy_slot_minimal_tuple(
             other, slot_mcx, out_mcx, 0,
@@ -931,23 +915,9 @@ pub fn exec_force_store_heap_tuple_owned<'mcx>(
     }
 }
 
-/// C `ExecForceStoreMinimalTuple(mtup, slot, shouldFree=false)`.
-pub fn exec_force_store_minimal_tuple<'mcx>(
-    mtup: &'mcx MinimalTupleData,
-    slot: &mut SlotData<'mcx>,
-    mcx: Mcx<'mcx>,
-) {
-    if matches!(slot, SlotData::Minimal(_)) {
-        exec_store_minimal_tuple(slot, mcx, mtup);
-    } else {
-        exec_clear_tuple(slot, mcx);
-        // SAFETY: mtup is a live minimal-tuple image for 'mcx.
-        let img = unsafe { TupleImage::from_minimal(NonNull::from(mtup)) };
-        force_store_deformed(slot, img);
-    }
-}
-
-/// C `ExecForceStoreMinimalTuple(mtup, slot, shouldFree=true)`.
+/// C `ExecForceStoreMinimalTuple(mtup, slot, shouldFree=true)`. No
+/// shouldFree=false borrowing variant exists (header-shrunk provenance, as
+/// `exec_store_minimal_tuple_ptr`); add a raw-pointer one when a caller lands.
 pub fn exec_force_store_minimal_tuple_owned<'mcx>(
     mtup: MinimalTuple<'mcx>,
     slot: &mut SlotData<'mcx>,

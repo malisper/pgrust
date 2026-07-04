@@ -301,8 +301,9 @@ where
                     let fetched =
                         exectuples::exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
                     let (ptr, t_len): (*const u8, u32) = match &fetched {
-                        exectuples::FetchedMinimalTuple::Slot(m) => {
-                            ((*m as *const ::types_tuple::MinimalTupleData).cast(), m.t_len)
+                        exectuples::FetchedMinimalTuple::Slot(m, _) => {
+                            // SAFETY: live stored image; header read.
+                            (m.as_ptr().cast_const().cast(), unsafe { m.as_ref().t_len })
                         }
                         exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
                     };

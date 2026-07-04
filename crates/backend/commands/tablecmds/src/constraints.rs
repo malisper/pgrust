@@ -392,6 +392,9 @@ fn cook_default<'mcx>(
                 .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
             ));
         }
+        if attgenerated == b'v' {
+            check_virtual_generated_security(pstate, expr)?;
+        }
     } else {
         debug_assert!(!vars::contain_var_clause(expr)?);
     }
@@ -476,6 +479,63 @@ fn check_nested_generated<'mcx>(
         }
     }
     nodes_core::NodeWalker::visit(&mut W { pstate, rel }, expr)?;
+    Ok(())
+}
+
+// check_virtual_generated_security (heap.c): virtual generation expressions
+// are restricted to pinned (built-in) functions and types — selecting from a
+// table with virtual generated columns is otherwise exploitable like a view
+// (CVE-2024-7348).
+fn check_virtual_generated_security<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<()> {
+    struct W<'a, 'p, 'mcx> {
+        pstate: &'a ParseState<'p, 'mcx>,
+    }
+    impl<'a, 'p, 'mcx> nodes_core::NodeWalker<'mcx> for W<'a, 'p, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            let cursor = || {
+                parser_small1::parser_errposition(
+                    self.pstate,
+                    parse_expr::expr_location(node),
+                    mbutils::GetDatabaseEncoding(),
+                )
+            };
+            if nodes_core::check_functions_in_node(node, &mut |func_id| {
+                Ok(func_id >= types_core::FirstUnpinnedObjectId)
+            })? {
+                return Err(Box::new(
+                    PgError::new(
+                        types_error::ERROR,
+                        "generation expression uses user-defined function".to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail(
+                        "Virtual generated columns that make use of user-defined functions \
+                         are not yet supported.",
+                    )
+                    .with_cursor_position(cursor()),
+                ));
+            }
+            if parse_expr::expr_type(node) >= types_core::FirstUnpinnedObjectId {
+                return Err(Box::new(
+                    PgError::new(
+                        types_error::ERROR,
+                        "generation expression uses user-defined type".to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail(
+                        "Virtual generated columns that make use of user-defined types \
+                         are not yet supported.",
+                    )
+                    .with_cursor_position(cursor()),
+                ));
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W { pstate }, expr)?;
     Ok(())
 }
 

@@ -61,6 +61,13 @@ fn size_arithmetic_checks_overflow() {
 #[test]
 fn shmem_lock_excludes() {
     init_seams();
+    if !s_lock_seams::perform_spin_delay::is_installed() {
+        s_lock::init_seams();
+    }
+    if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+    }
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let threads: Vec<_> = (0..4)
         .map(|_| {

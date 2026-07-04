@@ -1,8 +1,9 @@
 //! jsonb core + tier 2: the on-disk JEntry tree, I/O via the shared JSON
 //! lexer, the operator slice, btree comparison and hash opclass support, the
 //! mutation family (set/insert/delete/concat), jsonb_pretty, scalar casts.
-//! Loud lanes (unported-OID fmgr panic): jsonpath, subscripting, GIN,
-//! jbvDatetime, the *_strict/_unique aggregate variants.
+//! Loud lanes (unported-OID fmgr panic): subscripting, GIN jsonb_path_ops +
+//! jsonpath strategies, the *_strict/_unique aggregate variants. The jsonpath
+//! executor lives in adt_jsonpath_exec.
 
 pub mod aggs;
 pub mod build;

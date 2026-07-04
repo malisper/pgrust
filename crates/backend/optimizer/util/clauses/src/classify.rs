@@ -857,12 +857,22 @@ fn nonnullable_rels_args<'mcx>(
 /// `-FIRST_LOW_INVALID_HEAP_ATTR`.
 pub type MultiBitmapset<'mcx> = mcx::PgVec<'mcx, Bitmapset<'mcx>>;
 
+#[cold]
+#[inline(never)]
+fn negative_mbms_index() -> ! {
+    // C divergence: elog(ERROR, "negative multibitmapset member index not allowed").
+    panic!("negative multibitmapset member index not allowed");
+}
+
 pub fn mbms_add_member<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     a: &mut MultiBitmapset<'mcx>,
     listidx: i32,
     bitidx: i32,
 ) -> PgResult<()> {
+    if listidx < 0 || bitidx < 0 {
+        negative_mbms_index();
+    }
     while a.len() <= listidx as usize {
         a.push(Bitmapset::empty());
     }
@@ -896,6 +906,24 @@ pub fn mbms_overlap_sets<'mcx>(
         }
     }
     Ok(result)
+}
+
+/// mbms_int_members: recycling intersect — reduce a to its intersection with b.
+pub fn mbms_int_members<'mcx>(a: &mut MultiBitmapset<'mcx>, b: &MultiBitmapset<'mcx>) {
+    a.truncate(b.len());
+    for (i, bs) in a.iter_mut().enumerate() {
+        bs.int_members(&b[i]);
+    }
+}
+
+pub fn mbms_is_member(listidx: i32, bitidx: i32, a: &MultiBitmapset<'_>) -> bool {
+    if listidx < 0 || bitidx < 0 {
+        negative_mbms_index();
+    }
+    if listidx as usize >= a.len() {
+        return false;
+    }
+    a[listidx as usize].is_member(bitidx)
 }
 
 pub fn find_nonnullable_vars<'mcx>(

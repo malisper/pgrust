@@ -1,23 +1,27 @@
 //! nbtutils.c, READ side: per-tuple qual checking (_bt_checkkeys /
-//! _bt_check_compare), the startikey page-level precheck, and _bt_killitems.
-//! Array-key advancement/row compares are phase 2 (preprocessing rejects both,
-//! so the branches here are unreachable, not silently wrong).
+//! _bt_check_compare), SAOP array-key advancement and primitive-scan
+//! scheduling, the startikey page-level precheck, and _bt_killitems.
+//! Skip arrays and row compares are phase 2 (preprocessing rejects both).
 
 use ::bufmgr_seams as bufmgr;
 use ::datum::Datum;
 use ::types_core::{AttrNumber, OffsetNumber, XLogRecPtr};
 use ::types_error::PgResult;
+use ::types_fmgr::FmgrInfo;
 use ::types_nbtree::{
-    BTScanOpaqueData, BTScanPosIsPinned, BTScanPosIsValid, BTPageOpaqueData, BTP_HAS_GARBAGE,
-    BT_READ, P_FIRSTDATAKEY,
+    BTArrayKeyInfo, BTScanOpaqueData, BTScanPosIsPinned, BTScanPosIsValid, BTPageOpaqueData,
+    BTP_HAS_GARBAGE, BT_READ, MaxTIDsPerBTreePage, P_FIRSTDATAKEY,
 };
 use ::types_rel::Relation;
 use ::types_scan::scankey::{
     BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL,
     SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL,
-    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_NULLS_FIRST,
+    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_DESC, SK_BT_NULLS_FIRST,
 };
-use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
+use ::types_scan::sdir::{
+    BackwardScanDirection, ForwardScanDirection, ScanDirection, ScanDirectionIsBackward,
+    ScanDirectionIsForward,
+};
 use ::types_storage::bufpage::{ItemIdData, PageRef, SizeOfPageHeaderData};
 use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData, ItemPointerEquals};
 use ::types_tuple::varatt::varsize_any;
@@ -31,6 +35,609 @@ use crate::itup::{
 use crate::page::{bt_getbuf, bt_relbuf, page_item, page_opaque, page_special_off};
 use crate::search::{BtReadPageState, BtScanInsert};
 use crate::unported_phase2;
+
+const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
+const LOOK_AHEAD_REQUIRED_RECHECKS: i32 = 3;
+const LOOK_AHEAD_DEFAULT_DISTANCE: i32 = 5;
+const NSKIPADVANCES_THRESHOLD: i32 = 3;
+
+#[inline]
+fn flip_dir(dir: ScanDirection) -> ScanDirection {
+    match dir {
+        ForwardScanDirection => BackwardScanDirection,
+        BackwardScanDirection => ForwardScanDirection,
+        other => other,
+    }
+}
+
+/// _bt_compare_array_skey: tuple attribute value vs an array element / scan
+/// key argument; <0 / 0 / >0.
+fn bt_compare_array_skey(
+    frame: &mut OrderProcFrame,
+    orderproc: &mut FmgrInfo,
+    tupdatum: Datum,
+    tupnull: bool,
+    arrdatum: Datum,
+    cur: &ScanKeyData,
+) -> PgResult<i32> {
+    debug_assert!(cur.sk_strategy == BTEqualStrategyNumber);
+    debug_assert!(cur.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL) == 0);
+
+    if tupnull {
+        Ok(if cur.sk_flags & SK_ISNULL != 0 {
+            0
+        } else if cur.sk_flags & SK_BT_NULLS_FIRST != 0 {
+            -1
+        } else {
+            1
+        })
+    } else if cur.sk_flags & SK_ISNULL != 0 {
+        Ok(if cur.sk_flags & SK_BT_NULLS_FIRST != 0 { 1 } else { -1 })
+    } else {
+        let mut result = frame.cmp_proc(orderproc, cur.sk_collation, tupdatum, arrdatum)?;
+        if cur.sk_flags & SK_BT_DESC != 0 {
+            result = INVERT_COMPARE_RESULT(result);
+        }
+        Ok(result)
+    }
+}
+
+/// _bt_binsrch_array_skey: first array element >= tupdatum. `cur_elem_trig`
+/// enables the required-array lockstep optimization.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bt_binsrch_array_skey(
+    frame: &mut OrderProcFrame,
+    orderproc: &mut FmgrInfo,
+    cur_elem_trig: bool,
+    dir: ScanDirection,
+    tupdatum: Datum,
+    tupnull: bool,
+    array: &BTArrayKeyInfo<'_>,
+    cur: &ScanKeyData,
+    set_elem_result: &mut i32,
+) -> PgResult<i32> {
+    let mut low_elem: i32 = 0;
+    let mut mid_elem: i32 = -1;
+    let mut high_elem: i32 = array.num_elems - 1;
+    let mut result: i32 = 0;
+
+    debug_assert!(cur.sk_flags & SK_SEARCHARRAY != 0);
+    debug_assert!(cur.sk_flags & (SK_BT_SKIP | SK_ISNULL) == 0);
+    debug_assert!(cur.sk_strategy == BTEqualStrategyNumber);
+
+    if cur_elem_trig {
+        debug_assert!(cur.sk_flags & SK_BT_REQFWD != 0);
+
+        if ScanDirectionIsForward(dir) {
+            low_elem = array.cur_elem + 1;
+            if high_elem >= low_elem {
+                let arrdatum = array.elem_values[low_elem as usize];
+                result = bt_compare_array_skey(frame, orderproc, tupdatum, tupnull, arrdatum, cur)?;
+                if result <= 0 {
+                    *set_elem_result = result;
+                    return Ok(low_elem);
+                }
+                mid_elem = low_elem;
+                low_elem += 1;
+            }
+            if high_elem < low_elem {
+                *set_elem_result = 1;
+                return Ok(high_elem);
+            }
+        } else {
+            high_elem = array.cur_elem - 1;
+            if high_elem >= low_elem {
+                let arrdatum = array.elem_values[high_elem as usize];
+                result = bt_compare_array_skey(frame, orderproc, tupdatum, tupnull, arrdatum, cur)?;
+                if result >= 0 {
+                    *set_elem_result = result;
+                    return Ok(high_elem);
+                }
+                mid_elem = high_elem;
+                high_elem -= 1;
+            }
+            if high_elem < low_elem {
+                *set_elem_result = -1;
+                return Ok(low_elem);
+            }
+        }
+    }
+
+    while high_elem > low_elem {
+        mid_elem = low_elem + (high_elem - low_elem) / 2;
+        let arrdatum = array.elem_values[mid_elem as usize];
+        result = bt_compare_array_skey(frame, orderproc, tupdatum, tupnull, arrdatum, cur)?;
+        if result == 0 {
+            low_elem = mid_elem;
+            break;
+        }
+        if result > 0 {
+            low_elem = mid_elem + 1;
+        } else {
+            high_elem = mid_elem;
+        }
+    }
+
+    if low_elem != mid_elem {
+        result = bt_compare_array_skey(
+            frame,
+            orderproc,
+            tupdatum,
+            tupnull,
+            array.elem_values[low_elem as usize],
+            cur,
+        )?;
+    }
+    *set_elem_result = result;
+    Ok(low_elem)
+}
+
+/// _bt_start_array_keys.
+pub(crate) fn bt_start_array_keys(so: &mut BTScanOpaqueData<'_>, dir: ScanDirection) {
+    debug_assert!(so.numArrayKeys > 0);
+    debug_assert!(so.qual_ok);
+
+    {
+        let BTScanOpaqueData { keyData, arrayKeys, .. } = &mut *so;
+        for array in arrayKeys.iter_mut() {
+            let skey = &mut keyData[array.scan_key as usize];
+            debug_assert!(skey.sk_flags & SK_SEARCHARRAY != 0);
+            bt_array_set_low_or_high(skey, array, ScanDirectionIsForward(dir));
+        }
+    }
+    so.scanBehind = false;
+    so.oppositeDirCheck = false;
+}
+
+// _bt_array_set_low_or_high, SAOP arm (skip arrays are phase 2).
+fn bt_array_set_low_or_high(
+    skey: &mut ScanKeyData,
+    array: &mut BTArrayKeyInfo<'_>,
+    low_not_high: bool,
+) {
+    debug_assert!(skey.sk_flags & SK_SEARCHARRAY != 0);
+    if array.num_elems == -1 {
+        unported_phase2("skip arrays (_bt_array_set_low_or_high)");
+    }
+    debug_assert!(skey.sk_flags & SK_BT_SKIP == 0);
+
+    let set_elem = if low_not_high { 0 } else { array.num_elems - 1 };
+    array.cur_elem = set_elem;
+    skey.sk_argument = array.elem_values[set_elem as usize];
+}
+
+// _bt_array_increment/_bt_array_decrement, SAOP arms.
+fn bt_array_step(skey: &mut ScanKeyData, array: &mut BTArrayKeyInfo<'_>, forward: bool) -> bool {
+    if array.num_elems == -1 {
+        unported_phase2("skip arrays (_bt_array_increment/_bt_array_decrement)");
+    }
+    let next = if forward { array.cur_elem + 1 } else { array.cur_elem - 1 };
+    if next < 0 || next >= array.num_elems {
+        return false;
+    }
+    array.cur_elem = next;
+    skey.sk_argument = array.elem_values[next as usize];
+    true
+}
+
+/// _bt_advance_array_keys_increment: false = arrays exhausted (restored to
+/// their final positions for the opposite direction, as C does).
+fn bt_advance_array_keys_increment(
+    so: &mut BTScanOpaqueData<'_>,
+    dir: ScanDirection,
+) -> bool {
+    {
+        let BTScanOpaqueData { keyData, arrayKeys, .. } = &mut *so;
+        for array in arrayKeys.iter_mut().rev() {
+            let skey = &mut keyData[array.scan_key as usize];
+            if bt_array_step(skey, array, ScanDirectionIsForward(dir)) {
+                return true;
+            }
+            bt_array_set_low_or_high(skey, array, ScanDirectionIsForward(dir));
+        }
+    }
+    bt_start_array_keys(so, flip_dir(dir));
+    false
+}
+
+/// _bt_tuple_before_array_skeys: too early to advance required arrays?
+///
+/// # Safety
+/// As [`bt_checkkeys`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn bt_tuple_before_array_skeys(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    dir: ScanDirection,
+    tuple: ITup,
+    tupnatts: i32,
+    readpagetup: bool,
+    sktrig: i32,
+    mut scan_behind: Option<&mut bool>,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    let tupdesc: &TupleDescData<'_> = &rel.rd_att;
+    debug_assert!(so.numArrayKeys > 0 && so.numberOfKeys > 0);
+    debug_assert!(sktrig == 0 || readpagetup);
+    debug_assert!(!readpagetup || scan_behind.is_none());
+
+    if let Some(sb) = scan_behind.as_deref_mut() {
+        *sb = false;
+    }
+
+    let BTScanOpaqueData { keyData, orderProcs, numberOfKeys, .. } = &mut *so;
+    for ikey in sktrig as usize..*numberOfKeys as usize {
+        let cur = &keyData[ikey];
+        debug_assert!(!readpagetup || ikey == sktrig as usize);
+
+        if cur.sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0 {
+            debug_assert!(!readpagetup);
+            return Ok(false);
+        }
+
+        if cur.sk_attno as i32 > tupnatts {
+            debug_assert!(!readpagetup);
+            if let Some(sb) = scan_behind.as_deref_mut() {
+                *sb = true;
+            }
+            return Ok(false);
+        }
+
+        if cur.sk_strategy != BTEqualStrategyNumber {
+            if readpagetup {
+                return Ok(false);
+            }
+            continue;
+        }
+
+        let mut tupnull = false;
+        let tupdatum = index_getattr(tuple, cur.sk_attno, tupdesc, &mut tupnull);
+
+        if cur.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL) != 0 {
+            unported_phase2("skip-array sentinels (_bt_tuple_before_array_skeys)");
+        }
+        let result = bt_compare_array_skey(
+            frame,
+            &mut orderProcs[ikey],
+            tupdatum,
+            tupnull,
+            cur.sk_argument,
+            cur,
+        )?;
+        debug_assert!(cur.sk_flags & (SK_BT_NEXT | SK_BT_PRIOR) == 0);
+
+        if (ScanDirectionIsForward(dir) && result < 0)
+            || (ScanDirectionIsBackward(dir) && result > 0)
+        {
+            return Ok(true);
+        }
+
+        if readpagetup || result != 0 {
+            debug_assert!(result != 0);
+            return Ok(false);
+        }
+    }
+
+    debug_assert!(!readpagetup);
+    Ok(false)
+}
+
+/// _bt_start_prim_scan: true when _bt_checkkeys scheduled another primitive
+/// index scan.
+pub(crate) fn bt_start_prim_scan(so: &mut BTScanOpaqueData<'_>) -> bool {
+    debug_assert!(so.numArrayKeys > 0);
+    so.scanBehind = false;
+    so.oppositeDirCheck = false;
+    so.needPrimScan
+}
+
+/// _bt_advance_array_keys. `pstate` is Some iff `sktrig_required`.
+///
+/// # Safety
+/// As [`bt_checkkeys`]; `pstate.finaltup` (when set) points into the same
+/// pinned+locked page.
+#[allow(clippy::too_many_arguments)]
+unsafe fn bt_advance_array_keys(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    mut pstate: Option<&mut BtReadPageState<'_>>,
+    tuple: ITup,
+    tupnatts: i32,
+    sktrig: i32,
+    sktrig_required: bool,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    let tupdesc: &TupleDescData<'_> = &rel.rd_att;
+    let dir = so.currPos.dir;
+    debug_assert!(!so.needPrimScan && !so.scanBehind && !so.oppositeDirCheck);
+    debug_assert!(sktrig_required == pstate.is_some());
+
+    if sktrig_required {
+        let p = pstate.as_deref_mut().expect("required caller passes pstate");
+        p.rechecks = 0;
+        p.targetdistance = 0;
+    } else if sktrig < so.numberOfKeys - 1
+        && so.keyData[so.numberOfKeys as usize - 1].sk_flags & SK_SEARCHARRAY == 0
+    {
+        // Precheck the least significant key before the expensive binary
+        // searches (non-required trigger only).
+        let mut least_sign_ikey = so.numberOfKeys - 1;
+        let mut continuescan = true;
+        debug_assert!(so.keyData[sktrig as usize].sk_flags & SK_SEARCHARRAY != 0);
+        if !bt_check_compare(
+            rel,
+            so,
+            dir,
+            tuple,
+            tupnatts,
+            false,
+            false,
+            &mut continuescan,
+            &mut least_sign_ikey,
+            frame,
+        )? {
+            return Ok(false);
+        }
+    }
+
+    let mut beyond_end_advance = false;
+    let mut has_required_opposite_direction_only = false;
+    let mut all_required_satisfied = true;
+    let mut all_satisfied = true;
+
+    {
+        let BTScanOpaqueData {
+            keyData,
+            arrayKeys,
+            orderProcs,
+            numberOfKeys,
+            scanBehind,
+            ..
+        } = &mut *so;
+        let mut arrayidx = 0usize;
+
+        for ikey in 0..*numberOfKeys as usize {
+            let (sk_flags, sk_strategy, sk_attno) = {
+                let cur = &keyData[ikey];
+                (cur.sk_flags, cur.sk_strategy, cur.sk_attno)
+            };
+            let mut array_i: Option<usize> = None;
+
+            if sk_strategy == BTEqualStrategyNumber {
+                if sk_flags & SK_SEARCHARRAY != 0 {
+                    array_i = Some(arrayidx);
+                    debug_assert!(arrayKeys[arrayidx].scan_key == ikey as i32);
+                    arrayidx += 1;
+                }
+            } else if (ScanDirectionIsForward(dir) && sk_flags & SK_BT_REQBKWD != 0)
+                || (ScanDirectionIsBackward(dir) && sk_flags & SK_BT_REQFWD != 0)
+            {
+                has_required_opposite_direction_only = true;
+            }
+
+            if ikey < sktrig as usize {
+                continue;
+            }
+
+            let mut required = false;
+            if sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) != 0 {
+                required = true;
+                if sk_attno as i32 > tupnatts {
+                    debug_assert!((sktrig as usize) < ikey);
+                    *scanBehind = true;
+                }
+            }
+
+            if ikey == sktrig as usize && array_i.is_none() {
+                debug_assert!(sktrig_required && required && all_required_satisfied);
+                beyond_end_advance = true;
+                all_satisfied = false;
+                all_required_satisfied = false;
+                continue;
+            } else if sk_strategy != BTEqualStrategyNumber {
+                continue;
+            } else if !required && array_i.is_none() {
+                continue;
+            }
+
+            if beyond_end_advance {
+                if let Some(ai) = array_i {
+                    bt_array_set_low_or_high(
+                        &mut keyData[ikey],
+                        &mut arrayKeys[ai],
+                        ScanDirectionIsBackward(dir),
+                    );
+                }
+                continue;
+            }
+
+            if !all_required_satisfied || sk_attno as i32 > tupnatts {
+                if let Some(ai) = array_i {
+                    bt_array_set_low_or_high(
+                        &mut keyData[ikey],
+                        &mut arrayKeys[ai],
+                        ScanDirectionIsForward(dir),
+                    );
+                }
+                continue;
+            }
+
+            let mut tupnull = false;
+            let tupdatum = index_getattr(tuple, sk_attno, tupdesc, &mut tupnull);
+
+            let mut result: i32 = 0;
+            let mut set_elem: i32 = 0;
+            if let Some(ai) = array_i {
+                let cur_elem_trig = sktrig_required && ikey == sktrig as usize;
+                set_elem = bt_binsrch_array_skey(
+                    frame,
+                    &mut orderProcs[ikey],
+                    cur_elem_trig,
+                    dir,
+                    tupdatum,
+                    tupnull,
+                    &arrayKeys[ai],
+                    &keyData[ikey],
+                    &mut result,
+                )?;
+            } else {
+                debug_assert!(required);
+                result = bt_compare_array_skey(
+                    frame,
+                    &mut orderProcs[ikey],
+                    tupdatum,
+                    tupnull,
+                    keyData[ikey].sk_argument,
+                    &keyData[ikey],
+                )?;
+            }
+
+            if sktrig_required
+                && required
+                && ((ScanDirectionIsForward(dir) && result > 0)
+                    || (ScanDirectionIsBackward(dir) && result < 0))
+            {
+                beyond_end_advance = true;
+            }
+
+            debug_assert!(all_required_satisfied && all_satisfied);
+            if result != 0 {
+                all_satisfied = false;
+                if sktrig_required && required {
+                    all_required_satisfied = false;
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(ai) = array_i {
+                let array = &mut arrayKeys[ai];
+                if array.cur_elem != set_elem {
+                    array.cur_elem = set_elem;
+                    keyData[ikey].sk_argument = array.elem_values[set_elem as usize];
+                }
+            }
+        }
+    }
+
+    if beyond_end_advance && !bt_advance_array_keys_increment(so, dir) {
+        // end_toplevel_scan: whole top-level scan is done in this direction.
+        let p = pstate.expect("beyond-end advancement implies sktrig_required");
+        p.continuescan = false;
+        so.needPrimScan = false;
+        return Ok(false);
+    }
+
+    if (sktrig_required && all_required_satisfied) || (!sktrig_required && all_satisfied) {
+        let mut nsktrig = sktrig + 1;
+        let mut continuescan = true;
+        debug_assert!(all_required_satisfied);
+
+        if bt_check_compare(
+            rel,
+            so,
+            dir,
+            tuple,
+            tupnatts,
+            false,
+            !sktrig_required,
+            &mut continuescan,
+            &mut nsktrig,
+            frame,
+        )? && !so.scanBehind
+        {
+            debug_assert!(all_satisfied && continuescan);
+            if let Some(p) = pstate.as_deref_mut() {
+                p.continuescan = true;
+            }
+            return Ok(true);
+        }
+
+        if !continuescan {
+            debug_assert!(sktrig_required);
+            debug_assert!(
+                so.keyData[nsktrig as usize].sk_strategy != BTEqualStrategyNumber
+            );
+            debug_assert!(!beyond_end_advance);
+            let satisfied =
+                bt_advance_array_keys(rel, so, pstate, tuple, tupnatts, nsktrig, true, frame)?;
+            debug_assert!(!satisfied);
+            return Ok(false);
+        }
+    }
+
+    if !sktrig_required {
+        return Ok(false);
+    }
+
+    let pstate = pstate.expect("sktrig_required caller passes pstate");
+
+    'new_prim_scan: {
+        if !all_required_satisfied && pstate.finaltup == Some(tuple) {
+            break 'new_prim_scan;
+        }
+
+        if !all_required_satisfied {
+            if let Some(finaltup) = pstate.finaltup {
+                let mut sb = false;
+                let before = bt_tuple_before_array_skeys(
+                    rel,
+                    so,
+                    dir,
+                    finaltup,
+                    bt_tuple_get_natts(finaltup, rel.indnatts()),
+                    false,
+                    0,
+                    Some(&mut sb),
+                    frame,
+                )?;
+                so.scanBehind = sb;
+                if before {
+                    break 'new_prim_scan;
+                }
+            }
+        }
+
+        if so.scanBehind {
+            // Truncated high key -- _bt_scanbehind_checkkeys recheck scheduled.
+        } else if has_required_opposite_direction_only {
+            if let Some(finaltup) = pstate.finaltup {
+                if !bt_oppodir_checkkeys(rel, so, dir, finaltup, frame)? {
+                    break 'new_prim_scan;
+                }
+            }
+        }
+
+        // continue_scan:
+        pstate.continuescan = true;
+        so.needPrimScan = false;
+        if so.scanBehind {
+            so.oppositeDirCheck = has_required_opposite_direction_only;
+            if ScanDirectionIsForward(dir) {
+                pstate.skip = pstate.maxoff + 1;
+            }
+        }
+        return Ok(false);
+    }
+
+    // new_prim_scan:
+    debug_assert!(pstate.finaltup.is_some());
+
+    if !pstate.firstpage || pstate.nskipadvances > NSKIPADVANCES_THRESHOLD {
+        so.scanBehind = true;
+        pstate.continuescan = true;
+        so.needPrimScan = false;
+        so.oppositeDirCheck = has_required_opposite_direction_only;
+        if ScanDirectionIsForward(dir) {
+            pstate.skip = pstate.maxoff + 1;
+        }
+        return Ok(false);
+    }
+
+    pstate.continuescan = false;
+    so.needPrimScan = true;
+    Ok(false)
+}
 
 /// _bt_checkkeys. `tupnatts` is the tuple's own attribute count (may be less
 /// than the key count for a truncated high key).
@@ -50,6 +657,7 @@ pub(crate) unsafe fn bt_checkkeys(
     let mut ikey = pstate.startikey;
     debug_assert!(!so.needPrimScan && !so.scanBehind && !so.oppositeDirCheck);
     debug_assert!(array_keys || so.numArrayKeys == 0);
+    debug_assert!(!pstate.forcenonrequired || array_keys);
 
     let res = bt_check_compare(
         rel,
@@ -67,14 +675,100 @@ pub(crate) unsafe fn bt_checkkeys(
     if !array_keys || pstate.continuescan {
         return Ok(res);
     }
-    unported_phase2("_bt_advance_array_keys (SAOP/skip-scan lane)")
+
+    debug_assert!(!pstate.forcenonrequired);
+    if bt_tuple_before_array_skeys(rel, so, dir, tuple, tupnatts, true, ikey, None, frame)? {
+        pstate.continuescan = true;
+        pstate.rechecks += 1;
+        if pstate.rechecks >= LOOK_AHEAD_REQUIRED_RECHECKS {
+            bt_checkkeys_look_ahead(rel, so, pstate, tupnatts, frame)?;
+        }
+        return Ok(false);
+    }
+
+    bt_advance_array_keys(rel, so, Some(pstate), tuple, tupnatts, ikey, true, frame)
 }
 
-/// _bt_check_compare, scalar arm. `advancenonrequired`/array advancement and
-/// row compares route to phase-2 panics.
+/// _bt_scanbehind_checkkeys: is finaltup still before the start of matches
+/// for the current array keys?
+///
+/// # Safety
+/// `finaltup` per [`bt_checkkeys`].
+pub(crate) unsafe fn bt_scanbehind_checkkeys(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    dir: ScanDirection,
+    finaltup: ITup,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    let nfinaltupatts = bt_tuple_get_natts(finaltup, rel.indnatts());
+    debug_assert!(so.numArrayKeys > 0);
+
+    let mut sb = false;
+    if bt_tuple_before_array_skeys(
+        rel,
+        so,
+        dir,
+        finaltup,
+        nfinaltupatts,
+        false,
+        0,
+        Some(&mut sb),
+        frame,
+    )? {
+        return Ok(false);
+    }
+
+    if sb {
+        return Ok(false);
+    }
+
+    if !so.oppositeDirCheck {
+        return Ok(true);
+    }
+
+    bt_oppodir_checkkeys(rel, so, dir, finaltup, frame)
+}
+
+// _bt_oppodir_checkkeys: false when an inequality required in the opposite
+// direction only isn't satisfied by finaltup.
+unsafe fn bt_oppodir_checkkeys(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    dir: ScanDirection,
+    finaltup: ITup,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    let nfinaltupatts = bt_tuple_get_natts(finaltup, rel.indnatts());
+    let flipped = flip_dir(dir);
+    let mut ikey = 0;
+    let mut continuescan = true;
+    debug_assert!(so.numArrayKeys > 0);
+
+    bt_check_compare(
+        rel,
+        so,
+        flipped,
+        finaltup,
+        nfinaltupatts,
+        false,
+        false,
+        &mut continuescan,
+        &mut ikey,
+        frame,
+    )?;
+
+    if !continuescan && so.keyData[ikey as usize].sk_strategy != BTEqualStrategyNumber {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// _bt_check_compare.
 ///
 /// # Safety
 /// As [`bt_checkkeys`].
+#[allow(clippy::too_many_arguments)]
 unsafe fn bt_check_compare(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
@@ -165,7 +859,10 @@ unsafe fn bt_check_compare(
                 && key.sk_strategy == BTEqualStrategyNumber
                 && key.sk_flags & SK_SEARCHARRAY != 0
             {
-                unported_phase2("_bt_advance_array_keys (non-required array)");
+                let trig = *ikey;
+                return bt_advance_array_keys(
+                    rel, so, None, tuple, tupnatts, trig, false, frame,
+                );
             }
             return Ok(false);
         }
@@ -174,6 +871,59 @@ unsafe fn bt_check_compare(
     }
 
     Ok(true)
+}
+
+// _bt_checkkeys_look_ahead: speculatively probe a later tuple on the page and
+// set pstate.skip when it's still before the current array keys.
+//
+// # Safety
+// As [`bt_checkkeys`]; pstate.page items live for the call.
+unsafe fn bt_checkkeys_look_ahead(
+    rel: &Relation<'_>,
+    so: &mut BTScanOpaqueData<'_>,
+    pstate: &mut BtReadPageState<'_>,
+    tupnatts: i32,
+    frame: &mut OrderProcFrame,
+) -> PgResult<()> {
+    let dir = so.currPos.dir;
+    debug_assert!(!pstate.forcenonrequired);
+
+    if pstate.offnum < pstate.minoff {
+        return Ok(());
+    }
+
+    if ScanDirectionIsForward(dir) {
+        if pstate.offnum as i32 >= pstate.maxoff as i32 - LOOK_AHEAD_DEFAULT_DISTANCE {
+            return Ok(());
+        }
+    } else if pstate.offnum as i32 <= pstate.minoff as i32 + LOOK_AHEAD_DEFAULT_DISTANCE {
+        return Ok(());
+    }
+
+    if pstate.targetdistance == 0 {
+        pstate.targetdistance = LOOK_AHEAD_DEFAULT_DISTANCE;
+    } else if (pstate.targetdistance as usize) < MaxTIDsPerBTreePage / 2 {
+        pstate.targetdistance *= 2;
+    }
+
+    let aheadoffnum = if ScanDirectionIsForward(dir) {
+        (pstate.maxoff as i32).min(pstate.offnum as i32 + pstate.targetdistance)
+    } else {
+        (pstate.minoff as i32).max(pstate.offnum as i32 - pstate.targetdistance)
+    } as OffsetNumber;
+
+    let ahead = page_item(&pstate.page, pstate.page.item_id(aheadoffnum));
+    if bt_tuple_before_array_skeys(rel, so, dir, ahead, tupnatts, false, 0, None, frame)? {
+        pstate.skip = if ScanDirectionIsForward(dir) {
+            aheadoffnum + 1
+        } else {
+            aheadoffnum - 1
+        };
+    } else {
+        pstate.rechecks = 0;
+        pstate.targetdistance = (pstate.targetdistance / 8).max(1);
+    }
+    Ok(())
 }
 
 /// datum_image_eq (datum.c) trimmed to index-tuple callers: no external toast,
@@ -261,16 +1011,18 @@ pub(crate) unsafe fn bt_set_startikey(
     if so.numberOfKeys == 0 {
         return Ok(());
     }
-    debug_assert!(so.numArrayKeys == 0, "array lane is phase 2");
 
     let firsttup = page_item(&pstate.page, pstate.page.item_id(pstate.minoff));
     let lasttup = page_item(&pstate.page, pstate.page.item_id(pstate.maxoff));
 
     let firstchangingattnum = bt_keep_natts_fast(rel, firsttup, lasttup);
 
+    let BTScanOpaqueData { keyData, arrayKeys, orderProcs, numberOfKeys, .. } = &mut *so;
+    let mut start_past_saop_eq = false;
+    let mut arrayidx = 0usize;
     let mut startikey: i32 = 0;
-    while startikey < so.numberOfKeys {
-        let key = &mut so.keyData[startikey as usize];
+    while startikey < *numberOfKeys {
+        let key = &mut keyData[startikey as usize];
 
         if key.sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0 {
             break; // unsafe: key isn't marked required (corner case)
@@ -306,7 +1058,39 @@ pub(crate) unsafe fn bt_set_startikey(
             continue;
         }
 
-        debug_assert!(key.sk_flags & SK_SEARCHARRAY == 0, "array lane is phase 2");
+        if key.sk_flags & SK_SEARCHARRAY != 0 {
+            // SAOP array = key: binary search for a matching element rather
+            // than relying on the key's current sk_argument.
+            let array = &arrayKeys[arrayidx];
+            debug_assert!(array.scan_key == startikey);
+            arrayidx += 1;
+            if array.num_elems == -1 {
+                unported_phase2("skip arrays (_bt_set_startikey)");
+            }
+            if key.sk_attno as i32 >= firstchangingattnum {
+                break;
+            }
+            let mut firstnull = false;
+            let firstdatum = index_getattr(firsttup, key.sk_attno, tupdesc, &mut firstnull);
+            let mut result = 0;
+            bt_binsrch_array_skey(
+                frame,
+                &mut orderProcs[startikey as usize],
+                false,
+                ::types_scan::sdir::NoMovementScanDirection,
+                firstdatum,
+                firstnull,
+                array,
+                key,
+                &mut result,
+            )?;
+            if result != 0 {
+                break;
+            }
+            start_past_saop_eq = true;
+            startikey += 1;
+            continue;
+        }
 
         if key.sk_attno as i32 >= firstchangingattnum {
             break;
@@ -328,9 +1112,15 @@ pub(crate) unsafe fn bt_set_startikey(
         startikey += 1;
     }
 
-    // forcenonrequired only arises with arrays (phase 2).
-    pstate.forcenonrequired = false;
+    // skipScan is always false here (skip arrays are phase 2).
+    pstate.forcenonrequired = start_past_saop_eq;
     pstate.startikey = startikey;
+
+    debug_assert!(!pstate.forcenonrequired || so.numArrayKeys > 0);
+    if pstate.forcenonrequired && pstate.finaltup.is_none() {
+        pstate.forcenonrequired = false;
+        pstate.startikey = 0;
+    }
     Ok(())
 }
 

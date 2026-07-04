@@ -1,10 +1,10 @@
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED};
 
-use crate::arith::{add_var, cmp_var_common, div_var, mul_var, select_div_scale, sub_var};
+use crate::arith::{add_var, cmp_var, cmp_var_common, div_var, mul_var, select_div_scale, sub_var};
 use crate::io::get_str_from_var;
 use crate::var::{
     int64_to_var, make_result, make_result_into, make_result_opt_error, set_var_from_int64,
-    var_to_int32, var_to_int64, NumericImage, NumericVar, CONST_ZERO,
+    var_to_int32, var_to_int64, NumericImage, NumericVar, CONST_ONE, CONST_ZERO,
 };
 use crate::{
     division_by_zero_error, numeric_can_be_short, Num, DEC_DIGITS, NUMERIC_DSCALE_MASK,
@@ -14,6 +14,47 @@ use crate::{
 };
 
 #[inline]
+/// C: numerictypmodin over already-decoded typmod integers.
+pub fn numerictypmodin_core(tl: &[i32]) -> PgResult<i32> {
+    use ::types_error::{PgError, ERRCODE_INVALID_PARAMETER_VALUE};
+
+    #[cold]
+    #[inline(never)]
+    fn param_err(msg: String) -> PgResult<i32> {
+        Err(Box::new(
+            PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ))
+    }
+
+    match tl.len() {
+        2 => {
+            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
+                return param_err(format!(
+                    "NUMERIC precision {} must be between 1 and {}",
+                    tl[0], crate::NUMERIC_MAX_PRECISION
+                ));
+            }
+            if tl[1] < crate::NUMERIC_MIN_SCALE || tl[1] > crate::NUMERIC_MAX_SCALE {
+                return param_err(format!(
+                    "NUMERIC scale {} must be between {} and {}",
+                    tl[1], crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
+                ));
+            }
+            Ok(make_numeric_typmod(tl[0], tl[1]))
+        }
+        1 => {
+            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
+                return param_err(format!(
+                    "NUMERIC precision {} must be between 1 and {}",
+                    tl[0], crate::NUMERIC_MAX_PRECISION
+                ));
+            }
+            Ok(make_numeric_typmod(tl[0], 0))
+        }
+        _ => param_err(String::from("invalid NUMERIC type modifier")),
+    }
+}
+
 pub fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
     ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ as i32
 }
@@ -506,6 +547,36 @@ pub fn numeric_trunc_common(num: Num<'_>, scale: i32) -> PgResult<NumericImage> 
         arg.dscale = 0;
     }
     make_result(arg.view())
+}
+
+/// C: numeric_ceil (ceil_var).
+pub fn numeric_ceil(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+    let mut tmp = NumericVar::from_view(num.view());
+    tmp.trunc(0);
+    if num.sign() == NUMERIC_POS && cmp_var(num.view(), tmp.view()) != 0 {
+        let mut res = NumericVar::default();
+        add_var(tmp.view(), CONST_ONE, &mut res);
+        return make_result(res.view());
+    }
+    make_result(tmp.view())
+}
+
+/// C: numeric_floor (floor_var).
+pub fn numeric_floor(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+    let mut tmp = NumericVar::from_view(num.view());
+    tmp.trunc(0);
+    if num.sign() == NUMERIC_NEG && cmp_var(num.view(), tmp.view()) != 0 {
+        let mut res = NumericVar::default();
+        sub_var(tmp.view(), CONST_ONE, &mut res);
+        return make_result(res.view());
+    }
+    make_result(tmp.view())
 }
 
 pub fn numeric_abs(num: Num<'_>) -> NumericImage {
