@@ -119,7 +119,10 @@ pub fn subquery_planner<'mcx>(
                 // no-op for non-SQL-language functions and non-builtins cannot
                 // resolve on this lane. C preprocesses non-lateral functions
                 // too — uplevel correlation Vars appear without LATERAL and
-                // must become Params here.
+                // must become Params here — and its eval_const_expressions
+                // pass is mandatory: it inserts default arguments and converts
+                // named notation to positional. EXPRKIND_RTFUNC skips the
+                // second eval inside preprocess_expression, as in C.
                 {
                     let kind = if rte.lateral {
                         EXPRKIND_RTFUNC_LATERAL
@@ -129,10 +132,18 @@ pub fn subquery_planner<'mcx>(
                     let mut new_functions = NodeList::nil();
                     for f_node in &rte.functions {
                         let f = f_node.as_range_tbl_function().expect("functions cell");
+                        let funcexpr = match f.funcexpr {
+                            Some(e) => Some(clauses::eval_const_expressions_with_params(
+                                mcx,
+                                e,
+                                run.glob.bound_params,
+                            )?),
+                            None => None,
+                        };
                         let funcexpr = preprocess_expression(
                             run,
                             &parse.rtable,
-                            f.funcexpr,
+                            funcexpr,
                             kind,
                             parse.hasSubLinks,
                         )?;

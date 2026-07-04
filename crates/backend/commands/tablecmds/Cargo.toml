@@ -39,6 +39,7 @@ inval = { path = "../../utils/cache/inval" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
+xloginsert = { path = "../../access/transam/xloginsert" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 tablecmds_seams = { path = "../tablecmds_seams" }
 sequence_seams = { path = "../sequence_seams" }

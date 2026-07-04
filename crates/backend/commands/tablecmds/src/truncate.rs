@@ -13,6 +13,14 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use crate::unported;
 
+const RM_HEAP_ID: u8 = 10;
+const XLOG_HEAP_TRUNCATE: u8 = 0x30;
+const XLH_TRUNCATE_CASCADE: u8 = 1 << 0;
+const XLH_TRUNCATE_RESTART_SEQS: u8 = 1 << 1;
+const XLOG_INCLUDE_ORIGIN: u8 = 0x01;
+// offsetof(xl_heap_truncate, relids): dbId(4) + nrelids(4) + flags(1) + pad(3).
+const SizeOfHeapTruncate: usize = 12;
+
 fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
@@ -31,6 +39,7 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
 
     let mut rels: Vec<Relation<'mcx>> = Vec::new();
     let mut relids: Vec<Oid> = Vec::new();
+    let mut relids_logged: Vec<Oid> = Vec::new();
 
     for cell in stmt.relations.iter() {
         let rv = cell.as_range_var().expect("TRUNCATE target is a RangeVar");
@@ -59,6 +68,9 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
         let rel = table::table_open(mcx, myrelid, NoLock)?;
         truncate_check_activity(&rel)?;
 
+        if heapam::relation_is_logically_logged(&rel) {
+            relids_logged.push(myrelid);
+        }
         rels.push(rel);
         relids.push(myrelid);
 
@@ -82,6 +94,9 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
                     child.name(),
                 )?;
                 truncate_check_activity(&child)?;
+                if heapam::relation_is_logically_logged(&child) {
+                    relids_logged.push(childrelid);
+                }
                 rels.push(child);
                 relids.push(childrelid);
             }
@@ -98,7 +113,14 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
     }
 
     let n_explicit = rels.len();
-    ExecuteTruncateGuts(mcx, &mut rels, &mut relids, stmt.behavior)?;
+    ExecuteTruncateGuts(
+        mcx,
+        &mut rels,
+        &mut relids,
+        &mut relids_logged,
+        stmt.behavior,
+        stmt.restart_seqs,
+    )?;
 
     debug_assert_eq!(rels.len(), n_explicit);
     for rel in rels {
@@ -111,7 +133,9 @@ fn ExecuteTruncateGuts<'mcx>(
     mcx: Mcx<'mcx>,
     rels: &mut Vec<Relation<'mcx>>,
     relids: &mut Vec<Oid>,
+    relids_logged: &mut Vec<Oid>,
     behavior: DropBehavior,
+    restart_seqs: bool,
 ) -> PgResult<()> {
     let n_explicit = rels.len();
 
@@ -130,6 +154,9 @@ fn ExecuteTruncateGuts<'mcx>(
                 truncate_check_rel(relid, rel.rd_rel.relkind, rel.namespace(), rel.name())?;
                 truncate_check_perms(relid, rel.rd_rel.relkind, rel.name())?;
                 truncate_check_activity(&rel)?;
+                if heapam::relation_is_logically_logged(&rel) {
+                    relids_logged.push(relid);
+                }
                 rels.push(rel);
                 relids.push(relid);
             }
@@ -204,8 +231,30 @@ fn ExecuteTruncateGuts<'mcx>(
         }
         pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
     }
-    // XLOG_HEAP_TRUNCATE rides wal_level=logical, const-false here as in the
-    // visibilitymap catalog-rel gate.
+    if !relids_logged.is_empty() {
+        let mut xlrec = [0u8; SizeOfHeapTruncate];
+        xlrec[0..4].copy_from_slice(&init_small::globals::MyDatabaseId().to_ne_bytes());
+        xlrec[4..8].copy_from_slice(&(relids_logged.len() as u32).to_ne_bytes());
+        let mut flags: u8 = 0;
+        if behavior == DropBehavior::DROP_CASCADE {
+            flags |= XLH_TRUNCATE_CASCADE;
+        }
+        if restart_seqs {
+            flags |= XLH_TRUNCATE_RESTART_SEQS;
+        }
+        xlrec[8] = flags;
+        let mut logrelids: Vec<u8> = Vec::with_capacity(relids_logged.len() * 4);
+        for &relid in relids_logged.iter() {
+            logrelids.extend_from_slice(&relid.to_ne_bytes());
+        }
+        xloginsert::insert_record(
+            RM_HEAP_ID,
+            XLOG_HEAP_TRUNCATE,
+            XLOG_INCLUDE_ORIGIN,
+            &[&xlrec, &logrelids],
+            &[],
+        )?;
+    }
 
     if any_triggers {
         for (rel, entry) in rels.iter().zip(trig_state.iter_mut()) {
