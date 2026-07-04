@@ -1186,6 +1186,8 @@ fn prepare_temp_tablespaces_seam() -> PgResult<()> {
 thread_local! {
     static DEFAULT_TABLESPACE: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    static ALLOW_IN_PLACE_TABLESPACES: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn default_tablespace_guc() -> Option<String> {
@@ -1196,10 +1198,22 @@ fn set_default_tablespace_guc(value: Option<String>) {
     DEFAULT_TABLESPACE.with(|c| *c.borrow_mut() = value);
 }
 
+fn allow_in_place_tablespaces_guc() -> bool {
+    ALLOW_IN_PLACE_TABLESPACES.with(|c| c.get())
+}
+
+fn set_allow_in_place_tablespaces_guc(value: bool) {
+    ALLOW_IN_PLACE_TABLESPACES.with(|c| c.set(value));
+}
+
 pub fn init_seams() {
     guc_tables::vars::default_tablespace.install(guc_tables::GucVarAccessors {
         get: default_tablespace_guc,
         set: set_default_tablespace_guc,
+    });
+    guc_tables::vars::allow_in_place_tablespaces.install(guc_tables::GucVarAccessors {
+        get: allow_in_place_tablespaces_guc,
+        set: set_allow_in_place_tablespaces_guc,
     });
     tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
     tablespace_seams::get_tablespace_oid::set(get_tablespace_oid);

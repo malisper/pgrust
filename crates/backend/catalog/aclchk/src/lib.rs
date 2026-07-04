@@ -193,6 +193,13 @@ fn object_aclmask_ext(
             AclObjectType::Language,
             "language",
         ),
+        types_core::catalog::TABLE_SPACE_RELATION_ID => (
+            cache_syscache::cacheinfo::TABLESPACEOID,
+            3,
+            4,
+            AclObjectType::Tablespace,
+            "tablespace",
+        ),
         _ => panic!("object_aclmask: classid {classid} unported (ObjectProperty table)"),
     };
 
@@ -688,6 +695,13 @@ pub(crate) fn pg_aclmask_for_grant(
         ObjectType::OBJECT_TYPE => {
             object_aclmask(TYPE_RELATION_ID, object_oid, roleid, mask, how)
         }
+        ObjectType::OBJECT_TABLESPACE => object_aclmask(
+            types_core::catalog::TABLE_SPACE_RELATION_ID,
+            object_oid,
+            roleid,
+            mask,
+            how,
+        ),
         other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
     }
 }
@@ -808,6 +822,25 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
                 cache_syscache::cacheinfo::SUBSCRIPTIONOID,
                 &tuple,
                 ANUM_PG_SUBSCRIPTION_SUBOWNER,
+            )?
+            .as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        types_core::catalog::TABLE_SPACE_RELATION_ID => {
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::TABLESPACEOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for tablespace {objectid}"
+                ))));
+            };
+            let owner = SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::TABLESPACEOID,
+                &tuple,
+                3,
             )?
             .as_oid();
             ReleaseSysCache(tuple);

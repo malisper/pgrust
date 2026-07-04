@@ -1,6 +1,6 @@
 // DefineIndex (partitioned recursion included) + ComputeIndexAttrs +
 // CheckPredicate + ChooseIndex*Name* + IndexSetParentIndex (indexcmds.c).
-// Loud: CONCURRENTLY, INCLUDE, named opclasses, WITH options, TABLESPACE,
+// Loud: CONCURRENTLY, INCLUDE, named opclasses, WITH options,
 // exclusion/WITHOUT OVERLAPS, index detach.
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
@@ -279,9 +279,6 @@ pub fn DefineIndex<'mcx>(
     let exclusion = !stmt.excludeOpNames.is_nil();
     if !stmt.indexIncludingParams.is_nil() {
         unported("DefineIndex: INCLUDE columns");
-    }
-    if stmt.tableSpace.is_some() {
-        unported("DefineIndex: TABLESPACE");
     }
     if (stmt.deferrable || stmt.initdeferred) && !exclusion {
         unported("DefineIndex: DEFERRABLE unique/pk constraint indexes");
