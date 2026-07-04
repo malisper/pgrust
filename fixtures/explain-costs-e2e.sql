@@ -235,3 +235,37 @@ EXPLAIN SELECT count(*) FROM ec_sc
 EXPLAIN SELECT count(*) FROM ec_sc s1 JOIN ec_sd d1 ON s1.a = d1.v
   WHERE (CASE WHEN s1.b IN (SELECT k FROM ec_sd WHERE v <= s1.a) THEN 1 ELSE 2 END) = 1;
 DROP TABLE ec_sc, ec_sd;
+
+-- subquery qual pushdown (set_subquery_pathlist / subquery_is_pushdown_safe)
+-- grouping-column qual pushes into the subquery (HAVING, then moved to WHERE)
+EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b) sub WHERE sub.b < 10;
+-- aggregate-output qual pushes into HAVING and stays there
+EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b) sub WHERE sub.n > 100;
+EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b) sub WHERE sub.b < 10 AND sub.n > 100;
+-- LIMIT/OFFSET fence: qual stays a SubqueryScan filter
+EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b LIMIT 20) sub WHERE sub.b < 10;
+EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b OFFSET 5) sub WHERE sub.b < 10;
+-- set-op branches: qual pushed into each UNION/INTERSECT arm
+EXPLAIN SELECT * FROM (SELECT x AS q FROM ec_small UNION SELECT k FROM ec_dup) sub WHERE sub.q < 10;
+EXPLAIN SELECT * FROM (SELECT x AS q FROM ec_small INTERSECT SELECT k FROM ec_dup) sub WHERE sub.q < 10;
+-- EXCEPT fence
+EXPLAIN SELECT * FROM (SELECT x AS q FROM ec_small EXCEPT SELECT k FROM ec_dup) sub WHERE sub.q < 10;
+-- DISTINCT: nonvolatile qual pushes, volatile qual fences
+EXPLAIN SELECT * FROM (SELECT DISTINCT b FROM ec_big) sub WHERE sub.b < 10;
+EXPLAIN SELECT * FROM (SELECT DISTINCT b FROM ec_big) sub WHERE sub.b < random() * 20;
+-- DISTINCT ON: qual on the DISTINCT column pushes, non-DISTINCT column fences
+EXPLAIN SELECT * FROM (SELECT DISTINCT ON (b) b, a FROM ec_big ORDER BY b, a) sub WHERE sub.b < 10;
+EXPLAIN SELECT * FROM (SELECT DISTINCT ON (b) b, a FROM ec_big ORDER BY b, a) sub WHERE sub.a < 100;
+-- volatile output column fences quals that reference it
+EXPLAIN SELECT * FROM (SELECT b, random() AS r FROM ec_big GROUP BY b) sub WHERE sub.r > 0.5;
+-- window fences: PARTITION BY column pushes, other columns / wfunc output stay
+EXPLAIN SELECT * FROM (SELECT y, x, sum(x) OVER (PARTITION BY y) AS s FROM ec_small) sub WHERE sub.y = 3;
+EXPLAIN SELECT * FROM (SELECT y, x, sum(x) OVER (PARTITION BY y) AS s FROM ec_small) sub WHERE sub.x = 3;
+EXPLAIN SELECT * FROM (SELECT y, x, sum(x) OVER (PARTITION BY y) AS s FROM ec_small) sub WHERE sub.s > 100;
+-- security_barrier: leaky qual fences, leakproof operator pushes
+CREATE VIEW ec_sb WITH (security_barrier) AS SELECT b, d FROM ec_big WHERE a < 15000;
+EXPLAIN SELECT * FROM ec_sb WHERE b = 3;
+EXPLAIN SELECT * FROM ec_sb WHERE d LIKE 'row1%';
+DROP VIEW ec_sb;
+-- remove_unused_subquery_outputs: unread aggregate outputs NULLed (width)
+EXPLAIN SELECT sub.b FROM (SELECT b, count(*) AS n, sum(a) AS s FROM ec_big GROUP BY b) sub WHERE sub.b < 10;

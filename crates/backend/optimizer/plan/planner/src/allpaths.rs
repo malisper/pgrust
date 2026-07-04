@@ -139,17 +139,17 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
     Ok(())
 }
 
-// set_subquery_pathlist (allpaths.c): qual pushdown is loud (baserestrictinfo
-// empty on this lane), remove_unused_subquery_outputs skipped (plan-shape
-// optimization only), pathkeys empty (convert_subquery_pathkeys unported).
+// set_subquery_pathlist (allpaths.c): pathkeys empty
+// (convert_subquery_pathkeys unported).
 fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
+    let orig = rte.subquery.expect("RTE_SUBQUERY has a subquery");
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
-    assert!(
-        run.root.rel(rel).baserestrictinfo.is_empty(),
-        "set_subquery_pathlist (allpaths.c): qual pushdown \
-         (subquery_is_pushdown_safe) unported"
-    );
+
+    // The copy keeps planning (and qual pushdown) off the RTE contents.
+    let mut sub_parse = crate::subselect::query_cells_copy(run.mcx, orig)?;
+    crate::pushdown::pushdown_quals_into_subquery(run, rel, rti, rte, orig, &mut sub_parse)?;
+    crate::pushdown::remove_unused_subquery_outputs(run, rel, &mut sub_parse)?;
 
     let parse = run.parse();
     let mut n_baserels = 0;
@@ -174,10 +174,6 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     };
 
     debug_assert!(run.root.plan_params.is_empty());
-    let sub_parse = crate::subselect::query_cells_copy(
-        run.mcx,
-        rte.subquery.expect("RTE_SUBQUERY has a subquery"),
-    )?;
     run.push_root()?;
     crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
