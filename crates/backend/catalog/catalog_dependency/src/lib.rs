@@ -765,6 +765,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     | RELKIND_VIEW
                     | types_rel::RELKIND_MATVIEW
                     | types_rel::RELKIND_PARTITIONED_TABLE
+                    | types_rel::RELKIND_COMPOSITE_TYPE
             ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
