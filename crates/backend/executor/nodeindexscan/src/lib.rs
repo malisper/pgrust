@@ -63,6 +63,26 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `IndexRecheck`: does the EPQ test tuple meet the original quals?
+    fn epq_recheck(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        let ecxt = self.ss.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
+        let passes = {
+            let mut slots = EvalSlots {
+                scan: Some(estate.slot_mut(slot)),
+                inner: None,
+                outer: None,
+            };
+            exec_qual(self.indexqualorig.as_deref_mut(), &mut slots)?
+        };
+        estate.ecxt_mut(ecxt).reset();
+        Ok(passes)
+    }
+
     /// `IndexNext`.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let mcx = estate.es_query_cxt;

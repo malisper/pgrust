@@ -64,6 +64,15 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `FunctionRecheck`: nothing to check.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let forward =
             matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);

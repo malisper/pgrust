@@ -25,6 +25,15 @@ impl<'mcx> ScanNode<'mcx> for WorkTableScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `WorkTableScanRecheck`: nothing to check.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
         let mcx = estate.es_query_cxt;
