@@ -1,5 +1,5 @@
 //! fmgr wrappers (`fc_*`) + the `JSONPATH_BUILTINS` table. The jsonpath
-//! executor OIDs (@? / @@ / jsonb_path_*) stay loud via unported OIDs.
+//! executor OIDs (@? / @@ / jsonb_path_*) live in adt_jsonpath_exec.
 
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
