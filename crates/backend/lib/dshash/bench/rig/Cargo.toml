@@ -1,0 +1,24 @@
+[package]
+name = "dshash-rig"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "dshash-rig"
+path = "src/main.rs"
+
+[dependencies]
+dshash = { path = "../.." }
+init_small = { path = "../../../../utils/init/init_small" }
+lmgr_proc_seams = { path = "../../../../storage/lmgr/lmgr_proc_seams" }
+s_lock_seams = { path = "../../../../storage/lmgr/s_lock_seams" }
+waitevent_seams = { path = "../../../../utils/activity/waitevent_seams" }
+
+[profile.release]
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+debug = 0
