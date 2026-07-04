@@ -409,9 +409,28 @@ fn extract_lateral_references<'mcx>(
     }
     let mut newvars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for node in &vars {
-        let v = node
-            .as_var()
-            .expect("pull_vars_of_level returns Vars (PHVs are loud)");
+        if node.node_tag() == NodeTag::T_PlaceHolderVar {
+            // Subquery-leg PHVs come off query_cells_copy's private copy, so
+            // the level shift mutates in place; their expressions also still
+            // need preprocessing (subquery_planner only preprocessed
+            // level-zero PHVs in function/values RTEs).
+            let phlevelsup = node.as_place_holder_var().unwrap().phlevelsup;
+            if phlevelsup > 0 {
+                rewrite_manip::IncrementVarSublevelsUp(node, -(phlevelsup as i32), 0)?;
+                let phexpr = node.as_place_holder_var().unwrap().phexpr;
+                let newexpr = crate::subquery::preprocess_phv_expression(run, phexpr)?;
+                // SAFETY: node is exclusively owned (query_cells_copy above).
+                unsafe {
+                    node.with_mut::<types_nodes::primnodes::PlaceHolderVar, _>(|p| {
+                        p.phexpr = newexpr;
+                    })
+                }
+                .expect("PlaceHolderVar");
+            }
+            newvars.push(node);
+            continue;
+        }
+        let v = node.as_var().expect("lateral refs are Vars or PHVs");
         if levelsup != 0 {
             let nv = types_nodes::primnodes::Var {
                 varlevelsup: 0,
@@ -461,20 +480,12 @@ pub fn rebuild_lateral_attr_needed(run: &mut PlannerRun<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// create_lateral_join_info (initsplan.c); the PlaceHolderVar legs are dead
-// (no PHVs are ever created on this lane, asserted by the caller).
+// create_lateral_join_info (initsplan.c).
 pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
     if !run.root.hasLateralRTEs {
         return Ok(());
     }
     debug_assert!(run.root.placeholdersFrozen);
-    for i in 0..run.root.placeholder_list.len() {
-        let id = run.root.placeholder_list[i];
-        assert!(
-            relids_is_empty(&run.root.phinfo(id).ph_lateral),
-            "create_lateral_join_info (initsplan.c): lateral PlaceHolderVar crawl unported"
-        );
-    }
     let mcx = run.mcx;
     let mut found_laterals = false;
     let size = run.root.simple_rel_array_size as usize;
@@ -489,16 +500,53 @@ pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
         let mut lateral_relids: types_pathnodes::Relids<'_> = None;
         for i in 0..run.root.rel(rel).lateral_vars.len() {
             let id = run.root.rel(rel).lateral_vars[i];
-            let v = run
-                .root
-                .expr_node(id)
-                .as_var()
-                .expect("lateral_vars hold Vars");
+            let node = *run.root.expr_node(id);
+            if let Some(phv) = node.as_place_holder_var() {
+                let phid = crate::placeholder::find_placeholder_info(run, phv)?;
+                found_laterals = true;
+                lateral_relids =
+                    relids_union(mcx, &lateral_relids, &run.root.phinfo(phid).ph_eval_at);
+                continue;
+            }
+            let v = node.as_var().expect("lateral_vars hold Vars or PHVs");
             found_laterals = true;
             lateral_relids = relids_add_member(mcx, &lateral_relids, v.varno as u32);
         }
         run.root.rel_mut(rel).direct_lateral_relids = relids_copy(mcx, &lateral_relids);
         run.root.rel_mut(rel).lateral_relids = lateral_relids;
+    }
+
+    // Lateral references within PHVs make the eval-at rels laterally depend on
+    // the sources: directly for a baserel eval site, indirectly (lateral_relids
+    // only) for a join eval site, and only baserels count as sources so
+    // rearranged outer joins stay legal.
+    for i in 0..run.root.placeholder_list.len() {
+        let id = run.root.placeholder_list[i];
+        let ph_lateral = relids_copy(mcx, &run.root.phinfo(id).ph_lateral);
+        if relids_is_empty(&ph_lateral) {
+            continue;
+        }
+        found_laterals = true;
+        let eval_at = relids_copy(mcx, &run.root.phinfo(id).ph_eval_at);
+        let lateral_refs = relids_intersect(mcx, &ph_lateral, &run.root.all_baserels);
+        debug_assert!(!relids_is_empty(&lateral_refs));
+        if let Some(varno) = relids_singleton_member(&eval_at) {
+            let rel = find_base_rel(&run.root, varno);
+            let cur = run.root.rel_mut(rel).direct_lateral_relids.take();
+            run.root.rel_mut(rel).direct_lateral_relids = relids_union(mcx, &cur, &lateral_refs);
+            let cur = run.root.rel_mut(rel).lateral_relids.take();
+            run.root.rel_mut(rel).lateral_relids = relids_union(mcx, &cur, &lateral_refs);
+        } else {
+            for varno in relids_members(&eval_at) {
+                // Outer-join relids in eval_at have no RelOptInfo slot
+                // (find_base_rel_ignore_join).
+                let Some(rel) = run.root.simple_rel_array[varno as usize] else {
+                    continue;
+                };
+                let cur = run.root.rel_mut(rel).lateral_relids.take();
+                run.root.rel_mut(rel).lateral_relids = relids_union(mcx, &cur, &lateral_refs);
+            }
+        }
     }
 
     if !found_laterals {
