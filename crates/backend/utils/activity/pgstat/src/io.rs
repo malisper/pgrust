@@ -1,7 +1,7 @@
 // pgstat_io.c — per-backend pending IO matrix, flush into the per-BackendType
 // shared table, tracked-combination predicates.
 
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use std::sync::Mutex;
 
 use types_core::{BackendType, TimestampTz, BACKEND_NUM_TYPES};
@@ -99,21 +99,33 @@ pub const PENDING_IO_ZERO: PgStat_PendingIO = PgStat_PendingIO {
 
 static SHARED_IO: Mutex<PgStat_IO> = Mutex::new(IO_STATS_ZERO);
 
+pub(crate) struct PendingIoBlock {
+    pub(crate) io: PgStat_PendingIO,
+    pub(crate) backend: PgStat_PendingIO,
+    pub(crate) have_iostats: bool,
+    pub(crate) backend_has_iostats: bool,
+}
+
 thread_local! {
-    // UnsafeCell, not RefCell: the per-buffer-hit count sits on the M2/M4 pin
-    // path where C pays a bare array add; every access is a leaf (no callback
-    // escapes with_pending_io).
-    static PENDING_IO_STATS: core::cell::UnsafeCell<PgStat_PendingIO> =
-        const { core::cell::UnsafeCell::new(PENDING_IO_ZERO) };
-    static HAVE_IOSTATS: Cell<bool> = const { Cell::new(false) };
+    // One UnsafeCell block: the per-buffer-hit count sits on the M2/M4 pin
+    // path where C pays bare adds on plain globals; a single TLS access
+    // covers both matrices and both flags. Every access is a leaf (no
+    // callback escapes with_pending_block).
+    static PENDING_IO_BLOCK: core::cell::UnsafeCell<PendingIoBlock> =
+        const { core::cell::UnsafeCell::new(PendingIoBlock {
+            io: PENDING_IO_ZERO,
+            backend: PENDING_IO_ZERO,
+            have_iostats: false,
+            backend_has_iostats: false,
+        }) };
     static SNAPSHOT_IO: RefCell<Option<PgStat_IO>> = const { RefCell::new(None) };
 }
 
 #[inline(always)]
-fn with_pending_io<R>(f: impl FnOnce(&mut PgStat_PendingIO) -> R) -> R {
+pub(crate) fn with_pending_block<R>(f: impl FnOnce(&mut PendingIoBlock) -> R) -> R {
     // SAFETY: thread-local; every caller passes a closure that neither
     // re-enters this module nor stores the reference (single-entry leaf).
-    PENDING_IO_STATS.with(|s| f(unsafe { &mut *s.get() }))
+    PENDING_IO_BLOCK.with(|s| f(unsafe { &mut *s.get() }))
 }
 
 pub fn pgstat_bktype_io_stats_valid(backend_io: &PgStat_BktypeIO, bktype: BackendType) -> bool {
@@ -179,12 +191,17 @@ pub fn pgstat_count_io_op(
             || pgstat_tracks_io_op(miscinit::GetMyBackendType(), io_object, io_context, io_op)
     );
 
-    with_pending_io(|pending| {
-        pending.counts[o][c][p] += cnt as i64;
-        pending.bytes[o][c][p] += bytes;
+    let track_backend = crate::backend::pgstat_tracks_backend_bktype(miscinit::GetMyBackendType());
+    with_pending_block(|blk| {
+        blk.io.counts[o][c][p] += cnt as i64;
+        blk.io.bytes[o][c][p] += bytes;
+        blk.have_iostats = true;
+        if track_backend {
+            blk.backend.counts[o][c][p] += cnt as i64;
+            blk.backend.bytes[o][c][p] += bytes;
+            blk.backend_has_iostats = true;
+        }
     });
-    crate::backend::pgstat_count_backend_io_op(io_object, io_context, io_op, cnt, bytes);
-    HAVE_IOSTATS.with(|f| f.set(true));
     pending::pgstat_report_fixed_set();
 }
 
@@ -221,10 +238,15 @@ pub fn pgstat_count_io_op_time(
             }
         }
         let (o, c, p) = (io_object as usize, io_context as usize, io_op as usize);
-        with_pending_io(|pending| {
-            pending.pending_times_ns[o][c][p] += elapsed_ns;
+        let track_backend =
+            crate::backend::pgstat_tracks_backend_bktype(miscinit::GetMyBackendType());
+        with_pending_block(|blk| {
+            blk.io.pending_times_ns[o][c][p] += elapsed_ns;
+            if track_backend {
+                blk.backend.pending_times_ns[o][c][p] += elapsed_ns;
+                blk.backend_has_iostats = true;
+            }
         });
-        crate::backend::pgstat_count_backend_io_op_time(io_object, io_context, io_op, elapsed_ns);
     }
     pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
 }
@@ -260,13 +282,14 @@ pub fn pgstat_flush_io(nowait: bool) {
 }
 
 pub(crate) fn pgstat_io_flush_cb(_nowait: bool) -> bool {
-    if !HAVE_IOSTATS.with(|f| f.get()) {
+    if !with_pending_block(|blk| blk.have_iostats) {
         return false;
     }
     let bktype = miscinit::GetMyBackendType() as usize;
-    with_pending_io(|pending| {
+    with_pending_block(|blk| {
         let mut shared = SHARED_IO.lock().unwrap();
         let dst = &mut shared.stats[bktype];
+        let pending = &mut blk.io;
         for o in 0..IOOBJECT_NUM_TYPES {
             for c in 0..IOCONTEXT_NUM_TYPES {
                 for p in 0..IOOP_NUM_TYPES {
@@ -277,8 +300,8 @@ pub(crate) fn pgstat_io_flush_cb(_nowait: bool) -> bool {
             }
         }
         *pending = PENDING_IO_ZERO;
+        blk.have_iostats = false;
     });
-    HAVE_IOSTATS.with(|f| f.set(false));
     false
 }
 
@@ -462,9 +485,9 @@ pub fn io_op_from_u32(v: u32) -> IOOp {
 }
 
 pub fn pgstat_have_pending_io() -> bool {
-    HAVE_IOSTATS.with(|f| f.get())
+    with_pending_block(|blk| blk.have_iostats)
 }
 
 pub fn pgstat_pending_io() -> PgStat_PendingIO {
-    with_pending_io(|pending| *pending)
+    with_pending_block(|blk| blk.io)
 }
