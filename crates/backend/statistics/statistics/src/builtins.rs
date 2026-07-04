@@ -145,14 +145,49 @@ fn fc_pg_mcv_list_items(
     Ok(srf.finish(fcinfo))
 }
 
+#[cold]
+fn cannot_accept(typname: &'static str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!("cannot accept a value of type {typname}"))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+macro_rules! fc_reject {
+    ($($fname:ident: $typname:literal;)*) => {$(
+        fn $fname(_f: Option<&mut FmgrInfo>, _fc: &mut Fcinfo) -> PgResult<Datum> {
+            Err(cannot_accept($typname))
+        }
+    )*};
+}
+
+fc_reject! {
+    fc_pg_ndistinct_in: "pg_ndistinct";
+    fc_pg_ndistinct_recv: "pg_ndistinct";
+    fc_pg_dependencies_in: "pg_dependencies";
+    fc_pg_dependencies_recv: "pg_dependencies";
+    fc_pg_mcv_list_in: "pg_mcv_list";
+    fc_pg_mcv_list_recv: "pg_mcv_list";
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, retset: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset, func }
 }
 
 pub static STATISTICS_BUILTINS: &[FmgrBuiltin] = &[
+    b(3355, "pg_ndistinct_in", 1, false, fc_pg_ndistinct_in),
     b(3356, "pg_ndistinct_out", 1, false, fc_pg_ndistinct_out),
+    b(3357, "pg_ndistinct_recv", 1, false, fc_pg_ndistinct_recv),
+    b(3358, "pg_ndistinct_send", 1, false, varlena::builtins::fc_byteasend),
+    b(3404, "pg_dependencies_in", 1, false, fc_pg_dependencies_in),
     b(3405, "pg_dependencies_out", 1, false, fc_pg_dependencies_out),
+    b(3406, "pg_dependencies_recv", 1, false, fc_pg_dependencies_recv),
+    b(3407, "pg_dependencies_send", 1, false, varlena::builtins::fc_byteasend),
     b(3427, "pg_stats_ext_mcvlist_items", 1, true, fc_pg_mcv_list_items),
+    b(5018, "pg_mcv_list_in", 1, false, fc_pg_mcv_list_in),
+    b(5019, "pg_mcv_list_out", 1, false, varlena::builtins::fc_byteaout),
+    b(5020, "pg_mcv_list_recv", 1, false, fc_pg_mcv_list_recv),
+    b(5021, "pg_mcv_list_send", 1, false, varlena::builtins::fc_byteasend),
 ];
 
 pub fn register_builtins() {
