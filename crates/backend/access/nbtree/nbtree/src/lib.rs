@@ -58,12 +58,11 @@ fn non_btree_opaque() -> ! {
     panic!("nbtree entry point reached with a non-btree scan opaque")
 }
 
-pub(crate) fn check_for_interrupts() {
+pub(crate) fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        if let Err(e) = postgres_seams::check_for_interrupts::call() {
-            std::panic::panic_any(e);
-        }
+        return postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 macro_rules! split_scan {
