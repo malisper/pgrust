@@ -12,6 +12,7 @@ partdesc = { path = "../../../partitioning/partdesc" }
 pg_depend = { path = "../../../catalog/pg_depend" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 catcache = { path = "../../cache/catcache" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../format_type" }
