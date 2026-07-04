@@ -360,6 +360,7 @@ pub fn init_seams() {
     use guc_seams as s;
 
     s::new_guc_nest_level::set(NewGUCNestLevel);
+    s::guc_check_errdetail::set(|detail| GUC_check_errdetail(detail));
     s::at_eoxact_guc::set(|is_commit, nest_level| {
         AtEOXact_GUC(is_commit, nest_level);
         Ok(())
