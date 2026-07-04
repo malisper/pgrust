@@ -104,6 +104,10 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
             let name = object.as_string().expect("extension name is a String node").sval;
             format!("extension \"{name}\" does not exist, skipping")
         }
+        ObjectType::OBJECT_EVENT_TRIGGER => {
+            let name = object.as_string().expect("event trigger name is a String node").sval;
+            format!("event trigger \"{name}\" does not exist, skipping")
+        }
         ObjectType::OBJECT_RULE | ObjectType::OBJECT_TRIGGER => {
             let names = object.as_list().expect("relation-attached object is a name list");
             match owningrel_does_not_exist_skipping(names)? {

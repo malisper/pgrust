@@ -1,4 +1,5 @@
 use mcx::Mcx;
+use pg_depend::ObjectAddress;
 use tcop_dest::DestReceiver;
 use types_error::PgResult;
 use types_nodes::node_tree::Node;
@@ -9,7 +10,8 @@ use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
 use types_portal::{ParamListHandle, QueryCompletion, QueryEnvHandle};
 use utility_seams::{
-    ProcessUtilityContext, PROCESS_UTILITY_QUERY_NONATOMIC, PROCESS_UTILITY_TOPLEVEL,
+    ProcessUtilityContext, PROCESS_UTILITY_QUERY_NONATOMIC, PROCESS_UTILITY_SUBCOMMAND,
+    PROCESS_UTILITY_TOPLEVEL,
 };
 
 use crate::classify::{
@@ -25,11 +27,22 @@ use crate::handler_gap;
 // pg_authid.dat oid 4544.
 const ROLE_PG_CHECKPOINT: ::types_core::Oid = 4544;
 
+const INVALID_OBJECT_ADDRESS: ObjectAddress =
+    ObjectAddress::set(types_core::InvalidOid, types_core::InvalidOid);
+
 #[inline]
 fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::CommandTag) {
     if let Some(qc) = qc.as_mut() {
         qc.commandTag = tag;
         qc.nprocessed = 0;
+    }
+}
+
+// Uncollected command types stay loud instead of silently missing from
+// pg_event_trigger_ddl_commands.
+fn collect_gap(what: &str) {
+    if event_trigger::EventTriggerCollectionActive() {
+        panic!("unported: {what} command collection (active ddl_command_end/sql_drop state)");
     }
 }
 
@@ -122,7 +135,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
         parsetree,
         pstmt,
         source_text,
-        is_top_level,
+        context,
         params,
         query_env,
         dest,
@@ -159,12 +172,13 @@ fn dispatch_switch<'mcx>(
     parsetree: Node<'_>,
     pstmt: &PlannedStmt<'_>,
     source_text: &str,
-    is_top_level: bool,
+    context: ProcessUtilityContext,
     params: ParamListHandle,
     query_env: QueryEnvHandle,
     dest: &mut DestReceiver<'mcx>,
     qc: &mut Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
+    let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
     use NodeTag::*;
     match parsetree.node_tag() {
         T_TransactionStmt => {
@@ -312,7 +326,13 @@ fn dispatch_switch<'mcx>(
 
         T_GrantStmt => {
             let stmt = parsetree.as_grant_stmt().unwrap();
-            aclchk::ExecuteGrantStmt(mcx, stmt)?;
+            if event_trigger::EventTriggerSupportsObjectType(stmt.objtype) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                aclchk::ExecuteGrantStmt(mcx, stmt)?;
+            }
         }
         T_GrantRoleStmt => {
             let stmt = parsetree.as_grant_role_stmt().unwrap();
@@ -397,12 +417,6 @@ fn dispatch_switch<'mcx>(
                 .expect("ClusterStmt");
             commands_cluster::cluster(mcx, stmt, is_top_level)?;
         }
-        T_ReindexStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::ReindexStmt>()
-                .expect("ReindexStmt");
-            indexcmds::ExecReindex(mcx, stmt, is_top_level)?;
-        }
         T_VacuumStmt => {
             // ExecVacuum's VACUUM half lives in commands_vacuum, the ANALYZE
             // half in commands_analyze (each panics on the other's lane).
@@ -436,31 +450,27 @@ fn dispatch_switch<'mcx>(
             discard::DiscardCommand(parsetree.as_discard_stmt().unwrap(), is_top_level)?;
         }
 
-        T_CreatePolicyStmt => {
-            let stmt = parsetree.as_create_policy_stmt().unwrap();
-            // Retention contract as unify_stmt_lifetime.
+        // No event triggers on event triggers.
+        T_CreateEventTrigStmt => {
+            let stmt = parsetree.as_create_event_trig_stmt().unwrap();
             let stmt = unsafe {
                 core::mem::transmute::<
-                    &types_nodes::parsenodes::CreatePolicyStmt<'_>,
-                    &types_nodes::parsenodes::CreatePolicyStmt<'mcx>,
+                    &types_nodes::parsenodes::CreateEventTrigStmt<'_>,
+                    &types_nodes::parsenodes::CreateEventTrigStmt<'mcx>,
                 >(stmt)
             };
-            commands_policy::CreatePolicy(mcx, stmt)?;
+            event_trigger::CreateEventTrigger(mcx, stmt)?;
         }
-        T_AlterPolicyStmt => {
-            let stmt = parsetree.as_alter_policy_stmt().unwrap();
-            // Retention contract as unify_stmt_lifetime.
+        T_AlterEventTrigStmt => {
+            let stmt = parsetree.as_alter_event_trig_stmt().unwrap();
             let stmt = unsafe {
                 core::mem::transmute::<
-                    &types_nodes::parsenodes::AlterPolicyStmt<'_>,
-                    &types_nodes::parsenodes::AlterPolicyStmt<'mcx>,
+                    &types_nodes::parsenodes::AlterEventTrigStmt<'_>,
+                    &types_nodes::parsenodes::AlterEventTrigStmt<'mcx>,
                 >(stmt)
             };
-            commands_policy::AlterPolicy(mcx, stmt)?;
+            event_trigger::AlterEventTrigger(mcx, stmt)?;
         }
-
-        T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
-        T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
         T_CreateRoleStmt => {
             let stmt = parsetree.as_create_role_stmt().unwrap();
@@ -521,42 +531,112 @@ fn dispatch_switch<'mcx>(
         }
 
         T_DropStmt => {
-            use types_nodes::parsenodes::ObjectType::*;
             let stmt = parsetree.as_drop_stmt().unwrap();
-            // Retention contract as unify_stmt_lifetime: nothing derived from
-            // the statement arena escapes the utility call.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::DropStmt<'_>,
-                    &types_nodes::parsenodes::DropStmt<'mcx>,
-                >(stmt)
-            };
-            match stmt.removeType {
-                OBJECT_INDEX if stmt.concurrent => {
-                    xact::PreventInTransactionBlock(is_top_level, "DROP INDEX CONCURRENTLY")?;
-                    tablecmds::RemoveRelations(mcx, stmt)?;
-                }
-                OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
-                | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
-                // DROP POLICY stays specialized: dropcmds' get_object_address
-                // has no OBJECT_POLICY arm yet (C routes it through RemoveObjects).
-                OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
-                _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
+            if event_trigger::EventTriggerSupportsObjectType(stmt.removeType) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                exec_drop_stmt(mcx, parsetree, is_top_level)?;
             }
         }
 
         T_CommentStmt => {
             let stmt = parsetree.as_comment_stmt().unwrap();
-            // Retention contract as unify_stmt_lifetime.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::CommentStmt<'_>,
-                    &types_nodes::parsenodes::CommentStmt<'mcx>,
-                >(stmt)
-            };
-            commands_comment::CommentObject(mcx, stmt)?;
+            if event_trigger::EventTriggerSupportsObjectType(stmt.objtype) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                exec_comment_stmt(mcx, parsetree)?;
+            }
         }
 
+        T_RenameStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::RenameStmt>()
+                .expect("RenameStmt");
+            if event_trigger::EventTriggerSupportsObjectType(stmt.renameType) {
+                process_utility_slow(
+                    mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+                )?;
+            } else {
+                exec_rename_stmt(mcx, parsetree)?;
+            }
+        }
+
+        // All other statement types have event trigger support.
+        _ => process_utility_slow(
+            mcx, parsetree, pstmt, source_text, context, params, query_env, qc,
+        )?,
+    }
+    Ok(())
+}
+
+struct EventTriggerCleanup(bool);
+impl Drop for EventTriggerCleanup {
+    fn drop(&mut self) {
+        if self.0 {
+            event_trigger::EventTriggerEndCompleteQuery();
+        }
+    }
+}
+
+// ProcessUtilitySlow (utility.c): the event-trigger-fenced DDL fan-out.
+#[allow(clippy::too_many_arguments)]
+fn process_utility_slow<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: Node<'_>,
+    pstmt: &PlannedStmt<'_>,
+    source_text: &str,
+    context: ProcessUtilityContext,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
+    qc: &mut Option<&mut QueryCompletion>,
+) -> PgResult<()> {
+    let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
+    let is_complete_query = context != PROCESS_UTILITY_SUBCOMMAND;
+    let tag = CreateCommandTag(parsetree);
+
+    let need_cleanup = is_complete_query && event_trigger::EventTriggerBeginCompleteQuery(mcx)?;
+    // Drop-guard = C's PG_FINALLY around EventTriggerEndCompleteQuery.
+    let _cleanup = EventTriggerCleanup(need_cleanup);
+
+    if is_complete_query {
+        event_trigger::EventTriggerDDLCommandStart(mcx, tag)?;
+    }
+
+    let address = slow_switch(
+        mcx, parsetree, pstmt, source_text, context, is_top_level, params, query_env, qc,
+    )?;
+
+    if let Some(address) = address {
+        event_trigger::EventTriggerCollectSimpleCommand(address, INVALID_OBJECT_ADDRESS, tag);
+    }
+
+    if is_complete_query {
+        event_trigger::EventTriggerSQLDrop(mcx, tag)?;
+        event_trigger::EventTriggerDDLCommandEnd(mcx, tag)?;
+    }
+    Ok(())
+}
+
+// Ok(Some(address)) feeds the shared EventTriggerCollectSimpleCommand tail;
+// Ok(None) = C's `commandCollected = true` arms.
+#[allow(clippy::too_many_arguments)]
+fn slow_switch<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: Node<'_>,
+    pstmt: &PlannedStmt<'_>,
+    source_text: &str,
+    _context: ProcessUtilityContext,
+    is_top_level: bool,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
+    qc: &mut Option<&mut QueryCompletion>,
+) -> PgResult<Option<ObjectAddress>> {
+    use NodeTag::*;
+    match parsetree.node_tag() {
         T_CreateSchemaStmt => {
             let stmt = parsetree.as_create_schema_stmt().unwrap();
             // Retention contract as unify_stmt_lifetime.
@@ -566,8 +646,158 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::parsenodes::CreateSchemaStmt<'mcx>,
                 >(stmt)
             };
-            schemacmds::CreateSchemaCommand(mcx, stmt)?;
-}
+            let nsp_oid = schemacmds::CreateSchemaCommand(mcx, stmt)?;
+            // C collects inside CreateSchemaCommand ahead of its element
+            // subcommands; the port rejects schema elements, so collecting
+            // here is order-identical.
+            event_trigger::EventTriggerCollectSimpleCommand(
+                ObjectAddress::set(NAMESPACE_RELATION_ID, nsp_oid),
+                INVALID_OBJECT_ADDRESS,
+                CreateCommandTag(parsetree),
+            );
+            Ok(None)
+        }
+
+        T_CreateStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let mut stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
+            let mut table_rv: Option<&'mcx types_nodes::primnodes::RangeVar<'mcx>> = None;
+            let mut i = 0;
+            while i < stmts.len() {
+                let stmt = stmts.nth(i);
+                i += 1;
+                match stmt.node_tag() {
+                    T_CreateStmt => {
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateStmt>()
+                            .expect("CreateStmt");
+                        table_rv = cstmt.relation;
+                        let relid = tablecmds::DefineRelation(
+                            mcx,
+                            cstmt,
+                            types_rel::RELKIND_RELATION,
+                            types_core::InvalidOid,
+                            source_text,
+                        )?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            ObjectAddress::set(types_core::RELATION_RELATION_ID, relid),
+                            INVALID_OBJECT_ADDRESS,
+                            CreateCommandTag(stmt),
+                        );
+                        xact::CommandCounterIncrement()?;
+                        // toast_options: stmt.options is nil (gated in
+                        // DefineRelation), so transformRelOptions yields 0.
+                        catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
+                    }
+                    T_TableLikeClause => {
+                        // Delayed LIKE expansion: sub-statements run before
+                        // any remaining actions (C list_concat(morestmts, stmts)).
+                        let tlc = stmt
+                            .as_variant::<types_nodes::rawnodes::TableLikeClause>()
+                            .expect("TableLikeClause");
+                        let rv = table_rv.expect("LIKE expansion before CreateStmt");
+                        let morestmts = parse_utilcmd::expandTableLikeClause(mcx, rv, tlc)?;
+                        for (j, m) in morestmts.iter().enumerate() {
+                            stmts.insert_nth(mcx, i + j, m)?;
+                        }
+                    }
+                    T_AlterTableStmt => {
+                        let atstmt = stmt
+                            .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+                            .expect("AlterTableStmt");
+                        exec_alter_table_stmt(mcx, atstmt, stmt, source_text)?;
+                    }
+                    T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
+                    T_CommentStmt => {
+                        collect_gap("COMMENT (in CREATE TABLE)");
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::parsenodes::CommentStmt>()
+                            .expect("CommentStmt");
+                        commands_comment::CommentObject(mcx, cstmt)?;
+                    }
+                    // C recurses through ProcessUtility for the serial
+                    // blist/alist statements; the wrapper adds nothing here.
+                    T_CreateSeqStmt => {
+                        let seqstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+                            .expect("CreateSeqStmt");
+                        let seqoid = sequence::DefineSequence(mcx, seqstmt)?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid),
+                            INVALID_OBJECT_ADDRESS,
+                            CreateCommandTag(stmt),
+                        );
+                    }
+                    T_AlterSeqStmt => {
+                        collect_gap("ALTER SEQUENCE (in CREATE TABLE)");
+                        let altstmt = stmt
+                            .as_variant::<types_nodes::AlterSeqStmt>()
+                            .expect("AlterSeqStmt");
+                        sequence::AlterSequence(mcx, altstmt)?;
+                    }
+                    _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
+                }
+                if i < stmts.len() {
+                    xact::CommandCounterIncrement()?;
+                }
+            }
+            // The multiple commands generated here are stashed individually.
+            Ok(None)
+        }
+
+        T_AlterTableStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+                .expect("AlterTableStmt");
+            // Retention contract as unify_stmt_lifetime: nothing derived from
+            // the statement arena escapes the utility call.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterTableStmt<'_>,
+                    &types_nodes::parsenodes::AlterTableStmt<'mcx>,
+                >(stmt)
+            };
+            exec_alter_table_stmt(mcx, stmt, parsetree, source_text)?;
+            // ALTER TABLE stashes commands internally.
+            Ok(None)
+        }
+
+        T_IndexStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
+            // CREATE INDEX collects itself ahead of any ALTER TABLE subcmds.
+            Ok(None)
+        }
+
+        T_CreateTrigStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
+                .expect("CreateTrigStmt");
+            // C: address = CreateTrigger; the ported form returns no address.
+            collect_gap("CREATE TRIGGER");
+            trigger::CreateTrigger(mcx, stmt, source_text)?;
+            Ok(None)
+        }
+
+        T_ReindexStmt => {
+            // C: reindex_index collects via EventTriggerCollectSimpleCommand.
+            collect_gap("REINDEX");
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::ReindexStmt>()
+                .expect("ReindexStmt");
+            indexcmds::ExecReindex(mcx, stmt, is_top_level)?;
+            Ok(None)
+        }
 
         T_CreateFunctionStmt => {
             let stmt = parsetree.as_create_function_stmt().unwrap();
@@ -578,7 +808,8 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::parsenodes::CreateFunctionStmt<'mcx>,
                 >(stmt)
             };
-            functioncmds::CreateFunction(mcx, stmt)?;
+            let address = functioncmds::CreateFunction(mcx, stmt)?;
+            Ok(Some(address))
         }
 
         T_CreateStatsStmt => {
@@ -617,198 +848,42 @@ fn dispatch_switch<'mcx>(
             }
             // transformStatsStmt is a no-op for plain column references; the
             // expression lane panics inside CreateStatistics.
+            collect_gap("CREATE STATISTICS");
             statscmds::CreateStatistics(mcx, stmt)?;
-        }
-
-        T_IndexStmt => {
-            // Retention contract as unify_stmt_lifetime: the statement arena
-            // outlives the utility call; nothing derived escapes it.
-            let stmt_node =
-                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
-        }
-
-        T_CreateTrigStmt => {
-            // Retention contract as unify_stmt_lifetime: the statement arena
-            // outlives the utility call; nothing derived escapes it.
-            let stmt_node =
-                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
-                .expect("CreateTrigStmt");
-            trigger::CreateTrigger(mcx, stmt, source_text)?;
-        }
-
-        T_AlterTableStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
-                .expect("AlterTableStmt");
-            // Retention contract as unify_stmt_lifetime: nothing derived from
-            // the statement arena escapes the utility call.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::AlterTableStmt<'_>,
-                    &types_nodes::parsenodes::AlterTableStmt<'mcx>,
-                >(stmt)
-            };
-            exec_alter_table_stmt(mcx, stmt, source_text)?;
+            Ok(None)
         }
 
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
                 .expect("RenameStmt");
-            match stmt.renameType {
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
-                    tablecmds::RenameRelation(mcx, stmt)?;
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
-                    tablecmds::renameatt(mcx, stmt)?;
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_POLICY => {
-                    // Retention contract as unify_stmt_lifetime.
-                    let stmt = unsafe {
-                        core::mem::transmute::<
-                            &types_nodes::parsenodes::RenameStmt<'_>,
-                            &types_nodes::parsenodes::RenameStmt<'mcx>,
-                        >(stmt)
-                    };
-                    commands_policy::rename_policy(mcx, stmt)?;
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
-                    trigger::renametrig(mcx, stmt)?;
-                }
-                types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
-                    tablecmds::RenameConstraint(mcx, stmt)?;
-                }
-                other => panic!("unported: ExecRenameStmt {other:?}"),
-            }
+            // C: address = ExecRenameStmt; the ported renames return no
+            // address yet.
+            collect_gap("RENAME");
+            exec_rename_stmt_inner(mcx, stmt)?;
+            Ok(None)
         }
 
-        T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
-        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
-
-        // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
-        // LABEL fast paths and the event-trigger-fenced DDL fan-out.
-        T_CreateStmt => {
-            // Retention contract as unify_stmt_lifetime: the statement arena
-            // outlives the utility call; nothing derived escapes it.
-            let stmt_node =
-                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let mut stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
-            let mut table_rv: Option<&'mcx types_nodes::primnodes::RangeVar<'mcx>> = None;
-            let mut i = 0;
-            while i < stmts.len() {
-                let stmt = stmts.nth(i);
-                i += 1;
-                match stmt.node_tag() {
-                    T_CreateStmt => {
-                        let cstmt = stmt
-                            .as_variant::<types_nodes::rawnodes::CreateStmt>()
-                            .expect("CreateStmt");
-                        table_rv = cstmt.relation;
-                        let relid = tablecmds::DefineRelation(
-                            mcx,
-                            cstmt,
-                            types_rel::RELKIND_RELATION,
-                            types_core::InvalidOid,
-                            source_text,
-                        )?;
-                        xact::CommandCounterIncrement()?;
-                        // toast_options: stmt.options is nil (gated in
-                        // DefineRelation), so transformRelOptions yields 0.
-                        catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
-                    }
-                    T_TableLikeClause => {
-                        // Delayed LIKE expansion: sub-statements run before
-                        // any remaining actions (C list_concat(morestmts, stmts)).
-                        let tlc = stmt
-                            .as_variant::<types_nodes::rawnodes::TableLikeClause>()
-                            .expect("TableLikeClause");
-                        let rv = table_rv.expect("LIKE expansion before CreateStmt");
-                        let morestmts = parse_utilcmd::expandTableLikeClause(mcx, rv, tlc)?;
-                        for (j, m) in morestmts.iter().enumerate() {
-                            stmts.insert_nth(mcx, i + j, m)?;
-                        }
-                    }
-                    T_AlterTableStmt => {
-                        let atstmt = stmt
-                            .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
-                            .expect("AlterTableStmt");
-                        exec_alter_table_stmt(mcx, atstmt, source_text)?;
-                    }
-                    T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
-                    T_CommentStmt => {
-                        let cstmt = stmt
-                            .as_variant::<types_nodes::parsenodes::CommentStmt>()
-                            .expect("CommentStmt");
-                        commands_comment::CommentObject(mcx, cstmt)?;
-                    }
-                    // C recurses through ProcessUtility for the serial
-                    // blist/alist statements; the wrapper adds nothing here.
-                    T_CreateSeqStmt => {
-                        let seqstmt = stmt
-                            .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
-                            .expect("CreateSeqStmt");
-                        sequence::DefineSequence(mcx, seqstmt)?;
-                    }
-                    T_AlterSeqStmt => {
-                        let altstmt = stmt
-                            .as_variant::<types_nodes::AlterSeqStmt>()
-                            .expect("AlterSeqStmt");
-                        sequence::AlterSequence(mcx, altstmt)?;
-                    }
-                    _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
-                }
-                if i < stmts.len() {
-                    xact::CommandCounterIncrement()?;
-                }
-            }
-        }
-        T_DefineStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::DefineStmt>()
-                .expect("DefineStmt");
-            match stmt.kind {
-                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
-                    debug_assert!(!stmt.oldstyle);
-                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
-                }
-                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
-            }
+        T_DropStmt => {
+            exec_drop_stmt(mcx, parsetree, is_top_level)?;
+            // No commands stashed for DROP.
+            Ok(None)
         }
 
-        T_CreateOpClassStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
-                .expect("CreateOpClassStmt");
-            opclasscmds::DefineOpClass(mcx, stmt)?;
+        T_CommentStmt => {
+            // C: address = CommentObject; the ported CommentObject returns
+            // no address yet.
+            collect_gap("COMMENT");
+            exec_comment_stmt(mcx, parsetree)?;
+            Ok(None)
         }
 
-        T_CreateOpFamilyStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
-                .expect("CreateOpFamilyStmt");
-            opclasscmds::DefineOpFamily(mcx, stmt)?;
-        }
-
-        T_AlterOpFamilyStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
-                .expect("AlterOpFamilyStmt");
-            opclasscmds::AlterOpFamily(mcx, stmt)?;
-        }
-
-        T_AlterOperatorStmt => {
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
-                .expect("AlterOperatorStmt");
-            operatorcmds::AlterOperator(mcx, stmt)?;
+        T_GrantStmt => {
+            // C: EventTriggerCollectGrant inside ExecGrantStmt_oids.
+            collect_gap("GRANT");
+            let stmt = parsetree.as_grant_stmt().unwrap();
+            aclchk::ExecuteGrantStmt(mcx, stmt)?;
+            Ok(None)
         }
 
         T_CreateTableAsStmt => {
@@ -819,6 +894,9 @@ fn dispatch_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
                 .expect("CreateTableAsStmt");
+            // C: address = ExecCreateTableAs; the ported form returns no
+            // address yet.
+            collect_gap("CREATE TABLE AS / CREATE MATERIALIZED VIEW");
             commands_createas::ExecCreateTableAs(
                 mcx,
                 stmt,
@@ -827,16 +905,23 @@ fn dispatch_switch<'mcx>(
                 query_env,
                 qc.as_deref_mut(),
             )?;
+            Ok(None)
         }
         T_RefreshMatViewStmt => {
-            // C wraps this in EventTriggerInhibitCommandCollection; no event
-            // trigger surface exists.
+            // REFRESH CONCURRENTLY executes DDL internally; inhibit command
+            // collection around it exactly as C.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
                 .expect("RefreshMatViewStmt");
-            commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut())?;
+            collect_gap("REFRESH MATERIALIZED VIEW");
+            event_trigger::EventTriggerInhibitCommandCollection();
+            let res =
+                commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut());
+            event_trigger::EventTriggerUndoInhibitCommandCollection();
+            res?;
+            Ok(None)
         }
         T_CreateSeqStmt => {
             let stmt_node =
@@ -844,30 +929,18 @@ fn dispatch_switch<'mcx>(
             let seqstmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
                 .expect("CreateSeqStmt");
-            sequence::DefineSequence(mcx, seqstmt)?;
+            let seqoid = sequence::DefineSequence(mcx, seqstmt)?;
+            Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
         }
         T_AlterSeqStmt => {
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let altstmt =
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
+            // C: address = AlterSequence; the ported form returns no address.
+            collect_gap("ALTER SEQUENCE");
             sequence::AlterSequence(mcx, altstmt)?;
-        }
-        T_CreateExtensionStmt => {
-            // Retention contract as unify_stmt_lifetime.
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::CreateExtensionStmt>()
-                .expect("CreateExtensionStmt");
-            extension::CreateExtension(mcx, stmt)?;
-        }
-        T_AlterExtensionStmt => {
-            // Retention contract as unify_stmt_lifetime.
-            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::AlterExtensionStmt>()
-                .expect("AlterExtensionStmt");
-            extension::ExecAlterExtensionStmt(mcx, stmt)?;
+            Ok(None)
         }
         T_CreateDomainStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
@@ -882,20 +955,23 @@ fn dispatch_switch<'mcx>(
                 mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
                 pstate.p_sourcetext = Some(v.leak());
             }
-            typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
+            let address = typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
             parser_small1::free_parsestate(pstate)?;
+            Ok(Some(address))
         }
         T_CreateEnumStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_create_enum_stmt().expect("CreateEnumStmt");
-            typecmds::DefineEnum(mcx, stmt)?;
+            let address = typecmds::DefineEnum(mcx, stmt)?;
+            Ok(Some(address))
         }
         T_AlterEnumStmt => {
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
-            typecmds::AlterEnum(mcx, stmt)?;
+            let address = typecmds::AlterEnum(mcx, stmt)?;
+            Ok(Some(address))
         }
         T_RuleStmt => {
             // Retention contract as unify_stmt_lifetime.
@@ -908,7 +984,8 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::rawnodes::RuleStmt<'mcx>,
                 >(stmt)
             };
-            rewrite_define::DefineRule(mcx, stmt, source_text)?;
+            let address = rewrite_define::DefineRule(mcx, stmt, source_text)?;
+            Ok(Some(address))
         }
         T_ViewStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
@@ -922,15 +999,216 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::rawnodes::ViewStmt<'mcx>,
                 >(stmt)
             };
-            commands_view::DefineView(
+            event_trigger::EventTriggerAlterTableStart(CreateCommandTag(parsetree));
+            let view_oid = commands_view::DefineView(
                 mcx,
                 stmt,
                 source_text,
                 pstmt.stmt_location,
                 pstmt.stmt_len,
             )?;
+            event_trigger::EventTriggerCollectSimpleCommand(
+                ObjectAddress::set(types_core::RELATION_RELATION_ID, view_oid),
+                INVALID_OBJECT_ADDRESS,
+                CreateCommandTag(parsetree),
+            );
+            event_trigger::EventTriggerAlterTableEnd();
+            Ok(None)
         }
-        _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
+        T_CreatePolicyStmt => {
+            let stmt = parsetree.as_create_policy_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatePolicyStmt<'_>,
+                    &types_nodes::parsenodes::CreatePolicyStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = CreatePolicy; the ported form returns no address.
+            collect_gap("CREATE POLICY");
+            commands_policy::CreatePolicy(mcx, stmt)?;
+            Ok(None)
+        }
+        T_AlterPolicyStmt => {
+            let stmt = parsetree.as_alter_policy_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterPolicyStmt<'_>,
+                    &types_nodes::parsenodes::AlterPolicyStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = AlterPolicy; the ported form returns no address.
+            collect_gap("ALTER POLICY");
+            commands_policy::AlterPolicy(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_DefineStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
+                    debug_assert!(!stmt.oldstyle);
+                    // C: address = DefineOperator; the ported form returns no address.
+                    collect_gap("CREATE OPERATOR");
+                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+            }
+            Ok(None)
+        }
+
+        T_CreateOpClassStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
+                .expect("CreateOpClassStmt");
+            // C: address = DefineOpClass; the ported form returns no address.
+            collect_gap("CREATE OPERATOR CLASS");
+            opclasscmds::DefineOpClass(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_CreateOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
+                .expect("CreateOpFamilyStmt");
+            // C: address = DefineOpFamily; the ported form returns no address.
+            collect_gap("CREATE OPERATOR FAMILY");
+            opclasscmds::DefineOpFamily(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_AlterOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
+                .expect("AlterOpFamilyStmt");
+            collect_gap("ALTER OPERATOR FAMILY");
+            opclasscmds::AlterOpFamily(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_AlterOperatorStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
+                .expect("AlterOperatorStmt");
+            collect_gap("ALTER OPERATOR");
+            operatorcmds::AlterOperator(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_CreateExtensionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateExtensionStmt>()
+                .expect("CreateExtensionStmt");
+            // C: address = CreateExtension; the ported form returns no address.
+            collect_gap("CREATE EXTENSION");
+            extension::CreateExtension(mcx, stmt)?;
+            Ok(None)
+        }
+        T_AlterExtensionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterExtensionStmt>()
+                .expect("AlterExtensionStmt");
+            collect_gap("ALTER EXTENSION");
+            extension::ExecAlterExtensionStmt(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
+        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+
+        _ => {
+            handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)");
+        }
+    }
+}
+
+const NAMESPACE_RELATION_ID: types_core::Oid = 2615;
+
+fn exec_drop_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>, is_top_level: bool) -> PgResult<()> {
+    use types_nodes::parsenodes::ObjectType::*;
+    let stmt = parsetree.as_drop_stmt().unwrap();
+    // Retention contract as unify_stmt_lifetime: nothing derived from
+    // the statement arena escapes the utility call.
+    let stmt = unsafe {
+        core::mem::transmute::<
+            &types_nodes::parsenodes::DropStmt<'_>,
+            &types_nodes::parsenodes::DropStmt<'mcx>,
+        >(stmt)
+    };
+    match stmt.removeType {
+        OBJECT_INDEX if stmt.concurrent => {
+            xact::PreventInTransactionBlock(is_top_level, "DROP INDEX CONCURRENTLY")?;
+            tablecmds::RemoveRelations(mcx, stmt)?;
+        }
+        OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
+        | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+        // DROP POLICY stays specialized: dropcmds' get_object_address
+        // has no OBJECT_POLICY arm yet (C routes it through RemoveObjects).
+        OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
+        _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
+    }
+    Ok(())
+}
+
+fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
+    let stmt = parsetree.as_comment_stmt().unwrap();
+    // Retention contract as unify_stmt_lifetime.
+    let stmt = unsafe {
+        core::mem::transmute::<
+            &types_nodes::parsenodes::CommentStmt<'_>,
+            &types_nodes::parsenodes::CommentStmt<'mcx>,
+        >(stmt)
+    };
+    commands_comment::CommentObject(mcx, stmt)
+}
+
+fn exec_rename_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
+    let stmt = parsetree
+        .as_variant::<types_nodes::parsenodes::RenameStmt>()
+        .expect("RenameStmt");
+    exec_rename_stmt_inner(mcx, stmt)
+}
+
+fn exec_rename_stmt_inner<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::RenameStmt<'_>,
+) -> PgResult<()> {
+    match stmt.renameType {
+        types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
+            tablecmds::RenameRelation(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
+            tablecmds::renameatt(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_POLICY => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::RenameStmt<'_>,
+                    &types_nodes::parsenodes::RenameStmt<'mcx>,
+                >(stmt)
+            };
+            commands_policy::rename_policy(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+            trigger::renametrig(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+            tablecmds::RenameConstraint(mcx, stmt)?;
+        }
+        other => panic!("unported: ExecRenameStmt {other:?}"),
     }
     Ok(())
 }
@@ -991,6 +1269,8 @@ fn exec_index_stmt<'mcx>(
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::IndexStmt>()
         .expect("IndexStmt");
+    let tag = CreateCommandTag(stmt_node);
+    event_trigger::EventTriggerAlterTableStart(tag);
     let index_relid = indexcmds::DefineIndex(
         mcx,
         relid,
@@ -1004,6 +1284,14 @@ fn exec_index_stmt<'mcx>(
         false,
         false,
     )?;
+    // Stash CREATE INDEX itself first; any ALTER TABLE-stashed commands must
+    // appear after it.
+    event_trigger::EventTriggerCollectSimpleCommand(
+        ObjectAddress::set(types_core::RELATION_RELATION_ID, index_relid),
+        INVALID_OBJECT_ADDRESS,
+        tag,
+    );
+    event_trigger::EventTriggerAlterTableEnd();
     if let Some(comment) = stmt.idxcomment {
         commands_comment::CreateComments(
             mcx,
@@ -1019,6 +1307,7 @@ fn exec_index_stmt<'mcx>(
 fn exec_alter_table_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &types_nodes::parsenodes::AlterTableStmt<'mcx>,
+    parsetree: Node<'_>,
     source_text: &str,
 ) -> PgResult<()> {
     // DETACH CONCURRENTLY transaction-block fence: unported subtypes
@@ -1026,8 +1315,11 @@ fn exec_alter_table_stmt<'mcx>(
     let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
     let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
     if relid != types_core::InvalidOid {
-        // Event triggers absent by design (EventTriggerAlterTable*).
-        tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
+        event_trigger::EventTriggerAlterTableStart(CreateCommandTag(parsetree));
+        event_trigger::EventTriggerAlterTableRelid(relid);
+        let res = tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text);
+        event_trigger::EventTriggerAlterTableEnd();
+        res?;
     } else {
         elog_seams::ereport_msg::call(
             types_error::NOTICE,

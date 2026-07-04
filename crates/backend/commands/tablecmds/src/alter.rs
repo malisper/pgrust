@@ -467,6 +467,11 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
+            // C threads each ATExec* return address; only the subcmd count is
+            // observable through the ported SRF surface.
+            event_trigger::EventTriggerCollectAlterTableSubcmd(
+                pg_depend::ObjectAddress::set(RELATION_RELATION_ID, tab.relid),
+            );
             rel.close(NoLock)?;
             xact::CommandCounterIncrement()?;
         }

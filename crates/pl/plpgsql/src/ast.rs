@@ -284,6 +284,14 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
     }
 }
 
+// fn_is_trigger; the cache entry must carry trigger-ness so the handler
+// picks the right exec path on cache hits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FnTrigger {
+    NotTrigger,
+    EventTrigger { tg_event_varno: Dno, tg_tag_varno: Dno },
+}
+
 // PLpgSQL_function (phase-1 fields).
 #[derive(Debug)]
 pub struct PlFunction {
@@ -300,6 +308,7 @@ pub struct PlFunction {
     pub fn_retset: bool,
     pub fn_readonly: bool,
     pub fn_prokind: i8,
+    pub fn_is_trigger: FnTrigger,
     pub fn_nargs: i16,
     pub fn_argvarnos: Vec<Dno>,
     pub found_varno: Dno,

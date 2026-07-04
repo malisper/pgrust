@@ -33,6 +33,7 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog = { path = "../../catalog/catalog" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
+event_trigger = { path = "../event_trigger" }
 inval = { path = "../../utils/cache/inval" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 superuser = { path = "../../utils/misc/superuser" }

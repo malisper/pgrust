@@ -1177,6 +1177,57 @@ impl<'mcx> Parser<'mcx> {
             832 => *yyval = YYSTYPE::Ival(CAS_NO_INHERIT),
             833 => *yyval = YYSTYPE::Ival(CAS_NOT_ENFORCED),
             834 => *yyval = YYSTYPE::Ival(CAS_ENFORCED),
+            // CreateEventTrigStmt: CREATE EVENT TRIGGER name ON ColLabel
+            // [WHEN event_trigger_when_list] EXECUTE F_or_P func_name '(' ')'
+            835 | 836 => {
+                let mut n = Node::build::<types_nodes::parsenodes::CreateEventTrigStmt>(mcx)?;
+                n.trigname = Some(view.v(4).str_val());
+                n.eventname = Some(view.v(6).str_val());
+                if rule == 836 {
+                    n.whenclause = view.v(8).list();
+                    n.funcname = view.v(11).list();
+                } else {
+                    n.funcname = view.v(9).list();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // event_trigger_when_list
+            837 => {
+                let item = view.v(1).node().expect("event_trigger_when_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            838 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("event_trigger_when_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // event_trigger_when_item: ColId IN '(' event_trigger_value_list ')'
+            839 => {
+                let vals = Node::mk_list(mcx, view.v(4).list())?;
+                *yyval = def_elem(mcx, view.v(1).str_val(), Some(vals), view.l(1))?;
+            }
+            // event_trigger_value_list
+            840 => {
+                let s = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
+            }
+            841 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // AlterEventTrigStmt: ALTER EVENT TRIGGER name enable_trigger
+            842 => {
+                let mut n = Node::build::<types_nodes::parsenodes::AlterEventTrigStmt>(mcx)?;
+                n.trigname = Some(view.v(4).str_val());
+                n.tgenabled = view.v(5).ival() as i8;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // enable_trigger: ENABLE | ENABLE REPLICA | ENABLE ALWAYS | DISABLE
+            843 => *yyval = YYSTYPE::Ival(b'O' as i32),
+            844 => *yyval = YYSTYPE::Ival(b'R' as i32),
+            845 => *yyval = YYSTYPE::Ival(b'A' as i32),
+            846 => *yyval = YYSTYPE::Ival(b'D' as i32),
             // opt_without_overlaps: WITHOUT OVERLAPS | /*EMPTY*/
             552 => *yyval = YYSTYPE::Boolean(true),
             553 => *yyval = YYSTYPE::Boolean(false),

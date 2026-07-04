@@ -765,6 +765,20 @@ pub struct CreateSchemaStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CreateEventTrigStmt<'mcx> {
+    pub trigname: Option<&'mcx str>,
+    pub eventname: Option<&'mcx str>,
+    pub whenclause: NodeList<'mcx>,
+    pub funcname: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterEventTrigStmt<'mcx> {
+    pub trigname: Option<&'mcx str>,
+    pub tgenabled: i8,
+}
+
+#[derive(Default)]
 pub struct CreatedbStmt<'mcx> {
     pub dbname: Option<&'mcx str>,
     pub options: NodeList<'mcx>,
@@ -1304,6 +1318,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterOpFamilyStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOperatorStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOperatorStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateEventTrigStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateEventTrigStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterEventTrigStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterEventTrigStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CreatedbStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreatedbStmt;
 }
@@ -1634,6 +1654,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_comment_stmt(self) -> Option<&'mcx CommentStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_event_trig_stmt(self) -> Option<&'mcx CreateEventTrigStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_event_trig_stmt(self) -> Option<&'mcx AlterEventTrigStmt<'mcx>> {
         self.as_variant()
     }
 
