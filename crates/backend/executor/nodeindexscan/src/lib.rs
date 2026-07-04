@@ -398,6 +398,11 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
     scan_keys: &mut [ScanKeyData],
 ) -> PgResult<()> {
     for rk in runtime_keys.iter_mut() {
+        // ExecEvalParamExec pending-initplan arm, hoisted per repo convention.
+        let deps = rk.key_expr.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
         // SAFETY: the per-tuple context object outlives the plan (reset-only).
         unsafe { rk.key_expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
         let mut slots = EvalSlots { scan: None, inner: None, outer: None };
