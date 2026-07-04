@@ -33,9 +33,10 @@ pub fn FPzero(a: f64) -> bool {
 pub fn FPeq(a: f64, b: f64) -> bool {
     a == b || (a - b).abs() <= EPSILON
 }
+// Not !FPeq: C's FPne is NaN-false ((NaN-NaN) > EPSILON is false).
 #[inline]
 pub fn FPne(a: f64, b: f64) -> bool {
-    !FPeq(a, b)
+    a != b && (a - b).abs() > EPSILON
 }
 #[inline]
 pub fn FPlt(a: f64, b: f64) -> bool {
@@ -54,10 +55,10 @@ pub fn FPge(a: f64, b: f64) -> bool {
     a + EPSILON >= b
 }
 
-// point_eq_point: NaNs insist on exact equality.
+// point_eq_point: NaNs insist on float8_eq equality (NaN == NaN there).
 pub fn point_eq_point(pt1: &Point, pt2: &Point) -> bool {
     if pt1.x.is_nan() || pt1.y.is_nan() || pt2.x.is_nan() || pt2.y.is_nan() {
-        return pt1.x == pt2.x && pt1.y == pt2.y;
+        return ::adt_float::float8_eq(pt1.x, pt2.x) && ::adt_float::float8_eq(pt1.y, pt2.y);
     }
     FPeq(pt1.x, pt2.x) && FPeq(pt1.y, pt2.y)
 }

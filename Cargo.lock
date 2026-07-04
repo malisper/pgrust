@@ -11851,6 +11851,7 @@ name = "tuplesort"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_float",
  "adt_network",
  "adt_numeric",
  "adt_timestamp",
