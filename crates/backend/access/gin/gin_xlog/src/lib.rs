@@ -730,10 +730,16 @@ pub fn gin_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
 }
 
-/// gin_mask: wal_consistency_checking lane; bufmask.c is unported repo-wide
-/// (btree_mask/heap_mask are the same loud stubs in rmgr).
-pub fn gin_mask(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-    panic!("unported: gin_mask (bufmask.c lane; land backend-access-common-small)")
+pub fn gin_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    let opaque = opaque_of(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    if opaque.flags & GIN_DELETED != 0 {
+        bufmask::mask_page_content(pagedata);
+    } else if u16::from_ne_bytes([pagedata[12], pagedata[13]]) as usize > SIZE_OF_PAGE_HEADER {
+        bufmask::mask_unused_space(pagedata);
+    }
+    Ok(())
 }
 
 pub fn init_seams() {}

@@ -1,8 +1,6 @@
 //! generic_xlog.c: generic WAL records for AMs without a bespoke WAL format.
 //! C divergences: the Start/Register/Finish protocol keeps C's shape but the
-//! record is emitted through the one-call xloginsert form; generic_mask stays
-//! a loud panic until bufmask.c lands (wal_consistency_checking is pinned off
-//! repo-wide).
+//! record is emitted through the one-call xloginsert form.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -401,8 +399,10 @@ pub fn generic_redo(record: &mut XLogReaderState) -> PgResult<()> {
     Ok(())
 }
 
-pub fn generic_mask(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-    panic!("unported: generic_mask (bufmask.c lane; land backend-access-common-small)")
+pub fn generic_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_unused_space(pagedata);
+    Ok(())
 }
 
 pub fn init_seams() {}
