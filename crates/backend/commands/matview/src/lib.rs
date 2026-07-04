@@ -155,7 +155,7 @@ pub fn RefreshMatViewByOid<'mcx>(
         debug_assert!(!is_create);
         let mut has_unique = false;
         for &idx_oid in relcache::RelationGetIndexList(mcx, matview_oid)?.iter() {
-            let idx = table::table_open(mcx, idx_oid, AccessShareLock)?;
+            let idx = indexam::index_open(mcx, idx_oid, AccessShareLock)?;
             if is_usable_unique_index(&idx) {
                 has_unique = true;
             }
