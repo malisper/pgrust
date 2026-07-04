@@ -162,6 +162,7 @@ pub fn init_all() {
     explain::init_seams();
     commands_createas::init_seams();
     commands_matview::init_seams();
+    execreplication::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
     commands_async::init_seams();

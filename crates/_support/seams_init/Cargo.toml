@@ -160,6 +160,7 @@ pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
 commands_createas = { path = "../../backend/commands/createas" }
 commands_matview = { path = "../../backend/commands/matview" }
+execreplication = { path = "../../backend/executor/execreplication" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
