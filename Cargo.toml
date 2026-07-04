@@ -192,6 +192,7 @@ members = [
     "crates/backend/executor/nodenestloop",
     "crates/backend/executor/nodeagg",
     "crates/backend/executor/nodewindowagg",
+    "crates/backend/utils/sort/sort_storage",
     "crates/backend/utils/sort/tuplesort",
     "crates/backend/utils/sort/tuplesort_seams",
     "crates/backend/utils/sort/tuplestore",
