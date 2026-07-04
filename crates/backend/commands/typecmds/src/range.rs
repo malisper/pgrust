@@ -78,8 +78,7 @@ pub fn DefineRange<'mcx>(
                     return Err(conflicting(defel));
                 }
                 let tn = commands_define::defGetTypeName(mcx, defel)?;
-                let (oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-                rangeSubtype = oid;
+                rangeSubtype = parse_utilcmd::LookupTypeNameOid(mcx, tn)?;
             }
             "subtype_opclass" => {
                 if rangeSubOpclassName.is_some() {
