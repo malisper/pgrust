@@ -890,6 +890,15 @@ pub struct CommentStmt<'mcx> {
     pub comment: Option<&'mcx str>,
 }
 
+// C: provider NULL means the sole loaded provider; label NULL removes it.
+#[derive(Default)]
+pub struct SecLabelStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub object: Option<Node<'mcx>>,
+    pub provider: Option<&'mcx str>,
+    pub label: Option<&'mcx str>,
+}
+
 #[derive(Default)]
 pub struct CreateConversionStmt<'mcx> {
     pub conversion_name: NodeList<'mcx>,
@@ -1540,6 +1549,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SecLabelStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SecLabelStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DefineStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DefineStmt;
 }
@@ -1965,6 +1977,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_comment_stmt(self) -> Option<&'mcx CommentStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sec_label_stmt(self) -> Option<&'mcx SecLabelStmt<'mcx>> {
         self.as_variant()
     }
 

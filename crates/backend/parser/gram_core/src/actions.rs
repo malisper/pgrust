@@ -21,7 +21,7 @@ use types_nodes::parsenodes::{
     PublicationObjSpecType, PublicationTable,
     ReassignOwnedStmt,
     ReindexObjectType, ReindexStmt, RenameStmt, ReplicaIdentityStmt, RoleSpec, RoleSpecType,
-    RoleStmtType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
+    RoleStmtType, SecLabelStmt, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
     UnlistenStmt, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
     VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
@@ -8288,6 +8288,32 @@ impl<'mcx> Parser<'mcx> {
                 n.object = Some(Node::mk_string(mcx, view.v(4).str_val())?);
                 let c = view.v(6);
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // SecLabelStmt; LARGE OBJECT (998) shifts object/label one slot right.
+            991..=1000 => {
+                let mut n = Node::build::<SecLabelStmt>(mcx)?;
+                let p = view.v(3);
+                n.provider = if p.is_null_node() { None } else { Some(p.str_val()) };
+                n.objtype = match rule {
+                    991 | 993 => object_type(view.v(5).ival()),
+                    992 => ObjectType::OBJECT_COLUMN,
+                    994 => ObjectType::OBJECT_TYPE,
+                    995 => ObjectType::OBJECT_DOMAIN,
+                    996 => ObjectType::OBJECT_AGGREGATE,
+                    997 => ObjectType::OBJECT_FUNCTION,
+                    998 => ObjectType::OBJECT_LARGEOBJECT,
+                    999 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = match rule {
+                    991 | 992 => Some(Node::mk_list(mcx, view.v(6).list())?),
+                    993 => Some(Node::mk_string(mcx, view.v(6).str_val())?),
+                    998 => view.v(7).node(),
+                    _ => view.v(6).node(),
+                };
+                let l = view.v(if rule == 998 { 9 } else { 8 });
+                n.label = if l.is_null_node() { None } else { Some(l.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             670 => {
