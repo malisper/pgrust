@@ -128,9 +128,11 @@ fn install() {
             Ok(lsn)
         });
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
         pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
         bufmgr_seams::relation_smgr_locator::set(|rel| ::types_storage::RelFileLocatorBackend {
             locator: ::types_storage::RelFileLocator {

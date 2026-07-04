@@ -1032,8 +1032,87 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let outer = &mut aps.outer;
-    ::nodeagg::exec_agg(&mut aps.agg, estate, |e| exec_proc_node(outer, e))
+    let AggPlanState { agg, outer } = aps;
+    if let PlanStateNode::SeqScan(ss) = outer {
+        if seq_agg_fusible(agg, ss, estate)
+            && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+        {
+            let outer_slot = ss.ss.ss_ScanTupleSlot;
+            let src = SeqScanBatchSource { ss, outer_slot };
+            return ::nodeagg::exec_agg_batched(agg, estate, src);
+        }
+    }
+    ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
+}
+
+// Fused agg-over-seqscan page-batch drive (upstream batch executor, CF 6176):
+// same tuples, same transition order; per-tuple node recursion elided.
+// Instrumented children never match the SeqScan arm, so EXPLAIN ANALYZE
+// keeps the per-tuple drive and its filter counters.
+fn seq_agg_fusible<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    use ::execexpr::{Kernel, SlotSrc};
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !::nodeagg::agg_batch_drainable(agg)
+    {
+        return false;
+    }
+    match ss.variant() {
+        ::nodeseqscan::SeqScanVariant::Plain => true,
+        ::nodeseqscan::SeqScanVariant::WithQual => {
+            // Only allocation-free kernel quals run under the fused drive.
+            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
+                Some(Kernel::QualScanVarCmpConst { .. }) => true,
+                Some(Kernel::QualVarCmpVar { a_src, b_src, .. }) => {
+                    a_src == SlotSrc::Scan && b_src == SlotSrc::Scan
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+struct SeqScanBatchSource<'a, 'mcx> {
+    ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+    outer_slot: ExecSlotId,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeseqscan::seq_scan_batch_store(self.ss, estate, i);
+        match self.ss.ss.qual.as_deref_mut() {
+            None => Ok(true),
+            Some(q) => {
+                let mut slots = EvalSlots {
+                    scan: Some(estate.slot_mut(self.outer_slot)),
+                    inner: None,
+                    outer: None,
+                };
+                ::execexpr::exec_qual(Some(q), &mut slots)
+            }
+        }
+    }
+
+    #[inline]
+    fn outer_slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+
+    #[inline]
+    fn has_qual(&self) -> bool {
+        self.ss.ss.qual.is_some()
+    }
 }
 
 #[inline(never)]

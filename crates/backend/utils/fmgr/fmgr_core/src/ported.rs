@@ -38,6 +38,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::sequence_seams::builtins::SEQUENCE_BUILTINS,
+    ::extension_seams::builtins::EXTENSION_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,

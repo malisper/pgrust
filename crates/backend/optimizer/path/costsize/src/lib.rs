@@ -146,16 +146,25 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             } else {
                 sa.opfuncid
             };
-            if sa.hashfuncid != 0 {
-                panic!("cost_qual_eval_walker (costsize.c): hashed SAOP; M2 lane");
-            }
             let arraynode = sa.args.nth(1);
             let mut sacosts = QualCost { startup: 0.0, per_tuple: 0.0 };
             planner_seams::add_function_cost::call(opfuncid, &mut sacosts)?;
-            // C: the operator runs against about half the array elements.
-            cost.startup += sacosts.startup;
-            cost.per_tuple +=
-                sacosts.per_tuple * planner_seams::estimate_array_length::call(arraynode) * 0.5;
+            if sa.hashfuncid != 0 {
+                // Hashed SAOP: build the table at startup, then one hash +
+                // one comparison per tuple.
+                let mut hcosts = QualCost { startup: 0.0, per_tuple: 0.0 };
+                planner_seams::add_function_cost::call(sa.hashfuncid, &mut hcosts)?;
+                cost.startup += sacosts.startup + hcosts.startup;
+                cost.startup +=
+                    planner_seams::estimate_array_length::call(arraynode) * hcosts.per_tuple;
+                cost.per_tuple += hcosts.per_tuple + sacosts.per_tuple;
+            } else {
+                // C: the operator runs against about half the array elements.
+                cost.startup += sacosts.startup;
+                cost.per_tuple += sacosts.per_tuple
+                    * planner_seams::estimate_array_length::call(arraynode)
+                    * 0.5;
+            }
             for arg in sa.args.iter() {
                 cost_qual_eval_walker(arg, cost)?;
             }
@@ -986,10 +995,15 @@ pub fn cost_agg_shape(
         startup_cost += aggcosts.finalCost.per_tuple;
         total_cost = startup_cost + gucs::cpu_tuple_cost();
         output_tuples = 1.0;
-    } else if aggstrategy == types_pathnodes::AGG_SORTED {
+    } else if aggstrategy == types_pathnodes::AGG_SORTED
+        || aggstrategy == types_pathnodes::AGG_MIXED
+    {
         // Output is delivered on-the-fly, one group at a time.
         startup_cost = input_startup_cost;
         total_cost = input_total_cost;
+        if aggstrategy == types_pathnodes::AGG_MIXED && !gucs::enable_hashagg() {
+            disabled_nodes += 1;
+        }
         total_cost += aggcosts.transCost.startup;
         total_cost += aggcosts.transCost.per_tuple * input_tuples;
         total_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
@@ -1011,10 +1025,10 @@ pub fn cost_agg_shape(
         total_cost += gucs::cpu_tuple_cost() * num_groups;
         output_tuples = num_groups;
     } else {
-        panic!("cost_agg (costsize.c): AGG_MIXED; M3 grouping-sets lane");
+        unreachable!("cost_agg (costsize.c): aggstrategy {aggstrategy}");
     }
 
-    if aggstrategy == types_pathnodes::AGG_HASHED {
+    if aggstrategy == types_pathnodes::AGG_HASHED || aggstrategy == types_pathnodes::AGG_MIXED {
         let hashentrysize = ::nodeagg::hash_agg_entry_size(
             run.root.aggtransinfos.len(),
             input_width.max(0) as usize,

@@ -118,12 +118,17 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| {
             Ok(SURELY_DEAD.load(Ordering::Relaxed))
         });
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
 
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
 

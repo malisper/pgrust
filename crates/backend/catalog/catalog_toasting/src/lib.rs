@@ -139,6 +139,8 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
             constr_flags: 0,
             allow_system_table_mods: true,
             is_internal: true,
+            parent_index_relid: InvalidOid,
+            parent_constraint_id: InvalidOid,
         },
     )?;
 

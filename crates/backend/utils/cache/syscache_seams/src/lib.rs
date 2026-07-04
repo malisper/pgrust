@@ -201,6 +201,7 @@ pub struct PgProcShape {
     pub prorettype: Oid,
     pub provariadic: Oid,
     pub prosupport: Oid,
+    pub prolang: Oid,
     pub pronargs: i16,
     pub prokind: i8,
     pub provolatile: i8,
@@ -208,6 +209,8 @@ pub struct PgProcShape {
     pub proretset: bool,
     pub proisstrict: bool,
     pub proleakproof: bool,
+    pub prosecdef: bool,
+    pub proconfig_isnull: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -886,6 +889,11 @@ seam_core::seam!(
 seam_core::seam!(
     // RelationHasSysCache (syscache.c).
     pub fn relation_has_sys_cache(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    // RelationSupportsSysCache (syscache.c): rel OR supporting-index oid.
+    pub fn relation_supports_sys_cache(relid: Oid) -> bool
 );
 
 // The pg_type columns lookup_type_cache copies into a TypeCacheEntry, plus

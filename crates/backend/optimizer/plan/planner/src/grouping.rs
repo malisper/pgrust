@@ -295,9 +295,6 @@ fn grouping_planner_tail<'mcx>(
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            if parse.commandType == CmdType::CMD_MERGE {
-                panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
-            }
             debug_assert!(parse.withCheckOptions.is_nil());
             debug_assert!(run.root.rowMarks.is_empty());
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
@@ -312,6 +309,16 @@ fn grouping_planner_tail<'mcx>(
                 }
                 ids
             });
+            let merge_action_list = (!parse.mergeActionList.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for action in &parse.mergeActionList {
+                    ids.push(run.root.alloc_expr_node(action));
+                }
+                ids
+            });
+            let merge_join_condition = (parse.commandType == CmdType::CMD_MERGE)
+                .then(|| parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -322,6 +329,8 @@ fn grouping_planner_tail<'mcx>(
                 update_colnos,
                 returning_list,
                 onconflict,
+                merge_action_list,
+                merge_join_condition,
             );
             path_id = run.root.alloc_path(mtpath);
         }
@@ -828,13 +837,16 @@ fn create_grouping_paths<'mcx>(
 
     if can_hash {
         if !parse.groupingSets.is_nil() {
-            // C's hash-only consider_groupingsets_paths(is_sorted=false) arm.
-            if crate::gucs::enable_hashagg() {
-                panic!(
-                    "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
-                     strategy unported — set enable_hashagg=off; grouping-sets lane"
-                );
-            }
+            crate::groupingsets::consider_groupingsets_paths(
+                run,
+                grouped_rel,
+                cheapest,
+                false,
+                true,
+                &agg_costs,
+                &having_qual,
+                num_groups,
+            )?;
         } else {
             let group_clause =
                 crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
@@ -873,8 +885,7 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
     )
 }
 
-// get_number_of_groups (planner.c); the hash_sets leg needs the unported
-// hashed strategy and stays loud.
+// get_number_of_groups (planner.c).
 fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
     let parse = run.parse();
     let path_rows = {
@@ -884,12 +895,6 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
     if !parse.groupClause.is_nil() {
         if !parse.groupingSets.is_nil() {
             let mut gd = run.gset_data.take().expect("grouping sets preprocessed");
-            if !gd.unsortable_sets.is_empty() {
-                panic!(
-                    "get_number_of_groups (planner.c): unsortable grouping sets need the \
-                     hashed strategy (unported); grouping-sets lane"
-                );
-            }
             let tlist = run.processed_tlist();
             let mut dnum_groups = 0.0;
             for rollup in gd.rollups.iter_mut() {
@@ -908,6 +913,25 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
                     rollup.numGroups += num_groups;
                 }
                 dnum_groups += rollup.numGroups;
+            }
+            if !gd.hash_sets_idx.is_empty() {
+                gd.dNumHashGroups = 0.0;
+                let clauses = crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.processed_groupClause,
+                );
+                let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
+                for (gset, gs) in gd.hash_sets_idx.iter().zip(gd.unsortable_sets.iter_mut()) {
+                    let num_groups = crate::selfuncs::estimate_num_groups_pgset(
+                        run,
+                        &group_exprs,
+                        path_rows,
+                        Some(gset),
+                    )?;
+                    gs.numGroups = num_groups;
+                    gd.dNumHashGroups += num_groups;
+                }
+                dnum_groups += gd.dNumHashGroups;
             }
             run.gset_data = Some(gd);
             return Ok(dnum_groups);

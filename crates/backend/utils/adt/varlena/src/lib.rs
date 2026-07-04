@@ -770,6 +770,73 @@ pub fn split_identifier_string(
     }
 }
 
+// SplitGUCList (varlena.c): like SplitIdentifierString but never downcases
+// or truncates. None is C's `return false`.
+pub fn split_guc_list(rawstring: &str, separator: u8) -> Option<Vec<String>> {
+    use parser_small1::scanner_isspace;
+
+    let s = rawstring.as_bytes();
+    let mut namelist: Vec<String> = Vec::new();
+    let mut p = 0usize;
+
+    while p < s.len() && scanner_isspace(s[p]) {
+        p += 1;
+    }
+    if p == s.len() {
+        return Some(namelist);
+    }
+
+    loop {
+        let mut curname: Vec<u8> = Vec::new();
+        if s[p] == b'"' {
+            let mut q = p + 1;
+            loop {
+                let rel = s[q..].iter().position(|&b| b == b'"')?;
+                let endp = q + rel;
+                curname.extend_from_slice(&s[q..endp]);
+                if s.get(endp + 1) == Some(&b'"') {
+                    curname.push(b'"');
+                    q = endp + 2;
+                } else {
+                    p = endp + 1;
+                    break;
+                }
+            }
+        } else {
+            let start = p;
+            while p < s.len() && s[p] != separator && !scanner_isspace(s[p]) {
+                p += 1;
+            }
+            if p == start {
+                return None;
+            }
+            curname.extend_from_slice(&s[start..p]);
+        }
+
+        while p < s.len() && scanner_isspace(s[p]) {
+            p += 1;
+        }
+
+        let done = if p < s.len() && s[p] == separator {
+            p += 1;
+            while p < s.len() && scanner_isspace(s[p]) {
+                p += 1;
+            }
+            false
+        } else if p == s.len() {
+            true
+        } else {
+            return None;
+        };
+
+        namelist.push(String::from_utf8_lossy(&curname).into_owned());
+
+        if done {
+            return Some(namelist);
+        }
+    }
+}
+
 #[cold]
 fn invalid_surrogate_pair() -> Box<PgError> {
     Box::new(

@@ -35,5 +35,7 @@ lock_seams = { path = "../../storage/lmgr/lock_seams" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
 
+pg_largeobject = { path = "../pg_largeobject" }
+
 [dev-dependencies]
 init_small = { path = "../../utils/init/init_small" }

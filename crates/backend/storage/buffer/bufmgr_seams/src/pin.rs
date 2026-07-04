@@ -13,6 +13,22 @@ pub struct BufferPin {
     buffer: Buffer,
 }
 
+/// Page address of a pinned buffer; the caller's pin keeps it live.
+/// Published pool = C's inline BufferGetPage, unpublished (test fakes) or
+/// local (negative id) = the seam.
+#[inline]
+pub fn buffer_page_ptr(buffer: Buffer) -> core::ptr::NonNull<u8> {
+    let base = crate::buffer_blocks();
+    if !base.is_null() && buffer > 0 {
+        // SAFETY: published pool base; id in 1..=NBuffers (pin contract).
+        unsafe {
+            core::ptr::NonNull::new_unchecked(base.add((buffer as usize - 1) * types_core::BLCKSZ))
+        }
+    } else {
+        buffer_get_page::call(buffer)
+    }
+}
+
 impl BufferPin {
     #[inline]
     pub fn adopt(buffer: Buffer) -> Option<BufferPin> {
@@ -35,20 +51,9 @@ impl BufferPin {
 
     #[inline]
     pub fn page(&self) -> PageRef<'_> {
-        let base = crate::buffer_blocks();
-        // SAFETY: the pin held for the borrow keeps the page live and the id
-        // in 1..=NBuffers; published pool = C's inline BufferGetPage,
-        // unpublished (test fakes) or local (negative id) = the seam.
-        // Locking is the caller's part.
-        if !base.is_null() && self.buffer > 0 {
-            unsafe {
-                PageRef::from_raw(core::ptr::NonNull::new_unchecked(
-                    base.add((self.buffer as usize - 1) * types_core::BLCKSZ),
-                ))
-            }
-        } else {
-            unsafe { PageRef::from_raw(buffer_get_page::call(self.buffer)) }
-        }
+        // SAFETY: the pin held for the borrow keeps the page live. Locking is
+        // the caller's part.
+        unsafe { PageRef::from_raw(buffer_page_ptr(self.buffer)) }
     }
 
     #[inline]

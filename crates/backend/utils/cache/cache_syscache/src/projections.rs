@@ -124,7 +124,74 @@ const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
 const ANUM_PG_CAST_CASTMETHOD: i32 = 6;
 
+// Decode-once carriers for the hottest fixed-column projections: warm hit is
+// one FxHash probe, no catcache pin / per-column fetch. Coarse invalidation:
+// ANY catcache invalidation (catcache::inval_epoch) clears all memos — the
+// only channel through which a syscache answer can change.
+struct ShapeMemos {
+    #[allow(dead_code)]
+    mcx: Mcx<'static>,
+    epoch: u64,
+    type_shape: mcx::PgHashMap<'static, Oid, Option<PgTypeShape>>,
+    type_base: mcx::PgHashMap<'static, Oid, Option<syscache_seams::PgTypeBaseShape>>,
+    proc: mcx::PgHashMap<'static, Oid, Option<syscache_seams::PgProcShape>>,
+    cast: mcx::PgHashMap<'static, u64, Option<PgCastShape>>,
+}
+
+thread_local! {
+    static MEMOS: core::cell::RefCell<Option<ShapeMemos>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+// INVARIANT: `f` must not re-enter syscache/catcache (probe or insert only;
+// the decode itself runs outside the borrow).
+fn with_memos<R>(f: impl FnOnce(&mut ShapeMemos) -> R) -> R {
+    MEMOS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let m = slot.get_or_insert_with(|| {
+            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("SysCacheShapeMemos"))).mcx();
+            ShapeMemos {
+                mcx,
+                epoch: catcache::inval_epoch(),
+                type_shape: mcx::PgHashMap::with_capacity_in(64, mcx),
+                type_base: mcx::PgHashMap::with_capacity_in(64, mcx),
+                proc: mcx::PgHashMap::with_capacity_in(64, mcx),
+                cast: mcx::PgHashMap::with_capacity_in(64, mcx),
+            }
+        });
+        let e = catcache::inval_epoch();
+        if m.epoch != e {
+            m.epoch = e;
+            m.type_shape.clear();
+            m.type_base.clear();
+            m.proc.clear();
+            m.cast.clear();
+        }
+        f(m)
+    })
+}
+
 fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
+    use core::cell::Cell;
+    use crate::cacheinfo::SYS_CACHE_SIZE;
+    thread_local! {
+        // cc_tupdesc is written once at phase-2 init and never replaced, so
+        // this flat memo cannot go stale (getattr calls this per column).
+        static TDS: [Cell<Option<&'static TupleDescData<'static>>>; SYS_CACHE_SIZE] =
+            const { [const { Cell::new(None) }; SYS_CACHE_SIZE] };
+    }
+    TDS.with(|a| match a[cache_id as usize].get() {
+        Some(td) => td,
+        None => {
+            let td = tupdesc_for_slow(cache_id);
+            a[cache_id as usize].set(Some(td));
+            td
+        }
+    })
+}
+
+#[cold]
+fn tupdesc_for_slow(cache_id: i32) -> &'static TupleDescData<'static> {
     match catcache::cache_tupdesc(cache_id) {
         Some(td) => td,
         None => {
@@ -215,6 +282,15 @@ fn pg_class_relname(relid: Oid) -> PgResult<Option<types_tuple::NameData>> {
 }
 
 fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>> {
+    if let Some(hit) = with_memos(|m| m.type_shape.get(&typid).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_type_shape_uncached(typid)?;
+    with_memos(|m| m.type_shape.insert(typid, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_type_shape_uncached(typid: Oid) -> PgResult<Option<PgTypeShape>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -777,6 +853,7 @@ const ANUM_PG_RANGE_RNGSUBDIFF: i32 = 7;
 const ANUM_PG_PROC_PROARGDEFAULTS: i32 = 24;
 const ANUM_PG_PROC_PROLANG: i32 = 5;
 const ANUM_PG_PROC_PROSRC: i32 = 26;
+const ANUM_PG_PROC_PROCONFIG: i32 = 29;
 const ANUM_PG_AMPROC_AMPROCRIGHTTYPE: i32 = 4;
 const ANUM_PG_AMPROC_AMPROCNUM: i32 = 5;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
@@ -947,6 +1024,15 @@ fn lookup_pg_amproc(opfamily: Oid, lefttype: Oid, righttype: Oid, procnum: i16) 
 }
 
 fn pg_type_base_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseShape>> {
+    if let Some(hit) = with_memos(|m| m.type_base.get(&typid).copied()) {
+        return Ok(hit);
+    }
+    let shape = pg_type_base_shape_uncached(typid)?;
+    with_memos(|m| m.type_base.insert(typid, shape));
+    Ok(shape)
+}
+
+fn pg_type_base_shape_uncached(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseShape>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -963,7 +1049,59 @@ fn pg_type_base_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseS
     Ok(Some(shape))
 }
 
+// Decode-once Form cache (AGENTS rule 6): C hands back the cached FormData
+// pointer for free; the 13-field decode below must not run per probe. TYPEOID
+// invalidation (targeted or full-reset hash 0) flushes the whole memo.
+mod io_shape_memo {
+    use core::cell::RefCell;
+
+    use datum::Datum;
+    use mcx::{MemoryContext, PgHashMap};
+    use types_core::{InvalidOid, Oid};
+
+    use crate::cacheinfo::TYPEOID;
+
+    thread_local! {
+        static MEMO: RefCell<Option<PgHashMap<'static, Oid, syscache_seams::PgTypeIoShape>>> =
+            const { RefCell::new(None) };
+    }
+
+    fn flush(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
+        MEMO.with(|m| {
+            if let Some(map) = m.borrow_mut().as_mut() {
+                map.clear();
+            }
+        });
+    }
+
+    pub(super) fn get(typid: Oid) -> Option<syscache_seams::PgTypeIoShape> {
+        MEMO.with(|m| m.borrow().as_ref().and_then(|map| map.get(&typid).copied()))
+    }
+
+    pub(super) fn insert(typid: Oid, shape: syscache_seams::PgTypeIoShape) {
+        MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            if slot.is_none() {
+                let registered = inval::invalidate::CacheRegisterSyscacheCallback(
+                    TYPEOID,
+                    flush,
+                    Datum::from_oid(InvalidOid),
+                );
+                if registered.is_err() {
+                    return; // out of callback slots: run unmemoized
+                }
+                let mcx = Box::leak(Box::new(MemoryContext::new("TypeIoShapeMemo"))).mcx();
+                *slot = Some(PgHashMap::with_capacity_in(16, mcx));
+            }
+            slot.as_mut().unwrap().insert(typid, shape);
+        });
+    }
+}
+
 fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape>> {
+    if let Some(shape) = io_shape_memo::get(typid) {
+        return Ok(Some(shape));
+    }
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -985,6 +1123,7 @@ fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape
     };
     drop(t);
     ReleaseSysCache(tuple);
+    io_shape_memo::insert(typid, shape);
     Ok(Some(shape))
 }
 
@@ -1023,6 +1162,15 @@ fn pg_proc_proname(funcid: Oid) -> PgResult<Option<types_tuple::NameData>> {
 }
 
 fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
+    if let Some(hit) = with_memos(|m| m.proc.get(&funcid).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_proc_shape_uncached(funcid)?;
+    with_memos(|m| m.proc.insert(funcid, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_proc_shape_uncached(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
     let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
         return Ok(None);
     };
@@ -1032,6 +1180,7 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
         prorettype: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid(),
         provariadic: getattr(&t, PROCOID, ANUM_PG_PROC_PROVARIADIC).as_oid(),
         prosupport: getattr(&t, PROCOID, ANUM_PG_PROC_PROSUPPORT).as_oid(),
+        prolang: getattr(&t, PROCOID, ANUM_PG_PROC_PROLANG).as_oid(),
         pronargs: getattr(&t, PROCOID, ANUM_PG_PROC_PRONARGS).as_i16(),
         prokind: getattr(&t, PROCOID, ANUM_PG_PROC_PROKIND).as_i8(),
         provolatile: getattr(&t, PROCOID, ANUM_PG_PROC_PROVOLATILE).as_i8(),
@@ -1039,6 +1188,8 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
         proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
         proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
         proleakproof: getattr(&t, PROCOID, ANUM_PG_PROC_PROLEAKPROOF).as_bool(),
+        prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
+        proconfig_isnull: getattr_nullable(&t, PROCOID, ANUM_PG_PROC_PROCONFIG).is_none(),
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -1066,6 +1217,19 @@ fn lookup_pg_language_fmgr(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+const ANUM_PG_LANGUAGE_LANNAME: i32 = 2;
+
+fn lookup_pg_language_name(langoid: Oid) -> PgResult<Option<NameData>> {
+    use crate::cacheinfo::LANGOID;
+    let Some(tuple) = SearchSysCache1(LANGOID, SysCacheKey::Value(Datum::from_oid(langoid)))?
+    else {
+        return Ok(None);
+    };
+    let name = getattr_name(&tuple.tuple(), LANGOID, ANUM_PG_LANGUAGE_LANNAME);
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
 }
 
 fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmgrShape>> {
@@ -1240,6 +1404,16 @@ fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bo
 }
 
 fn lookup_pg_cast_shape(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option<PgCastShape>> {
+    let key = ((sourcetypeid as u64) << 32) | targettypeid as u64;
+    if let Some(hit) = with_memos(|m| m.cast.get(&key).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_cast_shape_uncached(sourcetypeid, targettypeid)?;
+    with_memos(|m| m.cast.insert(key, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_cast_shape_uncached(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option<PgCastShape>> {
     let Some(tuple) = SearchSysCache2(
         CASTSOURCETARGET,
         SysCacheKey::Value(Datum::from_oid(sourcetypeid)),
@@ -2053,6 +2227,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_proc_fmgr::set(lookup_pg_proc_fmgr);
     syscache_seams::lookup_pg_language_fmgr::set(lookup_pg_language_fmgr);
+    syscache_seams::lookup_pg_language_name::set(lookup_pg_language_name);
     syscache_seams::lookup_pg_proc_prosrc::set(lookup_pg_proc_prosrc);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
