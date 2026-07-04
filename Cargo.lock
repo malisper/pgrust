@@ -3982,6 +3982,7 @@ name = "genam_seams"
 version = "0.0.0"
 dependencies = [
  "datum",
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
@@ -9552,6 +9553,7 @@ dependencies = [
  "fmgr_seams",
  "format_type",
  "genam",
+ "genam_seams",
  "guc",
  "indexcmds_seams",
  "lsyscache",
