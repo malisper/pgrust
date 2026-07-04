@@ -61,8 +61,11 @@ pub fn init_all() {
     nodenestloop::init_seams();
     nodemergejoin::init_seams();
     nodematerial::init_seams();
+    nodememoize::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
+    auth_scram::init_seams();
+    crypt::init_seams();
     be_secure::init_seams();
     hba::init_seams();
     libpq_pqsignal::init_seams();

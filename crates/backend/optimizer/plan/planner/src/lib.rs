@@ -131,6 +131,7 @@ pub fn init_seams() {
     planner_seams::make_restrictinfo::set(crate::initsplan::make_restrictinfo);
     planner_seams::amcostestimate::set(crate::selfuncs::amcostestimate);
     planner_seams::estimate_num_groups::set(crate::selfuncs::estimate_num_groups);
+    planner_seams::estimate_num_groups_estinfo::set(crate::selfuncs::estimate_num_groups_estinfo);
     planner_seams::estimate_array_length::set(crate::selfuncs::estimate_array_length);
     planner_seams::mergejoinscansel::set(crate::selfuncs::mergejoinscansel);
     planner_seams::estimate_hash_bucket_stats::set(crate::selfuncs::estimate_hash_bucket_stats);

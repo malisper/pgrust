@@ -9,3 +9,10 @@ name = "crypt"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pg_md5 = { path = "../../../common/md5" }
+auth_scram = { path = "../auth_scram" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

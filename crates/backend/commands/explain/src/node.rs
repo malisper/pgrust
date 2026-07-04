@@ -384,6 +384,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_MergeJoin => "Merge",
         NodeTag::T_Hash => "Hash",
         NodeTag::T_Material => "Materialize",
+        NodeTag::T_Memoize => "Memoize",
         NodeTag::T_Agg => {
             let agg = node.as_agg().expect("Agg plan node");
             assert!(
@@ -699,6 +700,9 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_Material => {
             show_material_info(node, es);
+        }
+        NodeTag::T_Memoize => {
+            show_memoize_info(node, ancestors, es)?;
         }
         NodeTag::T_SubqueryScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
@@ -1531,6 +1535,58 @@ fn show_material_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if let Some(stats) = tuplestore_stats(node, es) {
         show_storage_info(stats, es);
     }
+}
+
+// show_memoize_info (explain.c); the parallel-worker stanza has no lane.
+fn show_memoize_info<'mcx>(
+    node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    use core::fmt::Write;
+    let m = node.as_memoize().expect("Memoize plan node");
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let mut keystr = PgString::new_in(mcx);
+    let mut sep = "";
+    for expr in &m.param_exprs {
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, node, ancestors, expr, useprefix, false, &mut buf)?;
+        write!(keystr, "{sep}{}", buf.as_str()).expect("PgString write");
+        sep = ", ";
+    }
+    ExplainPropertyText("Cache Key", keystr.as_str(), es);
+    ExplainPropertyText("Cache Mode", if m.binary_mode { "binary" } else { "logical" }, es);
+
+    if !es.analyze || es.qd.is_null() {
+        return Ok(());
+    }
+    let id = plan_of(node).plan_node_id;
+    let Some(si) = execmain_seams::query_desc_memoize_instrument::call(es.qd, id) else {
+        return Ok(());
+    };
+    if si.cache_misses > 0 {
+        let mem_peak_kb = (si.mem_peak + 1023) / 1024;
+        if es.format != EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es);
+            ExplainPropertyInteger("Cache Misses", None, si.cache_misses as i64, es);
+            ExplainPropertyInteger("Cache Evictions", None, si.cache_evictions as i64, es);
+            ExplainPropertyInteger("Cache Overflows", None, si.cache_overflows as i64, es);
+            ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb as i64, es);
+        } else {
+            crate::format::ExplainIndentText(es);
+            append!(
+                es,
+                "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
+                si.cache_hits,
+                si.cache_misses,
+                si.cache_evictions,
+                si.cache_overflows,
+                mem_peak_kb
+            );
+        }
+    }
+    Ok(())
 }
 
 fn show_windowagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {

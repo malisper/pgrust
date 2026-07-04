@@ -41,3 +41,12 @@ seam_core::seam!(
         old_rel_id: types_core::Oid,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // SetRelationHasSubclass; seam because tablecmds depends on catalog_index.
+    pub fn set_relation_has_subclass<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation_id: types_core::Oid,
+        relhassubclass: bool,
+    ) -> PgResult<()>
+);

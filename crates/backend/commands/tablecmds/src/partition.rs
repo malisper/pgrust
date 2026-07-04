@@ -150,7 +150,7 @@ pub(crate) fn store_catalog_inheritance1<'mcx>(
 }
 
 // SetRelationHasSubclass (tablecmds.c).
-pub(crate) fn SetRelationHasSubclass<'mcx>(
+pub fn SetRelationHasSubclass<'mcx>(
     mcx: Mcx<'mcx>,
     relation_id: Oid,
     relhassubclass: bool,
