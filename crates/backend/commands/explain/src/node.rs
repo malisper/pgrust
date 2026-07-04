@@ -1441,7 +1441,15 @@ fn show_sortorder_options(
         buf.try_push_str(" DESC")?;
         true
     } else {
-        node_gap("show_sortorder_options", "USING <op> needs get_opname + opfamily probe");
+        let scratch = mcx::MemoryContext::new("sortorder-opname");
+        let opname = lsyscache::get_opname(scratch.mcx(), sort_operator)?
+            .unwrap_or_else(|| node_gap("show_sortorder_options", "missing operator name"));
+        buf.try_push_str(" USING ")?;
+        buf.try_push_str(opname.as_str())?;
+        match lsyscache::get_ordering_op_properties(sort_operator)? {
+            Some((_, _, cmptype)) => cmptype == lsyscache::COMPARE_GT,
+            None => false,
+        }
     };
     if nulls_first != reverse {
         buf.try_push_str(if nulls_first { " NULLS FIRST" } else { " NULLS LAST" })?;
