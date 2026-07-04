@@ -300,15 +300,20 @@ fn do_compile(
     is_dml_trigger: bool,
 ) -> PgResult<PlFunction> {
     let proc = read_proc_row(fn_oid)?;
+    // plpgsql_compile_error_callback covers header processing too: pre-parse
+    // errors report "near line 1" (scanner initialized, nothing consumed).
+    let hdr_ctx = |e: Box<types_error::PgError>| {
+        attach_compile_context(e, &proc.proname, 1, for_validator, &proc.prosrc)
+    };
 
     if proc.prokind != PROKIND_FUNCTION {
         panic!("plpgsql_compile: procedures (CALL) unported (function {fn_oid})");
     }
     if !is_dml_trigger && proc.rettype == TRIGGEROID {
-        return Err(crate::exec::exec_err(
+        return Err(hdr_ctx(crate::exec::exec_err(
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             "trigger functions can only be called as triggers".to_string(),
-        ));
+        )));
     }
     if proc.rettype == EVENT_TRIGGEROID {
         panic!("plpgsql_compile: event trigger functions unported (function {fn_oid})");
@@ -332,7 +337,7 @@ fn do_compile(
 
     if is_dml_trigger {
         if !proc.argtypes.is_empty() {
-            return Err(Box::new(
+            return Err(hdr_ctx(Box::new(
                 elog::ereport(ERROR)
                     .errcode(types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("trigger functions cannot have declared arguments")
@@ -340,7 +345,7 @@ fn do_compile(
                         "The arguments of the trigger can be accessed through TG_NARGS and TG_ARGV instead.",
                     )
                     .into_error(),
-            ));
+            )));
         }
         rettypeid = types_core::InvalidOid;
         fn_retistuple = true;
@@ -384,13 +389,13 @@ fn do_compile(
             let buf = format!("${}", i + 1);
             let argdtype = CompState::build_datatype(argtypeid, -1, fn_collation)?;
             if argdtype.ttype == TypeKind::Pseudo {
-                return Err(crate::exec::exec_err(
+                return Err(hdr_ctx(crate::exec::exec_err(
                     types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                     format!(
                         "PL/pgSQL functions cannot accept type {}",
                         format_type::format_type_be(argtypeid)?
                     ),
-                ));
+                )));
             }
             if lsyscache::typ::type_is_rowtype(argtypeid)? || argtypeid == RECORDOID {
                 panic!(
@@ -403,9 +408,9 @@ fn do_compile(
             let refname = if !argname.is_empty() { argname.as_str() } else { buf.as_str() };
             let dno = comp.build_variable(refname, 0, argdtype, false)?;
             fn_argvarnos.push(dno);
-            add_parameter_name(&mut comp, dno, &buf)?;
+            add_parameter_name(&mut comp, dno, &buf).map_err(|e| hdr_ctx(e))?;
             if !argname.is_empty() {
-                add_parameter_name(&mut comp, dno, argname)?;
+                add_parameter_name(&mut comp, dno, argname).map_err(|e| hdr_ctx(e))?;
             }
         }
 
@@ -413,13 +418,13 @@ fn do_compile(
         rettypeid = proc.rettype;
         let rettyptype = lsyscache::typ::get_typtype(rettypeid)?;
         if rettyptype == TYPTYPE_PSEUDO && rettypeid != VOIDOID && rettypeid != RECORDOID {
-            return Err(crate::exec::exec_err(
+            return Err(hdr_ctx(crate::exec::exec_err(
                 types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                 format!(
                     "PL/pgSQL functions cannot return type {}",
                     format_type::format_type_be(rettypeid)?
                 ),
-            ));
+            )));
         }
         fn_retistuple = lsyscache::typ::type_is_rowtype(rettypeid)?;
         if fn_retistuple || rettypeid == RECORDOID {
@@ -873,6 +878,68 @@ fn bind_trigger_tuple(
     Ok(())
 }
 
+// build_attrmap_by_position (attmap.c) over RecDesc shapes, with the map
+// applied in place of execute_attr_map_tuple.
+fn map_returned_row(
+    rv: &crate::exec::RecValue,
+    out: &crate::exec::RecDesc,
+) -> PgResult<(Vec<Datum>, Vec<bool>)> {
+    const MSG: &str = "returned row structure does not match the structure of the triggering table";
+    #[cold]
+    fn mismatch(detail: String) -> Box<types_error::PgError> {
+        Box::new(
+            elog::ereport(ERROR)
+                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(MSG)
+                .errdetail(detail)
+                .into_error(),
+        )
+    }
+    let n = out.types.len();
+    let mut values = vec![Datum::null(); n];
+    let mut nulls = vec![true; n];
+    let mut j = 0usize;
+    let mut nincols = 0;
+    let mut noutcols = 0;
+    for i in 0..n {
+        if out.dropped[i] {
+            continue;
+        }
+        noutcols += 1;
+        while j < rv.desc.types.len() {
+            if rv.desc.dropped[j] {
+                j += 1;
+                continue;
+            }
+            nincols += 1;
+            if out.types[i] != rv.desc.types[j]
+                || (out.typmods[i] != rv.desc.typmods[j] && out.typmods[i] >= 0)
+            {
+                return Err(mismatch(format!(
+                    "Returned type {} does not match expected type {} in column \"{}\" (position {}).",
+                    format_type::format_type_with_typemod(rv.desc.types[j], rv.desc.typmods[j])?,
+                    format_type::format_type_with_typemod(out.types[i], out.typmods[i])?,
+                    out.names[i],
+                    noutcols
+                )));
+            }
+            values[i] = rv.values[j];
+            nulls[i] = rv.nulls[j];
+            j += 1;
+            break;
+        }
+    }
+    let extra = rv.desc.types[j..].iter().enumerate().filter(|&(k, _)| !rv.desc.dropped[j + k]).count();
+    if extra > 0 || nincols != noutcols {
+        return Err(mismatch(format!(
+            "Number of returned columns ({}) does not match expected column count ({}).",
+            nincols + extra,
+            noutcols
+        )));
+    }
+    Ok((values, nulls))
+}
+
 // plpgsql_exec_trigger (pl_exec.c).
 fn plpgsql_exec_trigger(
     func: &PlFunction,
@@ -959,24 +1026,15 @@ fn plpgsql_exec_trigger(
              (deconstruct_composite_datum lane) unported — unit backend-pl-plpgsql-exec"
         );
     };
-    // convert_tuples_by_position's compatibility contract, identity case only:
-    // the returned row must match the relation rowtype position-for-position.
-    let ok = rv.desc.types.len() == natts
-        && (0..natts).all(|i| {
-            rv.desc.dropped[i] == desc.dropped[i]
-                && (rv.desc.dropped[i] || rv.desc.types[i] == desc.types[i])
-        });
-    if !ok {
-        return Err(Box::new(
-            elog::ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
-                .errmsg("returned row structure does not match the structure of the triggering table")
-                .into_error(),
-        ));
-    }
+    // build_attrmap_by_position + execute_attr_map_tuple: map the returned
+    // row onto the relation rowtype (typmod-aware position walk).
+    let (values, nulls) = match map_returned_row(&rv, &desc) {
+        Ok(vn) => vn,
+        Err(e) => return Err(attach_exec_context(e, &estate)),
+    };
 
     let out_mcx = fcinfo.result_mcx();
-    let tup = heaptuple::heap_form_tuple(out_mcx, &tupdesc, &rv.values, &rv.nulls)?;
+    let tup = heaptuple::heap_form_tuple(out_mcx, &tupdesc, &values, &nulls)?;
     let (img, t_len) = (tup.header_ptr(), tup.t_len);
     core::mem::forget(tup);
     // SAFETY: img is a live heap-tuple image of t_len bytes in out_mcx,

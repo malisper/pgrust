@@ -1172,6 +1172,7 @@ impl<'a> Estate<'a> {
         block: &'a PlBlock,
         exc: &'a ExceptionBlock,
     ) -> PgResult<i32> {
+        let save_owner = resowner::CurrentResourceOwner();
         self.err_text = Some("during statement block entry");
         xact::BeginInternalSubTransaction(None)?;
         self.err_text = None;
@@ -1188,6 +1189,7 @@ impl<'a> Estate<'a> {
                     self.retval = self.copy_to_datum_ctx(self.retval, false, typlen, typbyval)?;
                 }
                 xact::ReleaseCurrentSubTransaction()?;
+                resowner::SetCurrentResourceOwner(save_owner);
                 self.err_text = None;
                 Ok(rc)
             }
@@ -1196,9 +1198,13 @@ impl<'a> Estate<'a> {
                 if e.level > ERROR {
                     return Err(e);
                 }
-                self.err_text = Some("during exception cleanup");
+                // Bake this frame's context with the throw-time stmt/text
+                // before the cleanup markers overwrite them (C's callback ran
+                // at errfinish).
                 let edata = attach_frame_context_at_catch(e, self);
+                self.err_text = Some("during exception cleanup");
                 xact::RollbackAndReleaseCurrentSubTransaction()?;
+                resowner::SetCurrentResourceOwner(save_owner);
                 // The subxact abort freed tuple tables made inside it
                 // (AtEOSubXact_SPI); drop the handle without a second free.
                 self.eval_tuptable = None;
@@ -1233,6 +1239,35 @@ impl<'a> Estate<'a> {
     }
 
     fn exec_assign_expr(&mut self, target: Dno, expr: &PlExpr) -> PgResult<()> {
+        // C's plan prepare resolves the recfield target via make_datum_param
+        // -> exec_get_datum_type, which errors positionless under the SPI
+        // context callback; mirror that before planning.
+        if let PlDatum::RecField(f) = &self.func.datums[target as usize] {
+            if self.recfield_type(f)?.is_none() {
+                let recname = match &self.func.datums[f.recparentno as usize] {
+                    PlDatum::Rec(r) => r.refname.clone(),
+                    _ => String::new(),
+                };
+                let err = if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(Some(_)))
+                {
+                    exec_err(
+                        types_error::ERRCODE_UNDEFINED_COLUMN,
+                        format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
+                    )
+                } else {
+                    Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                            .errmsg(format!("record \"{recname}\" is not assigned yet"))
+                            .errdetail(
+                                "The tuple structure of a not-yet-assigned record is indeterminate.",
+                            )
+                            .into_error(),
+                    )
+                };
+                return Err(spi_ctx_err(err, &expr.query, expr.parse_mode));
+            }
+        }
         self.ensure_plan(expr, 0)?;
         let (value, isnull, valtype, valtypmod) = self.exec_eval_expr(expr)?;
         self.exec_assign_value(target, value, isnull, valtype, valtypmod)?;
