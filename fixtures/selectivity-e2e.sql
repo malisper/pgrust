@@ -254,3 +254,31 @@ EXPLAIN SELECT n FROM selacl WHERE n = 2.5;
 RESET SESSION AUTHORIZATION;
 
 DROP TABLE selr, selm, seln, selb, seljoin, selmcv1, selmcv2, selbytea, selmvb1, selmvb2, selgin, selexpr, selbrin, selacl;
+
+-- estimate_num_groups completion: boolean group exprs (x2 short-circuit),
+-- whole-expression stats via expression index, SRF multiplier, known-equal
+-- cross-rel dedup; scalarineqsel CTID block-position arm.
+CREATE TABLE selgrp(a int4, b int4, flag bool, t text);
+INSERT INTO selgrp SELECT g % 50, g % 7, (g % 3 = 0), 'v' || (g % 20) FROM generate_series(1, 2000) g;
+CREATE INDEX selgrp_expr_idx ON selgrp ((a + b));
+ANALYZE selgrp;
+EXPLAIN SELECT flag, count(*) FROM selgrp GROUP BY flag;
+EXPLAIN SELECT a, flag FROM selgrp GROUP BY a, flag;
+EXPLAIN SELECT count(*) FROM selgrp GROUP BY (a = 1);
+EXPLAIN SELECT a + b, count(*) FROM selgrp GROUP BY a + b;
+EXPLAIN SELECT DISTINCT a + b FROM selgrp;
+EXPLAIN SELECT DISTINCT t || 'x' FROM selgrp;
+EXPLAIN SELECT DISTINCT a, generate_series(1, 3) FROM selgrp;
+CREATE TABLE selgrp2(a int4, c int4);
+INSERT INTO selgrp2 SELECT g % 10, g % 4 FROM generate_series(1, 1000) g;
+ANALYZE selgrp2;
+EXPLAIN SELECT selgrp.a, selgrp2.a FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp.a, selgrp2.a;
+EXPLAIN SELECT selgrp2.a, selgrp.a FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp2.a, selgrp.a;
+SET enable_tidscan = off;
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid < '(3,0)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid <= '(3,10)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid > '(5,1)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE ctid >= '(8,40)';
+EXPLAIN SELECT count(*) FROM selgrp WHERE '(3,0)' > ctid;
+RESET enable_tidscan;
+DROP TABLE selgrp, selgrp2;
