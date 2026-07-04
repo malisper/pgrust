@@ -24,3 +24,7 @@ seam_core::seam!(
         fcinfo: &'c mut FunctionCallInfoBaseData,
     ) -> PgResult<Datum>
 );
+
+seam_core::seam!(
+    pub fn get_extension_name(ext_oid: types_core::Oid) -> PgResult<Option<String>>
+);

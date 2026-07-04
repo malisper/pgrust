@@ -192,4 +192,12 @@ pub fn init_seams() {
     extension_seams::pg_available_extensions::set(funcs::fc_pg_available_extensions);
     extension_seams::pg_available_extension_versions::set(funcs::fc_pg_available_extension_versions);
     extension_seams::pg_extension_update_paths::set(funcs::fc_pg_extension_update_paths);
+    extension_seams::get_extension_name::set(|ext_oid| {
+        let cx = mcx::MemoryContext::new_bump("get_extension_name");
+        let out = match get_extension_name(cx.mcx(), ext_oid) {
+            Ok(name) => Ok(name.map(|s| s.as_str().to_owned())),
+            Err(e) => Err(e),
+        };
+        out
+    });
 }

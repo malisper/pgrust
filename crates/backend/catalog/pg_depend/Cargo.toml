@@ -26,3 +26,6 @@ nodes_core = { path = "../../nodes/nodes_core" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_shdepend = { path = "../pg_shdepend" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+extension_seams = { path = "../../commands/extension_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
