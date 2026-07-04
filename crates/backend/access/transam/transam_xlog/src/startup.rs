@@ -739,14 +739,26 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 
     {
         let tv = procarray::TransamVariables();
+        let xid_gen_lock = lwlock::main_lock(varsup::XID_GEN_LOCK);
+        LWLockAcquire(xid_gen_lock, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
         check_point.nextXid = types_core::FullTransactionId { value: tv.nextXid.load(Relaxed) };
         check_point.oldestXid = tv.oldestXid.load(Relaxed);
-        // oldestXidDB / nextOid live with the unported varsup allocator;
-        // carry the control file's values forward.
-        check_point.oldestXidDB = control_file().checkPointCopy.oldestXidDB;
-        check_point.nextOid = control_file().checkPointCopy.nextOid;
+        check_point.oldestXidDB = tv.oldestXidDB.load(Relaxed);
+        LWLockRelease(xid_gen_lock)?;
+
         check_point.oldestCommitTsXid = control_file().checkPointCopy.oldestCommitTsXid;
         check_point.newestCommitTsXid = control_file().checkPointCopy.newestCommitTsXid;
+
+        // An online checkpoint's nextOid covers the prefetched-but-unlogged
+        // range so crash replay never hands out an OID below what the
+        // pre-crash backend may already have used (xlog.c CreateCheckPoint).
+        let oid_gen_lock = lwlock::main_lock(varsup::OID_GEN_LOCK);
+        LWLockAcquire(oid_gen_lock, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
+        check_point.nextOid = tv.nextOid.load(Relaxed);
+        if !shutdown {
+            check_point.nextOid = check_point.nextOid.wrapping_add(tv.oidCount.load(Relaxed));
+        }
+        LWLockRelease(oid_gen_lock)?;
     }
     if multixact_seams::multixact_get_checkpt_multi::is_installed() {
         let (next_multi, next_offset, oldest_multi, oldest_db) =
