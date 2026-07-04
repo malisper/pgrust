@@ -37,6 +37,8 @@ const ANUM_PG_TYPE_TYPARRAY: i32 = 15;
 const ANUM_PG_TYPE_TYPALIGN: i32 = 23;
 const ANUM_PG_TYPE_TYPSTORAGE: i32 = 24;
 const ANUM_PG_TYPE_TYPCOLLATION: i32 = 29;
+const ANUM_PG_TYPE_TYPDEFAULTBIN: i32 = 30;
+const ANUM_PG_TYPE_TYPDEFAULT: i32 = 31;
 const ANUM_PG_SEQUENCE_SEQTYPID: i32 = 2;
 const ANUM_PG_SEQUENCE_SEQSTART: i32 = 3;
 const ANUM_PG_SEQUENCE_SEQINCREMENT: i32 = 4;
@@ -1173,6 +1175,32 @@ fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape
     Ok(Some(shape))
 }
 
+fn pg_type_default_strings<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+) -> PgResult<Option<syscache_seams::PgTypeDefaultShape<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let text_attr = |anum: i32| -> PgResult<Option<mcx::PgString<'mcx>>> {
+        match varlena_image(mcx, &t, TYPEOID, anum)? {
+            None => Ok(None),
+            Some(img) => {
+                let s = core::str::from_utf8(&img[4..]).expect("pg_type default is text");
+                Ok(Some(mcx::PgString::from_str_in(s, mcx)?))
+            }
+        }
+    };
+    let shape = syscache_seams::PgTypeDefaultShape {
+        typdefaultbin: text_attr(ANUM_PG_TYPE_TYPDEFAULTBIN)?,
+        typdefault: text_attr(ANUM_PG_TYPE_TYPDEFAULT)?,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 fn pg_type_typarray(typid: Oid) -> PgResult<Option<Oid>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
@@ -2289,6 +2317,7 @@ pub(crate) fn install() {
     syscache_seams::pg_type_domain_shape::set(pg_type_domain_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);
+    syscache_seams::pg_type_default_strings::set(pg_type_default_strings);
     syscache_seams::pg_type_typrelid::set(pg_type_typrelid);
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);

@@ -852,7 +852,8 @@ fn ATExecAddColumn<'mcx>(
     let mut has_missing = false;
     let rel3 = table::table_open(mcx, myrelid, NoLock)?;
     if rel3.rd_att.attr(newattnum as usize - 1).atthasdef {
-        let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?
+            .expect("atthasdef column has a default");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         tab.has_newvals = true;
         if !clauses::contain_volatile_functions(defval)? {
@@ -2220,7 +2221,8 @@ fn ATExecAlterColumnType<'mcx>(
 
     // Re-coerce any stored default before the column type flips.
     let defaultexpr = if att.atthasdef {
-        let defval = rewrite_handler::build_column_default(mcx, rel, attnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
+            .expect("atthasdef column has a default");
         let defval = nodes_core::strip_implicit_coercions(defval);
         let mut pstate = parser_small1::make_parsestate(mcx, None);
         let coerced = coerce::coerce_to_target_type(
