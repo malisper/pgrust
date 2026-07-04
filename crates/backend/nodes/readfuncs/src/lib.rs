@@ -386,6 +386,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
             b"NULLTEST" => self.read_null_test(),
             b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
+            b"GROUPINGSET" => self.read_grouping_set(),
+            b"TABLESAMPLECLAUSE" => self.read_table_sample_clause(),
             b"ROWMARKCLAUSE" => self.read_row_mark_clause(),
             b"SETOPERATIONSTMT" => self.read_set_operation_stmt(),
             b"AGGREF" => self.read_aggref(),
@@ -1241,6 +1243,53 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, n)
+    }
+
+    fn read_table_sample_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let t = types_nodes::parsenodes::TableSampleClause {
+            tsmhandler: self.read_u32("tsmhandler"),
+            args: self.read_node_list("args")?,
+            repeatable: self.read_node("repeatable")?,
+        };
+        Node::mk(self.mcx, t)
+    }
+
+    fn read_grouping_set(&mut self) -> PgResult<Node<'mcx>> {
+        let kind = match self.read_u32("kind") {
+            0 => types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_EMPTY,
+            1 => types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_SIMPLE,
+            2 => types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_ROLLUP,
+            3 => types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_CUBE,
+            4 => types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_SETS,
+            other => panic!("unrecognized GroupingSetKind: {other}"),
+        };
+        // SIMPLE content is stored as C's int list; keep Integer nodes in
+        // memory (parse-side shape).
+        self.label("content");
+        let t = self.token("content");
+        let mut content = NodeList::nil();
+        if !t.is_empty() {
+            assert!(t == b"(", "readfuncs.c: GroupingSet content is not a list");
+            let mut first = true;
+            loop {
+                let tok = self.token("list");
+                if tok == b")" {
+                    break;
+                }
+                if first && tok == b"i" {
+                    first = false;
+                    continue;
+                }
+                first = false;
+                let elem = self
+                    .node_read_token(tok)?
+                    .expect("nodeRead: <> is not a valid list element here");
+                content.lappend(self.mcx, elem)?;
+            }
+        }
+        let location = self.read_location("location");
+        let g = types_nodes::parsenodes::GroupingSet { kind, content, location };
+        Node::mk(self.mcx, g)
     }
 
     fn read_sort_group_clause(&mut self) -> PgResult<Node<'mcx>> {

@@ -60,6 +60,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_WindowFuncRunCondition => cmp!(as_window_func_run_condition),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
+        NodeTag::T_TableSampleClause => cmp!(as_table_sample_clause),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_FieldSelect => cmp!(as_field_select),
         NodeTag::T_FieldStore => cmp!(as_field_store),
@@ -364,6 +365,14 @@ impl NodeEqual for GroupingFunc<'_> {
 impl NodeEqual for GroupingSet<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.kind == b.kind && self.content.node_equal(&b.content)
+    }
+}
+
+impl NodeEqual for crate::parsenodes::TableSampleClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.tsmhandler == b.tsmhandler
+            && self.args.node_equal(&b.args)
+            && equal_opt(self.repeatable, b.repeatable)
     }
 }
 

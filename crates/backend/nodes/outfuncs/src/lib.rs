@@ -385,6 +385,20 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<SortGroupClause>().expect("SortGroupClause"),
         ),
+        NodeTag::T_TableSampleClause => {
+            let t = node
+                .as_variant::<types_nodes::parsenodes::TableSampleClause>()
+                .expect("TableSampleClause");
+            w!(out, "{{TABLESAMPLECLAUSE :tsmhandler {} :args ", t.tsmhandler);
+            out_list(out, &t.args)?;
+            w!(out, " :repeatable ");
+            out_opt_node(out, t.repeatable)?;
+            w!(out, "}}");
+        }
+        NodeTag::T_GroupingSet => out_grouping_set(
+            out,
+            node.as_variant::<types_nodes::parsenodes::GroupingSet>().expect("GroupingSet"),
+        )?,
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
         NodeTag::T_Param => {
@@ -1312,6 +1326,23 @@ fn out_sort_group_clause(out: &mut PgString<'_>, s: &SortGroupClause) {
     w!(out, " :hashable ");
     out_bool(out, s.hashable);
     w!(out, "}}");
+}
+
+// SIMPLE content is Integer nodes in memory; C stores it as an int list.
+fn out_grouping_set(out: &mut PgString<'_>, g: &types_nodes::parsenodes::GroupingSet<'_>) -> PgResult<()> {
+    w!(out, "{{GROUPINGSET :kind {} :content ", g.kind as i32);
+    if g.kind == types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_SIMPLE && !g.content.is_nil()
+    {
+        w!(out, "(i");
+        for n in g.content.iter() {
+            w!(out, " {}", n.as_integer().expect("SIMPLE grouping-set ref").ival);
+        }
+        w!(out, ")");
+    } else {
+        out_list(out, &g.content)?;
+    }
+    w!(out, " :location -1}}");
+    Ok(())
 }
 
 fn out_aggref(out: &mut PgString<'_>, a: &Aggref<'_>) -> PgResult<()> {
