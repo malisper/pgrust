@@ -17,10 +17,6 @@ mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
 
-pub fn init_seams() {
-    ruleutils_seams::deparse_expression::set(deparse_expression_for_seam);
-}
-
 fn deparse_expression_for_seam<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     expr: types_nodes::Node<'mcx>,
@@ -784,6 +780,7 @@ fn pg_get_indexdef_worker_extended(
 
 pub fn init_seams() {
     genam_seams::pg_get_indexdef_columns_keys_only::set(pg_get_indexdef_columns_keys_only);
+    ruleutils_seams::deparse_expression::set(deparse_expression_for_seam);
 }
 
 // looks_like_function (ruleutils.c): node types that deparse as func(...).

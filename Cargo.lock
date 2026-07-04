@@ -3728,6 +3728,7 @@ dependencies = [
  "miscinit_seams",
  "nbtree",
  "nodeindexscan",
+ "nodes_core",
  "predicate_seams",
  "procarray",
  "pruneheap",
@@ -7823,15 +7824,19 @@ name = "partcache"
 version = "0.1.0"
 dependencies = [
  "cache_syscache",
+ "clauses",
  "datum",
  "fmgr_seams",
  "format_type",
  "inval",
  "lsyscache",
  "mcx",
+ "nodes_core",
+ "readfuncs",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
 ]
 
@@ -10564,6 +10569,7 @@ dependencies = [
  "rel_vocab",
  "relcache",
  "rewrite_manip",
+ "ruleutils_seams",
  "syscache_seams",
  "table",
  "typcache",
@@ -10579,6 +10585,17 @@ dependencies = [
  "types_tuple",
  "varlena",
  "vars",
+]
+
+[[package]]
+name = "ruleutils_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -12015,6 +12032,7 @@ dependencies = [
  "rewrite_manip",
  "ri_triggers_seams",
  "ruleutils",
+ "ruleutils_seams",
  "sequence_seams",
  "smgr",
  "snapmgr",
