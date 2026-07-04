@@ -459,21 +459,19 @@ fn publist_names<'mcx>(mcx: Mcx<'mcx>, list: &NodeList<'mcx>) -> PgResult<PgVec<
 
 fn merge_publications<'mcx>(
     mcx: Mcx<'mcx>,
-    oldpublist: &[PgString<'mcx>],
+    oldpublist: &[&'mcx str],
     newlist: &NodeList<'mcx>,
     addpub: bool,
     subname: &str,
-) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
-    let mut merged: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
-    for p in oldpublist {
-        merged.push(PgString::from_str_in(p.as_str(), mcx)?);
-    }
+) -> PgResult<PgVec<'mcx, &'mcx str>> {
+    let mut merged: PgVec<'mcx, &'mcx str> = PgVec::new_in(mcx);
+    merged.extend(oldpublist.iter().copied());
 
     let newnames = publist_names(mcx, newlist)?;
     check_duplicates(&newnames)?;
 
     for name in newnames.iter() {
-        let found = merged.iter().position(|p| p.as_str() == *name);
+        let found = merged.iter().position(|p| p == name);
         match found {
             Some(idx) => {
                 if addpub {
@@ -488,7 +486,7 @@ fn merge_publications<'mcx>(
             }
             None => {
                 if addpub {
-                    merged.push(PgString::from_str_in(name, mcx)?);
+                    merged.push(name);
                 } else {
                     return Err(err(
                         format!("publication \"{name}\" is not in subscription \"{subname}\""),
@@ -984,9 +982,7 @@ pub fn AlterSubscription<'mcx>(
 
             let publist =
                 merge_publications(mcx, &sub.publications, &stmt.publication, isadd, subname)?;
-            let mut names: PgVec<'_, &str> = mcx::vec_with_capacity_in(mcx, publist.len())?;
-            names.extend(publist.iter().map(|p| p.as_str()));
-            let (pub_datum, img) = publication_list_to_array(mcx, &names)?;
+            let (pub_datum, img) = publication_list_to_array(mcx, &publist)?;
             pub_img_keepalive = Some(img);
             values[(Anum_pg_subscription_subpublications - 1) as usize] = pub_datum;
             replaces[(Anum_pg_subscription_subpublications - 1) as usize] = true;
