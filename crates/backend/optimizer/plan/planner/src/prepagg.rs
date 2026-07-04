@@ -297,6 +297,7 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
             shareable,
             shape.aggtransfn,
             aggtranstype,
+            transtype_len,
             transtype_byval,
             shape.aggcombinefn,
             shape.aggserialfn,
@@ -437,6 +438,7 @@ fn find_compatible_trans(
     shareable: bool,
     aggtransfn: u32,
     aggtranstype: u32,
+    transtype_len: i16,
     transtype_byval: bool,
     aggcombinefn: u32,
     aggserialfn: u32,
@@ -463,17 +465,44 @@ fn find_compatible_trans(
         if init_value_is_null && pertrans.initValueIsNull {
             return Some(transno);
         }
-        if !init_value_is_null && !pertrans.initValueIsNull {
-            assert!(
-                transtype_byval,
-                "find_compatible_trans (prepagg.c): by-ref datumIsEqual; M3 lane"
-            );
-            if init_value.as_u64() == pertrans.initValue.as_u64() {
-                return Some(transno);
-            }
+        if !init_value_is_null
+            && !pertrans.initValueIsNull
+            && datum_is_equal(init_value, pertrans.initValue, transtype_byval, transtype_len)
+        {
+            return Some(transno);
         }
     }
     None
+}
+
+// datumIsEqual (datum.c): by-val full-word compare, by-ref byte-image
+// compare, no detoast. By-ref initvals come from GetAggInitVal's input
+// function: plain varlena for -1, NUL-terminated cstring for -2.
+fn datum_is_equal(a: datum::Datum, b: datum::Datum, byval: bool, typlen: i16) -> bool {
+    if byval {
+        return a.as_u64() == b.as_u64();
+    }
+    let p1 = a.as_usize() as *const u8;
+    let p2 = b.as_usize() as *const u8;
+    // SAFETY: by-ref initval datums are live images of the layout typlen
+    // describes for the whole planner run.
+    unsafe {
+        let size = |p: *const u8| -> usize {
+            match typlen {
+                -1 => ::types_tuple::varatt::varsize_any(p),
+                -2 => {
+                    let mut n = 0usize;
+                    while *p.add(n) != 0 {
+                        n += 1;
+                    }
+                    n + 1
+                }
+                l => l as usize,
+            }
+        };
+        let (s1, s2) = (size(p1), size(p2));
+        s1 == s2 && core::slice::from_raw_parts(p1, s1) == core::slice::from_raw_parts(p2, s2)
+    }
 }
 
 pub fn get_agg_clause_costs(
