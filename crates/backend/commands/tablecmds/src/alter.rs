@@ -436,13 +436,14 @@ fn ATPrepCmd<'mcx>(
 ) -> PgResult<()> {
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     // ATSimplePermissions relkind gate; ownership was checked at lookup.
-    // SET/RESET (...) accepts ATT_TABLE|ATT_VIEW|ATT_MATVIEW|ATT_INDEX|
-    // ATT_PARTITIONED_INDEX|ATT_FOREIGN_TABLE; only table + index are live.
+    // SET/RESET (...) accepts ATT_TABLE|ATT_PARTITIONED_TABLE|ATT_VIEW|
+    // ATT_MATVIEW|ATT_INDEX; table + view + index are live.
     // SET/RESET (...) and SET STATISTICS also accept index relkinds per C's
     // per-subtype ATT_* masks.
     let index_ok = match cmd.subtype {
         AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
             rel.rd_rel.relkind == types_rel::RELKIND_INDEX
+                || rel.rd_rel.relkind == types_rel::RELKIND_VIEW
         }
         AlterTableType::AT_SetStatistics => {
             rel.rd_rel.relkind == types_rel::RELKIND_INDEX

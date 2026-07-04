@@ -656,10 +656,6 @@ fn pull_up_simple_subquery<'mcx>(
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
     let shared_sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
 
-    assert!(
-        shared_sub.rowMarks.is_nil(),
-        "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
-    );
     let rtoffset = parse.rtable.len() as i32;
     // Nested pull-ups append their AppendRelInfos to run.root directly (C
     // keeps them on the subroot and offsets at concat); adjust the same set.
@@ -978,6 +974,30 @@ fn pull_up_simple_subquery<'mcx>(
     }
     for p in &sub.rteperminfos {
         parse.rteperminfos.lappend(mcx, p)?;
+    }
+
+    // parse->rowMarks = list_concat(parse->rowMarks, subquery->rowMarks). The
+    // sublink arm's OffsetVarNodes already bumped the marker rtindexes on the
+    // fresh copy; the functional branches offset fresh copies here (the source
+    // markers may be shared with a cached parse tree).
+    for rc_node in &sub.rowMarks {
+        if pre_adjusted {
+            parse.rowMarks.lappend(mcx, rc_node)?;
+        } else {
+            let rc = rc_node.as_row_mark_clause().expect("rowMarks holds RowMarkClause");
+            parse.rowMarks.lappend(
+                mcx,
+                Node::mk(
+                    mcx,
+                    types_nodes::parsenodes::RowMarkClause {
+                        rti: rc.rti + rtoffset as u32,
+                        strength: rc.strength,
+                        waitPolicy: rc.waitPolicy,
+                        pushedDown: rc.pushedDown,
+                    },
+                )?,
+            )?;
+        }
     }
 
     // SAFETY: as above — exclusive pre-seal tree fixup.

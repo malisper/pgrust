@@ -321,6 +321,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_list(&tf.colvalexprs, w)?
                 || walk_list(&tf.passingvalexprs, w)?)
         }
+        NodeTag::T_InferenceElem => walk_opt(node.as_inference_elem().unwrap().expr, w),
         other => deferred("expression_tree_walker", other),
     }
 }
@@ -1767,6 +1768,24 @@ where
                     location: tf.location,
                 },
             )?))
+        }
+        NodeTag::T_InferenceElem => {
+            let ie = node.as_inference_elem().unwrap();
+            let expr = match ie.expr {
+                Some(e) => m(e)?.map(Some),
+                None => None,
+            };
+            match expr {
+                None => Ok(None),
+                Some(expr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::InferenceElem {
+                        expr,
+                        infercollid: ie.infercollid,
+                        inferopclass: ie.inferopclass,
+                    },
+                )?)),
+            }
         }
         other => deferred("expression_tree_mutator", other),
     }
