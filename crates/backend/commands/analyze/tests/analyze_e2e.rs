@@ -1035,7 +1035,7 @@ fn analyze_end_to_end_matches_live_postgres() {
     let mcv = &b.slots[0];
     assert_eq!(mcv.kind, 1);
     assert_eq!(mcv.staop, INT4_EQ_OP);
-    assert_eq!(mcv.valuetype, INT4OID);
+    assert_eq!(mcv.valuetype().unwrap(), INT4OID);
     let mcv_vals: Vec<i32> = mcv.values().unwrap().iter().map(|d| d.as_i32()).collect();
     assert_eq!(mcv_vals, [1, 2, 3]);
     let freqs: Vec<f32> = mcv.numbers().unwrap().iter().copied().collect();
