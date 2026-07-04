@@ -57,6 +57,7 @@ fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
 }
 
 fn install_bufmgr_seams() {
+    execreplication_seams::check_cmd_replica_identity::set(|_mcx, _rel, _cmd| Ok(()));
     bufmgr_seams::read_buffer::set(|_rel, block| {
         with_fake(|f| {
             assert!((block as usize) < f.pages.len());
