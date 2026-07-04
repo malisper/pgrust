@@ -18,6 +18,7 @@ datum = { path = "../../../_support/types/datum" }
 types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 elog = { path = "../../utils/error/elog" }
+elog_seams = { path = "../../utils/error/elog_seams" }
 types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

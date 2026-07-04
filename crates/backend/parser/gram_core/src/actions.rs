@@ -487,9 +487,13 @@ impl<'mcx> Parser<'mcx> {
         let mcx = self.mcx;
         let _ = yyloc;
         match rule {
-            455 => {
+            // CreateStmt: CREATE OptTemp TABLE [IF_P NOT EXISTS] qualified_name
+            // '(' OptTableElementList ')' OptInherit OptPartitionSpec
+            // table_access_method_clause OptWith OnCommitOption OptTableSpace
+            455 | 456 => {
+                let d = if rule == 456 { 3 } else { 0 };
                 let persistence = view.v(2).ival() as u8;
-                let relation = view.v(4).node().expect("qualified_name");
+                let relation = view.v(4 + d).node().expect("qualified_name");
                 // SAFETY: tree is parser-owned; no derived refs live.
                 unsafe {
                     relation
@@ -498,14 +502,14 @@ impl<'mcx> Parser<'mcx> {
                 }
                 let mut n = Node::build::<CreateStmt>(mcx)?;
                 n.relation = relation.as_variant::<RangeVar>();
-                n.tableElts = view.v(6).list();
-                n.inhRelations = view.v(8).list();
-                n.partspec = view.v(9).node();
-                n.accessMethod = opt_str(view.v(10));
-                n.options = view.v(11).list();
-                n.oncommit = on_commit_action(view.v(12).ival());
-                n.tablespacename = opt_str(view.v(13));
-                n.if_not_exists = false;
+                n.tableElts = view.v(6 + d).list();
+                n.inhRelations = view.v(8 + d).list();
+                n.partspec = view.v(9 + d).node();
+                n.accessMethod = opt_str(view.v(10 + d));
+                n.options = view.v(11 + d).list();
+                n.oncommit = on_commit_action(view.v(12 + d).ival());
+                n.tablespacename = opt_str(view.v(13 + d));
+                n.if_not_exists = rule == 456;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // CreateStmt: CREATE OptTemp TABLE [IF_P NOT EXISTS] qualified_name
