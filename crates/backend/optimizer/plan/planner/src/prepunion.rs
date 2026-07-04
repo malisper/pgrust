@@ -779,10 +779,17 @@ fn generate_setop_tlist<'mcx>(
             trivial = false;
         }
         if crate::pathkeys::expr_collation(expr) != col_coll {
-            panic!(
-                "generate_setop_tlist (prepunion.c): collation relabel (applyRelabelType); \
-                 collation lane"
-            );
+            let (ety, etypmod) = crate::costsize::expr_type_typmod(expr);
+            expr = nodes_core::node_funcs::apply_relabel_type(
+                mcx,
+                expr,
+                ety,
+                etypmod,
+                col_coll,
+                types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?;
+            trivial = false;
         }
 
         let tle = Node::mk(
