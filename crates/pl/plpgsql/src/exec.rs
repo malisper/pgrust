@@ -2099,10 +2099,11 @@ impl<'a> Estate<'a> {
 
         let result = self.exec_for_query(label, var, &cursor, body, true);
 
-        let close = SPI_cursor_close(cursor);
+        // Close only on success (C longjmps past it): a failed intra-loop
+        // COMMIT/ROLLBACK already dropped the portal in its abort arm.
         match result {
             Ok(rc) => {
-                close?;
+                SPI_cursor_close(cursor)?;
                 Ok(rc)
             }
             Err(e) => Err(e),
@@ -3736,10 +3737,9 @@ impl<'a> Estate<'a> {
         // No prefetch: the cursor is user-visible (WHERE CURRENT OF).
         let result = self.exec_for_query(label, var, &cursor, body, false);
 
-        let close = spi::SPI_cursor_close(cursor);
         let rc = match result {
             Ok(rc) => {
-                close?;
+                spi::SPI_cursor_close(cursor)?;
                 rc
             }
             Err(e) => return Err(e),
@@ -3762,10 +3762,9 @@ impl<'a> Estate<'a> {
         let portal = self.exec_dynquery_with_params(query, params, None, 0)?;
         let cursor = spi::SpiCursor::from_portal(portal);
         let result = self.exec_for_query(label, var, &cursor, body, true);
-        let close = spi::SPI_cursor_close(cursor);
         match result {
             Ok(rc) => {
-                close?;
+                spi::SPI_cursor_close(cursor)?;
                 Ok(rc)
             }
             Err(e) => Err(e),
