@@ -73,9 +73,11 @@ fn install_coll_stub() {
                 collnamespace: 11,
                 collprovider: row.provider,
                 collisdeterministic: true,
+                collencoding: -1,
                 collcollate: row.collate.map(s).transpose()?,
                 collctype: row.ctype.map(s).transpose()?,
                 colllocale: row.locale.map(s).transpose()?,
+                collicurules: None,
                 collversion: row.version.map(s).transpose()?,
             }))
         });

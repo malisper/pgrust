@@ -298,7 +298,7 @@ pub fn OpernameGetCandidates<'mcx>(
 
 // is_encoding_supported_by_icu (encnames.c): the pg_enc2icu_tbl NULL slots
 // are SQL_ASCII(0), EUC_JIS_2004(5), MULE_INTERNAL(7), LATIN10(17), WIN874(21).
-fn is_encoding_supported_by_icu(encoding: i32) -> bool {
+pub fn is_encoding_supported_by_icu(encoding: i32) -> bool {
     (0..=34).contains(&encoding) && !matches!(encoding, 0 | 5 | 7 | 17 | 21)
 }
 

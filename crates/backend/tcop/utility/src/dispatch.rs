@@ -703,6 +703,16 @@ fn dispatch_switch<'mcx>(
                     debug_assert!(!stmt.oldstyle);
                     operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_COLLATION => {
+                    let mut pstate = parser_small1::make_parsestate(mcx, None);
+                    {
+                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                        pstate.p_sourcetext = Some(v.leak());
+                    }
+                    collationcmds::DefineCollation(mcx, &mut pstate, stmt)?;
+                    parser_small1::free_parsestate(pstate)?;
+                }
                 other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
             }
         }

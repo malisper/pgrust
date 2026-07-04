@@ -49,8 +49,8 @@ use types_nodes::rawnodes::{
     FRAMEOPTION_START_UNBOUNDED_FOLLOWING, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
 use types_nodes::{
-    Alias, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar, RawStmt,
-    SelectStmt, UpdateStmt,
+    Alias, DefineStmt, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar,
+    RawStmt, SelectStmt, UpdateStmt,
     ValUnion,
 };
 use types_nodes::{BitString, Boolean, Float, Integer};
@@ -840,11 +840,18 @@ impl<'mcx> Parser<'mcx> {
             // CreateDomainStmt: CREATE DOMAIN_P any_name opt_as Typename ColQualList
             1529 => {
                 let mut constraints = NodeList::nil();
+                let mut coll_clause: Option<Node<'_>> = None;
                 for q in view.v(6).list().iter() {
                     match q.node_tag() {
                         NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
                         NodeTag::T_CollateClause => {
-                            panic!("gram_core: SplitColQualList COLLATE arm unported")
+                            if coll_clause.is_some() {
+                                return Err(self.errposition_error(
+                                    "multiple COLLATE clauses not allowed".into(),
+                                    q.as_collate_clause().unwrap().location,
+                                ));
+                            }
+                            coll_clause = Some(q);
                         }
                         other => panic!("unexpected node type {other:?} in ColQualList"),
                     }
@@ -852,6 +859,7 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<CreateDomainStmt>(mcx)?;
                 n.domainname = view.v(3).list();
                 n.typeName = view.v(5).node();
+                n.collClause = coll_clause;
                 n.constraints = constraints;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
@@ -5474,6 +5482,53 @@ impl<'mcx> Parser<'mcx> {
                 n.vals = view.v(7).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // DefineStmt: CREATE COLLATION [IF NOT EXISTS] any_name definition
+            //           | CREATE COLLATION [IF NOT EXISTS] any_name FROM any_name
+            860 | 861 | 862 | 863 => {
+                let ine = rule == 861 || rule == 863;
+                let off = if ine { 3 } else { 0 };
+                let mut n = Node::build::<DefineStmt>(mcx)?;
+                n.kind = ObjectType::OBJECT_COLLATION;
+                n.defnames = view.v(3 + off).list();
+                n.definition = if rule == 860 || rule == 861 {
+                    view.v(4 + off).list()
+                } else {
+                    let from = Node::mk_list(mcx, view.v(5 + off).list())?;
+                    let el = Node::mk(
+                        mcx,
+                        DefElem {
+                            defnamespace: None,
+                            defname: Some("from"),
+                            arg: Some(from),
+                            defaction: DefElemAction::DEFELEM_UNSPEC,
+                            location: view.l(5 + off),
+                        },
+                    )?;
+                    NodeList::make1(mcx, el)?
+                };
+                n.if_not_exists = ine;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // definition: '(' def_list ')'
+            864 => *yyval = YYSTYPE::List(view.v(2).list()),
+            // def_list: def_elem | def_list ',' def_elem
+            865 => {
+                let el = view.v(1).node().expect("def_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            866 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("def_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // def_elem: ColLabel '=' def_arg | ColLabel
+            867 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            868 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
+            // def_arg: func_type | reserved_keyword | qual_all_Op | NONE
+            869 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            870 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?)),
+            871 => *yyval = YYSTYPE::Node(Some(Node::mk_list(mcx, view.v(1).list())?)),
+            874 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, "none")?)),
             // opt_enum_val_list: enum_val_list | /*EMPTY*/
             879 => *yyval = YYSTYPE::List(view.v(1).list()),
             880 => *yyval = YYSTYPE::List(NodeList::nil()),
