@@ -1290,8 +1290,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(())
     }
 
-    // spool_tuples: pos == -1 spools the whole partition (the pass-through
-    // and spilled-store arms are unreachable: no runCondition, no spill).
+    // spool_tuples: pos == -1 spools the whole partition (the spilled-store
+    // pos=-1 arm is unreachable: spill is a loud panic).
     fn spool_tuples<F>(
         &mut self,
         estate: &mut EStateData<'mcx>,
@@ -1304,6 +1304,17 @@ impl<'mcx> WindowAggStateData<'mcx> {
         if self.buffer.is_none() || self.partition_spooled {
             return Ok(());
         }
+        // Pass-through exhausts the partition; STRICT (top window) discards
+        // the tuples, no node above needs them.
+        let pos = if self.status != WaStatus::Run {
+            debug_assert!(matches!(
+                self.status,
+                WaStatus::PassThrough | WaStatus::PassThroughStrict
+            ));
+            -1
+        } else {
+            pos
+        };
         let mcx = estate.es_query_cxt;
         while self.spooled_rows <= pos || pos == -1 {
             let Some(outer_id) = fetch(estate)? else {
@@ -1330,17 +1341,20 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     break;
                 }
             }
-            let outer_slot = estate.slot_mut(outer_id);
-            self.buffer.as_mut().unwrap().puttupleslot(outer_slot, mcx)?;
-            self.spooled_rows += 1;
+            if self.status != WaStatus::PassThroughStrict {
+                let outer_slot = estate.slot_mut(outer_id);
+                self.buffer.as_mut().unwrap().puttupleslot(outer_slot, mcx)?;
+                self.spooled_rows += 1;
+            }
         }
         Ok(())
     }
 
     fn release_partition(&mut self, estate: &mut EStateData<'mcx>) {
         let mcx = estate.es_query_cxt;
-        // Rank/ntile state lives in perfunc (C: partcontext localmem); byval
-        // trans values need no aggcontext reset.
+        // Rank/ntile state lives in perfunc (C: partcontext localmem); C's
+        // aggcontext resets here are deferred to the currentpos==0 restart,
+        // which is unconditional on a partition's first evaluation.
         if let Some(buffer) = self.buffer.as_mut() {
             buffer.clear();
         }
