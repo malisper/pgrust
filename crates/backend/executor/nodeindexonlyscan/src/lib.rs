@@ -40,7 +40,7 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
-    pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
+    pub ioss_NameCStringAttNums: PgBox<'mcx, [AttrNumber]>,
     pub ioss_VMBuffer: VmBuffer,
     pub ioss_PlanNodeId: i32,
 }
@@ -392,7 +392,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
 fn name_cstring_attnums<'mcx>(
     mcx: Mcx<'mcx>,
     index_rel: &Relation<'mcx>,
-) -> PgResult<PgVec<'mcx, AttrNumber>> {
+) -> PgResult<PgBox<'mcx, [AttrNumber]>> {
     let mut attnums = PgVec::new_in(mcx);
     let indnkeyatts = index_rel.indnkeyatts();
     for attnum in 0..indnkeyatts as usize {
@@ -402,7 +402,7 @@ fn name_cstring_attnums<'mcx>(
             attnums.push(attnum as AttrNumber);
         }
     }
-    Ok(attnums)
+    Ok(attnums.into_boxed_slice())
 }
 
 fn order_dir(dir: i32) -> ScanDirection {
