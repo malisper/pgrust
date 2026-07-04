@@ -1903,6 +1903,11 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, root, off, &mut paramids)?;
             }
         }
+        NodeTag::T_SampleScan => {
+            if let Some(ts) = plan.as_sample_scan().unwrap().tablesample {
+                finalize_primnode(run, root, ts, &mut paramids)?;
+            }
+        }
         NodeTag::T_TidScan => {
             finalize_primnode_list(run, root, &plan.as_tid_scan().unwrap().tidquals, &mut paramids)?;
             paramids.add_members(mcx, scan_params)?;

@@ -42,6 +42,7 @@ fn create_plan_recurse<'mcx>(
     match run.root.path(path_id) {
         PathNode::Path(p)
             if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_SampleScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
