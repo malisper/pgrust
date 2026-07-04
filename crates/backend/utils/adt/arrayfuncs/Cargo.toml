@@ -13,6 +13,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 funcapi_srf = { path = "../../fmgr/funcapi_srf" }
 lsyscache = { path = "../../cache/lsyscache" }
+format_type = { path = "../format_type" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }
