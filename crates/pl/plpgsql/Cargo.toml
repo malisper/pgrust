@@ -33,6 +33,7 @@ parser_seams = { path = "../../backend/parser/parser_seams" }
 parser_small1 = { path = "../../backend/parser/parser_small1" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+resowner = { path = "../../backend/utils/resowner/resowner" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 spi = { path = "../../backend/executor/spi" }

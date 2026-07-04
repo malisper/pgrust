@@ -324,7 +324,7 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
         PlStmt::Perform { .. } => "PERFORM",
         PlStmt::GetDiag { is_stacked: false, .. } => "GET DIAGNOSTICS",
         PlStmt::GetDiag { is_stacked: true, .. } => "GET STACKED DIAGNOSTICS",
-        PlStmt::DynExecute { .. } => "EXECUTE statement",
+        PlStmt::DynExecute { .. } => "EXECUTE",
     }
 }
 
