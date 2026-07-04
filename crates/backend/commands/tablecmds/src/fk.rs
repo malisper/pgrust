@@ -218,11 +218,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         (n, idx)
     };
 
-    // checkFkeyPermissions: ACL_REFERENCES; superuser fast path only
-    // (aclchk role walk unported; DefineIndex precedent).
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("checkFkeyPermissions (ACL_REFERENCES for non-superusers)");
-    }
+    checkFkeyPermissions(&pkrel, &pkattnum[..numpks])?;
 
     for i in 0..numfks {
         let attgenerated = rel.rd_att.attr(fkattnum[i] as usize - 1).attgenerated;
@@ -954,4 +950,25 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
+}
+
+fn checkFkeyPermissions(rel: &Relation<'_>, attnums: &[i16]) -> PgResult<()> {
+    let roleid = miscinit::GetUserId();
+    if aclchk::pg_class_aclcheck(rel.rd_id, roleid, adt_acl::ACL_REFERENCES)?
+        == aclchk::ACLCHECK_OK
+    {
+        return Ok(());
+    }
+    for &attnum in attnums {
+        let aclresult =
+            aclchk::pg_attribute_aclcheck(rel.rd_id, attnum, roleid, adt_acl::ACL_REFERENCES)?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk::aclcheck_error(
+                aclresult,
+                crate::get_relkind_objtype(rel.rd_rel.relkind),
+                rel.name(),
+            )?;
+        }
+    }
+    Ok(())
 }

@@ -173,6 +173,11 @@ fn walker<'w, 'mcx: 'w>(
             context.add(OperatorRelationId, opexpr.opno, 0);
             walk_list(&opexpr.args, context)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let opexpr = node.as_scalar_array_op_expr().unwrap();
+            context.add(OperatorRelationId, opexpr.opno, 0);
+            walk_list(&opexpr.args, context)
+        }
         NodeTag::T_Aggref => {
             let aggref = node.as_aggref().unwrap();
             context.add(types_core::PROCEDURE_RELATION_ID, aggref.aggfnoid, 0);

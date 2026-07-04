@@ -4,7 +4,7 @@
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
-use types_error::{PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::parsenodes::AlterTableType;
 use types_nodes::NodeList;
 use types_rel::{
@@ -30,38 +30,29 @@ pub(crate) fn ATExecSetRelOptions<'mcx>(
 
     let pgclass = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
-    update_one(mcx, &pgclass, rel.rd_id, rel.rd_rel.relkind, rel.rd_rel.relam, None, def_list, operation)?;
+    update_one(mcx, &pgclass, rel, None, def_list, operation)?;
 
     if rel.rd_rel.reltoastrelid != InvalidOid {
         let toastid = rel.rd_rel.reltoastrelid;
         let toastrel = table::table_open(mcx, toastid, lockmode)?;
-        update_one(
-            mcx,
-            &pgclass,
-            toastid,
-            toastrel.rd_rel.relkind,
-            toastrel.rd_rel.relam,
-            Some("toast"),
-            def_list,
-            operation,
-        )?;
+        update_one(mcx, &pgclass, &toastrel, Some("toast"), def_list, operation)?;
         toastrel.close(types_rel::NoLock)?;
     }
 
     pgclass.close(RowExclusiveLock)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_one<'mcx>(
     mcx: Mcx<'mcx>,
     pgclass: &Relation<'mcx>,
-    relid: Oid,
-    relkind: u8,
-    relam: Oid,
+    rel: &Relation<'mcx>,
     namspace: Option<&str>,
     def_list: &NodeList<'mcx>,
     operation: AlterTableType,
 ) -> PgResult<()> {
+    let relid = rel.rd_id;
+    let relkind = rel.rd_rel.relkind;
+    let relam = rel.rd_rel.relam;
     let key = oid_scankey(1, relid);
     let mut scan = genam::systable_beginscan(
         mcx,
@@ -117,10 +108,31 @@ fn update_one<'mcx>(
             RELKIND_PARTITIONED_TABLE => {
                 reloptions::partitioned_table_reloptions(new_options.as_deref(), true)?;
             }
-            RELKIND_VIEW => panic!(
-                "unported: tablecmds ATExecSetRelOptions view arm \
-                 (view_query_is_auto_updatable; CREATE VIEW lane)"
-            ),
+            RELKIND_VIEW => {
+                let opts = reloptions::view_reloptions(mcx, new_options.as_deref(), true)?;
+                let check_option = opts.is_some_and(|o| {
+                    o.check_option
+                        != types_rel::ViewOptCheckOption::VIEW_OPTION_CHECK_OPTION_NOT_SET
+                });
+                if check_option {
+                    let view_query = rewrite_handler::get_view_query(mcx, rel)?;
+                    if let Some(view_updatable_error) =
+                        rewrite_handler::view_query_is_auto_updatable(view_query, true)
+                    {
+                        genam::systable_endscan(mcx, scan)?;
+                        return Err(Box::new(
+                            types_error::PgError::new(
+                                ERROR,
+                                "WITH CHECK OPTION is supported only on automatically \
+                                 updatable views"
+                                    .to_string(),
+                            )
+                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                            .with_hint(view_updatable_error),
+                        ));
+                    }
+                }
+            }
             RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => {
                 reloptions::index_reloptions(mcx, relam, new_options.as_deref(), true)?;
             }
