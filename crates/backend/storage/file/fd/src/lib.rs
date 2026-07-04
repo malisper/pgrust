@@ -19,7 +19,7 @@ pub use copydir::{copy_file, copydir, directory_is_empty, pg_mkdir_p, rmtree};
 pub use desc::{
     closeAllVfds, with_allocated_dir, with_allocated_stdio, AllocateDir, AllocateFile,
     ClosePipeStream, CloseTransientFile, FreeDir, FreeFile, OpenPipeStream, OpenTransientFile,
-    OpenTransientFilePerm, ReadDir, ReadDirExtended, TransientFileRawFd,
+    OpenTransientFilePerm, PipeStreamGets, ReadDir, ReadDirExtended, TransientFileRawFd,
 };
 pub use io::{
     FileClose, FileFallocate, FileGetRawDesc, FileGetRawFlags, FileGetRawMode, FilePathName,

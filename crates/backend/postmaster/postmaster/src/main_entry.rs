@@ -345,6 +345,11 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     miscinit_seams::process_shared_preload_libraries::call()?;
 
+    if guc_tables::vars::EnableSSL.read() {
+        be_secure::secure_initialize(true)?;
+        backend_startup::loaded_ssl::set(true);
+    }
+
     postinit::InitializeMaxBackends()?;
     pmchild_seams::init_postmaster_child_slots::call();
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the

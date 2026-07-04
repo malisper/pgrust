@@ -166,6 +166,11 @@ pub struct Port {
     pub tcp_user_timeout: i32,
     pub ssl_in_use: bool,
     pub alpn_used: bool,
+    // C: char *peer_cn / *peer_dn (TopMemoryContext copies); the SSL* itself
+    // is the openssl backend's thread-local, not a Port field.
+    pub peer_cn: Option<String>,
+    pub peer_dn: Option<String>,
+    pub peer_cert_valid: bool,
     // C: `const HbaLine *hba` borrows the parsed_hba_lines list entry; an
     // owned clone of the matched line here (once per connection, cold).
     pub hba: Option<HbaLine>,
@@ -200,6 +205,9 @@ impl Port {
             tcp_user_timeout: 0,
             ssl_in_use: false,
             alpn_used: false,
+            peer_cn: None,
+            peer_dn: None,
+            peer_cert_valid: false,
             hba: None,
             remote_hostname_resolv: 0,
             remote_hostname_errcode: 0,

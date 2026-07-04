@@ -293,6 +293,17 @@ pub fn process_pm_reload_request() -> PgResult<()> {
         if !auth_seams::load_ident::call() {
             report(LOG, "pg_ident.conf was not reloaded".into(), 2015, "process_pm_reload_request");
         }
+
+        if guc_tables::vars::EnableSSL.read() {
+            if be_secure::secure_initialize(false)? == 0 {
+                backend_startup::loaded_ssl::set(true);
+            } else {
+                report(LOG, "SSL configuration was not reloaded".into(), 2030, "process_pm_reload_request");
+            }
+        } else {
+            be_secure::secure_destroy();
+            backend_startup::loaded_ssl::set(false);
+        }
     }
     Ok(())
 }

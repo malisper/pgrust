@@ -11,3 +11,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn set_port_noblock(noblock: bool) -> bool
 );
+
+seam_core::seam!(
+    pub fn secure_close()
+);

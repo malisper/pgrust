@@ -51,6 +51,12 @@ pub fn client_socket_state() -> Option<(pgsocket, bool, bool)> {
     CLIENT_STATE.get()
 }
 
+pub fn set_ssl_in_use(ssl_in_use: bool) {
+    if let Some((sock, noblock, _)) = CLIENT_STATE.get() {
+        CLIENT_STATE.set(Some((sock, noblock, ssl_in_use)));
+    }
+}
+
 // GUC storage declared in pqcomm.c; boot values from guc_tables.c.
 mod cfg {
     use std::cell::{Cell, RefCell};
@@ -205,8 +211,10 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
 // on_proc_exit hook: stop I/O but leave the fd open until process death.
 fn socket_close(_code: i32, _arg: usize) {
     if let Some((_, noblock, ssl_in_use)) = CLIENT_STATE.get() {
-        assert!(!ssl_in_use, "socket_close: secure_close TLS arm is unported");
-        CLIENT_STATE.set(Some((PGINVALID_SOCKET, noblock, ssl_in_use)));
+        if ssl_in_use {
+            be_secure_seams::secure_close::call();
+        }
+        CLIENT_STATE.set(Some((PGINVALID_SOCKET, noblock, false)));
     }
 }
 

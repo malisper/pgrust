@@ -19,10 +19,11 @@ use types_core::init::{
     uaPeer, uaRADIUS, uaReject, uaSCRAM, uaTrust, UserAuth,
 };
 use types_error::{
-    ErrorLocation, PgResult, DEBUG5, ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION,
+    ErrorLocation, PgResult, DEBUG5, ERRCODE_CONFIG_FILE_ERROR,
+    ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION,
     ERRCODE_INVALID_PASSWORD, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
-use types_startup::{clientCertFull, clientCertOff, Port};
+use types_startup::{clientCertDN, clientCertFull, clientCertOff, Port};
 
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_ERROR: i32 = -1;
@@ -94,6 +95,57 @@ pub fn auth_failed(port: &Port, status: i32, logdetail: Option<&str>) -> PgResul
         .finish(loc(316, "auth_failed"))
 }
 
+fn CheckCertAuth(port: &Port) -> PgResult<i32> {
+    let hba = port.hba.as_ref().expect("CheckCertAuth: port->hba is NULL");
+    let user_name = port.user_name.as_deref().unwrap_or("");
+
+    let peer_username = if hba.clientcertname == clientCertDN {
+        port.peer_dn.as_deref()
+    } else {
+        port.peer_cn.as_deref()
+    };
+
+    let Some(peer_username) = peer_username.filter(|u| !u.is_empty()) else {
+        ereport(LOG)
+            .errmsg(format!(
+                "certificate authentication failed for user \"{user_name}\": client certificate contains no user name"
+            ))
+            .finish(loc(2710, "CheckCertAuth"))?;
+        return Ok(STATUS_ERROR);
+    };
+
+    if hba.auth_method == uaCert {
+        let Some(peer_dn) = port.peer_dn.as_deref() else {
+            ereport(LOG)
+                .errmsg(format!(
+                    "certificate authentication failed for user \"{user_name}\": unable to retrieve subject DN"
+                ))
+                .finish(loc(2730, "CheckCertAuth"))?;
+            return Ok(STATUS_ERROR);
+        };
+        set_authn_id(port, peer_dn)?;
+    }
+
+    let status_check_usermap =
+        hba::check_usermap(hba.usermap.as_deref(), user_name, peer_username, false)?;
+    if status_check_usermap != STATUS_OK
+        && hba.clientcert == clientCertFull
+        && hba.auth_method != uaCert
+    {
+        let what = if hba.clientcertname == clientCertDN {
+            "DN mismatch"
+        } else {
+            "CN mismatch"
+        };
+        ereport(LOG)
+            .errmsg(format!(
+                "certificate validation (clientcert=verify-full) failed for user \"{user_name}\": {what}"
+            ))
+            .finish(loc(2755, "CheckCertAuth"))?;
+    }
+    Ok(status_check_usermap)
+}
+
 pub fn set_authn_id(port: &Port, id: &str) -> PgResult<()> {
     let (authn_id, _) = miscinit::client_connection_info();
     if let Some(previous) = authn_id {
@@ -131,18 +183,24 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
 
     postgres_seams::check_for_interrupts::call()?;
 
-    // Pre-auth clientcert check: unreachable, hostssl records cannot match
-    // in this no-SSL build.
     let clientcert = port
         .hba
         .as_ref()
         .expect("ClientAuthentication: port->hba is NULL")
         .clientcert;
     if clientcert != clientCertOff {
-        panic!(
-            "ClientAuthentication: clientcert set on matched hba line — \
-             SSL is not supported by this build"
-        );
+        if !be_secure::secure_loaded_verify_locations() {
+            return ereport(FATAL)
+                .errcode(ERRCODE_CONFIG_FILE_ERROR)
+                .errmsg("client certificates can only be checked if a root certificate store is available")
+                .finish(loc(404, "ClientAuthentication"));
+        }
+        if !port.peer_cert_valid {
+            return ereport(FATAL)
+                .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg("connection requires a valid client certificate")
+                .finish(loc(414, "ClientAuthentication"));
+        }
     }
 
     let auth_method = port_auth_method(port);
@@ -166,10 +224,12 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
         m => unreachable!("ClientAuthentication: unreachable auth method {m}"),
     };
 
-    // CheckCertAuth applies only under SSL (cert method / verify-full).
-    if (status == STATUS_OK && clientcert == clientCertFull) || auth_method == uaCert {
-        panic!("CheckCertAuth: SSL is not supported by this build");
-    }
+    let status = if (status == STATUS_OK && clientcert == clientCertFull) || auth_method == uaCert
+    {
+        CheckCertAuth(port)?
+    } else {
+        status
+    };
 
     if backend_startup::log_connections::get() & backend_startup::LOG_CONNECTION_AUTHENTICATION
         != 0

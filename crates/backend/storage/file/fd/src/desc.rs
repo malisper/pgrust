@@ -240,6 +240,45 @@ pub fn OpenPipeStream(command: &str, mode: &str) -> PgResult<i32> {
     }
 }
 
+// fgets(buf, size, fh) over an OpenPipeStream handle: fills up to
+// buf.len()-1 bytes, stops after '\n'. Ok(0) is EOF-without-bytes (C NULL
+// with !ferror); Err(errno) is C NULL with ferror set.
+pub fn PipeStreamGets(index: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    use std::io::Read;
+
+    with_fd(|fd| {
+        let Some(desc) = fd.allocated_descs.get_mut(index as usize) else {
+            return Err(libc::EBADF);
+        };
+        let AllocatedHandle::Pipe(pipe) = &mut desc.desc else {
+            return Err(libc::EBADF);
+        };
+        let Some(out) = pipe.stdout.as_mut() else {
+            return Err(libc::EBADF);
+        };
+        let mut n = 0usize;
+        while n + 1 < buf.len() {
+            let mut byte = [0u8; 1];
+            match out.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    buf[n] = byte[0];
+                    n += 1;
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        }
+        if n < buf.len() {
+            buf[n] = 0;
+        }
+        Ok(n)
+    })
+}
+
 // C contract: pclose()'s wait status, -1 on a stream we don't track.
 pub fn ClosePipeStream(index: i32) -> PgResult<i32> {
     let found = with_fd(|fd| {

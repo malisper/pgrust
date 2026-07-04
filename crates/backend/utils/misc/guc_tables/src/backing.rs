@@ -414,3 +414,76 @@ string_var!(
     Some("")
 );
 string_var!(CELL_cluster_name, cluster_name, set_cluster_name, Some(""));
+
+// be-secure.c file-scope SSL GUC globals, homed here until be_secure owns
+// installable storage (EnableSSL precedent above).
+bool_var!(
+    B_SSLPreferServerCiphers,
+    SSLPreferServerCiphers,
+    set_SSLPreferServerCiphers,
+    true
+);
+bool_var!(
+    B_ssl_passphrase_command_supports_reload,
+    ssl_passphrase_command_supports_reload,
+    set_ssl_passphrase_command_supports_reload,
+    false
+);
+int_var!(
+    CELL_ssl_min_protocol_version,
+    ssl_min_protocol_version,
+    set_ssl_min_protocol_version,
+    crate::consts::PG_TLS1_2_VERSION
+);
+int_var!(
+    CELL_ssl_max_protocol_version,
+    ssl_max_protocol_version,
+    set_ssl_max_protocol_version,
+    crate::consts::PG_TLS_ANY
+);
+string_var!(CELL_ssl_library, ssl_library, set_ssl_library, Some("OpenSSL"));
+string_var!(
+    CELL_ssl_cert_file,
+    ssl_cert_file,
+    set_ssl_cert_file,
+    Some("server.crt")
+);
+string_var!(
+    CELL_ssl_key_file,
+    ssl_key_file,
+    set_ssl_key_file,
+    Some("server.key")
+);
+string_var!(CELL_ssl_ca_file, ssl_ca_file, set_ssl_ca_file, Some(""));
+string_var!(CELL_ssl_crl_file, ssl_crl_file, set_ssl_crl_file, Some(""));
+string_var!(CELL_ssl_crl_dir, ssl_crl_dir, set_ssl_crl_dir, Some(""));
+string_var!(
+    CELL_ssl_dh_params_file,
+    ssl_dh_params_file,
+    set_ssl_dh_params_file,
+    Some("")
+);
+string_var!(
+    CELL_ssl_passphrase_command,
+    ssl_passphrase_command,
+    set_ssl_passphrase_command,
+    Some("")
+);
+string_var!(
+    CELL_SSLCipherSuites,
+    SSLCipherSuites,
+    set_SSLCipherSuites,
+    Some("")
+);
+string_var!(
+    CELL_SSLCipherList,
+    SSLCipherList,
+    set_SSLCipherList,
+    Some("HIGH:MEDIUM:+3DES:!aNULL")
+);
+string_var!(
+    CELL_SSLECDHCurve,
+    SSLECDHCurve,
+    set_SSLECDHCurve,
+    Some("X25519:prime256v1")
+);

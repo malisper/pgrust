@@ -38,6 +38,7 @@ smgr = { path = "../../../storage/smgr/smgr" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 table = { path = "../../../access/table/table" }
 genam = { path = "../../../access/index/genam" }
+be_secure = { path = "../../../libpq/be_secure" }
 backend_startup = { path = "../../../tcop/backend_startup" }
 
 timeout_seams = { path = "../../misc/timeout_seams" }

@@ -108,6 +108,8 @@ members = [
     "crates/backend/storage/ipc/latch",
     "crates/backend/libpq/be_secure_seams",
     "crates/backend/libpq/be_secure",
+    "crates/backend/libpq/be_secure_common",
+    "crates/backend/libpq/be_secure_openssl",
     "crates/backend/libpq/pqcomm",
     "crates/backend/storage/large_object",
     "crates/backend/catalog/pg_largeobject",
