@@ -26,6 +26,7 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use crate::GetDefaultOpClass;
 
 const NamespaceRelationId: Oid = 2615;
+const RELPERSISTENCE_TEMP: i8 = b't' as i8;
 const ClassNameNspIndexId: Oid = 2663;
 const Anum_pg_class_relname: AttrNumber = 2;
 const Anum_pg_class_relnamespace: AttrNumber = 3;
@@ -258,9 +259,8 @@ pub fn DefineIndex<'mcx>(
     quiet: bool,
 ) -> PgResult<Oid> {
     let _ = (is_alter_table, quiet);
-    if stmt.concurrent {
-        unported("DefineIndex: CONCURRENTLY");
-    }
+    let concurrent = stmt.concurrent
+        && lsyscache::get_rel_persistence(tableId)? != RELPERSISTENCE_TEMP;
     if stmt.reset_default_tblspc {
         guc::set_config_option(
             "default_tablespace",
@@ -328,7 +328,7 @@ pub fn DefineIndex<'mcx>(
         ));
     }
 
-    let lockmode = ShareLock;
+    let lockmode = if concurrent { types_rel::ShareUpdateExclusiveLock } else { ShareLock };
     let rel = table::table_open(mcx, tableId, lockmode)?;
     let (root_save_userid, root_save_sec_context) = miscinit::GetUserIdAndSecContext();
     let guard = miscinit::SecContextGuard::security_restricted(rel.rd_rel.relowner);
@@ -345,6 +345,15 @@ pub fn DefineIndex<'mcx>(
         }
     }
     let partitioned = rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
+    if partitioned && stmt.concurrent {
+        return Err(err(
+            format!(
+                "cannot create index on partitioned table \"{}\" concurrently",
+                rel.name()
+            ),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
 
     if check_not_in_use {
         catalog_heap::CheckTableNotInUse(&rel, "CREATE INDEX")?;
@@ -444,9 +453,9 @@ pub fn DefineIndex<'mcx>(
         ii_PredicateState: None,
         ii_Unique: stmt.unique,
         ii_NullsNotDistinct: stmt.nulls_not_distinct,
-        ii_ReadyForInserts: true,
+        ii_ReadyForInserts: !concurrent,
         ii_Summarizing: false,
-        ii_Concurrent: false,
+        ii_Concurrent: concurrent,
         ii_BrokenHotChain: false,
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
@@ -651,10 +660,16 @@ pub fn DefineIndex<'mcx>(
         colname_refs.push(n.as_str());
     }
 
+    let safe_index =
+        indexInfo.ii_Expressions.is_nil() && indexInfo.ii_Predicate.is_nil();
+
     let mut flags = (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
         | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 });
-    if skip_build {
+    if skip_build || concurrent {
         flags |= catalog_index::INDEX_CREATE_SKIP_BUILD;
+    }
+    if concurrent {
+        flags |= catalog_index::INDEX_CREATE_CONCURRENT;
     }
     if partitioned {
         flags |= catalog_index::INDEX_CREATE_SKIP_BUILD | catalog_index::INDEX_CREATE_PARTITIONED;
@@ -832,7 +847,72 @@ pub fn DefineIndex<'mcx>(
     guc::AtEOXact_GUC(false, root_save_nestlevel);
     guard.restore();
 
+    if !concurrent {
+        rel.close(types_rel::NoLock)?;
+        return Ok(indexRelationId);
+    }
+
+    // Concurrent build: phases per validate_index()'s protocol; session lock
+    // on the table pins it across the mid-command commits.
+    let heaprelid = rel.rd_lockInfo.lockRelId;
+    let heaplocktag = [types_storage::lock::LOCKTAG::relation(heaprelid.dbId, heaprelid.relId)];
     rel.close(types_rel::NoLock)?;
+
+    lmgr::LockRelationIdForSession(&heaprelid, types_rel::ShareUpdateExclusiveLock)?;
+
+    snapmgr::PopActiveSnapshot()?;
+    xact::CommitTransactionCommand()?;
+    xact::StartTransactionCommand()?;
+    if safe_index {
+        procarray::SetIndexsafeProcflags()?;
+    }
+
+    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock)?;
+
+    let snap = snapmgr::GetTransactionSnapshot()?;
+    snapmgr::PushActiveSnapshot(&snap)?;
+    catalog_index::index_concurrently_build(mcx, tableId, indexRelationId)?;
+    snapmgr::PopActiveSnapshot()?;
+
+    xact::CommitTransactionCommand()?;
+    xact::StartTransactionCommand()?;
+    if safe_index {
+        procarray::SetIndexsafeProcflags()?;
+    }
+
+    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock)?;
+
+    let snap = snapmgr::GetTransactionSnapshot()?;
+    let snapshot = snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot");
+    snapmgr::PushActiveSnapshot(&snapshot)?;
+
+    catalog_index::validate_index(mcx, tableId, indexRelationId, &snapshot)?;
+
+    let limit_xmin = snapshot.xmin;
+    snapmgr::PopActiveSnapshot()?;
+    snapmgr::UnregisterSnapshot(Some(&snapshot));
+
+    xact::CommitTransactionCommand()?;
+    xact::StartTransactionCommand()?;
+    if safe_index {
+        procarray::SetIndexsafeProcflags()?;
+    }
+
+    crate::WaitForOlderSnapshots(limit_xmin)?;
+
+    let snap = snapmgr::GetTransactionSnapshot()?;
+    snapmgr::PushActiveSnapshot(&snap)?;
+    catalog_index::index_set_state_flags(
+        mcx,
+        indexRelationId,
+        catalog_index::IndexStateFlagsAction::CreateSetValid,
+    )?;
+    snapmgr::PopActiveSnapshot()?;
+
+    inval::invalidate::CacheInvalidateRelcacheByRelid(heaprelid.relId)?;
+
+    lmgr::UnlockRelationIdForSession(&heaprelid, types_rel::ShareUpdateExclusiveLock)?;
+
     Ok(indexRelationId)
 }
 
@@ -1366,7 +1446,7 @@ fn ChooseIndexColumnNames<'mcx>(
 
 // ChooseRelationName. C divergence: probes pg_class under the transaction
 // snapshot, not a dirty snapshot (single-backend lane).
-fn ChooseRelationName<'mcx>(
+pub(crate) fn ChooseRelationName<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
     name2: Option<&str>,

@@ -69,5 +69,12 @@ cache_syscache = { path = "../../utils/cache/cache_syscache" }
 catalog_storage = { path = "../../catalog/catalog_storage" }
 types_guc = { path = "../../../_support/types/types_guc" }
 array = { package = "types_array", path = "../../../_support/types/array" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+catalog = { path = "../../catalog/catalog" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+inval = { path = "../../utils/cache/inval" }
 
 [dev-dependencies]

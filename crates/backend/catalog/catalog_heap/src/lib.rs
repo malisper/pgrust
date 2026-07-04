@@ -10,7 +10,7 @@ pub mod truncate;
 pub use truncate::{heap_truncate, heap_truncate_check_FKs, heap_truncate_find_FKs, heap_truncate_one_rel};
 pub use create::{heap_create, heap_create_with_catalog, CheckAttributeNamesTypes, InsertPgAttributeTuples, HeapCreateParams, InsertPgClassTuple, RelationClearMissing, StoreAttrMissingVal};
 pub use partition::{update_default_partition_oid, RemovePartitionKeyByRelId, StorePartitionBound, StorePartitionKey};
-pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, DeleteAttributeTuples, DeleteRelationTuple, RemoveAttributeById, RemoveStatistics};
+pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, CopyStatistics, DeleteAttributeTuples, DeleteRelationTuple, RemoveAttributeById, RemoveStatistics};
 
 use types_core::catalog::{CIDOID, OIDOID, TIDOID, XIDOID};
 use types_core::{AttrNumber, InvalidOid, NAMEDATALEN};

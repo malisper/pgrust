@@ -459,8 +459,20 @@ pub fn index_create<'mcx>(
     let skip_build = extra.flags & INDEX_CREATE_SKIP_BUILD != 0;
     let parentIndexRelid = extra.parent_index_relid;
 
-    if extra.flags & (INDEX_CREATE_CONCURRENT | INDEX_CREATE_IF_NOT_EXISTS) != 0 {
-        unported("index_create: concurrent/if-not-exists flags");
+    if extra.flags & INDEX_CREATE_IF_NOT_EXISTS != 0 {
+        unported("index_create: if-not-exists flag");
+    }
+    if concurrent && catalog::IsCatalogRelation(heapRelation) {
+        return Err(err(
+            "concurrent index creation on system catalog tables is not supported".into(),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    if concurrent && indexInfo.ii_HasExclusion {
+        return Err(err(
+            "concurrent index creation for exclusion constraints is not supported".into(),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
     assert!(!partitioned || skip_build, "partitioned indexes must never be built");
     assert!(
@@ -1216,6 +1228,11 @@ pub fn init_seams() {
 
 pub use drop::{index_drop, IndexGetRelation};
 mod drop;
+pub use concurrent::{
+    index_concurrently_build, index_concurrently_create_copy, index_concurrently_set_dead,
+    index_concurrently_swap, index_set_state_flags, validate_index, IndexStateFlagsAction,
+};
+mod concurrent;
 pub use reindex::{
     reindex_index, reindex_relation, RelationSetNewRelfilenumber, ReindexParams,
     REINDEXOPT_CONCURRENTLY, REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS,

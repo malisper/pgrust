@@ -323,6 +323,19 @@ pub fn find_tabstat_entry(rel_id: Oid) -> Option<PgStat_TableCounts> {
     })
 }
 
+// pgstat_copy_relation_stats (pgstat_relation.c): REINDEX CONCURRENTLY swap.
+pub fn pgstat_copy_relation_stats(
+    dst_relid: Oid,
+    dst_shared: bool,
+    src_relid: Oid,
+    src_shared: bool,
+) {
+    crate::shmem::copy_entry(
+        relation_key(src_relid, src_shared),
+        relation_key(dst_relid, dst_shared),
+    );
+}
+
 pub fn pgstat_fetch_stat_tabentry(relid: Oid) -> Option<crate::shmem::PgStat_StatTabEntry> {
     pgstat_fetch_stat_tabentry_ext(catalog_seams::is_shared_relation::call(relid), relid)
 }

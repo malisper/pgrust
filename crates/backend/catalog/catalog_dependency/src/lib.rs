@@ -773,6 +773,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     mcx,
                     object.objectId,
                     flags & PERFORM_DELETION_CONCURRENTLY != 0,
+                    flags & PERFORM_DELETION_CONCURRENT_LOCK != 0,
                 )?;
             } else if object.objectSubId != 0 {
                 catalog_heap::RemoveAttributeById(

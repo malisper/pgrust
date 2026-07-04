@@ -39,6 +39,9 @@ readfuncs = { path = "../../nodes/readfuncs" }
 nodes_core = { path = "../../nodes/nodes_core" }
 clauses = { path = "../../optimizer/util/clauses" }
 execexpr = { path = "../execexpr" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 
 [dev-dependencies]
 test_boot = { path = "../../../_support/test_boot" }

@@ -156,6 +156,18 @@ pub fn ItemPointerEquals(pointer1: &ItemPointerData, pointer2: &ItemPointerData)
         && ItemPointerGetOffsetNumber(pointer1) == ItemPointerGetOffsetNumber(pointer2)
 }
 
+// itemptr_encode/decode (tableam.h): TIDs as sortable int8 for validate_index.
+#[inline]
+pub fn itemptr_encode(itemptr: &ItemPointerData) -> i64 {
+    (((ItemPointerGetBlockNumber(itemptr) as u64) << 16)
+        | ItemPointerGetOffsetNumber(itemptr) as u64) as i64
+}
+
+#[inline]
+pub fn itemptr_decode(encoded: i64) -> ItemPointerData {
+    ItemPointerData::new((encoded >> 16) as BlockNumber, (encoded & 0xffff) as OffsetNumber)
+}
+
 #[inline]
 pub fn ItemPointerCompare(arg1: &ItemPointerData, arg2: &ItemPointerData) -> i32 {
     let b1 = ItemPointerGetBlockNumberNoCheck(arg1);

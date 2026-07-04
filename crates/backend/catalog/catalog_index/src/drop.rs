@@ -27,14 +27,21 @@ pub fn IndexGetRelation<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, missing_ok: bool) ->
     Ok(result)
 }
 
-pub fn index_drop<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, concurrent: bool) -> PgResult<()> {
+pub fn index_drop<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexId: Oid,
+    concurrent: bool,
+    concurrent_lock_mode: bool,
+) -> PgResult<()> {
     if concurrent {
         unported("index_drop: concurrent lane");
     }
+    let lockmode =
+        if concurrent_lock_mode { types_rel::ShareUpdateExclusiveLock } else { AccessExclusiveLock };
 
     let heapId = IndexGetRelation(mcx, indexId, false)?;
-    let userHeapRelation = table::table_open(mcx, heapId, AccessExclusiveLock)?;
-    let userIndexRelation = indexam::index_open(mcx, indexId, AccessExclusiveLock)?;
+    let userHeapRelation = table::table_open(mcx, heapId, lockmode)?;
+    let userIndexRelation = indexam::index_open(mcx, indexId, lockmode)?;
 
     catalog_heap::CheckTableNotInUse(&userIndexRelation, "DROP INDEX")?;
 

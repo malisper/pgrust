@@ -133,9 +133,6 @@ pub fn reindex_index<'mcx>(
     if params.options & REINDEXOPT_VERBOSE != 0 {
         unported("reindex_index: VERBOSE (pg_rusage lane)");
     }
-    if params.tablespace_oid != InvalidOid {
-        unported("reindex_index: SetRelationTableSpace (TABLESPACE option)");
-    }
     let missing_ok = params.options & REINDEXOPT_MISSING_OK != 0;
     let heapId = IndexGetRelation(mcx, indexId, missing_ok)?;
     if heapId == InvalidOid {
@@ -190,7 +187,32 @@ pub fn reindex_index<'mcx>(
         ));
     }
 
+    if params.tablespace_oid != InvalidOid && catalog::IsSystemRelation(&iRel) {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("cannot move system relation \"{}\"", iRel.name()),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let set_tablespace =
+        params.tablespace_oid != InvalidOid && CheckRelationTableSpaceMove(&iRel, params.tablespace_oid);
+
     catalog_heap::CheckTableNotInUse(&iRel, "REINDEX INDEX")?;
+
+    let iRel = if set_tablespace {
+        SetRelationTableSpacePgClass(mcx, &iRel, params.tablespace_oid)?;
+        catalog_storage::RelationDropStorage(&iRel)?;
+        relcache::invalidate::RelationAssumeNewRelfilelocator(&iRel);
+        xact::CommandCounterIncrement()?;
+        // C's CCI refreshes the entry in place; reopen so rd_rel.reltablespace
+        // steers the new relfilenumber below (lock held).
+        indexam::index_close(iRel, NoLock)?;
+        indexam::index_open(mcx, indexId, NoLock)?
+    } else {
+        iRel
+    };
 
     predicate_seams::transfer_predicate_locks_to_heap_relation::call(&iRel)?;
 
@@ -234,6 +256,52 @@ pub fn reindex_index<'mcx>(
     indexam::index_close(iRel, NoLock)?;
     heapRelation.close(NoLock)
 }
+
+// CheckRelationTableSpaceMove (tablecmds.c), index arm: storage exists and is
+// unmapped by reindex_index's earlier checks.
+fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace: Oid) -> bool {
+    let old_tablespace = rel.rd_rel.reltablespace;
+    !(new_tablespace == old_tablespace
+        || (new_tablespace == init_small::globals::MyDatabaseTableSpace()
+            && old_tablespace == InvalidOid))
+}
+
+// SetRelationTableSpace (tablecmds.c:3750), storage-bearing arm (no
+// tablespace-dependency rewrite; indexes always have storage here).
+fn SetRelationTableSpacePgClass<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    new_tablespace: Oid,
+) -> PgResult<()> {
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+    let key = [oid_scankey(1, rel.rd_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+    let desc = pg_class.descr();
+    let natts = desc.natts as usize;
+    let store = if new_tablespace == init_small::globals::MyDatabaseTableSpace() {
+        InvalidOid
+    } else {
+        new_tablespace
+    };
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    nulls.resize(natts, false);
+    replace.resize(natts, false);
+    values[ANUM_PG_CLASS_RELTABLESPACE - 1] = Datum::from_oid(store);
+    replace[ANUM_PG_CLASS_RELTABLESPACE - 1] = true;
+    let otid = tup.t_self;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    pg_class.close(RowExclusiveLock)
+}
+
+const ANUM_PG_CLASS_RELTABLESPACE: usize = 9;
 
 // index.c reindex_index tail: clear indcheckxmin / repair invalid flags on the
 // pg_index row. index_bad is reachable only via CONCURRENTLY leftovers (loud

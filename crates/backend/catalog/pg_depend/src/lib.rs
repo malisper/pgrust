@@ -432,6 +432,133 @@ pub fn changeDependencyFor<'mcx>(
     Ok(count)
 }
 
+// changeDependenciesOf (pg_depend.c).
+pub fn changeDependenciesOf<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    oldObjectId: Oid,
+    newObjectId: Oid,
+) -> PgResult<i64> {
+    let mut count = 0i64;
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let keys =
+        [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, oldObjectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    let natts = desc.natts as usize;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        nulls.resize(natts, false);
+        replace.resize(natts, false);
+        values[Anum_pg_depend_objid - 1] = Datum::from_oid(newObjectId);
+        replace[Anum_pg_depend_objid - 1] = true;
+        let tid = tup.t_self;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtup)?;
+        count += 1;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}
+
+// changeDependenciesOn (pg_depend.c).
+pub fn changeDependenciesOn<'mcx>(
+    mcx: Mcx<'mcx>,
+    refClassId: Oid,
+    oldRefObjectId: Oid,
+    newRefObjectId: Oid,
+) -> PgResult<i64> {
+    if isObjectPinned(&ObjectAddress::set(refClassId, oldRefObjectId)) {
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "cannot remove dependency on object {refClassId}/{oldRefObjectId} because it is a system object"
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let new_is_pinned = isObjectPinned(&ObjectAddress::set(refClassId, newRefObjectId));
+
+    let mut count = 0i64;
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_refclassid, refClassId),
+        oid_key(Anum_pg_depend_refobjid, oldRefObjectId),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    let natts = desc.natts as usize;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        if new_is_pinned {
+            catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+        } else {
+            let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[Anum_pg_depend_refobjid - 1] = Datum::from_oid(newRefObjectId);
+            replace[Anum_pg_depend_refobjid - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtup)?;
+        }
+        count += 1;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}
+
+// get_index_ref_constraints (pg_depend.c): FK constraints depending on the index.
+pub fn get_index_ref_constraints<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_id: Oid,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    const ConstraintRelationId: Oid = 2606;
+    const DEPENDENCY_NORMAL: i8 = b'n' as i8;
+    let mut result: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, index_id),
+        int4_key(Anum_pg_depend_refobjsubid, 0),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
+        let classid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_classid as i32, desc, &mut isnull)
+        }
+        .as_oid();
+        let objid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_objid as i32, desc, &mut isnull)
+        }
+        .as_oid();
+        let objsubid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_objsubid as i32, desc, &mut isnull)
+        }
+        .as_i32();
+        let deptype = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_deptype as i32, desc, &mut isnull)
+        }
+        .as_i8();
+        if classid == ConstraintRelationId && objsubid == 0 && deptype == DEPENDENCY_NORMAL {
+            result.push(objid);
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
 // creating_extension / CurrentExtensionObject (extension.c:79-80) are hosted
 // here, one layer below their C home: extension depends on this crate, and
 // recordDependencyOnCurrentExtension reads them per row.
