@@ -106,40 +106,13 @@ pub fn preprocess_rowmarks<'mcx>(
     } else {
         match parse.commandType {
             CmdType::CMD_SELECT | CmdType::CMD_INSERT => return Ok(()),
-            CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
-                // INSTEAD OF view targets: source data comes from the expanded
-                // view; same no-marks EPQ divergence as the MERGE arm below
-                // (IR triggers never lock or EPQ the view rows).
-                let target_rte = parse
-                    .rtable
-                    .nth(parse.resultRelation as usize - 1)
-                    .as_range_tbl_entry()
-                    .expect("rtable cell");
-                if target_rte.rtekind == RTEKind::RTE_RELATION
-                    && target_rte.relkind == types_rel::RELKIND_VIEW
-                {
-                    return Ok(());
-                }
-                let f = parse.jointree.expect("jointree is a FromExpr");
-                for child in &f.fromlist {
-                    let rtr = child.as_range_tbl_ref().unwrap_or_else(|| {
-                        panic!("preprocess_rowmarks: non-RTR jointree; M2 join lane")
-                    });
-                    if rtr.rtindex != parse.resultRelation {
-                        panic!(
-                            "preprocess_rowmarks (planner.c): non-target rel marks \
-                             (ROW_MARK_REFERENCE); M2 join lane"
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            // C adds non-locking ROW_MARK_REFERENCE marks for every
+            // C adds non-locking ROW_MARK_REFERENCE/COPY marks for every
             // non-target rel so EPQ re-fetches the exact source row via junk
-            // ctid columns. DIVERGENCE: no marks here — the EPQ recheck
-            // rescans the source under the same snapshot; identical results
-            // unless several source rows join the same rechecked target row.
-            CmdType::CMD_MERGE => return Ok(()),
+            // ctid/wholerow columns. DIVERGENCE: no marks here — the EPQ
+            // recheck rescans the source under the same snapshot; identical
+            // results unless several source rows join the same rechecked
+            // target row.
+            CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => return Ok(()),
             other => panic!("preprocess_rowmarks (planner.c): {other:?} rowmarks; M2 DML lane"),
         }
     }
