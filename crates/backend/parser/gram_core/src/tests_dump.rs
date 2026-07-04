@@ -284,7 +284,7 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(na) = n.as_named_arg_expr() {
         out.push_str("{NAMEDARGEXPR");
-        node_field(out, "arg", Some(na.arg));
+        node_field(out, "arg", na.arg);
         string_field(out, "name", na.name);
         int_field(out, "argnumber", na.argnumber);
         int_field(out, "location", na.location);
