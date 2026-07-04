@@ -2,9 +2,12 @@
 #![allow(non_upper_case_globals)]
 
 pub mod dependencies;
+pub mod expression;
 pub mod mcv;
 pub mod mvdistinct;
 pub mod sortitem;
+
+pub use expression::{ExprStatsCompute, ExprStatsRow};
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
@@ -76,6 +79,7 @@ pub struct StatExtEntry<'mcx> {
     pub columns: PgVec<'mcx, AttrNumber>,
     pub types: PgVec<'mcx, u8>,
     pub stattarget: i32,
+    pub exprs: PgVec<'mcx, types_nodes::Node<'mcx>>,
 }
 
 fn oid_key(attno: i32, arg: Oid) -> ScanKeyData {
@@ -172,10 +176,12 @@ pub fn fetch_statentries_for_relation<'mcx>(
         let mut types: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, nkinds)?;
         types.extend_from_slice(&kinddata[..nkinds]);
 
-        let (_, exprs_null) = getattr(tup, Anum_pg_statistic_ext_stxexprs, desc);
-        if !exprs_null {
-            panic!("fetch_statentries_for_relation (extended_stats.c): expression statistics lane");
-        }
+        let (exprs_d, exprs_null) = getattr(tup, Anum_pg_statistic_ext_stxexprs, desc);
+        let exprs = if exprs_null {
+            PgVec::new_in(mcx)
+        } else {
+            expression::decode_stxexprs(mcx, exprs_d)?
+        };
 
         result.push(StatExtEntry {
             statOid: oid_d.as_oid(),
@@ -184,6 +190,7 @@ pub fn fetch_statentries_for_relation<'mcx>(
             columns,
             types,
             stattarget,
+            exprs,
         });
     }
     genam::systable_endscan(mcx, scan)?;
@@ -241,13 +248,14 @@ pub fn ComputeExtStatisticsRows(mcx: Mcx<'_>, relid: Oid, colstats: &[ColStats])
     Ok(300 * result)
 }
 
-pub fn BuildRelationExtStatistics(
+pub fn BuildRelationExtStatistics<F: ExprStatsCompute>(
     mcx: Mcx<'_>,
     onerel: &Relation<'_>,
     inh: bool,
     totalrows: f64,
     rows: &[HeapTupleData<'_>],
     colstats: &[ColStats],
+    expr_compute: &mut F,
 ) -> PgResult<()> {
     if colstats.is_empty() {
         return Ok(());
@@ -279,11 +287,12 @@ pub fn BuildRelationExtStatistics(
             continue;
         }
 
-        let data = make_build_data(bmcx, onerel, stat, rows, &stats)?;
+        let data = make_build_data(bmcx, onerel, stat, rows, &stats, stattarget)?;
 
         let mut ndistinct: Option<PgVec<'_, u8>> = None;
         let mut deps: Option<PgVec<'_, u8>> = None;
         let mut mcv_ser: Option<PgVec<'_, u8>> = None;
+        let mut exprstats: Option<PgVec<'_, u8>> = None;
         for &t in stat.types.iter() {
             if t == STATS_EXT_NDISTINCT {
                 let nd = mvdistinct::statext_ndistinct_build(bmcx, totalrows, &data)?;
@@ -297,7 +306,12 @@ pub fn BuildRelationExtStatistics(
                     mcv_ser = Some(mcv::statext_mcv_serialize(bmcx, &m, &data.stats)?);
                 }
             } else if t == STATS_EXT_EXPRESSIONS {
-                panic!("BuildRelationExtStatistics (extended_stats.c): expression statistics lane");
+                assert!(
+                    !stat.exprs.is_empty(),
+                    "requested expression stats, but there are no expressions"
+                );
+                let rows_stats = expr_compute.compute(bmcx, &stat.exprs, stattarget, rows)?;
+                exprstats = Some(expression::serialize_expr_stats(bmcx, &rows_stats)?);
             }
         }
 
@@ -308,6 +322,7 @@ pub fn BuildRelationExtStatistics(
             ndistinct.as_deref(),
             deps.as_deref(),
             mcv_ser.as_deref(),
+            exprstats.as_deref(),
         )?;
     }
 
@@ -322,6 +337,7 @@ fn statext_store(
     ndistinct: Option<&[u8]>,
     dependencies: Option<&[u8]>,
     mcv: Option<&[u8]>,
+    exprs: Option<&[u8]>,
 ) -> PgResult<()> {
     let pg_stextdata = table::table_open(mcx, StatisticExtDataRelationId, ROW_EXCLUSIVE_LOCK)?;
 
@@ -347,6 +363,11 @@ fn statext_store(
             Datum::from_usize(d.as_ptr() as usize);
         nulls[Anum_pg_statistic_ext_data_stxdmcv as usize - 1] = false;
     }
+    if let Some(d) = exprs {
+        values[Anum_pg_statistic_ext_data_stxdexpr as usize - 1] =
+            Datum::from_usize(d.as_ptr() as usize);
+        nulls[Anum_pg_statistic_ext_data_stxdexpr as usize - 1] = false;
+    }
 
     statscmds::RemoveStatisticsDataById(mcx, statOid, inh)?;
 
@@ -363,8 +384,9 @@ fn make_build_data<'mcx>(
     stat: &StatExtEntry<'_>,
     rows: &[HeapTupleData<'_>],
     stats: &[ColStats],
+    stattarget: i32,
 ) -> PgResult<StatsBuildData<'mcx>> {
-    let nkeys = stat.columns.len();
+    let nkeys = stat.columns.len() + stat.exprs.len();
     let numrows = rows.len();
     let tupdesc = onerel.descr();
 
@@ -385,6 +407,15 @@ fn make_build_data<'mcx>(
         }
         values.push(v);
         nulls.push(n);
+    }
+
+    // Expression columns carry negative attnums (-1, -2, ...) per C.
+    for (j, &e) in stat.exprs.iter().enumerate() {
+        attnums.push(-(j as AttrNumber) - 1);
+        statsv.push(expression::expr_col_stats(e, stattarget)?);
+    }
+    if !stat.exprs.is_empty() {
+        expression::eval_exprs(mcx, onerel, &stat.exprs, rows, &mut values, &mut nulls)?;
     }
 
     Ok(StatsBuildData { numrows, attnums, stats: statsv, values, nulls })

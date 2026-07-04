@@ -461,6 +461,7 @@ fn do_analyze_rel<'mcx>(
             totalrows,
             &rows[..numrows as usize],
             &colstats,
+            &mut ExtStatsExprCompute { onerel },
         )?;
     }
 
@@ -806,6 +807,229 @@ fn examine_attribute<'mcx>(
         return Ok(None);
     }
     Ok(Some(stats))
+}
+
+// examine_expression (extended_stats.c): VacAttrStats typed from the
+// expression tree; attstattarget comes from the statistics object.
+fn examine_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: types_nodes::Node<'_>,
+    stattarget: i32,
+) -> PgResult<Option<VacAttrStats<'mcx>>> {
+    let atttypid = nodes_core::node_funcs::expr_type(expr);
+    let attcollid = nodes_core::node_funcs::expr_collation(expr);
+    let typanalyze = syscache_seams::pg_type_typanalyze::call(atttypid)?;
+    let ty = syscache_seams::lookup_pg_type_shape::call(atttypid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {atttypid}"));
+
+    let mut stats = VacAttrStats {
+        tupattnum: 0,
+        attstattarget: stattarget,
+        attrtypid: atttypid,
+        attrcollid: attcollid,
+        typlen: ty.typlen,
+        typbyval: ty.typbyval,
+        typalign: ty.typalign as u8,
+        compute: ComputeStats::Trivial,
+        extra: StdAnalyzeData { eqopr: InvalidOid, ltopr: InvalidOid },
+        minrows: 0,
+        stats_valid: false,
+        stanullfrac: 0.0,
+        stawidth: 0,
+        stadistinct: 0.0,
+        stakind: [0; STATISTIC_NUM_SLOTS],
+        staop: [InvalidOid; STATISTIC_NUM_SLOTS],
+        stacoll: [InvalidOid; STATISTIC_NUM_SLOTS],
+        stanumbers: [
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+        ],
+        stavalues: [
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+            PgVec::new_in(mcx),
+        ],
+        stavalues_set: [false; STATISTIC_NUM_SLOTS],
+        statypid: [atttypid; STATISTIC_NUM_SLOTS],
+        statyplen: [ty.typlen; STATISTIC_NUM_SLOTS],
+        statypbyval: [ty.typbyval; STATISTIC_NUM_SLOTS],
+        statypalign: [ty.typalign as u8; STATISTIC_NUM_SLOTS],
+    };
+    let ok = match typanalyze {
+        InvalidOid => std_typanalyze(&mut stats)?,
+        3816 => array_typanalyze::setup(&mut stats)?,
+        3916 => {
+            stats.compute = ComputeStats::Range { is_multirange: false };
+            range_typanalyze::setup(&mut stats)?
+        }
+        4242 => {
+            stats.compute = ComputeStats::Range { is_multirange: true };
+            range_typanalyze::setup(&mut stats)?
+        }
+        other => {
+            panic!("examine_expression (extended_stats.c): custom typanalyze {other}")
+        }
+    };
+    if !ok || stats.minrows <= 0 {
+        return Ok(None);
+    }
+    Ok(Some(stats))
+}
+
+pub struct ExtStatsExprCompute<'a, 'r> {
+    onerel: &'a Relation<'r>,
+}
+
+impl statistics::ExprStatsCompute for ExtStatsExprCompute<'_, '_> {
+    // compute_expr_stats + serialize_expr_stats row extraction
+    // (extended_stats.c); expression stats are computed against the sample
+    // only, so totalrows == samplerows per C.
+    fn compute<'b>(
+        &mut self,
+        mcx: Mcx<'b>,
+        exprs: &[types_nodes::Node<'b>],
+        stattarget: i32,
+        rows: &[HeapTupleData<'_>],
+    ) -> PgResult<PgVec<'b, Option<statistics::ExprStatsRow<'b>>>> {
+        let mut out: PgVec<'b, Option<statistics::ExprStatsRow<'b>>> =
+            mcx::vec_with_capacity_in(mcx, exprs.len())?;
+        let col_scratch = MemoryContext::new("Analyze Expression");
+        let mut col_cx = col_scratch.new_child_bump("Analyze Expression scratch");
+        let mut per_tuple = col_scratch.new_child_bump("Analyze Expression per-tuple");
+        for &expr in exprs {
+            let Some(mut stats) = examine_expression(mcx, expr, stattarget)? else {
+                out.push(None);
+                continue;
+            };
+            let mut state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+                .expect("statistics expression");
+            let mut slot = exectuples::make_tuple_table_slot(
+                mcx,
+                types_slot::TupleSlotKind::HeapTuple,
+                Some(self.onerel.rd_att.clone()),
+            );
+            let mut exprvals: PgVec<'b, Datum> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+            let mut exprnulls: PgVec<'b, bool> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+            for row in rows {
+                per_tuple.reset();
+                // SAFETY: per_tuple outlives the eval; the result is copied
+                // into mcx before the next reset.
+                unsafe { state.arm_result_mcx_raw(per_tuple.mcx()) };
+                // SAFETY: the sample image lives across this loop; the
+                // reborrow mirrors C's shouldFree=false ExecStoreHeapTuple.
+                let tuple = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        core::ptr::from_ref(row.t_data()).cast::<u8>(),
+                        row.t_len,
+                        row.t_self,
+                        row.t_tableOid,
+                    )
+                };
+                exectuples::exec_store_heap_tuple(&mut slot, mcx, tuple);
+                let nd = {
+                    let mut slots =
+                        execexpr::EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+                    execexpr::exec_eval_expr(&mut *state, &mut slots)?
+                };
+                if nd.isnull {
+                    exprvals.push(Datum::null());
+                    exprnulls.push(true);
+                } else {
+                    exprvals.push(datum_copy_in(mcx, nd.value, stats.typbyval, stats.typlen)?);
+                    exprnulls.push(false);
+                }
+            }
+            let tcnt = rows.len() as i32;
+            if tcnt > 0 {
+                let src =
+                    FetchSource::Expr { vals: &exprvals, nulls: &exprnulls, stride: 1, off: 0 };
+                match stats.compute {
+                    ComputeStats::Scalar => compute_scalar_stats(
+                        mcx,
+                        col_cx.mcx(),
+                        &mut stats,
+                        &src,
+                        tcnt,
+                        tcnt as f64,
+                    )?,
+                    ComputeStats::Trivial => compute_trivial_stats(&mut stats, &src, tcnt)?,
+                    ComputeStats::Range { is_multirange } => {
+                        range_typanalyze::compute_range_stats(
+                            mcx,
+                            &mut stats,
+                            is_multirange,
+                            &src,
+                            tcnt,
+                            tcnt as f64,
+                        )?
+                    }
+                    ComputeStats::Array { std_scalar, elem_typeid } => {
+                        array_typanalyze::compute_array_stats(
+                            mcx,
+                            col_cx.mcx(),
+                            &mut stats,
+                            std_scalar,
+                            elem_typeid,
+                            &src,
+                            tcnt,
+                            tcnt as f64,
+                        )?
+                    }
+                }
+                col_cx.reset();
+            }
+            out.push(expr_stats_row(mcx, &stats)?);
+        }
+        Ok(out)
+    }
+}
+
+fn expr_stats_row<'b>(
+    mcx: Mcx<'b>,
+    stats: &VacAttrStats<'_>,
+) -> PgResult<Option<statistics::ExprStatsRow<'b>>> {
+    if !stats.stats_valid {
+        return Ok(None);
+    }
+    let mut row = statistics::ExprStatsRow {
+        stanullfrac: stats.stanullfrac,
+        stawidth: stats.stawidth,
+        stadistinct: stats.stadistinct,
+        stakind: stats.stakind,
+        staop: stats.staop,
+        stacoll: stats.stacoll,
+        stanumbers: [None, None, None, None, None],
+        stavalues: [None, None, None, None, None],
+    };
+    for k in 0..STATISTIC_NUM_SLOTS {
+        if !stats.stanumbers[k].is_empty() {
+            let mut dat: PgVec<'b, Datum> =
+                mcx::vec_with_capacity_in(mcx, stats.stanumbers[k].len())?;
+            dat.extend(stats.stanumbers[k].iter().map(|&f| Datum::from_f32(f)));
+            row.stanumbers[k] = Some(datum::array_build::construct_array_image(
+                mcx, &dat, FLOAT4OID, 4, true, b'i',
+            )?);
+        }
+        if !stats.stavalues[k].is_empty() {
+            row.stavalues[k] = Some(datum::array_build::construct_array_image(
+                mcx,
+                &stats.stavalues[k],
+                stats.statypid[k],
+                stats.statyplen[k],
+                stats.statypbyval[k],
+                stats.statypalign[k],
+            )?);
+        } else if stats.stavalues_set[k] {
+            row.stavalues[k] =
+                Some(datum::array_build::construct_empty_array_image(mcx, stats.statypid[k])?);
+        }
+    }
+    Ok(Some(row))
 }
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {

@@ -28,3 +28,11 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 elog = { path = "../../utils/error/elog" }
 statscmds = { path = "../../commands/statscmds" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+nodes_core = { path = "../../nodes/nodes_core" }
+readfuncs = { path = "../../nodes/readfuncs" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+execexpr = { path = "../../executor/execexpr" }
+exectuples = { path = "../../executor/exectuples" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
