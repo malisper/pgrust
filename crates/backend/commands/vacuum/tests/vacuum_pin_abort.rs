@@ -129,6 +129,7 @@ fn maybe_inject(rmid: u8, info: u8) -> types_error::PgResult<()> {
 }
 
 fn install_wal_seams() {
+    xloginsert_seams::xlog_check_buffer_needs_backup::set(|_| false);
     xloginsert_seams::xlog_reset_insertion::set(xloginsert::XLogResetInsertion);
     xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
         maybe_inject(rmid, info)?;
