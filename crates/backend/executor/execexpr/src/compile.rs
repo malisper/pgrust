@@ -2436,9 +2436,130 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
+    fuse_program(state);
     if dump_programs_enabled() {
         dump_program(state);
     }
+}
+
+fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
+    match step {
+        Step::Qual { jumpdone }
+        | Step::Jump { jumpdone }
+        | Step::JumpIfNotTrue { jumpdone, .. }
+        | Step::JumpIfNotNull { jumpdone, .. }
+        | Step::JumpIfNull { jumpdone, .. }
+        | Step::BoolAndStepFirst { jumpdone, .. }
+        | Step::BoolAndStep { jumpdone, .. }
+        | Step::BoolOrStepFirst { jumpdone, .. }
+        | Step::BoolOrStep { jumpdone, .. }
+        | Step::SbsrefSubscripts { jumpdone, .. }
+        | Step::FuncStrict2Qual { jumpdone, .. } => Some(jumpdone),
+        Step::AggStrictInputCheck { jumpnull, .. }
+        | Step::AggStrictInputCheck1 { jumpnull, .. } => Some(jumpnull),
+        _ => None,
+    }
+}
+
+fn arg_index_of(call: &FuncCall, out: OutRef) -> Option<u8> {
+    if call.nargs != 2 {
+        return None;
+    }
+    // SAFETY: args 0/1 of the call's live 2-arg fcinfo image.
+    unsafe {
+        if out.0 == crate::steps::arg_slot_of(call.fcinfo, 0) {
+            Some(0)
+        } else if out.0 == crate::steps::arg_slot_of(call.fcinfo, 1) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
+fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
+    match (a, b) {
+        (Step::ScanVar { attnum, vartype, out }, Step::FuncExprStrict2 { call, out: fout }) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::ScanVarFuncStrict2 {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: *call,
+                out: *fout,
+            })
+        }
+        (
+            Step::FuncExprStrict2 { call: call1, out: out1 },
+            Step::FuncExprStrict2 { call: call2, out: fout },
+        ) => {
+            if call1.fcinfo == call2.fcinfo {
+                return None;
+            }
+            let argno = arg_index_of(call2, *out1)?;
+            Some(Step::FuncFuncStrict2 { call1: *call1, argno, call2: *call2, out: *fout })
+        }
+        (Step::FuncExprStrict2 { call, out }, Step::Qual { jumpdone }) => {
+            Some(Step::FuncStrict2Qual { call: *call, jumpdone: *jumpdone, out: *out })
+        }
+        _ => None,
+    }
+}
+
+// Ready-time superinstruction peephole (dispatch-threading journal, further
+// lever 1): adjacent measured-dominant step pairs collapse into single fused
+// steps, cutting one dispatch + the arg-slot round trip per pair. Runs after
+// select_kernel so every kernel matcher still sees the raw program shape; a
+// pair whose second step is a jump target stays unfused (jumping to the
+// first executes both, as the raw program would).
+fn fuse_program(state: &mut ExprState<'_>) {
+    let len = state.steps.len();
+    if len < 3 {
+        return;
+    }
+    if !state
+        .steps
+        .as_slice()
+        .windows(2)
+        .any(|w| try_fuse(&w[0], &w[1]).is_some())
+    {
+        return;
+    }
+    let mcx = *state.steps.allocator();
+    let steps = state.steps.as_slice();
+    let mut is_target = ::mcx::vec_with_capacity_in_infallible::<bool>(mcx, len);
+    is_target.resize(len, false);
+    for s in steps {
+        let mut s = *s;
+        if let Some(j) = jump_field_mut(&mut s) {
+            is_target[*j as usize] = true;
+        }
+    }
+    let mut map = ::mcx::vec_with_capacity_in_infallible::<u32>(mcx, len);
+    let mut out = ::mcx::vec_with_capacity_in_infallible::<Step>(mcx, len);
+    let mut i = 0usize;
+    while i < len {
+        map.push(out.len() as u32);
+        if i + 1 < len && !is_target[i + 1] {
+            if let Some(f) = try_fuse(&steps[i], &steps[i + 1]) {
+                // The consumed second step keeps the fused step's index so a
+                // (prevented) jump to it would still be in bounds.
+                map.push(out.len() as u32);
+                out.push(f);
+                i += 2;
+                continue;
+            }
+        }
+        out.push(steps[i]);
+        i += 1;
+    }
+    debug_assert_eq!(map.len(), len);
+    for s in out.iter_mut() {
+        if let Some(j) = jump_field_mut(s) {
+            *j = map[*j as usize];
+        }
+    }
+    state.steps = out;
 }
 
 // PGRUST_DUMP_EXPR_PROGRAMS: measurement-only step-sequence dump (fusion-lane
