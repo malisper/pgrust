@@ -143,7 +143,7 @@ impl OrderProcFrame {
 
 thread_local! {
     static PROC_SCRATCH: core::cell::RefCell<::mcx::MemoryContext> =
-        core::cell::RefCell::new(::mcx::MemoryContext::new("btproc scratch"));
+        core::cell::RefCell::new(::mcx::MemoryContext::new_bump("btproc scratch"));
 }
 
 // Detoast/deserialize scratch for the generic proc arm (C detoasts into the
@@ -159,7 +159,7 @@ fn with_proc_scratch<R>(f: impl for<'s> FnOnce(::mcx::Mcx<'s>) -> PgResult<R>) -
             f(ctx.mcx())
         }
         Err(_) => {
-            let ctx = ::mcx::MemoryContext::new("btproc scratch (reentrant)");
+            let ctx = ::mcx::MemoryContext::new_bump("btproc scratch (reentrant)");
             f(ctx.mcx())
         }
     })
