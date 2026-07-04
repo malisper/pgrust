@@ -347,6 +347,7 @@ members = [
     "crates/backend/utils/cache/plancache_portal_seams",
     "crates/backend/utils/cache/plancache",
     "crates/backend/nodes/nodes_core",
+    "crates/backend/nodes/params",
     "crates/backend/nodes/outfuncs",
     "crates/backend/nodes/readfuncs",
     "crates/backend/catalog/pg_attrdef",

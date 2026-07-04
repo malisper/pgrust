@@ -682,6 +682,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]
@@ -6185,6 +6186,25 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+]
+
+[[package]]
+name = "nodes_params"
+version = "0.1.0"
+dependencies = [
+ "adt_scalar",
+ "datum",
+ "fmgr_seams",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_portal",
+ "types_tuple",
+ "xact",
 ]
 
 [[package]]
