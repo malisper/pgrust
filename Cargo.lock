@@ -4575,9 +4575,11 @@ name = "indexam"
 version = "0.1.0"
 dependencies = [
  "brin",
+ "bufmgr",
  "datum",
  "gin",
  "gist",
+ "guc_tables",
  "hash",
  "indexam_seams",
  "mcx",
