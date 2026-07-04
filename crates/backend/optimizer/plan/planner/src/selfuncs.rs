@@ -228,8 +228,7 @@ pub fn scalarineqsel_wrapper<'mcx>(
     )
 }
 
-// scalarineqsel (selfuncs.c). The C no-stats CTID arm (block-position
-// estimate) keeps this port's pre-existing DEFAULT_INEQ_SEL shape.
+// scalarineqsel (selfuncs.c).
 fn scalarineqsel<'mcx>(
     run: &PlannerRun<'mcx>,
     operator: Oid,
@@ -241,6 +240,43 @@ fn scalarineqsel<'mcx>(
     consttype: Oid,
 ) -> PgResult<f64> {
     if vardata.stats.is_none() {
+        let is_ctid = vardata
+            .var
+            .and_then(|id| run.root.expr_node(id).as_var())
+            .is_some_and(|v| v.varattno == SELF_ITEM_POINTER_ATTRIBUTE_NUMBER);
+        if is_ctid {
+            let rel = vardata.rel.expect("ctid Var has a rel");
+            let pages = run.root.rel(rel).pages as f64;
+            let tuples = run.root.rel(rel).tuples;
+            if pages == 0.0 {
+                return Ok(1.0);
+            }
+            // SAFETY: non-null tid datum points at an ItemPointerData.
+            let itemptr =
+                unsafe { *(constval.as_usize() as *const types_tuple::itemptr::ItemPointerData) };
+            let mut block =
+                types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(&itemptr) as f64;
+            // The last page averages half full: half density there, half a
+            // page's weight in the fractions below.
+            let mut density = tuples / (pages - 0.5);
+            if block >= pages - 1.0 {
+                density *= 0.5;
+            }
+            if density > 0.0 {
+                let offset =
+                    types_tuple::itemptr::ItemPointerGetOffsetNumberNoCheck(&itemptr) as f64;
+                block += (offset / density).min(1.0);
+            }
+            let mut selec = block / (pages - 0.5);
+            // "<=" so far; one fewer tuple for "<" and ">=" (iseq == isgt).
+            if iseq == isgt && tuples >= 1.0 {
+                selec -= 1.0 / tuples;
+            }
+            if isgt {
+                selec = 1.0 - selec;
+            }
+            return Ok(clamp_probability(selec));
+        }
         return Ok(DEFAULT_INEQ_SEL);
     }
     let stanullfrac = vardata.nullfrac();
