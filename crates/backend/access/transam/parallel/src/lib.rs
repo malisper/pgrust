@@ -441,19 +441,25 @@ pub fn WaitForParallelWorkersToAttach(id: ParallelContextId) -> PgResult<()> {
         let mut all_known = true;
         let n = with_pcxt(id, |p| p.workers.len());
         for i in 0..n {
-            let (known, has_receiver, bgwhandle, attached) = with_pcxt(id, |p| {
+            let (known, has_receiver, bgwhandle) = with_pcxt(id, |p| {
                 (
                     p.known_attached_workers.get(i).copied().unwrap_or(true),
                     p.workers[i].error_receiver.is_some(),
                     p.workers[i].bgwhandle,
-                    p.shared.as_ref().is_some_and(|s| s.worker_attached[i].load(SeqCst)),
                 )
             });
             if known || !has_receiver {
                 continue;
             }
             let Some(handle) = bgwhandle else { continue };
-            match bgworker::GetBackgroundWorkerPid(&handle).0 {
+            // Status BEFORE the attached flag: a worker can attach+exit between
+            // the two reads, and stale not-attached + STOPPED is a false
+            // init-failure (C reads shm_mq_get_sender after BGWH_STOPPED).
+            let status = bgworker::GetBackgroundWorkerPid(&handle).0;
+            let attached = with_pcxt(id, |p| {
+                p.shared.as_ref().is_some_and(|s| s.worker_attached[i].load(SeqCst))
+            });
+            match status {
                 bgworker::BgwHandleStatus::BGWH_STARTED if attached => {
                     mark_known_attached(id, i);
                 }
@@ -527,16 +533,21 @@ pub fn WaitForParallelWorkersToFinish(id: ParallelContextId) -> PgResult<()> {
                     continue;
                 }
                 let Some(handle) = bgwhandle else { continue };
+                // Status first (see WaitForParallelWorkersToAttach).
+                let status = bgworker::GetBackgroundWorkerPid(&handle).0;
                 let attached = with_pcxt(id, |p| {
                     p.shared.as_ref().is_some_and(|s| s.worker_attached[i].load(SeqCst))
                 });
                 if matches!(
-                    bgworker::GetBackgroundWorkerPid(&handle).0,
+                    status,
                     bgworker::BgwHandleStatus::BGWH_STOPPED
                         | bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED
                 ) && !attached
                 {
                     return worker_failed_to_init("WaitForParallelWorkersToFinish", 878);
+                }
+                if attached {
+                    mark_known_attached(id, i);
                 }
             }
         }
