@@ -74,9 +74,9 @@ fn int4_scankey(attno: usize, v: i32) -> types_scan::scankey::ScanKeyData {
 }
 
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, types_core::NAMEDATALEN)?;
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, types_core::NAMEDATALEN as usize)?;
     buf.extend_from_slice(s.as_bytes());
-    buf.resize(types_core::NAMEDATALEN, 0);
+    buf.resize(types_core::NAMEDATALEN as usize, 0);
     Ok(buf)
 }
 
@@ -388,9 +388,9 @@ pub fn index_concurrently_swap<'mcx>(
             let p = nd.as_usize() as *const u8;
             // SAFETY: name column: fixed 64-byte in-place image.
             let bytes =
-                unsafe { core::slice::from_raw_parts(p, types_core::NAMEDATALEN) };
+                unsafe { core::slice::from_raw_parts(p, types_core::NAMEDATALEN as usize) };
             let mut name: mcx::PgVec<'mcx, u8> =
-                mcx::vec_with_capacity_in(mcx, types_core::NAMEDATALEN)?;
+                mcx::vec_with_capacity_in(mcx, types_core::NAMEDATALEN as usize)?;
             name.extend_from_slice(bytes);
             let (pd, _) = getattr_null(tup, Anum_pg_class_relispartition as i32, desc);
             genam::systable_endscan(mcx, scan)?;
