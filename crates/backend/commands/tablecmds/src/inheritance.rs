@@ -641,7 +641,8 @@ fn column_conflict(
     sqlstate: types_error::SqlState,
 ) -> Box<PgError> {
     let msg = template.replacen("{}", attname, 1);
-    Box::new(PgError::new(ERROR, msg).with_detail(detail).with_sqlstate(sqlstate))
+    let e = PgError::new(ERROR, msg).with_sqlstate(sqlstate);
+    Box::new(if detail.is_empty() { e } else { e.with_detail(detail) })
 }
 
 #[cold]
@@ -1042,14 +1043,18 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             if isnull {
                 panic!("null conbin for constraint \"{conname}\"");
             }
-            let text = fmgr_core::oid_function_call2_coll(
-                1716, // pg_get_expr
+            // decompile_conbin: DirectFunctionCall2(pg_get_expr); the result
+            // text lives in flinfo's fn_extra scratch — copy out before drop.
+            let mut flinfo = fmgr_seams::fmgr_info::call(1716)?;
+            let text = fmgr_core::function_call2_coll(
+                &mut flinfo,
                 types_core::InvalidOid,
                 val,
                 datum::Datum::from_oid(rel.rd_id),
             )?;
             let p = text.as_usize() as *const u8;
-            // SAFETY: live varlena text result through its extent.
+            // SAFETY: live varlena text result through its extent (flinfo
+            // scratch alive until end of scope).
             let image =
                 unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
             let payload = varlena::open_image(mcx, image)?;
