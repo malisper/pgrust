@@ -639,6 +639,7 @@ fn vacuum_error_mid_scan_abort_releases_all_pins() {
     shmem::init_seams();
     fd::init_seams();
     guc_tables::init_seams();
+    postgres_seams::check_for_interrupts::set(|| Ok(()));
     guc_tables::vars::VacuumCostDelay.install_if_absent(guc_tables::GucVarAccessors {
         get: init_small::globals::VacuumCostDelay,
         set: init_small::globals::SetVacuumCostDelay,
