@@ -486,6 +486,7 @@ dependencies = [
  "genam_seams",
  "heaptuple",
  "init_small",
+ "keywords",
  "latch_seams",
  "lsyscache",
  "mbutils",
@@ -3941,6 +3942,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "genfile"
+version = "0.1.0"
+dependencies = [
+ "acl_seams",
+ "datum",
+ "elog",
+ "fd",
+ "funcapi",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "libc",
+ "mcx",
+ "miscinit",
+ "pg_path",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "gin"
 version = "0.1.0"
 dependencies = [
@@ -6968,6 +6992,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "partitionfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "heaptuple",
+ "pg_inherits",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+]
+
+[[package]]
 name = "pathnode"
 version = "0.1.0"
 dependencies = [
@@ -9631,6 +9670,7 @@ dependencies = [
  "freespace",
  "funcapi",
  "genam",
+ "genfile",
  "gin",
  "gistproc",
  "guc",
@@ -9680,6 +9720,7 @@ dependencies = [
  "parse_expr",
  "parser_analyze",
  "parser_driver",
+ "partitionfuncs",
  "pg_class",
  "pg_database",
  "pg_db_role_setting",
