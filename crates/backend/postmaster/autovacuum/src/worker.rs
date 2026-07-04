@@ -15,7 +15,7 @@ use types_core::{
     BackendType, FirstNormalTransactionId, InvalidOid, MultiXactId, Oid, OidIsValid,
     ProcessingMode, TransactionId, NAMESPACE_RELATION_ID, RELATION_RELATION_ID,
 };
-use types_error::{PgError, PgResult, DEBUG1, LOG, WARNING};
+use types_error::{PgError, PgResult, DEBUG1, ERROR, FATAL, LOG, WARNING};
 use types_nodes::parsenodes::{DropBehavior, VacuumRelation};
 use types_nodes::{Node, NodeList};
 use types_rel::lock::{AccessShareLock, AccessExclusiveLock};
@@ -54,6 +54,24 @@ thread_local! {
     static DEFAULT_MULTIXACT_FREEZE_TABLE_AGE: Cell<i32> = const { Cell::new(0) };
 }
 
+// proc_exit / PANIC payloads must keep unwinding (main_loop.rs precedent).
+fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
+    if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
+        std::panic::resume_unwind(payload);
+    }
+    match payload.downcast::<PgError>() {
+        Ok(e) => *e,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "autovacuum worker panicked".to_string());
+            PgError::new(ERROR, msg)
+        }
+    }
+}
+
 fn fatal_exit(e: &PgError) -> ! {
     elog::emit_error_report_for(e);
     ipc::proc_exit(1, g::MyProcPid())
@@ -86,8 +104,12 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
     }
 
     // sigsetjmp equivalent: any error escaping the body is reported and the
-    // worker exits 0 (C 1440-1457).
-    match worker_body() {
+    // worker exits 0 (C 1440-1457). Loud panics unwind as ERROR here — an
+    // escaped panic reaches launch_backend's SIGABRT mapping and cycles the
+    // whole cluster (postgres.c run_one_iteration precedent).
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker_body))
+        .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))))
+    {
         Ok(()) => {}
         Err(e) => {
             g::HoldInterrupts();
@@ -590,12 +612,24 @@ pub fn do_autovacuum() -> PgResult<()> {
 
         if let (Some(relname), Some(nspname), Some(datname)) = (relname, nspname, datname) {
             autovac_report_activity(&tab, &nspname, &relname);
-            match autovacuum_do_vac_analyze(tmcx, &tab, bstrategy.clone()) {
+            let vac_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(debug_assertions)]
+                if std::env::var("PGRUST_TEST_AUTOVAC_PANIC_TABLE").as_deref() == Ok(relname.as_str()) {
+                    panic!("injected autovacuum panic for containment test: {relname}");
+                }
+                autovacuum_do_vac_analyze(tmcx, &tab, bstrategy.clone())
+            }))
+            .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))));
+            match vac_result {
                 Ok(()) => {
                     g::SetQueryCancelPending(false);
                 }
                 Err(mut err) => {
                     // C's PG_CATCH: adorn, report, abort, restart, continue.
+                    // FATAL never reaches C's PG_CATCH (errfinish proc_exits).
+                    if err.level() >= FATAL {
+                        return Err(err);
+                    }
                     g::HoldInterrupts();
                     let what = if tab.at_params.options & VACOPT_VACUUM != 0 {
                         "automatic vacuum of table"
