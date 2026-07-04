@@ -255,7 +255,7 @@ where
                 if let Some(ix) = instr {
                     ::instrument::instr_start_node(&mut estate.es_instrumentation[ix]);
                 }
-                ::nodehash::multi_exec_hash(hash_state, hash_child, estate)?;
+                hash_child.multi_exec(hash_state, estate)?;
                 if let Some(ix) = instr {
                     let ntuples =
                         hash_state.table.as_ref().expect("hash table built").total_tuples();
