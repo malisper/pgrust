@@ -70,3 +70,8 @@ CREATE FUNCTION f_sql(x integer) RETURNS SETOF integer LANGUAGE sql STABLE COST 
 CREATE FUNCTION f_out(IN a integer, OUT b integer, OUT c text) LANGUAGE sql AS $$ SELECT a, 'z'::text $$;
 CREATE FUNCTION f_secdef() RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path TO public, pg_temp SET work_mem = '4MB' AS $$ SELECT 1 $$;
 CREATE PROCEDURE p_noop(IN x integer) LANGUAGE plpgsql AS $$ begin end $$;
+
+CREATE VIEW v_isdistinct AS SELECT a IS DISTINCT FROM b AS d, e IS NOT DISTINCT FROM 1.5 AS nd FROM t1;
+CREATE VIEW v_booltest AS SELECT (a > 0) IS TRUE AS bt, (b < 0) IS NOT FALSE AS bnf, (a = b) IS UNKNOWN AS bu FROM t1;
+CREATE VIEW v_subscript AS SELECT (ARRAY[s.a, s.b])[1] AS one, s.arr[2] AS two, s.arr[1:2] AS slice FROM (SELECT a, b, ARRAY[a, b, a] AS arr FROM t1) s;
+CREATE VIEW v_svf AS SELECT CURRENT_DATE AS d, CURRENT_TIMESTAMP(2) AS ts2, LOCALTIMESTAMP AS lts, LOCALTIME(1) AS lt1, CURRENT_ROLE AS cr, SESSION_USER AS su, CURRENT_SCHEMA AS cs;

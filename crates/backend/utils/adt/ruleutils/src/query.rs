@@ -49,6 +49,22 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub rtable_columns: Vec<DeparseColumns>,
     pub unique_using: bool,
     pub using_names: Vec<String>,
+    pub subplans: Option<&'mcx NodeList<'mcx>>,
+    pub plan: core::cell::RefCell<crate::plan::DpnsPlan<'mcx>>,
+}
+
+impl<'mcx> DeparseNamespace<'mcx> {
+    pub(crate) fn empty(rtable: Vec<&'mcx RangeTblEntry<'mcx>>) -> Self {
+        DeparseNamespace {
+            rtable,
+            rtable_names: Vec::new(),
+            rtable_columns: Vec::new(),
+            unique_using: false,
+            using_names: Vec::new(),
+            subplans: None,
+            plan: core::cell::RefCell::new(crate::plan::DpnsPlan::default()),
+        }
+    }
 }
 
 pub(crate) fn deparse_context_for<'mcx>(
@@ -68,22 +84,17 @@ pub(crate) fn deparse_context_for<'mcx>(
     rte.inFromCl = true;
     let rte_ref = rte.seal_ref();
 
-    let mut dpns = DeparseNamespace {
-        rtable: vec![rte_ref],
-        rtable_names: Vec::new(),
-        rtable_columns: Vec::new(),
-        unique_using: false,
-        using_names: Vec::new(),
-    };
-    set_rtable_names(mcx, &mut dpns, &[])?;
+    let mut dpns = DeparseNamespace::empty(vec![rte_ref]);
+    set_rtable_names(mcx, &mut dpns, &[], None)?;
     set_simple_column_names(mcx, &mut dpns)?;
     Ok(dpns)
 }
 
-fn set_rtable_names<'mcx>(
+pub(crate) fn set_rtable_names<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
     parents: &[Rc<DeparseNamespace<'mcx>>],
+    rels_used: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let mut entries: Vec<(String, u32)> = Vec::new();
     for p in parents {
@@ -93,8 +104,10 @@ fn set_rtable_names<'mcx>(
             }
         }
     }
-    for rte in &dpns.rtable {
-        let refname: Option<String> = if let Some(alias) = rte.alias {
+    for (i, rte) in dpns.rtable.iter().enumerate() {
+        let refname: Option<String> = if rels_used.is_some_and(|ru| !ru.is_member(i as i32 + 1)) {
+            None
+        } else if let Some(alias) = rte.alias {
             alias.aliasname.map(str::to_owned)
         } else if rte.rtekind == RTEKind::RTE_RELATION {
             lsyscache::get_rel_name(mcx, rte.relid)?.map(|s| s.as_str().to_owned())
@@ -147,14 +160,8 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         .iter()
         .map(|n| n.as_range_tbl_entry().expect("rtable entry"))
         .collect();
-    let mut dpns = DeparseNamespace {
-        rtable,
-        rtable_names: Vec::new(),
-        rtable_columns: Vec::new(),
-        unique_using: false,
-        using_names: Vec::new(),
-    };
-    set_rtable_names(mcx, &mut dpns, parents)?;
+    let mut dpns = DeparseNamespace::empty(rtable);
+    set_rtable_names(mcx, &mut dpns, parents, None)?;
     for _ in 0..dpns.rtable.len() {
         dpns.rtable_columns.push(DeparseColumns::default());
     }
@@ -175,7 +182,7 @@ pub(crate) fn set_deparse_for_query<'mcx>(
     Ok(dpns)
 }
 
-fn set_simple_column_names<'mcx>(
+pub(crate) fn set_simple_column_names<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
 ) -> PgResult<()> {
@@ -775,7 +782,7 @@ fn get_rule_expr_toplevel<'mcx>(
     showimplicit: bool,
 ) -> PgResult<()> {
     match node.as_var() {
-        Some(v) => get_variable(v, 0, true, ctx).map(|_| ()),
+        Some(v) => get_variable(node, v, 0, true, ctx).map(|_| ()),
         None => get_rule_expr(node, ctx, showimplicit),
     }
 }
@@ -1354,7 +1361,7 @@ fn get_target_list<'mcx>(
 
         let saved_buf = std::mem::take(&mut ctx.buf);
         let attname: Option<String> = match tle.expr.as_var() {
-            Some(var) => get_variable(var, 0, true, ctx)?,
+            Some(var) => get_variable(tle.expr, var, 0, true, ctx)?,
             None => {
                 get_rule_expr(tle.expr, ctx, true)?;
                 if ctx.colnames_visible { None } else { Some("?column?".to_string()) }
@@ -1526,7 +1533,7 @@ fn get_rule_sortgroupclause<'mcx>(
     } else if let Some(v) = expr.as_var() {
         let save = ctx.var_in_order_by;
         ctx.var_in_order_by = true;
-        get_variable(v, 0, false, ctx)?;
+        get_variable(expr, v, 0, false, ctx)?;
         ctx.var_in_order_by = save;
     } else {
         let need_paren = ctx.pretty_paren()
