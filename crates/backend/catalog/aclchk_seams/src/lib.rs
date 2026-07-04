@@ -132,3 +132,12 @@ seam_core::seam!(
         how_all: bool,
     ) -> types_error::PgResult<(i32, bool)>
 );
+
+seam_core::seam!(
+    // pg_parameter_aclcheck(name, roleid, mode) (aclchk.c): AclResult.
+    pub fn pg_parameter_aclcheck(
+        name: &str,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<i32>
+);

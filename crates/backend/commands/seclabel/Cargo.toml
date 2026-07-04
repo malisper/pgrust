@@ -1,14 +1,11 @@
 [package]
-name = "ifaddr"
+name = "seclabel"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "ifaddr"
+name = "seclabel"
 path = "src/lib.rs"
 
 [dependencies]
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

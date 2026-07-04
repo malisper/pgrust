@@ -39,6 +39,7 @@ dependencies = [
  "parse_utilcmd_seams",
  "pg_depend",
  "pg_largeobject",
+ "pg_parameter_acl",
  "rel_vocab",
  "snapmgr",
  "superuser",
@@ -76,8 +77,10 @@ dependencies = [
  "datum",
  "dbcommands_seams",
  "elog",
+ "foreigncmds_seams",
  "init_small",
  "inval",
+ "lsyscache",
  "mbutils_seams",
  "mcx",
  "miscinit",
@@ -85,9 +88,11 @@ dependencies = [
  "rel_vocab",
  "superuser",
  "syscache_seams",
+ "tablespace_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_rel",
  "types_tuple",
  "varlena",
  "wchar",
@@ -2052,6 +2057,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_largeobject",
+ "pg_parameter_acl",
  "rel_vocab",
  "relation",
  "rewrite_define_seams",
@@ -5539,6 +5545,9 @@ version = "0.1.0"
 [[package]]
 name = "ifaddr"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "index_amvalidate"
@@ -8740,6 +8749,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_parameter_acl"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "guc",
+ "heaptuple",
+ "mcx",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "varlena",
+]
+
+[[package]]
 name = "pg_path"
 version = "0.1.0"
 dependencies = [
@@ -10913,6 +10940,7 @@ name = "rls"
 version = "0.0.0"
 dependencies = [
  "aclchk",
+ "adt_acl",
  "cache_syscache",
  "catalog_namespace",
  "catalog_objectaddress",
@@ -11403,6 +11431,33 @@ dependencies = [
  "xlogrecovery",
  "xlogutils",
  "xmlmap",
+]
+
+[[package]]
+name = "seclabel"
+version = "0.0.0"
+dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "miscinit",
+ "objectaddress_seams",
+ "pg_class_seams",
+ "pg_depend",
+ "relcache_seams",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -13677,6 +13732,7 @@ dependencies = [
 name = "user"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "adt_acl",
  "adt_bool",
  "adt_timestamp",
@@ -13686,6 +13742,7 @@ dependencies = [
  "catcache",
  "crypt",
  "datum",
+ "dbcommands_seams",
  "elog",
  "fmgr_seams",
  "genam",

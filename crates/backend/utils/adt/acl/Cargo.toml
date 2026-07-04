@@ -33,3 +33,7 @@ mbutils_seams = { path = "../../mb/mbutils_seams" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 adt_regproc = { path = "../regproc" }
 dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
+lsyscache = { path = "../../cache/lsyscache" }
+types_rel = { path = "../../../../_support/types/rel" }

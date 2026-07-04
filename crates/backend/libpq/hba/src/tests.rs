@@ -512,3 +512,20 @@ fn regex_tokens_are_loud() {
 fn radius_parse_is_loud() {
     let _ = parse_one("host all all 10.0.0.0/8 radius radiusservers=r radiussecrets=s");
 }
+
+#[test]
+fn samehost_matches_loopback_samenet_matches_subnet() {
+    setup();
+    use crate::check::{check_same_host_or_net, ipaddr_to_sockaddr};
+    use std::net::{IpAddr, Ipv4Addr};
+    let lo = ipaddr_to_sockaddr(&IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert!(check_same_host_or_net(&lo, types_startup::ipCmpSameHost).unwrap());
+    assert!(check_same_host_or_net(&lo, types_startup::ipCmpSameNet).unwrap());
+    // 127.0.0.2 is not an interface address but shares loopback's /8 net.
+    let near = ipaddr_to_sockaddr(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)));
+    assert!(!check_same_host_or_net(&near, types_startup::ipCmpSameHost).unwrap());
+    assert!(check_same_host_or_net(&near, types_startup::ipCmpSameNet).unwrap());
+    let far = ipaddr_to_sockaddr(&IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
+    assert!(!check_same_host_or_net(&far, types_startup::ipCmpSameHost).unwrap());
+    assert!(!check_same_host_or_net(&far, types_startup::ipCmpSameNet).unwrap());
+}

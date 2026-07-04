@@ -1,6 +1,5 @@
 //! user.c. Password verifiers (SCRAM/MD5) are unported: PASSWORD <string> is
 //! a loud panic, PASSWORD NULL and the empty-password NOTICE path work.
-//! AlterRoleSet execution is loud (AlterSetting write machinery unported).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -929,11 +928,69 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
 }
 
 // ALTER ROLE ... SET
-pub fn AlterRoleSet(_stmt: &AlterRoleSetStmt<'_>) -> ! {
-    panic!(
-        "AlterRoleSet (user.c): AlterSetting (pg_db_role_setting.c) write machinery unported \
-         (pg_db_role_setting lane)"
-    )
+pub fn AlterRoleSet<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterRoleSetStmt<'_>) -> PgResult<Oid> {
+    let mut databaseid = InvalidOid;
+    let mut roleid = InvalidOid;
+
+    if let Some(role) = stmt.role {
+        check_rolespec_name(role, "Cannot alter reserved roles.")?;
+
+        let tuple = get_rolespec_tuple(role)?;
+        let cache_id = tuple.cache_id();
+        let rolename = name_attr(cache_id, &tuple, Anum_pg_authid_rolname)?;
+        roleid = SysCacheGetAttrNotNull(cache_id, &tuple, Anum_pg_authid_oid)?.as_oid();
+        let rolsuper = SysCacheGetAttrNotNull(cache_id, &tuple, Anum_pg_authid_rolsuper)?.as_bool();
+
+        pg_shdepend::shdepLockAndCheckObject(mcx, catalog::AuthIdRelationId, roleid)?;
+
+        if rolsuper {
+            if !superuser::superuser()? {
+                return Err(err_detail(
+                    "permission denied to alter role",
+                    "Only roles with the SUPERUSER attribute may alter roles with the SUPERUSER attribute.".into(),
+                    ERRCODE_INSUFFICIENT_PRIVILEGE,
+                ));
+            }
+        } else if (!have_createrole_privilege()?
+            || !adt_acl::is_admin_of_role(miscinit::GetUserId(), roleid)?)
+            && roleid != miscinit::GetUserId()
+        {
+            return Err(err_detail(
+                "permission denied to alter role",
+                format!(
+                    "Only roles with the CREATEROLE attribute and the ADMIN option on role \"{rolename}\" may alter this role."
+                ),
+                ERRCODE_INSUFFICIENT_PRIVILEGE,
+            ));
+        }
+    }
+
+    if let Some(database) = stmt.database {
+        databaseid = dbcommands_seams::get_database_oid::call(mcx, database, false)?;
+        pg_shdepend::shdepLockAndCheckObject(mcx, types_core::catalog::DATABASE_RELATION_ID, databaseid)?;
+
+        if stmt.role.is_none()
+            && !aclchk::object_ownercheck(types_core::catalog::DATABASE_RELATION_ID, databaseid, miscinit::GetUserId())?
+        {
+            aclchk::aclcheck_error(
+                aclchk::ACLCHECK_NOT_OWNER,
+                types_nodes::parsenodes::ObjectType::OBJECT_DATABASE,
+                database,
+            )?;
+        }
+    }
+
+    if stmt.role.is_none() && stmt.database.is_none() && !superuser::superuser()? {
+        return Err(err_detail(
+            "permission denied to alter setting",
+            "Only roles with the SUPERUSER attribute may alter settings globally.".into(),
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ));
+    }
+
+    pg_db_role_setting::AlterSetting(mcx, databaseid, roleid, stmt.setstmt)?;
+
+    Ok(roleid)
 }
 
 // DROP ROLE

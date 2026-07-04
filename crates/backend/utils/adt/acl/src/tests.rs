@@ -232,3 +232,32 @@ fn aclmask_direct_owner_goptions_only_on_exact_match() {
     assert_eq!(aclmask_direct(&acl, 11, 10, ACL_SELECT, AclMaskHow::AclmaskAll), ACL_SELECT);
     assert_eq!(aclmask_direct(&acl, 12, 10, ACL_SELECT, AclMaskHow::AclmaskAll), 0);
 }
+
+#[test]
+fn priv_string_maps_match_c() {
+    use crate::builtins::{PARAMETER_PRIV_MAP, ROLE_PRIV_MAP, SEQUENCE_PRIV_MAP, TABLESPACE_PRIV_MAP};
+    let gof = |m: u64| (m & 0xFFFF_FFFF) << 32;
+    let c = |p: &str, map| convert_any_priv_string(p, map).unwrap();
+    assert_eq!(c("CREATE", TABLESPACE_PRIV_MAP), ACL_CREATE);
+    assert_eq!(c("create with grant option", TABLESPACE_PRIV_MAP), gof(ACL_CREATE));
+    assert!(convert_any_priv_string("USAGE", TABLESPACE_PRIV_MAP).is_err());
+    assert_eq!(c("USAGE", SEQUENCE_PRIV_MAP), ACL_USAGE);
+    assert_eq!(c("SELECT", SEQUENCE_PRIV_MAP), ACL_SELECT);
+    assert_eq!(c("UPDATE WITH GRANT OPTION", SEQUENCE_PRIV_MAP), gof(ACL_UPDATE));
+    assert_eq!(c("SET", PARAMETER_PRIV_MAP), ACL_SET);
+    assert_eq!(c("ALTER SYSTEM", PARAMETER_PRIV_MAP), ACL_ALTER_SYSTEM);
+    assert_eq!(c("alter system with grant option", PARAMETER_PRIV_MAP), gof(ACL_ALTER_SYSTEM));
+    assert_eq!(c("USAGE", ROLE_PRIV_MAP), ACL_USAGE);
+    assert_eq!(c("MEMBER", ROLE_PRIV_MAP), ACL_CREATE);
+    assert_eq!(c("SET", ROLE_PRIV_MAP), ACL_SET);
+    for spelled in [
+        "USAGE WITH GRANT OPTION",
+        "USAGE WITH ADMIN OPTION",
+        "MEMBER WITH GRANT OPTION",
+        "MEMBER WITH ADMIN OPTION",
+        "SET WITH GRANT OPTION",
+        "SET WITH ADMIN OPTION",
+    ] {
+        assert_eq!(c(spelled, ROLE_PRIV_MAP), gof(ACL_CREATE));
+    }
+}
