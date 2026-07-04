@@ -56,7 +56,7 @@ pub fn hash_procinfo(rel: &Relation<'_>) -> PgResult<FmgrInfo> {
 
 thread_local! {
     static HASH_PROC_SCRATCH: RefCell<MemoryContext> =
-        RefCell::new(MemoryContext::new("hash proc scratch"));
+        RefCell::new(MemoryContext::new_bump("hash proc scratch"));
 }
 
 #[inline]
@@ -70,7 +70,7 @@ fn invoke_hash_proc(finfo: &mut FmgrInfo, collation: Oid, key: Datum) -> PgResul
                 invoke_hash_proc_slow(finfo, collation, key, ctx.mcx())
             }
             Err(_) => {
-                let ctx = MemoryContext::new("hash proc scratch (reentrant)");
+                let ctx = MemoryContext::new_bump("hash proc scratch (reentrant)");
                 invoke_hash_proc_slow(finfo, collation, key, ctx.mcx())
             }
         }),
