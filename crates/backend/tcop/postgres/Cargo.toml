@@ -36,6 +36,7 @@ commands_async = { path = "../../commands/commands_async" }
 sinval = { path = "../../storage/ipc/sinval" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
 interrupt = { path = "../../../backend/postmaster/interrupt" }
 guc = { path = "../../utils/misc/guc" }
@@ -125,7 +126,6 @@ relcache_seams = { path = "../../utils/cache/relcache_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 logical_seams = { path = "../../replication/logical_seams" }
 snapbuild_seams = { path = "../../replication/snapbuild_seams" }
-parallel_seams = { path = "../../access/transam/parallel_seams" }
 origin_seams = { path = "../../replication/origin_seams" }
 backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
