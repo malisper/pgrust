@@ -169,6 +169,12 @@ fn walker<'w, 'mcx: 'w>(
             context.add(types_core::PROCEDURE_RELATION_ID, funcexpr.funcid, 0);
             walk_list(&funcexpr.args, context)
         }
+        NodeTag::T_TableSampleClause => {
+            let tsc = node.as_table_sample_clause().unwrap();
+            context.add(types_core::PROCEDURE_RELATION_ID, tsc.tsmhandler, 0);
+            walk_list(&tsc.args, context)?;
+            walk_opt(tsc.repeatable, context)
+        }
         NodeTag::T_OpExpr => {
             let opexpr = node.as_op_expr().unwrap();
             context.add(OperatorRelationId, opexpr.opno, 0);
