@@ -6231,6 +6231,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "logical"
+version = "0.0.0"
+dependencies = [
+ "types_error",
+]
+
+[[package]]
+name = "logical_decode"
+version = "0.0.0"
+dependencies = [
+ "types_error",
+]
+
+[[package]]
 name = "logical_seams"
 version = "0.0.0"
 dependencies = [
@@ -6245,6 +6259,13 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "logicalfuncs"
+version = "0.0.0"
+dependencies = [
  "types_error",
 ]
 
@@ -10747,6 +10768,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reorderbuffer"
+version = "0.0.0"
+dependencies = [
+ "types_error",
+]
+
+[[package]]
+name = "reorderbuffer_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "resowner"
 version = "0.1.0"
 dependencies = [
@@ -11770,6 +11806,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slotfuncs"
+version = "0.0.0"
+dependencies = [
+ "types_error",
+]
+
+[[package]]
 name = "slru"
 version = "0.0.0"
 dependencies = [
@@ -11830,6 +11873,13 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_storage",
+]
+
+[[package]]
+name = "snapbuild"
+version = "0.0.0"
+dependencies = [
+ "types_error",
 ]
 
 [[package]]
@@ -12831,6 +12881,13 @@ dependencies = [
  "waitevent_seams",
  "xact_seams",
  "xlogutils",
+]
+
+[[package]]
+name = "test_decoding"
+version = "0.0.0"
+dependencies = [
+ "types_error",
 ]
 
 [[package]]

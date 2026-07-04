@@ -1,0 +1,12 @@
+[package]
+name = "test_decoding"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "test_decoding"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../_support/types/types_error" }
