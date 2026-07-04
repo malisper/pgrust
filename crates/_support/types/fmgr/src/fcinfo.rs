@@ -241,11 +241,19 @@ impl<const N: usize> LocalFcinfo<N> {
         // derived from `self` so its provenance covers the whole 8B span
         // (a field-raw pointer would carry 4B provenance: Miri SB violation).
         unsafe {
-            (self as *mut Self)
+            let p = (self as *mut Self)
                 .cast::<u8>()
-                .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation))
-                .cast::<u64>()
-                .write(word);
+                .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation));
+            p.cast::<u64>().write(word);
+            // Re-store isnull=false as a DEDICATED byte store (C's `strb`):
+            // LLVM pairs the word store with an adjacent zero store into a
+            // 16B `stp`, which puts isnull at byte 12 of the pair — a shape
+            // the V2 store buffer will not forward to the post-call `ldrb`
+            // (measured: that reload+cmp carried 80% of fmgr_call2's cycles,
+            // 0.79x instr but 2.07x ns). A byte store forwards to a byte
+            // load; volatile so the merge/DSE passes cannot fold it back
+            // into the word store.
+            p.add(4).write_volatile(0u8);
         }
     }
 }
