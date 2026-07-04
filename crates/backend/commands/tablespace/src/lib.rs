@@ -53,7 +53,7 @@ const OIDCHARS: usize = 10;
 const FORKNAMECHARS: usize = 4;
 
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation { file: file!(), line: line!(), funcname }
+    ErrorLocation::new("tablespace.c", 0, funcname)
 }
 
 fn in_place_allowed() -> bool {
@@ -931,7 +931,7 @@ pub fn AlterTableSpaceOwner(mcx: Mcx<'_>, name: &str, new_owner_id: Oid) -> PgRe
 }
 
 pub fn GetDefaultTablespace(mcx: Mcx<'_>, relpersistence: u8, partitioned: bool) -> PgResult<Oid> {
-    if relpersistence == types_rel::RELPERSISTENCE_TEMP {
+    if relpersistence == types_core::catalog::RELPERSISTENCE_TEMP {
         PrepareTempTablespaces(mcx)?;
         return Ok(fd::GetNextTempTableSpace());
     }
