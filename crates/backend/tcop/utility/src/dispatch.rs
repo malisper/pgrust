@@ -1233,6 +1233,13 @@ fn exec_rename_stmt_inner<'mcx>(
             commands_policy::rename_policy(mcx, stmt)?;
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::RenameStmt<'_>,
+                    &types_nodes::parsenodes::RenameStmt<'mcx>,
+                >(stmt)
+            };
             trigger::renametrig(mcx, stmt)?;
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
