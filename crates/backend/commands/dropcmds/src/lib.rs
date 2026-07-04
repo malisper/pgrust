@@ -104,7 +104,7 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
         }
         ObjectType::OBJECT_RULE | ObjectType::OBJECT_TRIGGER => {
             let names = object.as_list().expect("relation-attached object is a name list");
-            match owningrel_does_not_exist_skipping(&names)? {
+            match owningrel_does_not_exist_skipping(names)? {
                 Some(msg) => msg,
                 None => {
                     let depname = names
@@ -113,7 +113,7 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                         .expect("dependent object name is a String node")
                         .sval;
                     let noun = if objtype == ObjectType::OBJECT_RULE { "rule" } else { "trigger" };
-                    let parent = string_parts(&names, names.len() - 1);
+                    let parent = string_parts(names, names.len() - 1);
                     format!(
                         "{noun} \"{depname}\" for relation \"{}\" does not exist, skipping",
                         parent.join(".")
@@ -143,7 +143,7 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                 .and_then(|n| n.as_string())
                 .expect("opclass access method name is a String node")
                 .sval;
-            let tail: Vec<&str> = string_parts(&names, names.len())[1..].to_vec();
+            let tail: Vec<&str> = string_parts(names, names.len())[1..].to_vec();
             match schema_does_not_exist_skipping_parts(&tail)? {
                 Some(msg) => msg,
                 None => {

@@ -32,12 +32,18 @@ use types_rel::{
 pub use pg_depend::ObjectAddress;
 
 pub fn init_seams() {
-    objectaddress_seams::get_object_description::set(
-        |mcx, class_id, object_id, object_sub_id, missing_ok| {
-            let object = ObjectAddress::sub_set(class_id, object_id, object_sub_id);
-            getObjectDescription(mcx, &object, missing_ok)
-        },
-    );
+    objectaddress_seams::get_object_description::set(get_object_description_by_oids);
+}
+
+fn get_object_description_by_oids(
+    mcx: Mcx<'_>,
+    class_id: Oid,
+    object_id: Oid,
+    object_sub_id: i32,
+    missing_ok: bool,
+) -> PgResult<Option<String>> {
+    let object = ObjectAddress::sub_set(class_id, object_id, object_sub_id);
+    getObjectDescription(mcx, &object, missing_ok)
 }
 
 pub const ProcedureRelationId: Oid = types_core::PROCEDURE_RELATION_ID;
@@ -303,7 +309,7 @@ fn get_object_address_unqualified(
 fn get_object_address_relobject<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
-    object: NodeList<'mcx>,
+    object: &NodeList<'mcx>,
     missing_ok: bool,
 ) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
     let nnames = object.len();
@@ -357,7 +363,7 @@ fn get_object_address_relobject<'mcx>(
 fn get_object_address_opcf<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
-    object: NodeList<'mcx>,
+    object: &NodeList<'mcx>,
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
     let amname = object
