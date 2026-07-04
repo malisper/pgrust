@@ -18,9 +18,11 @@ pub fn brin_minmax_opcinfo(typoid: Oid) -> BrinColInfo {
         oi_nstored: 2,
         oi_regular_nulls: true,
         kind: BrinOpcKind::MinMax,
-        oi_typids: [typoid, typoid],
+        oi_typids: [typoid, typoid, 0],
         minmax: MinmaxOpaque::default(),
         distance_procinfo: core::cell::RefCell::new(None),
+        bloom: None,
+        inclusion: None,
     }
 }
 

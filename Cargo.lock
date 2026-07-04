@@ -1191,6 +1191,7 @@ dependencies = [
 name = "amapi"
 version = "0.1.0"
 dependencies = [
+ "brin_validate",
  "cache_syscache",
  "catcache",
  "datum",
@@ -1788,6 +1789,8 @@ dependencies = [
 name = "brin"
 version = "0.1.0"
 dependencies = [
+ "brin_bloom",
+ "brin_inclusion",
  "brin_minmax",
  "brin_minmax_multi",
  "brin_pageops",
@@ -1810,6 +1813,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "brin_bloom"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast",
+ "fmgr_core",
+ "hashfn",
+ "lsyscache",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "brin_build"
 version = "0.1.0"
 dependencies = [
@@ -1828,6 +1851,21 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "xloginsert_seams",
+]
+
+[[package]]
+name = "brin_inclusion"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
 ]
 
 [[package]]
@@ -1901,6 +1939,22 @@ dependencies = [
  "types_error",
  "types_storage",
  "types_tuple",
+]
+
+[[package]]
+name = "brin_validate"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_brin",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -12424,6 +12478,7 @@ dependencies = [
  "be_secure",
  "bgworker",
  "bgwriter",
+ "brin_bloom",
  "brin_minmax_multi",
  "bufmgr",
  "cache_syscache",

@@ -68,8 +68,8 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
             F_BRIN_MINMAX_MULTI_OPCINFO => {
                 brin_minmax_multi::brin_minmax_multi_opcinfo(opcintype)
             }
-            F_BRIN_INCLUSION_OPCINFO => unported("BRIN inclusion opclass"),
-            F_BRIN_BLOOM_OPCINFO => unported("BRIN bloom opclass"),
+            F_BRIN_INCLUSION_OPCINFO => brin_inclusion::brin_inclusion_opcinfo(opcintype),
+            F_BRIN_BLOOM_OPCINFO => brin_bloom::brin_bloom_opcinfo(opcintype),
             other => panic!("unported: BRIN opclass with opcinfo proc {other}"),
         };
         debug_assert!((col.oi_nstored as usize) <= BRIN_MAX_NSTORED);
@@ -90,13 +90,24 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
             if stored_typid != att.atttypid {
                 // TupleDescInitEntry over the opclass's summary type; only the
                 // fill/deform-relevant pg_type fields matter for the disk desc.
-                debug_assert!(stored_typid == PG_BRIN_MINMAX_MULTI_SUMMARYOID);
+                match stored_typid {
+                    PG_BRIN_MINMAX_MULTI_SUMMARYOID | PG_BRIN_BLOOM_SUMMARYOID => {
+                        att.attlen = -1;
+                        att.attbyval = false;
+                        att.attalign = types_tuple::TYPALIGN_INT;
+                        att.attstorage = types_tuple::TYPSTORAGE_EXTENDED;
+                        att.attcollation = types_core::DEFAULT_COLLATION_OID;
+                    }
+                    types_core::BOOLOID => {
+                        att.attlen = 1;
+                        att.attbyval = true;
+                        att.attalign = types_tuple::TYPALIGN_CHAR;
+                        att.attstorage = types_tuple::TYPSTORAGE_PLAIN;
+                        att.attcollation = 0;
+                    }
+                    other => panic!("unported: BRIN stored type {other}"),
+                }
                 att.atttypid = stored_typid;
-                att.attlen = -1;
-                att.attbyval = false;
-                att.attalign = types_tuple::TYPALIGN_INT;
-                att.attstorage = types_tuple::TYPSTORAGE_EXTENDED;
-                att.attcollation = types_core::DEFAULT_COLLATION_OID;
             } else {
                 // TupleDescInitEntry reads pg_type.typstorage, not the heap
                 // column's attstorage (ALTER ... SET STORAGE must not change
@@ -397,6 +408,35 @@ pub fn bringetbitmap(
                                 keys[attno - 1][0].sk_collation,
                             )?;
                         }
+                        // C's bloom consistent takes the key array (fn_nargs
+                        // >= 4) but tests keys independently; per-key calls
+                        // are equivalent.
+                        BrinOpcKind::Bloom => {
+                            for key in &keys[attno - 1] {
+                                addrange = brin_bloom::brin_bloom_consistent(
+                                    per_range.mcx(),
+                                    bdesc,
+                                    bval,
+                                    key,
+                                )?;
+                                if !addrange {
+                                    break;
+                                }
+                            }
+                        }
+                        BrinOpcKind::Inclusion => {
+                            for key in &keys[attno - 1] {
+                                addrange = brin_inclusion::brin_inclusion_consistent(
+                                    per_range.mcx(),
+                                    bdesc,
+                                    bval,
+                                    key,
+                                )?;
+                                if !addrange {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     if !addrange {
                         break;
@@ -494,6 +534,22 @@ pub fn add_values_to_range(
                 bdesc.bd_indcollation[keyno],
             )?,
             BrinOpcKind::MinMaxMulti => brin_minmax_multi::brin_minmax_multi_add_value(
+                mcx,
+                bdesc,
+                bval,
+                values[keyno],
+                nulls[keyno],
+                bdesc.bd_indcollation[keyno],
+            )?,
+            BrinOpcKind::Bloom => brin_bloom::brin_bloom_add_value(
+                mcx,
+                bdesc,
+                bval,
+                values[keyno],
+                nulls[keyno],
+                bdesc.bd_indcollation[keyno],
+            )?,
+            BrinOpcKind::Inclusion => brin_inclusion::brin_inclusion_add_value(
                 mcx,
                 bdesc,
                 bval,
@@ -601,6 +657,20 @@ pub fn union_tuples(bdesc: &BrinDesc<'_>, a: &mut BrinMemTuple, b: &[u8]) -> PgR
                 col_b,
             )?,
             BrinOpcKind::MinMaxMulti => brin_minmax_multi::brin_minmax_multi_union(
+                mcx,
+                bdesc,
+                bdesc.bd_indcollation[keyno],
+                col_a,
+                col_b,
+            )?,
+            BrinOpcKind::Bloom => brin_bloom::brin_bloom_union(
+                mcx,
+                bdesc,
+                bdesc.bd_indcollation[keyno],
+                col_a,
+                col_b,
+            )?,
+            BrinOpcKind::Inclusion => brin_inclusion::brin_inclusion_union(
                 mcx,
                 bdesc,
                 bdesc.bd_indcollation[keyno],

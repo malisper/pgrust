@@ -167,6 +167,7 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
         IndexAmKind::Btree => nbt_validate::btvalidate(opclassoid),
         IndexAmKind::Hash => hash_validate::hashvalidate(opclassoid),
         IndexAmKind::Spgist => spgist_validate::spgvalidate(opclassoid),
+        IndexAmKind::Brin => brin_validate::brinvalidate(opclassoid),
         other => panic!("unported: amvalidate for index AM {other:?} (gist/gin validate lanes)"),
     }
 }
@@ -189,6 +190,8 @@ pub fn am_adjust_members(
         IndexAmKind::Spgist => {
             spgist_validate::spgadjustmembers(opfamilyoid, opclassoid, operators, functions)
         }
+        // C brinhandler sets amadjustmembers = NULL.
+        IndexAmKind::Brin => Ok(()),
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
 }

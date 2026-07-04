@@ -185,6 +185,7 @@ adt_tsgistidx = { path = "../../backend/utils/adt/tsgistidx" }
 network_spgist = { path = "../../backend/utils/adt/network_spgist" }
 commands_constraint = { path = "../../backend/commands/constraint_cmd" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
+brin_bloom = { path = "../../backend/access/brin/brin_bloom" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }

@@ -349,11 +349,14 @@ pub const F_BRIN_BLOOM_OPCINFO: Oid = 4591;
 pub enum BrinOpcKind {
     MinMax,
     MinMaxMulti,
+    Bloom,
+    Inclusion,
 }
 
-pub const BRIN_MAX_NSTORED: usize = 2;
+pub const BRIN_MAX_NSTORED: usize = 3;
 
 pub const PG_BRIN_MINMAX_MULTI_SUMMARYOID: Oid = 4601;
+pub const PG_BRIN_BLOOM_SUMMARYOID: Oid = 4600;
 
 pub struct MinmaxOpaque {
     pub cached_subtype: Cell<Oid>,
@@ -369,6 +372,34 @@ impl Default for MinmaxOpaque {
     }
 }
 
+// BloomOpaque/InclusionOpaque: FmgrInfos resolve lazily on first use as in
+// C, so a broken opclass errors at the same point C does (rule-5 caches).
+#[derive(Default)]
+pub struct BloomOpaque {
+    pub hash_procinfo: RefCell<Option<FmgrInfo>>,
+}
+
+pub const INCLUSION_MAX_PROCNUMS: usize = 4;
+pub const RT_MAX_STRATEGY: usize = 30;
+
+pub struct InclusionOpaque {
+    pub extra_procinfos: RefCell<[Option<FmgrInfo>; INCLUSION_MAX_PROCNUMS]>,
+    pub extra_proc_missing: Cell<[bool; INCLUSION_MAX_PROCNUMS]>,
+    pub cached_subtype: Cell<Oid>,
+    pub strategy_procinfos: RefCell<[Option<FmgrInfo>; RT_MAX_STRATEGY]>,
+}
+
+impl Default for InclusionOpaque {
+    fn default() -> Self {
+        InclusionOpaque {
+            extra_procinfos: RefCell::new([const { None }; INCLUSION_MAX_PROCNUMS]),
+            extra_proc_missing: Cell::new([false; INCLUSION_MAX_PROCNUMS]),
+            cached_subtype: Cell::new(0),
+            strategy_procinfos: RefCell::new([const { None }; RT_MAX_STRATEGY]),
+        }
+    }
+}
+
 pub struct BrinColInfo {
     pub oi_nstored: u16,
     pub oi_regular_nulls: bool,
@@ -376,6 +407,8 @@ pub struct BrinColInfo {
     pub oi_typids: [Oid; BRIN_MAX_NSTORED],
     pub minmax: MinmaxOpaque,
     pub distance_procinfo: RefCell<Option<FmgrInfo>>,
+    pub bloom: Option<Box<BloomOpaque>>,
+    pub inclusion: Option<Box<InclusionOpaque>>,
 }
 
 pub struct MinMaxMultiRanges {
