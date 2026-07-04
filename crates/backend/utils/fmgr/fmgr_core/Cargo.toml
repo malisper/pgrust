@@ -21,6 +21,7 @@ array_userfuncs = { path = "../../adt/array_userfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
 sequence_seams = { path = "../../../commands/sequence_seams" }
 extension_seams = { path = "../../../commands/extension_seams" }
+foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
 adt_regproc = { path = "../../adt/regproc" }
 adt_cash = { path = "../../adt/cash" }
 adt_char = { path = "../../adt/char" }

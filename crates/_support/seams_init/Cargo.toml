@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 operatorcmds = { path = "../../backend/commands/operatorcmds" }
+foreigncmds = { path = "../../backend/commands/foreigncmds" }
 opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
 extension = { path = "../../backend/commands/extension" }
