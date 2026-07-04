@@ -4391,6 +4391,7 @@ dependencies = [
  "lmgr_seams",
  "mbutils_seams",
  "mcx",
+ "parallel_seams",
  "queryenvironment",
  "snapmgr",
  "table",
