@@ -137,14 +137,29 @@ fn validate_and_find_my_exec() {
     }
     let found = found.unwrap();
     assert!(found.ends_with("/fakepg"));
-    assert!(!found.contains("unreadable"));
-    // Skipped when running as root (access(R_OK) succeeds regardless).
+    // Skipped when running as root (access(R_OK) succeeds regardless, so the
+    // unreadable candidate wins the PATH scan).
     if unsafe { libc::geteuid() } != 0 {
+        assert!(!found.contains("unreadable"));
         assert_eq!(logged.len(), 1);
         assert!(logged[0].starts_with("could not read binary"));
     }
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn path_membership_predicates() {
+    assert!(path_contains_parent_reference(".."));
+    assert!(path_contains_parent_reference("../x"));
+    assert!(!path_contains_parent_reference("a/../x"));
+    assert!(!path_contains_parent_reference("..x"));
+    assert!(path_is_relative_and_below_cwd("base"));
+    assert!(!path_is_relative_and_below_cwd("/abs"));
+    assert!(!path_is_relative_and_below_cwd("../up"));
+    assert!(path_is_prefix_of_path("/data", "/data"));
+    assert!(path_is_prefix_of_path("/data", "/data/base"));
+    assert!(!path_is_prefix_of_path("/data", "/database"));
 }
 
 #[test]
