@@ -193,12 +193,13 @@ pub fn ReleaseAndReadBuffer(
     ReadBuffer(rel, block_num)
 }
 
-/// RelationGetNumberOfBlocksInFork (bufmgr.c): smgrnblocks via the smgr seam.
+/// RelationGetNumberOfBlocksInFork (bufmgr.c): smgrnblocks(RelationGetSmgr(rel), ..)
+/// — the rd_smgr pin keeps the smgr entry and its fds alive across queries.
 pub fn RelationGetNumberOfBlocksInFork(
     rel: &RelationData<'_>,
     forknum: ForkNumber,
 ) -> PgResult<BlockNumber> {
-    smgr_seams::smgr_nblocks::call(rel_locator_backend(rel), forknum)
+    smgr_seams::rel_smgr_nblocks::call(rel, forknum)
 }
 
 macro_rules! unported {

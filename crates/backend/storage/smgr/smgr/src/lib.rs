@@ -820,6 +820,7 @@ pub fn init_seams() {
         smgropen(rlocator.locator, rlocator.backend)?;
         smgrcreate(rlocator, forknum, is_redo)
     });
+    smgr_seams::rel_smgr_nblocks::set(|rel, forknum| smgrnblocks_h(RelationGetSmgr(rel)?, forknum));
     smgr_seams::smgr_nblocks::set(|rlocator, forknum| {
         // smgrnblocks(smgropen(rlocator), forknum): C resolves the handle
         // once; one cache probe serves both the open and the nblocks body.
