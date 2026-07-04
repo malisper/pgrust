@@ -8,8 +8,11 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
+use core::ptr::NonNull;
+
 use ::types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    thin_arg, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction, ThinBuiltin, ThinFcinfo,
 };
 
 // C pallocs each cstring result into the per-row context; here the backend
@@ -108,18 +111,34 @@ macro_rules! fc1t {
 }
 
 macro_rules! fc2 {
-    ($($fc:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 2 args.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 2.
+            let (a, b) = unsafe { (thin_arg(fcinfo, 0), thin_arg(fcinfo, 1)) };
             Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())))
         }
     )*};
 }
 
 macro_rules! fc2t {
-    ($($fc:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())?))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 2 args.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 2.
+            let (a, b) = unsafe { (thin_arg(fcinfo, 0), thin_arg(fcinfo, 1)) };
             Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())?))
         }
     )*};
@@ -167,67 +186,67 @@ pub fn fc_hashint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 }
 
 fc2! {
-    fc_int4eq: int4eq(as_i32, as_i32) -> from_bool;
-    fc_int4ne: int4ne(as_i32, as_i32) -> from_bool;
-    fc_int4lt: int4lt(as_i32, as_i32) -> from_bool;
-    fc_int4le: int4le(as_i32, as_i32) -> from_bool;
-    fc_int4gt: int4gt(as_i32, as_i32) -> from_bool;
-    fc_int4ge: int4ge(as_i32, as_i32) -> from_bool;
-    fc_int2eq: int2eq(as_i16, as_i16) -> from_bool;
-    fc_int2ne: int2ne(as_i16, as_i16) -> from_bool;
-    fc_int2lt: int2lt(as_i16, as_i16) -> from_bool;
-    fc_int2le: int2le(as_i16, as_i16) -> from_bool;
-    fc_int2gt: int2gt(as_i16, as_i16) -> from_bool;
-    fc_int2ge: int2ge(as_i16, as_i16) -> from_bool;
-    fc_int24eq: int24eq(as_i16, as_i32) -> from_bool;
-    fc_int24ne: int24ne(as_i16, as_i32) -> from_bool;
-    fc_int24lt: int24lt(as_i16, as_i32) -> from_bool;
-    fc_int24le: int24le(as_i16, as_i32) -> from_bool;
-    fc_int24gt: int24gt(as_i16, as_i32) -> from_bool;
-    fc_int24ge: int24ge(as_i16, as_i32) -> from_bool;
-    fc_int42eq: int42eq(as_i32, as_i16) -> from_bool;
-    fc_int42ne: int42ne(as_i32, as_i16) -> from_bool;
-    fc_int42lt: int42lt(as_i32, as_i16) -> from_bool;
-    fc_int42le: int42le(as_i32, as_i16) -> from_bool;
-    fc_int42gt: int42gt(as_i32, as_i16) -> from_bool;
-    fc_int42ge: int42ge(as_i32, as_i16) -> from_bool;
-    fc_int4larger: int4larger(as_i32, as_i32) -> from_i32;
-    fc_int4smaller: int4smaller(as_i32, as_i32) -> from_i32;
-    fc_int2larger: int2larger(as_i16, as_i16) -> from_i16;
-    fc_int2smaller: int2smaller(as_i16, as_i16) -> from_i16;
-    fc_int4and: int4and(as_i32, as_i32) -> from_i32;
-    fc_int4or: int4or(as_i32, as_i32) -> from_i32;
-    fc_int4xor: int4xor(as_i32, as_i32) -> from_i32;
-    fc_int4shl: int4shl(as_i32, as_i32) -> from_i32;
-    fc_int4shr: int4shr(as_i32, as_i32) -> from_i32;
-    fc_int2and: int2and(as_i16, as_i16) -> from_i16;
-    fc_int2or: int2or(as_i16, as_i16) -> from_i16;
-    fc_int2xor: int2xor(as_i16, as_i16) -> from_i16;
-    fc_int2shl: int2shl(as_i16, as_i32) -> from_i16;
-    fc_int2shr: int2shr(as_i16, as_i32) -> from_i16;
+    fc_int4eq th_int4eq: int4eq(as_i32, as_i32) -> from_bool;
+    fc_int4ne th_int4ne: int4ne(as_i32, as_i32) -> from_bool;
+    fc_int4lt th_int4lt: int4lt(as_i32, as_i32) -> from_bool;
+    fc_int4le th_int4le: int4le(as_i32, as_i32) -> from_bool;
+    fc_int4gt th_int4gt: int4gt(as_i32, as_i32) -> from_bool;
+    fc_int4ge th_int4ge: int4ge(as_i32, as_i32) -> from_bool;
+    fc_int2eq th_int2eq: int2eq(as_i16, as_i16) -> from_bool;
+    fc_int2ne th_int2ne: int2ne(as_i16, as_i16) -> from_bool;
+    fc_int2lt th_int2lt: int2lt(as_i16, as_i16) -> from_bool;
+    fc_int2le th_int2le: int2le(as_i16, as_i16) -> from_bool;
+    fc_int2gt th_int2gt: int2gt(as_i16, as_i16) -> from_bool;
+    fc_int2ge th_int2ge: int2ge(as_i16, as_i16) -> from_bool;
+    fc_int24eq th_int24eq: int24eq(as_i16, as_i32) -> from_bool;
+    fc_int24ne th_int24ne: int24ne(as_i16, as_i32) -> from_bool;
+    fc_int24lt th_int24lt: int24lt(as_i16, as_i32) -> from_bool;
+    fc_int24le th_int24le: int24le(as_i16, as_i32) -> from_bool;
+    fc_int24gt th_int24gt: int24gt(as_i16, as_i32) -> from_bool;
+    fc_int24ge th_int24ge: int24ge(as_i16, as_i32) -> from_bool;
+    fc_int42eq th_int42eq: int42eq(as_i32, as_i16) -> from_bool;
+    fc_int42ne th_int42ne: int42ne(as_i32, as_i16) -> from_bool;
+    fc_int42lt th_int42lt: int42lt(as_i32, as_i16) -> from_bool;
+    fc_int42le th_int42le: int42le(as_i32, as_i16) -> from_bool;
+    fc_int42gt th_int42gt: int42gt(as_i32, as_i16) -> from_bool;
+    fc_int42ge th_int42ge: int42ge(as_i32, as_i16) -> from_bool;
+    fc_int4larger th_int4larger: int4larger(as_i32, as_i32) -> from_i32;
+    fc_int4smaller th_int4smaller: int4smaller(as_i32, as_i32) -> from_i32;
+    fc_int2larger th_int2larger: int2larger(as_i16, as_i16) -> from_i16;
+    fc_int2smaller th_int2smaller: int2smaller(as_i16, as_i16) -> from_i16;
+    fc_int4and th_int4and: int4and(as_i32, as_i32) -> from_i32;
+    fc_int4or th_int4or: int4or(as_i32, as_i32) -> from_i32;
+    fc_int4xor th_int4xor: int4xor(as_i32, as_i32) -> from_i32;
+    fc_int4shl th_int4shl: int4shl(as_i32, as_i32) -> from_i32;
+    fc_int4shr th_int4shr: int4shr(as_i32, as_i32) -> from_i32;
+    fc_int2and th_int2and: int2and(as_i16, as_i16) -> from_i16;
+    fc_int2or th_int2or: int2or(as_i16, as_i16) -> from_i16;
+    fc_int2xor th_int2xor: int2xor(as_i16, as_i16) -> from_i16;
+    fc_int2shl th_int2shl: int2shl(as_i16, as_i32) -> from_i16;
+    fc_int2shr th_int2shr: int2shr(as_i16, as_i32) -> from_i16;
 }
 
 fc2t! {
-    fc_int4pl: int4pl(as_i32, as_i32) -> from_i32;
-    fc_int4mi: int4mi(as_i32, as_i32) -> from_i32;
-    fc_int4mul: int4mul(as_i32, as_i32) -> from_i32;
-    fc_int4div: int4div(as_i32, as_i32) -> from_i32;
-    fc_int4mod: int4mod(as_i32, as_i32) -> from_i32;
-    fc_int2pl: int2pl(as_i16, as_i16) -> from_i16;
-    fc_int2mi: int2mi(as_i16, as_i16) -> from_i16;
-    fc_int2mul: int2mul(as_i16, as_i16) -> from_i16;
-    fc_int2div: int2div(as_i16, as_i16) -> from_i16;
-    fc_int2mod: int2mod(as_i16, as_i16) -> from_i16;
-    fc_int24pl: int24pl(as_i16, as_i32) -> from_i32;
-    fc_int24mi: int24mi(as_i16, as_i32) -> from_i32;
-    fc_int24mul: int24mul(as_i16, as_i32) -> from_i32;
-    fc_int24div: int24div(as_i16, as_i32) -> from_i32;
-    fc_int42pl: int42pl(as_i32, as_i16) -> from_i32;
-    fc_int42mi: int42mi(as_i32, as_i16) -> from_i32;
-    fc_int42mul: int42mul(as_i32, as_i16) -> from_i32;
-    fc_int42div: int42div(as_i32, as_i16) -> from_i32;
-    fc_int4gcd: int4gcd(as_i32, as_i32) -> from_i32;
-    fc_int4lcm: int4lcm(as_i32, as_i32) -> from_i32;
+    fc_int4pl th_int4pl: int4pl(as_i32, as_i32) -> from_i32;
+    fc_int4mi th_int4mi: int4mi(as_i32, as_i32) -> from_i32;
+    fc_int4mul th_int4mul: int4mul(as_i32, as_i32) -> from_i32;
+    fc_int4div th_int4div: int4div(as_i32, as_i32) -> from_i32;
+    fc_int4mod th_int4mod: int4mod(as_i32, as_i32) -> from_i32;
+    fc_int2pl th_int2pl: int2pl(as_i16, as_i16) -> from_i16;
+    fc_int2mi th_int2mi: int2mi(as_i16, as_i16) -> from_i16;
+    fc_int2mul th_int2mul: int2mul(as_i16, as_i16) -> from_i16;
+    fc_int2div th_int2div: int2div(as_i16, as_i16) -> from_i16;
+    fc_int2mod th_int2mod: int2mod(as_i16, as_i16) -> from_i16;
+    fc_int24pl th_int24pl: int24pl(as_i16, as_i32) -> from_i32;
+    fc_int24mi th_int24mi: int24mi(as_i16, as_i32) -> from_i32;
+    fc_int24mul th_int24mul: int24mul(as_i16, as_i32) -> from_i32;
+    fc_int24div th_int24div: int24div(as_i16, as_i32) -> from_i32;
+    fc_int42pl th_int42pl: int42pl(as_i32, as_i16) -> from_i32;
+    fc_int42mi th_int42mi: int42mi(as_i32, as_i16) -> from_i32;
+    fc_int42mul th_int42mul: int42mul(as_i32, as_i16) -> from_i32;
+    fc_int42div th_int42div: int42div(as_i32, as_i16) -> from_i32;
+    fc_int4gcd th_int4gcd: int4gcd(as_i32, as_i32) -> from_i32;
+    fc_int4lcm th_int4lcm: int4lcm(as_i32, as_i32) -> from_i32;
 }
 
 fc_in_range! {
@@ -422,4 +441,73 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(4131, "in_range_int2_int4", 5, fc_in_range_int2_int4),
     b(4132, "in_range_int2_int2", 5, fc_in_range_int2_int2),
     b(4130, "in_range_int2_int8", 5, fc_in_range_int2_int8),
+];
+
+const fn t(foid: Oid, func: PGFunction, thin: ::types_fmgr::PGFunctionThin) -> ThinBuiltin {
+    ThinBuiltin { foid, func, thin }
+}
+
+// Thin-ABI twins of the fc2!/fc2t! wrappers above (same cores, so the error
+// surface is identical by construction; none read flinfo or write isnull).
+pub static INT_THIN: &[ThinBuiltin] = &[
+    t(63, fc_int2eq, th_int2eq),
+    t(64, fc_int2lt, th_int2lt),
+    t(65, fc_int4eq, th_int4eq),
+    t(66, fc_int4lt, th_int4lt),
+    t(141, fc_int4mul, th_int4mul),
+    t(144, fc_int4ne, th_int4ne),
+    t(145, fc_int2ne, th_int2ne),
+    t(146, fc_int2gt, th_int2gt),
+    t(147, fc_int4gt, th_int4gt),
+    t(148, fc_int2le, th_int2le),
+    t(149, fc_int4le, th_int4le),
+    t(150, fc_int4ge, th_int4ge),
+    t(151, fc_int2ge, th_int2ge),
+    t(152, fc_int2mul, th_int2mul),
+    t(153, fc_int2div, th_int2div),
+    t(154, fc_int4div, th_int4div),
+    t(155, fc_int2mod, th_int2mod),
+    t(156, fc_int4mod, th_int4mod),
+    t(158, fc_int24eq, th_int24eq),
+    t(159, fc_int42eq, th_int42eq),
+    t(160, fc_int24lt, th_int24lt),
+    t(161, fc_int42lt, th_int42lt),
+    t(162, fc_int24gt, th_int24gt),
+    t(163, fc_int42gt, th_int42gt),
+    t(164, fc_int24ne, th_int24ne),
+    t(165, fc_int42ne, th_int42ne),
+    t(166, fc_int24le, th_int24le),
+    t(167, fc_int42le, th_int42le),
+    t(168, fc_int24ge, th_int24ge),
+    t(169, fc_int42ge, th_int42ge),
+    t(170, fc_int24mul, th_int24mul),
+    t(171, fc_int42mul, th_int42mul),
+    t(172, fc_int24div, th_int24div),
+    t(173, fc_int42div, th_int42div),
+    t(176, fc_int2pl, th_int2pl),
+    t(177, fc_int4pl, th_int4pl),
+    t(178, fc_int24pl, th_int24pl),
+    t(179, fc_int42pl, th_int42pl),
+    t(180, fc_int2mi, th_int2mi),
+    t(181, fc_int4mi, th_int4mi),
+    t(182, fc_int24mi, th_int24mi),
+    t(183, fc_int42mi, th_int42mi),
+    t(768, fc_int4larger, th_int4larger),
+    t(769, fc_int4smaller, th_int4smaller),
+    t(770, fc_int2larger, th_int2larger),
+    t(771, fc_int2smaller, th_int2smaller),
+    t(940, fc_int2mod, th_int2mod),
+    t(941, fc_int4mod, th_int4mod),
+    t(1892, fc_int2and, th_int2and),
+    t(1893, fc_int2or, th_int2or),
+    t(1894, fc_int2xor, th_int2xor),
+    t(1896, fc_int2shl, th_int2shl),
+    t(1897, fc_int2shr, th_int2shr),
+    t(1898, fc_int4and, th_int4and),
+    t(1899, fc_int4or, th_int4or),
+    t(1900, fc_int4xor, th_int4xor),
+    t(1902, fc_int4shl, th_int4shl),
+    t(1903, fc_int4shr, th_int4shr),
+    t(5044, fc_int4gcd, th_int4gcd),
+    t(5046, fc_int4lcm, th_int4lcm),
 ];

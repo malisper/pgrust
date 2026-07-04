@@ -8,8 +8,11 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
+use core::ptr::NonNull;
+
 use ::types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    thin_arg, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction, ThinBuiltin, ThinFcinfo,
 };
 
 pub fn fc_int8recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -73,18 +76,34 @@ macro_rules! fc1t {
 }
 
 macro_rules! fc2 {
-    ($($fc:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 2 args.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 2.
+            let (a, b) = unsafe { (thin_arg(fcinfo, 0), thin_arg(fcinfo, 1)) };
             Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())))
         }
     )*};
 }
 
 macro_rules! fc2t {
-    ($($fc:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
+    ($($fc:ident $th:ident: $core:ident($ga:ident, $gb:ident) -> $from:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())?))
+        }
+
+        /// # Safety
+        /// Thin-ABI call: `fcinfo` is a live image with >= 2 args.
+        pub unsafe fn $th(fcinfo: NonNull<ThinFcinfo>) -> PgResult<Datum> {
+            // SAFETY: thin contract — the registered arity is 2.
+            let (a, b) = unsafe { (thin_arg(fcinfo, 0), thin_arg(fcinfo, 1)) };
             Ok(Datum::$from(crate::$core(a.value.$ga(), b.value.$gb())?))
         }
     )*};
@@ -135,69 +154,69 @@ pub fn fc_hashint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 }
 
 fc2! {
-    fc_int8eq: int8eq(as_i64, as_i64) -> from_bool;
-    fc_int8ne: int8ne(as_i64, as_i64) -> from_bool;
-    fc_int8lt: int8lt(as_i64, as_i64) -> from_bool;
-    fc_int8gt: int8gt(as_i64, as_i64) -> from_bool;
-    fc_int8le: int8le(as_i64, as_i64) -> from_bool;
-    fc_int8ge: int8ge(as_i64, as_i64) -> from_bool;
-    fc_int84eq: int84eq(as_i64, as_i32) -> from_bool;
-    fc_int84ne: int84ne(as_i64, as_i32) -> from_bool;
-    fc_int84lt: int84lt(as_i64, as_i32) -> from_bool;
-    fc_int84gt: int84gt(as_i64, as_i32) -> from_bool;
-    fc_int84le: int84le(as_i64, as_i32) -> from_bool;
-    fc_int84ge: int84ge(as_i64, as_i32) -> from_bool;
-    fc_int48eq: int48eq(as_i32, as_i64) -> from_bool;
-    fc_int48ne: int48ne(as_i32, as_i64) -> from_bool;
-    fc_int48lt: int48lt(as_i32, as_i64) -> from_bool;
-    fc_int48gt: int48gt(as_i32, as_i64) -> from_bool;
-    fc_int48le: int48le(as_i32, as_i64) -> from_bool;
-    fc_int48ge: int48ge(as_i32, as_i64) -> from_bool;
-    fc_int82eq: int82eq(as_i64, as_i16) -> from_bool;
-    fc_int82ne: int82ne(as_i64, as_i16) -> from_bool;
-    fc_int82lt: int82lt(as_i64, as_i16) -> from_bool;
-    fc_int82gt: int82gt(as_i64, as_i16) -> from_bool;
-    fc_int82le: int82le(as_i64, as_i16) -> from_bool;
-    fc_int82ge: int82ge(as_i64, as_i16) -> from_bool;
-    fc_int28eq: int28eq(as_i16, as_i64) -> from_bool;
-    fc_int28ne: int28ne(as_i16, as_i64) -> from_bool;
-    fc_int28lt: int28lt(as_i16, as_i64) -> from_bool;
-    fc_int28gt: int28gt(as_i16, as_i64) -> from_bool;
-    fc_int28le: int28le(as_i16, as_i64) -> from_bool;
-    fc_int28ge: int28ge(as_i16, as_i64) -> from_bool;
-    fc_int8larger: int8larger(as_i64, as_i64) -> from_i64;
-    fc_int8smaller: int8smaller(as_i64, as_i64) -> from_i64;
-    fc_int8and: int8and(as_i64, as_i64) -> from_i64;
-    fc_int8or: int8or(as_i64, as_i64) -> from_i64;
-    fc_int8xor: int8xor(as_i64, as_i64) -> from_i64;
-    fc_int8shl: int8shl(as_i64, as_i32) -> from_i64;
-    fc_int8shr: int8shr(as_i64, as_i32) -> from_i64;
+    fc_int8eq th_int8eq: int8eq(as_i64, as_i64) -> from_bool;
+    fc_int8ne th_int8ne: int8ne(as_i64, as_i64) -> from_bool;
+    fc_int8lt th_int8lt: int8lt(as_i64, as_i64) -> from_bool;
+    fc_int8gt th_int8gt: int8gt(as_i64, as_i64) -> from_bool;
+    fc_int8le th_int8le: int8le(as_i64, as_i64) -> from_bool;
+    fc_int8ge th_int8ge: int8ge(as_i64, as_i64) -> from_bool;
+    fc_int84eq th_int84eq: int84eq(as_i64, as_i32) -> from_bool;
+    fc_int84ne th_int84ne: int84ne(as_i64, as_i32) -> from_bool;
+    fc_int84lt th_int84lt: int84lt(as_i64, as_i32) -> from_bool;
+    fc_int84gt th_int84gt: int84gt(as_i64, as_i32) -> from_bool;
+    fc_int84le th_int84le: int84le(as_i64, as_i32) -> from_bool;
+    fc_int84ge th_int84ge: int84ge(as_i64, as_i32) -> from_bool;
+    fc_int48eq th_int48eq: int48eq(as_i32, as_i64) -> from_bool;
+    fc_int48ne th_int48ne: int48ne(as_i32, as_i64) -> from_bool;
+    fc_int48lt th_int48lt: int48lt(as_i32, as_i64) -> from_bool;
+    fc_int48gt th_int48gt: int48gt(as_i32, as_i64) -> from_bool;
+    fc_int48le th_int48le: int48le(as_i32, as_i64) -> from_bool;
+    fc_int48ge th_int48ge: int48ge(as_i32, as_i64) -> from_bool;
+    fc_int82eq th_int82eq: int82eq(as_i64, as_i16) -> from_bool;
+    fc_int82ne th_int82ne: int82ne(as_i64, as_i16) -> from_bool;
+    fc_int82lt th_int82lt: int82lt(as_i64, as_i16) -> from_bool;
+    fc_int82gt th_int82gt: int82gt(as_i64, as_i16) -> from_bool;
+    fc_int82le th_int82le: int82le(as_i64, as_i16) -> from_bool;
+    fc_int82ge th_int82ge: int82ge(as_i64, as_i16) -> from_bool;
+    fc_int28eq th_int28eq: int28eq(as_i16, as_i64) -> from_bool;
+    fc_int28ne th_int28ne: int28ne(as_i16, as_i64) -> from_bool;
+    fc_int28lt th_int28lt: int28lt(as_i16, as_i64) -> from_bool;
+    fc_int28gt th_int28gt: int28gt(as_i16, as_i64) -> from_bool;
+    fc_int28le th_int28le: int28le(as_i16, as_i64) -> from_bool;
+    fc_int28ge th_int28ge: int28ge(as_i16, as_i64) -> from_bool;
+    fc_int8larger th_int8larger: int8larger(as_i64, as_i64) -> from_i64;
+    fc_int8smaller th_int8smaller: int8smaller(as_i64, as_i64) -> from_i64;
+    fc_int8and th_int8and: int8and(as_i64, as_i64) -> from_i64;
+    fc_int8or th_int8or: int8or(as_i64, as_i64) -> from_i64;
+    fc_int8xor th_int8xor: int8xor(as_i64, as_i64) -> from_i64;
+    fc_int8shl th_int8shl: int8shl(as_i64, as_i32) -> from_i64;
+    fc_int8shr th_int8shr: int8shr(as_i64, as_i32) -> from_i64;
 }
 
 fc2t! {
-    fc_int8pl: int8pl(as_i64, as_i64) -> from_i64;
-    fc_int8mi: int8mi(as_i64, as_i64) -> from_i64;
-    fc_int8mul: int8mul(as_i64, as_i64) -> from_i64;
-    fc_int8div: int8div(as_i64, as_i64) -> from_i64;
-    fc_int8mod: int8mod(as_i64, as_i64) -> from_i64;
-    fc_int8gcd: int8gcd(as_i64, as_i64) -> from_i64;
-    fc_int8lcm: int8lcm(as_i64, as_i64) -> from_i64;
-    fc_int84pl: int84pl(as_i64, as_i32) -> from_i64;
-    fc_int84mi: int84mi(as_i64, as_i32) -> from_i64;
-    fc_int84mul: int84mul(as_i64, as_i32) -> from_i64;
-    fc_int84div: int84div(as_i64, as_i32) -> from_i64;
-    fc_int48pl: int48pl(as_i32, as_i64) -> from_i64;
-    fc_int48mi: int48mi(as_i32, as_i64) -> from_i64;
-    fc_int48mul: int48mul(as_i32, as_i64) -> from_i64;
-    fc_int48div: int48div(as_i32, as_i64) -> from_i64;
-    fc_int82pl: int82pl(as_i64, as_i16) -> from_i64;
-    fc_int82mi: int82mi(as_i64, as_i16) -> from_i64;
-    fc_int82mul: int82mul(as_i64, as_i16) -> from_i64;
-    fc_int82div: int82div(as_i64, as_i16) -> from_i64;
-    fc_int28pl: int28pl(as_i16, as_i64) -> from_i64;
-    fc_int28mi: int28mi(as_i16, as_i64) -> from_i64;
-    fc_int28mul: int28mul(as_i16, as_i64) -> from_i64;
-    fc_int28div: int28div(as_i16, as_i64) -> from_i64;
+    fc_int8pl th_int8pl: int8pl(as_i64, as_i64) -> from_i64;
+    fc_int8mi th_int8mi: int8mi(as_i64, as_i64) -> from_i64;
+    fc_int8mul th_int8mul: int8mul(as_i64, as_i64) -> from_i64;
+    fc_int8div th_int8div: int8div(as_i64, as_i64) -> from_i64;
+    fc_int8mod th_int8mod: int8mod(as_i64, as_i64) -> from_i64;
+    fc_int8gcd th_int8gcd: int8gcd(as_i64, as_i64) -> from_i64;
+    fc_int8lcm th_int8lcm: int8lcm(as_i64, as_i64) -> from_i64;
+    fc_int84pl th_int84pl: int84pl(as_i64, as_i32) -> from_i64;
+    fc_int84mi th_int84mi: int84mi(as_i64, as_i32) -> from_i64;
+    fc_int84mul th_int84mul: int84mul(as_i64, as_i32) -> from_i64;
+    fc_int84div th_int84div: int84div(as_i64, as_i32) -> from_i64;
+    fc_int48pl th_int48pl: int48pl(as_i32, as_i64) -> from_i64;
+    fc_int48mi th_int48mi: int48mi(as_i32, as_i64) -> from_i64;
+    fc_int48mul th_int48mul: int48mul(as_i32, as_i64) -> from_i64;
+    fc_int48div th_int48div: int48div(as_i32, as_i64) -> from_i64;
+    fc_int82pl th_int82pl: int82pl(as_i64, as_i16) -> from_i64;
+    fc_int82mi th_int82mi: int82mi(as_i64, as_i16) -> from_i64;
+    fc_int82mul th_int82mul: int82mul(as_i64, as_i16) -> from_i64;
+    fc_int82div th_int82div: int82div(as_i64, as_i16) -> from_i64;
+    fc_int28pl th_int28pl: int28pl(as_i16, as_i64) -> from_i64;
+    fc_int28mi th_int28mi: int28mi(as_i16, as_i64) -> from_i64;
+    fc_int28mul th_int28mul: int28mul(as_i16, as_i64) -> from_i64;
+    fc_int28div th_int28div: int28div(as_i16, as_i64) -> from_i64;
 }
 
 fc_agg_inc! {
@@ -391,4 +410,74 @@ pub const INT8_BUILTINS: &[FmgrBuiltin] = &[
     b(947, "int8mod", 2, fc_int8mod),
     b(1396, "int8abs", 1, fc_int8abs),
     b(4126, "in_range_int8_int8", 5, fc_in_range_int8_int8),
+];
+
+const fn t(foid: Oid, func: PGFunction, thin: ::types_fmgr::PGFunctionThin) -> ThinBuiltin {
+    ThinBuiltin { foid, func, thin }
+}
+
+// Thin-ABI twins of the fc2!/fc2t! wrappers above (same cores, so the error
+// surface is identical by construction; none read flinfo or write isnull).
+pub static INT8_THIN: &[ThinBuiltin] = &[
+    t(463, fc_int8pl, th_int8pl),
+    t(464, fc_int8mi, th_int8mi),
+    t(465, fc_int8mul, th_int8mul),
+    t(466, fc_int8div, th_int8div),
+    t(467, fc_int8eq, th_int8eq),
+    t(468, fc_int8ne, th_int8ne),
+    t(469, fc_int8lt, th_int8lt),
+    t(470, fc_int8gt, th_int8gt),
+    t(471, fc_int8le, th_int8le),
+    t(472, fc_int8ge, th_int8ge),
+    t(474, fc_int84eq, th_int84eq),
+    t(475, fc_int84ne, th_int84ne),
+    t(476, fc_int84lt, th_int84lt),
+    t(477, fc_int84gt, th_int84gt),
+    t(478, fc_int84le, th_int84le),
+    t(479, fc_int84ge, th_int84ge),
+    t(837, fc_int82pl, th_int82pl),
+    t(838, fc_int82mi, th_int82mi),
+    t(839, fc_int82mul, th_int82mul),
+    t(840, fc_int82div, th_int82div),
+    t(841, fc_int28pl, th_int28pl),
+    t(852, fc_int48eq, th_int48eq),
+    t(853, fc_int48ne, th_int48ne),
+    t(854, fc_int48lt, th_int48lt),
+    t(855, fc_int48gt, th_int48gt),
+    t(856, fc_int48le, th_int48le),
+    t(857, fc_int48ge, th_int48ge),
+    t(942, fc_int28mi, th_int28mi),
+    t(943, fc_int28mul, th_int28mul),
+    t(945, fc_int8mod, th_int8mod),
+    t(947, fc_int8mod, th_int8mod),
+    t(948, fc_int28div, th_int28div),
+    t(1236, fc_int8larger, th_int8larger),
+    t(1237, fc_int8smaller, th_int8smaller),
+    t(1274, fc_int84pl, th_int84pl),
+    t(1275, fc_int84mi, th_int84mi),
+    t(1276, fc_int84mul, th_int84mul),
+    t(1277, fc_int84div, th_int84div),
+    t(1278, fc_int48pl, th_int48pl),
+    t(1279, fc_int48mi, th_int48mi),
+    t(1280, fc_int48mul, th_int48mul),
+    t(1281, fc_int48div, th_int48div),
+    t(1850, fc_int28eq, th_int28eq),
+    t(1851, fc_int28ne, th_int28ne),
+    t(1852, fc_int28lt, th_int28lt),
+    t(1853, fc_int28gt, th_int28gt),
+    t(1854, fc_int28le, th_int28le),
+    t(1855, fc_int28ge, th_int28ge),
+    t(1856, fc_int82eq, th_int82eq),
+    t(1857, fc_int82ne, th_int82ne),
+    t(1858, fc_int82lt, th_int82lt),
+    t(1859, fc_int82gt, th_int82gt),
+    t(1860, fc_int82le, th_int82le),
+    t(1861, fc_int82ge, th_int82ge),
+    t(1904, fc_int8and, th_int8and),
+    t(1905, fc_int8or, th_int8or),
+    t(1906, fc_int8xor, th_int8xor),
+    t(1908, fc_int8shl, th_int8shl),
+    t(1909, fc_int8shr, th_int8shr),
+    t(5045, fc_int8gcd, th_int8gcd),
+    t(5047, fc_int8lcm, th_int8lcm),
 ];

@@ -244,6 +244,24 @@ pub fn fmgr_isbuiltin(id: Oid) -> Option<&'static FmgrBuiltin> {
     }
 }
 
+// Oid-ascending per table (asserted in tests; binary-searched here).
+const THIN_TABLES: &[&[::fmgr::ThinBuiltin]] = &[
+    ::adt_int::builtins::INT_THIN,
+    ::adt_int8::builtins::INT8_THIN,
+];
+
+/// Thin-ABI twin for a resolved carrier. `fn_addr` referees the row: an oid
+/// reused by a diverging resolution path falls back to the PGFunction ABI.
+pub fn fmgr_thin_builtin(flinfo: &FmgrInfo) -> Option<::fmgr::PGFunctionThin> {
+    for t in THIN_TABLES {
+        if let Ok(i) = t.binary_search_by_key(&flinfo.fn_oid, |e| e.foid) {
+            let e = &t[i];
+            return (e.func as usize == flinfo.fn_addr as usize).then_some(e.thin);
+        }
+    }
+    None
+}
+
 /// C: `fmgr_lookupByName` — linear, validator/alias resolution only (cold).
 pub fn fmgr_lookup_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
     FMGR_BUILTINS.iter().find(|b| b.name == name)

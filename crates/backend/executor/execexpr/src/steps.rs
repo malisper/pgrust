@@ -235,6 +235,13 @@ pub enum Step {
         transno: u16,
     },
     AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
+    // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
+    FuncExprStrict2Thin { call: Call2Thin, out: OutRef },
+    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: Call2Thin, out: OutRef },
+    FuncFuncStrict2Thin { call1: Call2Thin, argno: u8, call2: Call2Thin, out: OutRef },
+    FuncStrict2QualThin { call: Call2Thin, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: Call2Thin, out: OutRef },
+    NotDistinctQualThin { call: Call2Thin, jumpdone: u32, out: OutRef },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
@@ -286,6 +293,13 @@ pub struct IoCoerceCalls {
 pub struct Call2 {
     pub(crate) fcinfo: NonNull<u8>,
     pub(crate) flinfo: NonNull<FmgrInfo>,
+}
+
+// Call2 with the thin fn resolved in place of the FmgrInfo indirection.
+#[derive(Clone, Copy, Debug)]
+pub struct Call2Thin {
+    pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) f: ::types_fmgr::PGFunctionThin,
 }
 
 impl From<FuncCall> for Call2 {
