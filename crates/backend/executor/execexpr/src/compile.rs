@@ -108,7 +108,10 @@ fn grow_steps(state: &mut ExprState<'_>, mcx: Mcx<'_>) -> PgResult<()> {
 #[derive(Clone, Copy)]
 pub struct SubplanCompileEnv {
     pub estate: NonNull<()>,
-    pub init: for<'x> unsafe fn(NonNull<()>, Node<'x>) -> PgResult<NonNull<()>>,
+    pub init: for<'x> unsafe fn(NonNull<()>, Node<'x>, Option<AggBind>) -> PgResult<NonNull<()>>,
+    /// Parent Agg's result-array binding: Aggrefs inside the SubPlan's
+    /// testexpr/args compile against the owning AggState (C parent PlanState).
+    pub agg: Option<AggBind>,
 }
 
 /// C `ExecInitExpr` (parent-less form; PlanState vocab is the execProcnode
@@ -128,13 +131,24 @@ pub fn exec_init_expr_subplans<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    exec_init_expr_subplans_agg(mcx, node, params, sub, None)
+}
+
+/// [`exec_init_expr_subplans`] under a parent Agg binding (SubPlan testexpr).
+pub fn exec_init_expr_subplans_agg<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+    agg: Option<AggBind>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let Some(node) = node else {
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
     let rout = state.result_out();
-    init_expr_rec(node, &mut state, mcx, rout, None, params, sub)?;
+    init_expr_rec(node, &mut state, mcx, rout, agg.map(Bind::Agg), params, sub)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
@@ -1505,9 +1519,13 @@ pub(crate) fn init_expr_rec<'mcx>(
                 let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
                 push_step(state, mcx, Step::ParamSet { prm, out })?;
             }
+            let aggbind = match agg {
+                Some(Bind::Agg(a)) => Some(a),
+                _ => env.agg,
+            };
             // SAFETY: env.estate is the caller's live estate (SubplanCompileEnv
             // contract: no aliasing borrows during compile).
-            let sstate = unsafe { (env.init)(env.estate, node) }?;
+            let sstate = unsafe { (env.init)(env.estate, node, aggbind) }?;
             state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
             push_step(state, mcx, Step::SubPlan { sstate, out })
         }

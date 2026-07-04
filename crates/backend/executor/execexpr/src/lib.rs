@@ -31,6 +31,7 @@ pub use compile::{
     exec_build_grouping_equal,
     exec_build_hash32_from_attrs, exec_build_hash32_from_exprs, exec_build_projection_info,
     exec_build_projection_info_subplans, exec_init_expr, exec_init_expr_subplans,
+    exec_init_expr_subplans_agg,
     exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggOrderedSpec, AggTransSpec,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };

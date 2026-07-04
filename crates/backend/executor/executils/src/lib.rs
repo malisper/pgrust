@@ -75,8 +75,11 @@ pub type CteProcHook = for<'a, 'mcx> unsafe fn(
     &'a mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>>;
 
-pub type SubplanInitHook =
-    for<'x> unsafe fn(core::ptr::NonNull<()>, types_nodes::Node<'x>) -> PgResult<core::ptr::NonNull<()>>;
+pub type SubplanInitHook = for<'x> unsafe fn(
+    core::ptr::NonNull<()>,
+    types_nodes::Node<'x>,
+    Option<execexpr::AggBind>,
+) -> PgResult<core::ptr::NonNull<()>>;
 
 pub type SubplanEvalHook = for<'a, 'mcx> unsafe fn(
     core::ptr::NonNull<()>,
@@ -133,6 +136,7 @@ pub fn with_subplan_compile_env<'mcx, R>(
     let env = estate.es_subplan_init_hook.map(|init| execexpr::SubplanCompileEnv {
         estate: core::ptr::NonNull::from(&mut *estate).cast(),
         init,
+        agg: None,
     });
     f(env)
 }
