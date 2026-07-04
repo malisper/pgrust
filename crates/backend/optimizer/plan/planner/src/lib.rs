@@ -21,6 +21,7 @@ pub mod joinrels;
 pub mod pathkeys;
 pub mod placeholder;
 pub mod planagg;
+pub mod orclauses;
 pub mod pathnode;
 pub mod plancat;
 pub mod partprune;
