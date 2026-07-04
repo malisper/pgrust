@@ -571,3 +571,104 @@ fn deform_resumes_past_cstring_attrs() {
         exec_clear_tuple(&mut slot, mcx);
     }
 }
+
+// SoA batch deform parity: gather must leave the slot exactly as
+// slot_getsomeattrs(ncols) would, resume state included.
+#[test]
+fn soa_batch_deform_matches_lazy_deform() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // int4, int2, int8 fixed prefix; text tail exercises resume past ncols.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(3, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+            col(4, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+        ],
+    );
+    let ncols = 3usize;
+    let plan = SoaDeformPlan::try_new(mcx, &desc.compact_attrs, ncols).unwrap();
+    let mut soa = SoaBatch::new_in(mcx, plan.ncols());
+    let txt = text_varlena("tail");
+
+    let rows: [( [Datum; 4], [bool; 4] ); 4] = [
+        (
+            [Datum::from_i32(7), Datum::from_i16(-3), Datum::from_i64(1_234_567), text_datum(&txt)],
+            [false, false, false, false],
+        ),
+        (
+            [Datum::from_i32(0), Datum::null(), Datum::from_i64(-1), text_datum(&txt)],
+            [false, true, false, false],
+        ),
+        (
+            [Datum::null(), Datum::from_i16(9), Datum::null(), text_datum(&txt)],
+            [true, false, true, false],
+        ),
+        (
+            [Datum::from_i32(i32::MAX), Datum::from_i16(1), Datum::from_i64(i64::MIN), Datum::null()],
+            [false, false, false, true],
+        ),
+    ];
+
+    let mut tuples = Vec::new();
+    for (values, isnull) in &rows {
+        tuples.push(heap_form_tuple(mcx, &desc, values, isnull).unwrap());
+    }
+    soa.begin(tuples.len() as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_deform_tuple(&mut soa, &plan, &desc.compact_attrs, i as u32, t);
+    }
+
+    for (i, (values, isnull)) in rows.iter().enumerate() {
+        let mut got = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        let tg = heap_form_tuple(mcx, &desc, values, isnull).unwrap();
+        exec_store_heap_tuple_owned(&mut got, mcx, tg);
+        assert!(soa_store_prefix(&mut got, &soa, i as u32));
+
+        let mut want = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        let tw = heap_form_tuple(mcx, &desc, values, isnull).unwrap();
+        exec_store_heap_tuple_owned(&mut want, mcx, tw);
+        slot_getsomeattrs(&mut want, ncols as i32);
+
+        {
+            let (gb, wb) = (got.base(), want.base());
+            assert_eq!(gb.tts_nvalid, wb.tts_nvalid, "row {i}");
+            assert_eq!(gb.tts_flags, wb.tts_flags, "row {i}");
+            for c in 0..ncols {
+                assert_eq!(gb.tts_isnull[c], wb.tts_isnull[c], "row {i} col {c}");
+                assert_eq!(gb.tts_values[c].as_i64(), wb.tts_values[c].as_i64(), "row {i} col {c}");
+            }
+            let (SlotData::Heap(gh), SlotData::Heap(wh)) = (&got, &want) else {
+                unreachable!()
+            };
+            assert_eq!(gh.off, wh.off, "row {i}");
+        }
+
+        // Resume past the prefix from the published offset.
+        let mut n4 = false;
+        let g4 = slot_getattr(&mut got, 4, &mut n4);
+        let mut w4n = false;
+        let w4 = slot_getattr(&mut want, 4, &mut w4n);
+        assert_eq!(n4, w4n, "row {i}");
+        if !n4 {
+            assert_eq!(datum_text_bytes(g4), datum_text_bytes(w4), "row {i}");
+        }
+        exec_clear_tuple(&mut got, mcx);
+        exec_clear_tuple(&mut want, mcx);
+    }
+
+    // Narrow tuple (pre-ALTER ADD COLUMN image) falls back to the lazy path.
+    let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+    let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();
+    soa.begin(1);
+    soa_deform_tuple(&mut soa, &plan, &desc.compact_attrs, 0, &nt);
+    assert!(soa.is_fallback(0));
+    let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc));
+    let nt2 = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();
+    exec_store_heap_tuple_owned(&mut slot, mcx, nt2);
+    assert!(!soa_store_prefix(&mut slot, &soa, 0));
+    exec_clear_tuple(&mut slot, mcx);
+}

@@ -1038,6 +1038,11 @@ fn agg_arm<'mcx>(
         if seq_agg_fusible(agg, ss, estate)
             && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
         {
+            ::nodeseqscan::seq_scan_batch_soa_prepare(
+                ss,
+                estate,
+                fused_soa_prefix(agg, ss).unwrap_or(0),
+            );
             let outer_slot = ss.ss.ss_ScanTupleSlot;
             let src = SeqScanBatchSource { ss, outer_slot };
             return ::nodeagg::exec_agg_batched(agg, estate, src);
@@ -1076,6 +1081,19 @@ fn seq_agg_fusible<'mcx>(
         }
         _ => false,
     }
+}
+
+// Deform prefix for the fused drive's SoA page-batch deform: everything the
+// per-row consumers read from the scan's output slot.
+fn fused_soa_prefix<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<i32> {
+    let mut p = ::nodeagg::agg_batch_outer_prefix(agg)?;
+    if let Some(q) = ss.ss.qual.as_deref() {
+        p = p.max(q.max_fetch(::execexpr::SlotSrc::Scan)?);
+    }
+    Some(p)
 }
 
 struct SeqScanBatchSource<'a, 'mcx> {

@@ -654,6 +654,44 @@ impl<'mcx> ExprState<'mcx> {
         self.kernel
     }
 
+    /// Max attnum this expression demands of `src`'s slot (its FETCHSOME
+    /// bound; 0 = none); None = shape unknown to the batch-deform planner.
+    pub fn max_fetch(&self, src: SlotSrc) -> Option<i32> {
+        match self.kernel {
+            Kernel::Program => {
+                let mut m = 0i32;
+                for s in self.steps() {
+                    match (s, src) {
+                        (Step::ScanFetchSome { last_var }, SlotSrc::Scan)
+                        | (Step::InnerFetchSome { last_var }, SlotSrc::Inner)
+                        | (Step::OuterFetchSome { last_var }, SlotSrc::Outer) => {
+                            m = m.max(*last_var as i32)
+                        }
+                        _ => {}
+                    }
+                }
+                Some(m)
+            }
+            Kernel::AggTransByVal { .. }
+            | Kernel::JustConst { .. }
+            | Kernel::JustConstAssign { .. } => Some(0),
+            Kernel::QualScanVarCmpConst { attnum, .. } => {
+                Some(if src == SlotSrc::Scan { attnum as i32 + 1 } else { 0 })
+            }
+            Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, .. } => {
+                let mut m = 0i32;
+                if a_src == src {
+                    m = a_attnum as i32 + 1;
+                }
+                if b_src == src {
+                    m = m.max(b_attnum as i32 + 1);
+                }
+                Some(m)
+            }
+            _ => None,
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn result_out(&self) -> OutRef {
         OutRef(self.resnd)
