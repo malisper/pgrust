@@ -411,11 +411,13 @@ pub fn cost_ctescan(
     let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
-    let mut run_cost = cpu_per_tuple * tuples;
+    let run_cost = cpu_per_tuple * tuples;
 
     let target = run.root.path_pathtarget(path_id);
     startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * rows;
+    // Live C contracts `+= a * b` to fmadd on ARM64 (-ffp-contract;
+    // docs/optimizations/adt_float-parity.md).
+    let run_cost = target.cost.per_tuple.mul_add(rows, run_cost);
 
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = rows;
@@ -463,9 +465,11 @@ pub fn cost_recursive_union(
         let p = run.root.path(rterm).base();
         (p.total_cost, p.rows, p.disabled_nodes, run.root.path_pathtarget(rterm).width)
     };
-    let mut total_cost = n_total + 10.0 * r_total;
-    let total_rows = n_rows + 10.0 * r_rows;
-    total_cost += gucs::cpu_tuple_cost() * total_rows;
+    // Live C contracts each `+= a * b` to fmadd on ARM64 (-ffp-contract;
+    // docs/optimizations/adt_float-parity.md).
+    let total_cost = r_total.mul_add(10.0, n_total);
+    let total_rows = r_rows.mul_add(10.0, n_rows);
+    let total_cost = gucs::cpu_tuple_cost().mul_add(total_rows, total_cost);
 
     let p = run.root.path_mut(runion).base_mut();
     p.disabled_nodes = n_disabled + r_disabled;
