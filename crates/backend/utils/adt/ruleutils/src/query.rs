@@ -452,7 +452,6 @@ fn set_relation_column_names<'mcx>(
                 })
                 .collect()
         }
-        RTEKind::RTE_TABLEFUNC => gap("set_relation_column_names", "tablefunc RTE"),
         _ => rte
             .eref
             .map(|e| {
