@@ -148,6 +148,16 @@ fn install_seams() {
             with_fake(|f| f.wal.push((rmid, info, main)));
             Ok(NEXT_LSN.fetch_add(64, Relaxed))
         });
+        // Classifies by raw xmin: 500 live, 700 dead, 1500 recently dead,
+        // anything else insert-in-progress.
+        heapam_visibility_seams::heap_tuple_satisfies_vacuum::set(|htup, _oldest, _buf| {
+            Ok(match htup.t_data().xmin() {
+                500 => HTSV_Result::HEAPTUPLE_LIVE,
+                700 => HTSV_Result::HEAPTUPLE_DEAD,
+                1500 => HTSV_Result::HEAPTUPLE_RECENTLY_DEAD,
+                _ => HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS,
+            })
+        });
         xlogutils_seams::in_recovery::set(|| false);
         transam_xlog_seams::data_checksums_enabled::set(|| false);
         transam_xlog_seams::recovery_in_progress::set(|| false);
@@ -284,6 +294,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         live_tuples: 0,
         recently_dead_tuples: 0,
         missed_dead_tuples: 0,
+        missed_dead_pages: 0,
         vm_new_visible_pages: 0,
         vm_new_visible_frozen_pages: 0,
         vm_new_frozen_pages: 0,
@@ -367,6 +378,113 @@ fn lazy_vacuum_heap_rel_reaps_dead_items() {
         assert!(f.pins.iter().all(|&p| p == 0), "leaked pins: {:?}", f.pins);
         assert!(f.locks.iter().all(|&l| l == 0), "leaked locks: {:?}", f.locks);
     });
+}
+
+fn noprune_page(block: BlockNumber) -> Buffer {
+    let buf = fake_page(0, block);
+    // SAFETY: freshly created exclusive test page.
+    let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+    pm.init(0);
+    let mut tuple = [0u8; 32];
+    for (expected, xmin) in [(1u16, 500u32), (2, 0), (3, 1500), (4, 700)] {
+        tuple[0..4].copy_from_slice(&xmin.to_ne_bytes());
+        let off = pm.add_item(&tuple, InvalidOffsetNumber, PAI_IS_HEAP).unwrap();
+        assert_eq!(off, expected);
+    }
+    let mut lp = pm.as_ref().item_id(2);
+    lp.set_dead();
+    pm.set_item_id(2, lp);
+    buf
+}
+
+// Share-lock scan of a page with one live (xmin 500 < FreezeLimit), one
+// LP_DEAD, one recently-dead, and one dead-but-unprunable tuple: counters,
+// dead_items, the relfrozenxid ratchet, and hastup all match C.
+#[test]
+fn lazy_scan_noprune_counts_and_collects() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    let buf = noprune_page(3);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.lpdead_item_pages = 0;
+    let mut has_lpdead_items = false;
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+    assert!(lazy_scan_noprune(&mut vr, buf, 3, page, &mut has_lpdead_items).unwrap());
+
+    assert!(has_lpdead_items);
+    assert_eq!(vr.live_tuples, 1);
+    assert_eq!(vr.recently_dead_tuples, 1);
+    assert_eq!(vr.missed_dead_tuples, 1);
+    assert_eq!(vr.missed_dead_pages, 1);
+    assert_eq!(vr.lpdead_items, 1);
+    assert_eq!(vr.lpdead_item_pages, 1);
+    assert_eq!(vr.dead_items.len(), 1);
+    assert_eq!(ItemPointerGetBlockNumberNoCheck(&vr.dead_items[0]), 3);
+    assert_eq!(ItemPointerGetOffsetNumberNoCheck(&vr.dead_items[0]), 2);
+    assert_eq!(vr.NewRelfrozenXid, 500, "ratcheted to oldest unfrozen xmin");
+    assert_eq!(vr.nonempty_pages, 4);
+    assert_eq!(vr.offnum, InvalidOffsetNumber);
+
+    bufmgr_seams::release_buffer::call(buf).unwrap();
+}
+
+// Aggressive VACUUM cannot skip a tuple with xmin < FreezeLimit: noprune
+// bails out with false and leaves the whole-VACUUM state untouched.
+#[test]
+fn lazy_scan_noprune_aggressive_requires_prune() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    let buf = noprune_page(5);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.aggressive = true;
+    let mut has_lpdead_items = false;
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+    assert!(!lazy_scan_noprune(&mut vr, buf, 5, page, &mut has_lpdead_items).unwrap());
+
+    assert_eq!(vr.live_tuples, 0);
+    assert_eq!(vr.missed_dead_tuples, 0);
+    assert_eq!(vr.lpdead_items, 0);
+    assert!(vr.dead_items.is_empty());
+    assert_eq!(vr.NewRelfrozenXid, 1000, "tracker untouched on bailout");
+    assert_eq!(vr.nonempty_pages, 0);
+    assert_eq!(vr.offnum, InvalidOffsetNumber);
+
+    bufmgr_seams::release_buffer::call(buf).unwrap();
+}
+
+// No-index one-pass strategy: LP_DEAD items found without a cleanup lock are
+// folded into missed_dead_tuples and force hastup, never into dead_items.
+#[test]
+fn lazy_scan_noprune_one_pass_counts_lpdead_as_missed() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    let buf = noprune_page(9);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.nindexes = 0;
+    vr.lpdead_item_pages = 0;
+    let mut has_lpdead_items = false;
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+    assert!(lazy_scan_noprune(&mut vr, buf, 9, page, &mut has_lpdead_items).unwrap());
+
+    assert!(has_lpdead_items);
+    assert_eq!(vr.missed_dead_tuples, 2, "HTSV-dead + folded LP_DEAD");
+    assert_eq!(vr.lpdead_items, 0);
+    assert_eq!(vr.lpdead_item_pages, 0);
+    assert!(vr.dead_items.is_empty());
+
+    bufmgr_seams::release_buffer::call(buf).unwrap();
 }
 
 // Mixed pattern: a used item behind trailing unused ones stops truncation.

@@ -1,6 +1,6 @@
 //! vacuumlazy.c phases I (scan/prune/freeze), II (index vacuum via
 //! ambulkdelete), III (mark LP_UNUSED), and end-of-vacuum rel truncation,
-//! single-table lane. Loud named panics: lazy_scan_noprune, parallel vacuum,
+//! single-table lane. Loud named panics: parallel vacuum,
 //! eager scanning. C divergences (recorded): the read stream is collapsed to
 //! sync per-block reads (bitmap precedent); dead items are a flat tid vec,
 //! not C 17+'s radix-tree TidStore (rock recorded in CATALOG).
@@ -96,6 +96,7 @@ pub struct LVRelState<'a, 'mcx> {
     live_tuples: i64,
     recently_dead_tuples: i64,
     missed_dead_tuples: i64,
+    missed_dead_pages: BlockNumber,
 
     vm_new_visible_pages: BlockNumber,
     vm_new_visible_frozen_pages: BlockNumber,
@@ -197,6 +198,7 @@ pub fn heap_vacuum_rel<'mcx>(
         live_tuples: 0,
         recently_dead_tuples: 0,
         missed_dead_tuples: 0,
+        missed_dead_pages: 0,
         vm_new_visible_pages: 0,
         vm_new_visible_frozen_pages: 0,
         vm_new_frozen_pages: 0,
@@ -345,29 +347,41 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
 
         visibilitymap_pin(vacrel.rel, blkno, &mut vmbuffer)?;
 
-        if !bufmgr_seams::conditional_lock_buffer_for_cleanup::call(buf)? {
-            // C settles for lazy_scan_noprune under a share lock; single
-            // pinner cannot fail the conditional cleanup lock today.
-            unported("lazy_scan_noprune (cleanup-lock contention lane)");
+        let mut got_cleanup_lock =
+            bufmgr_seams::conditional_lock_buffer_for_cleanup::call(buf)?;
+        if !got_cleanup_lock {
+            bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
         }
 
-        // SAFETY: buffer pinned + cleanup-locked above.
+        // SAFETY: buffer pinned + at least share-locked above.
         let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
 
-        if lazy_scan_new_or_empty(vacrel, buf, blkno, page, &vmbuffer)? {
+        if lazy_scan_new_or_empty(vacrel, buf, blkno, page, !got_cleanup_lock, &vmbuffer)? {
             continue;
         }
 
         let mut has_lpdead_items = false;
-        let ndeleted = lazy_scan_prune(
-            vacrel,
-            buf,
-            blkno,
-            page,
-            &mut vmbuffer,
-            all_visible_according_to_vm,
-            &mut has_lpdead_items,
-        )?;
+        if !got_cleanup_lock
+            && !lazy_scan_noprune(vacrel, buf, blkno, page, &mut has_lpdead_items)?
+        {
+            debug_assert!(vacrel.aggressive);
+            bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            bufmgr_seams::lock_buffer_for_cleanup::call(buf)?;
+            got_cleanup_lock = true;
+        }
+
+        let mut ndeleted = 0;
+        if got_cleanup_lock {
+            ndeleted = lazy_scan_prune(
+                vacrel,
+                buf,
+                blkno,
+                page,
+                &mut vmbuffer,
+                all_visible_according_to_vm,
+                &mut has_lpdead_items,
+            )?;
+        }
 
         if vacrel.nindexes == 0 || !vacrel.do_index_vacuuming || !has_lpdead_items {
             let freespace = page.heap_free_space();
@@ -375,7 +389,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             bufmgr_seams::release_buffer::call(buf)?;
             freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
 
-            if vacrel.nindexes == 0
+            if got_cleanup_lock
+                && vacrel.nindexes == 0
                 && ndeleted > 0
                 && blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES
             {
@@ -502,6 +517,7 @@ fn lazy_scan_new_or_empty(
     buf: Buffer,
     blkno: BlockNumber,
     page: PageRef<'_>,
+    sharelock: bool,
     vmbuffer: &VmBuffer,
 ) -> PgResult<bool> {
     if page.is_new() {
@@ -515,8 +531,16 @@ fn lazy_scan_new_or_empty(
     }
 
     if page_is_empty(page) {
-        // Caller always holds the cleanup lock here (share-lock escalation
-        // lane is unreachable: lazy_scan_noprune is loud).
+        // A share lock does not suffice to set all-visible: escalate to
+        // exclusive (still no cleanup lock needed), rechecking emptiness.
+        if sharelock {
+            bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
+            if !page_is_empty(page) {
+                return Ok(false);
+            }
+        }
+
         if !page.is_all_visible() {
             bufmgr_seams::mark_buffer_dirty::call(buf)?;
 
@@ -526,7 +550,7 @@ fn lazy_scan_new_or_empty(
                 xloginsert_seams::log_newpage_buffer::call(buf, true)?;
             }
 
-            // SAFETY: pinned + cleanup-locked by the scan loop.
+            // SAFETY: pinned + exclusive-or-cleanup-locked above.
             let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
             pm.set_all_visible();
             visibilitymap_set(
@@ -550,6 +574,131 @@ fn lazy_scan_new_or_empty(
     }
 
     Ok(false)
+}
+
+/// Share-lock fallback for lazy_scan_prune: no pruning or freezing. False
+/// (page unprocessed) only when an aggressive VACUUM must freeze this page.
+fn lazy_scan_noprune(
+    vacrel: &mut LVRelState<'_, '_>,
+    buf: Buffer,
+    blkno: BlockNumber,
+    page: PageRef<'_>,
+    has_lpdead_items: &mut bool,
+) -> PgResult<bool> {
+    debug_assert!(bufmgr_seams::buffer_get_block_number::call(buf) == blkno);
+
+    let mut hastup = false;
+    let mut lpdead_items = 0usize;
+    let mut live_tuples: i64 = 0;
+    let mut recently_dead_tuples: i64 = 0;
+    let mut missed_dead_tuples: i64 = 0;
+    let mut NoFreezePageRelfrozenXid = vacrel.NewRelfrozenXid;
+    let mut NoFreezePageRelminMxid = vacrel.NewRelminMxid;
+    let mut deadoffsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
+
+    let maxoff = page.max_offset_number();
+    let mut offnum = FirstOffsetNumber;
+    while offnum <= maxoff {
+        vacrel.offnum = offnum;
+        let itemid = page.item_id(offnum);
+
+        if !itemid.is_used() {
+            offnum += 1;
+            continue;
+        }
+
+        if itemid.is_redirected() {
+            hastup = true;
+            offnum += 1;
+            continue;
+        }
+
+        if itemid.is_dead() {
+            // Deliberately no hastup here, as C (see lazy_scan_prune).
+            deadoffsets[lpdead_items] = offnum;
+            lpdead_items += 1;
+            offnum += 1;
+            continue;
+        }
+
+        hastup = true;
+        // SAFETY: LP_NORMAL item within the pinned, share-locked page image.
+        let (ptr, len) = unsafe { page.item_raw_unchecked(itemid) };
+        // SAFETY: in-page tuple image; the pin outlives this scope.
+        let mut tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                ptr,
+                len,
+                ItemPointerData::new(blkno, offnum),
+                vacrel.rel.rd_id,
+            )
+        };
+
+        if heapam::freeze::heap_tuple_should_freeze(
+            tuple.t_data(),
+            &vacrel.cutoffs,
+            &mut NoFreezePageRelfrozenXid,
+            &mut NoFreezePageRelminMxid,
+        )? && vacrel.aggressive
+        {
+            // Aggressive VACUUM must advance relfrozenxid past FreezeLimit:
+            // only lazy_scan_prune under a cleanup lock can freeze this page.
+            vacrel.offnum = InvalidOffsetNumber;
+            return Ok(false);
+        }
+
+        match heapam_visibility_seams::heap_tuple_satisfies_vacuum::call(
+            &mut tuple,
+            vacrel.cutoffs.OldestXmin,
+            buf,
+        )? {
+            HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS | HTSV_Result::HEAPTUPLE_LIVE => {
+                live_tuples += 1;
+            }
+            HTSV_Result::HEAPTUPLE_DEAD => {
+                missed_dead_tuples += 1;
+            }
+            HTSV_Result::HEAPTUPLE_RECENTLY_DEAD => {
+                recently_dead_tuples += 1;
+            }
+            HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS => {}
+        }
+        offnum += 1;
+    }
+
+    vacrel.offnum = InvalidOffsetNumber;
+
+    // Freezing/pruning is deferred to the next VACUUM; ratchet the trackers
+    // last (lazy_scan_prune expects a clean slate).
+    vacrel.NewRelfrozenXid = NoFreezePageRelfrozenXid;
+    vacrel.NewRelminMxid = NoFreezePageRelminMxid;
+
+    if vacrel.nindexes == 0 {
+        if lpdead_items > 0 {
+            // One-pass strategy without a cleanup lock: count LP_DEAD items
+            // as missed instead of maintaining a dedicated reap lane, as C.
+            hastup = true;
+            missed_dead_tuples += lpdead_items as i64;
+        }
+    } else if lpdead_items > 0 {
+        vacrel.lpdead_item_pages += 1;
+        dead_items_add(vacrel, blkno, &deadoffsets[..lpdead_items])?;
+        vacrel.lpdead_items += lpdead_items as i64;
+    }
+
+    vacrel.live_tuples += live_tuples;
+    vacrel.recently_dead_tuples += recently_dead_tuples;
+    vacrel.missed_dead_tuples += missed_dead_tuples;
+    if missed_dead_tuples > 0 {
+        vacrel.missed_dead_pages += 1;
+    }
+
+    if hastup {
+        vacrel.nonempty_pages = blkno + 1;
+    }
+
+    *has_lpdead_items = lpdead_items > 0;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
