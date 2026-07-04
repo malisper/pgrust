@@ -1111,7 +1111,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(3).ival(),
                     view.l(3),
                     "UNIQUE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1131,7 +1131,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).ival(),
                     view.l(4),
                     "PRIMARY KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
