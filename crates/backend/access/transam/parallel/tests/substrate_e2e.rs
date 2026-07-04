@@ -434,6 +434,11 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 } else {
                     wlog(format!("e2e worker {pid} proc_exit({})", code.unwrap()));
                 }
+                // on_shmem_exit is stubbed here; release the PGPROC by hand or
+                // the 2-slot bgworker pool starves the next test's worker.
+                if lmgr_proc::MyProc().is_some() {
+                    lmgr_proc::ProcKill(0, 0);
+                }
                 // The reaper reports the exit no matter how the worker died —
                 // otherwise a worker crash hangs the leader instead of raising
                 // C's "parallel worker failed to initialize".
