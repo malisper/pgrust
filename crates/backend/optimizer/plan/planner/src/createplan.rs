@@ -46,6 +46,7 @@ fn create_plan_recurse<'mcx>(
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_WorkTableScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_TableFuncScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
         {
             create_scan_plan(run, path_id, flags)

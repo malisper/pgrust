@@ -5,7 +5,7 @@ use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
 };
 
@@ -42,10 +42,24 @@ pub fn fc_xml_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     }
 }
 
-pub fn fc_xml_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+struct OutBuf(Vec<u8>);
+
+// textout's fn_extra scratch convention: cstring results live on the resolved
+// FmgrInfo, so const-folding callers without an armed result mcx work too.
+pub fn fc_xml_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let out = crate::xml_out(arg_text(fcinfo, 0)?)?;
-    let mcx = fcinfo.result_mcx();
-    Ok(cstring_result(::varlena::text_to_cstring(mcx, &out)?))
+    let Some(flinfo) = flinfo else {
+        panic!("xml_out: cstring result needs a resolved FmgrInfo's scratch")
+    };
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(OutBuf(Vec::new()));
+    }
+    let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
+    buf.clear();
+    buf.reserve(out.len() + 1);
+    buf.extend_from_slice(&out);
+    buf.push(0);
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
 
 pub fn fc_xml_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
