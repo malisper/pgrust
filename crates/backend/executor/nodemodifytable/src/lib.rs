@@ -2791,7 +2791,7 @@ fn exec_rel_check<'mcx>(
             let mut node = readfuncs::stringToNode(mcx, ccbin.as_str())?;
             if constr.has_generated_virtual {
                 // execMain.c:1818 expand_generated_columns_in_expr.
-                node = planner::prepjointree::expand_generated_columns_in_expr(mcx, node, rel, 1)?;
+                node = expand_generated_columns_in_expr(mcx, node, rel, 1)?.unwrap_or(node);
             }
             let state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
                 .expect("check constraint expr");
@@ -2830,6 +2830,72 @@ fn exec_not_null_constraints<'mcx>(
 
 const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
 
+// build_generation_expression (rewriteHandler.c:4520), adbin-direct copy: the
+// rewrite_handler home is unreachable (planner -> execmain -> this crate
+// cycle) and cookDefault stored a coerced tree, so re-coercion is a no-op.
+fn build_generation_expression<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    let adbin = constr
+        .defval
+        .iter()
+        .find(|d| d.adnum == attrno as i16)
+        .and_then(|d| d.adbin.as_ref())
+        .unwrap_or_else(|| {
+            panic!(
+                "no generation expression found for column number {} of table \"{}\"",
+                attrno,
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            )
+        });
+    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    if att.attcollation != 0 && att.attcollation != nodes_core::node_funcs::expr_collation(expr) {
+        return types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr {
+                arg: expr,
+                collOid: att.attcollation,
+                location: -1,
+            },
+        );
+    }
+    Ok(expr)
+}
+
+// expand_generated_columns_in_expr (rewriteHandler.c:4493): Vars naming a
+// virtual generated column of rel at varno become the generation expression.
+fn expand_generated_columns_in_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    rel: &Relation<'mcx>,
+    varno: i32,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    if let Some(v) = node.as_var() {
+        if v.varlevelsup != 0 || v.varno != varno {
+            return Ok(None);
+        }
+        if v.varattno == 0 {
+            panic!(
+                "expand_generated_columns_in_expr (rewriteHandler.c): whole-row Var \
+                 over a virtual-generated relation unported"
+            );
+        }
+        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+            return Ok(None);
+        }
+        let e = build_generation_expression(mcx, rel, v.varattno as usize)?;
+        debug_assert!(varno == 1, "generation expression Vars are varno 1");
+        return Ok(Some(e));
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        expand_generated_columns_in_expr(mcx, n, rel, varno)
+    })
+}
+
 // ExecRelGenVirtualNotNull (execMain.c:2098): NullTest(IS NOT NULL) over the
 // generation expression per virtual not-null column; compiled once.
 pub fn exec_rel_gen_virtual_notnull<'mcx>(
@@ -2845,7 +2911,7 @@ pub fn exec_rel_gen_virtual_notnull<'mcx>(
             if !(att.attnotnull && att.attgenerated == VIRTUAL_GEN) {
                 continue;
             }
-            let arg = rewrite_handler::build_generation_expression(mcx, rel, i + 1)?;
+            let arg = build_generation_expression(mcx, rel, i + 1)?;
             let nulltest = types_nodes::Node::mk(
                 mcx,
                 types_nodes::primnodes::NullTest {
