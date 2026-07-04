@@ -9121,6 +9121,7 @@ dependencies = [
  "fmgr_seams",
  "genam",
  "heaptuple",
+ "lsyscache",
  "mcx",
  "miscinit_seams",
  "nodes_core",
