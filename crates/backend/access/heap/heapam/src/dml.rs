@@ -1,6 +1,5 @@
 // heapam.c DML phase 2: heap_insert / heap_delete / heap_update cores.
-// Deferred (named panics): toast, visibilitymap clears (pages can't be
-// all-visible until vacuum lands), MultiXact create/expand/wait lanes,
+// Deferred (named panics): toast, MultiXact create/expand/wait lanes,
 // speculative-insert driver, index-attr bitmaps (updates on relhasindex
 // rels), bulk insert + heap_multi_insert, heap_lock_tuple (phase 3).
 // C divergences: logical-decoding gates (RelationIsLogicallyLogged,
@@ -834,8 +833,11 @@ pub fn heap_delete(
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
         .expect("ReadBuffer returned InvalidBuffer");
 
+    // Pin the VM page before taking the content lock (deadlock rule: no IO
+    // under the lock); rechecked at l1 since the bit can change until locked.
+    let mut vmb = visibilitymap::VmBuffer::new();
     if pin.page().is_all_visible() {
-        unported("visibilitymap_clear write side (heap_delete all-visible page, visibilitymap.c)");
+        visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
     }
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
@@ -847,8 +849,10 @@ pub fn heap_delete(
     let mut tp = unsafe { page_tuple(pin.page(), lp, *tid, relation) };
 
     let mut result = 'l1: loop {
-        if pin.page().is_all_visible() {
-            unported("visibilitymap_clear write side (heap_delete all-visible page, visibilitymap.c)");
+        if !vmb.is_valid() && pin.page().is_all_visible() {
+            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+            visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
+            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
         }
         let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
 
@@ -879,7 +883,8 @@ pub fn heap_delete(
                 )?;
                 bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
-                if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                if (!vmb.is_valid() && pin.page().is_all_visible())
+                    || xmax_infomask_changed(tp.t_data().t_infomask, infomask)
                     || tp.t_data().xmax_raw() != xwait
                 {
                     continue 'l1;
@@ -924,6 +929,7 @@ pub fn heap_delete(
                 tuple_lock_hwlock(LockTupleMode::LockTupleExclusive),
             )?;
         }
+        vmb.release();
         return Ok(result);
     }
     let _ = &mut result;
@@ -949,12 +955,20 @@ pub fn heap_delete(
         true,
     )?;
 
+    let mut all_visible_cleared = false;
     {
         // SAFETY: pin + exclusive lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         page_set_prunable(&mut pm, xid);
         if pm.as_ref().is_all_visible() {
-            unported("visibilitymap_clear (heap_delete, visibilitymap.c)");
+            all_visible_cleared = true;
+            pm.clear_all_visible();
+            visibilitymap::visibilitymap_clear(
+                relation,
+                pin.block_number(),
+                &vmb,
+                visibilitymap::VISIBILITYMAP_VALID_BITS,
+            )?;
         }
     }
 
@@ -977,6 +991,9 @@ pub fn heap_delete(
     if relation_needs_wal(relation) {
         debug_assert!(old_key_tuple.is_none());
         let mut flags = 0u8;
+        if all_visible_cleared {
+            flags |= XLH_DELETE_ALL_VISIBLE_CLEARED;
+        }
         if changing_part {
             flags |= XLH_DELETE_IS_PARTITION_MOVE;
         }
@@ -1006,6 +1023,7 @@ pub fn heap_delete(
     }
 
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+    vmb.release();
 
     if relation.rd_rel.relkind == RELKIND_RELATION || relation.rd_rel.relkind == RELKIND_MATVIEW {
         if tp.has_external() {
@@ -1036,10 +1054,10 @@ pub fn heap_delete(
 }
 
 /// `heap_lock_tuple` core (heapam.c). Live: single-locker stamp + the
-/// LockWaitBlock wait-then-reread path. LOUD: MultiXact xmax arms, update-chain
-/// following (`follow_updates` / EPQ), all-visible VM pin/clear, and the
-/// NOWAIT/SKIP-LOCKED wait branches. Returns the pinned (content-unlocked)
-/// buffer; the caller stores the locked on-page tuple from it.
+/// LockWaitBlock wait-then-reread path, all-visible VM pin/clear. LOUD:
+/// MultiXact xmax arms and the NOWAIT/SKIP-LOCKED wait branches. Returns the
+/// pinned (content-unlocked) buffer; the caller stores the locked on-page
+/// tuple from it.
 #[allow(clippy::too_many_arguments)]
 pub fn heap_lock_tuple(
     relation: &RelationData<'_>,
@@ -1059,8 +1077,11 @@ pub fn heap_lock_tuple(
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
         .expect("ReadBuffer returned InvalidBuffer");
 
+    // Pin the VM page before taking the content lock (deadlock rule: no IO
+    // under the lock); rechecked after l3 since the bit can change until locked.
+    let mut vmb = visibilitymap::VmBuffer::new();
     if pin.page().is_all_visible() {
-        unported("visibilitymap_pin write side (heap_lock_tuple all-visible page, visibilitymap.c)");
+        visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
     }
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
@@ -1078,191 +1099,205 @@ pub fn heap_lock_tuple(
         }};
     }
 
-    let result = 'l3: loop {
-        let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
+    // C's `goto l3` from the post-failed VM re-pin window restarts the whole
+    // qualification loop; the outer loop is that arc.
+    let result = loop {
+        let result = 'l3: loop {
+            let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
 
-        if result == TM_Result::TM_Invisible {
-            break 'l3 TM_Result::TM_Invisible;
-        }
-
-        if matches!(
-            result,
-            TM_Result::TM_BeingModified | TM_Result::TM_Updated | TM_Result::TM_Deleted
-        ) {
-            let xwait = tp.t_data().xmax_raw();
-            let infomask = tp.t_data().t_infomask;
-            let infomask2 = tp.t_data().t_infomask2;
-            let t_ctid = tp.t_data().t_ctid;
-
-            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
-
-            if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                unported("MultiXact lock arms (heap_lock_tuple, multixact.c)");
+            if result == TM_Result::TM_Invisible {
+                break 'l3 TM_Result::TM_Invisible;
             }
 
-            if first_time {
-                first_time = false;
-                if xact_seams::transaction_id_is_current_transaction_id::call(xwait) {
-                    let already = match mode {
-                        LockTupleMode::LockTupleKeyShare => true,
-                        LockTupleMode::LockTupleShare => {
-                            HEAP_XMAX_IS_SHR_LOCKED(infomask) || HEAP_XMAX_IS_EXCL_LOCKED(infomask)
-                        }
-                        LockTupleMode::LockTupleNoKeyExclusive => HEAP_XMAX_IS_EXCL_LOCKED(infomask),
-                        LockTupleMode::LockTupleExclusive => {
-                            HEAP_XMAX_IS_EXCL_LOCKED(infomask)
-                                && (infomask2 & HEAP_KEYS_UPDATED) != 0
-                        }
-                    };
-                    if already {
-                        if have_tuple_lock {
-                            lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
-                        }
-                        return Ok((TM_Result::TM_Ok, pin));
-                    }
+            if matches!(
+                result,
+                TM_Result::TM_BeingModified | TM_Result::TM_Updated | TM_Result::TM_Deleted
+            ) {
+                let xwait = tp.t_data().xmax_raw();
+                let infomask = tp.t_data().t_infomask;
+                let infomask2 = tp.t_data().t_infomask2;
+                let t_ctid = tp.t_data().t_ctid;
+
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+
+                if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                    unported("MultiXact lock arms (heap_lock_tuple, multixact.c)");
                 }
-            }
 
-            let mut require_sleep = true;
-            match mode {
-                LockTupleMode::LockTupleKeyShare => {
-                    if (infomask2 & HEAP_KEYS_UPDATED) == 0 {
-                        let updated = !HEAP_XMAX_IS_LOCKED_ONLY(infomask);
-                        if follow_updates && updated && tp.t_self != t_ctid {
-                            let res = heap_lock_updated_tuple(
-                                relation,
-                                infomask,
-                                xwait,
-                                &t_ctid,
-                                xact_seams::get_current_transaction_id::call()?,
-                                mode,
-                            )?;
-                            if res != TM_Result::TM_Ok {
-                                // C's goto failed expects the buffer lock held.
-                                bufmgr_seams::lock_buffer::call(
-                                    pin.buffer(),
-                                    BUFFER_LOCK_EXCLUSIVE,
-                                )?;
-                                relock_tp!();
-                                break 'l3 res;
+                if first_time {
+                    first_time = false;
+                    if xact_seams::transaction_id_is_current_transaction_id::call(xwait) {
+                        let already = match mode {
+                            LockTupleMode::LockTupleKeyShare => true,
+                            LockTupleMode::LockTupleShare => {
+                                HEAP_XMAX_IS_SHR_LOCKED(infomask) || HEAP_XMAX_IS_EXCL_LOCKED(infomask)
                             }
+                            LockTupleMode::LockTupleNoKeyExclusive => HEAP_XMAX_IS_EXCL_LOCKED(infomask),
+                            LockTupleMode::LockTupleExclusive => {
+                                HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                                    && (infomask2 & HEAP_KEYS_UPDATED) != 0
+                            }
+                        };
+                        if already {
+                            if have_tuple_lock {
+                                lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
+                            }
+                            vmb.release();
+                            return Ok((TM_Result::TM_Ok, pin));
                         }
-                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                        relock_tp!();
-                        if !hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
-                            && (((tp.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0) || !updated)
-                        {
-                            continue 'l3;
-                        }
-                        require_sleep = false;
                     }
                 }
-                LockTupleMode::LockTupleShare => {
-                    if HEAP_XMAX_IS_LOCKED_ONLY(infomask) && !HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
-                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                        relock_tp!();
-                        if !HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
-                            || HEAP_XMAX_IS_EXCL_LOCKED(tp.t_data().t_infomask)
-                        {
-                            continue 'l3;
-                        }
-                        require_sleep = false;
-                    }
-                }
-                LockTupleMode::LockTupleNoKeyExclusive => {
-                    if HEAP_XMAX_IS_KEYSHR_LOCKED(infomask) {
-                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                        relock_tp!();
-                        if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
-                            || tp.t_data().xmax_raw() != xwait
-                        {
-                            continue 'l3;
-                        }
-                        require_sleep = false;
-                    }
-                }
-                LockTupleMode::LockTupleExclusive => {}
-            }
 
-            if require_sleep
-                && (infomask & HEAP_XMAX_IS_MULTI) == 0
-                && xact_seams::transaction_id_is_current_transaction_id::call(xwait)
-            {
-                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                relock_tp!();
-                if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
-                    || tp.t_data().xmax_raw() != xwait
+                let mut require_sleep = true;
+                match mode {
+                    LockTupleMode::LockTupleKeyShare => {
+                        if (infomask2 & HEAP_KEYS_UPDATED) == 0 {
+                            let updated = !HEAP_XMAX_IS_LOCKED_ONLY(infomask);
+                            if follow_updates && updated && tp.t_self != t_ctid {
+                                let res = heap_lock_updated_tuple(
+                                    relation,
+                                    infomask,
+                                    xwait,
+                                    &t_ctid,
+                                    xact_seams::get_current_transaction_id::call()?,
+                                    mode,
+                                )?;
+                                if res != TM_Result::TM_Ok {
+                                    // C's goto failed expects the buffer lock held.
+                                    bufmgr_seams::lock_buffer::call(
+                                        pin.buffer(),
+                                        BUFFER_LOCK_EXCLUSIVE,
+                                    )?;
+                                    relock_tp!();
+                                    break 'l3 res;
+                                }
+                            }
+                            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                            relock_tp!();
+                            if !hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
+                                && (((tp.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0) || !updated)
+                            {
+                                continue 'l3;
+                            }
+                            require_sleep = false;
+                        }
+                    }
+                    LockTupleMode::LockTupleShare => {
+                        if HEAP_XMAX_IS_LOCKED_ONLY(infomask) && !HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
+                            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                            relock_tp!();
+                            if !HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
+                                || HEAP_XMAX_IS_EXCL_LOCKED(tp.t_data().t_infomask)
+                            {
+                                continue 'l3;
+                            }
+                            require_sleep = false;
+                        }
+                    }
+                    LockTupleMode::LockTupleNoKeyExclusive => {
+                        if HEAP_XMAX_IS_KEYSHR_LOCKED(infomask) {
+                            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                            relock_tp!();
+                            if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                                || tp.t_data().xmax_raw() != xwait
+                            {
+                                continue 'l3;
+                            }
+                            require_sleep = false;
+                        }
+                    }
+                    LockTupleMode::LockTupleExclusive => {}
+                }
+
+                if require_sleep
+                    && (infomask & HEAP_XMAX_IS_MULTI) == 0
+                    && xact_seams::transaction_id_is_current_transaction_id::call(xwait)
                 {
-                    continue 'l3;
-                }
-                debug_assert!(HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask));
-                require_sleep = false;
-            }
-
-            if require_sleep
-                && (result == TM_Result::TM_Updated || result == TM_Result::TM_Deleted)
-            {
-                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                relock_tp!();
-                break 'l3 result;
-            } else if require_sleep {
-                if !heap_acquire_tuplock(relation, tid, mode, wait_policy, &mut have_tuple_lock)? {
                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                     relock_tp!();
-                    break 'l3 TM_Result::TM_WouldBlock;
-                }
-                match wait_policy {
-                    LockWaitPolicy::LockWaitBlock => {
-                        lmgr::XactLockTableWait(
-                            xwait,
-                            Some(relation),
-                            Some(&tp.t_self),
-                            ::types_storage::lock::XLTW_Oper::Lock,
-                        )?;
+                    if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                        || tp.t_data().xmax_raw() != xwait
+                    {
+                        continue 'l3;
                     }
-                    LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
-                        unported("heap_lock_tuple NOWAIT/SKIP LOCKED wait branch")
-                    }
+                    debug_assert!(HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask));
+                    require_sleep = false;
                 }
-                if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid {
-                    let res = heap_lock_updated_tuple(
-                        relation,
-                        infomask,
-                        xwait,
-                        &t_ctid,
-                        xact_seams::get_current_transaction_id::call()?,
-                        mode,
-                    )?;
-                    if res != TM_Result::TM_Ok {
-                        // C's goto failed expects the buffer lock held.
+
+                if require_sleep
+                    && (result == TM_Result::TM_Updated || result == TM_Result::TM_Deleted)
+                {
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                    relock_tp!();
+                    break 'l3 result;
+                } else if require_sleep {
+                    if !heap_acquire_tuplock(relation, tid, mode, wait_policy, &mut have_tuple_lock)? {
                         bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                         relock_tp!();
-                        break 'l3 res;
+                        break 'l3 TM_Result::TM_WouldBlock;
                     }
+                    match wait_policy {
+                        LockWaitPolicy::LockWaitBlock => {
+                            lmgr::XactLockTableWait(
+                                xwait,
+                                Some(relation),
+                                Some(&tp.t_self),
+                                ::types_storage::lock::XLTW_Oper::Lock,
+                            )?;
+                        }
+                        LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
+                            unported("heap_lock_tuple NOWAIT/SKIP LOCKED wait branch")
+                        }
+                    }
+                    if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid {
+                        let res = heap_lock_updated_tuple(
+                            relation,
+                            infomask,
+                            xwait,
+                            &t_ctid,
+                            xact_seams::get_current_transaction_id::call()?,
+                            mode,
+                        )?;
+                        if res != TM_Result::TM_Ok {
+                            // C's goto failed expects the buffer lock held.
+                            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                            relock_tp!();
+                            break 'l3 res;
+                        }
+                    }
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                    relock_tp!();
+                    if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                        || tp.t_data().xmax_raw() != xwait
+                    {
+                        continue 'l3;
+                    }
+                    update_xmax_hint_bits(&mut tp, pin.buffer(), xwait)?;
                 }
-                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-                relock_tp!();
-                if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
-                    || tp.t_data().xmax_raw() != xwait
-                {
-                    continue 'l3;
-                }
-                update_xmax_hint_bits(&mut tp, pin.buffer(), xwait)?;
-            }
 
-            result = if !require_sleep
-                || (tp.t_data().t_infomask & HEAP_XMAX_INVALID) != 0
-                || HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
-                || hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
-            {
-                TM_Result::TM_Ok
-            } else if tp.t_self != tp.t_data().t_ctid {
-                TM_Result::TM_Updated
-            } else {
-                TM_Result::TM_Deleted
-            };
+                result = if !require_sleep
+                    || (tp.t_data().t_infomask & HEAP_XMAX_INVALID) != 0
+                    || HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
+                    || hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
+                {
+                    TM_Result::TM_Ok
+                } else if tp.t_self != tp.t_data().t_ctid {
+                    TM_Result::TM_Updated
+                } else {
+                    TM_Result::TM_Deleted
+                };
+            }
+            break 'l3 result;
+        };
+
+        if result != TM_Result::TM_Ok || vmb.is_valid() || !pin.page().is_all_visible() {
+            break result;
         }
-        break 'l3 result;
+        // Didn't pin the VM page and the page became all visible during an
+        // unlocked window: unlock, pin, re-lock, and requalify (C's goto l3).
+        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+        visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
+        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
     };
 
     if result != TM_Result::TM_Ok {
@@ -1277,11 +1312,8 @@ pub fn heap_lock_tuple(
         if have_tuple_lock {
             lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
         }
+        vmb.release();
         return Ok((result, pin));
-    }
-
-    if pin.page().is_all_visible() {
-        unported("visibilitymap_pin re-lock window (heap_lock_tuple, visibilitymap.c)");
     }
 
     let xmax = tp.t_data().xmax_raw();
@@ -1314,8 +1346,18 @@ pub fn heap_lock_tuple(
         }
     }
 
-    if pin.page().is_all_visible() {
-        unported("visibilitymap_clear ALL_FROZEN (heap_lock_tuple, visibilitymap.c)");
+    // Locking doesn't change visibility, so only the all-frozen bit is
+    // cleared (the locker's xmax falsifies it).
+    let mut cleared_all_frozen = false;
+    if pin.page().is_all_visible()
+        && visibilitymap::visibilitymap_clear(
+            relation,
+            block,
+            &vmb,
+            visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+        )?
+    {
+        cleared_all_frozen = true;
     }
 
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
@@ -1325,7 +1367,11 @@ pub fn heap_lock_tuple(
         xlrec[0..4].copy_from_slice(&xid.to_ne_bytes());
         xlrec[4..6].copy_from_slice(&offnum.to_ne_bytes());
         xlrec[6] = compute_infobits(new_infomask, tp.t_data().t_infomask2);
-        xlrec[7] = 0;
+        xlrec[7] = if cleared_all_frozen {
+            XLH_LOCK_ALL_FROZEN_CLEARED
+        } else {
+            0
+        };
 
         let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
@@ -1348,6 +1394,7 @@ pub fn heap_lock_tuple(
     }
 
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+    vmb.release();
     if have_tuple_lock {
         lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
     }
@@ -2256,6 +2303,9 @@ fn heap_lock_updated_tuple_rec(
 
     let mut prior_xmax = prior_xmax;
     let mut tupid = tid;
+    // Chain-scope VM pin (C holds a possibly-stale vm page pin across chain
+    // members; visibilitymap_pin swaps it when the map page differs).
+    let mut vmb = visibilitymap::VmBuffer::new();
     'chain: loop {
         let block = ItemPointerGetBlockNumber(&tupid);
         let offnum = ItemPointerGetOffsetNumber(&tupid);
@@ -2263,14 +2313,26 @@ fn heap_lock_updated_tuple_rec(
             .expect("ReadBuffer returned InvalidBuffer");
 
         'l4: loop {
-            if pin.page().is_all_visible() {
-                unported("visibilitymap_pin (heap_lock_updated_tuple_rec, visibilitymap.c)");
-            }
+            crate::check_for_interrupts()?;
+            // Pin the VM page before taking the content lock (deadlock rule:
+            // no IO under the lock); rechecked once locked.
+            let pinned_desired_page = if pin.page().is_all_visible() {
+                visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
+                true
+            } else {
+                false
+            };
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+            if !pinned_desired_page && pin.page().is_all_visible() {
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+                visibilitymap::visibilitymap_pin(relation, block, &mut vmb)?;
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+            }
             macro_rules! done {
                 ($res:expr) => {{
                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
                     pin.release();
+                    vmb.release();
                     return Ok($res);
                 }};
             }
@@ -2368,11 +2430,16 @@ fn heap_lock_updated_tuple_rec(
                     mode,
                     false,
                 )?;
-                if pin.page().is_all_visible() {
-                    unported(
-                        "visibilitymap_clear ALL_FROZEN (heap_lock_updated_tuple_rec, \
-                         visibilitymap.c)",
-                    );
+                let mut cleared_all_frozen = false;
+                if pin.page().is_all_visible()
+                    && visibilitymap::visibilitymap_clear(
+                        relation,
+                        block,
+                        &vmb,
+                        visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+                    )?
+                {
+                    cleared_all_frozen = true;
                 }
                 {
                     let hdr = mytup.t_data_mut();
@@ -2388,7 +2455,11 @@ fn heap_lock_updated_tuple_rec(
                     xlrec[0..4].copy_from_slice(&new_xmax.to_ne_bytes());
                     xlrec[4..6].copy_from_slice(&offnum.to_ne_bytes());
                     xlrec[6] = compute_infobits(new_infomask, new_infomask2);
-                    xlrec[7] = 0;
+                    xlrec[7] = if cleared_all_frozen {
+                        XLH_LOCK_ALL_FROZEN_CLEARED
+                    } else {
+                        0
+                    };
                     let recptr = crate::wal::insert_record(
                         RM_HEAP2_ID,
                         XLOG_HEAP2_LOCK_UPDATED,

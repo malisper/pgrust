@@ -1317,7 +1317,7 @@ fn bt_readnextpage(
         debug_assert!(!ctx.so.needPrimScan);
 
         if ScanDirectionIsForward(dir) {
-            check_for_interrupts();
+            check_for_interrupts()?;
             ctx.so.currPos.buf = bt_getbuf(rel, blkno, BT_READ)?.into_buffer();
         } else {
             match bt_lock_and_validate_left(rel, &mut blkno, lastcurrblkno)? {
@@ -1386,7 +1386,7 @@ fn bt_lock_and_validate_left(
     let mut origblkno = *blkno; // detects circular links
 
     loop {
-        check_for_interrupts();
+        check_for_interrupts()?;
         let mut pin = bt_getbuf(rel, *blkno, BT_READ)?;
 
         let mut tries = 0;

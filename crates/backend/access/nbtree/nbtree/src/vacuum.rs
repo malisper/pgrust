@@ -56,7 +56,7 @@ pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
 }
 
 fn vacuum_delay_point() -> PgResult<()> {
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
     if init_small::globals::VacuumCostActive() {
         unported_phase2("vacuum_delay_point cost-based delay (VacuumCostActive)");
     }

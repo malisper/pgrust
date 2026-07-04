@@ -371,7 +371,7 @@ pub(crate) fn bt_pagedel<'s>(
         let rightsib = opaque.btpo_next;
         bt_relbuf(rel, leafbuf)?;
 
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
 
         if !rightsib_empty {
             return Ok(());
@@ -547,7 +547,7 @@ fn bt_unlink_halfdead_page(
     };
 
     bt_unlockbuf(rel, &leafbuf)?;
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
 
     let target_is_leaf = target == InvalidBlockNumber;
     let (target, target_pin, mut leftsib, targetlevel) = if target_is_leaf {
@@ -591,7 +591,7 @@ fn bt_unlink_halfdead_page(
                 }
                 return Ok(None);
             }
-            crate::check_for_interrupts();
+            crate::check_for_interrupts()?;
             pin = bt_getbuf(rel, leftsib, BT_WRITE)?;
         }
         lbuf = Some(pin);
