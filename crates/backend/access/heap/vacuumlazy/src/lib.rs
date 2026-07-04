@@ -2,8 +2,7 @@
 //! ambulkdelete), III (mark LP_UNUSED), and end-of-vacuum rel truncation,
 //! single-table lane. Loud named panics: parallel vacuum,
 //! eager scanning. C divergences (recorded): the read stream is collapsed to
-//! sync per-block reads (bitmap precedent); dead items are a flat tid vec,
-//! not C 17+'s radix-tree TidStore (rock recorded in CATALOG).
+//! sync per-block reads (bitmap precedent).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -36,9 +35,9 @@ use ::types_storage::bufpage::{
     MaxHeapTuplesPerPage, PageMut, PageRef, SizeOfPageHeaderData,
 };
 use ::types_storage::ReadBufferMode;
+use ::tidstore::TidStore;
 use ::types_tuple::{
-    FirstOffsetNumber, HeapTupleData, InvalidOffsetNumber, ItemPointerData,
-    ItemPointerGetBlockNumberNoCheck, ItemPointerGetOffsetNumberNoCheck,
+    FirstOffsetNumber, HeapTupleData, InvalidOffsetNumber, ItemPointerData, MaxOffsetNumber,
 };
 
 use ::bufmgr_seams::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
@@ -86,8 +85,10 @@ pub struct LVRelState<'a, 'mcx> {
     lpdead_item_pages: BlockNumber,
     nonempty_pages: BlockNumber,
 
-    dead_items: PgVec<'mcx, ItemPointerData>,
-    dead_items_max_bytes: usize,
+    // Option only so phase III can split the borrow (take/put-back); always
+    // Some between dead_items_alloc and dead_items_cleanup.
+    dead_items: Option<TidStore>,
+    dead_items_info: VacDeadItemsInfo,
     pvs: Option<vacuumparallel::ParallelVacuumState>,
 
     num_index_scans: i64,
@@ -190,8 +191,8 @@ pub fn heap_vacuum_rel<'mcx>(
         new_frozen_tuple_pages: 0,
         lpdead_item_pages: 0,
         nonempty_pages: 0,
-        dead_items: PgVec::new_in(mcx),
-        dead_items_max_bytes: init_small::globals::maintenance_work_mem() as usize * 1024,
+        dead_items: None,
+        dead_items_info: VacDeadItemsInfo { max_bytes: 0, num_items: 0 },
         pvs: None,
         num_index_scans: 0,
         tuples_deleted: 0,
@@ -218,11 +219,13 @@ pub fn heap_vacuum_rel<'mcx>(
 
     lazy_scan_heap(&mut vacrel, mcx)?;
 
-    // dead_items_cleanup: ends parallel mode, copying worker stats out first.
+    // dead_items_cleanup: ends parallel mode (copying worker stats out first),
+    // then drops the tidstore.
     if let Some(pvs) = vacrel.pvs.take() {
         vacuumparallel::parallel_vacuum_end(pvs, &mut vacrel.indstats)?;
     }
     debug_assert!(!xact::IsInParallelMode());
+    vacrel.dead_items = None;
 
     if vacrel.do_index_cleanup {
         update_relstats_all_indexes(&mut vacrel)?;
@@ -288,26 +291,97 @@ pub fn heap_vacuum_rel<'mcx>(
     Ok(())
 }
 
+// C VacDeadItemsInfo (vacuum.h); DSM-resident under parallel vacuum.
+struct VacDeadItemsInfo {
+    max_bytes: usize,
+    num_items: i64,
+}
+
+fn dead_items_alloc(vacrel: &mut LVRelState<'_, '_>, nworkers: i32) -> PgResult<()> {
+    let vac_work_mem = if miscinit::GetMyBackendType() == ::types_core::BackendType::AutovacWorker
+        && guc_tables::vars::autovacuum_work_mem.read() != -1
+    {
+        guc_tables::vars::autovacuum_work_mem.read()
+    } else {
+        init_small::globals::maintenance_work_mem()
+    };
+
+    // C tries parallel_vacuum_init whenever nworkers >= 0 (index-size gating
+    // inside decides). The leader-local tidstore below stays the accumulation
+    // buffer either way; a flat snapshot crosses to workers per pass.
+    if nworkers >= 0 && vacrel.nindexes > 1 && vacrel.do_index_vacuuming {
+        if vacrel.rel.uses_local_buffers() {
+            if nworkers > 0 {
+                elog::ereport(::types_error::WARNING)
+                    .errmsg(format!(
+                        "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
+                        vacrel.rel.name()
+                    ))
+                    .finish(::types_error::ErrorLocation::new(
+                        "vacuumlazy.c",
+                        3499,
+                        "dead_items_alloc",
+                    ))?;
+            }
+        } else {
+            vacrel.pvs = vacuumparallel::parallel_vacuum_init(
+                &vacrel.indrels,
+                nworkers,
+                vac_work_mem,
+                &vacrel.bstrategy,
+                vacrel.rel.rd_id,
+            )?;
+        }
+    }
+
+    vacrel.dead_items_info =
+        VacDeadItemsInfo { max_bytes: vac_work_mem as usize * 1024, num_items: 0 };
+    vacrel.dead_items = Some(TidStore::create_local(
+        vacrel.mcx,
+        vacrel.dead_items_info.max_bytes,
+        true,
+    )?);
+    Ok(())
+}
+
 fn dead_items_add(
     vacrel: &mut LVRelState<'_, '_>,
     blkno: BlockNumber,
     offsets: &[OffsetNumber],
 ) -> PgResult<()> {
-    vacrel.dead_items.reserve(offsets.len());
-    for &off in offsets {
-        let tid = ItemPointerData::new(blkno, off);
-        // The flat TidStore substitute relies on append-in-TID-order.
-        debug_assert!(vacrel
-            .dead_items
-            .last()
-            .is_none_or(|prev| ::types_tuple::itemptr::ItemPointerCompare(prev, &tid) < 0));
-        vacrel.dead_items.push(tid);
-    }
+    vacrel.dead_items.as_mut().unwrap().set_block_offsets(blkno, offsets)?;
+    vacrel.dead_items_info.num_items += offsets.len() as i64;
     Ok(())
 }
 
-fn dead_items_memory(vacrel: &LVRelState<'_, '_>) -> usize {
-    vacrel.dead_items.len() * core::mem::size_of::<ItemPointerData>()
+// C dead_items_reset: recreate the tidstore with the same max_bytes.
+fn dead_items_reset(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    vacrel.dead_items = None;
+    vacrel.dead_items = Some(TidStore::create_local(
+        vacrel.mcx,
+        vacrel.dead_items_info.max_bytes,
+        true,
+    )?);
+    vacrel.dead_items_info.num_items = 0;
+    Ok(())
+}
+
+// indexam's reap check binary-searches a sorted dead-TID slice (recorded
+// divergence); materialized per round until that lane adopts TidStoreIsMember.
+fn collect_dead_tids<'mcx>(vacrel: &LVRelState<'_, 'mcx>) -> PgVec<'mcx, ItemPointerData> {
+    let mut tids: PgVec<'mcx, ItemPointerData> =
+        PgVec::with_capacity_in(vacrel.dead_items_info.num_items as usize, vacrel.mcx);
+    let mut iter = vacrel.dead_items.as_ref().unwrap().begin_iterate();
+    let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
+    while let Some(res) = iter.next() {
+        let n = res.block_offsets(&mut offsets);
+        debug_assert!(n <= offsets.len());
+        for &off in &offsets[..n] {
+            tids.push(ItemPointerData::new(res.blkno, off));
+        }
+    }
+    debug_assert_eq!(tids.len() as i64, vacrel.dead_items_info.num_items);
+    tids
 }
 
 fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()> {
@@ -327,7 +401,9 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             lazy_check_wraparound_failsafe(vacrel)?;
         }
 
-        if !vacrel.dead_items.is_empty() && dead_items_memory(vacrel) > vacrel.dead_items_max_bytes
+        if vacrel.dead_items_info.num_items > 0
+            && vacrel.dead_items.as_ref().unwrap().memory_usage()
+                > vacrel.dead_items_info.max_bytes
         {
             vmbuffer.release();
             vacrel.consider_bypass_optimization = false;
@@ -423,7 +499,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
         + vacrel.recently_dead_tuples as f64
         + vacrel.missed_dead_tuples as f64;
 
-    if !vacrel.dead_items.is_empty() {
+    if vacrel.dead_items_info.num_items > 0 {
         lazy_vacuum(vacrel)?;
     }
 
@@ -859,17 +935,17 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
     if !vacrel.do_index_vacuuming {
         debug_assert!(!vacrel.do_index_cleanup);
-        vacrel.dead_items.clear();
+        dead_items_reset(vacrel)?;
         return Ok(());
     }
 
     let mut bypass = false;
     if vacrel.consider_bypass_optimization && vacrel.rel_pages > 0 {
         debug_assert!(vacrel.num_index_scans == 0);
-        debug_assert!(vacrel.lpdead_items == vacrel.dead_items.len() as i64);
+        debug_assert!(vacrel.lpdead_items == vacrel.dead_items_info.num_items);
         let threshold = vacrel.rel_pages as f64 * BYPASS_THRESHOLD_PAGES;
         bypass = (vacrel.lpdead_item_pages as f64) < threshold
-            && dead_items_memory(vacrel) < 32 * 1024 * 1024;
+            && vacrel.dead_items.as_ref().unwrap().memory_usage() < 32 * 1024 * 1024;
     }
 
     if bypass {
@@ -880,7 +956,7 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         debug_assert!(VacuumFailsafeActive());
     }
 
-    vacrel.dead_items.clear();
+    dead_items_reset(vacrel)?;
     Ok(())
 }
 
@@ -898,6 +974,8 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    let dead_tids = collect_dead_tids(vacrel);
+
     if vacrel.pvs.is_none() {
         for idx in 0..vacrel.nindexes {
             let istat = vacrel.indstats[idx].take();
@@ -910,7 +988,7 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                     num_heap_tuples: old_live_tuples,
                     strategy: vacrel.bstrategy.clone(),
                 };
-                vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &vacrel.dead_items)?
+                vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids)?
             };
             vacrel.indstats[idx] = Some(new_istat);
 
@@ -926,7 +1004,7 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
             vacrel.rel,
             &vacrel.indrels,
             &vacrel.bstrategy,
-            &vacrel.dead_items,
+            &dead_tids,
             old_live_tuples,
             vacrel.num_index_scans as i32,
         )?;
@@ -937,7 +1015,7 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
     }
 
     debug_assert!(
-        vacrel.num_index_scans > 0 || vacrel.dead_items.len() as i64 == vacrel.lpdead_items
+        vacrel.num_index_scans > 0 || vacrel.dead_items_info.num_items == vacrel.lpdead_items
     );
     debug_assert!(allindexes || VacuumFailsafeActive());
 
@@ -984,39 +1062,6 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     Ok(())
 }
 
-// dead_items_alloc: start parallel vacuum when requested and profitable. The
-// serial dead-items vec is already allocated in LVRelState (flat-vec
-// divergence); under parallel it stays the accumulation buffer and a snapshot
-// crosses to workers per pass.
-fn dead_items_alloc(vacrel: &mut LVRelState<'_, '_>, nworkers: i32) -> PgResult<()> {
-    if nworkers >= 0 && vacrel.nindexes > 1 && vacrel.do_index_vacuuming {
-        if vacrel.rel.uses_local_buffers() {
-            if nworkers > 0 {
-                elog::ereport(::types_error::WARNING)
-                    .errmsg(format!(
-                        "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
-                        vacrel.rel.name()
-                    ))
-                    .finish(::types_error::ErrorLocation::new(
-                        "vacuumlazy.c",
-                        3499,
-                        "dead_items_alloc",
-                    ))?;
-            }
-        } else {
-            let vac_work_mem = init_small::globals::maintenance_work_mem();
-            vacrel.pvs = vacuumparallel::parallel_vacuum_init(
-                &vacrel.indrels,
-                nworkers,
-                vac_work_mem,
-                &vacrel.bstrategy,
-                vacrel.rel.rd_id,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// update_relstats_all_indexes: index pg_class stats where accurate.
 fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     debug_assert!(vacrel.do_index_cleanup);
@@ -1049,20 +1094,15 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
     let mut vmbuffer = VmBuffer::new();
 
-    let mut i = 0usize;
-    while i < vacrel.dead_items.len() {
+    let dead_items = vacrel.dead_items.take().unwrap();
+    let mut iter = dead_items.begin_iterate();
+    while let Some(iter_result) = iter.next() {
         vacuum_delay_point(false)?;
 
-        let blkno = ItemPointerGetBlockNumberNoCheck(&vacrel.dead_items[i]);
-        let mut offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
-        let mut num_offsets = 0usize;
-        while i < vacrel.dead_items.len()
-            && ItemPointerGetBlockNumberNoCheck(&vacrel.dead_items[i]) == blkno
-        {
-            offsets[num_offsets] = ItemPointerGetOffsetNumberNoCheck(&vacrel.dead_items[i]);
-            num_offsets += 1;
-            i += 1;
-        }
+        let blkno = iter_result.blkno;
+        let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
+        let num_offsets = iter_result.block_offsets(&mut offsets);
+        debug_assert!(num_offsets <= offsets.len());
 
         let buf = bufmgr_seams::read_buffer_extended::call(
             vacrel.rel,
@@ -1083,12 +1123,13 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
         vacuumed_pages += 1;
     }
+    drop(iter);
+    vacrel.dead_items = Some(dead_items);
     debug_assert!(
         vacrel.num_index_scans > 1
-            || (vacrel.dead_items.len() as i64 == vacrel.lpdead_items
+            || (vacrel.dead_items_info.num_items == vacrel.lpdead_items
                 && vacuumed_pages == vacrel.lpdead_item_pages)
     );
-    vacrel.dead_items.clear();
 
     vmbuffer.release();
     Ok(())

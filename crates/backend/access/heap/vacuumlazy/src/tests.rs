@@ -285,9 +285,9 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         new_frozen_tuple_pages: 0,
         lpdead_item_pages: 1,
         nonempty_pages: 0,
-        dead_items: PgVec::new_in(mcx),
+        dead_items: Some(TidStore::create_local(mcx, 64 * 1024 * 1024, true).unwrap()),
+        dead_items_info: VacDeadItemsInfo { max_bytes: 64 * 1024 * 1024, num_items: 0 },
         pvs: None,
-        dead_items_max_bytes: 64 * 1024 * 1024,
         num_index_scans: 1,
         tuples_deleted: 0,
         tuples_frozen: 0,
@@ -423,9 +423,10 @@ fn lazy_scan_noprune_counts_and_collects() {
     assert_eq!(vr.missed_dead_pages, 1);
     assert_eq!(vr.lpdead_items, 1);
     assert_eq!(vr.lpdead_item_pages, 1);
-    assert_eq!(vr.dead_items.len(), 1);
-    assert_eq!(ItemPointerGetBlockNumberNoCheck(&vr.dead_items[0]), 3);
-    assert_eq!(ItemPointerGetOffsetNumberNoCheck(&vr.dead_items[0]), 2);
+    let dead_tids = collect_dead_tids(&vr);
+    assert_eq!(dead_tids.len(), 1);
+    assert_eq!(::types_tuple::ItemPointerGetBlockNumberNoCheck(&dead_tids[0]), 3);
+    assert_eq!(::types_tuple::ItemPointerGetOffsetNumberNoCheck(&dead_tids[0]), 2);
     assert_eq!(vr.NewRelfrozenXid, 500, "ratcheted to oldest unfrozen xmin");
     assert_eq!(vr.nonempty_pages, 4);
     assert_eq!(vr.offnum, InvalidOffsetNumber);
@@ -453,7 +454,7 @@ fn lazy_scan_noprune_aggressive_requires_prune() {
     assert_eq!(vr.live_tuples, 0);
     assert_eq!(vr.missed_dead_tuples, 0);
     assert_eq!(vr.lpdead_items, 0);
-    assert!(vr.dead_items.is_empty());
+    assert_eq!(vr.dead_items_info.num_items, 0);
     assert_eq!(vr.NewRelfrozenXid, 1000, "tracker untouched on bailout");
     assert_eq!(vr.nonempty_pages, 0);
     assert_eq!(vr.offnum, InvalidOffsetNumber);
@@ -483,7 +484,7 @@ fn lazy_scan_noprune_one_pass_counts_lpdead_as_missed() {
     assert_eq!(vr.missed_dead_tuples, 2, "HTSV-dead + folded LP_DEAD");
     assert_eq!(vr.lpdead_items, 0);
     assert_eq!(vr.lpdead_item_pages, 0);
-    assert!(vr.dead_items.is_empty());
+    assert_eq!(vr.dead_items_info.num_items, 0);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }

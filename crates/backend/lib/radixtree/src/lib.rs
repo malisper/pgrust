@@ -242,7 +242,10 @@ pub struct LocalStore {
 
 impl LocalStore {
     fn new(parent: &MemoryContext) -> LocalStore {
-        let leaf_ctx = parent.new_child("radix_tree");
+        Self::in_ctx(parent.new_child("radix_tree"))
+    }
+
+    fn in_ctx(leaf_ctx: MemoryContext) -> LocalStore {
         let node_slabs = core::array::from_fn(|i| {
             leaf_ctx.new_child_slab(
                 CLASS_NAME[i],
@@ -364,6 +367,13 @@ pub type RadixTree<V> = Tree<V, LocalStore>;
 impl<V: RtValue> RadixTree<V> {
     pub fn create(parent: &MemoryContext) -> PgResult<RadixTree<V>> {
         Tree::with_store(LocalStore::new(parent))
+    }
+
+    /// Leaves allocate directly in `ctx` and node slabs as its children —
+    /// C's varlen RT_CREATE shape (`tree->leaf_context = ctx`), so the
+    /// caller's insert-only/bump context choice reaches the leaves.
+    pub fn create_in(ctx: MemoryContext) -> PgResult<RadixTree<V>> {
+        Tree::with_store(LocalStore::in_ctx(ctx))
     }
 }
 
