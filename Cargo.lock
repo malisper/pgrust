@@ -2111,6 +2111,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "numutils",
  "objectaddress_seams",
  "opclasscmds_seams",
  "parse_func",
