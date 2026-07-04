@@ -14,7 +14,8 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{
-    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause,
+    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SetOperationStmt,
+    SortGroupClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
@@ -408,6 +409,123 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_Float => w!(out, "{}", node.as_variant::<Float>().expect("Float").fval),
         NodeTag::T_Boolean => {
             out_bool(out, node.as_variant::<Boolean>().expect("Boolean").boolval)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node
+                .as_variant::<types_nodes::primnodes::SubscriptingRef>()
+                .expect("SubscriptingRef");
+            w!(
+                out,
+                "{{SUBSCRIPTINGREF :refcontainertype {} :refelemtype {} :refrestype {} \
+                 :reftypmod {} :refcollid {} :refupperindexpr ",
+                sr.refcontainertype, sr.refelemtype, sr.refrestype, sr.reftypmod, sr.refcollid
+            );
+            out_opt_list(out, &sr.refupperindexpr)?;
+            w!(out, " :reflowerindexpr ");
+            out_opt_list(out, &sr.reflowerindexpr)?;
+            w!(out, " :refexpr ");
+            out_opt_node(out, sr.refexpr)?;
+            w!(out, " :refassgnexpr ");
+            out_opt_node(out, sr.refassgnexpr)?;
+            w!(out, "}}");
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_variant::<types_nodes::primnodes::CaseExpr>().expect("CaseExpr");
+            w!(out, "{{CASEEXPR :casetype {} :casecollid {} :arg ", c.casetype, c.casecollid);
+            out_opt_node(out, c.arg)?;
+            w!(out, " :args ");
+            out_list(out, &c.args)?;
+            w!(out, " :defresult ");
+            out_opt_node(out, c.defresult)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_variant::<types_nodes::primnodes::CaseWhen>().expect("CaseWhen");
+            w!(out, "{{CASEWHEN :expr ");
+            out_opt_node(out, cw.expr)?;
+            w!(out, " :result ");
+            out_opt_node(out, cw.result)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_CollateExpr => {
+            let c = node
+                .as_variant::<types_nodes::primnodes::CollateExpr>()
+                .expect("CollateExpr");
+            w!(out, "{{COLLATEEXPR :arg ");
+            out_node(out, c.arg)?;
+            w!(out, " :collOid {} :location -1}}", c.collOid);
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_variant::<types_nodes::primnodes::RowExpr>().expect("RowExpr");
+            w!(out, "{{ROWEXPR :args ");
+            out_list(out, &r.args)?;
+            w!(
+                out,
+                " :row_typeid {} :row_format {} :colnames ",
+                r.row_typeid, r.row_format as u32
+            );
+            out_list(out, &r.colnames)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_MinMaxExpr => {
+            let m =
+                node.as_variant::<types_nodes::primnodes::MinMaxExpr>().expect("MinMaxExpr");
+            w!(
+                out,
+                "{{MINMAXEXPR :minmaxtype {} :minmaxcollid {} :inputcollid {} :op {} :args ",
+                m.minmaxtype, m.minmaxcollid, m.inputcollid, m.op as u32
+            );
+            out_list(out, &m.args)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_WindowFunc => {
+            let f =
+                node.as_variant::<types_nodes::primnodes::WindowFunc>().expect("WindowFunc");
+            w!(
+                out,
+                "{{WINDOWFUNC :winfnoid {} :wintype {} :wincollid {} :inputcollid {} :args ",
+                f.winfnoid, f.wintype, f.wincollid, f.inputcollid
+            );
+            out_list(out, &f.args)?;
+            w!(out, " :aggfilter ");
+            out_opt_node(out, f.aggfilter)?;
+            w!(out, " :runCondition ");
+            out_list(out, &f.runCondition)?;
+            w!(out, " :winref {} :winstar ", f.winref);
+            out_bool(out, f.winstar);
+            w!(out, " :winagg ");
+            out_bool(out, f.winagg);
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_SetOperationStmt => {
+            let s = node.as_variant::<SetOperationStmt>().expect("SetOperationStmt");
+            w!(out, "{{SETOPERATIONSTMT :op {} :all ", s.op as u32);
+            out_bool(out, s.all);
+            w!(out, " :larg ");
+            out_opt_node(out, s.larg)?;
+            w!(out, " :rarg ");
+            out_opt_node(out, s.rarg)?;
+            w!(out, " :colTypes ");
+            out_oid_list(out, &s.colTypes);
+            w!(out, " :colTypmods ");
+            out_int_list(out, &s.colTypmods);
+            w!(out, " :colCollations ");
+            out_oid_list(out, &s.colCollations);
+            w!(out, " :groupClauses ");
+            out_list(out, &s.groupClauses)?;
+            w!(out, "}}");
+        }
+        NodeTag::T_RowMarkClause => {
+            let r = node
+                .as_variant::<types_nodes::parsenodes::RowMarkClause>()
+                .expect("RowMarkClause");
+            w!(
+                out,
+                "{{ROWMARKCLAUSE :rti {} :strength {} :waitPolicy {} :pushedDown ",
+                r.rti, r.strength as u32, r.waitPolicy as u32
+            );
+            out_bool(out, r.pushedDown);
+            w!(out, "}}");
         }
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK + view \

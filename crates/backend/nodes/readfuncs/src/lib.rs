@@ -386,6 +386,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
             b"NULLTEST" => self.read_null_test(),
             b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
+            b"ROWMARKCLAUSE" => self.read_row_mark_clause(),
             b"SETOPERATIONSTMT" => self.read_set_operation_stmt(),
             b"AGGREF" => self.read_aggref(),
             b"CASEEXPR" => self.read_case_expr(),
@@ -1252,6 +1253,28 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             hashable: self.read_bool("hashable"),
         };
         Node::mk(self.mcx, s)
+    }
+
+    fn read_row_mark_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let r = types_nodes::parsenodes::RowMarkClause {
+            rti: self.read_u32("rti"),
+            strength: match self.read_u32("strength") {
+                0 => types_nodes::nodes_enums::LockClauseStrength::LCS_NONE,
+                1 => types_nodes::nodes_enums::LockClauseStrength::LCS_FORKEYSHARE,
+                2 => types_nodes::nodes_enums::LockClauseStrength::LCS_FORSHARE,
+                3 => types_nodes::nodes_enums::LockClauseStrength::LCS_FORNOKEYUPDATE,
+                4 => types_nodes::nodes_enums::LockClauseStrength::LCS_FORUPDATE,
+                other => panic!("readfuncs.c: bad LockClauseStrength {other}"),
+            },
+            waitPolicy: match self.read_u32("waitPolicy") {
+                0 => types_nodes::nodes_enums::LockWaitPolicy::LockWaitBlock,
+                1 => types_nodes::nodes_enums::LockWaitPolicy::LockWaitSkip,
+                2 => types_nodes::nodes_enums::LockWaitPolicy::LockWaitError,
+                other => panic!("readfuncs.c: bad LockWaitPolicy {other}"),
+            },
+            pushedDown: self.read_bool("pushedDown"),
+        };
+        Node::mk(self.mcx, r)
     }
 
     fn read_set_operation_stmt(&mut self) -> PgResult<Node<'mcx>> {
