@@ -715,6 +715,9 @@ fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) {
 #[cold]
 #[inline(never)]
 pub fn send_message_to_frontend(edata: &PgError) {
+    if crate::sink::call_frontend_redirect(edata) {
+        return;
+    }
     use ::types_error::{
         PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
         PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY, PG_DIAG_MESSAGE_DETAIL,

@@ -60,6 +60,7 @@ pub struct ParallelShared {
     tstate: Vec<u8>,
     combocid: Arc<[(CommandId, CommandId)]>,
     pending_syncs: Vec<(RelFileLocator, bool)>,
+    reindex: types_rel::reindex::SerializedReindexState,
     active_snapshot: snapmgr::SerializedSnapshot,
     transaction_snapshot: Option<snapmgr::SerializedSnapshot>,
     clientconninfo: Vec<u8>,
@@ -200,8 +201,10 @@ pub fn CreateParallelContext(
         c.set(id + 1);
         id
     });
+    // C dlist_push_head: the head is the newest context, so AtEOSubXact's
+    // front-of-list subid scan sees inner-subxact contexts first.
     PCXT_LIST.with(|l| {
-        l.borrow_mut().push(ParallelContext {
+        l.borrow_mut().insert(0, ParallelContext {
             id,
             subid: xact::GetCurrentSubTransactionId(),
             nworkers,
@@ -292,6 +295,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         tstate,
         combocid: combocid::SerializeComboCIDState(),
         pending_syncs: catalog_storage::SerializePendingSyncs(),
+        reindex: types_rel::reindex::serialize_reindex_state(),
         active_snapshot,
         transaction_snapshot,
         clientconninfo,
@@ -776,10 +780,36 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
 
     let sender = take_my_error_sender(&shared, worker_number);
     shared.worker_attached[worker_number as usize].store(true, SeqCst);
+    // C shm_mq_set_sender wakes the leader's attach wait.
+    latch::SetLatch(types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+
+    // C pq_redirect_to_shm_mq: sub-ERROR client-bound reports become 'N'
+    // messages; ERROR+ is forwarded exactly once from the unwind payload.
+    let notice_sender = sender.clone();
+    let (leader_pid, leader_proc) =
+        (shared.parallel_leader_pid, shared.parallel_leader_proc_number);
+    let prev_redirect = elog::set_frontend_redirect(Some(Box::new(move |e: &PgError| {
+        if e.level >= ERROR {
+            return;
+        }
+        let _ = notice_sender.send(WorkerMessage::Notice(Box::new(e.clone())));
+        procsignal::SendProcSignal(
+            leader_pid,
+            types_storage::storage::ProcSignalReason::PROCSIG_PARALLEL_MESSAGE,
+            leader_proc,
+        );
+    })));
+    let prev_dest = elog::config::where_to_send_output();
+    elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
 
     let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         parallel_worker_body(&shared, worker_number)
     }));
+
+    elog::config::set_where_to_send_output(prev_dest);
+    elog::set_frontend_redirect(prev_redirect);
     let result = match body {
         Ok(r) => r,
         Err(payload) => match types_error::pg_error_from_panic(payload) {
@@ -817,10 +847,13 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
 }
 
 fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> PgResult<()> {
-    let _ = lmgr_proc::BecomeLockGroupMember(
+    // C 1400-1402: leader already gone — exit quietly (Terminate still sent).
+    if !lmgr_proc::BecomeLockGroupMember(
         shared.parallel_leader_proc_number,
         shared.parallel_leader_pid,
-    )?;
+    )? {
+        return Ok(());
+    }
 
     xact::SetParallelStartTimestamps(shared.xact_ts, shared.stmt_ts);
 
@@ -846,8 +879,10 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
 
     catalog_storage::RestorePendingSyncs(&shared.pending_syncs);
     relmapper::RestoreRelationMap(&shared.relmap)?;
-    // Reindex state: SetReindexProcessing has no port, the leader state is
-    // provably empty — nothing to restore.
+    types_rel::reindex::restore_reindex_state(
+        &shared.reindex,
+        xact::GetCurrentTransactionNestLevel(),
+    );
     combocid::RestoreComboCIDState(&shared.combocid);
     // Session attach: skipped (docs/parallel-query-design.md).
 
@@ -868,8 +903,9 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     );
 
     miscinit::RestoreClientConnectionInfo(&shared.clientconninfo)?;
-    // InitializeSystemUser: authn-id consumers unported; conninfo restore
-    // above carries the state a future port needs.
+    if miscinit::client_connection_info().0.is_some() {
+        panic!("ParallelWorkerMain: InitializeSystemUser (SYSTEM_USER for authenticated identity) unported");
+    }
 
     INITIALIZING_PARALLEL_WORKER.with(|c| c.set(false));
     xact::EnterParallelMode();
