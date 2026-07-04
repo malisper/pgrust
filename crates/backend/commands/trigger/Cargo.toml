@@ -30,6 +30,7 @@ catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
 miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
