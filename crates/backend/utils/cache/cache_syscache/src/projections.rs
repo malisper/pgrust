@@ -1937,6 +1937,8 @@ const ANUM_PG_TS_PARSER_PRSTOKEN: i32 = 5;
 const ANUM_PG_TS_PARSER_PRSEND: i32 = 6;
 const ANUM_PG_TS_PARSER_PRSHEADLINE: i32 = 7;
 const ANUM_PG_TS_PARSER_PRSLEXTYPE: i32 = 8;
+const ANUM_PG_TS_DICT_DICTNAME: i32 = 2;
+const ANUM_PG_TS_DICT_DICTNAMESPACE: i32 = 3;
 const ANUM_PG_TS_DICT_DICTTEMPLATE: i32 = 5;
 const ANUM_PG_TS_DICT_DICTINITOPTION: i32 = 6;
 const ANUM_PG_TS_TEMPLATE_TMPLINIT: i32 = 4;
@@ -1987,6 +1989,11 @@ fn lookup_pg_ts_dict_shape<'mcx>(
     };
     let cid = crate::cacheinfo::TSDICTOID;
     let t = tuple.tuple();
+    let dn = getattr(&t, cid, ANUM_PG_TS_DICT_DICTNAME);
+    // SAFETY: dictname is a NameData column; the datum points at its 64-byte
+    // in-tuple image.
+    let dictname = unsafe { *(dn.as_usize() as *const NameData) };
+    let dictnamespace = getattr(&t, cid, ANUM_PG_TS_DICT_DICTNAMESPACE).as_oid();
     let dicttemplate = getattr(&t, cid, ANUM_PG_TS_DICT_DICTTEMPLATE).as_oid();
     let dictinitoption = match getattr_nullable(&t, cid, ANUM_PG_TS_DICT_DICTINITOPTION) {
         None => None,
@@ -2004,7 +2011,7 @@ fn lookup_pg_ts_dict_shape<'mcx>(
     };
     drop(t);
     ReleaseSysCache(tuple);
-    Ok(Some(syscache_seams::PgTsDictShape { dicttemplate, dictinitoption }))
+    Ok(Some(syscache_seams::PgTsDictShape { dictname, dictnamespace, dicttemplate, dictinitoption }))
 }
 
 fn lookup_pg_ts_template_shape(

@@ -1011,6 +1011,8 @@ seam_core::seam!(
 );
 
 pub struct PgTsDictShape<'mcx> {
+    pub dictname: NameData,
+    pub dictnamespace: Oid,
     pub dicttemplate: Oid,
     // dictinitoption text payload (detoasted, header stripped); None = SQL NULL.
     pub dictinitoption: Option<mcx::PgVec<'mcx, u8>>,
