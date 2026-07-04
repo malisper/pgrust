@@ -11999,9 +11999,12 @@ name = "ruleutils"
 version = "0.1.0"
 dependencies = [
  "adt_xml",
+ "amapi",
+ "arrayfuncs",
  "cache_syscache",
  "catalog_namespace",
  "catcache",
+ "copyfuncs",
  "datum",
  "detoast",
  "fmgr_seams",
@@ -12020,6 +12023,8 @@ dependencies = [
  "parse_oper",
  "parse_relation",
  "parser_small1",
+ "partdesc",
+ "pg_depend",
  "readfuncs",
  "rel_vocab",
  "relcache",
