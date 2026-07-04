@@ -942,6 +942,7 @@ const _: () = assert!(!core::mem::needs_drop::<Option<CteProcHook>>());
 const _: () = assert!(!core::mem::needs_drop::<Option<ParamExecData>>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, IncrementalSortInfo)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
+const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
 mcx::forget_safe_struct!(
     EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked },
     EStateData<'_> {
@@ -968,9 +969,9 @@ mcx::forget_safe_struct!(
         es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
     },
 );
-mcx::forget_safe_struct!(
-    WorkerInstr<'_> { instrument, sort, incsort, agg, hash, index },
-);
+// SAFETY: six arena-backed PgVecs of no-drop Copy payloads (asserted above);
+// forgetting reclaims nothing beyond arena bytes.
+unsafe impl mcx::ForgetSafe for WorkerInstr<'_> {}
 
 #[cold]
 #[inline(never)]
