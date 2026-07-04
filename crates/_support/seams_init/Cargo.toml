@@ -182,6 +182,7 @@ inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
 costsize = { path = "../../backend/optimizer/path/costsize" }
+allpaths = { path = "../../backend/optimizer/path/allpaths" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }

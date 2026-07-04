@@ -239,7 +239,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
         }
 
         if with_pm(|pm| pm.pm_state == PMState::PM_STOP_BACKENDS) {
-            // ForgetUnstartedBackgroundWorkers: registry statically empty.
+            bgworker::ForgetUnstartedBackgroundWorkers();
             SignalChildren(libc::SIGTERM, target_mask);
             UpdatePMState(PMState::PM_WAIT_BACKENDS);
         }
@@ -331,13 +331,16 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
         if guc_tables::vars::remove_temp_files_after_crash.read() {
             fd::RemovePgTempFiles()?;
         }
-        // ResetBackgroundWorkerCrashTimes: bgworker registry statically empty.
+        bgworker::ResetBackgroundWorkerCrashTimes();
 
         ipc::shmem_exit(1)?;
 
         transam_xlog::LocalProcessControlFile(true)?;
 
         ipci::ResetShmemAfterCrash()?;
+        // C reset_shared() re-runs BackgroundWorkerShmemInit: counts zeroed,
+        // surviving registrations recopied into slots.
+        bgworker::BackgroundWorkerShmemInit();
 
         UpdatePMState(PMState::PM_STARTUP);
 
@@ -390,6 +393,130 @@ pub fn StartChildProcess(child_type: BackendType) -> Option<PmChild> {
 /// StartSysLogger — the syslogger pipe machinery is that unit's port.
 pub fn StartSysLogger() {
     panic!("StartSysLogger: syslogger unported (backend-postmaster-syslogger)");
+}
+
+/// StartBackgroundWorker(rw) (postmaster.c). Failure marks the entry crashed
+/// so maybe_start_bgworkers retries later, per C.
+fn StartBackgroundWorker(idx: usize) -> bool {
+    debug_assert_eq!(bgworker::rw_pid(idx), 0);
+
+    let Some(child_slot) = pmchild_seams::assign_postmaster_child_slot::call(BackendType::BgWorker)
+    else {
+        let _ = elog::ereport(types_error::LOG)
+            .errcode(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+            .errmsg("no slot available for new background worker process")
+            .finish(loc(4139, "StartBackgroundWorker"));
+        bgworker::set_rw_crashed_at(idx, timestamp_seams::get_current_timestamp::call());
+        return false;
+    };
+
+    report_internal(
+        DEBUG1,
+        format!("starting background worker process \"{}\"", bgworker::rw_name(idx)),
+        4153,
+        "StartBackgroundWorker",
+    );
+
+    let shmem_slot = bgworker::rw_shmem_slot(idx);
+    let startup_data = StartupData::BgWorker(types_startup::BgWorkerStartupData {
+        slot: shmem_slot,
+        generation: bgworker::slot_generation(shmem_slot),
+    });
+    let pid = launch_backend::postmaster_child_launch(
+        BackendType::BgWorker,
+        child_slot,
+        startup_data,
+        None,
+    );
+    if pid < 0 {
+        report(LOG, "could not fork background worker process".into(), 4162, "StartBackgroundWorker");
+        pmchild_seams::release_postmaster_child_slot::call(child_slot);
+        bgworker::set_rw_crashed_at(idx, timestamp_seams::get_current_timestamp::call());
+        return false;
+    }
+
+    bgworker::set_rw_pid(idx, pid);
+    pmchild_seams::set_child_pid::call(child_slot, pid);
+    bgworker::ReportBackgroundWorkerPID(idx);
+    true
+}
+
+/// bgworker_should_start_now(start_time) (postmaster.c).
+fn bgworker_should_start_now(start_time: bgworker::BgWorkerStartTime) -> bool {
+    use bgworker::BgWorkerStartTime::*;
+    match with_pm(|pm| pm.pm_state) {
+        PMState::PM_NO_CHILDREN
+        | PMState::PM_WAIT_CHECKPOINTER
+        | PMState::PM_WAIT_DEAD_END
+        | PMState::PM_WAIT_XLOG_ARCHIVAL
+        | PMState::PM_WAIT_XLOG_SHUTDOWN
+        | PMState::PM_WAIT_IO_WORKERS
+        | PMState::PM_WAIT_BACKENDS
+        | PMState::PM_STOP_BACKENDS => false,
+        PMState::PM_RUN => matches!(start_time, RecoveryFinished | ConsistentState),
+        PMState::PM_HOT_STANDBY => start_time == ConsistentState,
+        PMState::PM_RECOVERY | PMState::PM_STARTUP | PMState::PM_INIT => {
+            start_time == PostmasterStart
+        }
+    }
+}
+
+/// maybe_start_bgworkers (postmaster.c). Restart scheduling is unreachable
+/// this phase: registration rejects bgw_restart_time >= 0.
+pub fn maybe_start_bgworkers() {
+    const MAX_BGWORKERS_TO_LAUNCH: i32 = 100;
+    let mut num_launched = 0;
+
+    if with_pm(|pm| pm.fatal_error) {
+        with_pm(|pm| {
+            pm.start_worker_needed = false;
+            pm.have_crashed_worker = false;
+        });
+        return;
+    }
+
+    with_pm(|pm| {
+        pm.start_worker_needed = false;
+        pm.have_crashed_worker = false;
+    });
+
+    for idx in bgworker::registered_indexes() {
+        if bgworker::rw_pid(idx) != 0 {
+            continue;
+        }
+
+        if bgworker::rw_terminate(idx) {
+            bgworker::ForgetBackgroundWorker(idx);
+            continue;
+        }
+
+        if bgworker::rw_crashed_at(idx) != 0 {
+            if bgworker::rw_restart_time(idx) == bgworker::BGW_NEVER_RESTART {
+                let notify_pid = bgworker::rw_notify_pid(idx);
+                bgworker::ForgetBackgroundWorker(idx);
+                if notify_pid != 0 {
+                    let _ = procsignal::SendThreadSignal(notify_pid, libc::SIGUSR1);
+                }
+                continue;
+            }
+            panic!("maybe_start_bgworkers: bgworker restart scheduling unported (bgw_restart_time >= 0)");
+        }
+
+        if bgworker_should_start_now(bgworker::rw_start_time(idx)) {
+            bgworker::set_rw_crashed_at(idx, 0);
+
+            if !StartBackgroundWorker(idx) {
+                with_pm(|pm| pm.start_worker_needed = true);
+                return;
+            }
+
+            num_launched += 1;
+            if num_launched >= MAX_BGWORKERS_TO_LAUNCH {
+                with_pm(|pm| pm.start_worker_needed = true);
+                return;
+            }
+        }
+    }
 }
 
 pub fn StartAutovacuumWorker() {

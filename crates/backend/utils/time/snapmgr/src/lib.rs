@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use elog::{elog, ereport};
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::{
-    CommandId, InvalidTransactionId, Oid, TransactionId, TransactionIdIsNormal,
-    TransactionIdPrecedes,
+    CommandId, GlobalVisStateHandle, InvalidTransactionId, Oid, ProcNumber, TransactionId,
+    TransactionIdIsNormal, TransactionIdPrecedes,
 };
 use types_error::{ErrorLocation, PgResult, ERROR, WARNING};
 use types_resowner::ResourceOwner;
@@ -402,6 +402,121 @@ fn recycle_copy_locked(s: &mut SnapMgrState, snap: Snapshot) {
 
 pub fn CopySnapshot(snapshot: &Snapshot) -> Snapshot {
     with_state(|s| copy_snapshot_locked(s, snapshot))
+}
+
+// C's SerializedSnapshotData byte image rendered thread-native: a plain Send
+// struct (Vec lengths carry xcnt/subxcnt). vistest crosses too — the handle
+// indexes process-global GlobalVis state, valid on any thread.
+#[derive(Clone, Debug)]
+pub struct SerializedSnapshot {
+    pub xmin: TransactionId,
+    pub xmax: TransactionId,
+    pub xip: Vec<TransactionId>,
+    pub subxip: Vec<TransactionId>,
+    pub suboverflowed: bool,
+    pub takenDuringRecovery: bool,
+    pub curcid: CommandId,
+    pub vistest: GlobalVisStateHandle,
+}
+
+pub fn SerializeSnapshot(snapshot: &Snapshot) -> SerializedSnapshot {
+    debug_assert!(snapshot.snapshot_type == SnapshotType::SNAPSHOT_MVCC);
+    debug_assert!(snapshot.subxcnt >= 0);
+    // Overflowed subxip is skipped — except in recovery (top xids live there).
+    let subxip = if snapshot.suboverflowed && !snapshot.takenDuringRecovery {
+        Vec::new()
+    } else {
+        snapshot.subxip[..snapshot.subxcnt.max(0) as usize].to_vec()
+    };
+    SerializedSnapshot {
+        xmin: snapshot.xmin,
+        xmax: snapshot.xmax,
+        xip: snapshot.xip[..snapshot.xcnt as usize].to_vec(),
+        subxip,
+        suboverflowed: snapshot.suboverflowed,
+        takenDuringRecovery: snapshot.takenDuringRecovery,
+        curcid: snapshot.curcid.get(),
+        vistest: snapshot.vistest,
+    }
+}
+
+pub fn RestoreSnapshot(serialized: &SerializedSnapshot) -> Snapshot {
+    with_state(|s| {
+        let mut rc = match s.copy_freelist.pop() {
+            Some(rc) => rc,
+            None => Rc::new(SnapshotData::sentinel(s.mcx, SnapshotType::SNAPSHOT_MVCC)),
+        };
+        let snap = Rc::get_mut(&mut rc).expect("freelist copies are unique");
+        snap.snapshot_type = SnapshotType::SNAPSHOT_MVCC;
+        snap.xmin = serialized.xmin;
+        snap.xmax = serialized.xmax;
+        copy_xids_into(&mut snap.xip, &serialized.xip);
+        snap.xcnt = serialized.xip.len() as u32;
+        copy_xids_into(&mut snap.subxip, &serialized.subxip);
+        snap.subxcnt = serialized.subxip.len() as i32;
+        snap.suboverflowed = serialized.suboverflowed;
+        snap.takenDuringRecovery = serialized.takenDuringRecovery;
+        snap.copied = true;
+        snap.curcid.set(serialized.curcid);
+        snap.speculativeToken = 0;
+        snap.vistest = serialized.vistest;
+        snap.active_count.set(0);
+        snap.regd_count.set(0);
+        snap.snapXactCompletionCount = 0;
+        rc
+    })
+}
+
+pub fn RestoreTransactionSnapshot(
+    snapshot: &SerializedSnapshot,
+    source_proc: ProcNumber,
+) -> PgResult<()> {
+    SetTransactionSnapshot(snapshot, source_proc)
+}
+
+#[allow(unreachable_code, unused_variables)]
+fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumber) -> PgResult<()> {
+    with_state(|s| {
+        debug_assert!(!s.first_snapshot_set);
+        invalidate_catalog_snapshot_locked(s);
+        debug_assert!(s.registered.is_empty());
+        debug_assert!(s.first_xact_snapshot.is_none());
+        debug_assert!(s.historic.is_none());
+
+        // GetSnapshotData still runs: it sizes the xip arrays and updates the
+        // GlobalVis state, exactly why C calls it before overwriting fields.
+        let current = refill_static_locked(s, Which::Current, |target, mcx| {
+            procarray::GetSnapshotData(target, mcx)?;
+            debug_assert!(sourcesnap.xip.len() <= procarray::GetMaxSnapshotXidCount());
+            debug_assert!(sourcesnap.subxip.len() <= procarray::GetMaxSnapshotSubxidCount());
+            target.xmin = sourcesnap.xmin;
+            target.xmax = sourcesnap.xmax;
+            copy_xids_into(&mut target.xip, &sourcesnap.xip);
+            target.xcnt = sourcesnap.xip.len() as u32;
+            copy_xids_into(&mut target.subxip, &sourcesnap.subxip);
+            target.subxcnt = sourcesnap.subxip.len() as i32;
+            target.suboverflowed = sourcesnap.suboverflowed;
+            target.takenDuringRecovery = sourcesnap.takenDuringRecovery;
+            // curcid NOT copied: it's a local matter.
+            target.snapXactCompletionCount = 0;
+            Ok(())
+        })?;
+
+        unported("ProcArrayInstallRestoredXmin (procarray.c)");
+
+        if xact_seams::isolation_uses_xact_snapshot::call() {
+            if xact_seams::isolation_is_serializable::call() {
+                unported("SetSerializableTransactionSnapshot (predicate.c)");
+            }
+            let copy = copy_snapshot_locked(s, &current);
+            copy.regd_count.set(copy.regd_count.get() + 1);
+            s.current = Some(SnapRef::Copied(copy.clone()));
+            s.first_xact_snapshot = Some(copy.clone());
+            s.registered.push(copy);
+        }
+        s.first_snapshot_set = true;
+        Ok(())
+    })
 }
 
 pub fn PushActiveSnapshot(snapshot: &Snapshot) -> PgResult<()> {

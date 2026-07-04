@@ -1,0 +1,34 @@
+[package]
+name = "bgworker"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bgworker"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libc = "0.2"
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+mcx = { path = "../../../_support/mcx" }
+miscinit = { path = "../../utils/init/miscinit" }
+pmchild_seams = { path = "../pmchild_seams" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+postgres = { path = "../../tcop/postgres" }
+postinit = { path = "../../utils/init/postinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+[dev-dependencies]
+postmaster_seams = { path = "../postmaster_seams" }

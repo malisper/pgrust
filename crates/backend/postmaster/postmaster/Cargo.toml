@@ -35,6 +35,7 @@ ipci = { path = "../../storage/ipc/ipci" }
 varsup = { path = "../../access/transam/varsup" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
+bgworker = { path = "../bgworker" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 pg_prng = { path = "../../../common/pg_prng" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }

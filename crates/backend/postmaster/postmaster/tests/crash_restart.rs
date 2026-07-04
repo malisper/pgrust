@@ -125,6 +125,7 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
         10 + 16 + 8 + 10 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
     );
     pmchild_seams::init_postmaster_child_slots::call();
+    bgworker::BackgroundWorkerShmemInit();
 
     let dir = std::env::temp_dir().join(format!("pgrust-crash-restart-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

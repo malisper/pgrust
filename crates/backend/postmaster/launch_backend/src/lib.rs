@@ -62,7 +62,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "bgworker",
-        main_fn: Main::Unported("BackgroundWorkerMain (backend-postmaster-bgworker)"),
+        main_fn: Main::Ported(bgworker::BackgroundWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind { name: "wal sender", main_fn: Main::None, shmem_attach: true },

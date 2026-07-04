@@ -1011,6 +1011,11 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allpaths"
 version = "0.1.0"
+dependencies = [
+ "guc_tables",
+ "mcx",
+ "types_pathnodes",
+]
 
 [[package]]
 name = "amapi"
@@ -1392,6 +1397,33 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "bgworker"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "init_small",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "mcx",
+ "miscinit",
+ "pmchild_seams",
+ "pmsignal",
+ "postgres",
+ "postinit",
+ "postmaster_seams",
+ "procsignal",
+ "timeout_seams",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
 ]
 
 [[package]]
@@ -5766,6 +5798,7 @@ version = "0.0.0"
 dependencies = [
  "autovacuum",
  "backend_startup",
+ "bgworker",
  "bgwriter",
  "checkpointer",
  "guc",
@@ -9287,6 +9320,7 @@ dependencies = [
  "auth_seams",
  "autovacuum_seams",
  "backend_status_seams",
+ "bgworker",
  "controldata_utils",
  "dsm_core",
  "elog",
@@ -10817,6 +10851,7 @@ dependencies = [
  "adt_xml",
  "aio_config",
  "aio_uring",
+ "allpaths",
  "auth",
  "auth_scram",
  "autovacuum",
@@ -11119,6 +11154,27 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "shm_mq"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "init_small",
+ "ipc_seams",
+ "latch",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "pg_sema_seams",
+ "postgres_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
+]
 
 [[package]]
 name = "shmem"
@@ -12341,6 +12397,28 @@ dependencies = [
  "types_error",
  "types_snapshot",
  "types_tuple",
+]
+
+[[package]]
+name = "tqueue"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "init_small",
+ "ipc_seams",
+ "latch",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "pg_sema_seams",
+ "postgres_seams",
+ "s_lock_seams",
+ "shm_mq",
+ "shmem_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
 ]
 
 [[package]]

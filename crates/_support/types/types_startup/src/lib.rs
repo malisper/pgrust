@@ -102,9 +102,16 @@ pub struct BackendStartupData {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub struct BgWorkerStartupData {
+    pub slot: i32,
+    pub generation: u64,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum StartupData {
     None,
     Backend(BackendStartupData),
+    BgWorker(BgWorkerStartupData),
 }
 
 #[derive(Copy, Clone, Debug)]
