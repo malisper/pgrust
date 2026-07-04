@@ -414,9 +414,12 @@ fn treat_as_join_clause<'mcx>(
     }
 }
 
-// NumRelids (clauses.c); no outer-join relids on this lane.
+// NumRelids (clauses.c): baserel count only — outer-join relids (pulled from
+// varnullingrels) are deleted, as C's bms_del_members.
 fn num_relids_of<'mcx>(run: &mut PlannerRun<'mcx>, clause: Node<'mcx>) -> PgResult<i32> {
-    debug_assert!(run.root.outer_join_rels.is_none());
     let bms = vars::pull_varnos(run.mcx, clause)?;
-    Ok(bms.iter().count() as i32)
+    Ok(bms
+        .iter()
+        .filter(|&r| !relids_is_member(r, &run.root.outer_join_rels))
+        .count() as i32)
 }
