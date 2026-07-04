@@ -2158,8 +2158,12 @@ pub fn initial_cost_hashjoin(
     let mut startup_cost = o_startup;
     let mut run_cost = o_total - o_startup;
     startup_cost += i_total;
-    startup_cost += (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost()) * i_rows;
-    run_cost += gucs::cpu_operator_cost() * num_hashclauses * o_rows;
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+    // fuses `cost += expr * rows`); EXPLAIN costs are byte-compared and a
+    // 42.425-style display boundary exposes the one-ulp difference.
+    startup_cost = (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost())
+        .mul_add(i_rows, startup_cost);
+    run_cost = (gucs::cpu_operator_cost() * num_hashclauses).mul_add(o_rows, run_cost);
 
     let inner_width = run.root.path_pathtarget(inner_path).width;
     let (numbuckets, numbatches, _skew) =

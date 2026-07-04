@@ -2997,23 +2997,30 @@ pub fn estimate_multivariate_bucketsize<'mcx>(
     Ok((otherclauses, 1.0 / ndistinct))
 }
 
-// estimate_hash_bucket_stats (selfuncs.c), no-stats/no-MCV lane. The MCV bucket
-// adjustment (mcvfreq/avgfreq) is the extended-stats lane; without an MCV list
-// mcvfreq is 0 and the bucketsize is 1/ndistinct clamped to virtualbuckets.
+// estimate_hash_bucket_stats (selfuncs.c) -> (mcv_freq, bucketsize_frac).
 pub fn estimate_hash_bucket_stats<'mcx>(
     run: &mut PlannerRun<'mcx>,
     hashkey: Node<'mcx>,
-    virtualbuckets: f64,
+    nbuckets: f64,
 ) -> PgResult<(f64, f64)> {
     let node_id = run.intern_expr(hashkey);
     let vardata = examine_variable(run, node_id, hashkey, 0)?;
-    let (mut ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
-    let mcvfreq = 0.0;
-    if isdefault {
-        return Ok((mcvfreq, 0.1f64.max(mcvfreq)));
+
+    let mut mcv_freq = 0.0f64;
+    if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+        if let Some(&first) = sslot.numbers()?.first() {
+            mcv_freq = first as f64;
+        }
     }
-    // stanullfrac is 0 on the no-stats lane; scale ndistinct by the
-    // restriction selectivity as C does.
+
+    let (mut ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
+    if isdefault {
+        return Ok((mcv_freq, 0.1f64.max(mcv_freq)));
+    }
+
+    let stanullfrac = vardata.nullfrac();
+    let avgfreq = (1.0 - stanullfrac) / ndistinct;
+
     if let Some(rel) = vardata.rel {
         let (tuples, rows) = (run.root.rel(rel).tuples, run.root.rel(rel).rows);
         if tuples > 0.0 {
@@ -3021,18 +3028,23 @@ pub fn estimate_hash_bucket_stats<'mcx>(
             ndistinct = crate::costsize::clamp_row_est(ndistinct);
         }
     }
-    if ndistinct <= 0.0 {
-        ndistinct = 1.0;
-    }
-    let mut estfract = if ndistinct > virtualbuckets {
-        1.0 / virtualbuckets
+
+    let mut estfract = if ndistinct > nbuckets {
+        1.0 / nbuckets
     } else {
         1.0 / ndistinct
     };
+
+    if avgfreq > 0.0 && mcv_freq > avgfreq {
+        estfract *= mcv_freq / avgfreq;
+    }
+
     if estfract < 1.0e-6 {
         estfract = 1.0e-6;
+    } else if estfract > 1.0 {
+        estfract = 1.0;
     }
-    Ok((mcvfreq, estfract))
+    Ok((mcv_freq, estfract))
 }
 
 // mergejoinscansel (selfuncs.c) -> (leftstart, leftend, rightstart, rightend).
