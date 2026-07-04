@@ -1338,6 +1338,13 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().expect("FieldSelect");
+            Node::mk(
+                mcx,
+                pn::FieldSelect { arg: copy_expr(mcx, f.arg, levels_delta)?, ..*f },
+            )
+        }
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().expect("CoerceViaIO");
             Node::mk(
