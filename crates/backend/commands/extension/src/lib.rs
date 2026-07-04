@@ -179,28 +179,6 @@ pub(crate) fn first_dir_separator(s: &str) -> Option<usize> {
     s.bytes().position(|b| b == b'/')
 }
 
-// extension_file_exists (extension.c:2622): directory scan; missing control
-// directories read as false.
-pub fn extension_file_exists(extension_name: &str) -> PgResult<bool> {
-    for location in control::get_extension_control_directories()? {
-        let Ok(entries) = std::fs::read_dir(&location) else {
-            continue;
-        };
-        for de in entries.flatten() {
-            let fname = de.file_name();
-            let Some(fname) = fname.to_str() else { continue };
-            if !is_extension_control_filename(fname) {
-                continue;
-            }
-            let stem = &fname[..fname.len() - ".control".len()];
-            if stem == extension_name {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 pub fn is_extension_control_filename(filename: &str) -> bool {
     matches!(filename.rfind('.'), Some(dot) if &filename[dot..] == ".control")
 }
