@@ -1592,7 +1592,9 @@ pub fn transformStatsStmt<'mcx>(
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
 
-    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    // C: relation_open — CREATE STATISTICS on an index/composite type must
+    // reach CreateStatistics' own relkind error, not table_open's guard.
+    let rel = relation_seams::relation_open::call(mcx, relid, types_rel::NoLock)?;
     let nsitem = parse_relation::addRangeTableEntryForRelation(
         mcx,
         &mut pstate,
