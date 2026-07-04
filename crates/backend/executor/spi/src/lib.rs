@@ -331,6 +331,78 @@ pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<
     Ok(())
 }
 
+// SPI_start_transaction (spi.c:220): no-op for backwards compatibility.
+pub fn SPI_start_transaction() {}
+
+fn _SPI_commit_rollback(commit: bool, chain: bool) -> PgResult<()> {
+    let atomic = with_current(|c| c.atomic).expect("SPI transaction control: not connected");
+    if atomic {
+        return Err(ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg("invalid transaction termination")
+            .into_error()
+            .into());
+    }
+    // PLs build exception blocks from subtransactions; ending the top-level
+    // xact inside one would break their rollback contract, and the restart
+    // below relies on not being in a subtransaction.
+    if xact::IsSubTransaction() {
+        return Err(ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg(if commit {
+                "cannot commit while a subtransaction is active"
+            } else {
+                "cannot roll back while a subtransaction is active"
+            })
+            .into_error()
+            .into());
+    }
+    let savetc = chain.then(xact::SaveTransactionCharacteristics);
+    with_current(|c| c.internal_xact = true);
+    let deed = (|| -> PgResult<()> {
+        // HoldPortal runs user code and must precede the state change (for
+        // rollback it also couldn't run in an already-aborted transaction).
+        portalmem::HoldPinnedPortals()?;
+        portalmem::ForgetPortalSnapshots()?;
+        if commit {
+            xact::CommitTransactionCommand()
+        } else {
+            xact::AbortCurrentTransaction()
+        }
+    })();
+    if let Err(e) = deed {
+        xact::AbortCurrentTransaction()?;
+        xact::StartTransactionCommand()?;
+        if let Some(tc) = savetc {
+            xact::RestoreTransactionCharacteristics(tc);
+        }
+        with_current(|c| c.internal_xact = false);
+        return Err(e);
+    }
+    xact::StartTransactionCommand()?;
+    if let Some(tc) = savetc {
+        xact::RestoreTransactionCharacteristics(tc);
+    }
+    with_current(|c| c.internal_xact = false);
+    Ok(())
+}
+
+pub fn SPI_commit() -> PgResult<()> {
+    _SPI_commit_rollback(true, false)
+}
+
+pub fn SPI_commit_and_chain() -> PgResult<()> {
+    _SPI_commit_rollback(true, true)
+}
+
+pub fn SPI_rollback() -> PgResult<()> {
+    _SPI_commit_rollback(false, false)
+}
+
+pub fn SPI_rollback_and_chain() -> PgResult<()> {
+    _SPI_commit_rollback(false, true)
+}
+
 pub fn SPI_inside_nonatomic_context() -> bool {
     if SPI_CONNECTED.with(Cell::get) < 0 {
         return false;
