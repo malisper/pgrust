@@ -632,12 +632,6 @@ fn transformNullTest<'mcx>(
     let arg = transformExprRecurse(mcx, pstate, n.arg.expect("NullTest.arg"))?;
     // The argument can be any type, so don't coerce it.
     let argisrow = lsyscache::type_is_rowtype(expr_type(arg))?;
-    if argisrow {
-        panic!(
-            "transformExprRecurse (parse_expr.c): row-type NullTest (argisrow) unported — \
-             unit backend-parser-expr"
-        );
-    }
     Node::mk(
         mcx,
         types_nodes::primnodes::NullTest {
