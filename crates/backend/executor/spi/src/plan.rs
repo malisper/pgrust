@@ -5,7 +5,6 @@ use types_core::{InvalidOid, Oid};
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
-use types_portal::QueryEnvHandle;
 
 use crate::{
     current_exec_mcx, set_spi_result, with_current, _SPI_begin_call, _SPI_end_call,
@@ -59,7 +58,7 @@ fn analyze_and_rewrite(
         raw,
         src,
         argtypes,
-        QueryEnvHandle::NULL,
+        crate::current_query_env(),
     )?;
     if query.commandType == CmdType::CMD_UTILITY {
         let mut v = PgVec::new_in(qmcx);
@@ -262,7 +261,7 @@ pub fn SPI_prepare_plpgsql(
                     qraw,
                     qsrc,
                     hooks,
-                    QueryEnvHandle::NULL,
+                    crate::current_query_env(),
                 )?;
                 let query_list = if query.commandType == CmdType::CMD_UTILITY {
                     let mut v = PgVec::new_in(qmcx);

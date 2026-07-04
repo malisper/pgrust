@@ -1426,6 +1426,7 @@ fn examine_simple_variable<'mcx>(
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_JOIN
         | RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_NAMEDTUPLESTORE
         | RTEKind::RTE_CTE => Ok(SimpleVarStats::none()),
         other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }

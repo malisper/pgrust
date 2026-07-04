@@ -140,15 +140,32 @@ fn ExecuteTruncateGuts<'mcx>(
         catalog_heap::heap_truncate_check_FKs(mcx, rels, false)?;
     }
 
-    // ExecBS/ASTruncateTriggers fire only TRIGGER_TYPE_TRUNCATE triggers; FK RI
-    // triggers set relhastriggers but never that type, so they pass through.
+    // The BS/AS TRUNCATE trigger bracket (C creates an EState + relinfos;
+    // the caches below are its per-statement ri_TrigFunctions/WhenExprs).
+    let mut trig_state: Vec<Option<(
+        std::rc::Rc<types_trigger::TriggerDesc<'static>>,
+        trigger::TriggerFmgrCache,
+        trigger::TriggerWhenCache<'mcx>,
+    )>> = Vec::with_capacity(rels.len());
+    let mut any_triggers = false;
     for rel in rels.iter() {
-        if rel.rd_hastriggers {
-            let trigdesc = relcache::RelationGetTriggerDesc(rel.rd_id)?;
-            if trigdesc.is_some_and(|d| {
-                d.trig_truncate_before_statement || d.trig_truncate_after_statement
-            }) {
-                unported("ExecuteTruncateGuts: TRUNCATE triggers (trigger lane)");
+        let entry = if rel.rd_hastriggers {
+            relcache::RelationGetTriggerDesc(rel.rd_id)?.map(|d| {
+                any_triggers = true;
+                (d, trigger::TriggerFmgrCache::default(), trigger::TriggerWhenCache::default())
+            })
+        } else {
+            None
+        };
+        trig_state.push(entry);
+    }
+    if any_triggers {
+        trigger::AfterTriggerBeginQuery();
+        for (rel, entry) in rels.iter().zip(trig_state.iter_mut()) {
+            if let Some((td, fmgr, when_cache)) = entry.as_mut() {
+                let mut when =
+                    trigger::TriggerWhenEval { mcx, cache: when_cache, modified_cols: None };
+                trigger::ExecBSTruncateTriggers(mcx, rel, td, fmgr, &mut when)?;
             }
         }
     }
@@ -189,6 +206,17 @@ fn ExecuteTruncateGuts<'mcx>(
     }
     // XLOG_HEAP_TRUNCATE rides wal_level=logical, const-false here as in the
     // visibilitymap catalog-rel gate.
+
+    if any_triggers {
+        for (rel, entry) in rels.iter().zip(trig_state.iter_mut()) {
+            if let Some((td, _, when_cache)) = entry.as_mut() {
+                let mut when =
+                    trigger::TriggerWhenEval { mcx, cache: when_cache, modified_cols: None };
+                trigger::ExecASTruncateTriggers(rel, td, Some(&mut when))?;
+            }
+        }
+        trigger::AfterTriggerEndQuery()?;
+    }
 
     for rel in rels.drain(n_explicit..) {
         rel.close(NoLock)?;

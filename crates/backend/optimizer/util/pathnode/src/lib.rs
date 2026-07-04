@@ -105,6 +105,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_TidRangeScan) => true,
         t if t == tag16(NodeTag::T_BitmapHeapScan) => true,
         t if t == tag16(NodeTag::T_CteScan) => true,
+        t if t == tag16(NodeTag::T_NamedTuplestoreScan) => true,
         t if t == tag16(NodeTag::T_WorkTableScan) => true,
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
@@ -1018,6 +1019,19 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
     costsize::cost_ctescan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_namedtuplestorescan_path (pathnode.c); required_outer empty on this lane.
+pub fn create_namedtuplestorescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_NamedTuplestoreScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    costsize::cost_namedtuplestorescan(run, id, rel_id)?;
     Ok(id)
 }
 

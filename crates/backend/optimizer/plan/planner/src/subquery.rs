@@ -189,9 +189,8 @@ pub fn subquery_planner<'mcx>(
                         || run.suspended_roots.iter().any(|s| s.root.hasRecursion)
                 );
             }
-            RTEKind::RTE_NAMEDTUPLESTORE => {
-                panic!("subquery_planner (planner.c): {:?} RTE; M2 lane", rte.rtekind)
-            }
+            // C's default arm: an ENR RTE carries no preprocessable exprs.
+            RTEKind::RTE_NAMEDTUPLESTORE => {}
             RTEKind::RTE_GROUP => {
                 panic!("subquery_planner (planner.c): RTE_GROUP survey; M2 grouping lane")
             }

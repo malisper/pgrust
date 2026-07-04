@@ -763,22 +763,20 @@ fn transformFromClauseItem<'mcx>(
     match n.node_tag() {
         NodeTag::T_RangeVar => {
             let rv = n.as_range_var().unwrap();
-            // getNSItemForSpecialRelationTypes: an unqualified name is a CTE
-            // reference if any ctenamespace up the chain carries it (before
-            // plain-relation resolution); ENRs (p_queryEnv) stay loud.
+            // getNSItemForSpecialRelationTypes: an unqualified name resolves
+            // as a CTE, then an ENR, before plain-relation resolution.
             if rv.schemaname.is_none() {
-                if pstate.p_queryEnv.is_some() {
-                    panic!(
-                        "transformFromClauseItem (parse_clause.c): ENR reference \
-                         (scanNameSpaceForENR) unported — unit backend-parser-clause"
-                    );
-                }
                 let refname = rv.relname.expect("grammar always sets relname");
                 if let Some((cte, levelsup)) =
                     parse_relation::scanNameSpaceForCTE(pstate, refname)
                 {
                     let nsitem =
                         parse_relation::addRangeTableEntryForCTE(mcx, pstate, cte, levelsup, rv, true)?;
+                    let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
+                    return Ok((rtr, nsitem));
+                }
+                if parser_small1::name_matches_visible_ENR(pstate, refname) {
+                    let nsitem = parse_relation::addRangeTableEntryForENR(mcx, pstate, rv, true)?;
                     let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
                     return Ok((rtr, nsitem));
                 }
@@ -1391,11 +1389,22 @@ pub fn setTargetTable<'mcx>(
     alsoSource: bool,
     requiredPerms: types_nodes::parsenodes::AclMode,
 ) -> PgResult<i32> {
-    if relation.schemaname.is_none() && pstate.p_queryEnv.is_some() {
-        panic!(
-            "setTargetTable (parse_clause.c): scanNameSpaceForENR unported — \
-             unit backend-parser-clause"
-        );
+    if relation.schemaname.is_none()
+        && parser_small1::name_matches_visible_ENR(
+            pstate,
+            relation.relname.expect("grammar always sets relname"),
+        )
+    {
+        let relname = relation.relname.expect("grammar always sets relname");
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "relation \"{relname}\" cannot be the target of a modifying statement"
+                ))
+                .into_error()
+                .with_error_location(ErrorLocation::new("parse_clause.c", 0, "setTargetTable")),
+        ));
     }
     if let Some(old) = pstate.p_target_relation.take() {
         table::table_close(old, types_rel::NoLock)?;

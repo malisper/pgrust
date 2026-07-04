@@ -2,23 +2,29 @@
 // transaction-level deferred list, SET CONSTRAINTS state, and subxact
 // save/restore. Events re-fetch tuples by ctid under SnapshotAny as C's
 // table_tuple_fetch_row_version does (statement events carry no tuples).
-// LOUD: transition tables, WHEN/UPDATE-OF on the AFTER save path.
+// Transition tables: per-depth AfterTriggersTableData with tuplestores in the
+// hold registry; events reference them by index (C ats_table).
 use std::cell::{Cell, RefCell};
 
 use mcx::Mcx;
 use ri_triggers_seams::RiTriggerData;
 use types_core::{CommandId, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_nodes::nodes_enums::CmdType;
+use types_portal::TuplestoreHandle;
 use types_rel::{NoLock, Relation};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_trigger::{
     Trigger, TriggerDesc, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED, RI_TRIGGER_FK,
     RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_DISABLED, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT,
-    TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, TRIGGER_EVENT_UPDATE, TRIGGER_FIRES_ON_REPLICA,
-    TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_LEVEL_MASK,
-    TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK, TRIGGER_TYPE_UPDATE,
+    TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, TRIGGER_EVENT_TRUNCATE, TRIGGER_EVENT_UPDATE,
+    TRIGGER_FIRES_ON_REPLICA, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT,
+    TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK,
+    TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
 };
 use types_tuple::{HeapTupleData, ItemPointerData};
+
+use crate::exec::TriggerWhenEval;
 
 const F_RI_FKEY_CHECK_INS: Oid = 1644;
 const F_RI_FKEY_CHECK_UPD: Oid = 1645;
@@ -39,6 +45,202 @@ struct AfterTriggerEvent {
     tgoid: Oid,
     relid: Oid,
     firing_id: CommandId,
+    // C ats_table: index into this depth's TRANS_TABLES entry; MAX = none.
+    table_idx: u32,
+}
+
+pub(crate) struct TransTable {
+    relid: Oid,
+    cmd: CmdType,
+    closed: bool,
+    old_ts: TuplestoreHandle,
+    new_ts: TuplestoreHandle,
+}
+
+// C TransitionCaptureState: need flags + AfterTriggersTableData references
+// (depth-local indexes); handed to nodemodifytable per statement.
+pub struct TransitionCaptureState {
+    pub tcs_delete_old_table: bool,
+    pub tcs_update_old_table: bool,
+    pub tcs_update_new_table: bool,
+    pub tcs_insert_new_table: bool,
+    ins_idx: u32,
+    upd_idx: u32,
+    del_idx: u32,
+}
+
+impl TransitionCaptureState {
+    fn table_for(&self, event_op: u32) -> u32 {
+        match event_op {
+            TRIGGER_EVENT_INSERT => self.ins_idx,
+            TRIGGER_EVENT_UPDATE => self.upd_idx,
+            TRIGGER_EVENT_DELETE => self.del_idx,
+            _ => u32::MAX,
+        }
+    }
+}
+
+fn get_transition_table(depth: usize, relid: Oid, cmd: CmdType) -> u32 {
+    TRANS_TABLES.with(|t| {
+        let mut tt = t.borrow_mut();
+        while tt.len() <= depth {
+            tt.push(Vec::new());
+        }
+        let tables = &mut tt[depth];
+        if let Some(i) = tables
+            .iter()
+            .position(|tb| tb.relid == relid && tb.cmd == cmd && !tb.closed)
+        {
+            return i as u32;
+        }
+        tables.push(TransTable {
+            relid,
+            cmd,
+            closed: false,
+            old_ts: TuplestoreHandle::NULL,
+            new_ts: TuplestoreHandle::NULL,
+        });
+        (tables.len() - 1) as u32
+    })
+}
+
+fn ensure_store(depth: usize, idx: u32, old: bool) -> TuplestoreHandle {
+    TRANS_TABLES.with(|t| {
+        let mut tt = t.borrow_mut();
+        let tb = &mut tt[depth][idx as usize];
+        let slot = if old { &mut tb.old_ts } else { &mut tb.new_ts };
+        if slot.is_null() {
+            *slot = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(
+                false,
+                false,
+                init_small::globals::work_mem(),
+            ));
+        }
+        *slot
+    })
+}
+
+fn free_tables_at_depth(d: usize) {
+    TRANS_TABLES.with(|t| {
+        let mut tt = t.borrow_mut();
+        if let Some(tables) = tt.get_mut(d) {
+            for tb in tables.drain(..) {
+                tuplestore::hold::end(tb.old_ts);
+                tuplestore::hold::end(tb.new_ts);
+            }
+        }
+    });
+}
+
+// MakeTransitionCaptureState (trigger.c): None when no trigger wants a
+// transition table for this operation.
+pub fn MakeTransitionCaptureState(
+    trigdesc: &TriggerDesc<'_>,
+    relid: Oid,
+    cmd_type: CmdType,
+) -> PgResult<Option<TransitionCaptureState>> {
+    let (need_old_upd, need_new_upd, need_old_del, need_new_ins) = match cmd_type {
+        CmdType::CMD_INSERT => (false, false, false, trigdesc.trig_insert_new_table),
+        CmdType::CMD_UPDATE => (
+            trigdesc.trig_update_old_table,
+            trigdesc.trig_update_new_table,
+            false,
+            false,
+        ),
+        CmdType::CMD_DELETE => (false, false, trigdesc.trig_delete_old_table, false),
+        CmdType::CMD_MERGE => (
+            trigdesc.trig_update_old_table,
+            trigdesc.trig_update_new_table,
+            trigdesc.trig_delete_old_table,
+            trigdesc.trig_insert_new_table,
+        ),
+        other => panic!("unexpected CmdType: {other:?}"),
+    };
+    if !need_old_upd && !need_new_upd && !need_new_ins && !need_old_del {
+        return Ok(None);
+    }
+    let depth = QUERY_DEPTH.with(|c| c.get());
+    if depth < 0 {
+        return Err(outside_query());
+    }
+    let d = depth as usize;
+    let ins_idx = if need_new_ins {
+        let i = get_transition_table(d, relid, CmdType::CMD_INSERT);
+        ensure_store(d, i, false);
+        i
+    } else {
+        u32::MAX
+    };
+    let upd_idx = if need_old_upd || need_new_upd {
+        let i = get_transition_table(d, relid, CmdType::CMD_UPDATE);
+        if need_old_upd {
+            ensure_store(d, i, true);
+        }
+        if need_new_upd {
+            ensure_store(d, i, false);
+        }
+        i
+    } else {
+        u32::MAX
+    };
+    let del_idx = if need_old_del {
+        let i = get_transition_table(d, relid, CmdType::CMD_DELETE);
+        ensure_store(d, i, true);
+        i
+    } else {
+        u32::MAX
+    };
+    Ok(Some(TransitionCaptureState {
+        tcs_delete_old_table: need_old_del,
+        tcs_update_old_table: need_old_upd,
+        tcs_update_new_table: need_new_upd,
+        tcs_insert_new_table: need_new_ins,
+        ins_idx,
+        upd_idx,
+        del_idx,
+    }))
+}
+
+// AfterTriggerSaveEvent's transition-capture head, tuple-based; the caller
+// verified rel has no child-to-root conversion map.
+fn capture_transition_tuples(
+    tc: &TransitionCaptureState,
+    event: u32,
+    old_tup: Option<&HeapTupleData<'_>>,
+    new_tup: Option<&HeapTupleData<'_>>,
+) -> PgResult<()> {
+    let depth = QUERY_DEPTH.with(|c| c.get());
+    debug_assert!(depth >= 0);
+    let d = depth as usize;
+    if let Some(old) = old_tup {
+        let ts = match event {
+            TRIGGER_EVENT_DELETE if tc.tcs_delete_old_table => {
+                TRANS_TABLES.with(|t| t.borrow()[d][tc.del_idx as usize].old_ts)
+            }
+            TRIGGER_EVENT_UPDATE if tc.tcs_update_old_table => {
+                TRANS_TABLES.with(|t| t.borrow()[d][tc.upd_idx as usize].old_ts)
+            }
+            _ => TuplestoreHandle::NULL,
+        };
+        if !ts.is_null() {
+            tuplestore::hold::put_heap_tuple(ts, old)?;
+        }
+    }
+    if let Some(new) = new_tup {
+        let ts = match event {
+            TRIGGER_EVENT_INSERT if tc.tcs_insert_new_table => {
+                TRANS_TABLES.with(|t| t.borrow()[d][tc.ins_idx as usize].new_ts)
+            }
+            TRIGGER_EVENT_UPDATE if tc.tcs_update_new_table => {
+                TRANS_TABLES.with(|t| t.borrow()[d][tc.upd_idx as usize].new_ts)
+            }
+            _ => TuplestoreHandle::NULL,
+        };
+        if !ts.is_null() {
+            tuplestore::hold::put_heap_tuple(ts, new)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct SetConstraintState {
@@ -79,6 +281,8 @@ thread_local! {
     static TRANS_STACK: RefCell<Vec<SavedTrans>> = const { RefCell::new(Vec::new()) };
     // AfterTriggersTableData.before_trig_done, flattened to (depth, rel, op).
     static BEFORE_TRIG_DONE: RefCell<Vec<(i32, Oid, u32)>> = const { RefCell::new(Vec::new()) };
+    // AfterTriggersQueryData.tables, per query depth.
+    static TRANS_TABLES: RefCell<Vec<Vec<TransTable>>> = const { RefCell::new(Vec::new()) };
 }
 
 // before_stmt_triggers_fired (trigger.c): check-and-mark, once per rel+op per
@@ -195,6 +399,7 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
                         tgoid: ev.tgoid,
                         relid: ev.relid,
                         firing_id: 0,
+                        table_idx: ev.table_idx,
                     });
                     ev.flags |= AFTER_TRIGGER_DONE;
                 }
@@ -226,16 +431,16 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
             while i < evs.len() {
                 let ev = &evs[i];
                 if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
-                    return Some((ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid));
+                    return Some((ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx));
                 }
                 i += 1;
             }
             None
         });
-        let Some((ctid1, ctid2, event, tgoid, relid)) = next else {
+        let Some((ctid1, ctid2, event, tgoid, relid, table_idx)) = next else {
             break;
         };
-        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid)?;
+        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid, table_idx)?;
         with_list(sel, |evs| {
             let ev = &mut evs[i];
             ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
@@ -293,6 +498,7 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
         st[d].clear();
         st.truncate(d);
     });
+    free_tables_at_depth(d);
     BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd < depth));
     QUERY_DEPTH.with(|c| c.set(depth - 1));
     Ok(())
@@ -326,6 +532,10 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
 }
 
 pub fn AfterTriggerEndXact(_is_commit: bool) -> PgResult<()> {
+    let ndepths = TRANS_TABLES.with(|t| t.borrow().len());
+    for d in 0..ndepths {
+        free_tables_at_depth(d);
+    }
     XACT_EVENTS.with(|s| s.borrow_mut().clear());
     QUERY_STACK.with(|s| s.borrow_mut().clear());
     CON_STATE.with(|c| *c.borrow_mut() = None);
@@ -385,6 +595,11 @@ pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
         st.truncate(keep);
     });
     QUERY_DEPTH.with(|c| c.set(saved.query_depth));
+    let ndepths = TRANS_TABLES.with(|t| t.borrow().len());
+    let keep = (saved.query_depth + 1).max(0) as usize;
+    for d in keep..ndepths {
+        free_tables_at_depth(d);
+    }
     BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd <= saved.query_depth));
     XACT_EVENTS.with(|s| s.borrow_mut().truncate(saved.events_len));
     if saved.state_saved {
@@ -456,6 +671,7 @@ fn AfterTriggerExecute<'mcx>(
     event: u32,
     tgoid: Oid,
     relid: Oid,
+    table_idx: u32,
 ) -> PgResult<()> {
     let Some(trigdesc) = relcache::RelationGetTriggerDesc(relid)? else {
         return Ok(());
@@ -465,11 +681,34 @@ fn AfterTriggerExecute<'mcx>(
     };
     let rel = table::table_open(mcx, relid, NoLock)?;
 
+    // C L4516-4529: hand transition tuplestores to the function and mark the
+    // table closed so later statements get fresh stores.
+    let mut tg_oldtable = TuplestoreHandle::NULL;
+    let mut tg_newtable = TuplestoreHandle::NULL;
+    if table_idx != u32::MAX {
+        let depth = QUERY_DEPTH.with(|c| c.get());
+        debug_assert!(depth >= 0);
+        TRANS_TABLES.with(|t| {
+            let mut tt = t.borrow_mut();
+            let tb = &mut tt[depth as usize][table_idx as usize];
+            if trigger.tgoldtable.is_some() {
+                tg_oldtable = tb.old_ts;
+                tb.closed = true;
+            }
+            if trigger.tgnewtable.is_some() {
+                tg_newtable = tb.new_ts;
+                tb.closed = true;
+            }
+        });
+    }
+
     if event & TRIGGER_EVENT_ROW == 0 {
         let tg_event = event & TRIGGER_EVENT_OPMASK;
         let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
         let mut tdata =
             types_trigger_call::TriggerData::new(tg_event, &rel, None, None, trigger);
+        tdata.tg_oldtable = tg_oldtable.0;
+        tdata.tg_newtable = tg_newtable.0;
         // AFTER triggers: any returned tuple is discarded (C L4559-4567).
         let result =
             crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ());
@@ -505,6 +744,8 @@ fn AfterTriggerExecute<'mcx>(
             t2.as_mut(),
             trigger,
         );
+        tdata.tg_oldtable = tg_oldtable.0;
+        tdata.tg_newtable = tg_newtable.0;
         // AFTER ROW triggers: the returned tuple is ignored (C frees it).
         crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ())
     } else {
@@ -523,16 +764,7 @@ fn AfterTriggerExecute<'mcx>(
 
 fn trigger_enabled(t: &Trigger<'_>) -> bool {
     // SESSION_REPLICATION_ROLE_ORIGIN (the only ported role).
-    if t.tgenabled == TRIGGER_DISABLED || t.tgenabled == TRIGGER_FIRES_ON_REPLICA {
-        return false;
-    }
-    if t.tgqual.is_some() || t.tgnattr > 0 {
-        panic!(
-            "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
-             unported on the AFTER ROW save path"
-        );
-    }
-    true
+    t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_REPLICA
 }
 
 fn trigger_type_matches(tgtype: i16, event: i16) -> bool {
@@ -552,25 +784,32 @@ fn after_trigger_save_event<'mcx>(
     old_tup: Option<&HeapTupleData<'_>>,
     new_tup: Option<&HeapTupleData<'_>>,
     recheck_indexes: &[Oid],
+    transition_capture: Option<&TransitionCaptureState>,
+    mut when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
         return Err(outside_query());
     }
     let d = depth as usize;
-    for trigger in trigdesc.triggers.iter() {
+    for (tgindx, trigger) in trigdesc.triggers.iter().enumerate() {
         if !trigger_type_matches(trigger.tgtype, tgtype_event) {
             continue;
         }
         if !trigger_enabled(trigger) {
             continue;
         }
-        if trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some() {
-            panic!(
-                "AfterTriggerSaveEvent (trigger.c): transition tables unported \
-                 (trigger {})",
-                trigger.tgname.as_str()
-            );
+        if trigger.tgqual.is_some() || trigger.tgnattr > 0 {
+            let Some(w) = when.as_deref_mut() else {
+                panic!(
+                    "TriggerEnabled (trigger.c): WHEN/UPDATE-OF trigger fired \
+                     through a path without an evaluator (trigger {})",
+                    trigger.tgname.as_str()
+                );
+            };
+            if !w.check_tuples(tgindx, trigger, rel, event, old_tup, new_tup)? {
+                continue;
+            }
         }
         let is_update = event == TRIGGER_EVENT_UPDATE;
         let is_delete = event == TRIGGER_EVENT_DELETE;
@@ -618,6 +857,13 @@ fn after_trigger_save_event<'mcx>(
             | TRIGGER_EVENT_ROW
             | if trigger.tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 }
             | if trigger.tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 };
+        let table_idx = if trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some() {
+            transition_capture
+                .map(|tc| tc.table_for(event & TRIGGER_EVENT_OPMASK))
+                .unwrap_or(u32::MAX)
+        } else {
+            u32::MAX
+        };
         with_list(EvList::Query(d), |evs| {
             evs.push(AfterTriggerEvent {
                 flags: 0,
@@ -627,6 +873,7 @@ fn after_trigger_save_event<'mcx>(
                 tgoid: trigger.tgoid,
                 relid: rel.rd_id,
                 firing_id: 0,
+                table_idx,
             });
         });
     }
@@ -654,21 +901,24 @@ fn cancel_prior_stmt_triggers(relid: Oid, op: u32) {
 }
 
 // AfterTriggerSaveEvent, statement-level arm (row_trigger=false): no tuples,
-// both ctids invalid.
-fn save_stmt_event(
-    rel: &Relation<'_>,
+// both ctids invalid. TRUNCATE never cancels a prior set (C's switch).
+fn save_stmt_event<'mcx>(
+    rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
     event: u32,
     tgtype_event: i16,
-    transition_capture_possible: bool,
+    transition_capture: Option<&TransitionCaptureState>,
+    mut when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
         return Err(outside_query());
     }
     let d = depth as usize;
-    cancel_prior_stmt_triggers(rel.rd_id, event & TRIGGER_EVENT_OPMASK);
-    for trigger in trigdesc.triggers.iter() {
+    if event != TRIGGER_EVENT_TRUNCATE {
+        cancel_prior_stmt_triggers(rel.rd_id, event & TRIGGER_EVENT_OPMASK);
+    }
+    for (tgindx, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype
             & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
             != TRIGGER_TYPE_STATEMENT | TRIGGER_TYPE_AFTER | tgtype_event
@@ -678,18 +928,28 @@ fn save_stmt_event(
         if !trigger_enabled(trigger) {
             continue;
         }
-        if transition_capture_possible
-            && (trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some())
-        {
-            panic!(
-                "AfterTriggerSaveEvent (trigger.c): transition tables unported \
-                 (trigger {})",
-                trigger.tgname.as_str()
-            );
+        if trigger.tgqual.is_some() || trigger.tgnattr > 0 {
+            let Some(w) = when.as_deref_mut() else {
+                panic!(
+                    "TriggerEnabled (trigger.c): WHEN/UPDATE-OF trigger fired \
+                     through a path without an evaluator (trigger {})",
+                    trigger.tgname.as_str()
+                );
+            };
+            if !w.check_tuples(tgindx, trigger, rel, event, None, None)? {
+                continue;
+            }
         }
         let ats_event = (event & TRIGGER_EVENT_OPMASK)
             | if trigger.tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 }
             | if trigger.tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 };
+        let table_idx = if trigger.tgoldtable.is_some() || trigger.tgnewtable.is_some() {
+            transition_capture
+                .map(|tc| tc.table_for(event & TRIGGER_EVENT_OPMASK))
+                .unwrap_or(u32::MAX)
+        } else {
+            u32::MAX
+        };
         with_list(EvList::Query(d), |evs| {
             evs.push(AfterTriggerEvent {
                 flags: 0,
@@ -699,6 +959,7 @@ fn save_stmt_event(
                 tgoid: trigger.tgoid,
                 relid: rel.rd_id,
                 firing_id: 0,
+                table_idx,
             });
         });
     }
@@ -708,54 +969,104 @@ fn save_stmt_event(
 pub fn ExecASInsertTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     if !trigdesc.trig_insert_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_INSERT, true)
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_INSERT, transition_capture, when)
 }
 
 pub fn ExecASDeleteTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     if !trigdesc.trig_delete_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_DELETE, TRIGGER_TYPE_DELETE, true)
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_DELETE, TRIGGER_TYPE_DELETE, transition_capture, when)
 }
 
 pub fn ExecASUpdateTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     if !trigdesc.trig_update_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_UPDATE, TRIGGER_TYPE_UPDATE, true)
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_UPDATE, TRIGGER_TYPE_UPDATE, transition_capture, when)
 }
 
+// ExecASTruncateTriggers (trigger.c).
+pub fn ExecASTruncateTriggers<'mcx>(
+    rel: &Relation<'mcx>,
+    trigdesc: &TriggerDesc<'static>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+) -> PgResult<()> {
+    if !trigdesc.trig_truncate_after_statement {
+        return Ok(());
+    }
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_TRUNCATE, TRIGGER_TYPE_TRUNCATE, None, when)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn ExecARInsertTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: Option<&TriggerDesc<'static>>,
     new_tid: ItemPointerData,
     recheck_indexes: &[Oid],
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
-    if !trigdesc.trig_insert_after_row {
+    let after_row = trigdesc.is_some_and(|td| td.trig_insert_after_row);
+    let capture = transition_capture.filter(|tc| tc.tcs_insert_new_table);
+    if !after_row && capture.is_none() {
         return Ok(());
+    }
+    // C evaluates WHEN quals against the executor slots at queue time; the
+    // ctid re-fetch stands in for them (capture needs the tuple anyway).
+    let need_tuple = capture.is_some()
+        || trigdesc.is_some_and(|td| td.triggers.iter().any(|t| t.tgqual.is_some()));
+    let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
+    let mut r_new = None;
+    if need_tuple {
+        let r = heapam::heap_fetch(rel, &snap, new_tid, false)?;
+        if !r.found {
+            return Err(fetch_failed(1));
+        }
+        r_new = Some(r);
+    }
+    let new_t = r_new.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
+    if let Some(tc) = capture {
+        capture_transition_tuples(
+            tc,
+            TRIGGER_EVENT_INSERT,
+            None,
+            Some(new_t.as_ref().expect("fetched above")),
+        )?;
+        if !after_row {
+            return Ok(());
+        }
     }
     after_trigger_save_event(
         mcx,
         rel,
-        trigdesc,
+        trigdesc.expect("after_row implies a trigdesc"),
         TRIGGER_EVENT_INSERT,
         TRIGGER_TYPE_INSERT,
         new_tid,
         ItemPointerData::default(),
         None,
-        None,
+        new_t.as_ref(),
         recheck_indexes,
+        transition_capture,
+        when,
     )
 }
 
@@ -764,9 +1075,35 @@ pub fn ExecARDeleteTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &TriggerDesc<'static>,
     old_tid: ItemPointerData,
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
-    if !trigdesc.trig_delete_after_row {
+    let capture = transition_capture.filter(|tc| tc.tcs_delete_old_table);
+    if !trigdesc.trig_delete_after_row && capture.is_none() {
         return Ok(());
+    }
+    let need_tuple =
+        capture.is_some() || trigdesc.triggers.iter().any(|t| t.tgqual.is_some());
+    let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
+    let mut r_old = None;
+    if need_tuple {
+        let r = heapam::heap_fetch(rel, &snap, old_tid, false)?;
+        if !r.found {
+            return Err(fetch_failed(1));
+        }
+        r_old = Some(r);
+    }
+    let old_t = r_old.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
+    if let Some(tc) = capture {
+        capture_transition_tuples(
+            tc,
+            TRIGGER_EVENT_DELETE,
+            Some(old_t.as_ref().expect("fetched above")),
+            None,
+        )?;
+        if !trigdesc.trig_delete_after_row {
+            return Ok(());
+        }
     }
     after_trigger_save_event(
         mcx,
@@ -776,12 +1113,15 @@ pub fn ExecARDeleteTriggers<'mcx>(
         TRIGGER_TYPE_DELETE,
         old_tid,
         ItemPointerData::default(),
-        None,
+        old_t.as_ref(),
         None,
         &[],
+        transition_capture,
+        when,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ExecARUpdateTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -789,11 +1129,15 @@ pub fn ExecARUpdateTriggers<'mcx>(
     old_tid: ItemPointerData,
     new_tid: ItemPointerData,
     recheck_indexes: &[Oid],
+    transition_capture: Option<&TransitionCaptureState>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
-    if !trigdesc.trig_update_after_row {
+    let capture = transition_capture
+        .filter(|tc| tc.tcs_update_old_table || tc.tcs_update_new_table);
+    if !trigdesc.trig_update_after_row && capture.is_none() {
         return Ok(());
     }
-    // GetTupleForTrigger's fetch, for the RI-skip inspections.
+    // GetTupleForTrigger's fetch, for the RI-skip inspections and capture.
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
     let r_old = heapam::heap_fetch(rel, &snap, old_tid, false)?;
     if !r_old.found {
@@ -805,6 +1149,12 @@ pub fn ExecARUpdateTriggers<'mcx>(
     }
     let old_t = r_old.tuple().expect("found fetch has a tuple");
     let new_t = r_new.tuple().expect("found fetch has a tuple");
+    if let Some(tc) = capture {
+        capture_transition_tuples(tc, TRIGGER_EVENT_UPDATE, Some(&old_t), Some(&new_t))?;
+        if !trigdesc.trig_update_after_row {
+            return Ok(());
+        }
+    }
     after_trigger_save_event(
         mcx,
         rel,
@@ -816,6 +1166,8 @@ pub fn ExecARUpdateTriggers<'mcx>(
         Some(&old_t),
         Some(&new_t),
         recheck_indexes,
+        transition_capture,
+        when,
     )
 }
 

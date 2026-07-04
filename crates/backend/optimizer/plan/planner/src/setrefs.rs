@@ -412,6 +412,27 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("CteScan node");
             }
         }
+        NodeTag::T_NamedTuplestoreScan => {
+            let s = plan.as_named_tuplestore_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::NamedTuplestoreScan, _>(|s| {
+                        if let Some(tl) = tl {
+                            s.scan.plan.targetlist = tl;
+                        }
+                        if let Some(q) = qual {
+                            s.scan.plan.qual = q;
+                        }
+                        s.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("NamedTuplestoreScan node");
+            }
+        }
         NodeTag::T_WorkTableScan => {
             let s = plan.as_work_table_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);

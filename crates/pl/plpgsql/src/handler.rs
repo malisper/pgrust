@@ -1411,10 +1411,8 @@ fn plpgsql_exec_trigger(
     estate.datums[func.old_varno as usize] = crate::exec::DatumVal::Rec(Some(old_rv));
 
     if trigdata.tg_trigger.tgoldtable.is_some() || trigdata.tg_trigger.tgnewtable.is_some() {
-        panic!(
-            "SPI_register_trigger_data (spi.c): transition tables unported — \
-             unit backend-executor-spi"
-        );
+        let rc = spi::SPI_register_trigger_data(trigdata)?;
+        assert_eq!(rc, spi::SPI_OK_TD_REGISTER, "SPI_register_trigger_data failed");
     }
 
     fulfill_trigger_promises(&mut estate, func, trigdata)?;

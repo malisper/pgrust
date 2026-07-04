@@ -7841,6 +7841,15 @@ impl<'mcx> Parser<'mcx> {
             // opt_if_not_exists: IF_P NOT EXISTS | /*EMPTY*/
             888 => *yyval = YYSTYPE::Boolean(true),
             889 => *yyval = YYSTYPE::Boolean(false),
+            1876 => {
+                let n = view.v(1).node().expect("relation_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1877 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("relation_expr"))?;
+                *yyval = YYSTYPE::List(list);
+            }
             // CompositeTypeStmt: CREATE TYPE_P any_name AS '(' OptTableFuncElementList ')'
             853 => {
                 let names = view.v(3).list();

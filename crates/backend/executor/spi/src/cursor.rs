@@ -126,7 +126,7 @@ pub fn SPI_cursor_open(
         let params = cursor_params(&portal, &state.argtypes, values, nulls)?;
 
         let query_string = plancache::CachedPlanQueryString(psrc);
-        let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
+        let cplan = plancache::GetCachedPlan(psrc, params, None, crate::current_query_env())?;
         let stmt_slice = plancache::CachedPlanStmtList(cplan);
         // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice
         // until PortalDrop releases it (prepare.c precedent).
@@ -146,6 +146,7 @@ pub fn SPI_cursor_open(
             if p.cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL) == 0 {
                 p.cursorOptions |= CURSOR_OPT_NO_SCROLL;
             }
+            p.queryEnv = crate::current_query_env();
         }
 
         if read_only {

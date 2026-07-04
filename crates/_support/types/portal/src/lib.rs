@@ -95,7 +95,7 @@ extern_handle!(
     TuplestoreHandle,
 );
 
-mcx::forget_safe_nodrop!(ParamListHandle);
+mcx::forget_safe_nodrop!(ParamListHandle, QueryEnvHandle, TuplestoreHandle);
 
 // C's `void (*cleanup)(Portal)` is only ever NULL or portalcmds.c's
 // PortalCleanup: a closed set, so an enum rather than a pointer.

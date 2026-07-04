@@ -11,6 +11,8 @@ use types_portal::TuplestoreHandle;
 use types_rel::NoLock;
 use types_tuple::TupleDescData;
 
+pub mod hold;
+
 #[cfg(test)]
 mod tests;
 

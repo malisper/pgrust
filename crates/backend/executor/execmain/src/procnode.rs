@@ -67,6 +67,7 @@ pub enum PlanStateNode<'mcx> {
     Memoize(PgBox<'mcx, MemoizeNode<'mcx>>),
     RecursiveUnion(PgBox<'mcx, RecursiveUnionNode<'mcx>>),
     WorkTableScan(PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>),
+    NamedTuplestoreScan(PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -256,6 +257,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             // Divergence: C's RU has no ExprContext, only the tempContext here.
             PlanStateNode::RecursiveUnion(ru) => ru.state.ps_ExprContext,
             PlanStateNode::WorkTableScan(wts) => Some(wts.ss.ps_ExprContext),
+            PlanStateNode::NamedTuplestoreScan(nts) => Some(nts.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_)
@@ -297,7 +299,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::Append(_)
             | PlanStateNode::SubqueryScan(_)
             | PlanStateNode::RecursiveUnion(_)
-            | PlanStateNode::WorkTableScan(_) => crate::exec_type_from_tl(&plan.targetlist),
+            | PlanStateNode::WorkTableScan(_)
+            | PlanStateNode::NamedTuplestoreScan(_) => crate::exec_type_from_tl(&plan.targetlist),
             // The tlist is NIL (empty type) without RETURNING, else the first
             // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
@@ -940,6 +943,16 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::WorkTableScan(::mcx::alloc_in(mcx, state)?)
         }
+        NodeTag::T_NamedTuplestoreScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodenamedtuplestorescan::exec_init_named_tuplestore_scan(
+                mcx,
+                node.as_named_tuplestore_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::NamedTuplestoreScan(::mcx::alloc_in(mcx, state)?)
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -1035,6 +1048,7 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::TableFuncScan(ts) => Some(&mut ts.ss),
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
+        PlanStateNode::NamedTuplestoreScan(nts) => Some(&mut nts.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
         PlanStateNode::TidScan(ts) => Some(&mut ts.ss),
         PlanStateNode::TidRangeScan(ts) => Some(&mut ts.ss),
@@ -1086,6 +1100,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::SetOp(s) => set_op_arm(s, estate),
         PlanStateNode::RecursiveUnion(ru) => recursive_union_arm(ru, estate),
         PlanStateNode::WorkTableScan(wts) => work_table_scan_arm(wts, estate),
+        PlanStateNode::NamedTuplestoreScan(nts) => named_tuplestore_scan_arm(nts, estate),
         PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
         PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
@@ -1755,6 +1770,14 @@ fn work_table_scan_arm<'mcx>(
 }
 
 #[inline(never)]
+fn named_tuplestore_scan_arm<'mcx>(
+    nts: &mut PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodenamedtuplestorescan::exec_named_tuplestore_scan(nts, estate)
+}
+
+#[inline(never)]
 fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let NestLoopNode { state, outer, inner } = nl;
     ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
@@ -1946,6 +1969,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::TableFuncScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
+        PlanStateNode::NamedTuplestoreScan(nts) => end_scan(&mut nts.ss),
         PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
         PlanStateNode::TidScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::TidRangeScan(ts) => end_scan(&mut ts.ss),
@@ -2046,6 +2070,7 @@ pub fn planstate_instr_extra<'mcx>(
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
         PlanStateNode::WorkTableScan(_)
+        | PlanStateNode::NamedTuplestoreScan(_)
         | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
@@ -2204,6 +2229,9 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
         PlanStateNode::WorkTableScan(_) => Ok(()),
+        // C frees the exec state only; the tuplestore stays with its
+        // registrant (the trigger side owns reldata).
+        PlanStateNode::NamedTuplestoreScan(_) => Ok(()),
         PlanStateNode::RecursiveUnion(ru) => {
             let ru = &mut **ru;
             ::noderecursiveunion::exec_end_recursive_union(&mut ru.state, estate);
@@ -2253,6 +2281,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         | PlanStateNode::ValuesScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::WorkTableScan(_)
+        | PlanStateNode::NamedTuplestoreScan(_)
         | PlanStateNode::IndexScan(_)
         | PlanStateNode::TidScan(_)
         | PlanStateNode::TidRangeScan(_)
@@ -2551,6 +2580,6 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
         MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),
-        RecursiveUnion(x), WorkTableScan(x), Instrumented(x),
+        RecursiveUnion(x), WorkTableScan(x), NamedTuplestoreScan(x), Instrumented(x),
     },
 );

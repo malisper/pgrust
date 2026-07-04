@@ -299,9 +299,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         exec_check_xact_read_only(pstmt)?;
     }
 
-    if !qd.query_env.is_null() {
-        panic!("standard_ExecutorStart (execMain.c): QueryEnvironment wiring not ported");
-    }
+    let query_env = qd.query_env;
 
     let mut output_cid: CommandId = 0;
     match qd.operation {
@@ -368,6 +366,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
                 .try_reserve_exact(n_exec)
                 .map_err(|_| _mcx.oom(n_exec))?;
             es.es_param_subplans.extend(core::iter::repeat_n(None, n_exec));
+        }
+        if !query_env.is_null() {
+            // SAFETY: the registrant keeps the environment alive across this
+            // query's execution (queryenvironment::hold contract).
+            es.es_queryEnv = Some(unsafe { ::queryenvironment::hold::resolve(query_env) });
         }
         es.es_sourceText = Some(source_text);
         es.es_output_cid = output_cid;

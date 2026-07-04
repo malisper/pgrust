@@ -521,3 +521,88 @@ fn cannot_cast_bound(mcx: Mcx<'_>, col_type: Oid, col_name: &str) -> Box<PgError
         .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
     )
 }
+
+fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
+    mcx::vec_append_bytes(&mut buf, s.as_bytes())?;
+    Ok(core::str::from_utf8(buf.leak()).expect("was UTF-8"))
+}
+
+// CloneRowTriggersToPartition (tablecmds.c): reconstruct each of the parent's
+// non-internal row triggers as a CreateTrigStmt against the partition, with
+// tgparentid pointing at the parent trigger.
+pub(crate) fn CloneRowTriggersToPartition<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent: &Relation<'mcx>,
+    partition: &Relation<'mcx>,
+) -> PgResult<()> {
+    use types_trigger::{
+        TRIGGER_TYPE_AFTER, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_EVENT_MASK, TRIGGER_TYPE_ROW,
+        TRIGGER_TYPE_TIMING_MASK,
+    };
+    let Some(trigdesc) = relcache::RelationGetTriggerDesc(parent.rd_id)? else {
+        return Ok(());
+    };
+    for trig in trigdesc.triggers.iter() {
+        if trig.tgtype & TRIGGER_TYPE_ROW == 0 {
+            continue;
+        }
+        if trig.tgisinternal {
+            continue;
+        }
+        let timing = trig.tgtype & TRIGGER_TYPE_TIMING_MASK;
+        if timing != TRIGGER_TYPE_BEFORE && timing != TRIGGER_TYPE_AFTER {
+            panic!("unexpected trigger \"{}\" found", trig.tgname.as_str());
+        }
+        let qual = match &trig.tgqual {
+            Some(q) => {
+                let node = readfuncs::stringToNode(mcx, q.as_str())?;
+                Some(trigger::map_partition_qual(mcx, node, partition, parent)?)
+            }
+            None => None,
+        };
+        let mut cols = NodeList::nil();
+        for &attnum in trig.tgattr.iter() {
+            let att = parent.rd_att.attr(attnum as usize - 1);
+            let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            cols.lappend(mcx, Node::mk_string(mcx, str_in(mcx, name)?)?)?;
+        }
+        let mut trigargs = NodeList::nil();
+        for a in trig.tgargs.iter() {
+            trigargs.lappend(mcx, Node::mk_string(mcx, str_in(mcx, a.as_str())?)?)?;
+        }
+        let stmt = types_nodes::rawnodes::CreateTrigStmt {
+            replace: false,
+            isconstraint: trig.tgconstraint != InvalidOid,
+            trigname: Some(str_in(mcx, trig.tgname.as_str())?),
+            relation: None,
+            funcname: NodeList::nil(),
+            args: trigargs,
+            row: true,
+            timing: trig.tgtype & TRIGGER_TYPE_TIMING_MASK,
+            events: trig.tgtype & TRIGGER_TYPE_EVENT_MASK,
+            columns: cols,
+            whenClause: None,
+            transitionRels: NodeList::nil(),
+            deferrable: trig.tgdeferrable,
+            initdeferred: trig.tginitdeferred,
+            constrrel: None,
+        };
+        trigger::CreateTriggerFiringOn(
+            mcx,
+            &stmt,
+            None,
+            partition.rd_id,
+            trig.tgconstrrelid,
+            InvalidOid,
+            InvalidOid,
+            trig.tgfoid,
+            trig.tgoid,
+            qual,
+            false,
+            true,
+            trig.tgenabled,
+        )?;
+    }
+    Ok(())
+}

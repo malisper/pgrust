@@ -75,6 +75,10 @@ pub fn exec_re_scan<'mcx>(
             ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate);
             Ok(())
         }
+        PlanStateNode::NamedTuplestoreScan(nts) => {
+            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate);
+            Ok(())
+        }
         // The inner term takes C's chgParam={wtParam} deferred rescan, eagerly.
         PlanStateNode::RecursiveUnion(ru) => {
             let ru = &mut **ru;
@@ -317,6 +321,9 @@ pub fn exec_re_scan_with_chg<'mcx>(
         }
         PlanStateNode::WorkTableScan(wts) => {
             ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)
+        }
+        PlanStateNode::NamedTuplestoreScan(nts) => {
+            ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)
         }
         // Inner gets chg + wtParam (C: bms_add_member onto the deferred set).
         PlanStateNode::RecursiveUnion(ru) => {
