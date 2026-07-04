@@ -56,6 +56,9 @@ struct BatchSoa<'mcx> {
     qual_armed: bool,
     // Scan-node drive: deform the qual column only; survivors deform lazily.
     qual_only: bool,
+    // Fused-sort direct key feed: deform this column only, never publish the
+    // prefix onto the slot (other prefix cells stay stale).
+    key_col: Option<u16>,
     qual_col: u16,
     qual_cmp: ::execexpr::CmpOp,
     qual_konst: ::datum::Datum,
@@ -180,7 +183,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
         return;
     }
     if let Some(b) = &node.batch_soa {
-        if b.plan.ncols() as i32 == prefix && b.qual_only == qual_only {
+        if b.plan.ncols() as i32 == prefix && b.qual_only == qual_only && b.key_col.is_none() {
             return;
         }
     }
@@ -209,6 +212,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 plan,
                 qual_armed: qual.is_some(),
                 qual_only: qual_only && qual.is_some(),
+                key_col: None,
                 qual_col: qual.map_or(0, |(a, _, _)| a),
                 qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
                 qual_konst: qual.map_or(::datum::Datum::null(), |(_, _, k)| k),
@@ -220,6 +224,76 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
             mcx,
         )
     });
+}
+
+/// Arm the fused-sort direct key feed: outer column 0 of the scan's output
+/// must be exactly one scan Var (bare single-column scan, or a single
+/// `JustAssignVar` projection) whose column the fixed-width SoA plan covers,
+/// with no qual. False leaves the per-row emit path armed and untouched.
+pub fn seq_scan_sortkey_direct<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if node.ss.qual.is_some() {
+        return false;
+    }
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let attnum = match node.ss.ps_ProjInfo.as_ref() {
+        None if rel.rd_att.natts == 1 => 0u16,
+        None => return false,
+        Some(p) => match p.pi_state.kernel() {
+            ::execexpr::Kernel::JustAssignVar {
+                src: ::execexpr::SlotSrc::Scan,
+                attnum,
+                resultnum: 0,
+            } => attnum,
+            _ => return false,
+        },
+    };
+    if let Some(b) = &node.batch_soa {
+        if b.key_col == Some(attnum) {
+            return true;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(plan) = ::exectuples::SoaDeformPlan::try_new(mcx, atts, attnum as usize + 1)
+    else {
+        return false;
+    };
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+            plan,
+            qual_armed: false,
+            qual_only: false,
+            key_col: Some(attnum),
+            qual_col: 0,
+            qual_cmp: ::execexpr::CmpOp::Int4Eq,
+            qual_konst: ::datum::Datum::null(),
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    true
+}
+
+/// Direct key read for staged row `i`; None = fallback row (narrow tuple),
+/// the caller must take the full emit path.
+#[inline(always)]
+pub fn seq_scan_batch_key<'mcx>(
+    node: &SeqScanState<'mcx>,
+    i: u32,
+) -> Option<(::datum::Datum, bool)> {
+    let b = node.batch_soa.as_deref().expect("direct key feed armed");
+    let c = b.key_col.expect("direct key feed armed") as usize;
+    if b.soa.is_fallback(i) {
+        return None;
+    }
+    Some((b.soa.col_values(c)[i as usize], b.soa.col_isnull(c)[i as usize]))
 }
 
 pub fn seq_scan_next_pagebatch<'mcx>(
@@ -234,7 +308,8 @@ pub fn seq_scan_next_pagebatch<'mcx>(
     if n > 0 {
         if let Some(b) = batch_soa.as_mut() {
             let b = &mut **b;
-            let qual_col_only = (b.qual_only && b.qual_armed).then_some(b.qual_col);
+            let qual_col_only =
+                (b.qual_only && b.qual_armed).then_some(b.qual_col).or(b.key_col);
             ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
             if b.qual_armed {
                 ::execexpr::qual_bitmap_cmp_const(
@@ -305,7 +380,7 @@ pub fn seq_scan_batch_store<'mcx>(
     let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
     ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
     if let Some(b) = node.batch_soa.as_ref() {
-        if !b.qual_only {
+        if !b.qual_only && b.key_col.is_none() {
             ::exectuples::soa_store_prefix(slot, &b.soa, i);
         }
     }

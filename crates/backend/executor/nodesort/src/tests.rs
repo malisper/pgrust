@@ -216,6 +216,125 @@ fn rescan_without_random_access_resorts() {
     assert_eq!(out, vec![vec![Some(1)], vec![Some(2)]]);
 }
 
+struct KeyFeed {
+    slot: ExecSlotId,
+    rows: Vec<Option<i32>>,
+    batch: usize,
+    base: usize,
+    n: u32,
+    // Rows whose index % 3 == 2 report as fallback and take the emit path.
+    direct: bool,
+}
+
+impl SortFeedSource<'static> for KeyFeed {
+    fn next_batch(&mut self, _estate: &mut EStateData<'static>) -> ::types_error::PgResult<u32> {
+        self.base += self.n as usize;
+        self.n = self.batch.min(self.rows.len() - self.base) as u32;
+        Ok(self.n)
+    }
+
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'static>,
+    ) -> ::types_error::PgResult<Option<ExecSlotId>> {
+        let v = self.rows[self.base + i as usize];
+        let mcx = estate.es_query_cxt;
+        let slot = estate.slot_mut(self.slot);
+        exectuples::exec_clear_tuple(slot, mcx);
+        let base = slot.base_mut();
+        base.tts_values[0] = v.map_or(Datum::null(), Datum::from_i32);
+        base.tts_isnull[0] = v.is_none();
+        exectuples::exec_store_virtual_tuple(slot);
+        Ok(Some(self.slot))
+    }
+
+    fn key_direct(&mut self, _estate: &mut EStateData<'static>) -> bool {
+        self.direct
+    }
+
+    fn emit_key(&mut self, i: u32) -> Option<(Datum, bool)> {
+        let idx = self.base + i as usize;
+        if idx % 3 == 2 {
+            return None;
+        }
+        let v = self.rows[idx];
+        Some((v.map_or(Datum::null(), Datum::from_i32), v.is_none()))
+    }
+}
+
+fn drain_batched(
+    node: &mut SortState<'static>,
+    estate: &mut EStateData<'static>,
+    outer_desc: &Rc<TupleDescData<'static>>,
+    feed: &mut KeyFeed,
+    limit: usize,
+) -> Vec<Option<i32>> {
+    let mut out = Vec::new();
+    while out.len() < limit {
+        let got = exec_sort_batched(node, estate, outer_desc.clone(), &mut *feed).unwrap();
+        let Some(id) = got else { break };
+        let mut isnull = false;
+        let v = exectuples::slot_getattr(estate.slot_mut(id), 1, &mut isnull);
+        out.push(if isnull { None } else { Some(v.as_i32()) });
+    }
+    out
+}
+
+impl<'mcx, S: SortFeedSource<'mcx>> SortFeedSource<'mcx> for &mut S {
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> ::types_error::PgResult<u32> {
+        (**self).next_batch(estate)
+    }
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> ::types_error::PgResult<Option<ExecSlotId>> {
+        (**self).emit(i, estate)
+    }
+    fn key_direct(&mut self, estate: &mut EStateData<'mcx>) -> bool {
+        (**self).key_direct(estate)
+    }
+    fn emit_key(&mut self, i: u32) -> Option<(Datum, bool)> {
+        (**self).emit_key(i)
+    }
+}
+
+#[test]
+fn datum_sort_direct_key_matches_emit_path() {
+    let rows: Vec<Option<i32>> = (0..1000)
+        .map(|i| if i % 7 == 0 { None } else { Some((i * 48271) % 997) })
+        .collect();
+    for bound in [None, Some(10)] {
+        let mut outs = Vec::new();
+        for direct in [false, true] {
+            install_seams();
+            let mcx = leaked_mcx();
+            let desc = int4_desc(mcx, 1);
+            let mut estate = EStateData::new_in(mcx);
+            let in_slot =
+                estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
+            let plan = mk_sort_plan(mcx, 1);
+            let mut node = exec_init_sort(plan, &mut estate, 0, &desc, desc.clone()).unwrap();
+            if let Some(b) = bound {
+                sort_set_tuple_bound(&mut node, b);
+            }
+            let mut feed =
+                KeyFeed { slot: in_slot, rows: rows.clone(), batch: 96, base: 0, n: 0, direct };
+            let out = drain_batched(
+                &mut node,
+                &mut estate,
+                &desc,
+                &mut feed,
+                bound.map_or(usize::MAX, |b| b as usize),
+            );
+            outs.push(out);
+        }
+        assert_eq!(outs[0], outs[1], "bound={bound:?}");
+        assert_eq!(outs[0].len(), bound.map_or(1000, |b| b as usize));
+    }
+}
+
 #[test]
 fn bound_pushdown_uses_bounded_sort() {
     let rows: Vec<Vec<Option<i32>>> = (0..500).rev().map(|i| vec![Some(i)]).collect();

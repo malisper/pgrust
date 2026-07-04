@@ -92,6 +92,16 @@ pub trait SortFeedSource<'mcx> {
         i: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>>;
+    /// True arms `emit_key`: outer column 0 is served straight from the
+    /// leaf's staged column array — value/null identical to `emit` +
+    /// slot_getsomeattrs(1), no qual, same row order.
+    fn key_direct(&mut self, _estate: &mut EStateData<'mcx>) -> bool {
+        false
+    }
+    /// None = staged row not covered (fallback); take the `emit` path.
+    fn emit_key(&mut self, _i: u32) -> Option<(Datum, bool)> {
+        None
+    }
 }
 
 /// `ExecSort` over a page-batched leaf (exec-batching rung 3): identical put
@@ -145,6 +155,7 @@ pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
         }
 
         if node.datumSort {
+            let direct = src.key_direct(estate);
             if ts.datum_sort_is_byref() {
                 loop {
                     let n = src.next_batch(estate)?;
@@ -152,6 +163,12 @@ pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
                         break;
                     }
                     for i in 0..n {
+                        if direct {
+                            if let Some((val, isnull)) = src.emit_key(i) {
+                                ts.putdatum(val, isnull)?;
+                                continue;
+                            }
+                        }
                         let Some(id) = src.emit(i, estate)? else { continue };
                         let slot = estate.slot_mut(id);
                         exectuples::slot_getsomeattrs(slot, 1);
@@ -166,6 +183,12 @@ pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
                         return Ok(());
                     }
                     for i in 0..n {
+                        if direct {
+                            if let Some((val, isnull)) = src.emit_key(i) {
+                                p.put(val, isnull)?;
+                                continue;
+                            }
+                        }
                         let Some(id) = src.emit(i, estate)? else { continue };
                         let slot = estate.slot_mut(id);
                         exectuples::slot_getsomeattrs(slot, 1);
