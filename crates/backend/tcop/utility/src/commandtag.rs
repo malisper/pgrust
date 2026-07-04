@@ -136,6 +136,12 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
                 types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
                 types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION => {
+                    CMDTAG_ALTER_PUBLICATION
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
+                    CMDTAG_ALTER_SUBSCRIPTION
+                }
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
@@ -150,6 +156,12 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
                 types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
                 types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION => {
+                    CMDTAG_ALTER_PUBLICATION
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
+                    CMDTAG_ALTER_SUBSCRIPTION
+                }
                 _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
             }
         }
