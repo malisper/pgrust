@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::execexpr::{
-    exec_build_projection_info, exec_eval_expr, exec_init_expr, exec_init_qual, exec_project,
-    exec_qual, EvalSlots, ExprState,
+    exec_build_projection_info_subplans, exec_eval_expr, exec_init_expr,
+    exec_init_qual_subplans, exec_project, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::PgBox;
@@ -168,9 +168,19 @@ pub fn exec_init_merge_join<'mcx>(
         if mj_FillInner { Some(null_slot(outer_desc, estate)) } else { None };
 
     let params = estate.param_bind();
-    let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None, params)?;
-    let otherqual = exec_init_qual(mcx, &node.join.plan.qual, params)?;
-    let joinqual = exec_init_qual(mcx, &node.join.joinqual, params)?;
+    let (proj, otherqual, joinqual) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let proj = exec_build_projection_info_subplans(
+                mcx,
+                &node.join.plan.targetlist,
+                None,
+                params,
+                env,
+            )?;
+            let otherqual = exec_init_qual_subplans(mcx, &node.join.plan.qual, params, env)?;
+            let joinqual = exec_init_qual_subplans(mcx, &node.join.joinqual, params, env)?;
+            Ok((proj, otherqual, joinqual))
+        })?;
 
     let clauses = examine_quals(node, estate)?;
 
@@ -386,7 +396,7 @@ fn eval_qual<'mcx>(
     which: Qual,
 ) -> PgResult<bool> {
     let inner_id = node.mj_InnerTupleSlot.expect("inner slot set");
-    eval_qual_with(node, estate, which, inner_id)
+    eval_qual_subplan_aware(node, estate, which, inner_id)
 }
 
 fn eval_qual_with<'mcx>(
@@ -408,6 +418,33 @@ fn eval_qual_with<'mcx>(
     exec_qual(state, &mut slots)
 }
 
+fn eval_qual_subplan_aware<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: Qual,
+    inner_id: ExecSlotId,
+) -> PgResult<bool> {
+    let has_sub = match which {
+        Qual::Join => node.joinqual.as_deref().is_some_and(|q| q.has_subplan()),
+        Qual::Other => node.otherqual.as_deref().is_some_and(|q| q.has_subplan()),
+    };
+    if has_sub {
+        let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
+        let ecxt = node.ps_ExprContext;
+        {
+            let e = estate.ecxt_mut(ecxt);
+            e.ecxt_innertuple = Some(inner_id);
+            e.ecxt_outertuple = Some(outer_id);
+        }
+        let state = match which {
+            Qual::Join => node.joinqual.as_deref_mut(),
+            Qual::Other => node.otherqual.as_deref_mut(),
+        };
+        return ::executils::exec_qual_with_subplans(state, estate, ecxt);
+    }
+    eval_qual_with(node, estate, which, inner_id)
+}
+
 fn project_result<'mcx>(
     node: &mut MergeJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -421,6 +458,18 @@ fn project_result_with<'mcx>(
     estate: &mut EStateData<'mcx>,
     inner_id: ExecSlotId,
 ) -> PgResult<ExecSlotId> {
+    if node.proj.has_subplan() {
+        let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
+        let ecxt = node.ps_ExprContext;
+        {
+            let e = estate.ecxt_mut(ecxt);
+            e.ecxt_innertuple = Some(inner_id);
+            e.ecxt_outertuple = Some(outer_id);
+        }
+        let result_id = node.ps_ResultTupleSlot;
+        ::executils::exec_project_with_subplans(&mut node.proj, estate, ecxt, result_id)?;
+        return Ok(result_id);
+    }
     let mcx = estate.es_query_cxt;
     let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
     let result_id = node.ps_ResultTupleSlot;
@@ -453,7 +502,7 @@ fn mj_fill_outer<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     let null_inner = node.mj_NullInnerTupleSlot.expect("null inner slot");
-    if eval_qual_with(node, estate, Qual::Other, null_inner)? {
+    if eval_qual_subplan_aware(node, estate, Qual::Other, null_inner)? {
         return Ok(Some(project_result_with(node, estate, null_inner)?));
     }
     estate.reset_expr_context(node.ps_ExprContext);

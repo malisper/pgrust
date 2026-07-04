@@ -315,6 +315,23 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
+/// ExecHashSubPlan's chgParam rebuild trigger, marked at the param change.
+pub(crate) fn mark_hashed_subplans_stale<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+) {
+    for i in 0..estate.es_subplan_expr_states.len() {
+        let (p, _) = estate.es_subplan_expr_states[i];
+        // SAFETY: entries are SubPlanExprStates leaked on this estate.
+        let sstate = unsafe { &mut *p.cast::<SubPlanExprState<'mcx>>().as_ptr() };
+        if let Some(h) = sstate.hashed.as_mut() {
+            if h.built && chg.overlap(&sstate.plan.as_plan().expect("plan node").extParam) {
+                h.built = false;
+            }
+        }
+    }
+}
+
 pub(crate) struct SubPlanExprState<'mcx> {
     sub_link_type: SubLinkType,
     first_col_type: ::types_core::Oid,
@@ -433,11 +450,6 @@ fn exec_init_sub_plan_expr<'mcx>(
     param_ids.extend(subplan.paramIds.iter());
 
     let hashed = if subplan.useHashTable {
-        assert!(
-            plan.as_plan().expect("plan node").extParam.is_empty(),
-            "ExecSubPlan (nodeSubplan.c): hashed SubPlan with external params \
-             (initplan-chained rebuild) not ported"
-        );
         Some(init_hashed_state(subplan, estate, params)?)
     } else {
         None
@@ -655,6 +667,11 @@ fn scan_sub_plan_loop<'mcx>(
 ) -> PgResult<NullableDatum> {
     let mcx = estate.es_query_cxt;
     let link = sstate.sub_link_type;
+    if let Some(te) = sstate.testexpr.as_deref_mut() {
+        // C evaluates the testexpr in ecxt_per_tuple_memory (RowExpr allocs).
+        // SAFETY: the ExprContext outlives the plan (reset-only).
+        unsafe { te.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    }
     if sstate.par_param.is_empty() {
         crate::execami::exec_re_scan(ps, estate)?;
     } else {

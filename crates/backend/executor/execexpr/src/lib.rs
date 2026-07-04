@@ -24,7 +24,8 @@ mod steps;
 mod tests;
 
 pub use compile::{
-    erase_fn_expr, exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
+    erase_fn_expr, exec_build_agg_projection_info, exec_build_agg_projection_info_subplans,
+    exec_build_agg_qual, exec_build_agg_qual_subplans, exec_build_agg_trans,
     exec_build_window_projection_info,
     exec_build_agg_trans_gsets, exec_build_agg_trans_hashed, exec_build_agg_trans_mixed,
     exec_build_grouping_equal,

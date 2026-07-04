@@ -5,7 +5,8 @@
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_projection_info, exec_init_qual, exec_project, exec_qual, EvalSlots, ExprState,
+    exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project, exec_qual,
+    EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::PgBox;
@@ -115,9 +116,19 @@ pub fn exec_init_nest_loop<'mcx>(
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
     let params = estate.param_bind();
-    let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None, params)?;
-    let otherqual = exec_init_qual(mcx, &node.join.plan.qual, params)?;
-    let joinqual = exec_init_qual(mcx, &node.join.joinqual, params)?;
+    let (proj, otherqual, joinqual) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let proj = exec_build_projection_info_subplans(
+                mcx,
+                &node.join.plan.targetlist,
+                None,
+                params,
+                env,
+            )?;
+            let otherqual = exec_init_qual_subplans(mcx, &node.join.plan.qual, params, env)?;
+            let joinqual = exec_init_qual_subplans(mcx, &node.join.joinqual, params, env)?;
+            Ok((proj, otherqual, joinqual))
+        })?;
 
     Ok(NestLoopState {
         plan: node,
@@ -190,8 +201,7 @@ where
             if !node.nl_MatchedOuter && node.nl_fill_outer {
                 let null_inner = node.nl_NullInnerTupleSlot.expect("null inner slot");
                 estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
-                let otherqual = node.otherqual.as_deref_mut();
-                let pass = with_qual_slots(estate, ecxt, |slots| exec_qual(otherqual, slots))?;
+                let pass = eval_join_qual(node.otherqual.as_deref_mut(), estate, ecxt)?;
                 if pass {
                     let result_slot = node.ps_ResultTupleSlot;
                     let proj = &mut *node.proj;
@@ -203,8 +213,7 @@ where
             continue;
         }
 
-        let joinqual = node.joinqual.as_deref_mut();
-        let matched = with_qual_slots(estate, ecxt, |slots| exec_qual(joinqual, slots))?;
+        let matched = eval_join_qual(node.joinqual.as_deref_mut(), estate, ecxt)?;
         if matched {
             node.nl_MatchedOuter = true;
             // An antijoin never returns a matched tuple.
@@ -215,8 +224,7 @@ where
             if node.js_single_match {
                 node.nl_NeedNewOuter = true;
             }
-            let otherqual = node.otherqual.as_deref_mut();
-            let pass = with_qual_slots(estate, ecxt, |slots| exec_qual(otherqual, slots))?;
+            let pass = eval_join_qual(node.otherqual.as_deref_mut(), estate, ecxt)?;
             if pass {
                 let result_slot = node.ps_ResultTupleSlot;
                 let proj = &mut *node.proj;
@@ -241,6 +249,17 @@ pub fn exec_end_nest_loop(node: &mut NestLoopState<'_>) {
 pub fn exec_rescan_nest_loop(node: &mut NestLoopState<'_>) {
     node.nl_NeedNewOuter = true;
     node.nl_MatchedOuter = false;
+}
+
+fn eval_join_qual<'mcx>(
+    qual: Option<&mut ExprState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<bool> {
+    if qual.as_ref().is_some_and(|q| q.has_subplan()) {
+        return ::executils::exec_qual_with_subplans(qual, estate, ecxt);
+    }
+    with_qual_slots(estate, ecxt, |slots| exec_qual(qual, slots))
 }
 
 fn with_qual_slots<'mcx, R>(
@@ -269,6 +288,9 @@ fn project_join_tuple<'mcx>(
     result: ExecSlotId,
     proj: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
+    if proj.has_subplan() {
+        return ::executils::exec_project_with_subplans(proj, estate, ecxt, result);
+    }
     let mcx = estate.es_query_cxt;
     let (inner_id, outer_id) = {
         let e = estate.ecxt(ecxt);

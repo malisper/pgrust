@@ -1,10 +1,10 @@
-// nodeValuesscan.c; SubPlan-bearing rows are loud (their eval state must
-// link into the outer plan tree, which this port does not model yet).
+// nodeValuesscan.c.
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
-use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots};
+use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots, ExprState};
+use ::mcx::PgBox;
 use ::execscan::{exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{Mcx, PgVec};
@@ -22,6 +22,9 @@ pub struct ValuesScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     rowcontext: EcxtId,
     exprlists: PgVec<'mcx, Node<'mcx>>,
+    /// C exprstatelists: SubPlan-bearing rows are pre-initialized once so
+    /// their SubPlan states link into the plan tree (nodeValuesscan.c).
+    exprstatelists: PgVec<'mcx, Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>>,
     curr_idx: i32,
     array_len: i32,
 }
@@ -51,6 +54,28 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
         }
 
         estate.ecxt_mut(self.rowcontext).reset();
+
+        if self.exprstatelists[self.curr_idx as usize].is_some() {
+            let rowcontext = self.rowcontext;
+            let scan_slot = self.ss.ss_ScanTupleSlot;
+            let states = self.exprstatelists[self.curr_idx as usize].as_mut().unwrap();
+            {
+                let natts = estate.slot_mut(scan_slot).base_mut().tts_values.len();
+                assert_eq!(states.len(), natts, "values row length vs scan tupdesc");
+            }
+            for resind in 0..states.len() {
+                let d = ::executils::exec_eval_expr_with_subplans(
+                    &mut states[resind],
+                    estate,
+                    rowcontext,
+                )?;
+                let base = estate.slot_mut(scan_slot).base_mut();
+                base.tts_values[resind] = d.value;
+                base.tts_isnull[resind] = d.isnull;
+            }
+            exectuples::exec_store_virtual_tuple(estate.slot_mut(scan_slot));
+            return Ok(true);
+        }
 
         let row = self.exprlists[self.curr_idx as usize].as_list().expect("values row is a List");
         {
@@ -127,18 +152,36 @@ pub fn exec_init_values_scan<'mcx>(
     let array_len = node.values_lists.len() as i32;
     let mut exprlists: PgVec<'mcx, Node<'mcx>> =
         mcx::vec_with_capacity_in(mcx, array_len as usize)?;
+    let mut exprstatelists: PgVec<'mcx, Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>> =
+        mcx::vec_with_capacity_in(mcx, array_len as usize)?;
     for row in &node.values_lists {
         if !estate.es_subplanstates.is_empty() && clauses::contain_subplans(row)? {
-            panic!(
-                "ExecInitValuesScan (nodeValuesscan.c): SubPlan in a VALUES row \
-                 (pre-initialized exprstatelists) unported — unit \
-                 backend-executor-nodeValuesscan"
-            );
+            let row_list = row.as_list().expect("values row is a List");
+            let pb = estate.param_bind();
+            let mut states: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
+                mcx::vec_with_capacity_in(mcx, row_list.len())?;
+            ::executils::with_subplan_compile_env(estate, |env| -> PgResult<()> {
+                for e in row_list.iter() {
+                    states.push(
+                        ::execexpr::exec_init_expr_subplans(mcx, Some(e), pb, env)?
+                            .expect("non-NULL values expression"),
+                    );
+                }
+                Ok(())
+            })?;
+            for st in states.iter_mut() {
+                // SAFETY: the rowcontext ExprContext outlives the program
+                // (same estate, reset-only).
+                unsafe { st.arm_result_mcx_raw(estate.ecxt(rowcontext).per_tuple_mcx()) };
+            }
+            exprstatelists.push(Some(states));
+        } else {
+            exprstatelists.push(None);
         }
         exprlists.push(row);
     }
 
-    Ok(ValuesScanState { ss, rowcontext, exprlists, curr_idx: -1, array_len })
+    Ok(ValuesScanState { ss, rowcontext, exprlists, exprstatelists, curr_idx: -1, array_len })
 }
 
 // ExecTypeFromExprList (execTuples.c): anonymous RECORD rowtype from the
@@ -178,5 +221,5 @@ pub fn exec_rescan_values_scan<'mcx>(
 }
 
 mcx::forget_safe_struct!(
-    ValuesScanState<'_> { ss, rowcontext, exprlists, curr_idx, array_len },
+    ValuesScanState<'_> { ss, rowcontext, exprlists, exprstatelists, curr_idx, array_len },
 );
