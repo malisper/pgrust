@@ -155,6 +155,44 @@ struct ChunkMeta {
 
 const END: u32 = u32::MAX;
 
+pub const DENSE_END: u32 = u32::MAX;
+const NULL_KEY: i64 = i64::MIN;
+
+struct KeyTrack<'mcx> {
+    col: u16,
+    keys: PgVec<'mcx, i64>,
+    min: i32,
+    max: i32,
+    any: bool,
+}
+
+/// Direct-address seat for dense int4 build keys (nbatch==1): per-key chains
+/// in insertion-prepend order = the bucket chain's same-key subsequence, so
+/// probe emission order matches C; buckets stay untouched (unmatched-scan and
+/// match-flag walk order preserved).
+pub struct DenseTable<'mcx> {
+    min: i32,
+    heads: PgVec<'mcx, u32>,
+    next: PgVec<'mcx, u32>,
+}
+
+impl DenseTable<'_> {
+    #[inline(always)]
+    pub fn head_for(&self, key: i32) -> u32 {
+        let off = key as i64 - self.min as i64;
+        if (off as u64) < self.heads.len() as u64 {
+            self.heads[off as usize]
+        } else {
+            DENSE_END
+        }
+    }
+
+    #[inline(always)]
+    pub fn next(&self, cur: u32) -> u32 {
+        self.next[cur as usize]
+    }
+}
+
 pub struct HashJoinTable<'mcx> {
     nbuckets: u32,
     log2_nbuckets: u32,
@@ -177,6 +215,8 @@ pub struct HashJoinTable<'mcx> {
     batch_cxt: AuxCxtId,
     form_plan: Option<MinimalFormPlan>,
     bloom: Option<ProbeBloom<'mcx>>,
+    track: Option<KeyTrack<'mcx>>,
+    dense: Option<DenseTable<'mcx>>,
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
@@ -216,6 +256,8 @@ impl<'mcx> HashJoinTable<'mcx> {
             bloom: bloom_est
                 .filter(|_| nbatch == 1)
                 .map(|est| ProbeBloom::new_in(mcx, est)),
+            track: None,
+            dense: None,
         };
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
@@ -309,6 +351,18 @@ impl<'mcx> HashJoinTable<'mcx> {
         if let Some(bf) = self.bloom.as_mut() {
             bf.insert(hashvalue);
         }
+        let tracked: i64 = match self.track.as_ref() {
+            Some(t) => {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(
+                    &mut estate.es_tupleTable[slot_id.0 as usize],
+                    t.col as i32 + 1,
+                    &mut isnull,
+                );
+                if isnull { NULL_KEY } else { v.as_i32() as i64 }
+            }
+            None => 0,
+        };
         let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
         if batchno == self.curbatch {
             let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
@@ -346,6 +400,31 @@ impl<'mcx> HashJoinTable<'mcx> {
                 (*hdr).hashvalue = hashvalue;
                 *head = hdr;
                 self.tuples.push(NonNull::new_unchecked(hdr));
+            }
+            if self.track.is_some() {
+                debug_assert!(self.nbatch == 1);
+                let mut kill = false;
+                {
+                    let t = self.track.as_mut().expect("just checked");
+                    if t.keys.len() == t.keys.capacity() {
+                        let add = t.keys.capacity().max(256);
+                        kill = t.keys.try_reserve(add).is_err();
+                    }
+                    if !kill {
+                        t.keys.push(tracked);
+                        if tracked != NULL_KEY {
+                            let k = tracked as i32;
+                            t.min = t.min.min(k);
+                            t.max = t.max.max(k);
+                            t.any = true;
+                            kill = (t.max as i64 - t.min as i64 + 1) as usize
+                                > self.space_allowed / core::mem::size_of::<u32>();
+                        }
+                    }
+                }
+                if kill {
+                    self.track = None;
+                }
             }
 
             if self.nbatch == 1 && ntuples > (self.nbuckets_optimal as f64) * NTUP_PER_BUCKET {
@@ -416,6 +495,8 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.inner_batch_file.resize_with(nbatch as usize, || None);
         self.outer_batch_file.resize_with(nbatch as usize, || None);
         self.nbatch = nbatch;
+        self.track = None;
+        self.dense = None;
 
         if self.nbuckets_optimal != self.nbuckets {
             debug_assert!(self.nbuckets_optimal > self.nbuckets);
@@ -504,12 +585,70 @@ impl<'mcx> HashJoinTable<'mcx> {
         if self.space_used > self.space_peak {
             self.space_peak = self.space_used;
         }
+        self.seat_dense(mcx)?;
         Ok(())
+    }
+
+    /// Caller guarantees hash-match semantics reduce to int4 key equality
+    /// on 0-based `col`.
+    pub fn arm_key_track(&mut self, col: u16) {
+        if self.nbatch != 1 || self.curbatch != 0 {
+            return;
+        }
+        let mcx = *self.tuples.allocator();
+        self.track = Some(KeyTrack {
+            col,
+            keys: PgVec::new_in(mcx),
+            min: i32::MAX,
+            max: i32::MIN,
+            any: false,
+        });
+    }
+
+    // Dense arrays are never charged to space_used (EXPLAIN parity).
+    fn seat_dense(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        let Some(t) = self.track.take() else { return Ok(()) };
+        if self.nbatch != 1 || !t.any || self.tuples.is_empty() {
+            return Ok(());
+        }
+        debug_assert_eq!(t.keys.len(), self.tuples.len());
+        let range = (t.max as i64 - t.min as i64 + 1) as usize;
+        if range > self.tuples.len().saturating_mul(4)
+            || range > self.space_allowed / core::mem::size_of::<u32>()
+        {
+            return Ok(());
+        }
+        let mut heads: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, range)?;
+        heads.resize(range, DENSE_END);
+        let mut next: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, t.keys.len())?;
+        next.resize(t.keys.len(), DENSE_END);
+        for (i, &k) in t.keys.iter().enumerate() {
+            if k == NULL_KEY {
+                continue;
+            }
+            let idx = (k - t.min as i64) as usize;
+            next[i] = heads[idx];
+            heads[idx] = i as u32;
+        }
+        self.dense = Some(DenseTable { min: t.min, heads, next });
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn dense(&self) -> Option<&DenseTable<'mcx>> {
+        self.dense.as_ref()
+    }
+
+    #[inline(always)]
+    pub fn dense_tuple(&self, cur: u32) -> NonNull<HashJoinTupleHdr> {
+        self.tuples[cur as usize]
     }
 
     /// `ExecHashTableReset`.
     pub fn reset(&mut self, estate: &mut EStateData<'mcx>) {
         estate.reset_aux_context(self.batch_cxt);
+        self.track = None;
+        self.dense = None;
         self.tuples.clear();
         self.buckets.clear();
         self.buckets.resize(self.nbuckets as usize, core::ptr::null_mut());
@@ -654,6 +793,11 @@ impl<'mcx> HashState<'mcx> {
     /// bound); None = shape unknown to the batch-deform planner.
     pub fn build_prefix(&self) -> Option<i32> {
         self.hash_expr.max_fetch(::execexpr::SlotSrc::Inner)
+    }
+
+    /// 0-based build key column of a single low-32 var hash (dense-key gate).
+    pub fn build_hash_col(&self) -> Option<u16> {
+        self.hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner)
     }
 }
 

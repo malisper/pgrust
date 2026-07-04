@@ -68,3 +68,36 @@ fn sel_hash32_low32_matches_scalar_semantics() {
         }
     });
 }
+
+#[test]
+fn dense_chain_reverse_insertion_and_bounds() {
+    let ctx = MemoryContext::new("nodehash-test");
+    let mcx = ctx.mcx();
+    let keys: [i64; 6] = [5, 7, 5, NULL_KEY, 6, 5];
+    let min = 5i32;
+    let range = 3usize;
+    let mut heads: PgVec<'_, u32> = vec_with_capacity_in(mcx, range).unwrap();
+    heads.resize(range, DENSE_END);
+    let mut next: PgVec<'_, u32> = vec_with_capacity_in(mcx, keys.len()).unwrap();
+    next.resize(keys.len(), DENSE_END);
+    for (i, &k) in keys.iter().enumerate() {
+        if k == NULL_KEY {
+            continue;
+        }
+        let idx = (k - min as i64) as usize;
+        next[i] = heads[idx];
+        heads[idx] = i as u32;
+    }
+    let d = DenseTable { min, heads, next };
+    assert_eq!(d.head_for(5), 5);
+    assert_eq!(d.next(5), 2);
+    assert_eq!(d.next(2), 0);
+    assert_eq!(d.next(0), DENSE_END);
+    assert_eq!(d.head_for(6), 4);
+    assert_eq!(d.next(4), DENSE_END);
+    assert_eq!(d.head_for(7), 1);
+    assert_eq!(d.head_for(4), DENSE_END);
+    assert_eq!(d.head_for(8), DENSE_END);
+    assert_eq!(d.head_for(i32::MIN), DENSE_END);
+    assert_eq!(d.head_for(i32::MAX), DENSE_END);
+}

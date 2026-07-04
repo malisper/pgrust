@@ -52,6 +52,9 @@ pub trait HashJoinOuter<'mcx> {
     ) -> PgResult<()> {
         Ok(())
     }
+
+    /// Once, when the dense table seats: probe hashes are dead from here on.
+    fn dense_armed(&mut self) {}
 }
 
 /// Filter + the 0-based outer-scan attnum of its hashint4/hashoid key.
@@ -85,6 +88,9 @@ pub struct HashJoinState<'mcx> {
     outer_saved_scratch: PgVec<'mcx, u64>,
     inner_saved_scratch: PgVec<'mcx, u64>,
     hash_instr: Option<u32>,
+    dense_cols: Option<(u16, u16)>,
+    dense_on: bool,
+    hj_CurDense: u32,
 }
 
 impl<'mcx> HashJoinState<'mcx> {
@@ -113,6 +119,26 @@ impl<'mcx> HashJoinState<'mcx> {
     /// 0-based outer key column when the probe hash is columnar-precomputable.
     pub fn probe_hash_col(&self) -> Option<u16> {
         self.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner)
+    }
+
+    // Static gate half: a single Int4Eq var=var hashclause over exactly the
+    // hashed key columns, so non-null key equality <=> prefilter + recheck.
+    fn dense_cols_of(
+        hashclauses: Option<&ExprState<'_>>,
+        outer_hash_expr: &ExprState<'_>,
+    ) -> Option<(u16, u16)> {
+        use ::execexpr::{CmpOp, Kernel, SlotSrc};
+        let Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp: CmpOp::Int4Eq } =
+            hashclauses?.kernel()
+        else {
+            return None;
+        };
+        let (o, i) = match (a_src, b_src) {
+            (SlotSrc::Outer, SlotSrc::Inner) => (a_attnum, b_attnum),
+            (SlotSrc::Inner, SlotSrc::Outer) => (b_attnum, a_attnum),
+            _ => return None,
+        };
+        (outer_hash_expr.hash32var_low32(SlotSrc::Inner) == Some(o)).then_some((o, i))
     }
 }
 
@@ -243,6 +269,7 @@ pub fn exec_init_hash_join<'mcx>(
         None
     };
 
+    let dense_cols = HashJoinState::dense_cols_of(hashclauses.as_deref(), &*outer_hash_expr);
     let hjstate = HashJoinState {
         plan: node,
         ps_ExprContext,
@@ -269,6 +296,9 @@ pub fn exec_init_hash_join<'mcx>(
         outer_saved_scratch: PgVec::new_in(mcx),
         inner_saved_scratch: PgVec::new_in(mcx),
         hash_instr,
+        dense_cols,
+        dense_on: false,
+        hj_CurDense: ::nodehash::DENSE_END,
     };
     Ok((hjstate, hash_state))
 }
@@ -294,6 +324,18 @@ where
                     && node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_some();
                 hash_state.table =
                     Some(::nodehash::exec_hash_table_create(hash_state, estate, want_filter)?);
+                // Instrumented plans never engage dense (fusion precedent).
+                if estate.es_instrument == 0 {
+                    if let Some((_, icol)) = node.dense_cols {
+                        if hash_state.build_hash_col() == Some(icol) {
+                            hash_state
+                                .table
+                                .as_mut()
+                                .expect("hash table created")
+                                .arm_key_track(icol);
+                        }
+                    }
+                }
                 // MultiExecHash provides its own instrumentation (the Hash
                 // node has no ExecProcNode wrapper).
                 let instr = node.hash_instr.map(|ix| ix as usize);
@@ -311,8 +353,11 @@ where
                     return Ok(None);
                 }
                 table.nbatch_outstart = table.nbatch;
+                node.dense_on = table.dense().is_some();
                 // fill_outer must null-extend unmatched outers — never arms.
-                let push = if !node.hj_fill_outer {
+                // Dense seat supersedes bloom: a dense-table miss is an exact
+                // miss, so push None (also disarms a stale filter on rebuild).
+                let push = if !node.hj_fill_outer && !node.dense_on {
                     node.outer_hash_expr
                         .hash32var_low32(::execexpr::SlotSrc::Inner)
                         .and_then(|key_attnum| {
@@ -324,8 +369,33 @@ where
                     None
                 };
                 outer.set_hash_filter(estate, push)?;
+                if node.dense_on {
+                    outer.dense_armed();
+                }
                 node.hj_OuterNotEmpty = false;
                 node.hj_JoinState = HJ_NEED_NEW_OUTER;
+            }
+            HJ_NEED_NEW_OUTER if node.dense_on => {
+                let Some((key, isnull)) = get_outer_key(node, outer, estate)? else {
+                    if node.hj_fill_inner {
+                        node.hj_CurBucketNo = 0;
+                        node.hj_CurTuple = core::ptr::null_mut();
+                        node.hj_JoinState = HJ_FILL_INNER_TUPLES;
+                    } else {
+                        node.hj_JoinState = HJ_NEED_NEW_BATCH;
+                    }
+                    continue;
+                };
+                node.hj_MatchedOuter = false;
+                node.hj_CurTuple = core::ptr::null_mut();
+                let dense = hash_state
+                    .table
+                    .as_ref()
+                    .expect("hash table built")
+                    .dense()
+                    .expect("dense seated");
+                node.hj_CurDense = if isnull { ::nodehash::DENSE_END } else { dense.head_for(key) };
+                node.hj_JoinState = HJ_SCAN_BUCKET;
             }
             HJ_NEED_NEW_OUTER => {
                 let Some(hashvalue) = get_outer_tuple(node, outer, hash_state, estate)? else {
@@ -379,7 +449,12 @@ where
                 node.hj_JoinState = HJ_SCAN_BUCKET;
             }
             HJ_SCAN_BUCKET => {
-                if !scan_hash_bucket(node, hash_state, estate)? {
+                let found = if node.dense_on {
+                    scan_dense(node, hash_state, estate)
+                } else {
+                    scan_hash_bucket(node, hash_state, estate)?
+                };
+                if !found {
                     node.hj_JoinState = HJ_FILL_OUTER_TUPLE;
                     continue;
                 }
@@ -673,6 +748,61 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
     }
 }
 
+// Every dense chain entry equals the probe key, so the hashvalue prefilter
+// and hashclause recheck are both proven true — no recheck per match.
+fn scan_dense<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let cur = node.hj_CurDense;
+    if cur == ::nodehash::DENSE_END {
+        return false;
+    }
+    let table = hash_state.table.as_ref().expect("hash table built");
+    node.hj_CurDense = table.dense().expect("dense seated").next(cur);
+    let hdr = table.dense_tuple(cur);
+    node.hj_CurTuple = hdr.as_ptr();
+    let hslot = hash_state.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    // SAFETY: entry images live in the batch arena until reset.
+    unsafe {
+        let tuple = HashJoinTupleHdr::mintuple(hdr.as_ptr());
+        exectuples::exec_store_minimal_tuple_ptr(
+            &mut estate.es_tupleTable[hslot.0 as usize],
+            mcx,
+            tuple,
+        );
+    }
+    estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
+    true
+}
+
+// Dense ExecHashJoinOuterGetTuple: nbatch==1, so no batch files, no hash.
+fn get_outer_key<'mcx, O: HashJoinOuter<'mcx>>(
+    node: &mut HashJoinState<'mcx>,
+    outer: &mut O,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<(i32, bool)>> {
+    let Some(slot_id) = outer.exec_proc(estate)? else {
+        return Ok(None);
+    };
+    {
+        let e = estate.ecxt_mut(node.ps_ExprContext);
+        e.reset();
+        e.ecxt_outertuple = Some(slot_id);
+    }
+    let (ocol, _) = node.dense_cols.expect("dense gate matched");
+    let mut isnull = false;
+    let v = exectuples::slot_getattr(
+        &mut estate.es_tupleTable[slot_id.0 as usize],
+        ocol as i32 + 1,
+        &mut isnull,
+    );
+    node.hj_OuterNotEmpty = true;
+    Ok(Some((v.as_i32(), isnull)))
+}
+
 // ExecScanHashBucket: prefilter on hashvalue, recheck via ExecQual.
 fn scan_hash_bucket<'mcx>(
     node: &mut HashJoinState<'mcx>,
@@ -804,6 +934,8 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
     node.hj_OuterNotEmpty = false;
+    node.dense_on = false;
+    node.hj_CurDense = ::nodehash::DENSE_END;
     Ok(())
 }
 
@@ -839,6 +971,7 @@ pub fn exec_rescan_hash_join<'mcx>(
                 .destroy()?;
             hash_state.table = None;
             node.hj_JoinState = HJ_BUILD_HASHTABLE;
+            node.dense_on = false;
             rescan_inner = RescanInner::Rescan;
         }
     }
@@ -846,6 +979,7 @@ pub fn exec_rescan_hash_join<'mcx>(
     node.hj_CurBucketNo = 0;
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
+    node.hj_CurDense = ::nodehash::DENSE_END;
     Ok(rescan_inner)
 }
 
@@ -918,7 +1052,8 @@ mcx::forget_safe_struct!(
         js_single_match, hj_fill_outer, hj_fill_inner, hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
         hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
-        outer_saved_scratch, inner_saved_scratch, hash_instr;
+        outer_saved_scratch, inner_saved_scratch, hash_instr,
+        dense_cols, dense_on, hj_CurDense;
         ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,
         outer_hash_expr },
 );
