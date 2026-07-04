@@ -1373,7 +1373,7 @@ fn collect_varattnos(
                 out.push(v.varattno);
             }
         }
-        NodeTag::T_Const | NodeTag::T_Param => {}
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => {}
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);
