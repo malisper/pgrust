@@ -4,7 +4,7 @@
 mod tests;
 
 use mcx::Mcx;
-use parse_expr::{expr_collation, expr_location, expr_type};
+use parse_expr::{expr_collation, expr_location, expr_type, expr_typmod};
 use parser_small1::{parser_errposition, ParseState};
 use types_core::catalog::DEFAULT_COLLATION_OID;
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
@@ -494,19 +494,28 @@ fn assign_collations_walker<'mcx>(
                 // args or affect the aggregate's collation.
                 NodeTag::T_Aggref => {
                     let agg = node.as_aggref().unwrap();
-                    if agg.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
-                        panic!(
-                            "assign_ordered_set_collations/assign_hypothetical_collations \
-                             (parse_collate.c) unported — unit backend-parser-parse-collate"
-                        );
-                    }
-                    debug_assert!(agg.aggdirectargs.is_nil());
-                    for tle_node in &agg.args {
-                        let tle = tle_node.as_target_entry().expect("Aggref arg TargetEntry");
-                        if tle.resjunk {
-                            assign_expr_collations(context.mcx, context.pstate, tle_node)?;
-                        } else {
-                            assign_collations_walker(tle_node, &mut loccontext)?;
+                    match agg.aggkind {
+                        types_nodes::primnodes::AGGKIND_ORDERED_SET => {
+                            assign_ordered_set_collations(agg, &mut loccontext)?;
+                        }
+                        types_nodes::primnodes::AGGKIND_HYPOTHETICAL => {
+                            assign_hypothetical_collations(agg, &mut loccontext)?;
+                        }
+                        _ => {
+                            debug_assert!(agg.aggdirectargs.is_nil());
+                            for tle_node in &agg.args {
+                                let tle =
+                                    tle_node.as_target_entry().expect("Aggref arg TargetEntry");
+                                if tle.resjunk {
+                                    assign_expr_collations(
+                                        context.mcx,
+                                        context.pstate,
+                                        tle_node,
+                                    )?;
+                                } else {
+                                    assign_collations_walker(tle_node, &mut loccontext)?;
+                                }
+                            }
                         }
                     }
                     if let Some(filter) = agg.aggfilter {
@@ -873,6 +882,99 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
             ),
         }
     }
+}
+
+// assign_ordered_set_collations (parse_collate.c): direct args contribute
+// normally; aggregated args contribute only for single-arg non-variadic aggs,
+// else each is an independent sort column.
+fn assign_ordered_set_collations<'mcx>(
+    agg: &'mcx types_nodes::primnodes::Aggref<'mcx>,
+    loccontext: &mut AssignCollationsCtx<'_, '_, 'mcx>,
+) -> PgResult<()> {
+    let merge_sort_collations = agg.args.len() == 1
+        && lsyscache::function::get_func_variadictype(agg.aggfnoid)? == InvalidOid;
+    for d in &agg.aggdirectargs {
+        assign_collations_walker(d, loccontext)?;
+    }
+    for tle_node in &agg.args {
+        if merge_sort_collations {
+            assign_collations_walker(tle_node, loccontext)?;
+        } else {
+            assign_expr_collations(loccontext.mcx, loccontext.pstate, tle_node)?;
+        }
+    }
+    Ok(())
+}
+
+// assign_hypothetical_collations (parse_collate.c): unify each hypothetical/
+// aggregated pair, forcing the choice into the sort column via RelabelType.
+fn assign_hypothetical_collations<'mcx>(
+    agg: &'mcx types_nodes::primnodes::Aggref<'mcx>,
+    loccontext: &mut AssignCollationsCtx<'_, '_, 'mcx>,
+) -> PgResult<()> {
+    let mcx = loccontext.mcx;
+    let merge_sort_collations = agg.args.len() == 1
+        && lsyscache::function::get_func_variadictype(agg.aggfnoid)? == InvalidOid;
+
+    let extra_args = agg.aggdirectargs.len() - agg.args.len();
+    for (i, h_arg) in agg.aggdirectargs.iter().enumerate() {
+        if i < extra_args {
+            assign_collations_walker(h_arg, loccontext)?;
+            continue;
+        }
+        let s_tle_node = agg.args.nth(i - extra_args);
+        let s_tle = s_tle_node.as_target_entry().expect("Aggref arg TargetEntry");
+
+        let mut paircontext = AssignCollationsCtx::new(mcx, loccontext.pstate);
+        assign_collations_walker(h_arg, &mut paircontext)?;
+        assign_collations_walker(s_tle.expr, &mut paircontext)?;
+
+        if paircontext.strength == CollateStrength::Conflict {
+            return Err(collation_mismatch_error(
+                &paircontext,
+                "implicit",
+                paircontext.collation,
+                paircontext.collation2,
+                paircontext.location2,
+                "assign_hypothetical_collations",
+            ));
+        }
+
+        if OidIsValid(paircontext.collation)
+            && paircontext.collation != expr_collation(s_tle.expr)
+        {
+            let relabel = Node::mk(
+                mcx,
+                types_nodes::RelabelType {
+                    arg: s_tle.expr,
+                    resulttype: expr_type(s_tle.expr),
+                    resulttypmod: expr_typmod(s_tle.expr),
+                    resultcollid: paircontext.collation,
+                    relabelformat: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                    location: -1,
+                },
+            )?;
+            // SAFETY: parse analysis holds exclusive access to the tree it is
+            // transforming (addTargetToSortList precedent).
+            unsafe {
+                s_tle_node
+                    .with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.expr = relabel)
+                    .unwrap();
+            }
+        }
+
+        if merge_sort_collations {
+            let (c, st, l, c2, l2) = (
+                paircontext.collation,
+                paircontext.strength,
+                paircontext.location,
+                paircontext.collation2,
+                paircontext.location2,
+            );
+            merge_collation_state(c, st, l, c2, l2, loccontext)?;
+        }
+    }
+    Ok(())
 }
 
 fn merge_collation_state(
