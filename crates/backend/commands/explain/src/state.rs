@@ -7,7 +7,7 @@ use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERRO
 use types_nodes::list::NodeList;
 use types_nodes::plannodes::PlannedStmt;
 
-use crate::options::{defGetBoolean, defGetString};
+use define::{defGetBoolean, defGetString};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]

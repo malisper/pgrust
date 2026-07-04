@@ -35,6 +35,12 @@ pub fn gistbuild<'mcx>(
     let fillfactor = index.get_fillfactor(GIST_DEFAULT_FILLFACTOR);
     let freespace = BLCKSZ * (100 - fillfactor as usize) / 100;
 
+    if index.rd_options.as_ref().and_then(|o| o.gist()).is_some_and(|o| {
+        o.buffering_mode == types_rel::GistOptBufferingMode::GIST_OPTION_BUFFERING_ON
+    }) {
+        panic!("unported: gist buffered build (WITH (buffering=on); gistbuildbuffers lane)");
+    }
+
     let nkeys = index.indnkeyatts() as usize;
     let hasallsortsupports =
         (0..nkeys).all(|i| index_getprocid(index, i, GIST_SORTSUPPORT_PROC) != 0);

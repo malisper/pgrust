@@ -76,6 +76,7 @@ pub fn make_new_heap<'mcx>(
             relkind: types_rel::RELKIND_RELATION,
             relpersistence: persistence,
             allow_system_table_mods: true,
+            reloptions: None,
         },
         &old_heap.rd_att,
     )?;
@@ -98,7 +99,7 @@ pub fn make_new_heap<'mcx>(
         if has_opts {
             unported("make_new_heap: toast reloptions copy");
         }
-        catalog_toasting::NewRelationCreateToastTable(mcx, oid_new_heap)?;
+        catalog_toasting::NewRelationCreateToastTable(mcx, oid_new_heap, None)?;
     }
     old_heap.close(NoLock)?;
     Ok(oid_new_heap)

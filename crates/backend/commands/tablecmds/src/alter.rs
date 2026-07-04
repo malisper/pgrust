@@ -12,10 +12,10 @@ use types_error::{
     ERRCODE_NOT_NULL_VIOLATION, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_COLUMN, ERROR,
     NOTICE,
 };
-use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
+use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType, ObjectType};
 use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, TypeName};
 use types_nodes::{Node, NodeList};
-use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, LOCKMODE, RELKIND_RELATION};
+use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{MaxHeapAttributeNumber, TupleDescData};
 
@@ -113,6 +113,12 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             AlterTableType::AT_DetachPartitionFinalize => {
                 unported("ATExecDetachPartitionFinalize (tablecmds.c): partition pruning lane")
             }
+            AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
+                match cmd.def.and_then(|d| d.as_list()) {
+                    Some(l) => reloptions::AlterTableGetRelOptionsLockLevel(l),
+                    None => AccessExclusiveLock,
+                }
+            }
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
         if cmd_lockmode > lockmode {
@@ -132,6 +138,7 @@ pub fn AlterTableLookupRelation<'mcx>(
         stmt.relation.expect("AlterTableStmt.relation"),
         lockmode,
         stmt.missing_ok,
+        stmt.objtype,
     )
 }
 
@@ -140,6 +147,7 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
     prv: &types_nodes::primnodes::RangeVar<'_>,
     lockmode: LOCKMODE,
     missing_ok: bool,
+    objtype: ObjectType,
 ) -> PgResult<Oid> {
     let rv = rel_vocab::RangeVar {
         catalogname: prv.catalogname,
@@ -150,7 +158,7 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
         location: prv.location,
     };
     let mut callback = |rv: &rel_vocab::RangeVar<'_>, relOid: Oid, _old: Oid| {
-        RangeVarCallbackForAlterRelation(mcx, rv, relOid)
+        RangeVarCallbackForAlterRelation(mcx, rv, relOid, objtype)
     };
     let flags = if missing_ok { catalog_namespace::RVR_MISSING_OK } else { 0 };
     catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, flags, Some(&mut callback))
@@ -162,6 +170,7 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel_vocab::RangeVar<'_>,
     relOid: Oid,
+    objtype: ObjectType,
 ) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
@@ -188,8 +197,22 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
-    if relkind != RELKIND_RELATION {
-        unported("RangeVarCallbackForAlterRelation: non-plain-table relkind");
+    match objtype {
+        ObjectType::OBJECT_INDEX => {
+            if relkind != types_rel::RELKIND_INDEX
+                && relkind != types_rel::RELKIND_PARTITIONED_INDEX
+            {
+                return Err(Box::new(
+                    PgError::new(ERROR, format!("\"{}\" is not an index", rel.relname))
+                        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+        }
+        _ => {
+            if relkind != RELKIND_RELATION {
+                unported("RangeVarCallbackForAlterRelation: non-plain-table relkind");
+            }
+        }
     }
     let is_system =
         catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
@@ -217,6 +240,7 @@ struct NewConstraint<'mcx> {
 
 struct AlteredTableInfo<'mcx> {
     relid: Oid,
+    relkind: u8,
     old_desc: std::rc::Rc<TupleDescData<'mcx>>,
     subcmds: [NodeList<'mcx>; AT_NUM_PASSES],
     rewrite: i32,
@@ -234,7 +258,7 @@ pub fn AlterTable<'mcx>(
     stmt: &AlterTableStmt<'mcx>,
     query_string: &str,
 ) -> PgResult<()> {
-    let rel = table::table_open(mcx, relid, NoLock)?;
+    let rel = relation_seams::relation_open::call(mcx, relid, NoLock)?;
     // CheckAlterTableIsSafe: other-session temp tables are unreachable
     // (temp relations unported).
     catalog_heap::CheckTableNotInUse(&rel, "ALTER TABLE")?;
@@ -252,6 +276,7 @@ fn ATController<'mcx>(
 ) -> PgResult<()> {
     let mut tab = AlteredTableInfo {
         relid: rel.rd_id,
+        relkind: rel.rd_rel.relkind,
         old_desc: rel.rd_att.clone(),
         subcmds: core::array::from_fn(|_| NodeList::nil()),
         rewrite: 0,
@@ -283,7 +308,15 @@ fn ATPrepCmd<'mcx>(
 ) -> PgResult<()> {
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     // ATSimplePermissions relkind gate; ownership was checked at lookup.
-    if rel.rd_rel.relkind != RELKIND_RELATION {
+    // SET/RESET (...) accepts ATT_TABLE|ATT_VIEW|ATT_MATVIEW|ATT_INDEX|
+    // ATT_PARTITIONED_INDEX|ATT_FOREIGN_TABLE; only table + index are live.
+    let relopt_cmd = matches!(
+        cmd.subtype,
+        AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions
+    );
+    if rel.rd_rel.relkind != RELKIND_RELATION
+        && !(relopt_cmd && rel.rd_rel.relkind == types_rel::RELKIND_INDEX)
+    {
         unported("ATSimplePermissions: non-plain-table relkind");
     }
     let set_recurse = || {
@@ -343,6 +376,7 @@ fn ATPrepCmd<'mcx>(
             set_recurse();
             AT_PASS_MISC
         }
+        AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => AT_PASS_MISC,
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -352,7 +386,7 @@ fn ATPrepCmd<'mcx>(
 fn ATRewriteCatalogs<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
-    _lockmode: LOCKMODE,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
     for pass in 0..AT_NUM_PASSES {
@@ -364,7 +398,7 @@ fn ATRewriteCatalogs<'mcx>(
             nodes.push(c);
         }
         for &cnode in nodes.iter() {
-            let rel = table::table_open(mcx, tab.relid, NoLock)?;
+            let rel = relation_seams::relation_open::call(mcx, tab.relid, NoLock)?;
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
                 AlterTableType::AT_AddColumn => {
@@ -474,6 +508,11 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_SetStorage => {
                     ATExecSetStorage(mcx, &rel, cmd)?;
                 }
+                AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
+                    let empty = types_nodes::NodeList::nil();
+                    let defs = cmd.def.and_then(|d| d.as_list()).unwrap_or(&empty);
+                    crate::setrelopts::ATExecSetRelOptions(mcx, &rel, defs, cmd.subtype, lockmode)?;
+                }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             // C threads each ATExec* return address; only the subcmd count is
@@ -489,7 +528,10 @@ fn ATRewriteCatalogs<'mcx>(
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
     // or none is needed.
-    catalog_toasting::NewRelationCreateToastTable(mcx, tab.relid)
+    if tab.relkind == RELKIND_RELATION || tab.relkind == types_rel::RELKIND_MATVIEW {
+        catalog_toasting::NewRelationCreateToastTable(mcx, tab.relid, None)?;
+    }
+    Ok(())
 }
 
 fn ATRewriteTables<'mcx>(
