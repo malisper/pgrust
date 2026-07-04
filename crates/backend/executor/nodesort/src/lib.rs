@@ -75,6 +75,156 @@ pub fn sort_child_eflags(eflags: i32) -> i32 {
     eflags & !(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)
 }
 
+impl SortState<'_> {
+    pub fn sort_done(&self) -> bool {
+        self.sort_Done
+    }
+}
+
+/// Page-batched outer feed for the fused sort drive; `emit` must yield rows in
+/// the leaf's per-tuple emission order (line-pointer order for heap batches —
+/// tie order and abbrev conversion order depend on it).
+pub trait SortFeedSource<'mcx> {
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
+    /// None = qual-filtered; Some = the leaf's output slot (post-projection).
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>>;
+}
+
+/// `ExecSort` over a page-batched leaf (exec-batching rung 3): identical put
+/// sequence to `exec_sort`'s pull-one-slot feed, per-tuple node recursion
+/// elided. Callers route here only while the sort is unbuilt and the outer
+/// shape is fusible; the drain leg matches `exec_sort`.
+pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_desc: Rc<TupleDescData<'static>>,
+    mut src: S,
+) -> PgResult<Option<ExecSlotId>> {
+    cfi()?;
+    let dir = estate.es_direction;
+    let mcx = estate.es_query_cxt;
+    debug_assert!(node.datumSort == (outer_desc.natts == 1));
+
+    if !node.sort_Done {
+        estate.es_direction = ForwardScanDirection;
+
+        let mut tuplesortopts = TUPLESORT_NONE;
+        if node.randomAccess {
+            tuplesortopts |= TUPLESORT_RANDOMACCESS;
+        }
+        if node.bounded {
+            tuplesortopts |= TUPLESORT_ALLOWBOUNDED;
+        }
+        let work_mem = init_small::globals::work_mem();
+        let mut ts = if node.datumSort {
+            Tuplesort::begin_datum(
+                outer_desc.attr(0).atttypid,
+                node.plan.sortOperators[0],
+                node.plan.collations[0],
+                node.plan.nullsFirst[0],
+                work_mem,
+                tuplesortopts,
+            )?
+        } else {
+            Tuplesort::begin_heap(
+                outer_desc,
+                node.plan.sortColIdx,
+                node.plan.sortOperators,
+                node.plan.collations,
+                node.plan.nullsFirst,
+                work_mem,
+                tuplesortopts,
+            )?
+        };
+        if node.bounded {
+            ts.set_bound(node.bound);
+        }
+
+        if node.datumSort {
+            if ts.datum_sort_is_byref() {
+                loop {
+                    let n = src.next_batch(estate)?;
+                    if n == 0 {
+                        break;
+                    }
+                    for i in 0..n {
+                        let Some(id) = src.emit(i, estate)? else { continue };
+                        let slot = estate.slot_mut(id);
+                        exectuples::slot_getsomeattrs(slot, 1);
+                        let base = slot.base();
+                        ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
+                    }
+                }
+            } else {
+                ts.putdatum_batch(|p| loop {
+                    let n = src.next_batch(estate)?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    for i in 0..n {
+                        let Some(id) = src.emit(i, estate)? else { continue };
+                        let slot = estate.slot_mut(id);
+                        exectuples::slot_getsomeattrs(slot, 1);
+                        let base = slot.base();
+                        p.put(base.tts_values[0], base.tts_isnull[0])?;
+                    }
+                })?;
+            }
+        } else {
+            loop {
+                let n = src.next_batch(estate)?;
+                if n == 0 {
+                    break;
+                }
+                for i in 0..n {
+                    let Some(id) = src.emit(i, estate)? else { continue };
+                    ts.puttupleslot(estate.slot_mut(id), mcx)?;
+                }
+            }
+        }
+
+        ts.performsort()?;
+
+        let id = node.plan.plan.plan_node_id;
+        let stats = ts.get_stats();
+        match estate.es_sort_instrumentation.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, s)) => *s = stats,
+            None => estate.es_sort_instrumentation.push((id, stats)),
+        }
+
+        estate.es_direction = dir;
+        node.sort_Done = true;
+        node.bounded_Done = node.bounded;
+        node.bound_Done = node.bound;
+        node.tuplesortstate = Some(ts);
+    }
+
+    let ts = node.tuplesortstate.as_mut().expect("sort_Done without tuplesortstate");
+    let slot_id = node.ps_ResultTupleSlot;
+    let slot = estate.slot_mut(slot_id);
+    let forward = ScanDirectionIsForward(dir);
+    let got = if node.datumSort {
+        exectuples::exec_clear_tuple(slot, mcx);
+        match ts.getdatum(forward)? {
+            Some(nd) => {
+                let base = slot.base_mut();
+                base.tts_values[0] = if nd.isnull { Datum::null() } else { nd.value };
+                base.tts_isnull[0] = nd.isnull;
+                exectuples::exec_store_virtual_tuple(slot);
+                true
+            }
+            None => false,
+        }
+    } else {
+        ts.gettupleslot(forward, false, slot, mcx)?
+    };
+    Ok(if got { Some(slot_id) } else { None })
+}
+
 /// `ExecSort`: sort the subplan on first fetch, then feed from tuplesort.
 pub fn exec_sort<'mcx, F>(
     node: &mut SortState<'mcx>,
