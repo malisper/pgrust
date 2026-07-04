@@ -640,7 +640,6 @@ pub fn fc_record_smaller(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(fcinfo.arg(if c < 0 { 0 } else { 1 }))
 }
 
-
 // C RecordIOData input side: per-column in procs + typioparam.
 struct ColumnInData {
     column_type: Oid,

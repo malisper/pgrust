@@ -810,6 +810,9 @@ fn get_json_expr<'mcx>(
         },
     )?;
     ctx.buf.push(')');
+    Ok(())
+}
+
 // get_rule_expr_toplevel / get_rule_list_toplevel (ruleutils.c): a whole-row
 // Var at list top level prints its .* form via get_variable(istoplevel).
 fn get_rule_expr_toplevel<'mcx>(

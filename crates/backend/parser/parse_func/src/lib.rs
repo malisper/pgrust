@@ -1802,6 +1802,8 @@ fn objtype_from_i32(objtype: i32) -> types_nodes::parsenodes::ObjectType {
     );
     // SAFETY: ObjectType is repr(u32) and contiguous over the asserted range.
     unsafe { core::mem::transmute::<u32, types_nodes::parsenodes::ObjectType>(objtype as u32) }
+}
+
 /// C `ParseComplexProjection` (parse_func.c): Ok(None) = not a column of the
 /// composite; caller decides between function notation and unknown_attribute.
 pub fn ParseComplexProjection<'mcx>(
