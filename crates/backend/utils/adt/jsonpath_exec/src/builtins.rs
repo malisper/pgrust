@@ -77,16 +77,18 @@ fn vars_of<'v, 'a, 'mcx>(vars: &'v Option<VarPayload<'a, 'mcx>>) -> JsonPathVars
 }
 
 fn exists_common(fcinfo: &mut Fcinfo, four_args: bool, tz: bool) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let args = path_args(fcinfo, mcx, four_args)?;
-    let res = crate::jsonb_path_exists_core(
-        mcx,
-        args.jb.as_bytes(),
-        full_image(&args.jp),
-        vars_of(&args.vars),
-        args.silent,
-        tz,
-    )?;
+    let res = {
+        let mcx = fcinfo.result_mcx();
+        let args = path_args(fcinfo, mcx, four_args)?;
+        crate::jsonb_path_exists_core(
+            mcx,
+            args.jb.as_bytes(),
+            full_image(&args.jp),
+            vars_of(&args.vars),
+            args.silent,
+            tz,
+        )?
+    };
     match res {
         Some(b) => Ok(Datum::from_bool(b)),
         None => Ok(fcinfo.return_null()),
@@ -109,16 +111,18 @@ pub fn fc_jsonb_path_exists_opr(
 }
 
 fn match_common(fcinfo: &mut Fcinfo, four_args: bool, tz: bool) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let args = path_args(fcinfo, mcx, four_args)?;
-    let res = crate::jsonb_path_match_core(
-        mcx,
-        args.jb.as_bytes(),
-        full_image(&args.jp),
-        vars_of(&args.vars),
-        args.silent,
-        tz,
-    )?;
+    let res = {
+        let mcx = fcinfo.result_mcx();
+        let args = path_args(fcinfo, mcx, four_args)?;
+        crate::jsonb_path_match_core(
+            mcx,
+            args.jb.as_bytes(),
+            full_image(&args.jp),
+            vars_of(&args.vars),
+            args.silent,
+            tz,
+        )?
+    };
     match res {
         Some(b) => Ok(Datum::from_bool(b)),
         None => Ok(fcinfo.return_null()),
@@ -217,16 +221,18 @@ pub fn fc_jsonb_path_query_array_tz(
 }
 
 fn query_first_common(fcinfo: &mut Fcinfo, tz: bool) -> PgResult<Datum> {
-    let mcx = fcinfo.result_mcx();
-    let args = path_args(fcinfo, mcx, true)?;
-    let img = crate::jsonb_path_query_first_core(
-        mcx,
-        args.jb.as_bytes(),
-        full_image(&args.jp),
-        vars_of(&args.vars),
-        args.silent,
-        tz,
-    )?;
+    let img = {
+        let mcx = fcinfo.result_mcx();
+        let args = path_args(fcinfo, mcx, true)?;
+        crate::jsonb_path_query_first_core(
+            mcx,
+            args.jb.as_bytes(),
+            full_image(&args.jp),
+            vars_of(&args.vars),
+            args.silent,
+            tz,
+        )?
+    };
     match img {
         Some(img) => Ok(image_result(img)),
         None => Ok(fcinfo.return_null()),

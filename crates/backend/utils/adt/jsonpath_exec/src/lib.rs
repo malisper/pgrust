@@ -2171,11 +2171,9 @@ impl<'a, 'x, 'mcx: 'a> ExecCtx<'a, 'x, 'mcx> {
             let image: &'mcx [u8] = image.leak();
             let obj_v = JbV::Binary(&image[4..]);
 
-            let base_object = self.set_base_object(&obj_v, {
-                let cur = self.last_generated_object_id;
-                self.last_generated_object_id += 1;
-                cur
-            });
+            let id = self.last_generated_object_id;
+            self.last_generated_object_id += 1;
+            let base_object = self.set_base_object(&obj_v, id);
 
             res = self.execute_next_item(Some(jsp), next.as_ref(), &obj_v, found.as_deref_mut())?;
 
