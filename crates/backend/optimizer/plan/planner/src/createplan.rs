@@ -2252,22 +2252,29 @@ fn create_groupingsets_plan<'mcx>(
 }
 
 
-// create_windowagg_plan (createplan.c); runCondition/qual/frame-offset legs
-// dead (loud upstream), startOffset/endOffset always None (default frame).
+// create_windowagg_plan (createplan.c).
 fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
-    let (subpath_id, target_id, winclause_id, topwindow) = match run.root.path(path_id) {
-        PathNode::WindowAggPath(wp) => {
-            debug_assert!(wp.qual.is_empty() && wp.runCondition.is_empty());
-            (
+    let (subpath_id, target_id, winclause_id, topwindow, rc_ids, qual_ids) =
+        match run.root.path(path_id) {
+            PathNode::WindowAggPath(wp) => (
                 wp.subpath.expect("WindowAggPath has a subpath"),
                 wp.path.pathtarget_id.unwrap(),
                 wp.winclause,
                 wp.topwindow,
-            )
-        }
-        _ => unreachable!(),
-    };
+                crate::relnode::pgvec_clone_shallow(run.mcx, &wp.runCondition),
+                crate::relnode::pgvec_clone_shallow(run.mcx, &wp.qual),
+            ),
+            _ => unreachable!(),
+        };
     let wc_node = *run.root.expr_node(winclause_id);
+    let mut run_condition = NodeList::nil();
+    for &id in rc_ids.iter() {
+        run_condition.lappend(run.mcx, *run.root.expr_node(id))?;
+    }
+    let mut qual = NodeList::nil();
+    for &id in qual_ids.iter() {
+        qual.lappend(run.mcx, *run.root.expr_node(id))?;
+    }
 
     // WindowAgg spools its input into a tuplestore: request a small tlist,
     // with grouping columns labeled.
@@ -2329,6 +2336,9 @@ fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> P
     plan.inRangeColl = wc.inRangeColl;
     plan.inRangeAsc = wc.inRangeAsc;
     plan.inRangeNullsFirst = wc.inRangeNullsFirst;
+    plan.runCondition = run_condition.clone_in(run.mcx)?;
+    plan.runConditionOrig = run_condition;
+    plan.plan.qual = qual;
     plan.topWindow = topwindow;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())

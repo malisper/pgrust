@@ -340,6 +340,13 @@ pub struct WindowFunc<'mcx> {
     pub location: ParseLoc,
 }
 
+pub struct WindowFuncRunCondition<'mcx> {
+    pub opno: Oid,
+    pub inputcollid: Oid,
+    pub wfunc_left: bool,
+    pub arg: Node<'mcx>,
+}
+
 // C `Expr *expr` is never NULL in a live TargetEntry (makeTargetEntry
 // requires it); modeled non-optional, so no Default.
 pub struct TargetEntry<'mcx> {
@@ -1082,6 +1089,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RowExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_WindowFunc;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WindowFuncRunCondition<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WindowFuncRunCondition;
+}
 unsafe impl NodeVariant<'_> for JsonFormat {
     const TAG: NodeTag = NodeTag::T_JsonFormat;
 }
@@ -1371,6 +1381,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_window_func_run_condition(self) -> Option<&'mcx WindowFuncRunCondition<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_target_entry(self) -> Option<&'mcx TargetEntry<'mcx>> {
         self.as_variant()
     }
@@ -1630,4 +1645,20 @@ impl<'mcx> Node<'mcx> {
 pub struct SupportRequestOptimizeWindowClause {
     pub tag: crate::NodeTag,
     pub frame_options: i32,
+}
+
+pub const MONOTONICFUNC_NONE: i32 = 0;
+pub const MONOTONICFUNC_INCREASING: i32 = 1 << 0;
+pub const MONOTONICFUNC_DECREASING: i32 = 1 << 1;
+pub const MONOTONICFUNC_BOTH: i32 = MONOTONICFUNC_INCREASING | MONOTONICFUNC_DECREASING;
+
+// SupportRequestWFuncMonotonic (supportnodes.h); the window_func/
+// window_clause pointers are narrowed to the fields in-core prosupports
+// read (C divergence, same treatment as OptimizeWindowClause above).
+#[repr(C)]
+pub struct SupportRequestWFuncMonotonic {
+    pub tag: crate::NodeTag,
+    pub order_clause_empty: bool,
+    pub frame_options: i32,
+    pub monotonic: i32,
 }

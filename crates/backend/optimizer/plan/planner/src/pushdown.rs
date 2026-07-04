@@ -1,7 +1,6 @@
 //! allpaths.c subquery qual-pushdown slice: subquery_is_pushdown_safe,
-//! qual_is_pushdown_safe, subquery_push_qual, remove_unused_subquery_outputs.
-//! WindowFuncRunCondition creation is loud (runCondition lane), so
-//! run_cond_attrs is always empty.
+//! qual_is_pushdown_safe, subquery_push_qual, find_window_run_conditions,
+//! remove_unused_subquery_outputs.
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
@@ -43,6 +42,7 @@ pub(crate) fn pushdown_quals_into_subquery<'mcx>(
     rte: &'mcx RangeTblEntry<'mcx>,
     orig: &'mcx Query<'mcx>,
     sub_parse: &mut Query<'mcx>,
+    run_cond_attrs: &mut Bitmapset<'mcx>,
 ) -> PgResult<()> {
     if run.root.rel(rel).baserestrictinfo.is_empty() {
         return Ok(());
@@ -72,7 +72,7 @@ pub(crate) fn pushdown_quals_into_subquery<'mcx>(
             }
             PushdownSafe::WindowclauseRuncond => {
                 if !sub_parse.hasWindowFuncs
-                    || check_and_push_window_quals(sub_parse, clause)?
+                    || check_and_push_window_quals(run, sub_parse, clause, run_cond_attrs)?
                 {
                     upperrestrictlist.push(rid);
                 }
@@ -463,11 +463,12 @@ fn rte_copy_with_subquery<'mcx>(
 }
 
 // check_and_push_window_quals (allpaths.c): returns whether the caller must
-// keep the original qual. Declines exactly where C declines; where C would
-// build a WindowFuncRunCondition it panics (runCondition lane).
+// keep the original qual.
 fn check_and_push_window_quals<'mcx>(
-    subquery: &Query<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    subquery: &mut Query<'mcx>,
     clause: Node<'mcx>,
+    run_cond_attrs: &mut Bitmapset<'mcx>,
 ) -> PgResult<bool> {
     let Some(opexpr) = clause.as_op_expr() else {
         return Ok(true);
@@ -487,28 +488,51 @@ fn check_and_push_window_quals<'mcx>(
         if var.varattno <= 0 {
             continue;
         }
-        let tle = subquery
-            .targetList
-            .nth(var.varattno as usize - 1)
-            .as_target_entry()
-            .expect("tlist cell is a TargetEntry");
-        if find_window_run_conditions(tle.expr, opexpr, wfunc_left)? {
-            return Ok(true);
+        let mut keep_original = true;
+        if find_window_run_conditions(
+            run,
+            subquery,
+            var.varattno,
+            opexpr,
+            wfunc_left,
+            &mut keep_original,
+            run_cond_attrs,
+        )? {
+            return Ok(keep_original);
         }
     }
     Ok(true)
 }
 
-// find_window_run_conditions (allpaths.c), decline legs only. A false return
-// is C-identical (no run condition possible); reaching a monotonic-support
-// probe on a pseudo-constant comparison is where C builds the run condition.
+// find_window_run_conditions (allpaths.c). The subquery tlist cells are ours
+// to write but the entries are shared with the original parse tree, so a
+// matched WindowFunc is replaced whole (rebuilt entry) instead of mutated.
 fn find_window_run_conditions<'mcx>(
-    tle_expr: Node<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    subquery: &mut Query<'mcx>,
+    attno: i16,
     opexpr: &OpExpr<'mcx>,
     wfunc_left: bool,
+    keep_original: &mut bool,
+    run_cond_attrs: &mut Bitmapset<'mcx>,
 ) -> PgResult<bool> {
-    let mut w = tle_expr;
+    use types_nodes::primnodes::{
+        RelabelType, SupportRequestWFuncMonotonic, WindowFunc, WindowFuncRunCondition,
+        MONOTONICFUNC_BOTH, MONOTONICFUNC_DECREASING, MONOTONICFUNC_INCREASING,
+        MONOTONICFUNC_NONE,
+    };
+    let mcx = run.mcx;
+    *keep_original = true;
+
+    let tle = subquery
+        .targetList
+        .nth(attno as usize - 1)
+        .as_target_entry()
+        .expect("tlist cell is a TargetEntry");
+    let mut relabels: PgVec<'mcx, &'mcx RelabelType<'mcx>> = PgVec::new_in(mcx);
+    let mut w = tle.expr;
     while let Some(r) = w.as_relabel_type() {
+        relabels.push(r);
         w = r.arg;
     }
     let Some(wfunc) = w.as_window_func() else {
@@ -525,20 +549,158 @@ fn find_window_run_conditions<'mcx>(
     if !clauses::is_pseudo_constant_clause(otherexpr)? {
         return Ok(false);
     }
-    panic!(
-        "find_window_run_conditions (allpaths.c): WindowFuncRunCondition \
-         creation unported; runCondition lane"
-    );
+
+    let wclause = subquery
+        .windowClause
+        .nth(wfunc.winref as usize - 1)
+        .as_window_clause()
+        .expect("windowClause cell");
+    let mut req = SupportRequestWFuncMonotonic {
+        tag: NodeTag::T_SupportRequestWFuncMonotonic,
+        order_clause_empty: wclause.orderClause.is_nil(),
+        frame_options: wclause.frameOptions,
+        monotonic: MONOTONICFUNC_NONE,
+    };
+    let res = fmgr_core::oid_function_call1_coll(
+        prosupport,
+        0,
+        datum::Datum::from_usize(&mut req as *mut _ as usize),
+    )?;
+    if res.as_usize() == 0 || req.monotonic == MONOTONICFUNC_NONE {
+        return Ok(false);
+    }
+
+    let mut runoperator = 0;
+    let mut have_run_condition = false;
+    let opinfos = lsyscache::get_op_index_interpretation(mcx, opexpr.opno)?;
+    for opinfo in opinfos.iter() {
+        match opinfo.cmptype {
+            lsyscache::COMPARE_LT | lsyscache::COMPARE_LE => {
+                if (wfunc_left && req.monotonic & MONOTONICFUNC_INCREASING != 0)
+                    || (!wfunc_left && req.monotonic & MONOTONICFUNC_DECREASING != 0)
+                {
+                    *keep_original = false;
+                    have_run_condition = true;
+                    runoperator = opexpr.opno;
+                }
+                break;
+            }
+            lsyscache::COMPARE_GT | lsyscache::COMPARE_GE => {
+                if (wfunc_left && req.monotonic & MONOTONICFUNC_DECREASING != 0)
+                    || (!wfunc_left && req.monotonic & MONOTONICFUNC_INCREASING != 0)
+                {
+                    *keep_original = false;
+                    have_run_condition = true;
+                    runoperator = opexpr.opno;
+                }
+                break;
+            }
+            lsyscache::COMPARE_EQ => {
+                if req.monotonic & MONOTONICFUNC_BOTH == MONOTONICFUNC_BOTH {
+                    *keep_original = false;
+                    have_run_condition = true;
+                    runoperator = opexpr.opno;
+                    break;
+                }
+                let newcmptype = if req.monotonic & MONOTONICFUNC_INCREASING != 0 {
+                    if wfunc_left {
+                        lsyscache::COMPARE_LE
+                    } else {
+                        lsyscache::COMPARE_GE
+                    }
+                } else if wfunc_left {
+                    lsyscache::COMPARE_GE
+                } else {
+                    lsyscache::COMPARE_LE
+                };
+                *keep_original = true;
+                have_run_condition = true;
+                runoperator = lsyscache::get_opfamily_member_for_cmptype(
+                    opinfo.opfamily_id,
+                    opinfo.oplefttype,
+                    opinfo.oprighttype,
+                    newcmptype,
+                )?;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if !have_run_condition {
+        return Ok(false);
+    }
+
+    // C copyObject's otherexpr and the WindowFunc; both trees are read-only
+    // from here, so the sub-nodes stay shared.
+    let wfuncrc = Node::mk(
+        mcx,
+        WindowFuncRunCondition {
+            opno: runoperator,
+            inputcollid: opexpr.inputcollid,
+            wfunc_left,
+            arg: otherexpr,
+        },
+    )?;
+    let mut run_condition = wfunc.runCondition.clone_in(mcx)?;
+    run_condition.lappend(mcx, wfuncrc)?;
+    let new_wfunc = Node::mk(
+        mcx,
+        WindowFunc {
+            winfnoid: wfunc.winfnoid,
+            wintype: wfunc.wintype,
+            wincollid: wfunc.wincollid,
+            inputcollid: wfunc.inputcollid,
+            args: wfunc.args.clone_in(mcx)?,
+            aggfilter: wfunc.aggfilter,
+            runCondition: run_condition,
+            winref: wfunc.winref,
+            winstar: wfunc.winstar,
+            winagg: wfunc.winagg,
+            location: wfunc.location,
+        },
+    )?;
+    let mut expr = new_wfunc;
+    for r in relabels.iter().rev() {
+        expr = Node::mk(
+            mcx,
+            RelabelType {
+                arg: expr,
+                resulttype: r.resulttype,
+                resulttypmod: r.resulttypmod,
+                resultcollid: r.resultcollid,
+                relabelformat: r.relabelformat,
+                location: r.location,
+            },
+        )?;
+    }
+    let new_tle = Node::mk(
+        mcx,
+        TargetEntry {
+            expr,
+            resno: tle.resno,
+            resname: tle.resname,
+            ressortgroupref: tle.ressortgroupref,
+            resorigtbl: tle.resorigtbl,
+            resorigcol: tle.resorigcol,
+            resjunk: tle.resjunk,
+        },
+    )?;
+    subquery.targetList.as_mut_slice()[attno as usize - 1] = new_tle;
+
+    run_cond_attrs.add_member(mcx, attno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER)?;
+    Ok(true)
 }
 
 // remove_unused_subquery_outputs (allpaths.c): NULL-out subquery outputs the
-// upper query never reads. extra_used_attrs is empty (run conditions loud).
-// Entries are replaced whole (TargetEntry nodes are shared with the original
-// parsetree; only the copied list cells are ours to write).
+// upper query never reads. extra_used_attrs carries attnos consumed by
+// WindowAgg run conditions. Entries are replaced whole (TargetEntry nodes
+// are shared with the original parsetree; only the copied list cells are
+// ours to write).
 pub(crate) fn remove_unused_subquery_outputs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     subquery: &mut Query<'mcx>,
+    extra_used_attrs: Bitmapset<'mcx>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     if subquery.setOperations.is_some() {
@@ -550,7 +712,7 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
     }
 
     let relid = run.root.rel(rel).relid as i32;
-    let mut attrs_used = Bitmapset::empty();
+    let mut attrs_used = extra_used_attrs;
     let exprs = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel).exprs);
     for &eid in exprs.iter() {
         vars::pull_varattnos(mcx, *run.root.expr_node(eid), relid, &mut attrs_used)?;
