@@ -29,6 +29,7 @@ fn install_fixture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        pg_inherits_seams::type_inherits_from::set(|_, _| Ok(false));
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             if name == "@@" {
                 CANDIDATE_PROBES.fetch_add(1, Ordering::Relaxed);
