@@ -13,6 +13,9 @@ mod epq;
 mod execami;
 mod execcurrent;
 mod execmain;
+mod execparallel;
+mod nodegather;
+mod nodegathermerge;
 mod noderesult;
 mod nodeprojectset;
 mod nodesubplan;
@@ -28,6 +31,9 @@ pub use execmain::{
     standard_executor_end, standard_executor_finish, standard_executor_run,
     standard_executor_start,
 };
+pub use execparallel::{parallel_query_main, register_parallel_query_main};
+pub use nodegather::GatherState;
+pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;
 pub use nodeprojectset::ProjectSetState;
 pub use procnode::{
@@ -71,6 +77,26 @@ pub fn init_seams() {
     execmain_seams::query_desc_index_searches::set(querydesc::query_desc_index_searches_seam);
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
     execmain_seams::exec_current_of::set(execcurrent::exec_current_of_seam);
+    execmain_seams::query_desc_workers_launched::set(
+        querydesc::query_desc_workers_launched_seam,
+    );
+    execmain_seams::query_desc_worker_instrument::set(
+        querydesc::query_desc_worker_instrument_seam,
+    );
+    execmain_seams::query_desc_worker_sort_instrument::set(
+        querydesc::query_desc_worker_sort_instrument_seam,
+    );
+    execparallel::register_parallel_query_main();
+    {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        static PLP: AtomicBool = AtomicBool::new(true);
+        guc_tables::vars::parallel_leader_participation.install_if_absent(
+            guc_tables::GucVarAccessors {
+                get: || PLP.load(Relaxed),
+                set: |v| PLP.store(v, Relaxed),
+            },
+        );
+    }
 }
 
 // Divergence from C: result tupdescs die in es_query_cxt there (execMain.c),

@@ -832,3 +832,13 @@ pub fn BackgroundWorkerBlockSignals() {
 pub fn BackgroundWorkerUnblockSignals() {
     libpq_pqsignal::unblock_signals();
 }
+
+pub fn init_seams() {
+    bgworker_seams::background_worker_stopped::set(|slot, generation| {
+        let handle = BackgroundWorkerHandle { slot, generation };
+        matches!(
+            GetBackgroundWorkerPid(&handle).0,
+            BgwHandleStatus::BGWH_STOPPED | BgwHandleStatus::BGWH_POSTMASTER_DIED
+        )
+    });
+}

@@ -54,7 +54,9 @@ pub struct ShmMq {
     mq_bytes_written: AtomicU64,
     mq_detached: AtomicBool,
     mq_ring_size: usize,
-    mq_ring: Box<[UnsafeCell<u8>]>,
+    // u64 words: MinimalTuple images are deformed in place out of the ring
+    // (tqueue.c returns queue memory), so the base must be MAXALIGN'd.
+    mq_ring: Box<[UnsafeCell<u64>]>,
 }
 
 // SAFETY: the sender writes only unread ring bytes and the receiver reads
@@ -73,7 +75,7 @@ pub fn shm_mq_create(size: usize) -> Arc<ShmMq> {
         mq_bytes_written: AtomicU64::new(0),
         mq_detached: AtomicBool::new(false),
         mq_ring_size: ring_size,
-        mq_ring: (0..ring_size).map(|_| UnsafeCell::new(0)).collect(),
+        mq_ring: (0..ring_size / MAXIMUM_ALIGNOF).map(|_| UnsafeCell::new(0)).collect(),
     })
 }
 
@@ -115,7 +117,8 @@ impl ShmMq {
 
     fn ring_ptr(&self, offset: usize) -> *mut u8 {
         debug_assert!(offset < self.mq_ring_size);
-        self.mq_ring[offset].get()
+        // SAFETY: UnsafeCell<u64> is layout-transparent; offset is in bounds.
+        unsafe { self.mq_ring.as_ptr().cast::<u8>().cast_mut().add(offset) }
     }
 
     pub fn set_receiver(&self, proc: ProcNumber) {
@@ -217,8 +220,12 @@ pub enum ShmMqRecv<'a> {
 pub struct ShmMqHandle {
     mqh_queue: Arc<ShmMq>,
     // Reassembly buffer: retained global-heap storage (the handle outlives
-    // query contexts, like the Arc'd ring); grows, never shrinks.
-    mqh_buffer: Vec<u8>,
+    // query contexts, like the Arc'd ring); grows, never shrinks. u64 words
+    // for the same MAXALIGN reason as mq_ring.
+    mqh_buffer: Vec<u64>,
+    // BackgroundWorkerHandle's (slot, generation); status flows through
+    // bgworker_seams (direct dep cycles via tcop).
+    mqh_handle: Option<(i32, u64)>,
     mqh_consume_pending: usize,
     mqh_send_pending: usize,
     mqh_partial_bytes: usize,
@@ -237,6 +244,7 @@ pub fn shm_mq_attach(mq: Arc<ShmMq>) -> ShmMqHandle {
     ShmMqHandle {
         mqh_queue: mq,
         mqh_buffer: Vec::new(),
+        mqh_handle: None,
         mqh_consume_pending: 0,
         mqh_send_pending: 0,
         mqh_partial_bytes: 0,
@@ -257,6 +265,27 @@ enum WaitTarget {
 impl ShmMqHandle {
     pub fn queue(&self) -> &Arc<ShmMq> {
         &self.mqh_queue
+    }
+
+    /// `shm_mq_set_handle`: lets waits notice a counterparty that died
+    /// before attaching. Takes the BackgroundWorkerHandle's (slot, generation).
+    pub fn set_handle(&mut self, slot: i32, generation: u64) {
+        debug_assert!(self.mqh_handle.is_none());
+        self.mqh_handle = Some((slot, generation));
+    }
+
+    // shm_mq_counterparty_gone.
+    fn counterparty_gone(&self) -> bool {
+        if self.mqh_queue.detached() {
+            return true;
+        }
+        if let Some((slot, generation)) = self.mqh_handle {
+            if bgworker_seams::background_worker_stopped::call(slot, generation) {
+                self.mqh_queue.set_detached();
+                return true;
+            }
+        }
+        false
     }
 
     // Once a message is partially written it cannot be aborted except by
@@ -347,19 +376,18 @@ impl ShmMqHandle {
 
         if !self.mqh_counterparty_attached {
             if nowait {
-                // Divergence from C: no bgworker handle yet, so counterparty-
-                // gone reduces to the detached flag (checked before the
-                // sender identity, per C's attach/detach race note).
-                let counterparty_gone = self.mqh_queue.detached();
-                if self.mqh_queue.get_sender().is_none() {
-                    return Ok(if counterparty_gone {
-                        ShmMqRecv::Detached
-                    } else {
-                        ShmMqRecv::WouldBlock
-                    });
+                if self.counterparty_gone() {
+                    return Ok(ShmMqRecv::Detached);
                 }
-            } else if !wait_internal(&self.mqh_queue, WaitTarget::Sender, self.my_latch)?
-                && self.mqh_queue.get_sender().is_none()
+                if self.mqh_queue.get_sender().is_none() {
+                    return Ok(ShmMqRecv::WouldBlock);
+                }
+            } else if !wait_internal(
+                &self.mqh_queue,
+                WaitTarget::Sender,
+                self.my_latch,
+                self.mqh_handle,
+            )? && self.mqh_queue.get_sender().is_none()
             {
                 self.mqh_queue.set_detached();
                 return Ok(ShmMqRecv::Detached);
@@ -433,9 +461,9 @@ impl ShmMqHandle {
             }
         }
 
-        if self.mqh_buffer.len() < nbytes {
+        if self.mqh_buffer.len() * MAXIMUM_ALIGNOF < nbytes {
             let newbuflen = usize::min(nbytes.next_power_of_two(), MAX_ALLOC_SIZE);
-            self.mqh_buffer.resize(newbuflen, 0);
+            self.mqh_buffer.resize(newbuflen.div_ceil(MAXIMUM_ALIGNOF), 0);
         }
 
         loop {
@@ -446,7 +474,7 @@ impl ShmMqHandle {
                 unsafe {
                     ptr::copy_nonoverlapping(
                         rawdata,
-                        self.mqh_buffer.as_mut_ptr().add(self.mqh_partial_bytes),
+                        self.mqh_buffer.as_mut_ptr().cast::<u8>().add(self.mqh_partial_bytes),
                         rb,
                     );
                 }
@@ -473,7 +501,10 @@ impl ShmMqHandle {
 
         self.mqh_length_word_complete = false;
         self.mqh_partial_bytes = 0;
-        Ok(ShmMqRecv::Success(&self.mqh_buffer[..nbytes]))
+        // SAFETY: nbytes initialized bytes of the word-backed buffer.
+        Ok(ShmMqRecv::Success(unsafe {
+            std::slice::from_raw_parts(self.mqh_buffer.as_ptr().cast::<u8>(), nbytes)
+        }))
     }
 
     pub fn detach(&mut self) {
@@ -509,13 +540,18 @@ impl ShmMqHandle {
 
             if available == 0 && !self.mqh_counterparty_attached {
                 if nowait {
-                    if self.mqh_queue.detached() {
+                    if self.counterparty_gone() {
                         return Ok((ShmMqResult::Detached, sent));
                     }
                     if self.mqh_queue.get_receiver().is_none() {
                         return Ok((ShmMqResult::WouldBlock, sent));
                     }
-                } else if !wait_internal(&self.mqh_queue, WaitTarget::Receiver, self.my_latch)? {
+                } else if !wait_internal(
+                    &self.mqh_queue,
+                    WaitTarget::Receiver,
+                    self.my_latch,
+                    self.mqh_handle,
+                )? {
                     self.mqh_queue.set_detached();
                     return Ok((ShmMqResult::Detached, sent));
                 }
@@ -617,12 +653,13 @@ fn wait_on_my_latch(my_latch: Option<LatchHandle>, wait_event_info: u32) -> PgRe
     Ok(())
 }
 
-// Divergence from C: no BackgroundWorkerHandle yet, so worker death cannot be
-// detected here; we wait until attach or detach.
+// shm_mq_wait_internal: false = detached or the handle's worker died before
+// attaching.
 fn wait_internal(
     mq: &ShmMq,
     target: WaitTarget,
     my_latch: Option<LatchHandle>,
+    handle: Option<(i32, u64)>,
 ) -> PgResult<bool> {
     loop {
         mq.spin_acquire();
@@ -632,11 +669,16 @@ fn wait_internal(
         };
         mq.mq_mutex.unlock();
 
+        if attached {
+            return Ok(true);
+        }
         if mq.detached() {
             return Ok(false);
         }
-        if attached {
-            return Ok(true);
+        if let Some((slot, generation)) = handle {
+            if bgworker_seams::background_worker_stopped::call(slot, generation) {
+                return Ok(false);
+            }
         }
 
         wait_on_my_latch(my_latch, WAIT_EVENT_MQ_INTERNAL)?;

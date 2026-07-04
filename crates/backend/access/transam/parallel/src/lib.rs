@@ -339,6 +339,22 @@ pub fn context_nworkers(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers)
 }
 
+pub fn nworkers(id: ParallelContextId) -> i32 {
+    with_pcxt(id, |p| p.nworkers)
+}
+
+pub fn nworkers_to_launch(id: ParallelContextId) -> i32 {
+    with_pcxt(id, |p| p.nworkers_to_launch)
+}
+
+// pcxt->worker[i].bgwhandle (execParallel.c:904 shm_mq_set_handle wiring).
+pub fn worker_bgwhandle(
+    id: ParallelContextId,
+    i: usize,
+) -> Option<bgworker::BackgroundWorkerHandle> {
+    with_pcxt(id, |p| p.workers.get(i).and_then(|w| w.bgwhandle))
+}
+
 pub fn ReinitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     WaitForParallelWorkersToFinish(id)?;
     with_pcxt(id, |p| wait_for_workers_to_exit(p))?;

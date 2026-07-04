@@ -138,6 +138,7 @@ pub fn init_all() {
     deadlock::init_seams();
     predicate::init_seams();
     parallel::init_seams();
+    bgworker::init_seams();
     spi::init_seams();
     trigger::init_seams();
     ri_triggers::init_seams();

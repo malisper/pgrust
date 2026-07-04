@@ -9,6 +9,7 @@ name = "bgworker"
 path = "src/lib.rs"
 
 [dependencies]
+bgworker_seams = { path = "../bgworker_seams" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }

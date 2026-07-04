@@ -72,7 +72,15 @@ pub fn ExplainPrintPlan<'mcx>(
             break;
         }
     }
-    // Gather-invisible skip: Gather vocabulary is unported; plan_of is loud.
+    // debug_parallel_query=regress marks its top Gather invisible: skip it
+    // and hide per-worker detail below (explain.c:787-800).
+    let mut root = root;
+    if let Some(g) = root.as_gather() {
+        if g.invisible {
+            root = g.plan.lefttree.expect("invisible Gather without an outer plan");
+            es.hide_workers = true;
+        }
+    }
     ExplainNode(root, None, None, None, es)?;
     if es.settings {
         node_gap(
@@ -448,6 +456,8 @@ pub fn ExplainNode<'mcx>(
         // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
         // " Join"); see the jointype append below.
         NodeTag::T_NestLoop => "Nested Loop",
+        NodeTag::T_Gather => "Gather",
+        NodeTag::T_GatherMerge => "Gather Merge",
         NodeTag::T_HashJoin => "Hash",
         NodeTag::T_MergeJoin => "Merge",
         NodeTag::T_Hash => "Hash",
@@ -622,6 +632,26 @@ pub fn ExplainNode<'mcx>(
     } else {
         execmain_seams::query_desc_instrument::call(es.qd, plan.plan_node_id)
     };
+    // Per-worker set-aside buffers (explain.c:1371), text-only like the rest.
+    let save_workers_state = es.workers_state.take();
+    let worker_instrument = if es.analyze && !es.hide_workers && !es.qd.is_null() {
+        execmain_seams::query_desc_worker_instrument::call(es.qd, plan.plan_node_id)
+    } else {
+        None
+    };
+    if let Some(w) = &worker_instrument {
+        let mcx = es.str.allocator();
+        let mut worker_inited = ::mcx::PgVec::new_in(mcx);
+        worker_inited.resize(w.len(), false);
+        let mut worker_str = ::mcx::PgVec::new_in(mcx);
+        worker_str.resize_with(w.len(), || None);
+        es.workers_state = Some(crate::state::WorkersState {
+            num_workers: w.len(),
+            worker_inited,
+            worker_str,
+        });
+    }
+
     match instrument {
         Some(i) if es.analyze && i.nloops > 0.0 => {
             let nloops = i.nloops;
@@ -642,6 +672,28 @@ pub fn ExplainNode<'mcx>(
     let isdisabled = plan_is_disabled(node);
     if isdisabled {
         ExplainPropertyBool("Disabled", isdisabled, es);
+    }
+
+    // Per-worker general execution details (explain.c:1885-1935, text arm).
+    if es.workers_state.is_some() && es.verbose {
+        let w = worker_instrument.as_ref().expect("workers_state implies worker data");
+        for (n, i) in w.iter().enumerate() {
+            let nloops = i.nloops;
+            if nloops <= 0.0 {
+                continue;
+            }
+            let startup_ms = 1000.0 * i.startup / nloops;
+            let total_ms = 1000.0 * i.total / nloops;
+            let rows = i.ntuples / nloops;
+            explain_open_worker(n, es);
+            ExplainIndentText(es);
+            append!(es, "actual ");
+            if es.timing {
+                append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+            }
+            append!(es, "rows={rows:.2} loops={nloops:.0}\n");
+            explain_close_worker(n, es);
+        }
     }
 
     if es.verbose {
@@ -806,6 +858,43 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Hash => {
             show_hash_info(node, es)?;
         }
+        NodeTag::T_Gather => {
+            let gather = node.as_gather().unwrap();
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            ExplainPropertyInteger("Workers Planned", None, gather.num_workers as i64, es);
+            if es.analyze {
+                let nworkers = if es.qd.is_null() {
+                    0
+                } else {
+                    execmain_seams::query_desc_workers_launched::call(es.qd, plan.plan_node_id)
+                        .unwrap_or(0)
+                };
+                ExplainPropertyInteger("Workers Launched", None, nworkers as i64, es);
+            }
+            if gather.single_copy || es.format != EXPLAIN_FORMAT_TEXT {
+                ExplainPropertyBool("Single Copy", gather.single_copy, es);
+            }
+        }
+        NodeTag::T_GatherMerge => {
+            let gm = node.as_gather_merge().unwrap();
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            ExplainPropertyInteger("Workers Planned", None, gm.num_workers as i64, es);
+            if es.analyze {
+                let nworkers = if es.qd.is_null() {
+                    0
+                } else {
+                    execmain_seams::query_desc_workers_launched::call(es.qd, plan.plan_node_id)
+                        .unwrap_or(0)
+                };
+                ExplainPropertyInteger("Workers Launched", None, nworkers as i64, es);
+            }
+        }
         NodeTag::T_Result => {
             if let Some(q) = node.as_result().unwrap().resconstantqual {
                 show_one_time_filter(q, node, ancestors, es)?;
@@ -869,6 +958,24 @@ pub fn ExplainNode<'mcx>(
             crate::show_buffer_usage(es, &i.bufusage);
         }
     }
+
+    // Per-worker buffer usage (explain.c:2291-2310), then flush the worker
+    // sections and pop the set-aside state.
+    if es.workers_state.is_some() && es.buffers && es.verbose {
+        let w = worker_instrument.as_ref().expect("workers_state implies worker data");
+        for (n, i) in w.iter().enumerate() {
+            if i.nloops <= 0.0 {
+                continue;
+            }
+            explain_open_worker(n, es);
+            crate::show_buffer_usage(es, &i.bufusage);
+            explain_close_worker(n, es);
+        }
+    }
+    if es.workers_state.is_some() {
+        explain_flush_workers_state(es);
+    }
+    es.workers_state = save_workers_state;
 
     // ExplainMissingMembers: subplans removed by initial runtime pruning.
     let append_children = match node.as_append() {
@@ -1099,28 +1206,99 @@ fn show_sort_group_keys<'mcx>(
     Ok(())
 }
 
-// show_sort_info (explain.c); the shared_info worker stanza has no parallel
-// lane. spaceUsed value diverges from C (arena vs palloc accounting) —
-// notes/sort-explain-lane.md.
+// show_sort_info (explain.c). spaceUsed value diverges from C (arena vs
+// palloc accounting) — notes/sort-explain-lane.md.
 fn show_sort_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     if !es.analyze || es.qd.is_null() {
         return Ok(());
     }
     let id = plan_of(node).plan_node_id;
-    let Some(si) = execmain_seams::query_desc_sort_instrument::call(es.qd, id) else {
-        return Ok(());
-    };
-    let sort_method = si.sortMethod.name();
-    let space_type = si.spaceType.name();
-    if es.format == EXPLAIN_FORMAT_TEXT {
-        crate::format::ExplainIndentText(es);
-        append!(es, "Sort Method: {}  {}: {}kB\n", sort_method, space_type, si.spaceUsed);
-    } else {
-        ExplainPropertyText("Sort Method", sort_method, es);
-        ExplainPropertyInteger("Sort Space Used", Some("kB"), si.spaceUsed, es);
-        ExplainPropertyText("Sort Space Type", space_type, es);
+    if let Some(si) = execmain_seams::query_desc_sort_instrument::call(es.qd, id) {
+        let sort_method = si.sortMethod.name();
+        let space_type = si.spaceType.name();
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            crate::format::ExplainIndentText(es);
+            append!(es, "Sort Method: {}  {}: {}kB\n", sort_method, space_type, si.spaceUsed);
+        } else {
+            ExplainPropertyText("Sort Method", sort_method, es);
+            ExplainPropertyInteger("Sort Space Used", Some("kB"), si.spaceUsed, es);
+            ExplainPropertyText("Sort Space Type", space_type, es);
+        }
+    }
+    // The shared_info worker stanza; a worker slot exists only once its sort
+    // completed (C skips SORT_TYPE_STILL_IN_PROGRESS).
+    if let Some(workers) = execmain_seams::query_desc_worker_sort_instrument::call(es.qd, id) {
+        for (n, si) in workers {
+            if es.workers_state.is_some() {
+                explain_open_worker(n as usize, es);
+            }
+            crate::format::ExplainIndentText(es);
+            append!(
+                es,
+                "Sort Method: {}  {}: {}kB\n",
+                si.sortMethod.name(),
+                si.spaceType.name(),
+                si.spaceUsed
+            );
+            if es.workers_state.is_some() {
+                explain_close_worker(n as usize, es);
+            }
+        }
     }
     Ok(())
+}
+
+// ExplainOpenWorker (explain.c), text arm: swap in this worker's set-aside
+// buffer; the slot holds the main buffer until the matching close.
+fn explain_open_worker(n: usize, es: &mut ExplainState<'_>) {
+    debug_assert_eq!(es.format, EXPLAIN_FORMAT_TEXT);
+    let mcx = es.str.allocator();
+    let mut buf = {
+        let ws = es.workers_state.as_mut().expect("open_worker without workers_state");
+        if ws.worker_str[n].is_none() {
+            ws.worker_str[n] =
+                Some(stringinfo::StringInfo::new_in(mcx).expect("explain output append"));
+            ws.worker_inited[n] = true;
+        }
+        ws.worker_str[n].take().expect("worker buffer present")
+    };
+    core::mem::swap(&mut es.str, &mut buf);
+    es.workers_state.as_mut().unwrap().worker_str[n] = Some(buf);
+    if es.str.is_empty() {
+        ExplainIndentText(es);
+        append!(es, "Worker {n}:  ");
+    }
+    es.indent += 1;
+}
+
+// ExplainCloseWorker (explain.c), text arm: drop an output-less "Worker N:"
+// prefix, restore the main buffer.
+fn explain_close_worker(n: usize, es: &mut ExplainState<'_>) {
+    let bytes = es.str.as_bytes();
+    let mut len = bytes.len();
+    while len > 0 && bytes[len - 1] != b'\n' {
+        len -= 1;
+    }
+    es.str.truncate(len);
+    es.indent -= 1;
+    let mut buf = {
+        let ws = es.workers_state.as_mut().expect("close_worker without workers_state");
+        ws.worker_str[n].take().expect("worker slot holds the main buffer")
+    };
+    core::mem::swap(&mut es.str, &mut buf);
+    es.workers_state.as_mut().unwrap().worker_str[n] = Some(buf);
+}
+
+// ExplainFlushWorkersState (explain.c), text arm.
+fn explain_flush_workers_state(es: &mut ExplainState<'_>) {
+    let ws = es.workers_state.take().expect("flush without workers_state");
+    for (inited, buf) in ws.worker_inited.iter().zip(ws.worker_str.iter()) {
+        if *inited {
+            if let Some(b) = buf {
+                es.str.append_bytes(b.as_bytes()).expect("explain output append");
+            }
+        }
+    }
 }
 
 // show_incremental_sort_group_info (explain.c), text format (non-text gaps

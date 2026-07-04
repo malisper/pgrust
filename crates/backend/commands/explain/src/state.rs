@@ -31,9 +31,19 @@ pub enum ExplainSerializeOption {
 pub use ExplainFormat::*;
 pub use ExplainSerializeOption::*;
 
+// Text-format ExplainWorkersState (explain.c): per-worker set-aside output
+// buffers, swapped in around per-worker detail writes and flushed as one
+// "Worker N:" section each. The non-text group bookkeeping is with the other
+// non-text arms: loud.
+pub struct WorkersState<'mcx> {
+    pub num_workers: usize,
+    pub worker_inited: PgVec<'mcx, bool>,
+    pub worker_str: PgVec<'mcx, Option<stringinfo::StringInfo<'mcx>>>,
+}
+
 // Omitted vs C's ExplainState: grouping_stack (non-text formats are loud),
-// workers_state (ANALYZE is loud), extension_state (no extension options
-// registered in this build; ApplyExtensionExplainOption always misses).
+// extension_state (no extension options registered in this build;
+// ApplyExtensionExplainOption always misses).
 pub struct ExplainState<'mcx> {
     pub str: StringInfo<'mcx>,
     pub verbose: bool,
@@ -57,6 +67,7 @@ pub struct ExplainState<'mcx> {
     pub rtable_size: i32,
     pub rtable_names: PgVec<'mcx, Option<&'mcx str>>,
     pub hide_workers: bool,
+    pub workers_state: Option<WorkersState<'mcx>>,
     /// plan_ids already displayed (C printed_subplans).
     pub printed_subplans: types_nodes::bitmapset::Bitmapset<'mcx>,
     pub deparse_cxt: Option<ruleutils::PlanDeparse<'mcx>>,
@@ -85,6 +96,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         rtable_size: 0,
         rtable_names: PgVec::new_in(mcx),
         hide_workers: false,
+        workers_state: None,
         deparse_cxt: None,
     })
 }

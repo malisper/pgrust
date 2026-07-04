@@ -9,6 +9,7 @@ name = "shm_mq"
 path = "src/lib.rs"
 
 [dependencies]
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
 elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }
 latch = { path = "../latch" }

@@ -168,6 +168,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
+    pub fn query_desc_workers_launched(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<i32>
+);
+
+seam_core::seam!(
+    // Per-worker Instrumentation for a node, indexed by worker number
+    // (C planstate->worker_instrument).
+    pub fn query_desc_worker_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<Instrumentation>>
+);
+
+seam_core::seam!(
+    // (worker number, sort instrumentation) pairs (C SortState.shared_info).
+    pub fn query_desc_worker_sort_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(i32, TuplesortInstrumentation)>>
+);
+
+seam_core::seam!(
     pub fn exec_clean_type_from_tl<'p, 'a>(
         pstmt: &'p PlannedStmt<'a>,
     ) -> PgResult<Rc<TupleDescData<'static>>>

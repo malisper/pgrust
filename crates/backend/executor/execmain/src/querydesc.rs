@@ -417,6 +417,67 @@ pub(crate) fn query_desc_index_searches_seam(
     }
 }
 
+/// Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
+pub(crate) fn query_desc_workers_launched_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<i32> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::WorkersLaunched(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// Per-worker Instrumentation for one plan node (C planstate->worker_instrument),
+/// indexed by worker number; entries with nloops <= 0 are the caller's to skip.
+pub(crate) fn query_desc_worker_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<types_core::instrument::Instrumentation>> {
+    let idx = usize::try_from(plan_node_id).ok()?;
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            if d.estate.es_worker_instrument.is_empty() {
+                return None;
+            }
+            Some(
+                d.estate
+                    .es_worker_instrument
+                    .iter()
+                    .map(|w| w.instrument.get(idx).copied().unwrap_or_default())
+                    .collect(),
+            )
+        })
+    })
+}
+
+/// (worker number, sort instrumentation) pairs for one plan node (C
+/// SortState.shared_info).
+pub(crate) fn query_desc_worker_sort_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(i32, types_core::instrument::TuplesortInstrumentation)>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            let out: Vec<_> = d
+                .estate
+                .es_worker_instrument
+                .iter()
+                .enumerate()
+                .flat_map(|(n, w)| {
+                    w.sort
+                        .iter()
+                        .filter(|(id, _)| *id == plan_node_id)
+                        .map(move |(_, si)| (n as i32, *si))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+    })
+}
+
 pub(crate) fn query_desc_hash_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

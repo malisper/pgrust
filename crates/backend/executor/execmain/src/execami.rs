@@ -250,6 +250,14 @@ pub fn exec_re_scan<'mcx>(
             }
             Ok(())
         }
+        PlanStateNode::Gather(g) => {
+            let g = &mut **g;
+            crate::nodegather::exec_rescan_gather(&mut g.state, &mut g.outer, estate)
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            let gm = &mut **gm;
+            crate::nodegathermerge::exec_rescan_gather_merge(&mut gm.state, &mut gm.outer, estate)
+        }
         // execAmi.c has no ModifyTable rescan arm ("node type not supported").
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
@@ -584,6 +592,33 @@ pub fn exec_re_scan_with_chg<'mcx>(
             ::nodesetop::exec_rescan_set_op_chg(&mut s.state, estate);
             exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("SetOp outer plan"), estate, chg)?;
             exec_re_scan_with_chg(&mut s.inner, base.righttree.expect("SetOp inner plan"), estate, chg)?;
+        }
+        PlanStateNode::Gather(g) => {
+            let g = &mut **g;
+            crate::nodegather::exec_shutdown_gather_workers(&mut g.state)?;
+            g.state.initialized = false;
+            if g.state.plan.rescan_param >= 0 {
+                panic!(
+                    "ExecReScanGather (nodeGather.c): rescan_param deferred-rescan \
+                     lane unported"
+                );
+            }
+            exec_re_scan_with_chg(
+                &mut g.outer,
+                base.lefttree.expect("Gather outer plan"),
+                estate,
+                chg,
+            )?;
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            let gm = &mut **gm;
+            crate::nodegathermerge::exec_rescan_gather_merge_pre(&mut gm.state, estate)?;
+            exec_re_scan_with_chg(
+                &mut gm.outer,
+                base.lefttree.expect("GatherMerge outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")

@@ -70,9 +70,22 @@ pub enum PlanStateNode<'mcx> {
     RecursiveUnion(PgBox<'mcx, RecursiveUnionNode<'mcx>>),
     WorkTableScan(PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>),
     NamedTuplestoreScan(PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>),
+    Gather(PgBox<'mcx, GatherNode<'mcx>>),
+    GatherMerge(PgBox<'mcx, GatherMergeNode<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
+}
+
+// The outer child lives here (nodesort/nodeagg precedent).
+pub struct GatherNode<'mcx> {
+    pub state: crate::nodegather::GatherState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
+pub struct GatherMergeNode<'mcx> {
+    pub state: crate::nodegathermerge::GatherMergeState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
 // The subplans live here (BitmapCombineState precedent; indexed fetch).
@@ -339,6 +352,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::RecursiveUnion(ru) => ru.state.ps_ExprContext,
             PlanStateNode::WorkTableScan(wts) => Some(wts.ss.ps_ExprContext),
             PlanStateNode::NamedTuplestoreScan(nts) => Some(nts.ss.ps_ExprContext),
+            PlanStateNode::Gather(g) => g.state.ps.ps_ExprContext,
+            PlanStateNode::GatherMerge(gm) => gm.state.ps.ps_ExprContext,
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_)
@@ -399,6 +414,12 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone().expect("merge join already ended")),
             PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone().expect("window agg already ended")),
             PlanStateNode::SetOp(s) => Ok(s.state.ps_ResultTupleDesc.clone().expect("set op already ended")),
+            PlanStateNode::Gather(g) => {
+                Ok(g.state.ps.ps_ResultTupleDesc.clone().expect("gather already ended"))
+            }
+            PlanStateNode::GatherMerge(gm) => {
+                Ok(gm.state.ps.ps_ResultTupleDesc.clone().expect("gather merge already ended"))
+            }
             PlanStateNode::Memoize(m) => Ok(m.state.ps_ResultTupleDesc.clone().expect("memoize already ended")),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
@@ -1156,6 +1177,36 @@ pub fn exec_init_node<'mcx>(
                 ModifyTablePlanState { mt, subplan, epq },
             )?)
         }
+        NodeTag::T_Gather => {
+            let mcx = estate.es_query_cxt;
+            let g_plan = node.as_gather().unwrap();
+            let outer = exec_init_node(g_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitGather (nodeGather.c): Gather without an outer plan")
+                });
+            let state = crate::nodegather::exec_init_gather(g_plan, estate, &outer)?;
+            PlanStateNode::Gather(::mcx::alloc_in(
+                mcx,
+                GatherNode { state, outer: ::mcx::alloc_in(mcx, outer)? },
+            )?)
+        }
+        NodeTag::T_GatherMerge => {
+            let mcx = estate.es_query_cxt;
+            let gm_plan = node.as_gather_merge().unwrap();
+            let outer = exec_init_node(gm_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitGatherMerge (nodeGatherMerge.c): GatherMerge without \
+                         an outer plan"
+                    )
+                });
+            let state =
+                crate::nodegathermerge::exec_init_gather_merge(gm_plan, estate, &outer)?;
+            PlanStateNode::GatherMerge(::mcx::alloc_in(
+                mcx,
+                GatherMergeNode { state, outer: ::mcx::alloc_in(mcx, outer)? },
+            )?)
+        }
         tag => unported_nodes!(tag, {
             T_SampleScan => "nodeSamplescan.c",
             T_ValuesScan => "nodeValuesscan.c",
@@ -1164,8 +1215,6 @@ pub fn exec_init_node<'mcx>(
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
             T_WindowAgg => "nodeWindowAgg.c",
-            T_Gather => "nodeGather.c",
-            T_GatherMerge => "nodeGatherMerge.c",
             T_Hash => "nodeHash.c",
             T_LockRows => "nodeLockRows.c",
         }),
@@ -1277,7 +1326,27 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
         PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
+        PlanStateNode::Gather(g) => gather_arm(g, estate),
+        PlanStateNode::GatherMerge(gm) => gather_merge_arm(gm, estate),
     }
+}
+
+#[inline(never)]
+fn gather_arm<'mcx>(
+    g: &mut PgBox<'mcx, GatherNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let g = &mut **g;
+    crate::nodegather::exec_gather(&mut g.state, &mut g.outer, estate)
+}
+
+#[inline(never)]
+fn gather_merge_arm<'mcx>(
+    gm: &mut PgBox<'mcx, GatherMergeNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let gm = &mut **gm;
+    crate::nodegathermerge::exec_gather_merge(&mut gm.state, &mut gm.outer, estate)
 }
 
 type ProcResult = PgResult<Option<ExecSlotId>>;
@@ -2381,6 +2450,17 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
         PlanStateNode::Sort(s) => s.outer_desc = None,
         PlanStateNode::SubqueryScan(s) => end_scan(&mut s.ss),
+        PlanStateNode::Gather(g) => {
+            end_base(&mut g.state.ps);
+            g.state.pei = None;
+            g.state.reader = Vec::new();
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            end_base(&mut gm.state.ps);
+            gm.state.pei = None;
+            gm.state.reader = Vec::new();
+            gm.state.tuple_buffers_release();
+        }
         PlanStateNode::HashJoin(hj) => hj.probe_batch.filter = None,
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
@@ -2410,6 +2490,8 @@ pub enum InstrExtra {
     Bitmap(::types_core::instrument::BitmapHeapScanInstrumentation),
     Memoize(::types_core::instrument::MemoizeInstrumentation),
     IndexSearches(u64),
+    /// Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
+    WorkersLaunched(i32),
 }
 
 /// ANALYZE wraps every node, so only Instrumented arms can match the id.
@@ -2477,6 +2559,8 @@ pub fn planstate_instr_extra<'mcx>(
             None
         }
         PlanStateNode::SubqueryScan(s) => walk!(&mut *s.subplan),
+        PlanStateNode::Gather(g) => walk!(&mut *g.outer),
+        PlanStateNode::GatherMerge(gm) => walk!(&mut *gm.outer),
         PlanStateNode::SetOp(s) => walk!(&mut s.outer, &mut s.inner),
         PlanStateNode::RecursiveUnion(ru) => {
             let ru = &mut **ru;
@@ -2532,6 +2616,12 @@ fn instr_extra_of<'mcx>(
         PlanStateNode::BitmapIndexScan(biss) => Some(InstrExtra::IndexSearches(
             biss.biss_ScanDesc.as_deref().map_or(0, |sd| sd.xs_nsearches),
         )),
+        PlanStateNode::Gather(g) => {
+            Some(InstrExtra::WorkersLaunched(g.state.nworkers_launched))
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            Some(InstrExtra::WorkersLaunched(gm.state.nworkers_launched))
+        }
         _ => None,
     }
 }
@@ -2655,6 +2745,17 @@ fn exec_end_node_inner<'mcx>(
             Ok(())
         }
         PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
+        // C ExecEndGather: end child first, then shutdown (workers + context).
+        PlanStateNode::Gather(g) => {
+            let g = &mut **g;
+            exec_end_node(&mut g.outer, estate)?;
+            crate::nodegather::exec_shutdown_gather(&mut g.state, estate)
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            let gm = &mut **gm;
+            exec_end_node(&mut gm.outer, estate)?;
+            crate::nodegathermerge::exec_shutdown_gather_merge(&mut gm.state, estate)
+        }
         PlanStateNode::WorkTableScan(_) => Ok(()),
         // C frees the exec state only; the tuplestore stays with its
         // registrant (the trigger side owns reldata).
@@ -2691,15 +2792,19 @@ fn exec_end_node_inner<'mcx>(
     }
 }
 
-/// `ExecShutdownNode` (execProcnode.c): per-node arms are all no-ops for the
-/// ported set (Gather/ForeignScan/CustomScan/Hash own real shutdowns).
-pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut EStateData<'mcx>) {
+/// `ExecShutdownNode` (execProcnode.c). PgResult because the Gather arms wait
+/// on workers, whose errors rethrow here (C ereports out of ExecParallelFinish).
+pub fn exec_shutdown_node<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     match node {
         PlanStateNode::Instrumented(w) => exec_shutdown_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
-                exec_shutdown_node(outer, estate);
+                exec_shutdown_node(outer, estate)?;
             }
+            Ok(())
         }
         PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
@@ -2713,11 +2818,11 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         | PlanStateNode::TidScan(_)
         | PlanStateNode::TidRangeScan(_)
         | PlanStateNode::IndexOnlyScan(_)
-        | PlanStateNode::BitmapIndexScan(_) => {}
+        | PlanStateNode::BitmapIndexScan(_) => Ok(()),
         PlanStateNode::RecursiveUnion(ru) => {
             let ru = &mut **ru;
-            exec_shutdown_node(&mut ru.outer, estate);
-            exec_shutdown_node(&mut ru.inner, estate);
+            exec_shutdown_node(&mut ru.outer, estate)?;
+            exec_shutdown_node(&mut ru.inner, estate)
         }
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer, estate),
         PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer, estate),
@@ -2732,41 +2837,56 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual, estate),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
-                exec_shutdown_node(sub, estate);
+                exec_shutdown_node(sub, estate)?;
             }
+            Ok(())
         }
         PlanStateNode::ModifyTable(mps) => exec_shutdown_node(&mut mps.subplan, estate),
         PlanStateNode::Append(a) => {
             for sub in a.substates.iter_mut() {
-                exec_shutdown_node(sub, estate);
+                exec_shutdown_node(sub, estate)?;
             }
+            Ok(())
         }
         PlanStateNode::MergeAppend(m) => {
             for sub in m.substates.iter_mut() {
-                exec_shutdown_node(sub, estate);
+                exec_shutdown_node(sub, estate)?;
             }
+            Ok(())
         }
         PlanStateNode::SubqueryScan(s) => exec_shutdown_node(&mut s.subplan, estate),
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
-            exec_shutdown_node(&mut s.outer, estate);
-            exec_shutdown_node(&mut s.inner, estate);
+            exec_shutdown_node(&mut s.outer, estate)?;
+            exec_shutdown_node(&mut s.inner, estate)
         }
         PlanStateNode::NestLoop(nl) => {
-            exec_shutdown_node(&mut nl.outer, estate);
-            exec_shutdown_node(&mut nl.inner, estate);
+            exec_shutdown_node(&mut nl.outer, estate)?;
+            exec_shutdown_node(&mut nl.inner, estate)
         }
         // ExecShutdownHash: hand the table's instrumentation to the estate
         // (C: HashState.hinstrument) before EXPLAIN reads it.
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
             ::nodehashjoin::shutdown_accum_instrumentation(&hj.state, &hj.hash.state, estate);
-            exec_shutdown_node(&mut hj.outer, estate);
-            exec_shutdown_node(&mut hj.hash.child, estate);
+            exec_shutdown_node(&mut hj.outer, estate)?;
+            exec_shutdown_node(&mut hj.hash.child, estate)
         }
         PlanStateNode::MergeJoin(mj) => {
-            exec_shutdown_node(&mut mj.outer, estate);
-            exec_shutdown_node(&mut mj.inner, estate);
+            exec_shutdown_node(&mut mj.outer, estate)?;
+            exec_shutdown_node(&mut mj.inner, estate)
+        }
+        // ExecShutdownGather/GatherMerge: reap workers so instrumentation is
+        // final before EXPLAIN reads it; the context survives for rescan.
+        PlanStateNode::Gather(g) => {
+            let g = &mut **g;
+            crate::nodegather::exec_shutdown_gather(&mut g.state, estate)?;
+            exec_shutdown_node(&mut g.outer, estate)
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            let gm = &mut **gm;
+            crate::nodegathermerge::exec_shutdown_gather_merge(&mut gm.state, estate)?;
+            exec_shutdown_node(&mut gm.outer, estate)
         }
     }
 }
@@ -2801,6 +2921,17 @@ pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'
             if s.ss.qual.is_none() {
                 exec_set_tuple_bound(tuples_needed, &mut s.subplan);
             }
+        }
+        // C remembers the bound for the workers AND bounds the leader's copy.
+        PlanStateNode::Gather(g) => {
+            let g = &mut **g;
+            g.state.tuples_needed = tuples_needed;
+            exec_set_tuple_bound(tuples_needed, &mut g.outer);
+        }
+        PlanStateNode::GatherMerge(gm) => {
+            let gm = &mut **gm;
+            gm.state.tuples_needed = tuples_needed;
+            exec_set_tuple_bound(tuples_needed, &mut gm.outer);
         }
         _ => {}
     }
@@ -3031,6 +3162,8 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     HashSubNode<'_> { state, child },
     HashJoinNode<'_> { state, outer, hash, probe_batch },
     MergeJoinNode<'_> { state, outer, inner },
+    GatherNode<'_> { state, outer },
+    GatherMergeNode<'_> { state, outer },
 );
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
@@ -3040,6 +3173,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         BitmapIndexScan(x), Append(x), MergeAppend(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
         MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),
-        RecursiveUnion(x), WorkTableScan(x), NamedTuplestoreScan(x), Instrumented(x),
+        RecursiveUnion(x), WorkTableScan(x), NamedTuplestoreScan(x),
+        Gather(x), GatherMerge(x), Instrumented(x),
     },
 );

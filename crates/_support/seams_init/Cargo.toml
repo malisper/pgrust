@@ -132,6 +132,7 @@ condition_variable = { path = "../../backend/storage/lmgr/condition_variable" }
 deadlock = { path = "../../backend/storage/lmgr/deadlock" }
 predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
+bgworker = { path = "../../backend/postmaster/bgworker" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
