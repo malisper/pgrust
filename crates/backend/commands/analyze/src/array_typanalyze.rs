@@ -6,7 +6,7 @@ use mcx::{Mcx, MemoryContext, PgFxHashMap, PgVec};
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 
-use crate::{ComputeStats, FetchSource, VacAttrStats, STATISTIC_NUM_SLOTS};
+use crate::{ComputeStats, FetchSource, StdCompute, VacAttrStats, STATISTIC_NUM_SLOTS};
 
 pub(crate) const STATISTIC_KIND_MCELEM: i16 = 4;
 pub(crate) const STATISTIC_KIND_DECHIST: i16 = 5;
@@ -35,8 +35,12 @@ pub(crate) fn setup(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     {
         return Ok(true);
     }
-    let std_scalar = matches!(stats.compute, ComputeStats::Scalar);
-    stats.compute = ComputeStats::Array { std_scalar, elem_typeid: element_typeid };
+    let std = match stats.compute {
+        ComputeStats::Scalar => StdCompute::Scalar,
+        ComputeStats::Distinct => StdCompute::Distinct,
+        _ => StdCompute::Trivial,
+    };
+    stats.compute = ComputeStats::Array { std, elem_typeid: element_typeid };
     Ok(true)
 }
 
@@ -56,16 +60,20 @@ pub(crate) fn compute_array_stats<'mcx>(
     anl_mcx: Mcx<'mcx>,
     col_mcx: Mcx<'_>,
     stats: &mut VacAttrStats<'mcx>,
-    std_scalar: bool,
+    std: StdCompute,
     elem_typeid: Oid,
     src: &FetchSource<'_, '_>,
     samplerows: i32,
     totalrows: f64,
 ) -> PgResult<()> {
-    if std_scalar {
-        crate::compute_scalar_stats(anl_mcx, col_mcx, stats, src, samplerows, totalrows)?;
-    } else {
-        crate::compute_trivial_stats(stats, src, samplerows)?;
+    match std {
+        StdCompute::Scalar => {
+            crate::compute_scalar_stats(anl_mcx, col_mcx, stats, src, samplerows, totalrows)?
+        }
+        StdCompute::Distinct => {
+            crate::compute_distinct_stats(anl_mcx, col_mcx, stats, src, samplerows, totalrows)?
+        }
+        StdCompute::Trivial => crate::compute_trivial_stats(stats, src, samplerows)?,
     }
 
     let entry = typcache::lookup_type_cache(elem_typeid, ELEM_TYPECACHE_FLAGS)?;

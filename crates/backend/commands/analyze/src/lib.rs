@@ -54,9 +54,18 @@ pub struct VacuumParams {
 
 enum ComputeStats {
     Scalar,
+    Distinct,
     Trivial,
     Range { is_multirange: bool },
-    Array { std_scalar: bool, elem_typeid: Oid },
+    Array { std: StdCompute, elem_typeid: Oid },
+}
+
+// std_typanalyze's pick, saved by array_typanalyze (C's std_compute_stats).
+#[derive(Clone, Copy)]
+enum StdCompute {
+    Scalar,
+    Distinct,
+    Trivial,
 }
 
 struct StdAnalyzeData {
@@ -409,6 +418,9 @@ fn do_analyze_rel<'mcx>(
                 ComputeStats::Scalar => {
                     compute_scalar_stats(anl_mcx, col_cx.mcx(), s, &src, numrows, totalrows)?
                 }
+                ComputeStats::Distinct => {
+                    compute_distinct_stats(anl_mcx, col_cx.mcx(), s, &src, numrows, totalrows)?
+                }
                 ComputeStats::Trivial => {
                     compute_trivial_stats(s, &src, numrows)?
                 }
@@ -417,9 +429,9 @@ fn do_analyze_rel<'mcx>(
                         anl_mcx, s, is_multirange, &src, numrows, totalrows,
                     )?
                 }
-                ComputeStats::Array { std_scalar, elem_typeid } => {
+                ComputeStats::Array { std, elem_typeid } => {
                     array_typanalyze::compute_array_stats(
-                        anl_mcx, col_cx.mcx(), s, std_scalar, elem_typeid, &src, numrows,
+                        anl_mcx, col_cx.mcx(), s, std, elem_typeid, &src, numrows,
                         totalrows,
                     )?
                 }
@@ -654,6 +666,14 @@ fn compute_index_stats<'mcx>(
                             numindexrows as i32,
                             totalindexrows,
                         )?,
+                        ComputeStats::Distinct => compute_distinct_stats(
+                            anl_mcx,
+                            col_cx.mcx(),
+                            stats,
+                            &src,
+                            numindexrows as i32,
+                            totalindexrows,
+                        )?,
                         ComputeStats::Trivial => {
                             compute_trivial_stats(stats, &src, numindexrows as i32)?
                         }
@@ -667,12 +687,12 @@ fn compute_index_stats<'mcx>(
                                 totalindexrows,
                             )?
                         }
-                        ComputeStats::Array { std_scalar, elem_typeid } => {
+                        ComputeStats::Array { std, elem_typeid } => {
                             array_typanalyze::compute_array_stats(
                                 anl_mcx,
                                 col_cx.mcx(),
                                 stats,
-                                std_scalar,
+                                std,
                                 elem_typeid,
                                 &src,
                                 numindexrows as i32,
@@ -804,7 +824,7 @@ fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     if eqopr != InvalidOid && ltopr != InvalidOid {
         stats.compute = ComputeStats::Scalar;
     } else if eqopr != InvalidOid {
-        panic!("std_typanalyze (analyze.c): compute_distinct_stats eq-only-type lane");
+        stats.compute = ComputeStats::Distinct;
     } else {
         stats.compute = ComputeStats::Trivial;
     }
@@ -1099,6 +1119,199 @@ fn compute_trivial_stats(
             stats.typlen as i32
         };
         stats.stadistinct = 0.0;
+    } else if null_cnt > 0 {
+        stats.stats_valid = true;
+        stats.stanullfrac = 1.0;
+        stats.stawidth = if is_varwidth { 0 } else { stats.typlen as i32 };
+        stats.stadistinct = 0.0;
+    }
+    Ok(())
+}
+
+// C's track array: descending-count prefix, then count-1 entries in reverse
+// insertion order; a new value enters at the head of the count-1 run, and the
+// bottommost (oldest) singleton drops off when the list is full.
+fn distinct_track_update(
+    track: &mut PgVec<'_, (Datum, i32)>,
+    track_max: usize,
+    value: Datum,
+    datum_eq: &mut dyn FnMut(Datum, Datum) -> bool,
+) {
+    let mut firstcount1 = track.len();
+    let mut matched = None;
+    for j in 0..track.len() {
+        if datum_eq(value, track[j].0) {
+            matched = Some(j);
+            break;
+        }
+        if j < firstcount1 && track[j].1 == 1 {
+            firstcount1 = j;
+        }
+    }
+    match matched {
+        Some(mut j) => {
+            track[j].1 += 1;
+            while j > 0 && track[j].1 > track[j - 1].1 {
+                track.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+        None => {
+            if track.len() < track_max {
+                track.push((Datum::null(), 0));
+            }
+            let mut j = track.len();
+            while j > firstcount1 + 1 {
+                track[j - 1] = track[j - 2];
+                j -= 1;
+            }
+            if firstcount1 < track.len() {
+                track[firstcount1] = (value, 1);
+            }
+        }
+    }
+}
+
+fn compute_distinct_stats<'mcx>(
+    anl_mcx: Mcx<'mcx>,
+    col_mcx: Mcx<'_>,
+    stats: &mut VacAttrStats<'mcx>,
+    src: &FetchSource<'_, '_>,
+    samplerows: i32,
+    totalrows: f64,
+) -> PgResult<()> {
+    let is_varlena = !stats.typbyval && stats.typlen == -1;
+    let is_varwidth = !stats.typbyval && stats.typlen < 0;
+    let mut null_cnt = 0i32;
+    let mut nonnull_cnt = 0i32;
+    let mut toowide_cnt = 0i32;
+    let mut total_width = 0.0f64;
+    let mut num_mcv = stats.attstattarget;
+    let track_max = (2 * num_mcv).max(10) as usize;
+    let mut track: PgVec<'_, (Datum, i32)> = mcx::vec_with_capacity_in(col_mcx, track_max)?;
+
+    let eqfunc = lsyscache::get_opcode(stats.extra.eqopr)?;
+    let mut f_cmpeq = fmgr_seams::fmgr_info::call(eqfunc)?;
+    let collation = stats.attrcollid;
+    let mut datum_eq = |a: Datum, b: Datum| -> bool {
+        types_fmgr::function_call2_coll_in(&mut f_cmpeq, collation, col_mcx, a, b)
+            .unwrap_or_else(|e| panic!("compute_distinct_stats: equality failed: {e:?}"))
+            .as_bool()
+    };
+
+    for rowno in 0..samplerows as usize {
+        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
+        if isnull {
+            null_cnt += 1;
+            continue;
+        }
+        nonnull_cnt += 1;
+        if is_varlena {
+            let sz = varlena_stored_size(value);
+            total_width += sz as f64;
+            if sz > WIDTH_THRESHOLD {
+                toowide_cnt += 1;
+                continue;
+            }
+        } else if is_varwidth {
+            panic!("compute_distinct_stats (analyze.c): cstring-width type lane");
+        }
+        distinct_track_update(&mut track, track_max, value, &mut datum_eq);
+    }
+
+    if nonnull_cnt > 0 {
+        stats.stats_valid = true;
+        stats.stanullfrac = null_cnt as f32 / samplerows as f32;
+        stats.stawidth = if is_varwidth {
+            (total_width / nonnull_cnt as f64) as i32
+        } else {
+            stats.typlen as i32
+        };
+
+        let track_cnt = track.len() as i32;
+        let mut nmultiple = 0i32;
+        let mut summultiple = 0i32;
+        for &(_, count) in track.iter() {
+            if count == 1 {
+                break;
+            }
+            nmultiple += 1;
+            summultiple += count;
+        }
+
+        if nmultiple == 0 {
+            stats.stadistinct = -1.0 * (1.0 - stats.stanullfrac);
+        } else if track_cnt < track_max as i32 && toowide_cnt == 0 && nmultiple == track_cnt {
+            stats.stadistinct = track_cnt as f32;
+        } else {
+            // Haas-Stokes Duj1: n*d / (n - f1 + f1*n/N); too-wide values count
+            // as once-seen through nonnull_cnt.
+            let f1 = (nonnull_cnt - summultiple) as f64;
+            let d = f1 + nmultiple as f64;
+            let n = (samplerows - null_cnt) as f64;
+            let n_total = totalrows * (1.0 - stats.stanullfrac as f64);
+            let mut stadistinct = if n_total > 0.0 {
+                (n * d) / ((n - f1) + f1 * n / n_total)
+            } else {
+                0.0
+            };
+            if stadistinct < d {
+                stadistinct = d;
+            }
+            if stadistinct > n_total {
+                stadistinct = n_total;
+            }
+            stats.stadistinct = (stadistinct + 0.5).floor() as f32;
+        }
+        if stats.stadistinct as f64 > 0.1 * totalrows {
+            stats.stadistinct = -(stats.stadistinct as f64 / totalrows) as f32;
+        }
+
+        // MCV completeness cut differs from compute_scalar_stats: judged by
+        // the track list never filling, not by track_cnt == ndistinct.
+        if track_cnt < track_max as i32
+            && toowide_cnt == 0
+            && stats.stadistinct > 0.0
+            && track_cnt <= num_mcv
+        {
+            num_mcv = track_cnt;
+        } else {
+            if num_mcv > track_cnt {
+                num_mcv = track_cnt;
+            }
+            if num_mcv > 0 {
+                let mut mcv_counts: PgVec<'_, i32> =
+                    mcx::vec_with_capacity_in(col_mcx, num_mcv as usize)?;
+                for &(_, count) in track.iter().take(num_mcv as usize) {
+                    mcv_counts.push(count);
+                }
+                num_mcv = analyze_mcv_list(
+                    &mcv_counts,
+                    num_mcv,
+                    stats.stadistinct as f64,
+                    stats.stanullfrac as f64,
+                    samplerows,
+                    totalrows,
+                );
+            }
+        }
+
+        if num_mcv > 0 {
+            let mut mcv_values: PgVec<'mcx, Datum> =
+                mcx::vec_with_capacity_in(anl_mcx, num_mcv as usize)?;
+            let mut mcv_freqs: PgVec<'mcx, f32> =
+                mcx::vec_with_capacity_in(anl_mcx, num_mcv as usize)?;
+            for &(value, count) in track.iter().take(num_mcv as usize) {
+                mcv_values.push(datum_copy_in(anl_mcx, value, stats.typbyval, stats.typlen)?);
+                mcv_freqs.push(count as f32 / samplerows as f32);
+            }
+            stats.stakind[0] = STATISTIC_KIND_MCV;
+            stats.staop[0] = stats.extra.eqopr;
+            stats.stacoll[0] = stats.attrcollid;
+            stats.stanumbers[0] = mcv_freqs;
+            stats.stavalues[0] = mcv_values;
+            stats.stavalues_set[0] = true;
+        }
     } else if null_cnt > 0 {
         stats.stats_valid = true;
         stats.stanullfrac = 1.0;
@@ -1623,7 +1836,43 @@ fn stat_key(attno: i32, func: types_core::primitive::RegProcedure, arg: Datum) -
 
 #[cfg(test)]
 mod tests {
-    use super::analyze_mcv_list;
+    use super::{analyze_mcv_list, distinct_track_update};
+    use datum::Datum;
+    use mcx::{MemoryContext, PgVec};
+
+    fn run_track(values: &[i32], track_max: usize, cx: &MemoryContext) -> Vec<(i32, i32)> {
+        let mut track: PgVec<'_, (Datum, i32)> = PgVec::new_in(cx.mcx());
+        let mut eq = |a: Datum, b: Datum| a.as_i32() == b.as_i32();
+        for &v in values {
+            distinct_track_update(&mut track, track_max, Datum::from_i32(v), &mut eq);
+        }
+        track.iter().map(|&(d, c)| (d.as_i32(), c)).collect()
+    }
+
+    #[test]
+    fn distinct_track_orders_by_count_and_evicts_oldest_singleton() {
+        let cx = MemoryContext::new("distinct track test");
+        // 1 (the oldest singleton) drops off when 3 enters the full list.
+        assert_eq!(
+            run_track(&[7, 7, 7, 5, 5, 1, 2, 3], 4, &cx),
+            vec![(7, 3), (5, 2), (3, 1), (2, 1)]
+        );
+    }
+
+    #[test]
+    fn distinct_track_bubbles_matched_value_up() {
+        let cx = MemoryContext::new("distinct track test");
+        assert_eq!(run_track(&[1, 2, 2, 2, 1], 10, &cx), vec![(2, 3), (1, 2)]);
+    }
+
+    #[test]
+    fn distinct_track_full_of_multiples_drops_new_singleton() {
+        let cx = MemoryContext::new("distinct track test");
+        assert_eq!(
+            run_track(&[1, 1, 2, 2, 3, 3, 4], 3, &cx),
+            vec![(1, 2), (2, 2), (3, 2)]
+        );
+    }
 
     #[test]
     fn mcv_list_kept_whole_when_sample_is_table() {
