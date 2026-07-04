@@ -124,8 +124,9 @@ fn substitute_bound_param<'mcx>(
     )?))
 }
 
-// datumCopy (datum.c) scoped to bound-parameter substitution; by-ref sources
-// here are input-function results (4B-header varlenas, never toast pointers).
+// datumCopy (datum.c) scoped to bound-parameter substitution; by-ref varlena
+// sources carry any header form (fmgr_sql binds raw tuple datums: short 1B
+// headers and toast pointers included), so the -1 arm is C's VARSIZE_ANY.
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
@@ -133,8 +134,27 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
     }
     let size = match typlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum (see above).
-            unsafe { datum::VarlenaRef::from_ptr(p).varsize() }
+            // SAFETY: non-null by-ref varlena datum, readable for its
+            // header-declared (VARSIZE_ANY) size.
+            unsafe {
+                let b0 = *p;
+                if b0 == 0x01 {
+                    // VARHDRSZ_EXTERNAL + VARTAG_SIZE (postgres.h); the toast
+                    // pointer itself is copied, exactly datumCopy.
+                    2 + match *p.add(1) {
+                        18 => 16,
+                        1 => 8,
+                        2 | 3 => panic!(
+                            "datum_copy_in: expanded-object flatten (EOH_flatten_into) unported"
+                        ),
+                        tag => panic!("datum_copy_in: unknown vartag {tag}"),
+                    }
+                } else if b0 & 0x01 != 0 {
+                    (b0 as usize >> 1) & 0x7F
+                } else {
+                    datum::VarlenaRef::from_ptr(p).varsize()
+                }
+            }
         }
         -2 => {
             let mut n = 0usize;
