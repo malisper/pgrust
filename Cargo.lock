@@ -7650,6 +7650,8 @@ dependencies = [
 name = "planner"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
+ "adt_acl",
  "adt_int8",
  "adt_multirangetypes",
  "adt_network",
@@ -7683,6 +7685,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "miscinit_seams",
  "nbtree",
  "nodeagg",
  "nodehash",
