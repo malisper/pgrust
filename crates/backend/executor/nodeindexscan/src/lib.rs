@@ -94,7 +94,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
 
         let slot_id = self.ss.ss_ScanTupleSlot;
         loop {
-            check_for_interrupts();
+            check_for_interrupts()?;
             // SAFETY: written just above when None; single test+branch like
             // C's scandesc == NULL check.
             let scandesc = unsafe { self.iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
@@ -166,7 +166,7 @@ pub fn index_scan_next_tidrun<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<u32> {
-    check_for_interrupts();
+    check_for_interrupts()?;
     if node.iss_ScanDesc.is_none() {
         node.open_scandesc(estate)?;
     }
@@ -197,17 +197,12 @@ pub fn index_scan_batch_fetch<'mcx>(
     Ok(found)
 }
 
-#[cold]
-#[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("nodeindexscan: ProcessInterrupts (tcop/postgres.c) unported")
-}
-
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        return postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 /// `ExecIndexScan`; the reorder arm is cut off at init (ORDER BY).
