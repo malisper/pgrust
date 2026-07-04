@@ -1856,3 +1856,235 @@ fn aggregate_output_args_rejected() {
     let err = parse_err("DROP AGGREGATE a(OUT x int)");
     assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
 }
+
+#[test]
+fn collation_for_shape() {
+    let list = parse("SELECT COLLATION FOR (x);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "pg_collation_for", 1);
+    assert!(f.args.nth(0).as_column_ref().is_some());
+    assert_eq!(f.location, 7);
+}
+
+#[test]
+fn normalize_shapes() {
+    let list = parse("SELECT NORMALIZE(x);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "normalize", 1);
+    assert!(f.args.nth(0).as_column_ref().is_some());
+
+    let list = parse("SELECT NORMALIZE(x, NFKC);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "normalize", 2);
+    let a = f.args.nth(1).as_a_const().expect("A_Const");
+    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    assert_eq!(s.sval, "NFKC");
+}
+
+#[test]
+fn overlay_shapes() {
+    let list = parse("SELECT OVERLAY(a PLACING b FROM c FOR d);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "overlay", 4);
+
+    let list = parse("SELECT OVERLAY(a PLACING b FROM c);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "overlay", 3);
+
+    let list = parse("SELECT OVERLAY(a, b);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_eq!(f.funcname.len(), 1);
+    assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "overlay");
+    assert_eq!(f.args.len(), 2);
+    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_EXPLICIT_CALL);
+}
+
+#[test]
+fn position_shape() {
+    let list = parse("SELECT POSITION(a IN b);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "position", 2);
+    // position(A in B) becomes position(B, A).
+    let c0 = f.args.nth(0).as_column_ref().expect("ColumnRef");
+    let c1 = f.args.nth(1).as_column_ref().expect("ColumnRef");
+    assert_eq!(c0.fields.nth(0).as_string().unwrap().sval, "b");
+    assert_eq!(c1.fields.nth(0).as_string().unwrap().sval, "a");
+}
+
+#[test]
+fn treat_shape() {
+    let list = parse("SELECT TREAT(x AS text);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_eq!(f.funcname.len(), 2);
+    assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "pg_catalog");
+    assert_eq!(f.funcname.nth(1).as_string().unwrap().sval, "text");
+    assert_eq!(f.args.len(), 1);
+    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_EXPLICIT_CALL);
+}
+
+#[test]
+fn trim_shapes() {
+    for (sql, name, nargs) in [
+        ("SELECT TRIM(BOTH 'x' FROM y);", "btrim", 2),
+        ("SELECT TRIM(LEADING 'x' FROM y);", "ltrim", 2),
+        ("SELECT TRIM(TRAILING FROM y);", "rtrim", 1),
+        ("SELECT TRIM(y);", "btrim", 1),
+    ] {
+        let list = parse(sql);
+        let f = target_expr(&list).as_func_call().expect("FuncCall");
+        assert_system_func(f, name, nargs);
+    }
+    // trim_list: a_expr FROM expr_list is lappend($3, $1): (source, chars).
+    let list = parse("SELECT TRIM(BOTH 'x' FROM y);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert!(f.args.nth(0).as_column_ref().is_some());
+    assert!(f.args.nth(1).as_a_const().is_some());
+}
+
+#[test]
+fn nullif_shape() {
+    let list = parse("SELECT NULLIF(a, b);");
+    let e = target_expr(&list).as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_NULLIF);
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
+    assert!(e.lexpr.is_some() && e.rexpr.is_some());
+    assert_eq!(e.location, 7);
+}
+
+#[test]
+fn typed_table_shapes() {
+    use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, TypeName};
+    let list = parse("CREATE TABLE t OF ty (a WITH OPTIONS NOT NULL, b NOT NULL)");
+    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    assert!(!n.if_not_exists && n.inhRelations.is_nil());
+    let of = n.ofTypename.expect("ofTypename").as_variant::<TypeName>().unwrap();
+    assert_eq!(of.names.len(), 1);
+    assert_eq!(of.names.nth(0).as_string().unwrap().sval, "ty");
+    assert_eq!(n.tableElts.len(), 2);
+    for (i, name) in [(0usize, "a"), (1, "b")] {
+        let cd = n.tableElts.nth(i).as_variant::<ColumnDef>().unwrap();
+        assert_eq!(cd.colname, Some(name));
+        assert!(cd.typeName.is_none() && cd.is_local);
+        let c = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
+        assert_eq!(c.contype, ConstrType::CONSTR_NOTNULL);
+    }
+
+    let list = parse("CREATE TABLE IF NOT EXISTS t OF s.ty");
+    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    assert!(n.if_not_exists && n.tableElts.is_nil());
+    let of = n.ofTypename.unwrap().as_variant::<TypeName>().unwrap();
+    assert_eq!(of.names.len(), 2);
+    assert_eq!(of.names.nth(1).as_string().unwrap().sval, "ty");
+}
+
+#[test]
+fn partition_of_with_column_options_shapes() {
+    use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, PartitionBoundSpec};
+    let list = parse("CREATE TABLE p2 PARTITION OF p (a NOT NULL) FOR VALUES FROM (1) TO (10)");
+    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    assert!(!n.if_not_exists);
+    assert_eq!(n.inhRelations.len(), 1);
+    let cd = n.tableElts.nth(0).as_variant::<ColumnDef>().unwrap();
+    assert_eq!(cd.colname, Some("a"));
+    assert!(cd.typeName.is_none() && cd.is_local);
+    let c = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
+    assert_eq!(c.contype, ConstrType::CONSTR_NOTNULL);
+    let pb = n.partbound.expect("partbound").as_variant::<PartitionBoundSpec>().unwrap();
+    assert_eq!(pb.lowerdatums.len(), 1);
+    assert_eq!(pb.upperdatums.len(), 1);
+
+    let list = parse(
+        "CREATE TABLE IF NOT EXISTS p3 PARTITION OF p (a WITH OPTIONS NOT NULL) FOR VALUES IN (1)",
+    );
+    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    assert!(n.if_not_exists);
+    assert_eq!(n.inhRelations.len(), 1);
+    let cd = n.tableElts.nth(0).as_variant::<ColumnDef>().unwrap();
+    assert_eq!(cd.colname, Some("a"));
+    assert!(cd.typeName.is_none());
+    let pb = n.partbound.expect("partbound").as_variant::<PartitionBoundSpec>().unwrap();
+    assert_eq!(pb.listdatums.len(), 1);
+}
+
+#[test]
+fn named_arg_shapes() {
+    use types_nodes::rawnodes::FuncCall;
+    use types_nodes::NamedArgExpr;
+    let list = parse("SELECT f(1, silent := true)");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().unwrap();
+    let fc = rt.val.unwrap().as_variant::<FuncCall>().unwrap();
+    assert_eq!(fc.args.len(), 2);
+    let na = fc.args.nth(1).as_variant::<NamedArgExpr>().unwrap();
+    assert_eq!(na.name, Some("silent"));
+    assert_eq!(na.argnumber, -1);
+    assert!(na.arg.as_a_const().is_some());
+
+    let list = parse("SELECT f(silent => true)");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().unwrap();
+    let fc = rt.val.unwrap().as_variant::<FuncCall>().unwrap();
+    let na = fc.args.nth(0).as_variant::<NamedArgExpr>().unwrap();
+    assert_eq!(na.name, Some("silent"));
+}
+
+#[test]
+fn range_function_pair_and_ordinality_shapes() {
+    use types_nodes::RangeFunction;
+    let list = parse("SELECT * FROM generate_series(1,3) WITH ORDINALITY");
+    let sel = select_of(only_stmt(&list));
+    let rf = sel.fromClause.nth(0).as_variant::<RangeFunction>().unwrap();
+    assert!(rf.ordinality && !rf.is_rowsfrom);
+    assert_eq!(rf.functions.len(), 1);
+    let pair = rf.functions.nth(0).as_list().unwrap();
+    assert_eq!(pair.len(), 2);
+    assert!(pair.nth(1).as_list().unwrap().is_nil());
+}
+
+#[test]
+fn rows_from_shapes() {
+    use types_nodes::rawnodes::ColumnDef;
+    use types_nodes::RangeFunction;
+    let list = parse(
+        "SELECT * FROM ROWS FROM (f() AS (a int, b text), g()) WITH ORDINALITY AS t(x, y, z, o)",
+    );
+    let sel = select_of(only_stmt(&list));
+    let rf = sel.fromClause.nth(0).as_variant::<RangeFunction>().unwrap();
+    assert!(rf.ordinality && rf.is_rowsfrom);
+    assert_eq!(rf.functions.len(), 2);
+    let pair = rf.functions.nth(0).as_list().unwrap();
+    let coldefs = pair.nth(1).as_list().unwrap();
+    assert_eq!(coldefs.len(), 2);
+    let cd = coldefs.nth(0).as_variant::<ColumnDef>().unwrap();
+    assert_eq!(cd.colname, Some("a"));
+    assert!(cd.typeName.is_some() && cd.is_local);
+    let pair2 = rf.functions.nth(1).as_list().unwrap();
+    assert!(pair2.nth(1).as_list().unwrap().is_nil());
+    assert_eq!(rf.alias.unwrap().aliasname, Some("t"));
+}
+
+#[test]
+fn func_alias_coldeflist_shapes() {
+    use types_nodes::rawnodes::ColumnDef;
+    use types_nodes::RangeFunction;
+    let list = parse("SELECT * FROM f() AS t(a int, b text COLLATE \"C\")");
+    let sel = select_of(only_stmt(&list));
+    let rf = sel.fromClause.nth(0).as_variant::<RangeFunction>().unwrap();
+    assert_eq!(rf.alias.unwrap().aliasname, Some("t"));
+    assert_eq!(rf.coldeflist.len(), 2);
+    let cd = rf.coldeflist.nth(1).as_variant::<ColumnDef>().unwrap();
+    assert_eq!(cd.colname, Some("b"));
+    assert!(cd.collClause.is_some());
+
+    let list = parse("SELECT * FROM f() AS (a int)");
+    let sel = select_of(only_stmt(&list));
+    let rf = sel.fromClause.nth(0).as_variant::<RangeFunction>().unwrap();
+    assert!(rf.alias.is_none());
+    assert_eq!(rf.coldeflist.len(), 1);
+
+    let list = parse("SELECT * FROM f() t(a int)");
+    let sel = select_of(only_stmt(&list));
+    let rf = sel.fromClause.nth(0).as_variant::<RangeFunction>().unwrap();
+    assert_eq!(rf.alias.unwrap().aliasname, Some("t"));
+    assert_eq!(rf.coldeflist.len(), 1);
+}

@@ -507,38 +507,154 @@ fn transformRangeSubselect<'mcx>(
     Ok(&*nsitem)
 }
 
-// Single plain-function slice of C transformRangeFunction; the unnest()
-// multi-arg kluge never fires (unnest itself is unported).
 fn transformRangeFunction<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
-    r: &types_nodes::RangeFunction<'mcx>,
+    r: &'mcx types_nodes::RangeFunction<'mcx>,
 ) -> PgResult<&'mcx ParseNamespaceItem<'mcx>> {
-    if r.is_rowsfrom || r.functions.len() != 1 {
-        panic!(
-            "transformRangeFunction (parse_clause.c): ROWS FROM / multiple functions \
-             unported — unit backend-parser-clause"
-        );
-    }
-    if r.ordinality {
-        panic!(
-            "transformRangeFunction (parse_clause.c): WITH ORDINALITY unported — \
-             unit backend-parser-clause"
-        );
-    }
-    if !r.coldeflist.is_nil() {
-        panic!(
-            "transformRangeFunction (parse_clause.c): column definition lists \
-             unported — coldeflist lane"
-        );
-    }
-
     debug_assert!(!pstate.p_lateral_active);
     pstate.p_lateral_active = true;
 
-    let fexpr = r.functions.nth(0);
-    let last_srf = pstate.p_last_srf;
-    let newfexpr = transformExpr(mcx, pstate, fexpr, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+    let mut funcexprs = NodeList::nil();
+    let mut funcnames: mcx::PgVec<'mcx, &'mcx str> = mcx::PgVec::new_in(mcx);
+    let mut coldeflists: mcx::PgVec<'mcx, &'mcx NodeList<'mcx>> = mcx::PgVec::new_in(mcx);
+
+    for pair_node in &r.functions {
+        let pair = pair_node.as_list().expect("functions cell is a 2-list");
+        debug_assert_eq!(pair.len(), 2);
+        let fexpr = pair.nth(0);
+        let coldeflist = pair.nth(1).as_list().expect("coldeflist cell is a list");
+
+        // unnest(a, b, ...) with no decoration expands to per-argument
+        // pg_catalog.unnest() items (C's SQL-standard UNNEST kluge).
+        if let Some(fc) = fexpr.as_func_call() {
+            if fc.funcname.len() == 1
+                && fc.funcname.nth(0).as_string().map(|s| s.sval) == Some("unnest")
+                && fc.args.len() > 1
+                && fc.agg_order.is_nil()
+                && fc.agg_filter.is_none()
+                && fc.over.is_none()
+                && !fc.agg_star
+                && !fc.agg_distinct
+                && !fc.func_variadic
+                && coldeflist.is_nil()
+            {
+                for arg in &fc.args {
+                    let newfc = Node::mk(
+                        mcx,
+                        types_nodes::rawnodes::FuncCall {
+                            funcname: NodeList::make2(
+                                mcx,
+                                Node::mk_string(mcx, "pg_catalog")?,
+                                Node::mk_string(mcx, "unnest")?,
+                            )?,
+                            args: NodeList::make1(mcx, arg)?,
+                            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+                            location: fc.location,
+                            ..Default::default()
+                        },
+                    )?;
+                    let last_srf = pstate.p_last_srf;
+                    let newfexpr = transformExpr(
+                        mcx,
+                        pstate,
+                        newfc,
+                        ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+                    )?;
+                    check_srf_top_level(pstate, last_srf, newfexpr)?;
+                    funcexprs.lappend(mcx, newfexpr)?;
+                    funcnames.push(parse_target::FigureColname(newfc));
+                    coldeflists.push(coldeflist);
+                }
+                continue;
+            }
+        }
+
+        let last_srf = pstate.p_last_srf;
+        let newfexpr =
+            transformExpr(mcx, pstate, fexpr, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+        check_srf_top_level(pstate, last_srf, newfexpr)?;
+        funcexprs.lappend(mcx, newfexpr)?;
+        funcnames.push(parse_target::FigureColname(fexpr));
+
+        if !coldeflist.is_nil() && !r.coldeflist.is_nil() {
+            return Err(coldeflist_syntax_error(
+                pstate,
+                "multiple column definition lists are not allowed for the same function",
+                None,
+                expr_location_list(&r.coldeflist),
+            ));
+        }
+        coldeflists.push(coldeflist);
+    }
+
+    pstate.p_lateral_active = false;
+
+    parse_collate::assign_list_collations(mcx, pstate, &funcexprs)?;
+
+    if !r.coldeflist.is_nil() {
+        if funcexprs.len() != 1 {
+            if r.is_rowsfrom {
+                return Err(coldeflist_syntax_error(
+                    pstate,
+                    "ROWS FROM() with multiple functions cannot have a column definition list",
+                    Some(
+                        "Put a separate column definition list for each function inside \
+                         ROWS FROM().",
+                    ),
+                    expr_location_list(&r.coldeflist),
+                ));
+            }
+            return Err(coldeflist_syntax_error(
+                pstate,
+                "UNNEST() with multiple arguments cannot have a column definition list",
+                Some(
+                    "Use separate UNNEST() calls inside ROWS FROM(), and attach a column \
+                     definition list to each one.",
+                ),
+                expr_location_list(&r.coldeflist),
+            ));
+        }
+        if r.ordinality {
+            return Err(coldeflist_syntax_error(
+                pstate,
+                "WITH ORDINALITY cannot be used with a column definition list",
+                Some("Put the column definition list inside ROWS FROM()."),
+                expr_location_list(&r.coldeflist),
+            ));
+        }
+        coldeflists = mcx::PgVec::new_in(mcx);
+        coldeflists.push(&r.coldeflist);
+    }
+
+    let mut is_lateral = r.lateral;
+    if !is_lateral {
+        for fe in &funcexprs {
+            if vars::contain_vars_of_level(fe, 0)? {
+                is_lateral = true;
+                break;
+            }
+        }
+    }
+
+    parse_relation::addRangeTableEntryForFunction(
+        mcx,
+        pstate,
+        funcnames.as_slice(),
+        funcexprs,
+        coldeflists.as_slice(),
+        r,
+        is_lateral,
+        true,
+    )
+    .map(|nsitem| &*nsitem)
+}
+
+fn check_srf_top_level<'mcx>(
+    pstate: &mut ParseState<'_, 'mcx>,
+    last_srf: Option<Node<'mcx>>,
+    newfexpr: Node<'mcx>,
+) -> PgResult<()> {
     let moved = match (pstate.p_last_srf, last_srf) {
         (None, None) => false,
         (Some(a), Some(b)) => !a.ptr_eq(b),
@@ -551,25 +667,33 @@ fn transformRangeFunction<'mcx>(
             expr_location(pstate.p_last_srf.expect("moved implies Some")),
         ));
     }
-    let funcname = parse_target::FigureColname(fexpr);
+    Ok(())
+}
 
-    pstate.p_lateral_active = false;
-
-    parse_collate::assign_expr_collations(mcx, pstate, newfexpr)?;
-
-    let is_lateral = r.lateral || vars::contain_vars_of_level(newfexpr, 0)?;
-
-    parse_relation::addRangeTableEntryForFunction(
-        mcx,
-        pstate,
-        funcname,
-        newfexpr,
-        r.alias,
-        r.ordinality,
-        is_lateral,
-        true,
+#[cold]
+#[inline(never)]
+fn coldeflist_syntax_error(
+    pstate: &ParseState<'_, '_>,
+    msg: &'static str,
+    hint: Option<&'static str>,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    let mut b = elog::ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(msg)
+        .errposition(parser_errposition(pstate, location, encoding));
+    if let Some(h) = hint {
+        b = b.errhint(h);
+    }
+    Box::new(
+        b.into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformRangeFunction",
+            )),
     )
-    .map(|nsitem| &*nsitem)
 }
 
 #[cold]

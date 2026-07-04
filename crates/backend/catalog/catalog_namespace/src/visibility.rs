@@ -137,7 +137,8 @@ pub fn FunctionIsVisibleExt(funcid: Oid) -> PgResult<Option<bool>> {
     }
     // Visible iff FuncnameGetCandidates resolves the unqualified name +
     // signature to this exact proc.
-    let clist = FuncnameGetCandidates(scratch.mcx(), &[name_str(&proname)], pronargs, false, false)?;
+    let clist =
+        FuncnameGetCandidates(scratch.mcx(), &[name_str(&proname)], pronargs, &[], false, false)?;
     let mut visible = false;
     for cand in clist.iter() {
         if cand.args.as_slice() == proargtypes.as_slice() {

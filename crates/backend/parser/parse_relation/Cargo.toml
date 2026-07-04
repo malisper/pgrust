@@ -20,6 +20,8 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_utilcmd_seams = { path = "../parse_utilcmd_seams" }
 parser_small1 = { path = "../parser_small1" }
 relation_seams = { path = "../../access/common/relation_seams" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }

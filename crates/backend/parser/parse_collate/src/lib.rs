@@ -361,7 +361,8 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_JsonExpr
         | NodeTag::T_JsonBehavior
         | NodeTag::T_SubLink
-        | NodeTag::T_SubscriptingRef) => {
+        | NodeTag::T_SubscriptingRef
+        | NodeTag::T_NamedArgExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
                 // collation-marked in transformCaseExpr and doesn't affect
@@ -518,6 +519,12 @@ fn assign_collations_walker<'mcx>(
                     }
                 }
                 NodeTag::T_SQLValueFunction => {}
+                NodeTag::T_NamedArgExpr => {
+                    assign_collations_walker(
+                        node.as_named_arg_expr().unwrap().arg,
+                        &mut loccontext,
+                    )?;
+                }
                 NodeTag::T_JsonValueExpr => {
                     let j = node.as_json_value_expr().unwrap();
                     if let Some(e) = j.raw_expr {
@@ -665,6 +672,11 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
+                    // exprSetCollation(NamedArgExpr) is assert-only in C
+                    // (collation == exprCollation(arg)).
+                    NodeTag::T_NamedArgExpr => {
+                        debug_assert_eq!(set_coll, expr_collation(node));
+                    }
                     NodeTag::T_SubscriptingRef => node
                         .with_mut::<types_nodes::SubscriptingRef, _>(|s| s.refcollid = set_coll)
                         .unwrap(),

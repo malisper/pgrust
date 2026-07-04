@@ -887,10 +887,12 @@ fn generate_series_from_item<'mcx>(
             .unwrap()
             .seal_ref() as &types_nodes::Alias<'_>
     });
+    let mut pair = NodeList::make1(mcx, fc).unwrap();
+    pair.lappend(mcx, Node::mk_list(mcx, NodeList::nil()).unwrap()).unwrap();
     Node::mk(
         mcx,
         types_nodes::RangeFunction {
-            functions: NodeList::make1(mcx, fc).unwrap(),
+            functions: NodeList::make1(mcx, Node::mk_list(mcx, pair).unwrap()).unwrap(),
             alias,
             ..Default::default()
         },

@@ -38,7 +38,8 @@ pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullTest, NullTestType,
+    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind,
+    NamedArgExpr, NullTest, NullTestType,
     JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
     JsonValueExpr, JsonValueType, JsonWrapper,

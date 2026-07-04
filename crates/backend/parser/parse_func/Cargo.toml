@@ -12,6 +12,7 @@ path = "src/lib.rs"
 parse_func_seams = { path = "../parse_func_seams" }
 readfuncs = { path = "../../nodes/readfuncs" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
