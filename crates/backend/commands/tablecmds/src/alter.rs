@@ -2586,3 +2586,91 @@ fn ATExecForceNoForceRowSecurity<'mcx>(
 ) -> PgResult<()> {
     set_pg_class_bool(mcx, rel, Anum_pg_class_relforcerowsecurity, force_rls)
 }
+
+// find_composite_type_dependencies (tablecmds.c): origTypeName form only —
+// the origRelation error arms belong to ALTER TABLE OF/composite lanes.
+pub fn find_composite_type_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    orig_type_name: &str,
+) -> PgResult<()> {
+    let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, types_rel::AccessShareLock)?;
+    const Anum_pg_depend_classid: usize = 1;
+    const Anum_pg_depend_objid: usize = 2;
+    const Anum_pg_depend_objsubid: usize = 3;
+    const Anum_pg_depend_refclassid: usize = 4;
+    const Anum_pg_depend_refobjid: usize = 5;
+    let keys = [
+        oid_scankey(Anum_pg_depend_refclassid, TYPE_RELATION_ID),
+        oid_scankey(Anum_pg_depend_refobjid, type_oid),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &dep_rel,
+        pg_depend::DependReferenceIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = dep_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let get = |anum: usize| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_depend columns under its descriptor.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        let classid = get(Anum_pg_depend_classid).as_oid();
+        let objid = get(Anum_pg_depend_objid).as_oid();
+        let objsubid = get(Anum_pg_depend_objsubid).as_i32();
+        if classid == TYPE_RELATION_ID {
+            find_composite_type_dependencies(mcx, objid, orig_type_name)?;
+            continue;
+        }
+        if classid != RELATION_RELATION_ID {
+            continue;
+        }
+        let rel = relation_seams::relation_open::call(mcx, objid, types_rel::AccessShareLock)?;
+        let natts = rel.rd_att.natts as i32;
+        let mut attname: Option<String> = None;
+        if objsubid > 0 && objsubid <= natts {
+            let att = rel.rd_att.attr(objsubid as usize - 1);
+            attname =
+                Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").into());
+        } else {
+            for attno in 1..=natts {
+                let att = rel.rd_att.attr(attno as usize - 1);
+                if att.atttypid == type_oid && !att.attisdropped {
+                    attname = Some(
+                        core::str::from_utf8(att.attname.name_str())
+                            .expect("attname UTF-8")
+                            .into(),
+                    );
+                    break;
+                }
+            }
+            if attname.is_none() {
+                rel.close(types_rel::AccessShareLock)?;
+                continue;
+            }
+        }
+        if types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind)
+            || matches!(rel.rd_rel.relkind, b'p' | b'I')
+        {
+            let relname = rel.name().to_string();
+            let colname = attname.expect("column resolved above");
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot alter type \"{orig_type_name}\" because column \
+                         \"{relname}.{colname}\" uses it"
+                    ),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        rel.close(types_rel::AccessShareLock)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    dep_rel.close(types_rel::AccessShareLock)
+}

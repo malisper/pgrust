@@ -108,6 +108,41 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
     Ok(namespaceId)
 }
 
+pub fn LookupCreationNamespace(nspname: &str) -> PgResult<Oid> {
+    if nspname == "pg_temp" {
+        panic!("LookupCreationNamespace: pg_temp alias (AccessTempTableNamespace) unported");
+    }
+    let namespaceId = get_namespace_oid(nspname, false)?;
+    const ACL_CREATE: u64 = 1 << 9;
+    let aclresult = aclchk_seams::object_aclcheck::call(
+        types_core::catalog::NAMESPACE_RELATION_ID,
+        namespaceId,
+        miscinit_seams::get_user_id::call(),
+        ACL_CREATE,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        aclchk_seams::aclcheck_error::call(aclresult, OBJECT_SCHEMA, nspname)?;
+    }
+    Ok(namespaceId)
+}
+
+pub fn CheckSetNamespace(oldNspOid: Oid, nspOid: Oid) -> PgResult<()> {
+    if crate::isAnyTempNamespace(nspOid)? || crate::isAnyTempNamespace(oldNspOid)? {
+        return Err(Box::new(
+            PgError::error("cannot move objects into or out of temporary schemas")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    const PG_TOAST_NAMESPACE: Oid = 99;
+    if nspOid == PG_TOAST_NAMESPACE || oldNspOid == PG_TOAST_NAMESPACE {
+        return Err(Box::new(
+            PgError::error("cannot move objects into or out of TOAST schema")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    Ok(())
+}
+
 pub fn FindDefaultConversionProc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid> {
     recomputeNamespacePath()?;
 
