@@ -466,11 +466,10 @@ fn fc_pg_get_object_address(
         _ => {}
     }
 
-    let list_node =
-        |cells: &[Node<'_>]| -> PgResult<Node<'_>> {
-            let list = NodeList::from_slice(mcx, cells)?;
-            Node::mk(mcx, list)
-        };
+    fn list_node<'mcx>(mcx: Mcx<'mcx>, cells: &[Node<'mcx>]) -> PgResult<Node<'mcx>> {
+        let list = NodeList::from_slice(mcx, cells)?;
+        Node::mk(mcx, list)
+    }
 
     match objtype {
         OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW | OBJECT_INDEX
@@ -479,7 +478,7 @@ fn fc_pg_get_object_address(
         | OBJECT_TSTEMPLATE | OBJECT_TSCONFIGURATION | OBJECT_DEFAULT | OBJECT_POLICY
         | OBJECT_RULE | OBJECT_TRIGGER | OBJECT_TABCONSTRAINT | OBJECT_OPCLASS
         | OBJECT_OPFAMILY => {
-            objnode = Some(list_node(&name)?);
+            objnode = Some(list_node(mcx, &name)?);
         }
         OBJECT_ACCESS_METHOD | OBJECT_DATABASE | OBJECT_EVENT_TRIGGER | OBJECT_EXTENSION
         | OBJECT_FDW | OBJECT_FOREIGN_SERVER | OBJECT_LANGUAGE | OBJECT_PARAMETER_ACL
@@ -495,25 +494,25 @@ fn fc_pg_get_object_address(
         }
         OBJECT_CAST | OBJECT_DOMCONSTRAINT | OBJECT_TRANSFORM => {
             let tn = mk_type_name_node(mcx, typename.expect("built above"))?;
-            objnode = Some(list_node(&[tn, args[0]])?);
+            objnode = Some(list_node(mcx, &[tn, args[0]])?);
         }
         OBJECT_PUBLICATION_REL => {
-            let nl = list_node(&name)?;
-            objnode = Some(list_node(&[nl, args[0]])?);
+            let nl = list_node(mcx, &name)?;
+            objnode = Some(list_node(mcx, &[nl, args[0]])?);
         }
         OBJECT_PUBLICATION_NAMESPACE | OBJECT_USER_MAPPING => {
-            objnode = Some(list_node(&[name[0], args[0]])?);
+            objnode = Some(list_node(mcx, &[name[0], args[0]])?);
         }
         OBJECT_DEFACL => {
             let mut cells = Vec::with_capacity(name.len() + 1);
             cells.push(args[0]);
             cells.extend_from_slice(&name);
-            objnode = Some(list_node(&cells)?);
+            objnode = Some(list_node(mcx, &cells)?);
         }
         OBJECT_AMOP | OBJECT_AMPROC => {
-            let nl = list_node(&name)?;
-            let al = list_node(&args)?;
-            objnode = Some(list_node(&[nl, al])?);
+            let nl = list_node(mcx, &name)?;
+            let al = list_node(mcx, &args)?;
+            objnode = Some(list_node(mcx, &[nl, al])?);
         }
         OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE
         | OBJECT_OPERATOR => {
@@ -556,13 +555,13 @@ fn mk_type_name_node<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'mcx>) -> PgResult<Node
     Node::mk(
         mcx,
         TypeName {
-            names: tn.names,
+            names: NodeList::from_slice(mcx, tn.names.as_slice())?,
             typeOid: tn.typeOid,
             setof: tn.setof,
             pct_type: tn.pct_type,
-            typmods: tn.typmods,
+            typmods: NodeList::from_slice(mcx, tn.typmods.as_slice())?,
             typemod: tn.typemod,
-            arrayBounds: tn.arrayBounds,
+            arrayBounds: NodeList::from_slice(mcx, tn.arrayBounds.as_slice())?,
             location: tn.location,
         },
     )
