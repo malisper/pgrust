@@ -25,7 +25,8 @@ SELECT DISTINCT ON (a % 3) a % 3, d FROM don_t ORDER BY a % 3, d LIMIT 4;
 -- no ORDER BY at all (row choice unspecified; count only)
 SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM don_t) s;
 -- ORDER BY longer than DISTINCT ON: sort by the more rigorous list
-SELECT DISTINCT ON (a) a, b, c FROM don_t ORDER BY a, c DESC, d LIMIT 5;
+-- (int keys only: float8 sort keys hit the unported sortsupport loud)
+SELECT DISTINCT ON (a) a, b, d FROM don_t ORDER BY a, d DESC, b LIMIT 5;
 
 EXPLAIN SELECT DISTINCT ON (a) a, b FROM don_t ORDER BY a, b;
 EXPLAIN SELECT DISTINCT ON (a) a, b, d FROM don_t ORDER BY a, b DESC, d;
@@ -53,11 +54,11 @@ EXPLAIN SELECT * FROM don_u JOIN (SELECT DISTINCT a FROM don_t) s ON don_u.v = s
 SELECT count(*) FROM don_u JOIN (SELECT DISTINCT ON (a) a, b FROM don_t ORDER BY a, b) s
   ON don_u.v = s.a;
 
--- CTE drill (two references keep C on the materialized plan)
+-- CTE drill (two same-level references keep C on the materialized plan;
+-- sub-level CTE references are the ctelevelsup loud)
 EXPLAIN WITH g AS (SELECT a, count(*) n FROM don_t GROUP BY a)
-  SELECT * FROM don_u JOIN g ON don_u.v = g.a WHERE don_u.k < (SELECT max(n) FROM g);
+  SELECT * FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.v;
 WITH g AS (SELECT a, count(*) n FROM don_t GROUP BY a)
-  SELECT count(*) FROM don_u JOIN g ON don_u.v = g.a
-  WHERE don_u.k < (SELECT max(n) FROM g);
+  SELECT count(*) FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.v;
 
 DROP TABLE don_t, don_u;
