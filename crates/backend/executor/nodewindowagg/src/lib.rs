@@ -672,7 +672,12 @@ pub fn exec_init_window_agg<'mcx>(
         // C arms fcinfo->context with the WindowAggState; the AggStateNode
         // stands in (AggCheckCallContext accepts both).
         let fm = unsafe { agg_node.expect("aggs imply agg_node").as_mut() }.fm_node_ptr();
-        Some(exec_build_agg_trans(mcx, &specs, fm, params)?)
+        let mut et = exec_build_agg_trans(mcx, &specs, fm, params)?;
+        // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
+        // results ride the armed result mcx there (nodeAgg precedent).
+        // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
+        unsafe { et.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+        Some(et)
     } else {
         None
     };
