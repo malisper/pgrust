@@ -355,7 +355,6 @@ pub fn SPI_cursor_find(name: &str) -> Option<cursor::SpiCursor> {
 }
 
 pub use cursor::SPI_cursor_find_portal;
-}
 
 pub fn SPI_register_trigger_data() -> ! {
     panic!("SPI_register_trigger_data (spi.c): ENR/queryEnv lane not ported")
