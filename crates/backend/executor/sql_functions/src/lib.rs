@@ -719,6 +719,13 @@ fn execute_function<'mcx>(
         snapmgr::PopActiveSnapshot()?;
     }
 
+    // returnsTuple settles only when the LAST query is prepared; multi-
+    // statement bodies prepare lazily inside the run loop above, so the
+    // pre-loop snapshot can be stale (record result took the scalar
+    // copy-out path and dereferenced a by-value datum).
+    let returns_tuple = entry.owned.with(|s| s.returns_tuple.get());
+    let facts = EntryFacts { returns_tuple, ..facts };
+
     if facts.returns_set {
         if let Some(i) = suspended {
             assert!(state.eslist[i].lazy_eval, "suspension implies lazy eval");
