@@ -61,10 +61,12 @@ pub(crate) fn int2_scankey(attno: usize, v: i16) -> ScanKeyData {
     key
 }
 
-// CheckTableNotInUse (tablecmds.c): C compares rd_refcnt to 1; the store's Rc
-// plus our handle make the idle baseline 2.
+// CheckTableNotInUse (tablecmds.c): C compares rd_refcnt to expected (nailed
+// is a flag here, not a count, so the expected user-ref count is always the
+// caller's own handle). RelationUserRefcount survives entry rebuilds, which
+// split the Rc identity a bare strong_count check relied on.
 pub fn CheckTableNotInUse(rel: &Relation<'_>, stmt: &str) -> PgResult<()> {
-    if std::rc::Rc::strong_count(rel.data_rc()) > 2 {
+    if relcache::RelationUserRefcount(rel.rd_id) != 1 {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -76,8 +78,21 @@ pub fn CheckTableNotInUse(rel: &Relation<'_>, stmt: &str) -> PgResult<()> {
             .with_sqlstate(ERRCODE_OBJECT_IN_USE),
         ));
     }
-    // C also errors on AfterTriggerPendingOnRel; no trigger-creating DDL
-    // exists, so no pending events can exist.
+    if rel.rd_rel.relkind != types_rel::RELKIND_INDEX
+        && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_INDEX
+        && trigger_seams::after_trigger_pending_on_rel::call(rel.rd_id)
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "cannot {stmt} \"{}\" because it has pending trigger events",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_OBJECT_IN_USE),
+        ));
+    }
     Ok(())
 }
 

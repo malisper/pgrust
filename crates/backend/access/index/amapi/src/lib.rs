@@ -181,7 +181,9 @@ pub fn am_adjust_members(
         IndexAmKind::Btree => {
             nbt_validate::btadjustmembers(opfamilyoid, opclassoid, operators, functions)
         }
-        // hashadjustmembers exists in C; loud until the hash opclass lane.
+        IndexAmKind::Hash => {
+            hash_validate::hashadjustmembers(opfamilyoid, opclassoid, operators, functions)
+        }
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
 }

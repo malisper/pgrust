@@ -79,6 +79,7 @@ pub(crate) fn insert(
     let leaked = with_state(|st| match st.id_cache.insert(relid, RelCacheEnt { rel, nailed }) {
         Some(old) => {
             debug_assert!(replace_allowed);
+            crate::note_stale(st, &old.rel);
             (!refcount_zero(&old.rel, 0)).then(|| String::from(old.rel.name()))
         }
         None => None,
