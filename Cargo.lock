@@ -7555,6 +7555,7 @@ dependencies = [
  "acl_seams",
  "backend_status",
  "backend_status_seams",
+ "catalog_seams",
  "datum",
  "funcapi",
  "init_small",
