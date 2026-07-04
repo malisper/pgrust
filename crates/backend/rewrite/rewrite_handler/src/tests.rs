@@ -376,15 +376,18 @@ fn acquire_locks_recurses_into_subquery_rte() {
 }
 
 #[test]
-#[should_panic(expected = "mergeActionList arm")]
-fn merge_rewrite_defers_loud() {
+fn merge_rewrite_plain_table_passes() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
     query.commandType = CmdType::CMD_MERGE;
     query.resultRelation = 1;
-    let _ = QueryRewrite(mcx, query);
+    query.rtable =
+        NodeList::make1(mcx, relation_rte(mcx, TBL, RELKIND_RELATION, RowExclusiveLock))
+            .unwrap();
+    let out = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(out.len(), 1);
 }
 
 #[test]

@@ -1,0 +1,36 @@
+[package]
+name = "large_object"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "large_object"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+elog = { path = "../../utils/error/elog" }
+heaptuple = { path = "../../access/common/heaptuple" }
+detoast = { path = "../../access/common/detoast" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+indexam = { path = "../../access/index/indexam" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_largeobject = { path = "../../catalog/pg_largeobject" }
+pg_depend = { path = "../../catalog/pg_depend" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+xact = { path = "../../access/transam/xact" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }

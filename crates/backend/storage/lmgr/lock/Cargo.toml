@@ -25,6 +25,7 @@ lmgr_seams = { path = "../lmgr_seams" }
 latch_seams = { path = "../../ipc/latch_seams" }
 standby_seams = { path = "../../ipc/standby_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }

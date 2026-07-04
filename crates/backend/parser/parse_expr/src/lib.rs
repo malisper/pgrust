@@ -1839,7 +1839,7 @@ fn sql_fn_post_column_ref<'mcx>(
              selection (ParseFuncOrColumn on a Param) unported"
         );
     }
-    Ok(Some(parser_small1::sql_fn_make_param(mcx, paramno, ptype, location)?))
+    Ok(Some(parser_small1::sql_fn_make_param(mcx, state, paramno, ptype, location)?))
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {

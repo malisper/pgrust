@@ -192,9 +192,7 @@ pub fn reindex_index<'mcx>(
 
     catalog_heap::CheckTableNotInUse(&iRel, "REINDEX INDEX")?;
 
-    if xact::IsolationIsSerializable() {
-        unported("reindex_index: TransferPredicateLocksToHeapRelation (predicate.c)");
-    }
+    predicate_seams::transfer_predicate_locks_to_heap_relation::call(&iRel)?;
 
     let mut indexInfo = execindexing::BuildIndexInfo(mcx, &iRel)?;
     let mut skipped_constraint = false;

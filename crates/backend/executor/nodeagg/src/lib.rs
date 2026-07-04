@@ -2,9 +2,9 @@
 // and by-ref transtypes (INTERNAL is a byval pointer datum; its state lives in
 // the AggStateNode aggcontext the transfn reaches via fcinfo->context; by-ref
 // transvalues copy into that aggcontext at C's datumCopy points), finalfn
-// via resolve-once peragg carriers, no FILTER/DISTINCT/ORDER BY; transitions
-// compile into one execexpr program (C's evaltrans). AGG_MIXED, aggsplit
-// variants, grouping sets and spill are loud panics.
+// via resolve-once peragg carriers; transitions compile into one execexpr
+// program (C's evaltrans). Grouping sets (all strategies) live in gsets.rs.
+// aggsplit variants and hashagg spill are loud panics.
 #![allow(non_snake_case)]
 
 use core::alloc::Layout;
@@ -29,7 +29,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
 use ::types_nodes::primnodes::{Aggref, AGGKIND_NORMAL};
 use ::types_nodes::NodeTag;
-use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_PLAIN, AGG_SORTED};
+use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
@@ -451,21 +451,20 @@ pub fn exec_init_agg<'mcx>(
     outer_desc: Option<Rc<TupleDescData<'static>>>,
 ) -> PgResult<AggStateData<'mcx>> {
     let mcx = estate.es_query_cxt;
+    let has_grouping_sets = !node.groupingSets.is_nil() || !node.chain.is_nil();
     if node.aggstrategy != AGG_PLAIN
         && node.aggstrategy != AGG_HASHED
         && node.aggstrategy != AGG_SORTED
+        && node.aggstrategy != AGG_MIXED
     {
-        panic!(
-            "ExecInitAgg (nodeAgg.c): aggstrategy {} (AGG_MIXED) not ported",
-            node.aggstrategy
-        );
+        panic!("ExecInitAgg (nodeAgg.c): aggstrategy {} cannot happen", node.aggstrategy);
     }
+    assert!(
+        node.aggstrategy != AGG_MIXED || has_grouping_sets,
+        "ExecInitAgg (nodeAgg.c): AGG_MIXED outside grouping sets cannot happen"
+    );
     if node.aggsplit != AGGSPLIT_SIMPLE {
         panic!("ExecInitAgg (nodeAgg.c): aggsplit {} not ported", node.aggsplit);
-    }
-    let has_grouping_sets = !node.groupingSets.is_nil() || !node.chain.is_nil();
-    if has_grouping_sets && node.aggstrategy == AGG_HASHED {
-        panic!("ExecInitAgg (nodeAgg.c): hashed grouping sets not ported — grouping-sets lane");
     }
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
@@ -1381,7 +1380,7 @@ where
         return Ok(None);
     }
     if node.gsets.is_some() {
-        return gsets::agg_retrieve_grouping_sets(node, estate, &mut fetch_outer);
+        return gsets::exec_agg_gsets(node, estate, &mut fetch_outer);
     }
     if node.plan.aggstrategy == AGG_HASHED {
         if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
@@ -1404,6 +1403,15 @@ where
         }
         estate.reset_expr_context(node.tmpcontext);
     }
+    plain_finish(node, estate)
+}
+
+// exec_agg's post-drain tail (finalize + HAVING + project), shared with the
+// batched drive.
+fn plain_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
     process_ordered_aggregates(node, estate)?;
     estate.reset_expr_context(node.ps_ExprContext);
     finalize_aggregates(node, estate, node.pergroup_base)?;
@@ -1419,6 +1427,115 @@ where
     let mut slots = EvalSlots { scan: None, inner: None, outer: None };
     exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
     Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// Page-batch feed for the fused agg-over-scan drive (upstream batch
+/// executor design, CF 6176); implemented over the concrete scan node by the
+/// dispatcher, which owns both sides.
+pub trait AggBatchSource<'mcx> {
+    /// Stage the next page batch; 0 = input exhausted.
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
+    /// Store staged tuple `i` into the outer slot and apply the scan qual;
+    /// false = filtered out.
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
+    fn outer_slot(&self) -> ExecSlotId;
+    fn has_qual(&self) -> bool;
+}
+
+/// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
+/// per-tuple drive otherwise.
+pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
+    node.gsets.is_none()
+        && node.pertrans_sort.is_empty()
+        && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
+        && node.evaltrans.is_some()
+}
+
+/// `exec_agg` over a page-batch source: identical per-row transition order,
+/// minus the per-tuple node recursion (and minus the slot store for
+/// input-free transition kernels).
+pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut src: S,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(agg_batch_drainable(node));
+    if node.agg_done {
+        return Ok(None);
+    }
+    if node.plan.aggstrategy == AGG_HASHED {
+        if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
+            agg_fill_hash_table_batched(node, estate, &mut src)?;
+        }
+        return agg_retrieve_hash_table(node, estate);
+    }
+    initialize_aggregates(node)?;
+
+    let storeless = !src.has_qual()
+        && matches!(
+            node.evaltrans.as_deref().unwrap().kernel(),
+            ::execexpr::Kernel::AggTransByVal { .. }
+        );
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            break;
+        }
+        if storeless {
+            for _ in 0..n {
+                let mut slots = EvalSlots::default();
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+                estate.reset_expr_context(node.tmpcontext);
+            }
+        } else {
+            for i in 0..n {
+                if !src.fetch_tuple(i, estate)? {
+                    continue;
+                }
+                let outer_id = src.outer_slot();
+                estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+                estate.reset_expr_context(node.tmpcontext);
+            }
+        }
+    }
+    plain_finish(node, estate)
+}
+
+fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    src: &mut S,
+) -> PgResult<()> {
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            break;
+        }
+        for i in 0..n {
+            if !src.fetch_tuple(i, estate)? {
+                continue;
+            }
+            let outer_id = src.outer_slot();
+            estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+            lookup_hash_entry(node, estate, outer_id)?;
+            {
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+            }
+            estate.reset_expr_context(node.tmpcontext);
+        }
+    }
+    let ph = node.perhash.as_mut().unwrap();
+    ph.table_filled = true;
+    ph.hashiter = 0;
+    hash_agg_update_metrics(node, estate);
+    Ok(())
 }
 
 const MAX_FINAL_ARGS: usize = 4;
@@ -1800,6 +1917,10 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
             sort.end();
         }
     }
+    if let Some(gs) = node.gsets.as_mut() {
+        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        return;
+    }
     if let Some(ph) = node.perhash.as_mut() {
         ph.table_filled = false;
         ph.hashiter = 0;
@@ -1822,7 +1943,11 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         }
     }
     if let Some(gs) = node.gsets.as_mut() {
-        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        // C's no-chgParam AGG_HASHED arm: filled tables are reused, only the
+        // iterators reset.
+        if !gsets::rescan_hash_reuse(gs) {
+            gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        }
         return;
     }
     if let Some(ph) = node.perhash.as_mut() {

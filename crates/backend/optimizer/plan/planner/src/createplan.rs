@@ -1249,11 +1249,7 @@ fn create_modifytable_plan<'mcx>(
     let mcx = run.mcx;
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(
-            p.withCheckOptionLists.is_empty()
-                && p.rowMarks.is_empty()
-                && p.mergeActionLists.is_empty()
-        );
+        debug_assert!(p.withCheckOptionLists.is_empty() && p.rowMarks.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1270,7 +1266,8 @@ fn create_modifytable_plan<'mcx>(
         x if x == CmdType::CMD_INSERT as u32 => CmdType::CMD_INSERT,
         x if x == CmdType::CMD_UPDATE as u32 => CmdType::CMD_UPDATE,
         x if x == CmdType::CMD_DELETE as u32 => CmdType::CMD_DELETE,
-        other => panic!("make_modifytable (createplan.c): operation {other}; M4 MERGE lane"),
+        x if x == CmdType::CMD_MERGE as u32 => CmdType::CMD_MERGE,
+        other => panic!("make_modifytable (createplan.c): operation {other} unported"),
     };
 
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
@@ -1345,6 +1342,44 @@ fn create_modifytable_plan<'mcx>(
         plan.arbiterIndexes = crate::plancat::infer_arbiter_indexes(run, oc)?;
         plan.exclRelRTI = oc.exclRelIndex as u32;
         plan.exclRelTlist = oc.exclRelTlist.clone_in(mcx)?;
+    }
+    {
+        let (action_lists, join_conds) = {
+            let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+            debug_assert!(p.mergeActionLists.len() <= 1);
+            let mut lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for al in p.mergeActionLists.iter() {
+                lists.push(crate::relnode::pgvec_clone_shallow(mcx, al));
+            }
+            let mut conds: mcx::PgVec<'mcx, Option<types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for &c in p.mergeJoinConditions.iter() {
+                conds.push(c);
+            }
+            (lists, conds)
+        };
+        let mut mal = types_nodes::list::NodeList::nil();
+        for al in action_lists.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in al.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            mal.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        plan.mergeActionLists = mal;
+        let mut mjc = types_nodes::list::NodeList::nil();
+        for &c in join_conds.iter() {
+            // A None condition (no BY SOURCE actions) rides as an empty
+            // implicit-AND list: ExecQual over it is constant true, matching
+            // C's NULL-condition semantics.
+            let cell = match c {
+                Some(id) => *run.root.expr_node(id),
+                None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+            };
+            mjc.lappend(mcx, cell)?;
+        }
+        plan.mergeJoinConditions = mjc;
     }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
@@ -1688,16 +1723,25 @@ fn create_groupingsets_plan<'mcx>(
 
     let mut chain = NodeList::nil();
     if rollups.len() > 1 {
-        debug_assert!(!rollups[0].is_hashed);
+        let mut is_first_sort = rollups[0].is_hashed;
         for rollup in rollups[1..].iter() {
-            assert!(
-                !rollup.is_hashed,
-                "create_groupingsets_plan (createplan.c): hashed rollup; grouping-sets lane"
-            );
             let new_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
-            let sort_plan =
-                make_sort_from_groupcols(run, &rollup.groupClause, &new_grp_col_idx, subplan)?;
-            let strat = if rollup.gsets[0].is_empty() {
+            let sort_plan = if !rollup.is_hashed && !is_first_sort {
+                Some(make_sort_from_groupcols(
+                    run,
+                    &rollup.groupClause,
+                    &new_grp_col_idx,
+                    subplan,
+                )?)
+            } else {
+                None
+            };
+            if !rollup.is_hashed {
+                is_first_sort = false;
+            }
+            let strat = if rollup.is_hashed {
+                types_pathnodes::AGG_HASHED
+            } else if rollup.gsets[0].is_empty() {
                 types_pathnodes::AGG_PLAIN
             } else {
                 types_pathnodes::AGG_SORTED
@@ -1706,7 +1750,7 @@ fn create_groupingsets_plan<'mcx>(
             let mut agg = Node::build::<Agg>(mcx)?;
             agg.plan.targetlist = NodeList::nil();
             agg.plan.qual = NodeList::nil();
-            agg.plan.lefttree = Some(sort_plan);
+            agg.plan.lefttree = sort_plan;
             agg.aggstrategy = strat;
             agg.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
             agg.numCols = rollup.gsets[0].len() as i32;
@@ -1718,13 +1762,15 @@ fn create_groupingsets_plan<'mcx>(
             agg.transitionSpace = transition_space;
             // C strips the vestigial Sort after make_agg.
             // SAFETY: sort_plan was freshly built above; no other handle.
-            unsafe {
-                sort_plan.with_plan_mut(|p| {
-                    p.targetlist = NodeList::nil();
-                    p.lefttree = None;
-                })
+            if let Some(sp) = sort_plan {
+                unsafe {
+                    sp.with_plan_mut(|p| {
+                        p.targetlist = NodeList::nil();
+                        p.lefttree = None;
+                    })
+                }
+                .expect("Sort embeds a Plan base");
             }
-            .expect("Sort embeds a Plan base");
             chain.lappend(mcx, agg.seal())?;
         }
     }

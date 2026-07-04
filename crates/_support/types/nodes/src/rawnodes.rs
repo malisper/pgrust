@@ -127,6 +127,28 @@ pub struct ReturningClause<'mcx> {
     pub exprs: NodeList<'mcx>,
 }
 
+/// `relation` is a RangeVar node; `sourceRelation` a table_ref;
+/// `mergeWhenClauses` cells are MergeWhenClause.
+#[derive(Default)]
+pub struct MergeStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub sourceRelation: Option<Node<'mcx>>,
+    pub joinCondition: Option<Node<'mcx>>,
+    pub mergeWhenClauses: NodeList<'mcx>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct MergeWhenClause<'mcx> {
+    pub matchKind: crate::primnodes::MergeMatchKind,
+    pub commandType: crate::nodes_enums::CmdType,
+    pub r#override: crate::primnodes::OverridingKind,
+    pub condition: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub values: NodeList<'mcx>,
+}
+
 /// `infer` is an InferClause node; `targetList` cells are ResTarget.
 #[derive(Default)]
 pub struct OnConflictClause<'mcx> {
@@ -742,6 +764,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReturningClause;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeWhenClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeWhenClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_OnConflictClause;
 }
@@ -875,6 +903,26 @@ unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
+#[derive(Default)]
+pub struct CreateExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateExtensionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterExtensionStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,
@@ -961,6 +1009,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_on_conflict_clause(self) -> Option<&'mcx OnConflictClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_stmt(self) -> Option<&'mcx MergeStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_when_clause(self) -> Option<&'mcx MergeWhenClause<'mcx>> {
         self.as_variant()
     }
 

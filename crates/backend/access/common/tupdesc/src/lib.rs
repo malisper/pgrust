@@ -613,3 +613,36 @@ fn type_lookup_failed(oidtypeid: Oid) -> Box<PgError> {
 fn unsupported_type(oidtypeid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("unsupported type {oidtypeid}")))
 }
+
+// build_attrmap_by_name (access/common/attmap.c), missing_ok=false shape:
+// attmap[out_attno-1] = the indesc attno with the same name.
+pub fn build_attrmap_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+) -> PgResult<PgVec<'mcx, i16>> {
+    let mut attmap: PgVec<'mcx, i16> = vec_with_capacity_in(mcx, outdesc.natts as usize)?;
+    for i in 0..outdesc.natts as usize {
+        let outatt = outdesc.attr(i);
+        if outatt.attisdropped {
+            attmap.push(0);
+            continue;
+        }
+        let name = outatt.attname.name_str();
+        let mut mapped: i16 = 0;
+        for j in 0..indesc.natts as usize {
+            let inatt = indesc.attr(j);
+            if !inatt.attisdropped && inatt.attname.name_str() == name {
+                assert!(
+                    inatt.atttypid == outatt.atttypid && inatt.atttypmod == outatt.atttypmod,
+                    "build_attrmap_by_name: could-not-convert-row-type report unported"
+                );
+                mapped = inatt.attnum;
+                break;
+            }
+        }
+        assert!(mapped != 0, "build_attrmap_by_name: missing-attribute report unported");
+        attmap.push(mapped);
+    }
+    Ok(attmap)
+}

@@ -9,6 +9,7 @@ name = "ipci"
 path = "src/lib.rs"
 
 [dependencies]
+predicate = { path = "../../lmgr/predicate" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
@@ -28,6 +29,7 @@ commands_async = { path = "../../../commands/commands_async" }
 clog = { path = "../../../access/transam/clog" }
 subtrans = { path = "../../../access/transam/subtrans" }
 multixact = { path = "../../../access/transam/multixact" }
+twophase = { path = "../../../access/transam/twophase" }
 sinval = { path = "../sinval" }
 pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }

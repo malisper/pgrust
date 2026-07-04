@@ -352,6 +352,19 @@ enum PergroupMode<'a> {
     Fixed,
     Indirect(NonNull<NonNull<AggPerGroup>>),
     Sets(&'a [NonNull<AggPerGroup>]),
+    // C's dosort+dohash program: Sets bases plus one Indirect cell per hash set.
+    Mixed(&'a [NonNull<AggPerGroup>], &'a [NonNull<NonNull<AggPerGroup>>]),
+}
+
+pub fn exec_build_agg_trans_mixed<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    cells: &[NonNull<NonNull<AggPerGroup>>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Mixed(set_bases, cells), agg_node, params)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -497,6 +510,40 @@ fn build_agg_trans<'mcx>(
                 }
             }
         };
+        let indirect_step = |base: NonNull<NonNull<AggPerGroup>>| -> Step {
+            if spec.transtype_byval {
+                match (fn_strict, init_strict) {
+                    (_, true) => Step::AggTransInitStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (true, false) => Step::AggTransStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (false, false) => {
+                        Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+                    }
+                }
+            } else {
+                let byref = crate::steps::AggByRef {
+                    agg: agg_state_node(agg_node),
+                    translen: spec.transtype_len,
+                };
+                let transno = transno as u16;
+                match (fn_strict, spec.init_value_is_null) {
+                    (true, true) => {
+                        Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (true, false) => {
+                        Step::AggTransStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
+                }
+            }
+        };
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
@@ -509,40 +556,18 @@ fn build_agg_trans<'mcx>(
                 }
             }
             PergroupMode::Indirect(base) => {
-                let base = *base;
-                let step = if spec.transtype_byval {
-                    match (fn_strict, init_strict) {
-                        (_, true) => Step::AggTransInitStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (true, false) => Step::AggTransStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (false, false) => {
-                            Step::AggTransByValIndirect { call, base, transno: transno as u16 }
-                        }
-                    }
-                } else {
-                    let byref = crate::steps::AggByRef {
-                        agg: agg_state_node(agg_node),
-                        translen: spec.transtype_len,
-                    };
-                    let transno = transno as u16;
-                    match (fn_strict, spec.init_value_is_null) {
-                        (true, true) => {
-                            Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (true, false) => {
-                            Step::AggTransStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
-                    }
-                };
-                push_step(&mut state, mcx, step)?;
+                push_step(&mut state, mcx, indirect_step(*base))?;
+            }
+            PergroupMode::Mixed(bases, cells) => {
+                for &base in bases.iter() {
+                    // SAFETY: as PergroupMode::Sets.
+                    let pergroup =
+                        unsafe { NonNull::new_unchecked(base.as_ptr().add(transno)) };
+                    push_step(&mut state, mcx, fixed_step(pergroup))?;
+                }
+                for &cell in cells.iter() {
+                    push_step(&mut state, mcx, indirect_step(cell))?;
+                }
             }
         }
         let target = state.steps.len() as u32;
@@ -1362,13 +1387,13 @@ fn init_scalar_array_op<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    if saop.hashfuncid != 0 {
-        unported("EEOP_HASHED_SCALARARRAYOP (convert_saop_to_hashed_saop lane)");
-    }
     debug_assert!(saop.args.len() == 2);
     let scalararg = saop.args.nth(0);
     let arrayarg = saop.args.nth(1);
-    let opfuncid = if saop.opfuncid != 0 {
+    // C: hash probes use the equality function (negfuncid) for NOT IN.
+    let opfuncid = if saop.hashfuncid != 0 && saop.negfuncid != 0 {
+        saop.negfuncid
+    } else if saop.opfuncid != 0 {
         saop.opfuncid
     } else {
         // set_sa_opfuncid (nodeFuncs.c).
@@ -1404,6 +1429,46 @@ fn init_scalar_array_op<'mcx>(
         init_expr_rec(scalararg, state, mcx, arg_out, agg, params, sub)?;
     }
     init_expr_rec(arrayarg, state, mcx, out, agg, params, sub)?;
+
+    if saop.hashfuncid != 0 {
+        let mut hash_flinfo = fmgr_core::fmgr_info(saop.hashfuncid)?;
+        hash_flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
+        let hash_frame = FuncFrame::new_in(mcx, hash_flinfo, 1, saop.inputcollid)?;
+        let hash_frame_ix = state.frames.len() as u32;
+        let hashcall = FuncCall {
+            fcinfo: hash_frame.fcinfo,
+            flinfo: hash_frame.flinfo,
+            frame: hash_frame_ix,
+            nargs: 1,
+        };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(hash_frame);
+
+        let table = state.saop_tables.len() as u32;
+        state
+            .saop_tables
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<crate::steps::SaopTable<'_>>()))?;
+        state.saop_tables.push(crate::steps::SaopTable {
+            hashcall,
+            built: false,
+            has_nulls: false,
+            map: ::mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
+        });
+
+        return Ok(Step::HashedScalarArrayOp {
+            call,
+            inclause: saop.useOr,
+            typlen,
+            typbyval,
+            typalign: typalign as u8,
+            table,
+            out,
+        });
+    }
 
     Ok(Step::ScalarArrayOp {
         call,

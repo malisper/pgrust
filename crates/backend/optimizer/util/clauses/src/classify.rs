@@ -1,7 +1,7 @@
 use lsyscache::{func_parallel, func_strict, func_volatile, get_func_leakproof};
 use types_core::Oid;
 use types_error::PgResult;
-use types_nodes::primnodes::{Param, ParamKind};
+use types_nodes::primnodes::{Param, ParamKind, ScalarArrayOpExpr};
 use types_nodes::{Bitmapset, Node, NodeTag};
 
 use crate::walker::{
@@ -351,7 +351,12 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_CoerceViaIO | NodeTag::T_ArrayCoerceExpr) => {
+            // CoerceViaIO is strict regardless of its I/O functions; look
+            // only at its argument (checking the functions could be wrong).
+            NodeTag::T_CoerceViaIO => {
+                return self.visit(node.as_coerce_via_io().unwrap().arg);
+            }
+            t @ NodeTag::T_ArrayCoerceExpr => {
                 deferred("contain_nonstrict_functions_walker", t)
             }
             _ => {}
@@ -517,19 +522,52 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
             return walk_grouping_func_args(node, self);
         }
         if let Some(sa) = node.as_scalar_array_op_expr() {
-            // convert_saop_to_hashed_saop_walker: C hashes ANY over a Const
-            // array of >= 9 elements when the operator is hashable.
             const MIN_ARRAY_SIZE_FOR_HASHED_SAOP: i64 = 9;
-            if sa.useOr {
-                if let Some(c) = sa.args.nth(1).as_const() {
-                    if !c.constisnull
-                        && saop_const_array_nitems(c.constvalue)
-                            >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
-                    {
-                        panic!(
-                            "convert_saop_to_hashed_saop (clauses.c): hashed-SAOP \
-                             conversion unported"
-                        );
+            if let Some(c) = sa.args.nth(1).as_const() {
+                if !c.constisnull {
+                    if sa.useOr {
+                        if let Some((l, r)) = lsyscache::get_op_hash_functions(sa.opno)? {
+                            if l == r {
+                                if saop_const_array_nitems(c.constvalue)
+                                    >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+                                {
+                                    // SAFETY: caller holds the just-planned tree
+                                    // exclusively (fix_opfuncids precedent).
+                                    unsafe {
+                                        node.with_mut::<ScalarArrayOpExpr, _>(|s| {
+                                            s.hashfuncid = l;
+                                        })
+                                        .unwrap();
+                                    }
+                                }
+                                // C returns false here: matched-const arms
+                                // do not descend into this node's children.
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        // NOT IN whose negator is hashable: hash-and-negate.
+                        let negator = lsyscache::get_negator(sa.opno)?;
+                        if negator != 0 {
+                            if let Some((l, r)) = lsyscache::get_op_hash_functions(negator)? {
+                                if l == r {
+                                    if saop_const_array_nitems(c.constvalue)
+                                        >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+                                    {
+                                        let negfuncid = lsyscache::get_opcode(negator)?;
+                                        // SAFETY: as above.
+                                        unsafe {
+                                            node.with_mut::<ScalarArrayOpExpr, _>(|s| {
+                                                s.hashfuncid = l;
+                                                s.negfuncid = negfuncid;
+                                            })
+                                            .unwrap();
+                                        }
+                                    }
+                                    return Ok(false);
+                                }
+                            }
+                        }
                     }
                 }
             }

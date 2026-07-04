@@ -23,6 +23,9 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 readfuncs = { path = "../../../nodes/readfuncs" }
 relcache_seams = { path = "../relcache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+inval_seams = { path = "../inval_seams" }
 relcache_build_seams = { path = "../relcache_build_seams" }
 relmapper_seams = { path = "../relmapper_seams" }
 syscache_seams = { path = "../syscache_seams" }

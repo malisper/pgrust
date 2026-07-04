@@ -44,9 +44,7 @@ pub fn subquery_planner<'mcx>(
     if !parse.cteList.is_nil() {
         crate::cte::ss_process_ctes(run, &parse)?;
     }
-    if parse.commandType == CmdType::CMD_MERGE {
-        panic!("transform_MERGE_to_join (prepjointree.c): M2 MERGE lane");
-    }
+    crate::prepjointree::transform_MERGE_to_join(mcx, &mut parse)?;
     replace_empty_jointree(mcx, &mut parse)?;
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
@@ -209,9 +207,26 @@ pub fn subquery_planner<'mcx>(
         preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
     parse.limitCount =
         preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
-    if !parse.mergeActionList.is_nil() {
-        panic!("preprocess_expression (planner.c): MERGE; M4 MERGE lane");
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_tlist = preprocess_expression_list(
+            run,
+            action.targetList.clone_in(mcx)?,
+            EXPRKIND_TARGET,
+            has_sublinks,
+        )?;
+        let new_qual = preprocess_expression(run, action.qual, EXPRKIND_QUAL, has_sublinks)?;
+        // SAFETY: parse tree is planner-owned; no derived refs live.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.targetList = new_tlist;
+                a.qual = new_qual;
+            })
+        }
+        .expect("MergeAction");
     }
+    parse.mergeJoinCondition =
+        preprocess_expression(run, parse.mergeJoinCondition, EXPRKIND_QUAL, has_sublinks)?;
     if let Some(oc_node) = parse.onConflict {
         let oc = oc_node.as_on_conflict_expr().expect("onConflict is OnConflictExpr");
         for elem_node in &oc.arbiterElems {
