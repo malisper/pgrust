@@ -1038,6 +1038,50 @@ pub fn fc_float8_timestamptz(
     Ok(Datum::from_i64(crate::float8_timestamptz(fcinfo.arg_f64(0))?))
 }
 
+pub fn fc_in_range_timestamp_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let offset = arg_interval(fcinfo, 2);
+    Ok(Datum::from_bool(crate::interval::in_range_timestamp_interval(
+        fcinfo.arg_i64(0),
+        fcinfo.arg_i64(1),
+        &offset,
+        fcinfo.arg_bool(3),
+        fcinfo.arg_bool(4),
+    )?))
+}
+
+pub fn fc_in_range_timestamptz_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let offset = arg_interval(fcinfo, 2);
+    Ok(Datum::from_bool(crate::interval::in_range_timestamptz_interval(
+        fcinfo.arg_i64(0),
+        fcinfo.arg_i64(1),
+        &offset,
+        fcinfo.arg_bool(3),
+        fcinfo.arg_bool(4),
+    )?))
+}
+
+pub fn fc_in_range_interval_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let val = arg_interval(fcinfo, 0);
+    let base = arg_interval(fcinfo, 1);
+    let offset = arg_interval(fcinfo, 2);
+    Ok(Datum::from_bool(crate::interval::in_range_interval_interval(
+        &val,
+        &base,
+        &offset,
+        fcinfo.arg_bool(3),
+        fcinfo.arg_bool(4),
+    )?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -1060,6 +1104,9 @@ pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     srf(6274, "generate_series_timestamptz_at_zone", 4, fc_generate_series_timestamptz),
     b(6354, "generate_series_timestamp_support", 1, fc_generate_series_timestamp_support),
     b(1158, "float8_timestamptz", 1, fc_float8_timestamptz),
+    b(4134, "in_range_timestamp_interval", 5, fc_in_range_timestamp_interval),
+    b(4135, "in_range_timestamptz_interval", 5, fc_in_range_timestamptz_interval),
+    b(4136, "in_range_interval_interval", 5, fc_in_range_interval_interval),
     b(1150, "timestamptz_in", 3, fc_timestamptz_in),
     b(1151, "timestamptz_out", 1, fc_timestamptz_out),
     b(1152, "timestamp_eq", 2, fc_timestamp_eq),

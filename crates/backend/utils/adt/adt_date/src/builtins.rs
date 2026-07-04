@@ -1024,6 +1024,81 @@ pub fn fc_timetztypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     anytime_typmodout(fcinfo, true)
 }
 
+#[cold]
+#[inline(never)]
+fn invalid_in_range_offset() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error("invalid preceding or following size in window function")
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE),
+    )
+}
+
+pub fn fc_in_range_date_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let offset = arg_interval(fcinfo, 2);
+    let val = crate::date2timestamp(fcinfo.arg_i32(0))?;
+    let base = crate::date2timestamp(fcinfo.arg_i32(1))?;
+    Ok(Datum::from_bool(adt_timestamp::interval::in_range_timestamp_interval(
+        val,
+        base,
+        &offset,
+        fcinfo.arg_bool(3),
+        fcinfo.arg_bool(4),
+    )?))
+}
+
+// C disregards the month/day interval fields (time_pl_interval precedent);
+// the non-wrapping sum makes +infinity saturate to `less`.
+pub fn fc_in_range_time_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let val = fcinfo.arg_i64(0);
+    let base = fcinfo.arg_i64(1);
+    let offset = arg_interval(fcinfo, 2);
+    let sub = fcinfo.arg_bool(3);
+    let less = fcinfo.arg_bool(4);
+    if offset.time < 0 {
+        return Err(invalid_in_range_offset());
+    }
+    let sum = if sub {
+        base - offset.time
+    } else {
+        match base.checked_add(offset.time) {
+            Some(s) => s,
+            None => return Ok(Datum::from_bool(less)),
+        }
+    };
+    Ok(Datum::from_bool(if less { val <= sum } else { val >= sum }))
+}
+
+pub fn fc_in_range_timetz_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let val = arg_timetz(fcinfo, 0);
+    let base = arg_timetz(fcinfo, 1);
+    let offset = arg_interval(fcinfo, 2);
+    let sub = fcinfo.arg_bool(3);
+    let less = fcinfo.arg_bool(4);
+    if offset.time < 0 {
+        return Err(invalid_in_range_offset());
+    }
+    let time = if sub {
+        base.time - offset.time
+    } else {
+        match base.time.checked_add(offset.time) {
+            Some(s) => s,
+            None => return Ok(Datum::from_bool(less)),
+        }
+    };
+    let sum = TimeTzADT { time, zone: base.zone };
+    let cmp = crate::timetz_cmp_internal(&val, &sum);
+    Ok(Datum::from_bool(if less { cmp <= 0 } else { cmp >= 0 }))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -1039,6 +1114,9 @@ pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
     b(2910, "timetypmodout", 1, fc_timetypmodout),
     b(2911, "timetztypmodin", 1, fc_timetztypmodin),
     b(2912, "timetztypmodout", 1, fc_timetztypmodout),
+    b(4133, "in_range_date_interval", 5, fc_in_range_date_interval),
+    b(4137, "in_range_time_interval", 5, fc_in_range_time_interval),
+    b(4138, "in_range_timetz_interval", 5, fc_in_range_timetz_interval),
     b(2468, "date_recv", 1, fc_date_recv),
     b(2469, "date_send", 1, fc_date_send),
     b(2470, "time_recv", 3, fc_time_recv),
