@@ -637,6 +637,75 @@ fn interval_typmod_rounds_and_truncates_like_c() {
 }
 
 #[test]
+fn interval_agg_family_matches_c() {
+    use crate::interval::{
+        do_interval_accum, do_interval_discard, interval_agg_combine, interval_avg_final,
+        interval_sum_final, IntervalAggState,
+    };
+    gmt_session();
+    let mut st = IntervalAggState::default();
+    assert_eq!(interval_avg_final(&st).unwrap(), None);
+    assert_eq!(interval_sum_final(&st).unwrap(), None);
+    for s in ["1 year", "2 years", "6 years 3 days"] {
+        do_interval_accum(&mut st, &iv_in(s)).unwrap();
+    }
+    assert_eq!(iv_out(&interval_avg_final(&st).unwrap().unwrap()), "3 years 1 day");
+    assert_eq!(iv_out(&interval_sum_final(&st).unwrap().unwrap()), "9 years 3 days");
+    do_interval_discard(&mut st, &iv_in("6 years 3 days")).unwrap();
+    assert_eq!(iv_out(&interval_avg_final(&st).unwrap().unwrap()), "1 year 6 mons");
+    do_interval_accum(&mut st, &iv_in("infinity")).unwrap();
+    assert_eq!(iv_out(&interval_avg_final(&st).unwrap().unwrap()), "infinity");
+    assert_eq!(iv_out(&interval_sum_final(&st).unwrap().unwrap()), "infinity");
+    do_interval_accum(&mut st, &iv_in("-infinity")).unwrap();
+    assert!(interval_avg_final(&st).unwrap_err().message.contains("interval out of range"));
+    assert!(interval_sum_final(&st).unwrap_err().message.contains("interval out of range"));
+
+    let mut a = IntervalAggState::default();
+    do_interval_accum(&mut a, &iv_in("1 day")).unwrap();
+    let mut b = IntervalAggState::default();
+    do_interval_accum(&mut b, &iv_in("3 days")).unwrap();
+    interval_agg_combine(&mut a, &b).unwrap();
+    assert_eq!(iv_out(&interval_sum_final(&a).unwrap().unwrap()), "4 days");
+    assert_eq!(iv_out(&interval_avg_final(&a).unwrap().unwrap()), "2 days");
+}
+
+#[test]
+fn interval_typmod_least_field_matches_c() {
+    use adt_datetime::{DAY, HOUR, INTERVAL_MASK, MINUTE, MONTH, SECOND, YEAR};
+    use crate::interval::{intervaltypmodleastfield, INTERVAL_FULL_PRECISION, INTERVAL_TYPMOD};
+    let lf = |r: i32| intervaltypmodleastfield(INTERVAL_TYPMOD(INTERVAL_FULL_PRECISION, r));
+    assert_eq!(intervaltypmodleastfield(-1), 0);
+    assert_eq!(lf(INTERVAL_MASK(YEAR)), 5);
+    assert_eq!(lf(INTERVAL_MASK(MONTH)), 4);
+    assert_eq!(lf(INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)), 4);
+    assert_eq!(lf(INTERVAL_MASK(DAY)), 3);
+    assert_eq!(lf(INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR)), 2);
+    assert_eq!(lf(INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE)), 1);
+    assert_eq!(lf(INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND)), 0);
+    assert_eq!(lf(INTERVAL_MASK(SECOND)), 0);
+    assert_eq!(lf(adt_datetime::INTERVAL_FULL_RANGE), 0);
+}
+
+#[test]
+fn make_interval_secs_overflow_is_22003() {
+    let err = make_interval(0, 0, 0, 0, 0, 0, 1e308).unwrap_err();
+    assert_eq!(err.message, "value out of range: overflow");
+    let err = make_interval(0, 0, 0, 0, 0, 0, 1e18).unwrap_err();
+    assert_eq!(err.message, "interval out of range");
+}
+
+#[test]
+fn anytimestamp_typmod_out_shapes() {
+    let mut buf = [0u8; 64];
+    let n = crate::builtins::typmod_paren_suffix_out(2, b" with time zone", &mut buf);
+    assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "(2) with time zone");
+    let n = crate::builtins::typmod_paren_suffix_out(-1, b" without time zone", &mut buf);
+    assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), " without time zone");
+    let n = crate::builtins::typmod_paren_suffix_out(0, b" without time zone", &mut buf);
+    assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "(0) without time zone");
+}
+
+#[test]
 fn interval_arithmetic_matches_c() {
     gmt_session();
     let a = iv_in("1 mon 5 days 03:00:00");

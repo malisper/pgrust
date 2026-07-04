@@ -30,7 +30,7 @@ fn tm_panic() -> ! {
 
 /// C: `TmFromChar` (formatting.c:440). `abbrev` is inline (max TOKMAXLEN
 /// bytes, the DecodeTimezoneAbbrevPrefix match cap) instead of C's pnstrdup.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct TmFromChar {
     pub mode: FromCharDateMode,
     pub hh: i32,
