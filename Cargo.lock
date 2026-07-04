@@ -6708,6 +6708,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "vacuum_seams",
  "varlena",
  "varsup",
  "waitevent_seams",

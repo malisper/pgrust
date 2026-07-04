@@ -8,6 +8,7 @@ publish.workspace = true
 bench-internals = []
 
 [dependencies]
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
 adt_numeric = { path = "../../../utils/adt/numeric" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
@@ -76,7 +77,6 @@ pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
 syncrep_seams = { path = "../../../replication/syncrep_seams" }
 condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
 autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
-vacuum_seams = { path = "../../../commands/vacuum_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
