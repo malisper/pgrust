@@ -96,6 +96,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // ExplainMissingMembers/ExplainMemberNodes: initially valid subplan
+    // indexes for the Append at part_prune_index (None = no initial pruning).
+    pub fn query_desc_prune_result(
+        query_desc: QueryDescHandle,
+        part_prune_index: i32,
+    ) -> Option<Vec<i32>>
+);
+
+seam_core::seam!(
     pub fn query_desc_agg_instrument(
         query_desc: QueryDescHandle,
         plan_node_id: i32,

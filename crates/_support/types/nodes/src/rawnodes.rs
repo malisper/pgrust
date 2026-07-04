@@ -553,6 +553,13 @@ pub struct PartitionRangeDatum<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct PartitionCmd<'mcx> {
+    pub name: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub bound: Option<Node<'mcx>>,
+    pub concurrent: bool,
+}
+
 // C ConstrType (parsenodes.h).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConstrType {
@@ -877,6 +884,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for PartitionBoundSpec<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for PartitionRangeDatum<'mcx> {
     const TAG: NodeTag = NodeTag::T_PartitionRangeDatum;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionCmd<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionCmd;
 }
 
 #[derive(Default)]

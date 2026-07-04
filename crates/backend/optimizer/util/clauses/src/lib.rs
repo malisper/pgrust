@@ -24,6 +24,7 @@ pub use classify::{
     mbms_add_member, mbms_add_members, mbms_overlap_sets, num_relids, pull_paramids,
     MultiBitmapset,
 };
+pub use fold::negate_clause;
 pub use fold::{
     all_arguments_const, estimate_expression_value, eval_const_expressions,
     eval_const_expressions_with_params, make_bool_const,

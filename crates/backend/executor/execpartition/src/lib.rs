@@ -1,7 +1,9 @@
 // execPartition.c, INSERT tuple-routing lane: ExecFindPartition over
-// column-keyed LIST/RANGE trees. Expression keys, HASH, DEFAULT partitions,
-// attno-remapped children and runtime pruning are loud.
+// column-keyed LIST/RANGE/HASH trees. Expression keys, attno-remapped
+// children and runtime pruning are loud.
 #![allow(non_snake_case)]
+
+pub mod pruning;
 
 use datum::Datum;
 use mcx::Mcx;
@@ -24,6 +26,8 @@ struct PartitionDispatch<'mcx> {
     key: std::rc::Rc<partcache::PartitionKeyData>,
     partdesc: std::rc::Rc<PartitionDescData>,
     supfuncs: Vec<FmgrInfo>,
+    // ExecPartitionCheck state for default routing, compiled once per tree.
+    default_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
 }
 
 pub struct PartitionTupleRouting<'mcx> {
@@ -54,7 +58,13 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                     .unwrap_or_else(|e| panic!("fmgr_info({fn_oid}) failed: {e:?}")),
             );
         }
-        self.dispatches.push(PartitionDispatch { rel, key, partdesc, supfuncs });
+        self.dispatches.push(PartitionDispatch {
+            rel,
+            key,
+            partdesc,
+            supfuncs,
+            default_check: None,
+        });
         Ok(self.dispatches.len() - 1)
     }
 
@@ -79,12 +89,11 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         let mut isnull = [false; PARTITION_MAX_KEYS];
         let mut dispatch_idx = 0usize;
         loop {
-            let (oid, is_leaf) = {
+            let (oid, is_leaf, is_default) = {
                 let pd = &mut self.dispatches[dispatch_idx];
                 let n = pd.key.partnatts as usize;
-                // FormPartitionKeyDatum, column-attno arm (expressions loud
-                // at partcache build; children share the root's attnos on
-                // this lane — asserted at init_dispatch/leaf open below).
+                // FormPartitionKeyDatum, column-attno arm (expressions
+                // loud at partcache build; attnos asserted equal below).
                 for i in 0..n {
                     let attno = pd.key.partattrs[i];
                     values[i] = exectuples::slot_getattr(slot, attno as i32, &mut isnull[i]);
@@ -103,7 +112,11 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                 if part_index < 0 {
                     return Err(no_partition_error(mcx, pd, &values, &isnull));
                 }
-                (pd.partdesc.oids[part_index as usize], pd.partdesc.is_leaf[part_index as usize])
+                (
+                    pd.partdesc.oids[part_index as usize],
+                    pd.partdesc.is_leaf[part_index as usize],
+                    boundinfo.has_default() && part_index == boundinfo.default_index,
+                )
             };
             if is_leaf {
                 let idx = self.leaf_index(oid)?;
@@ -113,9 +126,14 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                     root_natts,
                     "execPartition: attno-remapped partitions unported"
                 );
+                if is_default {
+                    let PartitionTupleRouting { dispatches, leaves, .. } = self;
+                    check_default_partition(mcx, &mut dispatches[dispatch_idx], &leaves[idx], slot)?;
+                }
                 return Ok(idx);
             }
             // Sub-partitioned child: descend (opened RowExclusiveLock as C).
+            let parent_idx = dispatch_idx;
             if let Some(i) = self.dispatches.iter().position(|d| d.rel.rd_id == oid) {
                 dispatch_idx = i;
             } else {
@@ -123,8 +141,136 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                 assert!(sub.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
                 dispatch_idx = self.init_dispatch(sub)?;
             }
+            if is_default {
+                let sub_idx = dispatch_idx;
+                assert_ne!(parent_idx, sub_idx);
+                let (parent_pd, sub_rel) = if parent_idx < sub_idx {
+                    let (a, b) = self.dispatches.split_at_mut(sub_idx);
+                    (&mut a[parent_idx], &b[0].rel)
+                } else {
+                    let (a, b) = self.dispatches.split_at_mut(parent_idx);
+                    (&mut b[0], &a[sub_idx].rel)
+                };
+                check_default_partition(mcx, parent_pd, sub_rel, slot)?;
+            }
         }
     }
+}
+
+// ExecFindPartition's default-partition re-check (ExecPartitionCheck).
+// C divergence: generate_partition_qual's ancestor-qual concatenation is
+// dropped — each routing level already checked its own bound on the descent.
+fn check_default_partition<'mcx>(
+    mcx: Mcx<'mcx>,
+    pd: &mut PartitionDispatch<'mcx>,
+    target: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    if pd.default_check.is_none() {
+        let spec = types_nodes::rawnodes::PartitionBoundSpec {
+            strategy: pd.key.strategy as u8,
+            is_default: true,
+            ..Default::default()
+        };
+        let qual = partbounds::get_qual_from_partbound(
+            mcx,
+            &pd.key,
+            pd.rel.rd_id,
+            pd.partdesc.boundinfo.as_ref(),
+            &pd.partdesc.oids,
+            &spec,
+        )?;
+        let expr = partbounds::make_ands_explicit(mcx, qual)?;
+        let planned = clauses_seams::eval_const_expressions::call(mcx, expr)?;
+        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+            .expect("partition constraint expr");
+        pd.default_check = Some(state);
+    }
+    let state = pd.default_check.as_mut().expect("just built");
+    let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+    let r = execexpr::exec_eval_expr(state, &mut slots)?;
+    // ExecCheck: NULL passes.
+    if !r.isnull && !r.value.as_bool() {
+        return Err(partition_constraint_violation(mcx, target, slot));
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn partition_constraint_violation<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> Box<PgError> {
+    let table = rel.name().to_string();
+    let mut e = PgError::new(
+        ERROR,
+        format!("new row for relation \"{table}\" violates partition constraint"),
+    )
+    .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+    .with_schema_name(
+        lsyscache::misc::get_namespace_name(mcx, rel.rd_rel.relnamespace)
+            .ok()
+            .flatten()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+    )
+    .with_table_name(table);
+    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+        e = e.with_detail(format!("Failing row contains {desc}."));
+    }
+    Box::new(e)
+}
+
+// ExecBuildSlotValueDescription, table-SELECT-permission arm (single-
+// superuser boot: column-ACL filtering and RLS are unreachable).
+fn slot_value_description<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<String> {
+    const MAX_FIELD_LEN: usize = 64;
+    exectuples::slot_getallattrs(slot);
+    let mut buf = String::from("(");
+    let mut write_comma = false;
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        if att.attisdropped {
+            continue;
+        }
+        if write_comma {
+            buf.push_str(", ");
+        }
+        write_comma = true;
+        let base = slot.base();
+        if base.tts_isnull[i] {
+            buf.push_str("null");
+            continue;
+        }
+        let value = base.tts_values[i];
+        let (foutoid, _) = lsyscache::typ::getTypeOutputInfo(att.atttypid)?;
+        let mut finfo = fmgr_core::fmgr_info(foutoid)?;
+        let out = fmgr_core::function_call1_coll_in(&mut finfo, 0, mcx, value)?;
+        // SAFETY: output fns return a NUL-terminated cstring datum.
+        let s = unsafe {
+            core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
+        }
+        .to_bytes();
+        let s = core::str::from_utf8(s).expect("type output is UTF-8");
+        if s.len() <= MAX_FIELD_LEN {
+            buf.push_str(s);
+        } else {
+            let mut end = MAX_FIELD_LEN;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            buf.push_str(&s[..end]);
+            buf.push_str("...");
+        }
+    }
+    buf.push(')');
+    Ok(buf)
 }
 
 // get_partition_for_tuple, LIST/RANGE arms with the last-found cache.
@@ -139,6 +285,13 @@ fn get_partition_for_tuple(
     let mut bound_offset: i32 = -1;
     let mut part_index: i32 = -1;
     match key.strategy as u8 {
+        // Too cheap to cache; hash tables cannot have a DEFAULT partition.
+        b'h' => {
+            let row_hash =
+                partbounds::compute_partition_hash_value(supfuncs, &key.partcollation, values, isnull)
+                    .unwrap_or_else(|e| panic!("partition hash support function failed: {e:?}"));
+            return boundinfo.indexes[(row_hash % boundinfo.indexes.len() as u64) as usize];
+        }
         b'l' => {
             if isnull[0] {
                 if boundinfo.accepts_nulls() {
@@ -205,7 +358,7 @@ fn get_partition_for_tuple(
     }
 
     if part_index < 0 {
-        // DEFAULT partitions are unported (default_index is always -1 here).
+        // No bound matched: the DEFAULT partition, if any (cache untouched).
         return boundinfo.default_index;
     }
 

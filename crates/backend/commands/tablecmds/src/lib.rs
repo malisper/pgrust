@@ -347,6 +347,18 @@ pub fn DefineRelation<'mcx>(
     if let Some(parent_oid) = parent_oid {
         let bound_spec_node = stmt.partbound.expect("checked above");
         let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
+        // Lock the default partition before validating: its constraint changes
+        // with every sibling added (C DefineRelation tablecmds.c:1156).
+        let pdesc = partdesc::RelationGetPartitionDesc(&parent)?;
+        let default_part_oid = pdesc
+            .boundinfo
+            .as_ref()
+            .filter(|b| b.has_default())
+            .map(|b| pdesc.oids[b.default_index as usize]);
+        let default_rel = match default_part_oid {
+            Some(oid) => Some(table::table_open(mcx, oid, types_rel::AccessExclusiveLock)?),
+            None => None,
+        };
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
         let mut pstate = parser_small1::make_parsestate(mcx, None);
         let bound = partition::transformPartitionBound(
@@ -358,7 +370,6 @@ pub fn DefineRelation<'mcx>(
         let _ = query_string;
         {
             let key = partcache::RelationGetPartitionKey(&parent)?;
-            let pdesc = partdesc::RelationGetPartitionDesc(&parent)?;
             let spec = bound
                 .as_variant::<types_nodes::rawnodes::PartitionBoundSpec>()
                 .expect("PartitionBoundSpec");
@@ -370,6 +381,21 @@ pub fn DefineRelation<'mcx>(
                 &pdesc.oids,
                 spec,
             )?;
+            if let Some(default_rel) = &default_rel {
+                partbounds::check_default_partition_contents(
+                    mcx,
+                    &parent,
+                    default_rel,
+                    &key,
+                    pdesc.boundinfo.as_ref(),
+                    &pdesc.oids,
+                    spec,
+                )?;
+            }
+        }
+        if let Some(default_rel) = default_rel {
+            // Keep the lock until commit.
+            default_rel.close(types_rel::NoLock)?;
         }
         catalog_heap::StorePartitionBound(mcx, &rel, &parent, bound)?;
         partition::store_catalog_inheritance1(mcx, relation_id, parent_oid)?;

@@ -364,6 +364,30 @@ fn on_conflict_rule_numbers_match_tables() {
 }
 
 #[test]
+fn partition_cmd_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (141, "opt_concurrently", 1134),
+        (142, "opt_concurrently", 1135),
+        (277, "AlterTableStmt", 2115),
+        (278, "AlterTableStmt", 2125),
+        (283, "AlterTableStmt", 2179),
+        (298, "partition_cmd", 2326),
+        (299, "partition_cmd", 2340),
+        (300, "partition_cmd", 2353),
+        (301, "index_partition_cmd", 2369),
+        (393, "PartitionBoundSpec", 3147),
+        (397, "hash_partbound_elem", 3241),
+        (398, "hash_partbound", 3248),
+        (399, "hash_partbound", 3252),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
 fn returning_clause_shapes() {
     let list = parse("INSERT INTO t VALUES (1, 2) RETURNING id;");
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");

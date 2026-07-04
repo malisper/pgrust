@@ -1627,12 +1627,27 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     tlist_same_exprs: bool,
 ) -> PgResult<()> {
     let scanjoin_target = scanjoin_targets[0];
-    debug_assert!(run.root.rel(rel_id).part_scheme.is_none());
+    let rel_is_partitioned = {
+        let r = run.root.rel(rel_id);
+        r.part_scheme.is_some()
+            && r.boundinfo.is_some()
+            && r.nparts > 0
+            && !r.part_rels.is_empty()
+            && !crate::joinrels::is_dummy_rel(&run.root, rel_id)
+    };
 
     if !scanjoin_target_parallel_safe {
         // generate_useful_gather_paths is a no-op with no partial paths.
         debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
         run.root.rel_mut(rel_id).consider_parallel = false;
+    }
+
+    // Partitioned rels: drop the whole-rel paths and rebuild from retargeted
+    // child paths below (C keeps neither; the below-Append target is never
+    // costlier).
+    if rel_is_partitioned {
+        run.root.rel_mut(rel_id).pathlist = mcx::PgVec::new_in(run.mcx);
+        debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
     }
 
     let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).pathlist);
@@ -1665,6 +1680,57 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         scanjoin_targets_contain_srfs,
     )?;
     run.root.rel_mut(rel_id).pathtarget_id = Some(*scanjoin_targets.last().unwrap());
+
+    if rel_is_partitioned {
+        let mut live_children: Vec<types_pathnodes::RelId> = Vec::new();
+        let live = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel_id).live_parts);
+        for i in crate::relnode::relids_members(&live) {
+            let child = run.root.rel(rel_id).part_rels[i as usize]
+                .expect("live partition has a RelOptInfo");
+            let child_rti = run.root.rel(child).relid as usize;
+            let appinfo = run.root.append_rel_array[child_rti]
+                .clone()
+                .expect("child rel has an AppendRelInfo");
+            let mut child_targets: mcx::PgVec<'mcx, types_pathnodes::PtId> =
+                mcx::PgVec::new_in(run.mcx);
+            for &t in scanjoin_targets.iter() {
+                let src_exprs =
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(t).exprs);
+                let mut exprs: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for &eid in src_exprs.iter() {
+                    let e = *run.root.expr_node(eid);
+                    let tr = crate::inherit::adjust_appendrel_attrs(run, e, &appinfo)?;
+                    exprs.push(run.intern_expr(tr));
+                }
+                let src = run.root.pathtarget(t);
+                let copy = types_pathnodes::PathTarget {
+                    exprs,
+                    sortgrouprefs: crate::relnode::pgvec_clone_shallow(
+                        run.mcx,
+                        &src.sortgrouprefs,
+                    ),
+                    cost: src.cost,
+                    width: src.width,
+                    has_volatile_expr: src.has_volatile_expr,
+                };
+                child_targets.push(run.root.alloc_pathtarget(copy));
+            }
+            apply_scanjoin_target_to_paths(
+                run,
+                child,
+                &child_targets,
+                scanjoin_targets_contain_srfs,
+                scanjoin_target_parallel_safe,
+                tlist_same_exprs,
+            )?;
+            if !crate::joinrels::is_dummy_rel(&run.root, child) {
+                live_children.push(child);
+            }
+        }
+        crate::allpaths::add_paths_to_append_rel(run, rel_id, &live_children)?;
+    }
+
     // Reassess the cheapest paths now that costs may have changed.
     crate::pathnode::set_cheapest(run, rel_id)?;
     Ok(())

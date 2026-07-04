@@ -423,10 +423,10 @@ pub fn exec_re_scan_with_chg<'mcx>(
         PlanStateNode::Append(a) => {
             let a = &mut **a;
             let subplans = &plan.as_append().expect("Append plan").appendplans;
-            for (sub, sub_plan) in a.substates.iter_mut().zip(subplans.iter()) {
-                exec_re_scan_with_chg(sub, sub_plan, estate, chg)?;
+            for (sub, &origin) in a.substates.iter_mut().zip(a.subplan_origin.iter()) {
+                exec_re_scan_with_chg(sub, subplans.nth(origin as usize), estate, chg)?;
             }
-            ::nodeappend::exec_rescan_append(&mut a.state);
+            ::nodeappend::exec_rescan_append_chg(&mut a.state, chg);
         }
         PlanStateNode::SubqueryScan(s) => {
             let s = &mut **s;

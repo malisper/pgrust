@@ -17,4 +17,5 @@ types_rel = { path = "../../../../_support/types/rel" }
 cache_syscache = { path = "../cache_syscache" }
 lsyscache = { path = "../lsyscache" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type = { path = "../../adt/format_type" }
 inval = { path = "../inval" }

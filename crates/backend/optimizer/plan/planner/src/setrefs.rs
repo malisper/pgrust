@@ -3308,7 +3308,6 @@ fn set_append_references<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let aplan = plan.as_append().expect("Append node");
     debug_assert!(aplan.plan.qual.is_nil());
-    assert!(aplan.part_prune_index < 0, "set_append_references (setrefs.c): partition pruning lane");
 
     let mut new_children = NodeList::nil();
     for child in &aplan.appendplans {
@@ -3344,9 +3343,116 @@ fn set_append_references<'mcx>(
         }
         .expect("Append node");
     }
+    if plan.as_append().unwrap().part_prune_index >= 0 {
+        let old_index = plan.as_append().unwrap().part_prune_index;
+        let new_index = register_partpruneinfo(run, old_index, rtoffset)?;
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe {
+            plan.with_mut::<types_nodes::plannodes::Append, _>(|p| p.part_prune_index = new_index)
+        }
+        .expect("Append node");
+    }
+
     debug_assert!(plan.as_plan().unwrap().lefttree.is_none());
     debug_assert!(plan.as_plan().unwrap().righttree.is_none());
     Ok(plan)
+}
+
+// register_partpruneinfo (setrefs.c): move the pending pruneinfo into
+// glob.part_prune_infos, offsetting RT indexes and recording the startup-
+// prunable leaf RTIs.
+fn register_partpruneinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    part_prune_index: i32,
+    rtoffset: i32,
+) -> PgResult<i32> {
+    let mcx = run.mcx;
+    assert!(
+        part_prune_index >= 0
+            && (part_prune_index as usize) < run.pending_part_prune_infos.len()
+    );
+    let pnode = run.pending_part_prune_infos.nth(part_prune_index as usize);
+    let pinfo = pnode.as_partition_prune_info().expect("PartitionPruneInfo node");
+
+    if rtoffset != 0 {
+        let mut shifted = types_nodes::bitmapset::Bitmapset::empty();
+        let mut m = pinfo.relids.next_member(-1);
+        while m >= 0 {
+            shifted.add_member(mcx, m + rtoffset)?;
+            m = pinfo.relids.next_member(m);
+        }
+        // SAFETY: exclusive ownership of the pending pruneinfo tree.
+        unsafe {
+            pnode.with_mut::<types_nodes::plannodes::PartitionPruneInfo, _>(|p| {
+                p.relids = shifted;
+            })
+        }
+        .expect("PartitionPruneInfo node");
+    }
+
+    for l in pinfo.prune_infos.iter() {
+        let prune_infos = l.as_list().expect("prune_infos cell is a List");
+        for prel_node in prune_infos.iter() {
+            let prel = prel_node
+                .as_partitioned_rel_prune_info()
+                .expect("PartitionedRelPruneInfo node");
+            fix_pruning_steps(run, &prel.initial_pruning_steps, rtoffset)?;
+            fix_pruning_steps(run, &prel.exec_pruning_steps, rtoffset)?;
+            let has_initial = !prel.initial_pruning_steps.is_nil();
+            let mut prunable: Vec<i32> = Vec::new();
+            for i in 0..prel.nparts as usize {
+                if prel.leafpart_rti_map[i] != 0 && has_initial {
+                    prunable.push(prel.leafpart_rti_map[i] + rtoffset);
+                }
+            }
+            // SAFETY: exclusive ownership of the pending pruneinfo tree.
+            unsafe {
+                prel_node.with_mut::<types_nodes::plannodes::PartitionedRelPruneInfo, _>(|p| {
+                    p.rtindex += rtoffset as u32;
+                    if rtoffset != 0 {
+                        let mut map = mcx::vec_from_elem_in(mcx, 0i32, p.nparts as usize);
+                        for i in 0..p.nparts as usize {
+                            map[i] = if p.leafpart_rti_map[i] != 0 {
+                                p.leafpart_rti_map[i] + rtoffset
+                            } else {
+                                0
+                            };
+                        }
+                        p.leafpart_rti_map = map.leak();
+                    }
+                })
+            }
+            .expect("PartitionedRelPruneInfo node");
+            for rti in prunable {
+                run.glob.prunable_relids.add_member(mcx, rti)?;
+            }
+        }
+    }
+
+    run.glob.part_prune_infos.lappend(mcx, pnode)?;
+    Ok(run.glob.part_prune_infos.len() as i32 - 1)
+}
+
+// fix_scan_list over each PartitionPruneStepOp's exprs (the step nodes
+// themselves are not expression nodes, so the walker sees only the exprs).
+fn fix_pruning_steps<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    steps: &NodeList<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    for step in steps.iter() {
+        let Some(op) = step.as_partition_prune_step_op() else { continue };
+        if let Some(fixed) = fix_scan_list(run, &op.exprs, rtoffset, 1.0)? {
+            // SAFETY: exclusive ownership of the pending pruneinfo tree.
+            unsafe {
+                step.with_mut::<types_nodes::plannodes::PartitionPruneStepOp, _>(|s| {
+                    s.exprs = fixed;
+                })
+            }
+            .expect("PartitionPruneStepOp node");
+        }
+    }
+    Ok(())
 }
 
 // set_subqueryscan_references (setrefs.c): the subplan is processed under the

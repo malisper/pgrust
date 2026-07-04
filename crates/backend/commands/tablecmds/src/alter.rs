@@ -104,6 +104,15 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_EnableAlwaysRule
             | AlterTableType::AT_EnableReplicaRule
             | AlterTableType::AT_DisableRule => AccessExclusiveLock,
+            AlterTableType::AT_AttachPartition => {
+                unported("ATExecAttachPartition (tablecmds.c): partition pruning lane")
+            }
+            AlterTableType::AT_DetachPartition => {
+                unported("ATExecDetachPartition (tablecmds.c): partition pruning lane")
+            }
+            AlterTableType::AT_DetachPartitionFinalize => {
+                unported("ATExecDetachPartitionFinalize (tablecmds.c): partition pruning lane")
+            }
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
         if cmd_lockmode > lockmode {
