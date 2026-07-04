@@ -16,7 +16,7 @@ use types_nodes::primnodes::{
     Alias, ArrayExpr, CaseExpr, CaseWhen, CoercionForm, FieldSelect, FromExpr, FuncExpr, OpExpr,
     RowExpr, ScalarArrayOpExpr, TargetEntry,
 };
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::{Node, NodeList};
 
 const F_ARRAY_CAT: Oid = 383;
 const F_INT8INC: Oid = 1219;
@@ -183,7 +183,7 @@ pub fn rewriteSearchAndCycle<'mcx>(mcx: Mcx<'mcx>, cte_node: Node<'mcx>) -> PgRe
         rtable: NodeList::make1(mcx, newrte1)?,
         jointree: Some(alloc_leak_in(
             mcx,
-            FromExpr { fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1)?), quals: None },
+            FromExpr { fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1)?)?, quals: None },
         )?),
         ..Default::default()
     };
@@ -404,7 +404,7 @@ pub fn rewriteSearchAndCycle<'mcx>(mcx: Mcx<'mcx>, cte_node: Node<'mcx>) -> PgRe
         rtable: NodeList::make1(mcx, newrte2)?,
         jointree: Some(alloc_leak_in(
             mcx,
-            FromExpr { fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1)?), quals },
+            FromExpr { fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1)?)?, quals },
         )?),
         ..Default::default()
     };
