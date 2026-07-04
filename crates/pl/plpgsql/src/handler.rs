@@ -691,8 +691,10 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
     };
     let parse_result = parser.parse_function_body();
     let latest_line = parser.sc.latest_lineno();
+    // C's inline callback always tries the position transpose (cbarg
+    // .proc_source is set unconditionally for inline blocks).
     let action = parse_result
-        .map_err(|e| attach_compile_context(e, func_name, latest_line, false, src))?;
+        .map_err(|e| attach_compile_context(e, func_name, latest_line, true, src))?;
 
     Ok(PlFunction {
         fn_signature: func_name.to_string(),
