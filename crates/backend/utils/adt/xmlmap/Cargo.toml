@@ -1,0 +1,26 @@
+[package]
+name = "xmlmap"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_xml = { path = "../xml" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+datum = { path = "../../../../_support/types/datum" }
+dbcommands = { path = "../../../commands/dbcommands" }
+elog = { path = "../../error/elog" }
+execexpr = { path = "../../../executor/execexpr" }
+init_small = { path = "../../init/init_small" }
+lsyscache = { path = "../../cache/lsyscache" }
+mcx = { path = "../../../../_support/mcx" }
+adt_regproc = { path = "../regproc" }
+spi = { path = "../../../executor/spi" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+table = { path = "../../../access/table/table" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

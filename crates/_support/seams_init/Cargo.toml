@@ -172,6 +172,7 @@ adt_float = { path = "../../backend/utils/adt/float" }
 pg_locale = { path = "../../backend/utils/adt/pg_locale" }
 varlena = { path = "../../backend/utils/adt/varlena" }
 adt_xml = { path = "../../backend/utils/adt/xml" }
+xmlmap = { path = "../../backend/utils/adt/xmlmap" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
 catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }

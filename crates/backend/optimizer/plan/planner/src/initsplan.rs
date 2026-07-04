@@ -218,6 +218,15 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
             }
         }
         NodeTag::T_FieldSelect => pull_var_nodes(node.as_field_select().unwrap().arg, out),
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in &x.named_args {
+                pull_var_nodes(a, out);
+            }
+            for a in &x.args {
+                pull_var_nodes(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M2 expression lane"),
     }
 }

@@ -42,6 +42,8 @@ pub use steps::{
     SlotSrc, Step,
 };
 pub use types_portal::params::ParamBind;
+pub use xmlops::map_sql_value_to_xml_value;
+pub use arrayops::ResMcx;
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.
 pub fn evaluate_expr<'mcx>(
