@@ -250,13 +250,13 @@ impl<'mcx> TableFuncScanState<'mcx> {
                         .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
                         .with_detail(format!(
                             "Filter for column \"{}\" is null.",
-                            self.tupdesc.attr(colno).attname.name_str()
+                            String::from_utf8_lossy(self.tupdesc.attr(colno).attname.name_str())
                         ))
                         .into());
                 }
                 ctx.set_column_filter(varlena_payload(mcx, value)?, colno as i32)?;
             } else {
-                let attname = self.tupdesc.attr(colno).attname.name_str().as_bytes();
+                let attname = self.tupdesc.attr(colno).attname.name_str();
                 ctx.set_column_filter(attname, colno as i32)?;
             }
         }
@@ -312,7 +312,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
                 if isnull && self.tf.notnulls.is_member(colno as i32) {
                     return Err(PgError::error(format!(
                         "null is not allowed in column \"{}\"",
-                        self.tupdesc.attr(colno).attname.name_str()
+                        String::from_utf8_lossy(self.tupdesc.attr(colno).attname.name_str())
                     ))
                     .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
                     .into());
