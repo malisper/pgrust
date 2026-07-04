@@ -507,6 +507,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "timestamp_seams",
+ "transam_xlog",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -757,6 +758,7 @@ dependencies = [
  "datum",
  "elog",
  "fd",
+ "funcapi",
  "guc_tables",
  "hashfn",
  "libc",
@@ -771,6 +773,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "xact",
  "xact_seams",
 ]
@@ -3071,6 +3074,7 @@ dependencies = [
 name = "cryptohashfuncs"
 version = "0.1.0"
 dependencies = [
+ "crc32c",
  "datum",
  "pg_md5",
  "pg_sha2",
@@ -4035,6 +4039,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "varlena",
+ "xid8funcs",
 ]
 
 [[package]]
@@ -12941,6 +12946,29 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xid8funcs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "init_small",
+ "lwlock",
+ "mcx",
+ "pqformat",
+ "procarray_seams",
+ "snapmgr",
+ "stringinfo",
+ "transam_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varsup",
+ "xact",
 ]
 
 [[package]]

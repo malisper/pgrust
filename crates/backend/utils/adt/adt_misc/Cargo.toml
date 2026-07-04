@@ -28,6 +28,7 @@ table = { path = "../../../access/table/table" }
 dbcommands = { path = "../../../commands/dbcommands" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
 elog = { path = "../../error/elog" }
 latch_seams = { path = "../../../storage/ipc/latch_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
