@@ -657,7 +657,11 @@ fn match_unsorted_outer<'mcx>(
             continue;
         }
         let Some(ict_for_merge) = inner_cheapest_total else { continue };
-        if !mergeclause_list.is_empty() && gucs::enable_mergejoin() {
+        // FULL may try a clauseless merge join (its only legal plan for
+        // FULL JOIN ON FALSE), per C.
+        if (!mergeclause_list.is_empty() || save_jointype == types_pathnodes::JOIN_FULL)
+            && gucs::enable_mergejoin()
+        {
             generate_mergejoin_paths(
                 run,
                 joinrel,
