@@ -1,12 +1,12 @@
 //! combocid.c: combo command ID support. cmin/cmax overlay in one header
 //! field; a combo CID maps to the real pair via backend-private state.
-//! Serialize/Restore (parallel workers) unported.
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use types_core::CommandId;
 use types_error::PgResult;
@@ -113,6 +113,23 @@ fn GetRealCmax(combocid: CommandId) -> CommandId {
         debug_assert!((combocid as usize) < s.comboCids.len());
         s.comboCids[combocid as usize].1
     })
+}
+
+// Arc'd snapshot instead of C's byte image: immutable while parallel mode's
+// fences hold (no writer can create combo CIDs during a parallel operation).
+pub fn SerializeComboCIDState() -> Arc<[(CommandId, CommandId)]> {
+    STATE.with(|s| Arc::from(s.borrow().comboCids.as_slice()))
+}
+
+// Only valid in a worker with no combo CIDs yet.
+pub fn RestoreComboCIDState(state: &Arc<[(CommandId, CommandId)]>) {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        debug_assert!(s.comboCids.is_empty() && s.comboHash.is_empty());
+        s.comboCids.extend_from_slice(state);
+        s.comboHash
+            .extend(state.iter().enumerate().map(|(i, &key)| (key, i as CommandId)));
+    });
 }
 
 pub fn init_seams() {

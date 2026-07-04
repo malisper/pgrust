@@ -86,6 +86,50 @@ fn combo_cids_are_reused_and_allocated_in_order() {
 }
 
 #[test]
+fn serialize_restore_roundtrip_across_thread() {
+    setup();
+    assert_eq!(GetComboCommandId(1, 2), 0);
+    assert_eq!(GetComboCommandId(3, 4), 1);
+
+    let state = SerializeComboCIDState();
+    assert_eq!(&state[..], &[(1, 2), (3, 4)]);
+
+    std::thread::spawn(move || {
+        RestoreComboCIDState(&state);
+        assert_eq!(GetRealCmin(0), 1);
+        assert_eq!(GetRealCmax(0), 2);
+        assert_eq!(GetRealCmin(1), 3);
+        assert_eq!(GetRealCmax(1), 4);
+        assert_eq!(GetComboCommandId(3, 4), 1);
+        assert_eq!(GetComboCommandId(5, 6), 2);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn restored_state_resolves_tuple_combo_cids_on_worker_thread() {
+    setup();
+    let mut t = TestTuple::new(XID_CURRENT, 0);
+    t.hdr_mut().set_cmin(3);
+
+    let (cmax, iscombo) = HeapTupleHeaderAdjustCmax(t.hdr_mut(), 7).unwrap();
+    assert!(iscombo);
+    t.hdr_mut().set_xmax(XID_CURRENT);
+    t.hdr_mut().set_cmax(cmax, iscombo);
+
+    let state = SerializeComboCIDState();
+    std::thread::spawn(move || {
+        let mut t = t;
+        RestoreComboCIDState(&state);
+        assert_eq!(HeapTupleHeaderGetCmin(t.hdr_mut()), 3);
+        assert_eq!(HeapTupleHeaderGetCmax(t.hdr_mut()), 7);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn at_eoxact_forgets_combo_state() {
     setup();
     assert_eq!(GetComboCommandId(1, 2), 0);

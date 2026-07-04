@@ -327,6 +327,80 @@ fn xid_in_mvcc_snapshot_matches_c_shape() {
 }
 
 #[test]
+fn serialize_restore_roundtrip_across_thread() {
+    let _g = test_lock();
+    my_backend();
+    let mcx = with_state(|s| s.mcx);
+
+    let mut d = SnapshotData::sentinel(mcx, types_snapshot::SnapshotType::SNAPSHOT_MVCC);
+    d.xmin = 100;
+    d.xmax = 200;
+    d.xip.extend_from_slice(&[110, 120, 150]);
+    d.xcnt = 3;
+    d.subxip.extend_from_slice(&[130, 140]);
+    d.subxcnt = 2;
+    d.takenDuringRecovery = false;
+    d.curcid.set(7);
+    d.vistest = types_core::GlobalVisStateHandle::new(3);
+    let src: Snapshot = Rc::new(d);
+
+    let ser = SerializeSnapshot(&src);
+    assert_eq!(ser.xmin, 100);
+    assert_eq!(ser.xmax, 200);
+    assert_eq!(ser.xip, vec![110, 120, 150]);
+    assert_eq!(ser.subxip, vec![130, 140]);
+    assert_eq!(ser.curcid, 7);
+
+    std::thread::spawn(move || {
+        let restored = RestoreSnapshot(&ser);
+        assert_eq!(restored.snapshot_type, types_snapshot::SnapshotType::SNAPSHOT_MVCC);
+        assert_eq!(restored.xmin, 100);
+        assert_eq!(restored.xmax, 200);
+        assert_eq!(restored.xip[..], [110, 120, 150]);
+        assert_eq!(restored.xcnt, 3);
+        assert_eq!(restored.subxip[..], [130, 140]);
+        assert_eq!(restored.subxcnt, 2);
+        assert!(!restored.suboverflowed);
+        assert!(!restored.takenDuringRecovery);
+        assert!(restored.copied);
+        assert_eq!(restored.curcid.get(), 7);
+        assert_eq!(restored.vistest, types_core::GlobalVisStateHandle::new(3));
+        assert_eq!(restored.active_count.get(), 0);
+        assert_eq!(restored.regd_count.get(), 0);
+        assert_eq!(restored.snapXactCompletionCount, 0);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn serialize_drops_overflowed_subxip_unless_recovery() {
+    let _g = test_lock();
+    my_backend();
+    let mcx = with_state(|s| s.mcx);
+
+    let mut d = SnapshotData::sentinel(mcx, types_snapshot::SnapshotType::SNAPSHOT_MVCC);
+    d.xmin = 10;
+    d.xmax = 20;
+    d.subxip.extend_from_slice(&[12, 15]);
+    d.subxcnt = 2;
+    d.suboverflowed = true;
+    let mut src: Snapshot = Rc::new(d);
+
+    let ser = SerializeSnapshot(&src);
+    assert!(ser.suboverflowed);
+    assert!(ser.subxip.is_empty());
+
+    Rc::get_mut(&mut src).unwrap().takenDuringRecovery = true;
+    let ser = SerializeSnapshot(&src);
+    assert_eq!(ser.subxip, vec![12, 15]);
+    let restored = RestoreSnapshot(&ser);
+    assert_eq!(restored.subxip[..], [12, 15]);
+    assert!(restored.suboverflowed);
+    assert!(restored.takenDuringRecovery);
+}
+
+#[test]
 fn historic_snapshot_short_circuits_acquisition() {
     let _g = test_lock();
     my_backend();

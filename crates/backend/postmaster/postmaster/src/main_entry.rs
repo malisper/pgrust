@@ -347,6 +347,9 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     postinit::InitializeMaxBackends()?;
     pmchild_seams::init_postmaster_child_slots::call();
+    // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
+    // slot-pool init (plain statics, no shmem placement here).
+    bgworker::BackgroundWorkerShmemInit();
 
     let fastpath_groups = postinit::InitializeFastPathLocks();
 

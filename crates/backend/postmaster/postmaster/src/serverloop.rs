@@ -42,21 +42,39 @@ pub fn ConfigurePostmasterWaitSet(accept_connections: bool) -> PgResult<()> {
     })
 }
 
-/// DetermineSleepTime. The bgworker wakeup scan is statically empty (bgworker
-/// registry unported), leaving C's no-worker arm.
+/// DetermineSleepTime. Crashed-worker wakeup scheduling is unreachable this
+/// phase (registration rejects bgw_restart_time >= 0), leaving the C scan's
+/// forget-only arms.
 pub fn DetermineSleepTime() -> i64 {
-    let (shutdown, abort_start_time) = with_pm(|pm| (pm.shutdown, pm.abort_start_time));
-    if shutdown > NoShutdown || true {
+    let (shutdown, abort_start_time, start_worker_needed, have_crashed_worker) = with_pm(|pm| {
+        (pm.shutdown, pm.abort_start_time, pm.start_worker_needed, pm.have_crashed_worker)
+    });
+    if shutdown > NoShutdown || (!start_worker_needed && !have_crashed_worker) {
         if abort_start_time != 0 {
             let seconds = SIGKILL_CHILDREN_AFTER_SECS - (now_secs() - abort_start_time);
             return (seconds * 1000).max(0);
         }
         return 60 * 1000;
     }
-    #[allow(unreachable_code)]
-    {
-        60 * 1000
+
+    if start_worker_needed {
+        return 0;
     }
+
+    for idx in bgworker::registered_indexes() {
+        if bgworker::rw_crashed_at(idx) == 0 {
+            continue;
+        }
+        if bgworker::rw_restart_time(idx) == bgworker::BGW_NEVER_RESTART
+            || bgworker::rw_terminate(idx)
+        {
+            bgworker::ForgetBackgroundWorker(idx);
+            continue;
+        }
+        panic!("DetermineSleepTime: bgworker restart scheduling unported (bgw_restart_time >= 0)");
+    }
+
+    60 * 1000
 }
 
 fn now_secs() -> i64 {
@@ -388,7 +406,9 @@ pub fn LaunchMissingBackgroundProcesses() {
         with_pm(|pm| pm.walsummarizer = c);
     }
 
-    // maybe_start_bgworkers: bgworker registry unported (statically empty).
+    if with_pm(|pm| pm.start_worker_needed || pm.have_crashed_worker) {
+        crate::statemachine::maybe_start_bgworkers();
+    }
     let _ = loc(3400, "LaunchMissingBackgroundProcesses");
     let _ = FastShutdown;
 }

@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use types_core::init::{BackendType, BACKEND_NUM_TYPES};
 use types_core::pid_t;
-use types_error::{ErrorLocation, PgResult, DEBUG2, LOG};
+use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, LOG};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::WaitEventSetHandle;
 
@@ -138,6 +138,8 @@ pub struct PostmasterState {
     pub startup_status: StartupStatusEnum,
     pub start_autovac_launcher: bool,
     pub avlauncher_needs_signal: bool,
+    pub start_worker_needed: bool,
+    pub have_crashed_worker: bool,
     pub wal_receiver_requested: bool,
     pub io_worker_count: i32,
     pub listen_sockets: Vec<i32>,
@@ -166,6 +168,8 @@ impl PostmasterState {
             startup_status: StartupStatusEnum::NotRunning,
             start_autovac_launcher: false,
             avlauncher_needs_signal: false,
+            start_worker_needed: true,
+            have_crashed_worker: false,
             wal_receiver_requested: false,
             io_worker_count: 0,
             listen_sockets: Vec::new(),
@@ -346,7 +350,8 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
     }
 
     if pmsignal::CheckPostmasterSignal(PMSIGNAL_BACKGROUND_WORKER_CHANGE) {
-        panic!("process_pm_pmsignal: BackgroundWorkerStateChange unported (backend-postmaster-bgworker)");
+        bgworker::BackgroundWorkerStateChange(with_pm(|pm| pm.pm_state < PMState::PM_STOP_BACKENDS));
+        with_pm(|pm| pm.start_worker_needed = true);
     }
 
     let syslogger = with_pm(|pm| pm.syslogger);
@@ -432,15 +437,19 @@ fn exit_status_code(exitstatus: i32) -> Option<i32> {
 }
 
 fn log_child_exit(procname: &str, pid: pid_t, exitstatus: i32) {
+    log_child_exit_at(LOG, procname, pid, exitstatus);
+}
+
+fn log_child_exit_at(level: types_error::ErrorLevel, procname: &str, pid: pid_t, exitstatus: i32) {
     match exit_status_code(exitstatus) {
         Some(code) => report(
-            LOG,
+            level,
             format!("{procname} (PID {pid}) exited with exit code {code}"),
             3830,
             "LogChildExit",
         ),
         None => report(
-            LOG,
+            level,
             format!("{procname} (PID {pid}) was terminated by signal {}", exitstatus & 0x7f),
             3844,
             "LogChildExit",
@@ -516,7 +525,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             statemachine::UpdatePMState(PMState::PM_RUN);
             with_pm(|pm| pm.conns_allowed = true);
 
-            // StartWorkerNeeded: bgworker registry statically empty.
+            with_pm(|pm| pm.start_worker_needed = true);
 
             report(
                 LOG,
@@ -575,10 +584,45 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             Some((child_slot, btype))
                 if matches!(btype, BackendType::Backend | BackendType::DeadEndBackend) =>
             {
-                // CleanupBackend: bgworker-notify n/a (registry empty).
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);
                 if !(status0 || status1) {
                     handle_child_crash("server process", pid, exitstatus)?;
+                } else {
+                    bgworker::BackgroundWorkerStopNotifications(pid);
+                }
+            }
+            Some((child_slot, BackendType::BgWorker)) => {
+                // CleanupBackend's B_BG_WORKER half.
+                let rw = bgworker::find_registered_worker_by_pid(pid);
+                let procname = match rw {
+                    Some(idx) => format!("background worker \"{}\"", bgworker::rw_type(idx)),
+                    None => "background worker".to_string(),
+                };
+                pmchild_seams::release_postmaster_child_slot::call(child_slot);
+                if !(status0 || status1) {
+                    handle_child_crash(&procname, pid, exitstatus)?;
+                } else {
+                    bgworker::BackgroundWorkerStopNotifications(pid);
+                    if let Some(idx) = rw {
+                        if !status0 {
+                            bgworker::set_rw_crashed_at(
+                                idx,
+                                timestamp_seams::get_current_timestamp::call(),
+                            );
+                        } else {
+                            bgworker::set_rw_crashed_at(idx, 0);
+                            bgworker::set_rw_terminate(idx, true);
+                        }
+                        bgworker::set_rw_pid(idx, 0);
+                        bgworker::ReportBackgroundWorkerExit(idx);
+                        log_child_exit_at(
+                            if status0 { DEBUG1 } else { LOG },
+                            &procname,
+                            pid,
+                            exitstatus,
+                        );
+                        with_pm(|pm| pm.have_crashed_worker = true);
+                    }
                 }
             }
             Some((_slot, btype)) => panic!(

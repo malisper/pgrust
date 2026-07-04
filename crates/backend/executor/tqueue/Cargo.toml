@@ -1,0 +1,29 @@
+[package]
+name = "tqueue"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tqueue"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+shm_mq = { path = "../../storage/ipc/shm_mq" }
+types_error = { path = "../../../_support/types/types_error" }
+
+[dev-dependencies]
+init_small = { path = "../../utils/init/init_small" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+latch = { path = "../../storage/ipc/latch" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_storage = { path = "../../../_support/types/types_storage" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
