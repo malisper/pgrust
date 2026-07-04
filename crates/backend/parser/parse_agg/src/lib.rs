@@ -892,6 +892,18 @@ pub fn parseCheckAggregates<'mcx>(
         }
         check_ungrouped_columns(pstate, qry, hnvg, 0, false, having)?;
     }
+
+    // C: per spec, aggregates can't appear in a recursive term.
+    let has_self_ref_rtes = qry.rtable.iter().any(|rte_node| {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE && rte.self_reference
+    });
+    if pstate.p_hasAggs && has_self_ref_rtes {
+        panic!(
+            "parseCheckAggregates (parse_agg.c): aggregate in a recursive query's \
+             recursive term (locate_agg_of_level) unported — recursive-cte lane"
+        );
+    }
     Ok(())
 }
 

@@ -2308,22 +2308,271 @@ mod from_where {
     }
 
     #[test]
-    fn with_recursive_is_loud() {
+    fn with_recursive_basic_union_all() {
         install();
         let ctx = MemoryContext::new("t");
         let mcx = ctx.mcx();
 
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = analyze_sql(mcx, "WITH RECURSIVE w AS (SELECT 1) SELECT * FROM w");
-        }));
-        let payload = r.expect_err("must be loud");
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .map(std::string::String::from)
-            .or_else(|| payload.downcast_ref::<std::string::String>().cloned())
-            .unwrap();
-        assert!(msg.contains("WITH RECURSIVE"), "{msg}");
+        let q = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM w WHERE n > 0) \
+             SELECT * FROM w",
+        )
+        .unwrap();
+        assert!(q.hasRecursive);
+        assert_eq!(q.cteList.len(), 1);
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert_eq!(cte.ctename, Some("w"));
+        assert!(cte.cterecursive);
+        assert_eq!(cte.cterefcount, 1);
+        assert_eq!(cte.ctecolnames.len(), 1);
+        assert_eq!(cte.ctecolnames.nth(0).as_string().unwrap().sval, "n");
+        assert_eq!(cte.ctecoltypes.as_slice(), &[INT4OID]);
+        assert_eq!(cte.ctecoltypmods.as_slice(), &[-1]);
+        assert_eq!(cte.ctecolcollations.as_slice(), &[types_core::InvalidOid]);
+
+        let cq = cte.ctequery.unwrap().as_query().unwrap();
+        assert_eq!(cq.commandType, CmdType::CMD_SELECT);
+        assert!(!cq.canSetTag);
+        assert!(cq.setOperations.is_some());
+        assert_eq!(cq.rtable.len(), 2);
+        let rec_leaf =
+            cq.rtable.nth(1).as_range_tbl_entry().unwrap().subquery.unwrap();
+        let wrte = rec_leaf.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(wrte.rtekind, RTEKind::RTE_CTE);
+        assert!(wrte.self_reference);
+        assert_eq!(wrte.ctename, Some("w"));
+        assert_eq!(wrte.ctelevelsup, 2);
+        assert_eq!(wrte.coltypes.as_slice(), &[INT4OID]);
+        assert_eq!(wrte.eref.unwrap().colnames.nth(0).as_string().unwrap().sval, "n");
+
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(te.resname, Some("n"));
+        let var = te.expr.as_var().unwrap();
+        assert_eq!((var.varno, var.varattno, var.vartype), (1, 1, INT4OID));
+    }
+
+    #[test]
+    fn with_recursive_keyword_nonrecursive_cte() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "WITH RECURSIVE w AS (SELECT 1 AS a) SELECT * FROM w").unwrap();
+        assert!(q.hasRecursive);
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert!(!cte.cterecursive);
+        assert_eq!(cte.cterefcount, 1);
+        assert_eq!(cte.ctecoltypes.as_slice(), &[INT4OID]);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert!(!rte.self_reference);
+    }
+
+    #[test]
+    fn with_recursive_forward_reference_topo_sorted() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT 1 AS n) SELECT * FROM a",
+        )
+        .unwrap();
+        assert_eq!(q.cteList.len(), 2);
+        assert_eq!(q.cteList.nth(0).as_common_table_expr().unwrap().ctename, Some("b"));
+        assert_eq!(q.cteList.nth(1).as_common_table_expr().unwrap().ctename, Some("a"));
+        assert!(!q.cteList.nth(0).as_common_table_expr().unwrap().cterecursive);
+        assert!(!q.cteList.nth(1).as_common_table_expr().unwrap().cterecursive);
+    }
+
+    #[test]
+    fn with_recursive_unknown_column_resolves_to_text() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w AS (SELECT 'foo' AS f UNION ALL SELECT f FROM w) SELECT * FROM w",
+        )
+        .unwrap();
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert!(cte.cterecursive);
+        assert_eq!(cte.ctecolnames.nth(0).as_string().unwrap().sval, "f");
+        assert_eq!(cte.ctecoltypes.as_slice(), &[TEXTOID]);
+        assert_eq!(cte.ctecoltypmods.as_slice(), &[-1]);
+        assert_eq!(cte.ctecolcollations.as_slice(), &[100]);
+    }
+
+    #[test]
+    fn with_recursive_selfref_in_nonrecursive_term_is_42p19() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT n FROM w UNION ALL SELECT 1) SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message(),
+            "recursive reference to query \"w\" must not appear within its non-recursive term"
+        );
+    }
+
+    #[test]
+    fn with_recursive_selfref_in_subquery_is_42p19() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT (SELECT n FROM w) FROM t) \
+             SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message(),
+            "recursive reference to query \"w\" must not appear within a subquery"
+        );
+    }
+
+    #[test]
+    fn with_recursive_selfref_in_outer_join_is_42p19() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT w.n FROM t LEFT JOIN w ON true) \
+             SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message(),
+            "recursive reference to query \"w\" must not appear within an outer join"
+        );
+    }
+
+    #[test]
+    fn with_recursive_selfref_twice_is_42p19() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT w.n FROM w, w w2) \
+             SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message(),
+            "recursive reference to query \"w\" must not appear more than once"
+        );
+    }
+
+    #[test]
+    fn with_recursive_without_union_is_42p19() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "WITH RECURSIVE w(n) AS (SELECT n FROM w) SELECT * FROM w")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message(),
+            "recursive query \"w\" does not have the form non-recursive-term UNION [ALL] \
+             recursive-term"
+        );
+    }
+
+    #[test]
+    fn with_recursive_order_by_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM w ORDER BY n) \
+             SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "ORDER BY in a recursive query is not implemented");
+    }
+
+    #[test]
+    fn with_recursive_limit_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM w LIMIT 1) \
+             SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "LIMIT in a recursive query is not implemented");
+    }
+
+    #[test]
+    fn with_recursive_mutual_recursion_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT * FROM a",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "mutual recursion between WITH items is not implemented");
+    }
+
+    #[test]
+    fn with_recursive_type_mismatch_is_42804() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w(n) AS (SELECT 1 UNION ALL SELECT n::int8 FROM w) SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+        assert_eq!(
+            err.message(),
+            "recursive query \"w\" column 1 has type integer in non-recursive term but type \
+             bigint overall"
+        );
+        assert_eq!(
+            err.hint().unwrap_or_default(),
+            "Cast the output of the non-recursive term to the correct type."
+        );
     }
 
     #[test]

@@ -1136,14 +1136,13 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     let cte = cte_node.as_common_table_expr().expect("CTE reference");
     debug_assert!(cte.search_clause.is_none() && cte.cycle_clause.is_none());
 
-    // Analysis completed iff ctequery is a Query; the recursive lane (the only
-    // producer of self-references) is loud upstream.
+    // Self-reference iff the CTE's analysis isn't completed yet. The C
+    // no-RETURNING check is dead: DML CTEs are loud upstream.
     let self_reference = cte.ctequery.expect("CTE has query").as_query().is_none();
-    assert!(!self_reference, "addRangeTableEntryForCTE: self-reference; recursive CTE lane");
-    debug_assert_eq!(
-        cte.ctequery.unwrap().as_query().unwrap().commandType,
-        types_nodes::nodes_enums::CmdType::CMD_SELECT
-    );
+    debug_assert!(cte.cterecursive || !self_reference);
+    if let Some(q) = cte.ctequery.unwrap().as_query() {
+        debug_assert_eq!(q.commandType, types_nodes::nodes_enums::CmdType::CMD_SELECT);
+    }
 
     let alias = rv.alias;
     let refname = alias.and_then(|a| a.aliasname).or(cte.ctename).expect("cte name");
@@ -1165,7 +1164,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         rtekind: RTEKind::RTE_CTE,
         ctename: cte.ctename,
         ctelevelsup: levelsup,
-        self_reference: false,
+        self_reference,
         coltypes: cte.ctecoltypes.clone_in(mcx)?,
         coltypmods: cte.ctecoltypmods.clone_in(mcx)?,
         colcollations: cte.ctecolcollations.clone_in(mcx)?,
@@ -1175,9 +1174,13 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         inFromCl,
         ..Default::default()
     };
-    // SAFETY: shared CommonTableExpr node mutated during analysis; no live
-    // derived refs (the `cte` borrow above is dead past the field reads).
-    unsafe { cte_node.with_mut::<types_nodes::parsenodes::CommonTableExpr, _>(|c| c.cterefcount += 1) };
+    if !self_reference {
+        // SAFETY: shared CommonTableExpr node mutated during analysis; no live
+        // derived refs (the `cte` borrow above is dead past the field reads).
+        unsafe {
+            cte_node.with_mut::<types_nodes::parsenodes::CommonTableExpr, _>(|c| c.cterefcount += 1)
+        };
+    }
 
     let rte_node = Node::mk(mcx, rte)?;
     pstate.p_rtable.lappend(mcx, rte_node)?;
