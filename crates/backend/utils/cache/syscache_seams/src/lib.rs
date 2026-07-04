@@ -207,6 +207,7 @@ pub struct PgProcShape {
     pub prorettype: Oid,
     pub provariadic: Oid,
     pub prosupport: Oid,
+    pub prolang: Oid,
     pub pronargs: i16,
     pub prokind: i8,
     pub provolatile: i8,
@@ -214,6 +215,8 @@ pub struct PgProcShape {
     pub proretset: bool,
     pub proisstrict: bool,
     pub proleakproof: bool,
+    pub prosecdef: bool,
+    pub proconfig_isnull: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,6 +472,59 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn lookup_pg_opfamily_shape(opfid: Oid) -> PgResult<Option<PgOpfamilyShape>>
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAmopRow {
+    pub amopfamily: Oid,
+    pub amoplefttype: Oid,
+    pub amoprighttype: Oid,
+    pub amopstrategy: i16,
+    pub amoppurpose: i8,
+    pub amopopr: Oid,
+    pub amopsortfamily: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAmprocRow {
+    pub amprocfamily: Oid,
+    pub amproclefttype: Oid,
+    pub amprocrighttype: Oid,
+    pub amprocnum: i16,
+    pub amproc: Oid,
+}
+
+seam_core::seam!(
+    // SearchSysCacheList1(AMOPSTRATEGY, opfamily): (rows, list.ordered).
+    pub fn lookup_pg_amop_rows<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamily: Oid,
+    ) -> PgResult<(PgVec<'mcx, PgAmopRow>, bool)>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList1(AMPROCNUM, opfamily): (rows, list.ordered).
+    pub fn lookup_pg_amproc_rows<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamily: Oid,
+    ) -> PgResult<(PgVec<'mcx, PgAmprocRow>, bool)>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList1(CLAAMNAMENSP, amoid): (oid, opcfamily, opcintype,
+    // opcdefault, opcname) per opclass of the AM, catcache list order.
+    pub fn lookup_pg_opclass_rows_by_am<'mcx>(
+        mcx: Mcx<'mcx>,
+        amoid: Oid,
+    ) -> PgResult<PgVec<'mcx, (Oid, Oid, Oid, bool, NameData)>>
+);
+
+seam_core::seam!(
+    pub fn pg_opclass_opcname(opclass: Oid) -> PgResult<Option<NameData>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_opfamily_oid_exact(amoid: Oid, opfname: &str, nsp: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -839,6 +895,11 @@ seam_core::seam!(
 seam_core::seam!(
     // RelationHasSysCache (syscache.c).
     pub fn relation_has_sys_cache(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    // RelationSupportsSysCache (syscache.c): rel OR supporting-index oid.
+    pub fn relation_supports_sys_cache(relid: Oid) -> bool
 );
 
 // The pg_type columns lookup_type_cache copies into a TypeCacheEntry, plus

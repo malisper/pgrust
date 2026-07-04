@@ -34,6 +34,7 @@ pub struct SqlFnParamState<'p> {
     pub fname: &'p str,
     pub argtypes: &'p [Oid],
     pub argnames: &'p [&'p str],
+    pub input_collation: Oid,
 }
 
 /// C `VarParamState` aliases the caller's mutable `Oid **paramTypes` /
@@ -219,7 +220,13 @@ pub fn sql_fn_paramref_hook<'mcx>(
             "sql_fn_paramref_hook",
         ));
     }
-    mk_param(mcx, paramno, parstate.argtypes[(paramno - 1) as usize], pref.location)
+    sql_fn_make_param(
+        mcx,
+        parstate,
+        paramno,
+        parstate.argtypes[(paramno - 1) as usize],
+        pref.location,
+    )
 }
 
 pub fn sql_fn_resolve_param_name(state: &SqlFnParamState<'_>, name: &str) -> Option<(i32, Oid)> {
@@ -232,11 +239,24 @@ pub fn sql_fn_resolve_param_name(state: &SqlFnParamState<'_>, name: &str) -> Opt
 
 pub fn sql_fn_make_param<'mcx>(
     mcx: Mcx<'mcx>,
+    state: &SqlFnParamState<'_>,
     paramno: i32,
     paramtype: Oid,
     location: i32,
 ) -> PgResult<Node<'mcx>> {
-    mk_param(mcx, paramno, paramtype, location)
+    let node = mk_param(mcx, paramno, paramtype, location)?;
+    // A function input collation overrides the type-derived collation for
+    // parameter symbols (functions.c sql_fn_make_param).
+    if OidIsValid(state.input_collation) {
+        let p = node.as_param().expect("just built");
+        if OidIsValid(p.paramcollid) {
+            // SAFETY: sole reference to the freshly built Param node.
+            unsafe {
+                node.with_mut::<Param, _>(|p| p.paramcollid = state.input_collation);
+            }
+        }
+    }
+    Ok(node)
 }
 
 pub fn variable_paramref_hook<'mcx>(

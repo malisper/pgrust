@@ -40,6 +40,7 @@ rmgr = { path = "../../transam/rmgr" }
 transam_seams = { path = "../../transam/transam_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+xloginsert = { path = "../../transam/xloginsert" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
@@ -53,7 +54,6 @@ miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 heaptuple = { path = "../../common/heaptuple" }
 heapam_visibility = { path = "../heapam_visibility" }
 xact = { path = "../../transam/xact" }
-xloginsert = { path = "../../transam/xloginsert" }
 xlogreader = { path = "../../transam/xlogreader" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 transam_xlog = { path = "../../transam/transam_xlog" }

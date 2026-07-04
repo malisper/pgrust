@@ -25,26 +25,23 @@ const MAXALIGN: usize = 8;
 const MAX_BUFFERS_TO_EXTEND_BY: u32 = 64;
 
 // RelationGetTargetBlock/RelationSetTargetBlock: the cache is C's
-// rd_smgr->smgr_targblock, so RelationTruncate's smgr reset invalidates it.
+// rd_smgr->smgr_targblock — reads only consult a cached rd_smgr (C returns
+// InvalidBlockNumber when smgr is closed), writes open+pin via
+// RelationGetSmgr so the entry (and the cache) survives per-statement
+// smgrdestroyall like C's owned SMgrRelations.
 pub fn relation_get_target_block(rel: &RelationData<'_>) -> BlockNumber {
-    let locator = rel.rd_locator.get();
-    if locator.relNumber == 0 {
-        return InvalidBlockNumber;
+    match rel.rd_smgr.get() {
+        Some(h) => smgr::smgrgettargblock_h(h),
+        None => InvalidBlockNumber,
     }
-    smgr::smgrgettargblock(::types_storage::RelFileLocatorBackend {
-        locator,
-        backend: rel.rd_backend,
-    })
 }
 
 pub fn relation_set_target_block(rel: &RelationData<'_>, blk: BlockNumber) {
-    let locator = rel.rd_locator.get();
-    if locator.relNumber == 0 {
+    if rel.rd_locator.get().relNumber == 0 {
         return;
     }
-    let key = ::types_storage::RelFileLocatorBackend { locator, backend: rel.rd_backend };
-    if smgr::smgropen(key.locator, key.backend).is_ok() {
-        smgr::smgrsettargblock(key, blk);
+    if let Ok(h) = smgr::RelationGetSmgr(rel) {
+        smgr::smgrsettargblock_h(h, blk);
     }
 }
 
@@ -251,9 +248,9 @@ pub fn RelationGetBufferForTuple<'mcx>(
     if len > MaxHeapTupleSize {
         return Err(row_too_big(len));
     }
-    if (options & HEAP_INSERT_FROZEN) != 0 {
-        unported("visibilitymap_pin (HEAP_INSERT_FROZEN lane, visibilitymap.c)");
-    }
+    // C divergence: HEAP_INSERT_FROZEN's visibilitymap pin + all-visible page
+    // marking are elided (VM writes unported repo-wide; conservative — pages
+    // stay unmarked, tuples still get frozen xmin in heap_prepare_insert).
 
     let save_free_space = relation.get_target_page_free_space(HEAP_DEFAULT_FILLFACTOR) as usize;
     let nearly_empty_free_space =

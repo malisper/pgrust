@@ -868,6 +868,33 @@ pub fn table_scan_getnextslot<'mcx>(
     }
 }
 
+pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => {
+            (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0 && h.rs_base.rs_parallel.is_none()
+        }
+    }
+}
+
+/// Page-batch scan feed (upstream batch scan API, CF 6176): 0 = exhausted.
+pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_getnextpagebatch(h),
+    }
+}
+
+/// Store tuple `i` of the staged page batch into `slot`.
+pub fn table_scan_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+    }
+}
+
 pub fn table_beginscan_tidrange<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1019,6 +1046,35 @@ pub fn table_index_fetch_tuple<'mcx>(
         IndexFetchTableData::Heap(h) => ::heapam_handler::heapam_index_fetch_tuple(
             mcx, h, tid, snapshot, slot, call_again, all_dead,
         ),
+    }
+}
+
+pub use ::heapam_handler::{BatchFetch, INDEX_FETCH_BATCH_MAX};
+
+pub fn table_index_fetch_batch_fill<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    first_tid: &ItemPointerData,
+    rest: &[ItemPointerData],
+    snapshot: &Snapshot<'mcx>,
+) -> PgResult<()> {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_fill(mcx, h, first_tid, rest, snapshot)
+        }
+    }
+}
+
+pub fn table_index_fetch_batch_next<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    tid: &mut ItemPointerData,
+    slot: &mut SlotData<'mcx>,
+) -> ::heapam_handler::BatchFetch {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_next(mcx, h, tid, slot)
+        }
     }
 }
 

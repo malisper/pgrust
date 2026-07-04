@@ -32,6 +32,9 @@ fn proc_candidate<'mcx>(
 
 fn proc_shape(rettype: Oid, nargs: i16, prokind: u8) -> syscache_seams::PgProcShape {
     syscache_seams::PgProcShape {
+        prolang: 12,
+        prosecdef: false,
+        proconfig_isnull: true,
         pronamespace: PG_CATALOG,
         prorettype: rettype,
         provariadic: InvalidOid,

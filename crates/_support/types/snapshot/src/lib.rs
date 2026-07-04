@@ -94,6 +94,61 @@ impl<'mcx> SnapshotData<'mcx> {
     }
 }
 
+pub const XVM_SNAP_VALID: u8 = 1;
+pub const XVM_IN_SNAPSHOT: u8 = 2;
+pub const XVM_COMMIT_VALID: u8 = 4;
+pub const XVM_COMMITTED: u8 = 8;
+pub const XVM_HINT_OK: u8 = 16;
+
+// Per-page xid-status memo for batch MVCC visibility (one page walk under one
+// buffer lock = one consistent resolution window). Hint denials are never
+// cached: the page LSN can advance mid-walk and re-allow them.
+pub struct XidVisMemo {
+    xids: [TransactionId; XidVisMemo::N],
+    flags: [u8; XidVisMemo::N],
+    next: u8,
+}
+
+impl Default for XidVisMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl XidVisMemo {
+    const N: usize = 4;
+
+    #[inline]
+    pub fn new() -> Self {
+        XidVisMemo { xids: [0; Self::N], flags: [0; Self::N], next: 0 }
+    }
+
+    #[inline]
+    pub fn get(&self, xid: TransactionId) -> u8 {
+        for i in 0..Self::N {
+            if self.xids[i] == xid {
+                return self.flags[i];
+            }
+        }
+        0
+    }
+
+    #[inline]
+    pub fn merge(&mut self, xid: TransactionId, flags: u8) {
+        debug_assert!(xid != 0);
+        for i in 0..Self::N {
+            if self.xids[i] == xid {
+                self.flags[i] |= flags;
+                return;
+            }
+        }
+        let slot = self.next as usize;
+        self.xids[slot] = xid;
+        self.flags[slot] = flags;
+        self.next = ((slot + 1) % Self::N) as u8;
+    }
+}
+
 #[inline]
 pub fn IsMVCCSnapshot(snapshot: &SnapshotData<'_>) -> bool {
     snapshot.snapshot_type == SNAPSHOT_MVCC

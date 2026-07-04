@@ -118,12 +118,17 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| {
             Ok(SURELY_DEAD.load(Ordering::Relaxed))
         });
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
 
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
 
@@ -466,6 +471,128 @@ fn index_fetch_dead_chain_reports_all_dead() {
     assert!(all_dead);
     assert!(!call_again);
     assert_eq!(tid, ItemPointerData::new(0, 1)); // unchanged on miss
+    heapam_index_fetch_end(hscan);
+    quiesced();
+}
+
+#[test]
+fn index_fetch_batch_lifecycle() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+
+    let mut t2 = tuple_image(INVISIBLE_XMIN, 0, 2);
+    set_infomask(&mut t2, HEAP_XMAX_INVALID, 0);
+    register_table(
+        oid,
+        vec![build_page(&[
+            Item::Tuple(tuple_image(20, 0, 1)),
+            Item::Tuple(t2),
+            Item::Tuple(tuple_image(20, 0, 3)),
+        ])],
+    );
+    let rel = test_relation(mcx, oid);
+    let snap = mvcc_snapshot(mcx);
+    let mut slot = buffer_slot(mcx, &rel);
+
+    let mut hscan = heapam_index_fetch_begin(&rel);
+    let prune_before = PRUNE_CALLS.load(Ordering::Relaxed);
+    let first = ItemPointerData::new(0, 1);
+    let rest = [ItemPointerData::new(0, 2), ItemPointerData::new(0, 3)];
+    heapam_index_fetch_batch_fill(mcx, &mut hscan, &first, &rest, &snap).unwrap();
+    assert_eq!(PRUNE_CALLS.load(Ordering::Relaxed), prune_before + 1);
+
+    let mut tid = ItemPointerData::new(0, 1);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Stored
+    ));
+    assert_eq!(tid, ItemPointerData::new(0, 1));
+    assert_eq!(slot_val(&slot), 1);
+    assert_eq!(slot.base().tts_tableOid, oid);
+
+    let mut tid = ItemPointerData::new(0, 2);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::NotVisible { all_dead: false }
+    ));
+
+    let mut tid = ItemPointerData::new(0, 3);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Stored
+    ));
+    assert_eq!(slot_val(&slot), 3);
+
+    let mut tid = ItemPointerData::new(0, 3);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Miss
+    ));
+
+    heapam_index_fetch_batch_fill(mcx, &mut hscan, &first, &rest, &snap).unwrap();
+    let mut tid = ItemPointerData::new(0, 3);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Miss
+    ));
+    let mut tid = ItemPointerData::new(0, 1);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Miss
+    ));
+
+    heapam_index_fetch_batch_fill(mcx, &mut hscan, &first, &rest, &snap).unwrap();
+    heapam_index_fetch_reset(&mut hscan);
+    let mut tid = ItemPointerData::new(0, 1);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Miss
+    ));
+
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    heapam_index_fetch_end(hscan);
+    quiesced();
+}
+
+#[test]
+fn index_fetch_batch_all_dead_entry() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[
+            Item::Tuple(tuple_image(INVISIBLE_XMIN, 0, 1)),
+            Item::Tuple(tuple_image(20, 0, 2)),
+        ])],
+    );
+    let rel = test_relation(mcx, oid);
+    let snap = mvcc_snapshot(mcx);
+    let mut slot = buffer_slot(mcx, &rel);
+
+    SURELY_DEAD.store(true, Ordering::Relaxed);
+    let mut hscan = heapam_index_fetch_begin(&rel);
+    let first = ItemPointerData::new(0, 1);
+    let rest = [ItemPointerData::new(0, 2)];
+    heapam_index_fetch_batch_fill(mcx, &mut hscan, &first, &rest, &snap).unwrap();
+    SURELY_DEAD.store(false, Ordering::Relaxed);
+
+    let mut tid = ItemPointerData::new(0, 1);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::NotVisible { all_dead: true }
+    ));
+    let mut tid = ItemPointerData::new(0, 2);
+    assert!(matches!(
+        heapam_index_fetch_batch_next(mcx, &mut hscan, &mut tid, &mut slot),
+        BatchFetch::Stored
+    ));
+    exectuples::exec_clear_tuple(&mut slot, mcx);
     heapam_index_fetch_end(hscan);
     quiesced();
 }

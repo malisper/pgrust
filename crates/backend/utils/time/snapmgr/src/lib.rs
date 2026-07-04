@@ -174,7 +174,11 @@ pub fn FirstSnapshotSet() -> bool {
 // Always refills the SAME persistent struct so snapXactCompletionCount and
 // the once-sized xip arrays survive — the reuse fastpath depends on it.
 // Seams reached under the borrow never re-enter snapmgr.
-fn get_snapshot_data_static_locked(s: &mut SnapMgrState, which: Which) -> PgResult<Snapshot> {
+fn refill_static_locked(
+    s: &mut SnapMgrState,
+    which: Which,
+    fill: impl FnOnce(&mut SnapshotData<'static>, Mcx<'static>) -> PgResult<()>,
+) -> PgResult<Snapshot> {
     let mcx = s.mcx;
     let slot = match which {
         Which::Current => &mut s.current_data,
@@ -192,7 +196,7 @@ fn get_snapshot_data_static_locked(s: &mut SnapMgrState, which: Which) -> PgResu
             Rc::get_mut(slot).expect("fresh Rc is unique")
         }
     };
-    procarray::GetSnapshotData(target, mcx)?;
+    fill(target, mcx)?;
     let snap = slot.clone();
     match which {
         Which::Current => s.current = Some(SnapRef::Static(Which::Current)),
@@ -200,6 +204,12 @@ fn get_snapshot_data_static_locked(s: &mut SnapMgrState, which: Which) -> PgResu
         Which::Catalog => s.catalog_valid = true,
     }
     Ok(snap)
+}
+
+fn get_snapshot_data_static_locked(s: &mut SnapMgrState, which: Which) -> PgResult<Snapshot> {
+    refill_static_locked(s, which, |target, mcx| {
+        procarray::GetSnapshotData(target, mcx)
+    })
 }
 
 fn get_snapshot_data_static(which: Which) -> PgResult<Snapshot> {
@@ -229,10 +239,13 @@ pub fn GetTransactionSnapshot() -> PgResult<Snapshot> {
 
             // Xact-snapshot mode: the first snapshot must live to end of xact.
             if xact_seams::isolation_uses_xact_snapshot::call() {
-                if xact_seams::isolation_is_serializable::call() {
-                    unported("GetSerializableTransactionSnapshot (predicate.c)");
-                }
-                let current = get_snapshot_data_static_locked(s, Which::Current)?;
+                let current = if xact_seams::isolation_is_serializable::call() {
+                    refill_static_locked(s, Which::Current, |target, mcx| {
+                        predicate_seams::get_serializable_transaction_snapshot::call(target, mcx)
+                    })?
+                } else {
+                    get_snapshot_data_static_locked(s, Which::Current)?
+                };
                 let copy = copy_snapshot_locked(s, &current);
                 copy.regd_count.set(copy.regd_count.get() + 1);
                 s.current = Some(SnapRef::Copied(copy.clone()));

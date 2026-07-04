@@ -26,26 +26,106 @@ impl<'mcx> IndexClauseSet<'mcx> {
     }
 }
 
-// check_index_predicates (indxpath.c): the non-partial arm shares the rel's
-// baserestrictinfo with each index. LOUD BOUNDARY: proving a partial index
-// usable (predOK) and filtering implied quals out of indrestrictinfo both
-// require predicate_implied_by — predtest.c is unported — so ANY planning
-// over a rel that has a partial index panics here.
-pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) {
+// check_index_predicates (indxpath.c). generate_join_implied_equalities is a
+// no-op under eclass-lite ECs (joinrels.rs note): derivable join equalities
+// stay in joininfo, which the movable-clause scan below already covers; the
+// richer-EC case stays loud.
+pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();
+    let mut have_partial = false;
     for i in 0..nindexes {
         let index = run.root.rel(rel).indexlist[i];
-        assert!(
-            index.indpred.is_empty(),
-            "check_index_predicates (indxpath.c): partial index; predicate_implied_by \
-             (predtest.c) unported"
-        );
         let mut clauses = PgVec::new_in(mcx);
         clauses.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
         *index.indrestrictinfo.borrow_mut() = clauses;
-        index.predOK.set(false);
+        if !index.indpred.is_empty() {
+            have_partial = true;
+        }
     }
+    if !have_partial {
+        return Ok(());
+    }
+
+    let ec_can_derive = (0..run.root.eq_classes.len()).any(|i| {
+        let ec = run.root.ec(types_pathnodes::EcId(i as u32));
+        ec.ec_members.len() > 1 || ec.ec_has_const
+    });
+    assert!(
+        !ec_can_derive,
+        "check_index_predicates (indxpath.c): EC-derivable join clauses; M2 join lane"
+    );
+
+    let mut clauselist: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        clauselist.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+    }
+    for i in 0..run.root.rel(rel).joininfo.len() {
+        let rid = run.root.rel(rel).joininfo[i];
+        if join_clause_is_movable_to(run, rid, rel) {
+            clauselist.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+    }
+
+    let relid = run.root.rel(rel).relid;
+    let is_target_rel = relids_is_member(relid as i32, &run.root.all_result_relids)
+        || run.root.rowMarks.iter().any(|&rm| run.rowmark(rm).rti == relid);
+
+    for i in 0..nindexes {
+        let index = run.root.rel(rel).indexlist[i];
+        if index.indpred.is_empty() {
+            continue;
+        }
+        let mut indpred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        for &pid in index.indpred.iter() {
+            indpred.push(*run.root.expr_node(pid));
+        }
+        if !index.predOK.get() {
+            index
+                .predOK
+                .set(crate::predtest::predicate_implied_by(mcx, &indpred, &clauselist, false)?);
+        }
+        // Target rels keep implied quals for EvalPlanQual rechecks; a
+        // !amoptionalkey index must keep first-column quals to stay scannable.
+        if is_target_rel || !index.amoptionalkey {
+            continue;
+        }
+        let mut kept: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+        for j in 0..run.root.rel(rel).baserestrictinfo.len() {
+            let rid = run.root.rel(rel).baserestrictinfo[j];
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            if clauses::contain_mutable_functions(clause)?
+                || !crate::predtest::predicate_implied_by(mcx, &[clause], &indpred, false)?
+            {
+                kept.push(rid);
+            }
+        }
+        *index.indrestrictinfo.borrow_mut() = kept;
+    }
+    Ok(())
+}
+
+// join_clause_is_movable_to (restrictinfo.c).
+fn join_clause_is_movable_to(run: &PlannerRun<'_>, rid: RinfoId, rel: RelId) -> bool {
+    let rinfo = run.root.rinfo(rid);
+    let baserel = run.root.rel(rel);
+    if !relids_is_member(baserel.relid as i32, &rinfo.clause_relids) {
+        return false;
+    }
+    if relids_is_member(baserel.relid as i32, &rinfo.outer_relids) {
+        return false;
+    }
+    if crate::relnode::relids_overlap(&rinfo.clause_relids, &baserel.nulling_relids) {
+        return false;
+    }
+    if crate::relnode::relids_overlap(&baserel.lateral_referencers, &rinfo.clause_relids) {
+        return false;
+    }
+    if rinfo.is_clone {
+        return false;
+    }
+    true
 }
 
 // create_index_paths (indxpath.c), restriction-clause arm; join/eclass
@@ -519,7 +599,7 @@ fn get_index_paths<'mcx>(
     clauses: &IndexClauseSet<'mcx>,
     bitindexpaths: &mut PgVec<'mcx, PathId>,
 ) -> PgResult<()> {
-    let indexpaths = build_index_paths(run, rel, index, clauses, false)?;
+    let indexpaths = build_index_paths(run, rel, index, clauses, index.predOK.get(), false)?;
     for &ipath in indexpaths.iter() {
         if index.amhasgettuple {
             add_path(run, rel, ipath);
@@ -548,6 +628,7 @@ fn build_index_paths<'mcx>(
     rel: RelId,
     index: &'mcx IndexOptInfo<'mcx>,
     clauses: &IndexClauseSet<'mcx>,
+    useful_predicate: bool,
     bitmap: bool,
 ) -> PgResult<PgVec<'mcx, PathId>> {
     let mcx = run.mcx;
@@ -593,7 +674,11 @@ fn build_index_paths<'mcx>(
 
     let index_only_scan = !bitmap && check_index_only(run, rel, index);
 
-    if !index_clauses.is_empty() || !useful_pathkeys.is_empty() || index_only_scan {
+    if !index_clauses.is_empty()
+        || !useful_pathkeys.is_empty()
+        || useful_predicate
+        || index_only_scan
+    {
         let forward_clauses = {
             let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
             v.extend(index_clauses.iter().cloned());
@@ -643,7 +728,8 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
     if !crate::gucs::enable_indexonlyscan() {
         return false;
     }
-    // Attrs needed above the scan plus all baserestrictinfo Vars, each
+    // Attrs needed above the scan plus indrestrictinfo Vars (quals implied by
+    // the index predicate need no recheck, hence not baserestrictinfo), each
     // checked against returnable index columns.
     let r = run.root.rel(rel);
     let mut needed: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(run.mcx);
@@ -652,7 +738,7 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
             needed.push(i as i16 + r.min_attr);
         }
     }
-    for &rid in r.baserestrictinfo.iter() {
+    for &rid in index.indrestrictinfo.borrow().iter() {
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         collect_varattnos(run, clause, r.relid as i32, &mut needed);
     }
@@ -862,23 +948,54 @@ fn assert_no_similar_or_groups<'mcx>(
     Ok(())
 }
 
-// build_paths_for_OR (indxpath.c); partial indexes loud upstream, so the
-// useful_predicate leg is dead.
+// build_paths_for_OR (indxpath.c).
 fn build_paths_for_or<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
 ) -> PgResult<PgVec<'mcx, PathId>> {
-    let mut result: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
+    let mcx = run.mcx;
+    let mut result: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut all_clause_nodes: Option<PgVec<'mcx, Node<'mcx>>> = None;
     let nindexes = run.root.rel(rel).indexlist.len();
     for i in 0..nindexes {
         let index = run.root.rel(rel).indexlist[i];
         if !index.amhasgetbitmap {
             continue;
         }
-        debug_assert!(index.indpred.is_empty());
-        let mut clauseset = IndexClauseSet::new(run.mcx, index.nkeycolumns as usize);
+        let mut useful_predicate = false;
+        if !index.indpred.is_empty() {
+            if !index.predOK.get() {
+                if all_clause_nodes.is_none() {
+                    let mut v: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                    for &r in clauses.iter().chain(other_clauses.iter()) {
+                        v.push(*run.root.expr_node(run.root.rinfo(r).clause));
+                    }
+                    all_clause_nodes = Some(v);
+                }
+                let mut indpred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                for &pid in index.indpred.iter() {
+                    indpred.push(*run.root.expr_node(pid));
+                }
+                if !crate::predtest::predicate_implied_by(
+                    mcx,
+                    &indpred,
+                    all_clause_nodes.as_ref().unwrap(),
+                    false,
+                )? {
+                    continue;
+                }
+                let mut other_nodes: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                for &r in other_clauses.iter() {
+                    other_nodes.push(*run.root.expr_node(run.root.rinfo(r).clause));
+                }
+                if !crate::predtest::predicate_implied_by(mcx, &indpred, &other_nodes, false)? {
+                    useful_predicate = true;
+                }
+            }
+        }
+        let mut clauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
         for &r in clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
@@ -888,7 +1005,7 @@ fn build_paths_for_or<'mcx>(
         for &r in other_clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
-        let paths = build_index_paths(run, rel, index, &clauseset, true)?;
+        let paths = build_index_paths(run, rel, index, &clauseset, useful_predicate, true)?;
         result.extend(paths.iter().copied());
     }
     Ok(result)
@@ -1109,7 +1226,9 @@ fn find_indexpath_quals<'mcx>(
                 let rid = ic.rinfo.expect("IndexClause rinfo");
                 quals.push(*run.root.expr_node(run.root.rinfo(rid).clause));
             }
-            debug_assert!(ip.indexinfo.expect("indexinfo set").indpred.is_empty());
+            for &pid in ip.indexinfo.expect("indexinfo set").indpred.iter() {
+                preds.push(*run.root.expr_node(pid));
+            }
         }
         other => panic!(
             "find_indexpath_quals (indxpath.c): pathtype {}",

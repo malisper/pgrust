@@ -531,8 +531,8 @@ pub fn ProcedureCreate<'mcx>(
     if !is_update {
         pg_depend::recordDependencyOnOwner(PROCEDURE_RELATION_ID, retval, a.proowner);
     }
-    // recordDependencyOnCurrentExtension / recordDependencyOnNewAcl: no-ops —
-    // CREATE EXTENSION is unported and proacl is always NULL here.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, is_update)?;
+    // recordDependencyOnNewAcl: no-op — proacl is always NULL here.
 
     rel.close(RowExclusiveLock)?;
 

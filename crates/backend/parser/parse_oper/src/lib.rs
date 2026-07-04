@@ -86,6 +86,52 @@ fn name_parts<'a, 'mcx>(opname: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) ->
     &buf[..n]
 }
 
+// LookupOperName (parse_oper.c) with pstate=NULL, location=-1: exact-match
+// lookup for DDL callers; no implicit-coercion resolution.
+pub fn LookupOperName(
+    opername: &NodeList<'_>,
+    oprleft: Oid,
+    oprright: Oid,
+    noError: bool,
+) -> PgResult<Oid> {
+    let mut buf = [""; 4];
+    let parts = name_parts(opername, &mut buf);
+    let result = catalog_namespace::OpernameGetOprid(parts, oprleft, oprright)?;
+    if OidIsValid(result) {
+        return Ok(result);
+    }
+    if !noError {
+        let sig = op_signature_string(parts, oprleft, oprright)?;
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                .errmsg(format!("operator does not exist: {sig}"))
+                .into_error(),
+        ));
+    }
+    Ok(InvalidOid)
+}
+
+// LookupOperWithArgs (parse_oper.c): ObjectWithArgs from the grammar always
+// carries exactly two TypeName objargs (the NONE oper_argtypes arms are loud
+// in gram_core, so unary forms cannot reach here).
+pub fn LookupOperWithArgs(
+    oper_name: &NodeList<'_>,
+    oper_args: &NodeList<'_>,
+    noError: bool,
+) -> PgResult<Oid> {
+    assert_eq!(oper_args.len(), 2, "LookupOperWithArgs: objargs must have 2 entries");
+    let scratch = mcx::MemoryContext::new("LookupOperWithArgs");
+    let mut oids = [InvalidOid; 2];
+    for (i, n) in oper_args.iter().enumerate() {
+        let t = n
+            .as_variant::<types_nodes::rawnodes::TypeName>()
+            .expect("oper_argtypes holds TypeName nodes");
+        oids[i] = parse_utilcmd::LookupTypeNameOid(scratch.mcx(), t)?;
+    }
+    LookupOperName(oper_name, oids[0], oids[1], noError)
+}
+
 fn make_oper_cache_key(
     key: &mut OprCacheKey,
     parts: &[&str],
@@ -643,7 +689,7 @@ fn missing_op_error(argtype: Oid, ordering: bool) -> Box<PgError> {
     )
 }
 
-fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> PgResult<String> {
+pub fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> PgResult<String> {
     let opname = parts.join(".");
     Ok(if OidIsValid(arg1) {
         format!(

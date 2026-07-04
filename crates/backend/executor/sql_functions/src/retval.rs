@@ -52,7 +52,17 @@ pub fn check_sql_stmt_retval<'mcx>(
     let Some(idx) = query_list.iter().rposition(|q| q.canSetTag) else {
         return Err(retval_mismatch_final_stmt(rettype));
     };
-    let q = &query_list[idx];
+    check_query_retval(mcx, &query_list[idx], rettype)
+}
+
+pub(crate) fn check_query_retval<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: &Query<'mcx>,
+    rettype: Oid,
+) -> PgResult<()> {
+    if rettype == VOIDOID {
+        return Ok(());
+    }
     let (tlist, tlist_is_modifiable): (&NodeList<'mcx>, bool) = match q.commandType {
         CmdType::CMD_SELECT => (&q.targetList, q.setOperations.is_none()),
         CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE

@@ -26,6 +26,8 @@ use types_rel::{RELKIND_SEQUENCE, RELKIND_VIEW};
 
 mod grant;
 pub use grant::{get_rolespec_oid, ExecuteGrantStmt};
+mod lo;
+pub use lo::{object_ownercheck_lo, pg_largeobject_aclcheck_snapshot};
 
 pub const ACLCHECK_OK: i32 = 0;
 pub const ACLCHECK_NO_PRIV: i32 = 1;

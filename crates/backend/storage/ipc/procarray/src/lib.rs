@@ -428,6 +428,41 @@ fn ProcArrayEndTransactionInternal(proc: &PGPROC, latestXid: TransactionId) {
         .store(tv.xactCompletionCount.load(Relaxed) + 1, Relaxed);
 }
 
+/// `ProcArrayClearTransaction(MyProc)` — PREPARE TRANSACTION's clear: the xid
+/// keeps running via the gxact's dummy proc already in the array.
+pub fn ProcArrayClearTransaction() -> PgResult<()> {
+    let proc = GetPGProcByNumber(MyProc().expect("ProcArrayClearTransaction without MyProc"));
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, MyProc().unwrap())?;
+
+    let hdr = ProcGlobal();
+    let pgxactoff = proc.pgxactoff.load(Relaxed) as usize;
+
+    hdr.xids[pgxactoff].value.store(InvalidTransactionId, Relaxed);
+    proc.xid.value.store(InvalidTransactionId, Relaxed);
+    proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    proc.recoveryConflictPending.store(false, Relaxed);
+
+    debug_assert_eq!(proc.statusFlags.load(Relaxed) & PROC_VACUUM_STATE_MASK, 0);
+    debug_assert_eq!(proc.delayChkptFlags.load(Relaxed), 0);
+
+    // GetSnapshotData omits our own xid; without the bump a reused snapshot
+    // might not count the prepared transaction as running.
+    let tv = TransamVariables();
+    tv.xactCompletionCount
+        .store(tv.xactCompletionCount.load(Relaxed) + 1, Relaxed);
+
+    let subxid_status = proc.subxidStatus.get();
+    debug_assert_eq!(hdr.subxidStates[pgxactoff].get(), subxid_status);
+    if subxid_status.count > 0 || subxid_status.overflowed {
+        hdr.subxidStates[pgxactoff].set(Default::default());
+        proc.subxidStatus.set(Default::default());
+    }
+
+    LWLockRelease(ProcArrayLock())?;
+    Ok(())
+}
+
 fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgResult<()> {
     let hdr = ProcGlobal();
     let proc = GetPGProcByNumber(procno);
@@ -1293,6 +1328,7 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
+    procarray_seams::proc_array_clear_transaction::set(ProcArrayClearTransaction);
     procarray_seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
     procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);

@@ -17,6 +17,9 @@ const F_POLY: Oid = 1007;
 
 fn proc_shape(prorettype: Oid, prokind: i8, pronargs: i16) -> PgProcShape {
     PgProcShape {
+        prolang: 12,
+        prosecdef: false,
+        proconfig_isnull: true,
         pronamespace: 11,
         prorettype,
         provariadic: InvalidOid,

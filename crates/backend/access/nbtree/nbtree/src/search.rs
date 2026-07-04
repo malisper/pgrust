@@ -26,7 +26,9 @@ use ::types_scan::scankey::{
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_snapshot::SnapshotData;
 use ::types_storage::bufpage::PageRef;
-use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
+use ::types_tuple::itemptr::{
+    ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck,
+};
 use ::types_tuple::TupleDescData;
 
 use crate::fcframe::OrderProcFrame;
@@ -952,6 +954,37 @@ fn bt_returnitem(ctx: &mut ScanCtx<'_, '_>) {
             core::ptr::NonNull::new(curr_tuples.as_ptr().wrapping_add(item.tupleOffset as usize)
                 as *mut u8);
     }
+}
+
+/// Upcoming currPos TIDs on the same heap block as items[itemIndex], in
+/// consumption order (currPos.dir), excluding the current item. Pure read of
+/// the materialized page batch: killed-item filtering already happened at
+/// _bt_readpage, so plain continuation returns exactly these TIDs next.
+pub fn bt_peek_same_block_tids(
+    so: &BTScanOpaqueData<'_>,
+    out: &mut [MaybeUninit<ItemPointerData>],
+) -> usize {
+    let pos = &so.currPos;
+    if !BTScanPosIsValid(pos) || pos.itemIndex < pos.firstItem || pos.itemIndex > pos.lastItem {
+        return 0;
+    }
+    // SAFETY: indexes stay within [firstItem, lastItem]: written slots.
+    let cur = unsafe { pos.item(pos.itemIndex as usize) }.heapTid;
+    let blk = ItemPointerGetBlockNumberNoCheck(&cur);
+    let step: i32 = if ScanDirectionIsForward(pos.dir) { 1 } else { -1 };
+    let mut n = 0usize;
+    let mut j = pos.itemIndex + step;
+    while j >= pos.firstItem && j <= pos.lastItem && n < out.len() {
+        // SAFETY: j within [firstItem, lastItem] (loop bound).
+        let tid = unsafe { pos.item(j as usize) }.heapTid;
+        if ItemPointerGetBlockNumberNoCheck(&tid) != blk {
+            break;
+        }
+        out[n].write(tid);
+        n += 1;
+        j += step;
+    }
+    n
 }
 
 /// _bt_steppage.

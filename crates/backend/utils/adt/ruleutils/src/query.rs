@@ -5,8 +5,19 @@ use std::rc::Rc;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodes_enums::{CmdType, LimitOption};
-use types_nodes::parsenodes::SetOperation;
+use types_nodes::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
+use types_nodes::parsenodes::{CTEMaterialize, RangeTblFunction, SetOperation, WindowClause};
+use types_nodes::primnodes::{CoercionForm, OverridingKind, SubLinkType};
+use types_nodes::rawnodes::{
+    FRAMEOPTION_BETWEEN, FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET,
+    FRAMEOPTION_END_OFFSET_FOLLOWING, FRAMEOPTION_END_OFFSET_PRECEDING,
+    FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
+    FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
+    FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+    FRAMEOPTION_START_CURRENT_ROW, FRAMEOPTION_START_OFFSET,
+    FRAMEOPTION_START_OFFSET_FOLLOWING, FRAMEOPTION_START_OFFSET_PRECEDING,
+    FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+};
 use types_nodes::primnodes::{Alias, FromExpr, JoinExpr};
 use types_nodes::{JoinType, Node, NodeList, NodeTag, Query, RTEKind, RangeTblEntry};
 
@@ -65,7 +76,7 @@ pub(crate) fn deparse_context_for<'mcx>(
         using_names: Vec::new(),
     };
     set_rtable_names(mcx, &mut dpns, &[])?;
-    set_simple_column_names(&mut dpns)?;
+    set_simple_column_names(mcx, &mut dpns)?;
     Ok(dpns)
 }
 
@@ -131,9 +142,6 @@ pub(crate) fn set_deparse_for_query<'mcx>(
     query: &'mcx Query<'mcx>,
     parents: &[Rc<DeparseNamespace<'mcx>>],
 ) -> PgResult<DeparseNamespace<'mcx>> {
-    if !query.cteList.is_nil() {
-        gap("set_deparse_for_query", "WITH/CTE deparse");
-    }
     let rtable: Vec<&RangeTblEntry<'_>> = query
         .rtable
         .iter()
@@ -161,19 +169,22 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         if dpns.rtable[i].rtekind == RTEKind::RTE_JOIN {
             set_join_column_names(&mut dpns, i)?;
         } else {
-            set_relation_column_names(&mut dpns, i)?;
+            set_relation_column_names(mcx, &mut dpns, i)?;
         }
     }
     Ok(dpns)
 }
 
-fn set_simple_column_names(dpns: &mut DeparseNamespace<'_>) -> PgResult<()> {
+fn set_simple_column_names<'mcx>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+) -> PgResult<()> {
     for _ in 0..dpns.rtable.len() {
         dpns.rtable_columns.push(DeparseColumns::default());
     }
     for i in 0..dpns.rtable.len() {
         if dpns.rtable[i].rtekind != RTEKind::RTE_JOIN {
-            set_relation_column_names(dpns, i)?;
+            set_relation_column_names(mcx, dpns, i)?;
         }
     }
     Ok(())
@@ -406,14 +417,33 @@ fn relation_real_colnames(relid: types_core::Oid) -> PgResult<Vec<Option<String>
     Ok(out)
 }
 
-fn set_relation_column_names(dpns: &mut DeparseNamespace<'_>, idx: usize) -> PgResult<()> {
+fn set_relation_column_names<'mcx>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
     let rte = dpns.rtable[idx];
     let mut colinfo = std::mem::take(&mut dpns.rtable_columns[idx]);
 
     let real_colnames: Vec<Option<String>> = match rte.rtekind {
         RTEKind::RTE_RELATION => relation_real_colnames(rte.relid)?,
         RTEKind::RTE_FUNCTION if !rte.functions.is_nil() => {
-            gap("set_relation_column_names", "function RTE (expandRTE)")
+            let (colnames, _) = parse_relation::expandRTE(
+                mcx,
+                rte,
+                1,
+                0,
+                types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                -1,
+                true,
+            )?;
+            colnames
+                .iter()
+                .map(|c| {
+                    let s = c.as_string().expect("expanded colname").sval;
+                    if s.is_empty() { None } else { Some(s.to_owned()) }
+                })
+                .collect()
         }
         RTEKind::RTE_TABLEFUNC => gap("set_relation_column_names", "tablefunc RTE"),
         _ => rte
@@ -617,6 +647,7 @@ pub(crate) fn get_query_def<'mcx>(
     let save_varprefix = ctx.varprefix;
     let save_result_desc = ctx.result_desc.take();
     let save_target_list = ctx.target_list.take();
+    let save_window_clause = ctx.window_clause.take();
     let save_colnames_visible = ctx.colnames_visible;
     let save_in_group_by = ctx.in_group_by;
     let save_var_in_order_by = ctx.var_in_order_by;
@@ -633,6 +664,9 @@ pub(crate) fn get_query_def<'mcx>(
             ctx.result_desc = result_desc;
             get_select_query_def(query, target_list, having_qual, ctx)
         }
+        CmdType::CMD_UPDATE => get_update_query_def(query, ctx),
+        CmdType::CMD_INSERT => get_insert_query_def(query, ctx),
+        CmdType::CMD_DELETE => get_delete_query_def(query, ctx),
         CmdType::CMD_NOTHING => {
             ctx.buf.push_str("NOTHING");
             Ok(())
@@ -644,11 +678,106 @@ pub(crate) fn get_query_def<'mcx>(
     ctx.varprefix = save_varprefix;
     ctx.result_desc = save_result_desc;
     ctx.target_list = save_target_list;
+    ctx.window_clause = save_window_clause;
     ctx.colnames_visible = save_colnames_visible;
     ctx.in_group_by = save_in_group_by;
     ctx.var_in_order_by = save_var_in_order_by;
     ctx.indent_level = save_indent;
     r
+}
+
+fn get_with_clause<'mcx>(query: &'mcx Query<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if query.cteList.is_nil() {
+        return Ok(());
+    }
+    if ctx.pretty_indent() {
+        ctx.indent_level += PRETTYINDENT_STD;
+        ctx.buf.push(' ');
+    }
+    let mut sep = if query.hasRecursive { "WITH RECURSIVE " } else { "WITH " };
+    for cte_node in query.cteList.iter() {
+        let cte = cte_node.as_common_table_expr().expect("cteList entry");
+        ctx.buf.push_str(sep);
+        ctx.buf.push_str(&quote_identifier(cte.ctename.expect("CTE has a name")));
+        if !cte.aliascolnames.is_nil() {
+            ctx.buf.push('(');
+            let mut first = true;
+            for col in cte.aliascolnames.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                ctx.buf.push_str(&quote_identifier(col.as_string().expect("colname").sval));
+            }
+            ctx.buf.push(')');
+        }
+        ctx.buf.push_str(" AS ");
+        match cte.ctematerialized {
+            CTEMaterialize::CTEMaterializeDefault => {}
+            CTEMaterialize::CTEMaterializeAlways => ctx.buf.push_str("MATERIALIZED "),
+            CTEMaterialize::CTEMaterializeNever => ctx.buf.push_str("NOT MATERIALIZED "),
+        }
+        ctx.buf.push('(');
+        if ctx.pretty_indent() {
+            append_context_keyword(ctx, "", 0, 0, 0);
+        }
+        let ctequery = cte
+            .ctequery
+            .and_then(|n| n.as_query())
+            .expect("transformed CTE holds a Query");
+        get_query_def(ctequery, ctx, None, true)?;
+        if ctx.pretty_indent() {
+            append_context_keyword(ctx, "", 0, 0, 0);
+        }
+        ctx.buf.push(')');
+        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
+            gap("get_with_clause", "SEARCH/CYCLE clause deparse");
+        }
+        sep = ", ";
+    }
+    if ctx.pretty_indent() {
+        ctx.indent_level -= PRETTYINDENT_STD;
+        append_context_keyword(ctx, "", 0, 0, 0);
+    } else {
+        ctx.buf.push(' ');
+    }
+    Ok(())
+}
+
+fn get_values_def<'mcx>(
+    values_lists: &'mcx NodeList<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    ctx.buf.push_str("VALUES ");
+    let mut first_list = true;
+    for sublist in values_lists.iter() {
+        if !first_list {
+            ctx.buf.push_str(", ");
+        }
+        first_list = false;
+        ctx.buf.push('(');
+        let mut first_col = true;
+        for col in sublist.as_list().expect("VALUES sublist").iter() {
+            if !first_col {
+                ctx.buf.push(',');
+            }
+            first_col = false;
+            get_rule_expr_toplevel(col, ctx, false)?;
+        }
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+fn get_rule_expr_toplevel<'mcx>(
+    node: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    match node.as_var() {
+        Some(v) => get_variable(v, 0, true, ctx).map(|_| ()),
+        None => get_rule_expr(node, ctx, showimplicit),
+    }
 }
 
 fn get_select_query_def<'mcx>(
@@ -657,7 +786,9 @@ fn get_select_query_def<'mcx>(
     having_qual: Option<Node<'mcx>>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
+    get_with_clause(query, ctx)?;
     ctx.target_list = Some(target_list);
+    ctx.window_clause = Some(&query.windowClause);
 
     let force_colno = if let Some(setops) = query.setOperations {
         get_setop_query(setops, query, ctx)?;
@@ -678,24 +809,285 @@ fn get_select_query_def<'mcx>(
     }
     if let Some(count) = query.limitCount {
         if query.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
-            gap("get_select_query_def", "FETCH FIRST ... WITH TIES");
-        }
-        append_context_keyword(ctx, " LIMIT ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0);
-        match count.as_const() {
-            Some(c) if c.constisnull => ctx.buf.push_str("ALL"),
-            _ => get_rule_expr(count, ctx, false)?,
+            append_context_keyword(ctx, " FETCH FIRST ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0);
+            ctx.buf.push('(');
+            get_rule_expr(count, ctx, false)?;
+            ctx.buf.push(')');
+            ctx.buf.push_str(" ROWS WITH TIES");
+        } else {
+            append_context_keyword(ctx, " LIMIT ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0);
+            match count.as_const() {
+                Some(c) if c.constisnull => ctx.buf.push_str("ALL"),
+                _ => get_rule_expr(count, ctx, false)?,
+            }
         }
     }
 
     if query.hasForUpdate {
-        gap("get_select_query_def", "FOR UPDATE/SHARE deparse");
+        for rc_node in query.rowMarks.iter() {
+            let rc = rc_node.as_row_mark_clause().expect("rowMarks entry");
+            if rc.pushedDown {
+                continue;
+            }
+            let kw = match rc.strength {
+                LockClauseStrength::LCS_FORKEYSHARE => " FOR KEY SHARE",
+                LockClauseStrength::LCS_FORSHARE => " FOR SHARE",
+                LockClauseStrength::LCS_FORNOKEYUPDATE => " FOR NO KEY UPDATE",
+                LockClauseStrength::LCS_FORUPDATE => " FOR UPDATE",
+                LockClauseStrength::LCS_NONE => {
+                    panic!("unrecognized LockClauseStrength: LCS_NONE")
+                }
+            };
+            append_context_keyword(ctx, kw, -PRETTYINDENT_STD, PRETTYINDENT_STD, 0);
+            let name = get_rtable_name(rc.rti as usize, ctx).expect("locked rel has a refname");
+            ctx.buf.push_str(&format!(" OF {}", quote_identifier(&name)));
+            match rc.waitPolicy {
+                LockWaitPolicy::LockWaitError => ctx.buf.push_str(" NOWAIT"),
+                LockWaitPolicy::LockWaitSkip => ctx.buf.push_str(" SKIP LOCKED"),
+                LockWaitPolicy::LockWaitBlock => {}
+            }
+        }
     }
     Ok(())
 }
 
+fn get_returning_clause<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    if query.returningList.is_nil() {
+        return Ok(());
+    }
+    append_context_keyword(ctx, " RETURNING", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
+    let mut have_with = false;
+    if let Some(old_alias) = query.returningOldAlias {
+        if old_alias != "old" {
+            ctx.buf.push_str(&format!(" WITH (OLD AS {}", quote_identifier(old_alias)));
+            have_with = true;
+        }
+    }
+    if let Some(new_alias) = query.returningNewAlias {
+        if new_alias != "new" {
+            if have_with {
+                ctx.buf.push_str(&format!(", NEW AS {}", quote_identifier(new_alias)));
+            } else {
+                ctx.buf.push_str(&format!(" WITH (NEW AS {}", quote_identifier(new_alias)));
+                have_with = true;
+            }
+        }
+    }
+    if have_with {
+        ctx.buf.push(')');
+    }
+    get_target_list(&query.returningList, ctx)
+}
+
+fn result_relation_rte<'a, 'mcx>(query: &'a Query<'mcx>) -> &'a RangeTblEntry<'mcx> {
+    let rte = query
+        .rtable
+        .nth(query.resultRelation as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable entry");
+    debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+    rte
+}
+
+fn get_insert_query_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    get_with_clause(query, ctx)?;
+
+    let mut select_rte: Option<&RangeTblEntry<'_>> = None;
+    let mut values_rte: Option<&RangeTblEntry<'_>> = None;
+    for n in query.rtable.iter() {
+        let rte = n.as_range_tbl_entry().expect("rtable entry");
+        if rte.rtekind == RTEKind::RTE_SUBQUERY {
+            assert!(select_rte.is_none(), "too many subquery RTEs in INSERT");
+            select_rte = Some(rte);
+        }
+        if rte.rtekind == RTEKind::RTE_VALUES {
+            assert!(values_rte.is_none(), "too many values RTEs in INSERT");
+            values_rte = Some(rte);
+        }
+    }
+    assert!(
+        select_rte.is_none() || values_rte.is_none(),
+        "both subquery and values RTEs in INSERT"
+    );
+    let rte = result_relation_rte(query);
+
+    if ctx.pretty_indent() {
+        ctx.indent_level += PRETTYINDENT_STD;
+        ctx.buf.push(' ');
+    }
+    let relname = generate_relation_name(ctx.mcx, rte.relid)?;
+    ctx.buf.push_str(&format!("INSERT INTO {relname}"));
+    get_rte_alias(rte, query.resultRelation as usize, true, ctx)?;
+    ctx.buf.push(' ');
+
+    let mut strippedexprs: Vec<Node<'mcx>> = Vec::new();
+    let mut sep = "";
+    if !query.targetList.is_nil() {
+        ctx.buf.push('(');
+    }
+    for tle_node in query.targetList.iter() {
+        let tle = tle_node.as_target_entry().expect("targetList entry");
+        if tle.resjunk {
+            continue;
+        }
+        ctx.buf.push_str(sep);
+        sep = ", ";
+        let attname = lsyscache::get_attname(ctx.mcx, rte.relid, tle.resno, false)?
+            .expect("get_attname missing_ok=false");
+        ctx.buf.push_str(&quote_identifier(attname.as_str()));
+        strippedexprs.push(process_indirection(tle.expr, ctx)?);
+    }
+    if !query.targetList.is_nil() {
+        ctx.buf.push_str(") ");
+    }
+
+    match query.r#override {
+        OverridingKind::OVERRIDING_SYSTEM_VALUE => {
+            ctx.buf.push_str("OVERRIDING SYSTEM VALUE ")
+        }
+        OverridingKind::OVERRIDING_USER_VALUE => ctx.buf.push_str("OVERRIDING USER VALUE "),
+        OverridingKind::OVERRIDING_NOT_SET => {}
+    }
+
+    if let Some(srte) = select_rte {
+        get_query_def(srte.subquery.expect("subquery RTE has a subquery"), ctx, None, false)?;
+    } else if let Some(vrte) = values_rte {
+        get_values_def(&vrte.values_lists, ctx)?;
+    } else if !strippedexprs.is_empty() {
+        append_context_keyword(ctx, "VALUES (", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2);
+        let mut first = true;
+        for e in &strippedexprs {
+            if !first {
+                ctx.buf.push_str(", ");
+            }
+            first = false;
+            get_rule_expr_toplevel(*e, ctx, false)?;
+        }
+        ctx.buf.push(')');
+    } else {
+        ctx.buf.push_str("DEFAULT VALUES");
+    }
+
+    if query.onConflict.is_some() {
+        gap("get_insert_query_def", "ON CONFLICT deparse");
+    }
+    get_returning_clause(query, ctx)
+}
+
+fn get_update_query_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    get_with_clause(query, ctx)?;
+    let rte = result_relation_rte(query);
+    if ctx.pretty_indent() {
+        ctx.buf.push(' ');
+        ctx.indent_level += PRETTYINDENT_STD;
+    }
+    let relname = generate_relation_name(ctx.mcx, rte.relid)?;
+    ctx.buf.push_str(&format!(
+        "UPDATE {}{relname}",
+        if !rte.inh { "ONLY " } else { "" }
+    ));
+    get_rte_alias(rte, query.resultRelation as usize, false, ctx)?;
+    ctx.buf.push_str(" SET ");
+    get_update_query_targetlist_def(query, &query.targetList, rte, ctx)?;
+    get_from_clause(query, " FROM ", ctx)?;
+    if let Some(quals) = query.jointree.and_then(|jt| jt.quals) {
+        append_context_keyword(ctx, " WHERE ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
+        get_rule_expr(quals, ctx, false)?;
+    }
+    get_returning_clause(query, ctx)
+}
+
+fn get_update_query_targetlist_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    target_list: &'mcx NodeList<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    if query.hasSubLinks {
+        for tle_node in target_list.iter() {
+            let tle = tle_node.as_target_entry().expect("targetList entry");
+            if tle.resjunk
+                && tle
+                    .expr
+                    .as_sub_link()
+                    .is_some_and(|sl| sl.subLinkType == SubLinkType::MULTIEXPR_SUBLINK)
+            {
+                gap("get_update_query_targetlist_def", "MULTIEXPR assignment deparse");
+            }
+        }
+    }
+    let mut sep = "";
+    for tle_node in target_list.iter() {
+        let tle = tle_node.as_target_entry().expect("targetList entry");
+        if tle.resjunk {
+            continue;
+        }
+        ctx.buf.push_str(sep);
+        sep = ", ";
+        let attname = lsyscache::get_attname(ctx.mcx, rte.relid, tle.resno, false)?
+            .expect("get_attname missing_ok=false");
+        ctx.buf.push_str(&quote_identifier(attname.as_str()));
+        let expr = process_indirection(tle.expr, ctx)?;
+        ctx.buf.push_str(" = ");
+        get_rule_expr(expr, ctx, false)?;
+    }
+    Ok(())
+}
+
+fn get_delete_query_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    get_with_clause(query, ctx)?;
+    let rte = result_relation_rte(query);
+    if ctx.pretty_indent() {
+        ctx.buf.push(' ');
+        ctx.indent_level += PRETTYINDENT_STD;
+    }
+    let relname = generate_relation_name(ctx.mcx, rte.relid)?;
+    ctx.buf.push_str(&format!(
+        "DELETE FROM {}{relname}",
+        if !rte.inh { "ONLY " } else { "" }
+    ));
+    get_rte_alias(rte, query.resultRelation as usize, false, ctx)?;
+    get_from_clause(query, " USING ", ctx)?;
+    if let Some(quals) = query.jointree.and_then(|jt| jt.quals) {
+        append_context_keyword(ctx, " WHERE ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
+        get_rule_expr(quals, ctx, false)?;
+    }
+    get_returning_clause(query, ctx)
+}
+
+// processIndirection (ruleutils.c): FieldStore/assignment-SubscriptingRef
+// stripping is loud; only the implicit-CoerceToDomain descent is live.
+fn process_indirection<'mcx>(
+    node: Node<'mcx>,
+    _ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_FieldStore => gap("processIndirection", "FieldStore deparse"),
+        NodeTag::T_SubscriptingRef => {
+            gap("processIndirection", "subscript assignment deparse")
+        }
+        NodeTag::T_CoerceToDomain => {
+            gap("processIndirection", "CoerceToDomain assignment deparse")
+        }
+        _ => Ok(node),
+    }
+}
+
 fn get_simple_values_rte<'a, 'mcx>(
     query: &'a Query<'mcx>,
-    _ctx: &DeparseContext<'mcx>,
+    ctx: &DeparseContext<'mcx>,
 ) -> Option<&'a RangeTblEntry<'mcx>> {
     let mut result: Option<&RangeTblEntry<'_>> = None;
     for n in query.rtable.iter() {
@@ -708,6 +1100,27 @@ fn get_simple_values_rte<'a, 'mcx>(
         } else if rte.rtekind == RTEKind::RTE_RELATION && !rte.inFromCl {
             continue;
         } else {
+            return None;
+        }
+    }
+    let rte = result?;
+    let eref_colnames = &rte.eref?.colnames;
+    if query.targetList.len() != eref_colnames.len() {
+        return None;
+    }
+    let mut colno = 0usize;
+    for (tle_node, cname_node) in query.targetList.iter().zip(eref_colnames.iter()) {
+        let tle = tle_node.as_target_entry().expect("targetList entry");
+        let cname = cname_node.as_string().expect("eref colname").sval;
+        if tle.resjunk {
+            return None;
+        }
+        colno += 1;
+        let colname: Option<&str> = match &ctx.result_desc {
+            Some(rd) if colno <= rd.len() => Some(rd[colno - 1].as_str()),
+            _ => tle.resname,
+        };
+        if colname != Some(cname) {
             return None;
         }
     }
@@ -725,8 +1138,8 @@ fn get_basic_select_query<'mcx>(
         ctx.buf.push(' ');
     }
 
-    if get_simple_values_rte(query, ctx).is_some() {
-        gap("get_values_def", "VALUES list deparse");
+    if let Some(values_rte) = get_simple_values_rte(query, ctx) {
+        return get_values_def(&values_rte.values_lists, ctx);
     }
 
     ctx.buf.push_str(if query.isReturn { "RETURN" } else { "SELECT" });
@@ -784,8 +1197,141 @@ fn get_basic_select_query<'mcx>(
     }
 
     if !query.windowClause.is_nil() {
-        gap("get_basic_select_query", "WINDOW clause deparse");
+        get_rule_windowclause(query, target_list, ctx)?;
     }
+    Ok(())
+}
+
+fn get_rule_windowclause<'mcx>(
+    query: &'mcx Query<'mcx>,
+    target_list: &'mcx NodeList<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let mut sep: Option<&str> = None;
+    for wc_node in query.windowClause.iter() {
+        let wc = wc_node.as_window_clause().expect("windowClause entry");
+        let Some(name) = wc.name else { continue };
+        match sep {
+            None => {
+                append_context_keyword(ctx, " WINDOW ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1)
+            }
+            Some(s) => ctx.buf.push_str(s),
+        }
+        sep = Some(", ");
+        ctx.buf.push_str(&format!("{} AS ", quote_identifier(name)));
+        get_rule_windowspec(wc, target_list, ctx)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn get_rule_windowspec<'mcx>(
+    wc: &'mcx WindowClause<'mcx>,
+    target_list: &'mcx NodeList<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let mut needspace = false;
+    ctx.buf.push('(');
+    if let Some(refname) = wc.refname {
+        ctx.buf.push_str(&quote_identifier(refname));
+        needspace = true;
+    }
+    if !wc.partitionClause.is_nil() && wc.refname.is_none() {
+        if needspace {
+            ctx.buf.push(' ');
+        }
+        ctx.buf.push_str("PARTITION BY ");
+        let mut sep = "";
+        for c in wc.partitionClause.iter() {
+            let grp = c.as_sort_group_clause().expect("partitionClause entry");
+            ctx.buf.push_str(sep);
+            get_rule_sortgroupclause(grp.tleSortGroupRef, target_list, false, ctx)?;
+            sep = ", ";
+        }
+        needspace = true;
+    }
+    if !wc.orderClause.is_nil() && !wc.copiedOrder {
+        if needspace {
+            ctx.buf.push(' ');
+        }
+        ctx.buf.push_str("ORDER BY ");
+        get_rule_orderby(&wc.orderClause, target_list, false, ctx)?;
+        needspace = true;
+    }
+    if wc.frameOptions & FRAMEOPTION_NONDEFAULT != 0 {
+        if needspace {
+            ctx.buf.push(' ');
+        }
+        get_window_frame_options(wc.frameOptions, wc.startOffset, wc.endOffset, ctx)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_window_frame_options<'mcx>(
+    frame_options: i32,
+    start_offset: Option<Node<'mcx>>,
+    end_offset: Option<Node<'mcx>>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    if frame_options & FRAMEOPTION_NONDEFAULT == 0 {
+        return Ok(());
+    }
+    if frame_options & FRAMEOPTION_RANGE != 0 {
+        ctx.buf.push_str("RANGE ");
+    } else if frame_options & FRAMEOPTION_ROWS != 0 {
+        ctx.buf.push_str("ROWS ");
+    } else if frame_options & FRAMEOPTION_GROUPS != 0 {
+        ctx.buf.push_str("GROUPS ");
+    } else {
+        debug_assert!(false);
+    }
+    if frame_options & FRAMEOPTION_BETWEEN != 0 {
+        ctx.buf.push_str("BETWEEN ");
+    }
+    if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+        ctx.buf.push_str("UNBOUNDED PRECEDING ");
+    } else if frame_options & FRAMEOPTION_START_CURRENT_ROW != 0 {
+        ctx.buf.push_str("CURRENT ROW ");
+    } else if frame_options & FRAMEOPTION_START_OFFSET != 0 {
+        get_rule_expr(start_offset.expect("frame start offset"), ctx, false)?;
+        if frame_options & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
+            ctx.buf.push_str(" PRECEDING ");
+        } else if frame_options & FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
+            ctx.buf.push_str(" FOLLOWING ");
+        } else {
+            debug_assert!(false);
+        }
+    } else {
+        debug_assert!(false);
+    }
+    if frame_options & FRAMEOPTION_BETWEEN != 0 {
+        ctx.buf.push_str("AND ");
+        if frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+            ctx.buf.push_str("UNBOUNDED FOLLOWING ");
+        } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
+            ctx.buf.push_str("CURRENT ROW ");
+        } else if frame_options & FRAMEOPTION_END_OFFSET != 0 {
+            get_rule_expr(end_offset.expect("frame end offset"), ctx, false)?;
+            if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+                ctx.buf.push_str(" PRECEDING ");
+            } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+                ctx.buf.push_str(" FOLLOWING ");
+            } else {
+                debug_assert!(false);
+            }
+        } else {
+            debug_assert!(false);
+        }
+    }
+    if frame_options & FRAMEOPTION_EXCLUDE_CURRENT_ROW != 0 {
+        ctx.buf.push_str("EXCLUDE CURRENT ROW ");
+    } else if frame_options & FRAMEOPTION_EXCLUDE_GROUP != 0 {
+        ctx.buf.push_str("EXCLUDE GROUP ");
+    } else if frame_options & FRAMEOPTION_EXCLUDE_TIES != 0 {
+        ctx.buf.push_str("EXCLUDE TIES ");
+    }
+    debug_assert!(ctx.buf.ends_with(' '));
+    ctx.buf.pop();
     Ok(())
 }
 
@@ -1101,8 +1647,9 @@ fn get_from_clause_item<'mcx>(
                 .as_range_tbl_entry()
                 .expect("rtable entry");
             if rte.lateral {
-                gap("get_from_clause_item", "LATERAL deparse");
+                ctx.buf.push_str("LATERAL ");
             }
+            let mut rtfunc1: Option<&RangeTblFunction<'_>> = None;
             match rte.rtekind {
                 RTEKind::RTE_RELATION => {
                     if !rte.inh {
@@ -1117,13 +1664,100 @@ fn get_from_clause_item<'mcx>(
                     get_query_def(sub, ctx, None, true)?;
                     ctx.buf.push(')');
                 }
+                RTEKind::RTE_FUNCTION => {
+                    let first = rte
+                        .functions
+                        .nth(0)
+                        .as_range_tbl_function()
+                        .expect("functions entry");
+                    if rte.functions.len() == 1
+                        && (first.funccolnames.is_nil() || !rte.funcordinality)
+                    {
+                        rtfunc1 = Some(first);
+                        get_rule_expr_funccall(
+                            first.funcexpr.expect("RangeTblFunction has a funcexpr"),
+                            ctx,
+                            true,
+                        )?;
+                    } else {
+                        let all_unnest = rte.functions.iter().all(|f| {
+                            let rtfunc = f.as_range_tbl_function().expect("functions entry");
+                            rtfunc.funccolnames.is_nil()
+                                && rtfunc
+                                    .funcexpr
+                                    .and_then(|e| e.as_func_expr())
+                                    .is_some_and(|fe| fe.funcid == F_UNNEST_ANYARRAY)
+                        });
+                        if all_unnest {
+                            ctx.buf.push_str("UNNEST(");
+                            let mut first_arg = true;
+                            for f in rte.functions.iter() {
+                                let fe = f
+                                    .as_range_tbl_function()
+                                    .unwrap()
+                                    .funcexpr
+                                    .unwrap()
+                                    .as_func_expr()
+                                    .unwrap();
+                                for arg in fe.args.iter() {
+                                    if !first_arg {
+                                        ctx.buf.push_str(", ");
+                                    }
+                                    first_arg = false;
+                                    get_rule_expr(arg, ctx, true)?;
+                                }
+                            }
+                            ctx.buf.push(')');
+                        } else {
+                            ctx.buf.push_str("ROWS FROM(");
+                            let mut funcno = 0;
+                            for f in rte.functions.iter() {
+                                let rtfunc =
+                                    f.as_range_tbl_function().expect("functions entry");
+                                if funcno > 0 {
+                                    ctx.buf.push_str(", ");
+                                }
+                                get_rule_expr_funccall(
+                                    rtfunc.funcexpr.expect("RangeTblFunction has a funcexpr"),
+                                    ctx,
+                                    true,
+                                )?;
+                                if !rtfunc.funccolnames.is_nil() {
+                                    ctx.buf.push_str(" AS ");
+                                    get_from_clause_coldeflist(rtfunc, ctx)?;
+                                }
+                                funcno += 1;
+                            }
+                            ctx.buf.push(')');
+                        }
+                    }
+                    if rte.funcordinality {
+                        ctx.buf.push_str(" WITH ORDINALITY");
+                    }
+                }
+                RTEKind::RTE_VALUES => {
+                    ctx.buf.push('(');
+                    get_values_def(&rte.values_lists, ctx)?;
+                    ctx.buf.push(')');
+                }
+                RTEKind::RTE_CTE => {
+                    ctx.buf
+                        .push_str(&quote_identifier(rte.ctename.expect("CTE RTE has a name")));
+                }
                 other => gap("get_from_clause_item", &format!("{other:?} RTE deparse")),
             }
-            if rte.tablesample.is_some() {
+            get_rte_alias(rte, varno, false, ctx)?;
+            match rtfunc1 {
+                Some(rtfunc) if !rtfunc.funccolnames.is_nil() => {
+                    let colinfo_names =
+                        ctx.namespaces[0].rtable_columns[varno - 1].colnames.clone();
+                    get_from_clause_coldeflist_named(rtfunc, &colinfo_names, ctx)?;
+                }
+                _ => get_column_alias_list(varno, ctx),
+            }
+            if rte.rtekind == RTEKind::RTE_RELATION && rte.tablesample.is_some() {
                 gap("get_from_clause_item", "TABLESAMPLE deparse");
             }
-            get_rte_alias(rte, varno, false, ctx)?;
-            get_column_alias_list(varno, ctx);
             Ok(())
         }
         NodeTag::T_JoinExpr => {
@@ -1252,6 +1886,8 @@ fn get_rte_alias(
             .as_str()
             .to_owned();
         refname.as_deref() != Some(relname.as_str())
+    } else if rte.rtekind == RTEKind::RTE_CTE {
+        refname.as_deref() != rte.ctename
     } else {
         matches!(
             rte.rtekind,
@@ -1264,6 +1900,98 @@ fn get_rte_alias(
         ctx.buf.push_str(&quote_identifier(&name));
     }
     Ok(())
+}
+
+const F_UNNEST_ANYARRAY: types_core::Oid = 2331;
+
+fn looks_like_function(node: Node<'_>) -> bool {
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => matches!(
+            node.as_func_expr().unwrap().funcformat,
+            CoercionForm::COERCE_EXPLICIT_CALL | CoercionForm::COERCE_SQL_SYNTAX
+        ),
+        NodeTag::T_NullIfExpr
+        | NodeTag::T_CoalesceExpr
+        | NodeTag::T_MinMaxExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_XmlExpr
+        | NodeTag::T_JsonExpr => true,
+        _ => false,
+    }
+}
+
+fn get_rule_expr_funccall<'mcx>(
+    node: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    if looks_like_function(node) {
+        get_rule_expr(node, ctx, showimplicit)
+    } else {
+        ctx.buf.push_str("CAST(");
+        get_rule_expr(node, ctx, false)?;
+        ctx.buf.push_str(&format!(
+            " AS {})",
+            format_type::format_type_with_typemod(
+                parse_expr::expr_type(node),
+                parse_expr::expr_typmod(node)
+            )?
+        ));
+        Ok(())
+    }
+}
+
+fn coldeflist_body<'mcx>(
+    rtfunc: &RangeTblFunction<'mcx>,
+    names: &[String],
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    ctx.buf.push('(');
+    let typmods: Vec<i32> = rtfunc.funccoltypmods.iter().collect();
+    let collations: Vec<types_core::Oid> = rtfunc.funccolcollations.iter().collect();
+    for (i, atttypid) in rtfunc.funccoltypes.iter().enumerate() {
+        if i > 0 {
+            ctx.buf.push_str(", ");
+        }
+        ctx.buf.push_str(&format!(
+            "{} {}",
+            quote_identifier(&names[i]),
+            format_type::format_type_with_typemod(atttypid, typmods[i])?
+        ));
+        let attcollation = collations[i];
+        if attcollation != types_core::InvalidOid
+            && attcollation != lsyscache::get_typcollation(atttypid)?
+        {
+            let collname = crate::generate_collation_name(ctx.mcx, attcollation)?;
+            ctx.buf.push_str(&format!(" COLLATE {collname}"));
+        }
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_from_clause_coldeflist<'mcx>(
+    rtfunc: &RangeTblFunction<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let names: Vec<String> = rtfunc
+        .funccolnames
+        .iter()
+        .map(|n| n.as_string().expect("funccolname").sval.to_owned())
+        .collect();
+    coldeflist_body(rtfunc, &names, ctx)
+}
+
+fn get_from_clause_coldeflist_named<'mcx>(
+    rtfunc: &RangeTblFunction<'mcx>,
+    colinfo_names: &[Option<String>],
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let names: Vec<String> = colinfo_names
+        .iter()
+        .map(|n| n.clone().expect("no dropped columns in a coldeflist"))
+        .collect();
+    coldeflist_body(rtfunc, &names, ctx)
 }
 
 fn get_column_alias_list(varno: usize, ctx: &mut DeparseContext<'_>) {
