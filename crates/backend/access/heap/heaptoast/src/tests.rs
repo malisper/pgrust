@@ -78,12 +78,6 @@ fn install_seams() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         crate::init_seams();
-        guc_tables::vars::XLOGbuffers
-            .install(guc_tables::GucVarAccessors { get: || 64, set: |_| {} });
-        transam_xlog::XLOGShmemInit();
-        transam_xlog::ctl::XLogCtl()
-            .SharedRecoveryState
-            .store(transam_xlog::RECOVERY_STATE_DONE, std::sync::atomic::Ordering::Relaxed);
 
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {
@@ -195,7 +189,6 @@ fn install_seams() {
         freespace_seams::record_page_with_free_space::set(|_, _, _| Ok(()));
         xloginsert_seams::xlog_insert_record::set(|_, _, _, _, _| Ok(0x1000));
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
-        transam_xlog_seams::xlog_logical_info_active::set(|| false);
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_| false);
         catalog_seams::get_new_oid_with_index::set(|_mcx, _rel, _idx, _col| {
