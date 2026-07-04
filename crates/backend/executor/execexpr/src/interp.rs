@@ -1211,6 +1211,70 @@ fn run_program<'mcx>(
                 }
                 write_out(*out, r.value, r.isnull);
             }
+            Step::OuterVarNotDistinct { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the call's live
+                // 2-arg fcinfo image (fuse_program invariant).
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull && other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else {
+                    let (value, isnull) = invoke2(call)?;
+                    write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
+                }
+            }
+            Step::NotDistinctQual { call, jumpdone, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let r = if a0.isnull && a1.isnull {
+                    NullableDatum { value: Datum::from_bool(false), isnull: false }
+                } else if a0.isnull || a1.isnull {
+                    NullableDatum { value: Datum::from_bool(true), isnull: false }
+                } else {
+                    let (value, isnull) = invoke2(call)?;
+                    NullableDatum { value: Datum::from_bool(!value.as_bool()), isnull }
+                };
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarAggTransByValIndirect { attnum, argno, call, base: pgbase, transno, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: argno is an arg of the call's live 2-arg fcinfo
+                // image; pgbase/transno as AggTransByValIndirect.
+                unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    let pg = pgbase.read().as_ptr().add(*transno as usize);
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke2(call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Step::AssignScanVar2 { attnum1, resultnum1, attnum2, resultnum2 } => {
+                let nd1 = read_var(need_slot(&mut scan), *attnum1);
+                let nd2 = read_var(need_slot(&mut scan), *attnum2);
+                let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+                assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
+                assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
+            }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
                 let (a0, a1) = unsafe {
@@ -1741,7 +1805,11 @@ fn check_still_valid_slow<'mcx>(
             Step::ScanVar { attnum, vartype, .. }
             | Step::ScanVarFuncStrict2 { attnum, vartype, .. } => (SlotSrc::Scan, attnum, vartype),
             Step::InnerVar { attnum, vartype, .. } => (SlotSrc::Inner, attnum, vartype),
-            Step::OuterVar { attnum, vartype, .. } => (SlotSrc::Outer, attnum, vartype),
+            Step::OuterVar { attnum, vartype, .. }
+            | Step::OuterVarNotDistinct { attnum, vartype, .. }
+            | Step::OuterVarAggTransByValIndirect { attnum, vartype, .. } => {
+                (SlotSrc::Outer, attnum, vartype)
+            }
             _ => continue,
         };
         let slot = slots.get(src);

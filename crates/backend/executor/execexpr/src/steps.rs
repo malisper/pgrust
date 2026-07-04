@@ -226,6 +226,17 @@ pub enum Step {
     ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
     FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
     FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarNotDistinct { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
+    NotDistinctQual { call: Call2, jumpdone: u32, out: OutRef },
+    OuterVarAggTransByValIndirect {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: Call2,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.

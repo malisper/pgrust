@@ -2507,6 +2507,42 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
         (Step::FuncExprStrict2 { call, out }, Step::Qual { jumpdone }) => {
             Some(Step::FuncStrict2Qual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
         }
+        (Step::OuterVar { attnum, vartype, out }, Step::NotDistinct { call, out: fout }) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::OuterVarNotDistinct {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: (*call).into(),
+                out: *fout,
+            })
+        }
+        (Step::NotDistinct { call, out }, Step::Qual { jumpdone }) if call.nargs == 2 => {
+            Some(Step::NotDistinctQual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
+        }
+        (
+            Step::OuterVar { attnum, vartype, out },
+            Step::AggTransByValIndirect { call, base, transno },
+        ) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::OuterVarAggTransByValIndirect {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: (*call).into(),
+                base: *base,
+                transno: *transno,
+            })
+        }
+        (
+            Step::AssignScanVar { attnum: attnum1, resultnum: resultnum1 },
+            Step::AssignScanVar { attnum: attnum2, resultnum: resultnum2 },
+        ) => Some(Step::AssignScanVar2 {
+            attnum1: *attnum1,
+            resultnum1: *resultnum1,
+            attnum2: *attnum2,
+            resultnum2: *resultnum2,
+        }),
         _ => None,
     }
 }
