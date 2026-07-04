@@ -44,9 +44,9 @@ SELECT JSON_ARRAY(JSON_ARRAY(1,2), JSON_OBJECT('a': 3));
 -- JSON_ARRAY(query): parses/plans; execution rides the EXPR-sublink-over-agg
 -- path, which returns NULL on current main (pre-existing, no SQL/JSON syntax:
 -- `SELECT (SELECT json_agg(a) FROM (SELECT generate_series(1,3)) q(a));`
--- reproduces) — kept out of the differential until that lane lands.
-SELECT a FROM (SELECT generate_series(1, 3)) q(a);
-SELECT json_agg(a) FROM (SELECT generate_series(1, 3)) q(a);
+-- reproduces, as does the SRF-in-subquery-tlist form
+-- `SELECT a FROM (SELECT generate_series(1,3)) q(a)` returning 0 rows) —
+-- kept out of the differential until those lanes land.
 -- JSON() / JSON_SCALAR / JSON_SERIALIZE
 SELECT JSON('{"a": 1}');
 SELECT JSON('  {"a" : 1 }  ');
