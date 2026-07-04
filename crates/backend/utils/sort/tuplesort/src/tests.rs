@@ -1015,3 +1015,122 @@ fn abbrev_heap_text_sort_with_tiebreak_key() {
     assert_eq!(got, oracle);
     ts.end();
 }
+
+fn heap_sort_rows(
+    mcx: Mcx<'static>,
+    ncols: i32,
+    keys: &[SortSupport],
+    rows: &[Vec<Option<i32>>],
+) -> Vec<Vec<Option<i32>>> {
+    let desc = int4_desc(mcx, ncols);
+    let mut in_slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+    let mut out_slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+    let mut ts = Tuplesort::begin_heap_with_keys(desc, keys, 1024, TUPLESORT_NONE);
+    for r in rows {
+        store_row(&mut in_slot, mcx, r);
+        ts.puttupleslot(&mut in_slot, mcx).unwrap();
+    }
+    ts.performsort().unwrap();
+    let mut got = Vec::new();
+    while ts.gettupleslot(true, false, &mut out_slot, mcx).unwrap() {
+        let mut row = Vec::new();
+        for a in 1..=ncols {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(&mut out_slot, a, &mut isnull);
+            row.push(if isnull { None } else { Some(v.as_i32()) });
+        }
+        got.push(row);
+    }
+    ts.end();
+    got
+}
+
+// Unique full key set => unique sorted permutation => exact oracle equality.
+#[test]
+fn mksort_two_key_unique() {
+    let mcx = leaked_mcx();
+    let keys = [int32_key(1, false, false), int32_key(2, false, false)];
+    let mut seed = 11u64;
+    let mut order: Vec<i32> = (0..1000).collect();
+    for i in (1..order.len()).rev() {
+        order.swap(i, (lcg(&mut seed) % (i as u64 + 1)) as usize);
+    }
+    let rows: Vec<Vec<Option<i32>>> =
+        order.iter().map(|&i| vec![Some(i % 25), Some(i)]).collect();
+    let got = heap_sort_rows(mcx, 2, &keys, &rows);
+    let mut oracle = rows.clone();
+    oracle.sort();
+    assert_eq!(got, oracle);
+}
+
+// Six keys, duplicated prefixes, unique last key: per-key segment recursion.
+#[test]
+fn mksort_six_key_unique() {
+    let mcx = leaked_mcx();
+    let keys: Vec<SortSupport> = (1..=6).map(|a| int32_key(a, false, false)).collect();
+    let mut seed = 17u64;
+    let mut order: Vec<i32> = (0..2000).collect();
+    for i in (1..order.len()).rev() {
+        order.swap(i, (lcg(&mut seed) % (i as u64 + 1)) as usize);
+    }
+    let rows: Vec<Vec<Option<i32>>> = order
+        .iter()
+        .map(|&i| {
+            vec![Some(i % 3), Some(i % 4), Some(i % 5), Some(i % 7), Some(i % 11), Some(i)]
+        })
+        .collect();
+    let got = heap_sort_rows(mcx, 6, &keys, &rows);
+    let mut oracle = rows.clone();
+    oracle.sort();
+    assert_eq!(got, oracle);
+}
+
+// Full-key duplicates (col 3 is payload, not a key): the tie fallback must
+// reproduce pg_qsort's tie permutation bit-for-bit.
+#[test]
+fn mksort_ties_match_pgqsort_order() {
+    let mcx = leaked_mcx();
+    let keys = [int32_key(1, false, false), int32_key(2, true, true)];
+    let mut seed = 23u64;
+    let rows: Vec<Vec<Option<i32>>> = (0..700)
+        .map(|i| {
+            let k1 = (lcg(&mut seed) % 5) as i32;
+            let k2 = lcg(&mut seed) % 4;
+            vec![Some(k1), if k2 == 0 { None } else { Some(k2 as i32) }, Some(i)]
+        })
+        .collect();
+    let got_mksort = heap_sort_rows(mcx, 3, &keys, &rows);
+    crate::testhooks::MKSORT_DISABLE.with(|c| c.set(true));
+    let got_pgqsort = heap_sort_rows(mcx, 3, &keys, &rows);
+    crate::testhooks::MKSORT_DISABLE.with(|c| c.set(false));
+    assert_eq!(got_mksort, got_pgqsort);
+}
+
+// Nulls in the leading key: notnull spec must not engage; NULLS LAST holds.
+#[test]
+fn mksort_null_leading_key() {
+    let mcx = leaked_mcx();
+    let keys = [int32_key(1, false, false), int32_key(2, false, false)];
+    let mut seed = 31u64;
+    let rows: Vec<Vec<Option<i32>>> = (0..500)
+        .map(|i| {
+            let k1 = lcg(&mut seed) % 10;
+            vec![if k1 == 0 { None } else { Some(k1 as i32) }, Some(i)]
+        })
+        .collect();
+    let got = heap_sort_rows(mcx, 2, &keys, &rows);
+    let mut oracle = rows.clone();
+    oracle.sort_by(|x, y| {
+        use std::cmp::Ordering;
+        let c = match (x[0], y[0]) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(a), Some(b)) => a.cmp(&b),
+        };
+        c.then(x[1].cmp(&y[1]))
+    });
+    assert_eq!(got, oracle);
+}
