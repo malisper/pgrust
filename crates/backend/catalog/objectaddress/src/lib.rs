@@ -1421,7 +1421,7 @@ fn permission_denied(attr_detail: String) -> Box<PgError> {
 // check_object_ownership (objectaddress.c); objtypes without an arm below
 // are superuser-only until ported.
 pub fn check_object_ownership<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     roleid: Oid,
     objtype: ObjectType,
     address: ObjectAddress,
