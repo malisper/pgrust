@@ -674,6 +674,7 @@ pub(crate) fn get_query_def<'mcx>(
         CmdType::CMD_UPDATE => get_update_query_def(query, ctx),
         CmdType::CMD_INSERT => get_insert_query_def(query, ctx),
         CmdType::CMD_DELETE => get_delete_query_def(query, ctx),
+        CmdType::CMD_MERGE => get_merge_query_def(query, ctx),
         CmdType::CMD_NOTHING => {
             ctx.buf.push_str("NOTHING");
             Ok(())
@@ -737,8 +738,58 @@ fn get_with_clause<'mcx>(query: &'mcx Query<'mcx>, ctx: &mut DeparseContext<'mcx
             append_context_keyword(ctx, "", 0, 0, 0);
         }
         ctx.buf.push(')');
-        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
-            gap("get_with_clause", "SEARCH/CYCLE clause deparse");
+        if let Some(sc) = cte.search_clause.and_then(|n| n.as_cte_search_clause()) {
+            ctx.buf.push_str(&format!(
+                " SEARCH {} FIRST BY ",
+                if sc.search_breadth_first { "BREADTH" } else { "DEPTH" }
+            ));
+            let mut first = true;
+            for col in sc.search_col_list.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                ctx.buf.push_str(&quote_identifier(col.as_string().expect("colname").sval));
+            }
+            ctx.buf.push_str(&format!(
+                " SET {}",
+                quote_identifier(sc.search_seq_column.expect("SEARCH SET column"))
+            ));
+        }
+        if let Some(cc) = cte.cycle_clause.and_then(|n| n.as_cte_cycle_clause()) {
+            ctx.buf.push_str(" CYCLE ");
+            let mut first = true;
+            for col in cc.cycle_col_list.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                ctx.buf.push_str(&quote_identifier(col.as_string().expect("colname").sval));
+            }
+            ctx.buf.push_str(&format!(
+                " SET {}",
+                quote_identifier(cc.cycle_mark_column.expect("CYCLE SET column"))
+            ));
+            let mark_value = cc.cycle_mark_value.expect("cycle_mark_value");
+            let mark_default = cc.cycle_mark_default.expect("cycle_mark_default");
+            let cmv = mark_value.as_const().expect("cycle_mark_value is a Const");
+            let cmd = mark_default.as_const().expect("cycle_mark_default is a Const");
+            let default_marks = cmv.consttype == types_core::BOOLOID
+                && !cmv.constisnull
+                && cmv.constvalue.as_bool()
+                && cmd.consttype == types_core::BOOLOID
+                && !cmd.constisnull
+                && !cmd.constvalue.as_bool();
+            if !default_marks {
+                ctx.buf.push_str(" TO ");
+                get_rule_expr(mark_value, ctx, false)?;
+                ctx.buf.push_str(" DEFAULT ");
+                get_rule_expr(mark_default, ctx, false)?;
+            }
+            ctx.buf.push_str(&format!(
+                " USING {}",
+                quote_identifier(cc.cycle_path_column.expect("CYCLE USING column"))
+            ));
         }
         sep = ", ";
     }
@@ -1070,6 +1121,117 @@ fn get_delete_query_def<'mcx>(
     if let Some(quals) = query.jointree.and_then(|jt| jt.quals) {
         append_context_keyword(ctx, " WHERE ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
         get_rule_expr(quals, ctx, false)?;
+    }
+    get_returning_clause(query, ctx)
+}
+
+fn get_merge_query_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::primnodes::MergeMatchKind;
+
+    get_with_clause(query, ctx)?;
+    let rte = result_relation_rte(query);
+    if ctx.pretty_indent() {
+        ctx.buf.push(' ');
+        ctx.indent_level += PRETTYINDENT_STD;
+    }
+    let relname = generate_relation_name(ctx.mcx, rte.relid)?;
+    ctx.buf.push_str(&format!(
+        "MERGE INTO {}{relname}",
+        if !rte.inh { "ONLY " } else { "" }
+    ));
+    get_rte_alias(rte, query.resultRelation as usize, false, ctx)?;
+
+    get_from_clause(query, " USING ", ctx)?;
+    append_context_keyword(ctx, " ON ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2);
+    get_rule_expr(query.mergeJoinCondition.expect("MERGE has a join condition"), ctx, false)?;
+
+    let have_not_matched_by_source = query.mergeActionList.iter().any(|n| {
+        n.as_merge_action().expect("mergeActionList entry").matchKind
+            == MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE
+    });
+
+    for action_node in query.mergeActionList.iter() {
+        let action = action_node.as_merge_action().expect("mergeActionList entry");
+        append_context_keyword(ctx, " WHEN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2);
+        ctx.buf.push_str(match action.matchKind {
+            MergeMatchKind::MERGE_WHEN_MATCHED => "MATCHED",
+            MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE => "NOT MATCHED BY SOURCE",
+            MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET => {
+                if have_not_matched_by_source {
+                    "NOT MATCHED BY TARGET"
+                } else {
+                    "NOT MATCHED"
+                }
+            }
+        });
+        if let Some(qual) = action.qual {
+            append_context_keyword(ctx, " AND ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 3);
+            get_rule_expr(qual, ctx, false)?;
+        }
+        append_context_keyword(ctx, " THEN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 3);
+
+        match action.commandType {
+            CmdType::CMD_INSERT => {
+                ctx.buf.push_str("INSERT");
+                let mut strippedexprs: Vec<Node<'mcx>> = Vec::new();
+                let mut sep = "";
+                if !action.targetList.is_nil() {
+                    ctx.buf.push_str(" (");
+                }
+                for tle_node in action.targetList.iter() {
+                    let tle = tle_node.as_target_entry().expect("targetList entry");
+                    debug_assert!(!tle.resjunk);
+                    ctx.buf.push_str(sep);
+                    sep = ", ";
+                    let attname = lsyscache::get_attname(ctx.mcx, rte.relid, tle.resno, false)?
+                        .expect("get_attname missing_ok=false");
+                    ctx.buf.push_str(&quote_identifier(attname.as_str()));
+                    strippedexprs.push(process_indirection(tle.expr, ctx)?);
+                }
+                if !action.targetList.is_nil() {
+                    ctx.buf.push(')');
+                }
+                match action.r#override {
+                    OverridingKind::OVERRIDING_SYSTEM_VALUE => {
+                        ctx.buf.push_str(" OVERRIDING SYSTEM VALUE")
+                    }
+                    OverridingKind::OVERRIDING_USER_VALUE => {
+                        ctx.buf.push_str(" OVERRIDING USER VALUE")
+                    }
+                    OverridingKind::OVERRIDING_NOT_SET => {}
+                }
+                if !strippedexprs.is_empty() {
+                    append_context_keyword(
+                        ctx,
+                        " VALUES (",
+                        -PRETTYINDENT_STD,
+                        PRETTYINDENT_STD,
+                        4,
+                    );
+                    let mut first = true;
+                    for e in &strippedexprs {
+                        if !first {
+                            ctx.buf.push_str(", ");
+                        }
+                        first = false;
+                        get_rule_expr_toplevel(*e, ctx, false)?;
+                    }
+                    ctx.buf.push(')');
+                } else {
+                    ctx.buf.push_str(" DEFAULT VALUES");
+                }
+            }
+            CmdType::CMD_UPDATE => {
+                ctx.buf.push_str("UPDATE SET ");
+                get_update_query_targetlist_def(query, &action.targetList, rte, ctx)?;
+            }
+            CmdType::CMD_DELETE => ctx.buf.push_str("DELETE"),
+            CmdType::CMD_NOTHING => ctx.buf.push_str("DO NOTHING"),
+            other => gap("get_merge_query_def", &format!("{other:?} action")),
+        }
     }
     get_returning_clause(query, ctx)
 }

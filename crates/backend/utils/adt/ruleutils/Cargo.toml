@@ -28,6 +28,7 @@ rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
 guc = { path = "../../misc/guc" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 types_scan = { path = "../../../../_support/types/types_scan" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
 typcache = { path = "../../cache/typcache" }
 vars = { path = "../../../optimizer/util/vars" }
 varlena = { path = "../varlena" }
