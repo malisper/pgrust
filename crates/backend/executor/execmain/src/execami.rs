@@ -25,6 +25,8 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
         // loud-panics on any other relam before a plan can carry it).
         NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan => true,
         NodeTag::T_SeqScan
+        | NodeTag::T_TidScan
+        | NodeTag::T_TidRangeScan
         | NodeTag::T_FunctionScan
         | NodeTag::T_ValuesScan
         | NodeTag::T_CteScan
@@ -66,7 +68,22 @@ pub fn exec_re_scan<'mcx>(
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate),
         PlanStateNode::CteScan(cs) => ::nodectescan::exec_rescan_cte_scan(cs, estate),
+        PlanStateNode::WorkTableScan(wts) => {
+            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate);
+            Ok(())
+        }
+        // The inner term takes C's chgParam={wtParam} deferred rescan, eagerly.
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            ::noderecursiveunion::exec_rescan_recursive_union(&mut ru.state, estate);
+            exec_re_scan(&mut ru.outer, estate)?;
+            exec_re_scan_with_chg(&mut ru.inner, ru.state.inner_plan, estate, &ru.state.wt_chg)
+        }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_rescan_tid_scan(ts, estate),
+        PlanStateNode::TidRangeScan(ts) => {
+            ::nodetidrangescan::exec_rescan_tid_range_scan(ts, estate)
+        }
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
         }
@@ -291,7 +308,29 @@ pub fn exec_re_scan_with_chg<'mcx>(
         PlanStateNode::CteScan(_) => {
             panic!("ExecReScanCteScan (nodeCtescan.c): changed-param rescan not ported")
         }
+        PlanStateNode::WorkTableScan(wts) => {
+            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)
+        }
+        // Inner gets chg + wtParam (C: bms_add_member onto the deferred set).
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            ::noderecursiveunion::exec_rescan_recursive_union(&mut ru.state, estate);
+            exec_re_scan_with_chg(
+                &mut ru.outer,
+                base.lefttree.expect("RecursiveUnion outer plan"),
+                estate,
+                chg,
+            )?;
+            let mcx = estate.es_query_cxt;
+            let mut inner_chg = chg.clone_in(mcx)?;
+            inner_chg.add_member(mcx, ru.state.plan.wtParam)?;
+            exec_re_scan_with_chg(&mut ru.inner, ru.state.inner_plan, estate, &inner_chg)?;
+        }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate)?,
+        PlanStateNode::TidScan(ts) => ::nodetidscan::exec_rescan_tid_scan(ts, estate)?,
+        PlanStateNode::TidRangeScan(ts) => {
+            ::nodetidrangescan::exec_rescan_tid_range_scan(ts, estate)?
+        }
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)?
         }

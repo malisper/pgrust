@@ -49,6 +49,22 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub rtable_columns: Vec<DeparseColumns>,
     pub unique_using: bool,
     pub using_names: Vec<String>,
+    pub subplans: Option<&'mcx NodeList<'mcx>>,
+    pub plan: core::cell::RefCell<crate::plan::DpnsPlan<'mcx>>,
+}
+
+impl<'mcx> DeparseNamespace<'mcx> {
+    pub(crate) fn empty(rtable: Vec<&'mcx RangeTblEntry<'mcx>>) -> Self {
+        DeparseNamespace {
+            rtable,
+            rtable_names: Vec::new(),
+            rtable_columns: Vec::new(),
+            unique_using: false,
+            using_names: Vec::new(),
+            subplans: None,
+            plan: core::cell::RefCell::new(crate::plan::DpnsPlan::default()),
+        }
+    }
 }
 
 pub(crate) fn deparse_context_for<'mcx>(
@@ -68,22 +84,17 @@ pub(crate) fn deparse_context_for<'mcx>(
     rte.inFromCl = true;
     let rte_ref = rte.seal_ref();
 
-    let mut dpns = DeparseNamespace {
-        rtable: vec![rte_ref],
-        rtable_names: Vec::new(),
-        rtable_columns: Vec::new(),
-        unique_using: false,
-        using_names: Vec::new(),
-    };
-    set_rtable_names(mcx, &mut dpns, &[])?;
+    let mut dpns = DeparseNamespace::empty(vec![rte_ref]);
+    set_rtable_names(mcx, &mut dpns, &[], None)?;
     set_simple_column_names(mcx, &mut dpns)?;
     Ok(dpns)
 }
 
-fn set_rtable_names<'mcx>(
+pub(crate) fn set_rtable_names<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
     parents: &[Rc<DeparseNamespace<'mcx>>],
+    rels_used: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let mut entries: Vec<(String, u32)> = Vec::new();
     for p in parents {
@@ -93,8 +104,10 @@ fn set_rtable_names<'mcx>(
             }
         }
     }
-    for rte in &dpns.rtable {
-        let refname: Option<String> = if let Some(alias) = rte.alias {
+    for (i, rte) in dpns.rtable.iter().enumerate() {
+        let refname: Option<String> = if rels_used.is_some_and(|ru| !ru.is_member(i as i32 + 1)) {
+            None
+        } else if let Some(alias) = rte.alias {
             alias.aliasname.map(str::to_owned)
         } else if rte.rtekind == RTEKind::RTE_RELATION {
             lsyscache::get_rel_name(mcx, rte.relid)?.map(|s| s.as_str().to_owned())
@@ -147,14 +160,8 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         .iter()
         .map(|n| n.as_range_tbl_entry().expect("rtable entry"))
         .collect();
-    let mut dpns = DeparseNamespace {
-        rtable,
-        rtable_names: Vec::new(),
-        rtable_columns: Vec::new(),
-        unique_using: false,
-        using_names: Vec::new(),
-    };
-    set_rtable_names(mcx, &mut dpns, parents)?;
+    let mut dpns = DeparseNamespace::empty(rtable);
+    set_rtable_names(mcx, &mut dpns, parents, None)?;
     for _ in 0..dpns.rtable.len() {
         dpns.rtable_columns.push(DeparseColumns::default());
     }
@@ -175,7 +182,7 @@ pub(crate) fn set_deparse_for_query<'mcx>(
     Ok(dpns)
 }
 
-fn set_simple_column_names<'mcx>(
+pub(crate) fn set_simple_column_names<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
 ) -> PgResult<()> {
@@ -667,6 +674,7 @@ pub(crate) fn get_query_def<'mcx>(
         CmdType::CMD_UPDATE => get_update_query_def(query, ctx),
         CmdType::CMD_INSERT => get_insert_query_def(query, ctx),
         CmdType::CMD_DELETE => get_delete_query_def(query, ctx),
+        CmdType::CMD_MERGE => get_merge_query_def(query, ctx),
         CmdType::CMD_NOTHING => {
             ctx.buf.push_str("NOTHING");
             Ok(())
@@ -730,8 +738,58 @@ fn get_with_clause<'mcx>(query: &'mcx Query<'mcx>, ctx: &mut DeparseContext<'mcx
             append_context_keyword(ctx, "", 0, 0, 0);
         }
         ctx.buf.push(')');
-        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
-            gap("get_with_clause", "SEARCH/CYCLE clause deparse");
+        if let Some(sc) = cte.search_clause.and_then(|n| n.as_cte_search_clause()) {
+            ctx.buf.push_str(&format!(
+                " SEARCH {} FIRST BY ",
+                if sc.search_breadth_first { "BREADTH" } else { "DEPTH" }
+            ));
+            let mut first = true;
+            for col in sc.search_col_list.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                ctx.buf.push_str(&quote_identifier(col.as_string().expect("colname").sval));
+            }
+            ctx.buf.push_str(&format!(
+                " SET {}",
+                quote_identifier(sc.search_seq_column.expect("SEARCH SET column"))
+            ));
+        }
+        if let Some(cc) = cte.cycle_clause.and_then(|n| n.as_cte_cycle_clause()) {
+            ctx.buf.push_str(" CYCLE ");
+            let mut first = true;
+            for col in cc.cycle_col_list.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                ctx.buf.push_str(&quote_identifier(col.as_string().expect("colname").sval));
+            }
+            ctx.buf.push_str(&format!(
+                " SET {}",
+                quote_identifier(cc.cycle_mark_column.expect("CYCLE SET column"))
+            ));
+            let mark_value = cc.cycle_mark_value.expect("cycle_mark_value");
+            let mark_default = cc.cycle_mark_default.expect("cycle_mark_default");
+            let cmv = mark_value.as_const().expect("cycle_mark_value is a Const");
+            let cmd = mark_default.as_const().expect("cycle_mark_default is a Const");
+            let default_marks = cmv.consttype == types_core::BOOLOID
+                && !cmv.constisnull
+                && cmv.constvalue.as_bool()
+                && cmd.consttype == types_core::BOOLOID
+                && !cmd.constisnull
+                && !cmd.constvalue.as_bool();
+            if !default_marks {
+                ctx.buf.push_str(" TO ");
+                get_rule_expr(mark_value, ctx, false)?;
+                ctx.buf.push_str(" DEFAULT ");
+                get_rule_expr(mark_default, ctx, false)?;
+            }
+            ctx.buf.push_str(&format!(
+                " USING {}",
+                quote_identifier(cc.cycle_path_column.expect("CYCLE USING column"))
+            ));
         }
         sep = ", ";
     }
@@ -775,7 +833,7 @@ fn get_rule_expr_toplevel<'mcx>(
     showimplicit: bool,
 ) -> PgResult<()> {
     match node.as_var() {
-        Some(v) => get_variable(v, 0, true, ctx).map(|_| ()),
+        Some(v) => get_variable(node, v, 0, true, ctx).map(|_| ()),
         None => get_rule_expr(node, ctx, showimplicit),
     }
 }
@@ -1067,6 +1125,117 @@ fn get_delete_query_def<'mcx>(
     get_returning_clause(query, ctx)
 }
 
+fn get_merge_query_def<'mcx>(
+    query: &'mcx Query<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::primnodes::MergeMatchKind;
+
+    get_with_clause(query, ctx)?;
+    let rte = result_relation_rte(query);
+    if ctx.pretty_indent() {
+        ctx.buf.push(' ');
+        ctx.indent_level += PRETTYINDENT_STD;
+    }
+    let relname = generate_relation_name(ctx.mcx, rte.relid)?;
+    ctx.buf.push_str(&format!(
+        "MERGE INTO {}{relname}",
+        if !rte.inh { "ONLY " } else { "" }
+    ));
+    get_rte_alias(rte, query.resultRelation as usize, false, ctx)?;
+
+    get_from_clause(query, " USING ", ctx)?;
+    append_context_keyword(ctx, " ON ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2);
+    get_rule_expr(query.mergeJoinCondition.expect("MERGE has a join condition"), ctx, false)?;
+
+    let have_not_matched_by_source = query.mergeActionList.iter().any(|n| {
+        n.as_merge_action().expect("mergeActionList entry").matchKind
+            == MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE
+    });
+
+    for action_node in query.mergeActionList.iter() {
+        let action = action_node.as_merge_action().expect("mergeActionList entry");
+        append_context_keyword(ctx, " WHEN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2);
+        ctx.buf.push_str(match action.matchKind {
+            MergeMatchKind::MERGE_WHEN_MATCHED => "MATCHED",
+            MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE => "NOT MATCHED BY SOURCE",
+            MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET => {
+                if have_not_matched_by_source {
+                    "NOT MATCHED BY TARGET"
+                } else {
+                    "NOT MATCHED"
+                }
+            }
+        });
+        if let Some(qual) = action.qual {
+            append_context_keyword(ctx, " AND ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 3);
+            get_rule_expr(qual, ctx, false)?;
+        }
+        append_context_keyword(ctx, " THEN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 3);
+
+        match action.commandType {
+            CmdType::CMD_INSERT => {
+                ctx.buf.push_str("INSERT");
+                let mut strippedexprs: Vec<Node<'mcx>> = Vec::new();
+                let mut sep = "";
+                if !action.targetList.is_nil() {
+                    ctx.buf.push_str(" (");
+                }
+                for tle_node in action.targetList.iter() {
+                    let tle = tle_node.as_target_entry().expect("targetList entry");
+                    debug_assert!(!tle.resjunk);
+                    ctx.buf.push_str(sep);
+                    sep = ", ";
+                    let attname = lsyscache::get_attname(ctx.mcx, rte.relid, tle.resno, false)?
+                        .expect("get_attname missing_ok=false");
+                    ctx.buf.push_str(&quote_identifier(attname.as_str()));
+                    strippedexprs.push(process_indirection(tle.expr, ctx)?);
+                }
+                if !action.targetList.is_nil() {
+                    ctx.buf.push(')');
+                }
+                match action.r#override {
+                    OverridingKind::OVERRIDING_SYSTEM_VALUE => {
+                        ctx.buf.push_str(" OVERRIDING SYSTEM VALUE")
+                    }
+                    OverridingKind::OVERRIDING_USER_VALUE => {
+                        ctx.buf.push_str(" OVERRIDING USER VALUE")
+                    }
+                    OverridingKind::OVERRIDING_NOT_SET => {}
+                }
+                if !strippedexprs.is_empty() {
+                    append_context_keyword(
+                        ctx,
+                        " VALUES (",
+                        -PRETTYINDENT_STD,
+                        PRETTYINDENT_STD,
+                        4,
+                    );
+                    let mut first = true;
+                    for e in &strippedexprs {
+                        if !first {
+                            ctx.buf.push_str(", ");
+                        }
+                        first = false;
+                        get_rule_expr_toplevel(*e, ctx, false)?;
+                    }
+                    ctx.buf.push(')');
+                } else {
+                    ctx.buf.push_str(" DEFAULT VALUES");
+                }
+            }
+            CmdType::CMD_UPDATE => {
+                ctx.buf.push_str("UPDATE SET ");
+                get_update_query_targetlist_def(query, &action.targetList, rte, ctx)?;
+            }
+            CmdType::CMD_DELETE => ctx.buf.push_str("DELETE"),
+            CmdType::CMD_NOTHING => ctx.buf.push_str("DO NOTHING"),
+            other => gap("get_merge_query_def", &format!("{other:?} action")),
+        }
+    }
+    get_returning_clause(query, ctx)
+}
+
 // processIndirection (ruleutils.c): FieldStore/assignment-SubscriptingRef
 // stripping is loud; only the implicit-CoerceToDomain descent is live.
 fn process_indirection<'mcx>(
@@ -1354,7 +1523,7 @@ fn get_target_list<'mcx>(
 
         let saved_buf = std::mem::take(&mut ctx.buf);
         let attname: Option<String> = match tle.expr.as_var() {
-            Some(var) => get_variable(var, 0, true, ctx)?,
+            Some(var) => get_variable(tle.expr, var, 0, true, ctx)?,
             None => {
                 get_rule_expr(tle.expr, ctx, true)?;
                 if ctx.colnames_visible { None } else { Some("?column?".to_string()) }
@@ -1526,7 +1695,7 @@ fn get_rule_sortgroupclause<'mcx>(
     } else if let Some(v) = expr.as_var() {
         let save = ctx.var_in_order_by;
         ctx.var_in_order_by = true;
-        get_variable(v, 0, false, ctx)?;
+        get_variable(expr, v, 0, false, ctx)?;
         ctx.var_in_order_by = save;
     } else {
         let need_paren = ctx.pretty_paren()
@@ -1904,7 +2073,7 @@ fn get_rte_alias(
 
 const F_UNNEST_ANYARRAY: types_core::Oid = 2331;
 
-fn looks_like_function(node: Node<'_>) -> bool {
+pub(crate) fn looks_like_function(node: Node<'_>) -> bool {
     match node.node_tag() {
         NodeTag::T_FuncExpr => matches!(
             node.as_func_expr().unwrap().funcformat,

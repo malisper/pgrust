@@ -493,7 +493,7 @@ fn type_domain_and_array() {
 
 #[test]
 fn type_io() {
-    with_mcx(|_m| {
+    with_mcx(|m| {
         assert_eq!(getTypeInputInfo(INT4OID).unwrap(), (42, INT4OID));
         assert_eq!(getTypeInputInfo(INT4_ARRAY).unwrap(), (750, INT4OID));
         assert_eq!(getTypeOutputInfo(INT4OID).unwrap(), (43, false));
@@ -507,7 +507,7 @@ fn type_io() {
         assert_eq!(get_typmodout(1).unwrap(), InvalidOid);
         assert_eq!(get_typsubscript(INT4_ARRAY).unwrap(), (typ::F_ARRAY_SUBSCRIPT_HANDLER, INT4OID));
         assert!(getSubscriptingRoutines(INT4OID).unwrap().is_none());
-        assert!(get_typdefault(INT4OID).unwrap().is_none());
+        assert!(get_typdefault(m, INT4OID).unwrap().is_none());
         assert_eq!(get_typavgwidth(INT4OID, -1).unwrap(), 4);
         assert_eq!(get_typavgwidth(TEXTOID, -1).unwrap(), 32);
     });

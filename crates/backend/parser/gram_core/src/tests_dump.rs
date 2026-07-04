@@ -857,12 +857,14 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);
         list_field(out, "including", &c.including);
-        out.push_str(" :exclusions <>");
+        list_field(out, "exclusions", &c.exclusions);
         list_field(out, "options", &c.options);
         string_field(out, "indexname", c.indexname);
         string_field(out, "indexspace", c.indexspace);
         bool_field(out, "reset_default_tblspc", false);
-        out.push_str(" :access_method <> :where_clause <> :pktable ");
+        string_field(out, "access_method", c.access_method);
+        node_field(out, "where_clause", c.where_clause);
+        out.push_str(" :pktable ");
         match c.pktable {
             Some(rv) => range_var(out, rv),
             None => out.push_str("<>"),
@@ -1089,6 +1091,27 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
+        out.push_str("{ALTERDOMAINSTMT :subtype ");
+        out.push(a.subtype as char);
+        list_field(out, "typeName", &a.typeName);
+        string_field(out, "name", a.name);
+        node_field(out, "def", a.def);
+        int_field(out, "behavior", a.behavior as i32);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>() {
+        out.push_str("{ALTEROBJECTSCHEMASTMT");
+        int_field(out, "objectType", a.objectType as i32);
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", a.object);
+        string_field(out, "newschema", a.newschema);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
     } else if let Some(a) = n.as_alter_function_stmt() {
         out.push_str("{ALTERFUNCTIONSTMT");
         int_field(out, "objtype", a.objtype as i32);
@@ -1242,6 +1265,35 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "constructor", a.constructor);
         node_field(out, "arg", a.arg);
         bool_field(out, "absent_on_null", a.absent_on_null);
+    } else if let Some(d) = n.as_delete_stmt() {
+        out.push_str("{DELETESTMT");
+        node_field(out, "relation", d.relation);
+        list_field(out, "usingClause", &d.usingClause);
+        node_field(out, "whereClause", d.whereClause);
+        node_field(out, "returningClause", d.returningClause);
+        node_field(out, "withClause", d.withClause);
+        out.push('}');
+    } else if let Some(u) = n.as_update_stmt() {
+        out.push_str("{UPDATESTMT");
+        node_field(out, "relation", u.relation);
+        list_field(out, "targetList", &u.targetList);
+        node_field(out, "whereClause", u.whereClause);
+        list_field(out, "fromClause", &u.fromClause);
+        node_field(out, "returningClause", u.returningClause);
+        node_field(out, "withClause", u.withClause);
+        out.push('}');
+    } else if let Some(st) = n.as_set_to_default() {
+        out.push_str("{SETTODEFAULT");
+        int_field(out, "typeId", st.typeId as i32);
+        int_field(out, "typeMod", st.typeMod);
+        int_field(out, "collation", st.collation as i32);
+        int_field(out, "location", st.location);
+        out.push('}');
+    } else if let Some(c) = n.as_current_of_expr() {
+        out.push_str("{CURRENTOFEXPR");
+        int_field(out, "cvarno", c.cvarno as i32);
+        string_field(out, "cursor_name", c.cursor_name);
+        int_field(out, "cursor_param", c.cursor_param);
         out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());

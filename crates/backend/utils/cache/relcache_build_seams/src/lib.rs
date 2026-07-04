@@ -114,6 +114,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // RelationGetExclusionInfo's pg_constraint half (relcache.c): conexclop
+    // of the exclusion (or conperiod pk/unique) constraint owning index_relid.
+    pub fn scan_exclusion_ops<'mcx>(
+        mcx: Mcx<'mcx>,
+        conrelid: Oid,
+        index_relid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
     // RelationBuildTriggers (trigger.c); None when the rel has no pg_trigger
     // rows (relhastriggers can lag drops).
     pub fn build_trigger_desc(

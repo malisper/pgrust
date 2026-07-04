@@ -19,6 +19,8 @@ pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         crate::init_seams();
+        miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::pg_class_aclmask::set(|_, _, mask, _| Ok(mask));
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
@@ -956,7 +958,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     let mcx = cx.mcx();
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.0, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.0, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     // The bitmap heap path was generated but is dominated by the plain index
     // scan (as C); rebuild one over the surviving index path to plan it.
@@ -970,7 +972,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     };
     let baserel = run.root.path(ipath).base().parent;
     let bpath =
-        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, 1.0).unwrap();
+        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, &None, 1.0).unwrap();
 
     // Exact C arithmetic over the fixture (100 pages / 10000 tuples, one
     // matching row): tree cost = indextotalcost + 0.1*cpu_operator_cost*1;
@@ -1047,7 +1049,7 @@ fn competing_paths_pick_cheapest_total_and_startup() {
     // tuple_fraction > 0 sets consider_startup: the seqscan (startup 0) and
     // the index scan (cheaper total) both survive add_path's fuzzy compare.
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.1, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.1, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     let rel = run.root.rel(final_rel);
     assert_eq!(rel.pathlist.len(), 2);
@@ -1293,12 +1295,32 @@ fn with_cte_query(mcx: Mcx<'_>, cterefcount: i32) -> Query<'_> {
 }
 
 #[test]
-fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+fn single_ref_cte_inlines_to_plain_scan() {
     let cx = cx();
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
         with_cte_query(mcx, 1),
+        "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.subplans.len(), 0);
+    assert_eq!(stmt.paramExecTypes.len(), 0);
+    assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_SeqScan);
+}
+
+// Default-policy CTE referenced more than once stays materialized (C
+// SS_process_ctes refcount > 1 arm).
+#[test]
+fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let stmt = planner(
+        mcx,
+        with_cte_query(mcx, 2),
         "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -5066,5 +5088,66 @@ mod grouping_sets {
             agg.plan.lefttree.unwrap().node_tag(),
             NodeTag::T_SeqScan
         );
+    }
+}
+
+mod short_varlena {
+    use super::*;
+
+    fn short_text(payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() + 1 <= 0x7F);
+        let mut v = vec![(((payload.len() + 1) as u8) << 1) | 0x01];
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn long_text(payload: &[u8]) -> Vec<u8> {
+        let total = 4 + payload.len();
+        let mut v = ((total as u32) << 2).to_ne_bytes().to_vec();
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn payload_reads_short_and_4b_headers() {
+        let s = short_text(b"abc");
+        let l = long_text(b"abc");
+        let ds = Datum::from_usize(s.as_ptr() as usize);
+        let dl = Datum::from_usize(l.as_ptr() as usize);
+        assert_eq!(crate::selfuncs::varlena_datum_payload(ds), b"abc");
+        assert_eq!(crate::selfuncs::varlena_datum_payload(dl), b"abc");
+    }
+
+    #[test]
+    fn image_any_expands_short_to_4b() {
+        let ctx = MemoryContext::new("image-any-test");
+        let mcx = ctx.mcx();
+        let s = short_text(b"hello");
+        let l = long_text(b"hello");
+        let expanded =
+            crate::selfuncs::varlena_image_any(mcx, Datum::from_usize(s.as_ptr() as usize))
+                .unwrap();
+        assert_eq!(expanded, &l[..]);
+        let borrowed =
+            crate::selfuncs::varlena_image_any(mcx, Datum::from_usize(l.as_ptr() as usize))
+                .unwrap();
+        assert_eq!(borrowed.as_ptr(), l.as_ptr());
+    }
+
+    #[test]
+    fn endpoint_copy_reads_short_header_size() {
+        let ctx = MemoryContext::new("endpoint-copy-test");
+        let mcx = ctx.mcx();
+        let s = short_text(b"xy");
+        let out = crate::selfuncs::endpoint_datum_copy(
+            mcx,
+            Datum::from_usize(s.as_ptr() as usize),
+            false,
+            -1,
+        )
+        .unwrap();
+        let p = out.as_usize() as *const u8;
+        let copied = unsafe { core::slice::from_raw_parts(p, s.len()) };
+        assert_eq!(copied, &s[..]);
     }
 }

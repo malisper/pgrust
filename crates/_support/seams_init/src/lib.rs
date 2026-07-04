@@ -1,6 +1,7 @@
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
     detoast::init_seams();
+    ruleutils::init_seams();
     heaptoast::init_seams();
     printtup::init_seams();
     relation::init_seams();
@@ -54,6 +55,8 @@ pub fn init_all() {
     execscan::init_seams();
     nodeseqscan::init_seams();
     nodeindexscan::init_seams();
+    nodetidscan::init_seams();
+    nodetidrangescan::init_seams();
     nodeindexonlyscan::init_seams();
     nodeagg::init_seams();
     nodewindowagg::init_seams();
@@ -176,6 +179,10 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(opclasscmds::builtins::OPCLASS_BUILTINS);
     operatorcmds::init_seams();
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
+    fmgr_core::register_late_builtins(genfile::GENFILE_BUILTINS);
+    fmgr_core::register_late_builtins(guc_funcs::GUC_FUNCS_BUILTINS);
+    fmgr_core::register_late_builtins(mbutils::builtins::MBUTILS_BUILTINS);
+    parse_utilcmd::init_seams();
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
@@ -186,10 +193,10 @@ pub fn init_all() {
     plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
+    fmgr_core::register_late_builtins(commands_constraint::CONSTRAINT_BUILTINS);
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
-    fmgr_core::register_late_builtins(genfile::GENFILE_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

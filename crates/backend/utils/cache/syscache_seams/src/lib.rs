@@ -461,6 +461,41 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SearchSysCache1(OPEROID, opno) projected to (oprname, oprnamespace);
+    // None mirrors !HeapTupleIsValid.
+    pub fn pg_operator_oprnamensp(opno: Oid) -> PgResult<Option<(NameData, Oid)>>
+);
+
+// The (name, namespace) pair regconfigout/regdictionaryout read off one
+// TSCONFIGOID/TSDICTOID probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgTsObjectRow {
+    pub name: NameData,
+    pub namespace_oid: Oid,
+}
+
+seam_core::seam!(
+    // GetSysCacheOid2(TSCONFIGNAMENSP, cfgname, cfgnamespace); InvalidOid on a miss.
+    pub fn lookup_pg_ts_config_oid_by_name_nsp(cfgname: &str, cfgnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TSCONFIGOID, cfgid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_ts_config_row(cfgid: Oid) -> PgResult<Option<PgTsObjectRow>>
+);
+
+seam_core::seam!(
+    // GetSysCacheOid2(TSDICTNAMENSP, dictname, dictnamespace); InvalidOid on a miss.
+    pub fn lookup_pg_ts_dict_oid_by_name_nsp(dictname: &str, dictnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TSDICTOID, dictid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_ts_dict_row(dictid: Oid) -> PgResult<Option<PgTsObjectRow>>
+);
+
+
+seam_core::seam!(
     pub fn lookup_pg_constraint_shape(conoid: Oid) -> PgResult<Option<PgConstraintShape>>
 );
 

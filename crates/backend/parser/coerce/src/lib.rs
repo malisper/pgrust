@@ -1580,6 +1580,44 @@ pub fn coerce_to_domain<'mcx>(
     )
 }
 
+// coerce_null_to_domain (parse_coerce.c): NULL Const of the base type,
+// CoerceToDomain-wrapped so runtime NOT NULL/CHECK constraints fire.
+pub fn coerce_null_to_domain<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+    typmod: i32,
+    collation: Oid,
+    typlen: i32,
+    typbyval: bool,
+) -> PgResult<Node<'mcx>> {
+    let mut base_type_mod = typmod;
+    let base_type_id = lsyscache::getBaseTypeAndTypmod(typid, &mut base_type_mod)?;
+    let result = Node::mk_const(
+        mcx,
+        base_type_id,
+        base_type_mod,
+        collation,
+        typlen,
+        datum::Datum::null(),
+        true,
+        typbyval,
+    )?;
+    if typid != base_type_id {
+        return coerce_to_domain(
+            mcx,
+            result,
+            base_type_id,
+            base_type_mod,
+            typid,
+            CoercionContext::COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+            false,
+        );
+    }
+    Ok(result)
+}
+
 #[cold]
 #[inline(never)]
 fn unported_node(what: &str, tag: NodeTag) -> ! {
@@ -1835,6 +1873,7 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         | NodeTag::T_Var
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CurrentOfExpr
         | NodeTag::T_CoerceToDomainValue => false,
         NodeTag::T_CoerceToDomain => {
             expression_returns_set(node.as_coerce_to_domain().unwrap().arg)

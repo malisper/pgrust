@@ -42,7 +42,9 @@ pub fn plan_set_operations<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<RelId> 
     let refnames_tlist = &leftmost_query.targetList;
 
     if run.root.hasRecursion {
-        panic!("generate_recursion_path (prepunion.c): recursive UNION; recursive-CTE lane");
+        let (setop_rel, top_tlist) = generate_recursion_path(run, topop, refnames_tlist)?;
+        run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(run.mcx, top_tlist)?));
+        return Ok(setop_rel);
     }
     let (setop_rel, top_tlist, _trivial) = recurse_set_operations(
         run,
@@ -76,7 +78,7 @@ fn recurse_set_operations<'mcx>(
         let tuple_fraction = run.root.tuple_fraction;
         let sub_parse = crate::subselect::query_cells_copy(run.mcx, subquery)?;
         run.push_root()?;
-        crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, parent_op)?;
+        crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, parent_op)?;
         let child_tlist = run.processed_tlist();
         let idx = run.pop_root_to_rel_subroot();
         run.root.rel_mut(rel).subroot_idx = Some(idx);
@@ -379,6 +381,95 @@ fn generate_union_paths<'mcx>(
         add_path(run, result_rel, apath);
     }
 
+    Ok((result_rel, tlist))
+}
+
+// generate_recursion_path (prepunion.c).
+fn generate_recursion_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    op: &'mcx SetOperationStmt<'mcx>,
+    refnames_tlist: &NodeList<'mcx>,
+) -> PgResult<(RelId, NodeList<'mcx>)> {
+    let mcx = run.mcx;
+    assert!(op.op == SetOperation::SETOP_UNION, "only UNION queries can be recursive");
+    debug_assert!(run.root.wt_param_id >= 0);
+
+    let (lrel, lpath_tlist, ltrivial) = recurse_set_operations(
+        run,
+        op.larg.expect("setop larg"),
+        None,
+        &op.colTypes,
+        &op.colCollations,
+        refnames_tlist,
+    )?;
+    if run.root.rel(lrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
+        build_setop_child_paths(run, lrel, ltrivial, &lpath_tlist, false, false)?;
+    }
+    let lpath = run.root.rel(lrel).cheapest_total_path.expect("non-recursive term has a path");
+    // The recursive term's worktable scans read this (set_worktable_pathlist).
+    run.root.non_recursive_path = Some(lpath);
+    let (rrel, rpath_tlist, rtrivial) = recurse_set_operations(
+        run,
+        op.rarg.expect("setop rarg"),
+        None,
+        &op.colTypes,
+        &op.colCollations,
+        refnames_tlist,
+    )?;
+    if run.root.rel(rrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
+        build_setop_child_paths(run, rrel, rtrivial, &rpath_tlist, false, false)?;
+    }
+    let rpath = run.root.rel(rrel).cheapest_total_path.expect("recursive term has a path");
+    run.root.non_recursive_path = None;
+
+    let input_tlists: PgVec<'mcx, &NodeList<'mcx>> = {
+        let mut v = PgVec::new_in(mcx);
+        v.push(&lpath_tlist);
+        v.push(&rpath_tlist);
+        v
+    };
+    let tlist =
+        generate_append_tlist(run, &op.colTypes, &op.colCollations, &input_tlists, refnames_tlist)?;
+
+    let relids = crate::relnode::relids_union(
+        mcx,
+        &run.root.rel(lrel).relids,
+        &run.root.rel(rrel).relids,
+    );
+    let result_rel =
+        crate::relnode::fetch_upper_rel_with_relids(&mut run.root, UPPERREL_SETOP, relids);
+    let target_id = create_pathtarget(run, &tlist)?;
+    run.root.rel_mut(result_rel).pathtarget_id = Some(target_id);
+
+    let (group_ids, d_num_groups) = if op.all {
+        (PgVec::new_in(mcx), 0.0)
+    } else {
+        let group_list = generate_setop_grouplist(run, op, &tlist)?;
+        if !grouping_is_hashable_nodes(&group_list) {
+            return Err(Box::new(
+                types_error::PgError::error("could not implement recursive UNION")
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail("All column datatypes must be hashable."),
+            ));
+        }
+        let (lrows, rrows) =
+            (run.root.path(lpath).base().rows, run.root.path(rpath).base().rows);
+        (intern_clause_list(run, &group_list), lrows + rrows * 10.0)
+    };
+
+    let wt_param = run.root.wt_param_id;
+    let path = crate::pathnode::create_recursiveunion_path(
+        run,
+        result_rel,
+        lpath,
+        rpath,
+        target_id,
+        group_ids,
+        wt_param,
+        d_num_groups,
+    );
+    add_path(run, result_rel, path);
+    postprocess_setop_rel(run, result_rel)?;
     Ok((result_rel, tlist))
 }
 

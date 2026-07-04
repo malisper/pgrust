@@ -1020,6 +1020,38 @@ fn slow_switch<'mcx>(
             let address = typecmds::AlterEnum(mcx, stmt)?;
             Ok(Some(address))
         }
+        T_AlterDomainStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
+                .expect("AlterDomainStmt");
+            typecmds::AlterDomain(mcx, stmt)?;
+        }
+        T_AlterObjectSchemaStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
+                .expect("AlterObjectSchemaStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    let names = stmt
+                        .object
+                        .expect("AlterObjectSchemaStmt.object")
+                        .as_list()
+                        .expect("name list");
+                    typecmds::AlterTypeNamespace(
+                        mcx,
+                        names,
+                        stmt.newschema.expect("newschema"),
+                        stmt.objectType,
+                    )?;
+                }
+                other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
+            }
+        }
         T_RuleStmt => {
             // Retention contract as unify_stmt_lifetime.
             let stmt = parsetree
@@ -1156,7 +1188,37 @@ fn slow_switch<'mcx>(
         }
 
         T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
-        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterOwnerStmt>()
+                .expect("AlterOwnerStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::AlterOwnerStmt<'_>,
+                            &types_nodes::parsenodes::AlterOwnerStmt<'mcx>,
+                        >(stmt)
+                    };
+                    let names = stmt
+                        .object
+                        .expect("AlterOwnerStmt.object")
+                        .as_list()
+                        .expect("name list");
+                    let newowner = aclchk::get_rolespec_oid(
+                        stmt.newowner.expect("AlterOwnerStmt.newowner"),
+                        false,
+                    )?;
+                    // C: address = ExecAlterOwnerStmt; no address surface yet.
+                    collect_gap("ALTER OWNER");
+                    typecmds::AlterTypeOwner(mcx, names, newowner, stmt.objectType)?;
+                    Ok(None)
+                }
+                _ => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+            }
+        }
 
         _ => {
             handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)");
@@ -1244,6 +1306,26 @@ fn exec_rename_stmt_inner<'mcx>(
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
             tablecmds::RenameConstraint(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::RenameStmt<'_>,
+                    &types_nodes::parsenodes::RenameStmt<'mcx>,
+                >(stmt)
+            };
+            typecmds::RenameType(mcx, stmt)?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::RenameStmt<'_>,
+                    &types_nodes::parsenodes::RenameStmt<'mcx>,
+                >(stmt)
+            };
+            typecmds::RenameDomainConstraint(mcx, stmt)?;
         }
         other => panic!("unported: ExecRenameStmt {other:?}"),
     }

@@ -19,6 +19,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::catalog::BOOLOID,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_NamedArgExpr => {
+            expr_type(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
@@ -27,7 +30,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
-        | NodeTag::T_BooleanTest => types_core::catalog::BOOLOID,
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_CurrentOfExpr => types_core::catalog::BOOLOID,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
@@ -140,6 +144,9 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
+        NodeTag::T_NamedArgExpr => {
+            expr_typmod(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
@@ -154,6 +161,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
+        | NodeTag::T_CurrentOfExpr
         | NodeTag::T_RowExpr => -1,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
@@ -228,6 +236,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_NamedArgExpr => {
+            expr_collation(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
+        }
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
@@ -237,6 +248,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         | NodeTag::T_NullTest
         | NodeTag::T_GroupingFunc
         | NodeTag::T_BooleanTest
+        | NodeTag::T_CurrentOfExpr
         | NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
@@ -371,6 +383,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
+        NodeTag::T_CurrentOfExpr => -1,
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             leftmost_loc(c.location, expr_location(c.arg))

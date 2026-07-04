@@ -767,16 +767,24 @@ fn bt_preprocess_array_keys<'mcx>(
         }
 
         let p = cur.sk_argument.as_usize() as *const u8;
-        // SAFETY: non-null array datum; index-qual array consts carry an
-        // inline 4-byte header (asserted, matching execexpr's SAOP walk).
-        let b0 = unsafe { *p };
-        assert!(
-            b0 != 0x01 && b0 & 0x03 == 0,
-            "_bt_preprocess_array_keys: toasted/packed array image"
-        );
-        // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
-        let img = unsafe {
-            core::slice::from_raw_parts(p, arrfn::arr_size(core::slice::from_raw_parts(p, 4)))
+        // DatumGetArrayTypeP: borrow in place on an inline 4-byte header; a
+        // short (1B) image expands into `mcx` so ARR_* offsets hold
+        // (bound-param arrays keep their packed form through datumCopy).
+        // SAFETY: non-null array datum addresses a live varlena.
+        let img: &[u8] = unsafe {
+            let b0 = *p;
+            if b0 & 0x01 == 0x01 {
+                assert!(b0 != 0x01, "_bt_preprocess_array_keys: external toast array image");
+                let total = ((b0 >> 1) & 0x7F) as usize;
+                let payload = core::slice::from_raw_parts(p.add(1), total - 1);
+                let mut v: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total - 1 + 4)?;
+                ::mcx::vec_append_bytes(&mut v, &::datum::varlena::set_varsize_4b(total - 1 + 4))?;
+                ::mcx::vec_append_bytes(&mut v, payload)?;
+                v.leak()
+            } else {
+                assert!(b0 & 0x03 == 0, "_bt_preprocess_array_keys: compressed array image");
+                core::slice::from_raw_parts(p, arrfn::arr_size(core::slice::from_raw_parts(p, 4)))
+            }
         };
         let arr_elemtype = arrfn::arr_elemtype(img);
         let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(arr_elemtype)?;

@@ -398,6 +398,28 @@ pub struct AlterOwnerStmt<'mcx> {
     pub newowner: Option<&'mcx RoleSpec<'mcx>>,
 }
 
+// C: subtype T/N/O/C/X/V selects the ALTER DOMAIN arm; def is the default
+// expression or new Constraint.
+#[derive(Default)]
+pub struct AlterDomainStmt<'mcx> {
+    pub subtype: u8,
+    pub typeName: NodeList<'mcx>,
+    pub name: Option<&'mcx str>,
+    pub def: Option<Node<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+}
+
+// C: relation is used by the table-like forms, object by everything else.
+#[derive(Default)]
+pub struct AlterObjectSchemaStmt<'mcx> {
+    pub objectType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub newschema: Option<&'mcx str>,
+    pub missing_ok: bool,
+}
+
 // C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
 #[derive(Default)]
 pub struct CreateFunctionStmt<'mcx> {
@@ -595,7 +617,32 @@ impl Default for WithClause<'_> {
     }
 }
 
-/// search_clause/cycle_clause stay None (SEARCH/CYCLE are loud in the grammar).
+/// `search_col_list` cells are String.
+#[derive(Default)]
+pub struct CTESearchClause<'mcx> {
+    pub search_col_list: NodeList<'mcx>,
+    pub search_breadth_first: bool,
+    pub search_seq_column: Option<&'mcx str>,
+    pub location: ParseLoc,
+}
+
+/// `cycle_col_list` cells are String.
+#[derive(Default)]
+pub struct CTECycleClause<'mcx> {
+    pub cycle_col_list: NodeList<'mcx>,
+    pub cycle_mark_column: Option<&'mcx str>,
+    pub cycle_mark_value: Option<Node<'mcx>>,
+    pub cycle_mark_default: Option<Node<'mcx>>,
+    pub cycle_path_column: Option<&'mcx str>,
+    pub location: ParseLoc,
+    pub cycle_mark_type: Oid,
+    pub cycle_mark_typmod: i32,
+    pub cycle_mark_collation: Oid,
+    pub cycle_mark_neop: Oid,
+}
+
+/// search_clause/cycle_clause stay None from the grammar (SEARCH/CYCLE are
+/// loud there); rule-load fills them via readfuncs.
 pub struct CommonTableExpr<'mcx> {
     pub ctename: Option<&'mcx str>,
     pub aliascolnames: NodeList<'mcx>,
@@ -1210,6 +1257,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterFunctionStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOwnerStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOwnerStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDomainStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDomainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterObjectSchemaStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterObjectSchemaStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1357,6 +1410,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CommonTableExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommonTableExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CTESearchClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CTESearchClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CTECycleClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CTECycleClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumStmt;
 }
@@ -1410,6 +1469,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_common_table_expr(self) -> Option<&'mcx CommonTableExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_cte_search_clause(self) -> Option<&'mcx CTESearchClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_cte_cycle_clause(self) -> Option<&'mcx CTECycleClause<'mcx>> {
         self.as_variant()
     }
 

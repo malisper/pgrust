@@ -18,6 +18,7 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 
 [dev-dependencies]
+test_boot = { path = "../../../../_support/test_boot" }
 mcx = { path = "../../../../_support/mcx" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 heapam = { path = "../../../../backend/access/heap/heapam" }
