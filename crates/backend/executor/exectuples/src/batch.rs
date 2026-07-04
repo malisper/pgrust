@@ -386,6 +386,8 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
     true
 }
 
+mcx::forget_safe_nodrop!(SoaVarKeyPlan);
+
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs },
     SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds },
