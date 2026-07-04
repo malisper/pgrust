@@ -11,6 +11,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
 types_slot = { path = "../../../_support/types/types_slot" }
 tableam = { path = "../../access/table/tableam" }
+nodehash = { path = "../nodehash" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }
@@ -19,6 +20,7 @@ datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
 
 [dev-dependencies]
+hashfn = { path = "../../../common/hashfn" }
 types_core = { path = "../../../_support/types/types_core" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }

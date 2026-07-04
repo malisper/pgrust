@@ -6591,11 +6591,13 @@ dependencies = [
 name = "nodehash"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "execexpr",
  "exectuples",
  "executils",
  "fd",
  "guc_tables",
+ "hashfn",
  "heaptuple",
  "init_small",
  "mcx",
@@ -7081,9 +7083,11 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
+ "hashfn",
  "heapam_visibility_seams",
  "mcx",
  "miscinit_seams",
+ "nodehash",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",

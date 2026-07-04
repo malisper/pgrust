@@ -30,6 +30,9 @@ pub enum SeqScanVariant {
     WithQual,
     WithProject,
     WithQualProject,
+    // Plain scan carrying a hashjoin-pushed Bloom filter over its key
+    // column (pure filter, false positives only); reverts to Plain on disarm.
+    PlainBloom,
     Epq,
 }
 
@@ -40,6 +43,45 @@ pub struct SeqScanState<'mcx> {
     batch_soa: Option<::mcx::PgBox<'mcx, BatchSoa<'mcx>>>,
     scan_batch: ScanBatchMode,
     batch_allowed: bool,
+    bloom: Option<::mcx::PgBox<'mcx, BloomScan<'mcx>>>,
+}
+
+// Hashjoin Bloom pushdown state: key-column-only SoA deform of each staged
+// page, selection bits from the filter; survivors store like the per-row
+// path (no prefix publish — slot state identical to table_scan_getnextslot).
+struct BloomScan<'mcx> {
+    filter: std::rc::Rc<::nodehash::ProbeBloom<'mcx>>,
+    plan: ::exectuples::SoaDeformPlan<'mcx>,
+    soa: ::exectuples::SoaBatch<'mcx>,
+    col: u16,
+    sel: [u64; ::exectuples::SOA_BM_WORDS],
+    nwords: u32,
+    cur_word: u32,
+    cur_bits: u64,
+}
+
+impl BloomScan<'_> {
+    #[inline(always)]
+    fn next_selected(&mut self) -> Option<u32> {
+        loop {
+            if self.cur_bits != 0 {
+                let bit = self.cur_bits.trailing_zeros();
+                self.cur_bits &= self.cur_bits - 1;
+                return Some(self.cur_word * 64 + bit);
+            }
+            if self.cur_word + 1 >= self.nwords {
+                return None;
+            }
+            self.cur_word += 1;
+            self.cur_bits = self.sel[self.cur_word as usize];
+        }
+    }
+
+    fn reset_staged(&mut self) {
+        self.nwords = 0;
+        self.cur_word = 0;
+        self.cur_bits = 0;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +482,7 @@ pub fn exec_seq_scan<'mcx>(
             }
             exec_scan_extended::<_, true, false>(node, estate)
         }
+        SeqScanVariant::PlainBloom => exec_seq_scan_bloom(node, estate),
         SeqScanVariant::WithProject => exec_scan_extended::<_, false, true>(node, estate),
         SeqScanVariant::WithQualProject => {
             if scan_batch_ready(node, estate)? {
@@ -537,6 +580,102 @@ fn exec_seq_scan_batch<'mcx, const PROJ: bool>(
     }
 }
 
+/// Hashjoin Bloom pushdown seat: arm (Some) or disarm (None) after a hash
+/// build. Runtime gate only — plans are untouched; Instrumented outers never
+/// reach here, so EXPLAIN ANALYZE keeps the per-tuple drive and its counters.
+pub fn seq_scan_set_bloom<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    push: Option<(std::rc::Rc<::nodehash::ProbeBloom<'mcx>>, u16)>,
+) -> PgResult<bool> {
+    if node.variant == SeqScanVariant::PlainBloom {
+        node.variant = SeqScanVariant::Plain;
+        node.bloom = None;
+    }
+    let Some((filter, col)) = push else { return Ok(false) };
+    if node.variant != SeqScanVariant::Plain
+        || !node.batch_allowed
+        || node.ss.instr_idx.is_some()
+        || estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    if !::tableam::table_scan_supports_pagebatch(node.ss.ss_currentScanDesc.as_ref().unwrap()) {
+        return Ok(false);
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(plan) = ::exectuples::SoaDeformPlan::try_new(mcx, atts, col as usize + 1) else {
+        return Ok(false);
+    };
+    node.bloom = Some(::mcx::PgBox::new_in(
+        BloomScan {
+            soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+            plan,
+            filter,
+            col,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    node.variant = SeqScanVariant::PlainBloom;
+    Ok(true)
+}
+
+// Plain-scan Bloom drive: stage a page, deform the key column only, keep
+// rows the filter admits (misses prove no hash match; NULL keys test hash 0
+// like the Hash32Var kernel; fallback rows pass conservatively). Same tuple
+// order and slot state as the per-row Plain path for every surviving row.
+#[inline(never)]
+fn exec_seq_scan_bloom<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    estate.ecxt_mut(node.ss.ps_ExprContext).reset();
+    loop {
+        let next = node.bloom.as_deref_mut().expect("bloom drive armed").next_selected();
+        let Some(i) = next else {
+            node.ensure_scandesc(estate)?;
+            let SeqScanState { ss, bloom, .. } = node;
+            // SAFETY: written by ensure_scandesc when None.
+            let scandesc = unsafe { ss.ss_currentScanDesc.as_mut().unwrap_unchecked() };
+            let n = ::tableam::table_scan_getnextpagebatch(scandesc)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let b = &mut **bloom.as_mut().expect("bloom drive armed");
+            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, Some(b.col));
+            b.filter.sel_hash32_low32(
+                b.soa.col_values(b.col as usize),
+                b.soa.col_isnull(b.col as usize),
+                &mut b.sel,
+            );
+            let nwords = (n as usize).div_ceil(64);
+            // Skipped rows carry a forced bit: no columnar key, pass through.
+            for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
+                *w |= fb;
+            }
+            b.nwords = nwords as u32;
+            b.cur_word = 0;
+            b.cur_bits = b.sel[0];
+            continue;
+        };
+        let mcx = estate.es_query_cxt;
+        let scandesc =
+            node.ss.ss_currentScanDesc.as_mut().expect("bloom fetch after page stage");
+        let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
+        ::tableam::table_scan_batch_store_slot(mcx, scandesc, i, slot);
+        return Ok(Some(node.ss.ss_ScanTupleSlot));
+    }
+}
+
 /// `ExecInitSeqScan`; opens the scan relation through the estate range table.
 pub fn exec_init_seq_scan<'mcx>(
     mcx: Mcx<'mcx>,
@@ -624,11 +763,13 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         batch_soa: None,
         scan_batch: ScanBatchMode::Unknown,
         batch_allowed: false,
+        bloom: None,
     })
 }
 
 /// `ExecEndSeqScan`.
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
+    node.bloom = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -645,6 +786,9 @@ pub fn exec_rescan_seq_scan<'mcx>(
         table_rescan(mcx, scan, None)?;
     }
     if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.reset_staged();
+    }
+    if let Some(b) = node.bloom.as_deref_mut() {
         b.reset_staged();
     }
     execscan::exec_scan_rescan(&mut node.ss, estate);
@@ -671,10 +815,12 @@ mcx::forget_safe_nodrop!(SeqScanVariant);
 
 mcx::forget_safe_nodrop!(ScanBatchMode);
 
+// bloom exempt: its Rc is released in exec_end_seq_scan (and on disarm).
 mcx::forget_safe_struct!(
-    SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed },
+    SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed; bloom },
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, publish, qual_col, qual_cmp, qual_konst,
         sel, nwords, cur_word, cur_bits,
     },
+    BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits; filter },
 );
