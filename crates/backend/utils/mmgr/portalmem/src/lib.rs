@@ -32,6 +32,9 @@ use ::types_resowner::{
 
 pub use ::types_core::CommandTag;
 
+mod funcs;
+pub use funcs::{fc_pg_cursor, PORTALMEM_BUILTINS};
+
 #[cfg(test)]
 mod tests;
 

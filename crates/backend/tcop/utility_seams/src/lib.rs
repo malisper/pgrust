@@ -34,6 +34,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // UtilityContainsQuery (utility.c): the contained analyzed Query node.
+    pub fn utility_contains_query<'mcx>(parsetree: Node<'mcx>) -> Option<Node<'mcx>>
+);
+
+seam_core::seam!(
     pub fn utility_tuple_descriptor(
         parsetree: Node<'_>,
     ) -> PgResult<Option<Rc<TupleDescData<'static>>>>

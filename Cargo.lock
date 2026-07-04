@@ -3741,6 +3741,7 @@ dependencies = [
  "name",
  "nbt_compare",
  "pgstatfuncs",
+ "portalmem",
  "pseudorandomfuncs",
  "sequence_seams",
  "stringinfo",
@@ -6061,6 +6062,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_scan",
  "types_slot",
  "types_tuple",
 ]
@@ -7941,8 +7943,10 @@ dependencies = [
 name = "portalmem"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "elog",
  "execmain_seams",
+ "funcapi",
  "ipc_portal_seams",
  "mcx",
  "plancache_portal_seams",
@@ -7953,9 +7957,11 @@ dependencies = [
  "tuplestore_hold_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_portal",
  "types_resowner",
  "types_snapshot",
+ "varlena",
  "xact_portal_seams",
  "xact_seams",
 ]
@@ -11149,6 +11155,7 @@ name = "tstore_receiver"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "detoast",
  "exectuples",
  "mcx",
  "tuplestore",
