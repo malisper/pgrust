@@ -2715,7 +2715,7 @@ fn create_gather_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgRe
     // Projection pushes down to the child: the work parallelizes, and no
     // system column can ride the tuple queue (MinimalTuple representation).
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
 
     let mut plan = Node::build::<types_nodes::plannodes::Gather>(mcx)?;
     plan.plan.targetlist = tlist;
@@ -2747,7 +2747,7 @@ fn create_gather_merge_plan<'mcx>(
         )
     };
     assert!(!pathkeys.is_empty());
-    let tlist = build_path_tlist(run, target_id)?;
+    let tlist = build_path_tlist(run, target_id, path_id)?;
     // As with Gather, project away columns in the workers.
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
 
