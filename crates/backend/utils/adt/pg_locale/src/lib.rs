@@ -17,12 +17,15 @@ use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ErrorLocation, WARNING};
 
 mod builtin_case;
+mod icu;
+mod icu_ffi;
 mod lconv;
 mod libc_locale;
 mod setup;
 #[cfg(test)]
 mod tests;
 
+pub use icu::{icu_language_tag, icu_validate_locale};
 pub use lconv::{pglc_localeconv, PgLconv, CHAR_MAX};
 pub use libc_locale::{pg_tolower, pg_toupper};
 pub use setup::{
@@ -52,6 +55,7 @@ pub struct PgLocale {
     pub builtin_locale: Option<&'static str>,
     pub builtin_casemap_full: bool,
     lt: libc_locale::LibcLocale,
+    icu: icu::IcuLocale,
 }
 
 pub static C_LOCALE: PgLocale = PgLocale {
@@ -63,6 +67,7 @@ pub static C_LOCALE: PgLocale = PgLocale {
     builtin_locale: None,
     builtin_casemap_full: false,
     lt: libc_locale::LibcLocale::NONE,
+    icu: icu::IcuLocale::NONE,
 };
 
 impl PgLocale {
@@ -70,35 +75,44 @@ impl PgLocale {
         debug_assert!(!self.collate_is_c, "pg_strncoll on a collate_is_c locale");
         if self.provider == COLLPROVIDER_LIBC {
             libc_locale::strncoll_libc(arg1, arg2, self.lt)
+        } else if self.provider == COLLPROVIDER_ICU {
+            icu::strncoll(arg1, arg2, self.icu)
         } else {
             panic!(
-                "pg_locale: pg_strncoll ICU arm not ported (pg_locale_icu.c): provider {}",
+                "pg_locale: pg_strncoll provider {} has no arm",
                 self.provider as char
             );
         }
     }
 
     // strxfrm_is_safe: false for libc (no TRUST_STRXFRM — glibc strxfrm is
-    // inconsistent with strcoll for many locales); ICU arm loud elsewhere.
+    // inconsistent with strcoll for many locales); true for ICU sort keys.
     pub fn pg_strxfrm_enabled(&self) -> bool {
-        false
+        self.provider == COLLPROVIDER_ICU
     }
 
     pub fn pg_strnxfrm(&self, dest: &mut [u8], src: &[u8]) -> usize {
         debug_assert!(!self.collate_is_c, "pg_strnxfrm on a collate_is_c locale");
         if self.provider == COLLPROVIDER_LIBC {
             libc_locale::strnxfrm_libc(dest, src, self.lt)
+        } else if self.provider == COLLPROVIDER_ICU {
+            icu::strnxfrm(dest, src, self.icu)
         } else {
             panic!(
-                "pg_locale: pg_strnxfrm ICU arm not ported (pg_locale_icu.c): provider {}",
+                "pg_locale: pg_strnxfrm provider {} has no arm",
                 self.provider as char
             );
         }
     }
 
-    // strnxfrm_prefix: NULL for libc.
+    // strnxfrm_prefix: NULL for libc, live for ICU.
     pub fn pg_strnxfrm_prefix_enabled(&self) -> bool {
-        false
+        self.provider == COLLPROVIDER_ICU
+    }
+
+    pub fn pg_strnxfrm_prefix(&self, dest: &mut [u8], src: &[u8]) -> usize {
+        debug_assert!(self.provider == COLLPROVIDER_ICU, "strnxfrm_prefix is ICU-only");
+        icu::strnxfrm_prefix(dest, src, self.icu)
     }
 
     // SB_lower_char's tolower_l arm (like_match.c); SB encodings only.
@@ -116,7 +130,7 @@ pub fn pg_strlower<'mcx>(
     if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strlower_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
-        panic!("pg_locale: pg_strlower ICU arm not ported (pg_locale_icu.c)");
+        icu::str_case(icu::CASE_LOWER, dest, src, locale.icu)
     } else if locale.provider == COLLPROVIDER_LIBC {
         libc_locale::strlower_libc(mcx, dest, src, locale)
     } else {
@@ -133,7 +147,7 @@ pub fn pg_strtitle<'mcx>(
     if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strtitle_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
-        panic!("pg_locale: pg_strtitle ICU arm not ported (pg_locale_icu.c)");
+        icu::str_case(icu::CASE_TITLE, dest, src, locale.icu)
     } else if locale.provider == COLLPROVIDER_LIBC {
         libc_locale::strtitle_libc(mcx, dest, src, locale)
     } else {
@@ -150,7 +164,7 @@ pub fn pg_strupper<'mcx>(
     if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strupper_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
-        panic!("pg_locale: pg_strupper ICU arm not ported (pg_locale_icu.c)");
+        icu::str_case(icu::CASE_UPPER, dest, src, locale.icu)
     } else if locale.provider == COLLPROVIDER_LIBC {
         libc_locale::strupper_libc(mcx, dest, src, locale)
     } else {
@@ -167,7 +181,7 @@ pub fn pg_strfold<'mcx>(
     if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strfold_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
-        panic!("pg_locale: pg_strfold ICU arm not ported (pg_locale_icu.c)");
+        icu::str_case(icu::CASE_FOLD, dest, src, locale.icu)
     } else if locale.provider == COLLPROVIDER_LIBC {
         // C: for libc, just use strlower.
         libc_locale::strlower_libc(mcx, dest, src, locale)
@@ -263,18 +277,11 @@ fn create_pg_locale(collid: Oid, cache_mcx: Mcx<'static>) -> PgResult<PgLocale> 
     let mut result = if row.collprovider == COLLPROVIDER_BUILTIN {
         create_pg_locale_builtin(cache_mcx, &req(&row.colllocale, "colllocale")?)?
     } else if row.collprovider == COLLPROVIDER_ICU {
-        // Loadable stub (rows exist; comparisons/case ops LOUD per method,
-        // pg_locale_icu.c unported): collate_is_c/ctype_is_c false as in C.
-        PgLocale {
-            provider: COLLPROVIDER_ICU,
-            deterministic: true,
-            collate_is_c: false,
-            ctype_is_c: false,
-            is_default: false,
-            builtin_locale: None,
-            builtin_casemap_full: false,
-            lt: libc_locale::LibcLocale::NONE,
-        }
+        create_pg_locale_icu(
+            cache_mcx,
+            &req(&row.colllocale, "colllocale")?,
+            row.collicurules.as_ref().map(|s| s.as_str()),
+        )?
     } else if row.collprovider == COLLPROVIDER_LIBC {
         create_pg_locale_libc(
             &req(&row.collcollate, "collcollate")?,
@@ -385,6 +392,25 @@ fn create_pg_locale_builtin(cache_mcx: Mcx<'static>, locstr: &str) -> PgResult<P
         builtin_locale: Some(intern_str(cache_mcx, locstr)?),
         builtin_casemap_full: locstr == "PG_UNICODE_FAST",
         lt: libc_locale::LibcLocale::NONE,
+        icu: icu::IcuLocale::NONE,
+    })
+}
+
+fn create_pg_locale_icu(
+    cache_mcx: Mcx<'static>,
+    iculocstr: &str,
+    icurules: Option<&str>,
+) -> PgResult<PgLocale> {
+    Ok(PgLocale {
+        provider: COLLPROVIDER_ICU,
+        deterministic: true,
+        collate_is_c: false,
+        ctype_is_c: false,
+        is_default: false,
+        builtin_locale: None,
+        builtin_casemap_full: false,
+        lt: libc_locale::LibcLocale::NONE,
+        icu: icu::create_icu_locale(cache_mcx, iculocstr, icurules)?,
     })
 }
 
@@ -399,6 +425,7 @@ fn create_pg_locale_libc(collate: &str, ctype: &str) -> PgResult<PgLocale> {
         builtin_locale: None,
         builtin_casemap_full: false,
         lt,
+        icu: icu::IcuLocale::NONE,
     })
 }
 
@@ -422,7 +449,14 @@ pub fn init_database_collation() -> PgResult<()> {
         })?;
         create_pg_locale_builtin(cache_mcx, locstr.as_str())?
     } else if row.datlocprovider == COLLPROVIDER_ICU {
-        panic!("pg_locale: ICU provider arm not ported (pg_locale_icu.c): database default");
+        let locstr = row.datlocale.as_ref().ok_or_else(|| {
+            PgError::error(format!("unexpected null datlocale for database {dboid}"))
+        })?;
+        create_pg_locale_icu(
+            cache_mcx,
+            locstr.as_str(),
+            row.daticurules.as_ref().map(|s| s.as_str()),
+        )?
     } else if row.datlocprovider == COLLPROVIDER_LIBC {
         create_pg_locale_libc(row.datcollate.as_str(), row.datctype.as_str())?
     } else {
@@ -458,8 +492,9 @@ fn collation_actual_version(collprovider: u8, locale: &str) -> PgResult<Option<S
         get_collation_actual_version_builtin(locale).map(|v| Some(v.to_owned()))
     } else if collprovider == COLLPROVIDER_LIBC {
         Ok(get_collation_actual_version_libc(locale))
+    } else if collprovider == COLLPROVIDER_ICU {
+        icu::get_collation_actual_version_icu(locale).map(Some)
     } else {
-        // ICU without USE_ICU: C falls through and returns NULL.
         Ok(None)
     }
 }
@@ -566,6 +601,38 @@ fn collation_is_deterministic(collid: Oid) -> PgResult<bool> {
     Ok(pg_newlocale_from_collation(collid)?.deterministic)
 }
 
+// hashtext/hashbpchar nondeterministic leg (hashfunc.c/varchar.c): hash the
+// pg_strnxfrm sort key INCLUDING its NUL (C hashes bsize+1 bytes).
+fn varstr_nondeterministic_hash(
+    collid: Oid,
+    data: &[u8],
+    seed: Option<u64>,
+) -> PgResult<Option<u64>> {
+    let locale = pg_newlocale_from_collation(collid)?;
+    if locale.deterministic {
+        return Ok(None);
+    }
+    XFRM_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let bsize = locale.pg_strnxfrm(&mut [], data);
+        buf.clear();
+        buf.resize(bsize + 1, 0);
+        let rsize = locale.pg_strnxfrm(&mut buf[..], data);
+        if rsize > bsize {
+            return Err(PgError::error("pg_strnxfrm() returned unexpected result").into());
+        }
+        buf[bsize] = 0;
+        Ok(Some(match seed {
+            None => hashfn::hash_bytes(&buf[..bsize + 1]) as u64,
+            Some(seed) => hashfn::hash_bytes_extended(&buf[..bsize + 1], seed),
+        }))
+    })
+}
+
+thread_local! {
+    static XFRM_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
 fn get_collation_actual_version_seam<'mcx>(
     mcx: Mcx<'mcx>,
     collprovider: u8,
@@ -583,6 +650,7 @@ pub fn init_seams() {
     pg_locale_seams::set_database_ctype_is_c::set(setup::set_database_ctype_is_c);
     pg_locale_seams::init_database_collation::set(init_database_collation);
     pg_locale_seams::get_collation_actual_version::set(get_collation_actual_version_seam);
+    pg_locale_seams::varstr_nondeterministic_hash::set(varstr_nondeterministic_hash);
 
     setup::install_guc_hooks();
 }

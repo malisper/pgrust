@@ -405,18 +405,15 @@ fn hash_collation_err() -> Box<PgError> {
     )
 }
 
-fn collation_is_deterministic(collid: Oid) -> PgResult<bool> {
+fn bpchar_nondeterministic_hash(
+    collid: Oid,
+    k: &[u8],
+    seed: Option<u64>,
+) -> PgResult<Option<u64>> {
     if collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID {
-        Ok(true)
-    } else {
-        pg_locale_seams::collation_is_deterministic::call(collid)
+        return Ok(None);
     }
-}
-
-#[cold]
-#[inline(never)]
-fn nondeterministic_hash_unported(name: &str) -> ! {
-    panic!("{name}: nondeterministic-collation hashing unported (pg_locale pg_strnxfrm lane)")
+    pg_locale_seams::varstr_nondeterministic_hash::call(collid, k, seed)
 }
 
 pub fn hashbpchar(key: &[u8], collid: Oid) -> PgResult<u32> {
@@ -424,11 +421,10 @@ pub fn hashbpchar(key: &[u8], collid: Oid) -> PgResult<u32> {
         return Err(hash_collation_err());
     }
     let k = bc_trim(key);
-    if collation_is_deterministic(collid)? {
-        Ok(hashfn::hash_bytes(k))
-    } else {
-        nondeterministic_hash_unported("hashbpchar")
+    if let Some(h) = bpchar_nondeterministic_hash(collid, k, None)? {
+        return Ok(h as u32);
     }
+    Ok(hashfn::hash_bytes(k))
 }
 
 pub fn hashbpcharextended(key: &[u8], collid: Oid, seed: u64) -> PgResult<u64> {
@@ -436,11 +432,10 @@ pub fn hashbpcharextended(key: &[u8], collid: Oid, seed: u64) -> PgResult<u64> {
         return Err(hash_collation_err());
     }
     let k = bc_trim(key);
-    if collation_is_deterministic(collid)? {
-        Ok(hashfn::hash_bytes_extended(k, seed))
-    } else {
-        nondeterministic_hash_unported("hashbpcharextended")
+    if let Some(h) = bpchar_nondeterministic_hash(collid, k, Some(seed))? {
+        return Ok(h);
     }
+    Ok(hashfn::hash_bytes_extended(k, seed))
 }
 
 // C returns the raw memcmp value; sign-normalized here (varlena precedent).
