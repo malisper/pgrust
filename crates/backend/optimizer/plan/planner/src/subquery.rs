@@ -172,7 +172,7 @@ pub fn subquery_planner<'mcx>(
                 let kind =
                     if rte.lateral { EXPRKIND_TABLEFUNC_LATERAL } else { EXPRKIND_TABLEFUNC };
                 let tf =
-                    preprocess_expression(run, rte.tablefunc, kind, parse.hasSubLinks)?;
+                    preprocess_expression(run, &parse.rtable, rte.tablefunc, kind, parse.hasSubLinks)?;
                 // SAFETY: as the RTE_RELATION arm above.
                 unsafe {
                     rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
