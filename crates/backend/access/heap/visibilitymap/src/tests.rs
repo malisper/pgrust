@@ -131,6 +131,12 @@ fn install_seams() {
         bufmgr_seams::extend_buffered_rel_to::set(|_, _, _, _, _, _| {
             panic!("unported callee reached from bufmgr.c: ExtendBufferedRelTo (extend machinery, phase 2)")
         });
+        bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
+            bufmgr_seams::extend_buffered_rel_to::call(
+                bufmgr_seams::relation_smgr_locator::call(rel),
+                fork, strategy, flags, extend_to, mode,
+            )
+        });
         smgr_seams::smgr_exists::set(|_rloc, fork| {
             assert_eq!(fork, ForkNumber::VISIBILITYMAP_FORKNUM);
             with_fake(|f| {
@@ -283,13 +289,6 @@ fn get_status_bit_math() {
         ])],
         true,
     );
-    bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
-        bufmgr_seams::extend_buffered_rel_to::call(
-            bufmgr_seams::relation_smgr_locator::call(rel),
-            fork, strategy, flags, extend_to, mode,
-        )
-    });
-
     let mut vmbuf = VmBuffer::new();
     assert_eq!(visibilitymap_get_status(&rel, 0, &mut vmbuf).unwrap(), 0b10);
     assert_eq!(visibilitymap_get_status(&rel, 1, &mut vmbuf).unwrap(), 0b01);
