@@ -10,7 +10,8 @@ mod tests;
 use ::adt_multirangetypes::{leak_image, multirange_get_bounds, multirange_is_empty};
 use ::adt_rangetypes::ops;
 use ::adt_rangetypes::{
-    make_range, range_cmp_bounds, range_deserialize, range_get_flags, range_is_empty,
+    make_range, range_bound_slots, range_cmp_bounds, range_deserialize_into,
+    range_get_flags, range_is_empty,
     range_type_oid, range_types_do_not_match, RangeBound, RangeInfo, RANGE_CONTAIN_EMPTY,
     RANGE_EMPTY, RANGE_LB_INF, RANGE_UB_INF,
 };
@@ -139,8 +140,10 @@ fn range_super_union<'m>(
     r2: &'m [u8],
 ) -> PgResult<&'m [u8]> {
     let ri = &mut cache.ri;
-    let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
-    let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
+    let (mut lower2, mut upper2) = range_bound_slots();
+    let empty2 = range_deserialize_into(&ri.elem, r2, &mut lower2, &mut upper2);
     let flags1 = range_get_flags(r1);
     let flags2 = range_get_flags(r2);
 
@@ -193,7 +196,8 @@ fn multirange_union_range_equal(
     if range_is_empty(r) || multirange_is_empty(mr) {
         return Ok(range_is_empty(r) && multirange_is_empty(mr));
     }
-    let (lower1, upper1, _empty) = range_deserialize(&ri.elem, r);
+    let (mut lower1, mut upper1) = range_bound_slots();
+    let _empty = range_deserialize_into(&ri.elem, r, &mut lower1, &mut upper1);
     let (lower2, _t1) = multirange_get_bounds(ri, mr, 0);
     let (_t2, upper2) =
         multirange_get_bounds(ri, mr, ::adt_multirangetypes::multirange_count(mr) as usize - 1);
@@ -563,8 +567,11 @@ fn fc_range_gist_penalty(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let cache = cached_gist_range_cache(f, range_type_oid(orig))?;
     let has_subtype_diff = cache.subdiff.is_some();
 
-    let (orig_lower, orig_upper, orig_empty) = range_deserialize(&cache.ri.elem, orig);
-    let (new_lower, new_upper, new_empty) = range_deserialize(&cache.ri.elem, new);
+    let (mut orig_lower, mut orig_upper) = range_bound_slots();
+
+    let orig_empty = range_deserialize_into(&cache.ri.elem, orig, &mut orig_lower, &mut orig_upper);
+    let (mut new_lower, mut new_upper) = range_bound_slots();
+    let new_empty = range_deserialize_into(&cache.ri.elem, new, &mut new_lower, &mut new_upper);
 
     let p: f32 = if new_empty {
         if orig_empty {
@@ -891,7 +898,8 @@ fn single_sorting_split<'m>(
     let maxoff = ranges.len() - 1;
     let mut sort_items = Vec::with_capacity(maxoff);
     for (i, &range) in ranges.iter().enumerate().skip(1) {
-        let (lower, upper, empty) = range_deserialize(&cache.ri.elem, range);
+        let (mut lower, mut upper) = range_bound_slots();
+        let empty = range_deserialize_into(&cache.ri.elem, range, &mut lower, &mut upper);
         debug_assert!(!empty);
         let _ = empty;
         sort_items.push(SingleBoundSortItem {
@@ -1012,7 +1020,8 @@ fn double_sorting_split<'m>(
 
     let mut by_lower = Vec::with_capacity(maxoff);
     for &range in &ranges[1..] {
-        let (lower, upper, empty) = range_deserialize(&cache.ri.elem, range);
+        let (mut lower, mut upper) = range_bound_slots();
+        let empty = range_deserialize_into(&cache.ri.elem, range, &mut lower, &mut upper);
         debug_assert!(!empty);
         let _ = empty;
         by_lower.push(NonEmptyRange { lower, upper });
@@ -1128,7 +1137,8 @@ fn double_sorting_split<'m>(
 
     let mut common_entries: Vec<CommonEntry> = Vec::with_capacity(maxoff);
     for (i, &range) in ranges.iter().enumerate().skip(1) {
-        let (lower, upper, _empty) = range_deserialize(&cache.ri.elem, range);
+        let (mut lower, mut upper) = range_bound_slots();
+        let _empty = range_deserialize_into(&cache.ri.elem, range, &mut lower, &mut upper);
         if range_cmp_bounds(mcx, &mut cache.ri, &upper, &context.left_upper)? <= 0 {
             if range_cmp_bounds(mcx, &mut cache.ri, &lower, &context.right_lower)? >= 0 {
                 let delta = if context.has_subtype_diff {
