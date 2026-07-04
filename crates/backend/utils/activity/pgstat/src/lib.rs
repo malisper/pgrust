@@ -18,9 +18,12 @@ pub mod shmem;
 pub mod slru;
 pub mod xact;
 
-pub use database::pgstat_fetch_stat_dbentry;
+pub use database::{pgstat_fetch_stat_dbentry, pgstat_report_autovac};
 pub use pending::pgstat_clear_snapshot;
-pub use relation::{pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext};
+pub use relation::{
+    pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext, pgstat_report_analyze,
+    pgstat_report_vacuum,
+};
 pub use shmem::{
     pgstat_get_stat_snapshot_timestamp, pgstat_have_entry, pgstat_reset, pgstat_reset_counters,
     pgstat_reset_of_kind, PgStat_StatTabEntry,

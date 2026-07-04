@@ -184,6 +184,18 @@ pub(crate) fn pgstat_update_dbstats(_ts: TimestampTz) {
     });
 }
 
+pub fn pgstat_report_autovac(dboid: Oid) {
+    let key = PgStat_HashKey {
+        kind: PGSTAT_KIND_DATABASE,
+        dboid,
+        objid: 0,
+    };
+    let ts = timestamp_seams::get_current_timestamp::call();
+    crate::shmem::update_database_entry(key, |dbentry| {
+        dbentry.last_autovac_time = ts;
+    });
+}
+
 pub fn pgstat_fetch_stat_dbentry(dboid: Oid) -> Option<PgStat_StatDBEntry> {
     let key = PgStat_HashKey {
         kind: PGSTAT_KIND_DATABASE,

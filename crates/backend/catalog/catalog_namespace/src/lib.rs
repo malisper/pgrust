@@ -203,9 +203,47 @@ pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) {
             MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
             BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
             path::invalidate_search_path_cache();
+            advertise_temp_namespace(InvalidOid);
         }
         MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(InvalidSubTransactionId));
     }
+}
+
+// C: MyProc->tempNamespaceId write; readers are other backends' orphan checks
+// (checkTempNamespaceStatus), so it lives in the PGPROC, not TLS.
+pub(crate) fn advertise_temp_namespace(namespace_id: Oid) {
+    if let Some(procno) = lmgr_proc::MyProc() {
+        lmgr_proc::GetPGProcByNumber(procno)
+            .tempNamespaceId
+            .store(namespace_id, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TempNamespaceStatus {
+    NotTemp,
+    Idle,
+    InUse,
+}
+
+pub fn checkTempNamespaceStatus(namespaceId: Oid) -> PgResult<TempNamespaceStatus> {
+    use std::sync::atomic::Ordering::Relaxed;
+    debug_assert!(OidIsValid(init_small::globals::MyDatabaseId()));
+
+    let proc_number = GetTempNamespaceProcNumber(namespaceId)?;
+    if proc_number == INVALID_PROC_NUMBER {
+        return Ok(TempNamespaceStatus::NotTemp);
+    }
+    let Some(proc) = lmgr_proc::ProcNumberGetProc(proc_number) else {
+        return Ok(TempNamespaceStatus::Idle);
+    };
+    if proc.databaseId.load(Relaxed) != init_small::globals::MyDatabaseId() {
+        return Ok(TempNamespaceStatus::Idle);
+    }
+    if proc.tempNamespaceId.load(Relaxed) != namespaceId {
+        return Ok(TempNamespaceStatus::Idle);
+    }
+    Ok(TempNamespaceStatus::InUse)
 }
 
 pub fn AtEOSubXact_Namespace(
@@ -222,6 +260,7 @@ pub fn AtEOSubXact_Namespace(
             MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
             BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
             path::invalidate_search_path_cache();
+            advertise_temp_namespace(InvalidOid);
         }
     }
 }

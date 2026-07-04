@@ -27,3 +27,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn handle_notify_interrupt()
 );
+
+seam_core::seam!(
+    // AsyncNotifyFreezeXids (async.c): freeze old xids in the notify queue
+    // before CLOG truncation (vac_truncate_clog).
+    pub fn async_notify_freeze_xids(new_frozen_xid: types_core::TransactionId) -> PgResult<()>
+);

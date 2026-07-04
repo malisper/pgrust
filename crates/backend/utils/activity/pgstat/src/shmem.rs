@@ -162,6 +162,28 @@ pub(crate) fn copy_entry(src: PgStat_HashKey, dst: PgStat_HashKey) {
     }
 }
 
+pub(crate) fn update_relation_entry(key: PgStat_HashKey, f: impl FnOnce(&mut PgStat_StatTabEntry)) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Relation(tabentry) = store
+        .entry(key)
+        .or_insert(SharedEntry::Relation(PgStat_StatTabEntry::default()))
+    else {
+        unreachable!("relation key holds non-relation shared entry")
+    };
+    f(tabentry);
+}
+
+pub(crate) fn update_database_entry(key: PgStat_HashKey, f: impl FnOnce(&mut PgStat_StatDBEntry)) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Database(dbentry) = store
+        .entry(key)
+        .or_insert(SharedEntry::Database(PgStat_StatDBEntry::default()))
+    else {
+        unreachable!("database key holds non-database shared entry")
+    };
+    f(dbentry);
+}
+
 struct SnapshotState {
     mode: i32,
     snapshot_timestamp: TimestampTz,

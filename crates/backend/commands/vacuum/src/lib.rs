@@ -43,6 +43,27 @@ use multixact::{
 thread_local! {
     static IN_VACUUM: Cell<bool> = const { Cell::new(false) };
     static VACUUM_FAILSAFE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    // C's working copies (vacuum.c `vacuum_cost_delay`/`vacuum_cost_limit`),
+    // distinct from the VacuumCostDelay/VacuumCostLimit GUC storage:
+    // VacuumUpdateCosts writes these, never the GUC vars.
+    static VACUUM_COST_DELAY: Cell<f64> = const { Cell::new(0.0) };
+    static VACUUM_COST_LIMIT: Cell<i32> = const { Cell::new(200) };
+}
+
+pub fn vacuum_cost_delay() -> f64 {
+    VACUUM_COST_DELAY.get()
+}
+
+pub fn set_vacuum_cost_delay(v: f64) {
+    VACUUM_COST_DELAY.set(v);
+}
+
+pub fn vacuum_cost_limit() -> i32 {
+    VACUUM_COST_LIMIT.get()
+}
+
+pub fn set_vacuum_cost_limit(v: i32) {
+    VACUUM_COST_LIMIT.set(v);
 }
 
 pub fn VacuumFailsafeActive() -> bool {
@@ -182,8 +203,14 @@ pub fn vacuum<'mcx>(
     bstrategy: BufferAccessStrategy,
     is_top_level: bool,
 ) -> PgResult<()> {
-    debug_assert!(params.options & VACOPT_VACUUM != 0);
-    xact::PreventInTransactionBlock(is_top_level, "VACUUM")?;
+    debug_assert!(params.options & (VACOPT_VACUUM | VACOPT_ANALYZE) != 0);
+    // ANALYZE-only callers here are the autovacuum worker (never in a
+    // transaction block); ANALYZE statements go through commands_analyze.
+    if params.options & VACOPT_VACUUM != 0 {
+        xact::PreventInTransactionBlock(is_top_level, "VACUUM")?;
+    } else if xact::IsInTransactionBlock(is_top_level) {
+        unported("vacuum: ANALYZE inside a transaction block (use_own_xacts=false)");
+    }
 
     if IN_VACUUM.get() {
         return Err(ereport(ERROR)
@@ -193,8 +220,8 @@ pub fn vacuum<'mcx>(
             .into());
     }
 
-    if params.options & (VACOPT_ONLY_DATABASE_STATS | VACOPT_SKIP_DATABASE_STATS) != 0 {
-        unported("vacuum: database-stats options");
+    if params.options & VACOPT_ONLY_DATABASE_STATS != 0 {
+        unported("vacuum: ONLY_DATABASE_STATS");
     }
     if relations.is_nil() {
         unported("get_all_vacuum_rels (database-wide VACUUM)");
@@ -222,14 +249,18 @@ pub fn vacuum<'mcx>(
 
     IN_VACUUM.set(true);
     VACUUM_FAILSAFE_ACTIVE.set(false);
+    autovacuum_seams::vacuum_update_costs::call()?;
+    init_small::globals::SetVacuumCostBalance(0);
     // catch_unwind = C's PG_FINALLY: panics become ERRORs at the tcop
     // boundary and the session survives, so in_vacuum must reset here too.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
         for vrel in vacrels.iter() {
-            let params_copy = *params;
-            if !vacuum_rel(mcx, vrel.oid, vrel.relname, &params_copy, bstrategy.clone())? {
-                VACUUM_FAILSAFE_ACTIVE.set(false);
-                continue;
+            if params.options & VACOPT_VACUUM != 0 {
+                let params_copy = *params;
+                if !vacuum_rel(mcx, vrel.oid, vrel.relname, &params_copy, bstrategy.clone())? {
+                    VACUUM_FAILSAFE_ACTIVE.set(false);
+                    continue;
+                }
             }
             VACUUM_FAILSAFE_ACTIVE.set(false);
             if params.options & VACOPT_ANALYZE != 0 {
@@ -252,7 +283,9 @@ pub fn vacuum<'mcx>(
         Ok(())
     }));
     IN_VACUUM.set(false);
+    init_small::globals::SetVacuumCostActive(false);
     VACUUM_FAILSAFE_ACTIVE.set(false);
+    init_small::globals::SetVacuumCostBalance(0);
     match result {
         Ok(r) => r?,
         Err(p) => std::panic::resume_unwind(p),
@@ -261,8 +294,11 @@ pub fn vacuum<'mcx>(
     // Matches the CommitTransaction waiting in PostgresMain.
     xact::StartTransactionCommand()?;
 
-    // C divergence (recorded): vac_update_datfrozenxid is skipped — the
-    // pg_database inplace-update lane is unported.
+    if params.options & VACOPT_VACUUM != 0
+        && params.options & VACOPT_SKIP_DATABASE_STATS == 0
+    {
+        vac_update_datfrozenxid(mcx)?;
+    }
     Ok(())
 }
 
@@ -491,6 +527,13 @@ pub fn vacuum_open_relation<'mcx>(
     let Some(relname) = relname else {
         return Ok(None);
     };
+    // C: autovacuum workers stay silent here unless verbose (divergence:
+    // keyed off VACOPT_VERBOSE, C keys off log_min_duration >= 0).
+    if miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+        && options & VACOPT_VERBOSE == 0
+    {
+        return Ok(None);
+    }
     let verb = if options & VACOPT_VACUUM != 0 { "vacuum" } else { "analyze" };
     let (code, why) = if rel_lock {
         (ERRCODE_UNDEFINED_TABLE, "relation no longer exists")
@@ -672,6 +715,10 @@ pub fn vac_estimate_reltuples(
 const RelationRelationId: Oid = 1259;
 const ClassOidIndexId: Oid = 2662;
 const Natts_pg_class: usize = 34;
+const DatabaseRelationId: Oid = 1262;
+const Anum_pg_class_relkind: usize = 18;
+const Anum_pg_class_relfrozenxid: usize = 30;
+const Anum_pg_class_relminmxid: usize = 31;
 const Anum_pg_class_oid: usize = 1;
 const Anum_pg_class_relpages: usize = 10;
 const Anum_pg_class_reltuples: usize = 11;
@@ -834,6 +881,219 @@ pub fn vac_update_relstats(
     Ok(())
 }
 
+pub fn vac_update_datfrozenxid(mcx: Mcx<'_>) -> PgResult<()> {
+    use init_small::globals::MyDatabaseId;
+
+    // One backend per database at a time; released at transaction end (C shape).
+    lmgr::LockDatabaseFrozenIds(::types_rel::lock::ExclusiveLock)?;
+
+    let mut new_frozen_xid = procarray::GetOldestNonRemovableTransactionIdShared()?;
+    let mut new_min_multi = GetOldestMultiXactId()?;
+    let last_sane_frozen_xid = varsup::ReadNextTransactionId()?;
+    let last_sane_min_multi = ReadNextMultiXactId()?;
+
+    let rd = table::table_open(mcx, RelationRelationId, AccessShareLock)?;
+    let desc = rd.descr();
+    let mut scan = genam::systable_beginscan(mcx, &rd, InvalidOid, false, None, &[])?;
+    let mut bogus = false;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let relkind = getattr(tup, Anum_pg_class_relkind, desc).as_u8();
+        let relfrozenxid = getattr(tup, Anum_pg_class_relfrozenxid, desc).as_u32();
+        let relminmxid: MultiXactId = getattr(tup, Anum_pg_class_relminmxid, desc).as_u32();
+        if !matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE) {
+            debug_assert!(!::types_core::xact::TransactionIdIsValid(relfrozenxid));
+            debug_assert!(!MultiXactIdIsValid(relminmxid));
+            continue;
+        }
+        if ::types_core::xact::TransactionIdIsValid(relfrozenxid) {
+            debug_assert!(TransactionIdIsNormal(relfrozenxid));
+            if TransactionIdPrecedes(last_sane_frozen_xid, relfrozenxid) {
+                bogus = true;
+                break;
+            }
+            if TransactionIdPrecedes(relfrozenxid, new_frozen_xid) {
+                new_frozen_xid = relfrozenxid;
+            }
+        }
+        if MultiXactIdIsValid(relminmxid) {
+            if MultiXactIdPrecedes(last_sane_min_multi, relminmxid) {
+                bogus = true;
+                break;
+            }
+            if MultiXactIdPrecedes(relminmxid, new_min_multi) {
+                new_min_multi = relminmxid;
+            }
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    table::table_close(rd, AccessShareLock)?;
+
+    if bogus {
+        return Ok(());
+    }
+    debug_assert!(TransactionIdIsNormal(new_frozen_xid));
+    debug_assert!(MultiXactIdIsValid(new_min_multi));
+
+    let rd = table::table_open(mcx, DatabaseRelationId, RowExclusiveLock)?;
+    let mut key = ::types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = pg_database::Anum_pg_database_oid as i16;
+    key.sk_strategy = ::types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(::types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = ::datum::Datum::from_oid(MyDatabaseId());
+
+    let Some((ctup, inplace_state)) = genam::systable_inplace_update_begin(
+        mcx,
+        &rd,
+        pg_database::DatabaseOidIndexId,
+        true,
+        &[key],
+    )?
+    else {
+        return Err(::types_error::PgError::error(format!(
+            "could not find tuple for database {}",
+            MyDatabaseId()
+        ))
+        .into());
+    };
+
+    let desc = rd.descr();
+    let old = ctup.as_tuple();
+    let datfrozenxid = getattr(old, pg_database::Anum_pg_database_datfrozenxid as usize, desc).as_u32();
+    let datminmxid: MultiXactId =
+        getattr(old, pg_database::Anum_pg_database_datminmxid as usize, desc).as_u32();
+
+    let mut values = [::datum::Datum::null(); pg_database::Natts_pg_database];
+    let nulls = [false; pg_database::Natts_pg_database];
+    let mut replaces = [false; pg_database::Natts_pg_database];
+    let mut dirty = false;
+
+    // Never let the value go backward unless the stored one is "in the future"
+    // (corrupt) — C's exact rule.
+    if datfrozenxid != new_frozen_xid
+        && (TransactionIdPrecedes(datfrozenxid, new_frozen_xid)
+            || TransactionIdPrecedes(last_sane_frozen_xid, datfrozenxid))
+    {
+        values[pg_database::Anum_pg_database_datfrozenxid as usize - 1] =
+            ::datum::Datum::from_u32(new_frozen_xid);
+        replaces[pg_database::Anum_pg_database_datfrozenxid as usize - 1] = true;
+        dirty = true;
+    } else {
+        new_frozen_xid = datfrozenxid;
+    }
+    if datminmxid != new_min_multi
+        && (MultiXactIdPrecedes(datminmxid, new_min_multi)
+            || MultiXactIdPrecedes(last_sane_min_multi, datminmxid))
+    {
+        values[pg_database::Anum_pg_database_datminmxid as usize - 1] =
+            ::datum::Datum::from_u32(new_min_multi);
+        replaces[pg_database::Anum_pg_database_datminmxid as usize - 1] = true;
+        dirty = true;
+    } else {
+        new_min_multi = datminmxid;
+    }
+
+    if dirty {
+        let newtup = heaptuple::heap_modify_tuple(mcx, old, desc, &values, &nulls, &replaces)?;
+        genam::systable_inplace_update_finish(mcx, inplace_state, newtup.as_tuple())?;
+    } else {
+        genam::systable_inplace_update_cancel(mcx, inplace_state)?;
+    }
+    table::table_close(rd, RowExclusiveLock)?;
+
+    if dirty || varsup::ForceTransactionIdLimitUpdate()? {
+        vac_truncate_clog(mcx, new_frozen_xid, new_min_multi, last_sane_frozen_xid, last_sane_min_multi)?;
+    }
+    Ok(())
+}
+
+// C: WrapLimitsVacuumLock LWLock (one truncation task per cluster).
+static WRAP_LIMITS_VACUUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn vac_truncate_clog(
+    mcx: Mcx<'_>,
+    mut frozen_xid: ::types_core::TransactionId,
+    mut min_multi: MultiXactId,
+    last_sane_frozen_xid: ::types_core::TransactionId,
+    last_sane_min_multi: MultiXactId,
+) -> PgResult<()> {
+    use init_small::globals::MyDatabaseId;
+
+    let next_xid = varsup::ReadNextTransactionId()?;
+    let _guard = WRAP_LIMITS_VACUUM_LOCK.lock().unwrap();
+
+    let mut oldestxid_datoid = MyDatabaseId();
+    let mut minmulti_datoid = MyDatabaseId();
+    let mut bogus = false;
+    let mut frozen_already_wrapped = false;
+
+    let rd = table::table_open(mcx, DatabaseRelationId, AccessShareLock)?;
+    let desc = rd.descr();
+    let mut scan = genam::systable_beginscan(mcx, &rd, InvalidOid, false, None, &[])?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let oid = getattr(tup, pg_database::Anum_pg_database_oid as usize, desc).as_oid();
+        let datconnlimit =
+            getattr(tup, pg_database::Anum_pg_database_datconnlimit as usize, desc).as_i32();
+        let datfrozenxid =
+            getattr(tup, pg_database::Anum_pg_database_datfrozenxid as usize, desc).as_u32();
+        let datminmxid: MultiXactId =
+            getattr(tup, pg_database::Anum_pg_database_datminmxid as usize, desc).as_u32();
+
+        debug_assert!(TransactionIdIsNormal(datfrozenxid));
+        debug_assert!(MultiXactIdIsValid(datminmxid));
+
+        // Databases being dropped can't be connected to or autovacuumed.
+        if datconnlimit == pg_database::DATCONNLIMIT_INVALID_DB {
+            continue;
+        }
+
+        if TransactionIdPrecedes(last_sane_frozen_xid, datfrozenxid)
+            || MultiXactIdPrecedes(last_sane_min_multi, datminmxid)
+        {
+            bogus = true;
+        }
+
+        if TransactionIdPrecedes(next_xid, datfrozenxid) {
+            frozen_already_wrapped = true;
+        } else if TransactionIdPrecedes(datfrozenxid, frozen_xid) {
+            frozen_xid = datfrozenxid;
+            oldestxid_datoid = oid;
+        }
+
+        if MultiXactIdPrecedes(datminmxid, min_multi) {
+            min_multi = datminmxid;
+            minmulti_datoid = oid;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    table::table_close(rd, AccessShareLock)?;
+
+    if frozen_already_wrapped {
+        ereport(WARNING)
+            .errmsg("some databases have not been vacuumed in over 2 billion transactions")
+            .errdetail("You might have already suffered transaction-wraparound data loss.")
+            .finish(loc("vac_truncate_clog"))?;
+        return Ok(());
+    }
+    if bogus {
+        return Ok(());
+    }
+
+    async_seams::async_notify_freeze_xids::call(frozen_xid)?;
+
+    if guc_tables::vars::track_commit_timestamp.read() {
+        unported("vac_truncate_clog: commit_ts truncation (AdvanceOldestCommitTsXid/TruncateCommitTs)");
+    }
+
+    clog::TruncateCLOG(frozen_xid, oldestxid_datoid)?;
+    multixact::TruncateMultiXact(min_multi, minmulti_datoid)?;
+
+    varsup::SetTransactionIdLimit(frozen_xid, oldestxid_datoid)?;
+    multixact::SetMultiXactIdLimit(min_multi, minmulti_datoid, false)?;
+    Ok(())
+}
+
 macro_rules! vacuum_guc_int {
     ($($cell:ident, $var:ident, $boot:expr;)+) => {
         $( static $cell: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new($boot); )+
@@ -920,8 +1180,41 @@ pub fn vac_cleanup_one_index<'mcx>(
 }
 
 pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {
-    if init_small::globals::VacuumCostActive() {
-        unported("vacuum_delay_point: cost-based delay (VacuumCostActive)");
+    use init_small::globals as g;
+
+    postgres_seams::check_for_interrupts::call()?;
+
+    if g::InterruptPending() || (!g::VacuumCostActive() && !interrupt::ConfigReloadPending()) {
+        return Ok(());
+    }
+
+    if interrupt::ConfigReloadPending()
+        && miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+    {
+        interrupt::SetConfigReloadPending(false);
+        guc_file_seams::process_config_file::call(::types_guc::GucContext::PGC_SIGHUP)?;
+        autovacuum_seams::vacuum_update_costs::call()?;
+    }
+
+    if !g::VacuumCostActive() {
+        return Ok(());
+    }
+
+    // VacuumSharedCostBalance parallel arm: vacuumparallel unported.
+    let mut msec = 0.0f64;
+    if g::VacuumCostBalance() >= vacuum_cost_limit() {
+        msec = vacuum_cost_delay() * g::VacuumCostBalance() as f64 / vacuum_cost_limit() as f64;
+    }
+
+    if msec > 0.0 {
+        if msec > vacuum_cost_delay() * 4.0 {
+            msec = vacuum_cost_delay() * 4.0;
+        }
+        // track_cost_delay_timing progress increments: progress-reporting lane.
+        std::thread::sleep(std::time::Duration::from_micros((msec * 1000.0) as u64));
+        g::SetVacuumCostBalance(0);
+        autovacuum_seams::auto_vacuum_update_cost_limit::call()?;
+        postgres_seams::check_for_interrupts::call()?;
     }
     Ok(())
 }

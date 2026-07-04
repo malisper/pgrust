@@ -122,6 +122,12 @@ pub fn ConditionalLockRelationOid(relid: Oid, lockmode: LOCKMODE) -> PgResult<bo
     Ok(true)
 }
 
+pub fn LockDatabaseFrozenIds(lockmode: LOCKMODE) -> PgResult<()> {
+    let tag = LOCKTAG::database_frozen_ids(init_small::globals::MyDatabaseId());
+    acquire(tag, lockmode, false)?;
+    Ok(())
+}
+
 pub fn LockRelationId(relid: &LockRelId, lockmode: LOCKMODE) -> PgResult<()> {
     let tag = LOCKTAG::relation(relid.dbId, relid.relId);
     let res = acquire(tag, lockmode, false)?;

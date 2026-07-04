@@ -524,6 +524,7 @@ pub fn StartAutovacuumWorker() {
     if canAcceptConnections(BackendType::AutovacWorker) == CacState::Ok {
         let c = StartChildProcess(BackendType::AutovacWorker);
         if c.is_none() {
+            autovacuum_seams::autovac_worker_failed::call();
             with_pm(|pm| pm.avlauncher_needs_signal = true);
         }
     }
