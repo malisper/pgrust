@@ -788,10 +788,58 @@ pub fn RelationGetSmgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
 #[cold]
 #[inline(never)]
 fn rel_open_smgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
-    let h = smgropen_handle(rel.rd_locator.get(), rel.rd_backend)?;
+    let h = smgropen_handle(rel_file_locator(rel), rel.rd_backend)?;
     smgrpin_h(h);
     rel.rd_smgr.set(Some(h));
     Ok(h)
+}
+
+/// rd_locator read; the compute arm backfills entries built outside relcache
+/// (tests, pre-InitPhysicalAddr builds) with RelationInitPhysicalAddr's
+/// steady-state rules — C's invariant is "valid before any smgr access".
+/// Twin of bufmgr::rel_locator_backend's compute arm (seam boundary keeps
+/// the crates apart).
+pub fn rel_file_locator(rel: &RelationData<'_>) -> RelFileLocator {
+    let locator = rel.rd_locator.get();
+    if locator.relNumber != 0 {
+        return locator;
+    }
+    compute_rel_locator(rel)
+}
+
+const DEFAULTTABLESPACE_OID: ::types_core::Oid = 1663;
+const GLOBALTABLESPACE_OID: ::types_core::Oid = 1664;
+
+#[cold]
+#[inline(never)]
+fn compute_rel_locator(rel: &RelationData<'_>) -> RelFileLocator {
+    let form = &rel.rd_rel;
+    let rel_number = if form.relfilenode == 0 {
+        let n = relmapper_seams::relation_map_oid_to_filenumber::call(rel.rd_id, form.relisshared);
+        // C elog(ERROR)s on a missing mapping; can't-happen once maps load.
+        assert!(
+            n != 0,
+            "could not find relation mapping for relation \"{}\", OID {}",
+            String::from_utf8_lossy(form.relname.name_str()),
+            rel.rd_id
+        );
+        n
+    } else {
+        form.relfilenode
+    };
+    let spc = if form.reltablespace != 0 {
+        form.reltablespace
+    } else {
+        DEFAULTTABLESPACE_OID
+    };
+    let db = if spc == GLOBALTABLESPACE_OID {
+        0
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    let locator = RelFileLocator { spcOid: spc, dbOid: db, relNumber: rel_number };
+    rel.rd_locator.set(locator);
+    locator
 }
 
 // rel.h RelationCloseSmgr.
