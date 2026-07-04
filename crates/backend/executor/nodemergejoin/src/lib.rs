@@ -418,6 +418,7 @@ fn eval_qual_with<'mcx>(
     exec_qual(state, &mut slots)
 }
 
+#[inline(always)]
 fn eval_qual_subplan_aware<'mcx>(
     node: &mut MergeJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,

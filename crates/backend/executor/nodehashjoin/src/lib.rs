@@ -818,6 +818,7 @@ pub fn exec_rescan_hash_join<'mcx>(
     Ok(rescan_inner)
 }
 
+#[inline(always)]
 fn eval_probe_qual<'mcx>(
     qual: Option<&mut ExprState<'mcx>>,
     ecxt: EcxtId,
