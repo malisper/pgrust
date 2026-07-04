@@ -12230,6 +12230,7 @@ dependencies = [
  "twophase",
  "twophase_config",
  "typcache",
+ "typecmds",
  "types_fmgr",
  "user",
  "utility",
@@ -13534,9 +13535,11 @@ dependencies = [
  "partcache",
  "partdesc",
  "pg_attrdef",
+ "pg_class_seams",
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
+ "pg_shdepend",
  "pg_type",
  "pgstat",
  "planner",
@@ -13567,6 +13570,7 @@ dependencies = [
  "trigger",
  "tupdesc",
  "typcache",
+ "typecmds_seams",
  "types_array",
  "types_core",
  "types_error",
@@ -14450,6 +14454,7 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds",
+ "typecmds_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -14459,6 +14464,16 @@ dependencies = [
  "varlena",
  "vars",
  "xact",
+]
+
+[[package]]
+name = "typecmds_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]

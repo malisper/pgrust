@@ -756,24 +756,9 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_SetOptions
         | AlterTableType::AT_ResetOptions => AT_PASS_MISC,
         AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => AT_PASS_MISC,
-        AlterTableType::AT_AttachPartition => {
-            if !partitioned {
-                return Err(at_wrong_relkind("ATTACH PARTITION", rel.name()));
-            }
-            AT_PASS_MISC
-        }
-        AlterTableType::AT_DetachPartition => {
-            if !partitioned {
-                return Err(at_wrong_relkind("DETACH PARTITION", rel.name()));
-            }
-            AT_PASS_MISC
-        }
-        AlterTableType::AT_DetachPartitionFinalize => {
-            if !partitioned {
-                return Err(at_wrong_relkind("DETACH PARTITION ... FINALIZE", rel.name()));
-            }
-            AT_PASS_MISC
-        }
+        AlterTableType::AT_AttachPartition
+        | AlterTableType::AT_DetachPartition
+        | AlterTableType::AT_DetachPartitionFinalize => AT_PASS_MISC,
         AlterTableType::AT_AddInherit => {
             ATPrepAddInherit(rel)?;
             AT_PASS_MISC
@@ -4752,19 +4737,6 @@ fn undefined_column(col_name: &str, relname: &str) -> Box<PgError> {
             format!("column \"{col_name}\" of relation \"{relname}\" does not exist"),
         )
         .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn at_wrong_relkind(action: &str, relname: &str) -> Box<PgError> {
-    Box::new(
-        PgError::new(
-            ERROR,
-            format!("ALTER action {action} cannot be performed on relation \"{relname}\""),
-        )
-        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
-        .with_detail("This operation is not supported for tables.".to_string()),
     )
 }
 
