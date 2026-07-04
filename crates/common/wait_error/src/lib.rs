@@ -1,6 +1,9 @@
-//! src/common/wait_error.c, hosted here until common-extra-srv-batch4 lands;
-//! system(3) via std::process, raw wait word preserved.
+//! src/common/wait_error.c
 
+#![allow(non_snake_case)]
+
+// Not from wait_error.c: a system(3) wrapper colocated here since every
+// caller immediately feeds its raw wait status into wait_result_to_str et al.
 pub fn system(command: &str) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     match std::process::Command::new("/bin/sh").arg("-c").arg(command).status() {
@@ -86,4 +89,65 @@ pub fn wait_result_is_any_signal(exit_status: i32, include_command_not_found: bo
         return true;
     }
     false
+}
+
+pub fn wait_result_to_exit_code(exit_status: i32) -> i32 {
+    if exit_status == -1 {
+        return -1;
+    }
+    if WIFEXITED(exit_status) {
+        return WEXITSTATUS(exit_status);
+    }
+    if WIFSIGNALED(exit_status) {
+        return 128 + WTERMSIG(exit_status);
+    }
+    -1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exited(code: i32) -> i32 {
+        code << 8
+    }
+
+    fn signaled(sig: i32) -> i32 {
+        sig
+    }
+
+    #[test]
+    fn exit_code_classification() {
+        assert_eq!(wait_result_to_str(exited(0)), "child process exited with exit code 0");
+        assert_eq!(wait_result_to_str(exited(126)), "command not executable");
+        assert_eq!(wait_result_to_str(exited(127)), "command not found");
+    }
+
+    #[test]
+    fn signal_classification() {
+        assert!(WIFSIGNALED(signaled(libc::SIGTERM)));
+        assert_eq!(WTERMSIG(signaled(libc::SIGTERM)), libc::SIGTERM);
+    }
+
+    #[test]
+    fn is_signal_matches_direct_and_shell_form() {
+        assert!(wait_result_is_signal(signaled(libc::SIGTERM), libc::SIGTERM));
+        assert!(wait_result_is_signal(exited(128 + libc::SIGTERM), libc::SIGTERM));
+        assert!(!wait_result_is_signal(exited(1), libc::SIGTERM));
+    }
+
+    #[test]
+    fn is_any_signal_includes_shell_not_found_when_requested() {
+        assert!(wait_result_is_any_signal(exited(127), true));
+        assert!(!wait_result_is_any_signal(exited(127), false));
+        assert!(wait_result_is_any_signal(exited(129), false));
+        assert!(wait_result_is_any_signal(signaled(libc::SIGKILL), false));
+    }
+
+    #[test]
+    fn exit_code_roundtrip() {
+        assert_eq!(wait_result_to_exit_code(exited(3)), 3);
+        assert_eq!(wait_result_to_exit_code(signaled(libc::SIGTERM)), 128 + libc::SIGTERM);
+        assert_eq!(wait_result_to_exit_code(-1), -1);
+    }
 }

@@ -21,6 +21,7 @@ mod tokenize;
 
 
 use elog::ereport;
+pub use pgstrcasecmp::pg_strcasecmp;
 use types_core::init::UserAuth;
 use types_error::{ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_CONFIG_FILE_ERROR, LOG};
 use types_startup::{AuthToken, HbaLine, Port};
@@ -107,28 +108,6 @@ pub(crate) fn token_matches_insensitive(t: &AuthToken, k: &[u8]) -> bool {
 // which panics loudly on '/'-prefixed tokens (regex engine unported).
 pub(crate) fn token_has_regexp(_t: &AuthToken) -> bool {
     false
-}
-
-// pg_strcasecmp (port/pgstrcasecmp.c): ASCII-insensitive, high-bit bytes as
-// unsigned char; length difference at the common prefix is the '\0' compare.
-pub fn pg_strcasecmp(s1: &[u8], s2: &[u8]) -> i32 {
-    let n = s1.len().min(s2.len());
-    for i in 0..n {
-        let mut c1 = s1[i];
-        let mut c2 = s2[i];
-        if c1 != c2 {
-            if c1.is_ascii_uppercase() {
-                c1 += b'a' - b'A';
-            }
-            if c2.is_ascii_uppercase() {
-                c2 += b'a' - b'A';
-            }
-            if c1 != c2 {
-                return c1 as i32 - c2 as i32;
-            }
-        }
-    }
-    s1.len() as i32 - s2.len() as i32
 }
 
 pub(crate) fn line_context(line_num: i32, file_name: &str) -> String {

@@ -1,4 +1,4 @@
-//! src/common/percentrepl.c, hosted here until common-percentrepl lands.
+//! src/common/percentrepl.c
 
 use elog::ereport;
 use types_error::{ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
@@ -53,4 +53,41 @@ pub fn replace_percent_placeholders(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn double_percent_is_literal() {
+        assert_eq!(replace_percent_placeholders("100%%", "p", &[]).unwrap(), "100%");
+    }
+
+    #[test]
+    fn placeholder_substitution() {
+        let v = [('f', Some("file")), ('p', Some("path"))];
+        assert_eq!(
+            replace_percent_placeholders("cp %p %f", "archive_command", &v).unwrap(),
+            "cp path file"
+        );
+    }
+
+    #[test]
+    fn trailing_percent_errors() {
+        let err = replace_percent_placeholders("abc%", "p", &[]).unwrap_err();
+        assert!(err.message().contains("invalid value for parameter"));
+    }
+
+    #[test]
+    fn unsupported_placeholder_errors() {
+        let err = replace_percent_placeholders("%z", "p", &[('f', Some("x"))]).unwrap_err();
+        assert!(err.message().contains("invalid value for parameter"));
+    }
+
+    #[test]
+    fn null_value_is_unsupported() {
+        let err = replace_percent_placeholders("%r", "p", &[('r', None)]).unwrap_err();
+        assert!(err.message().contains("invalid value for parameter"));
+    }
 }

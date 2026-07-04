@@ -2,6 +2,7 @@
 //! match, ties to the earliest rule, exclusive states xq/xnq/xvq/xc.
 
 use ::mcx::{Mcx, PgVec};
+use ::pgstrcasecmp::pg_strncasecmp;
 use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use ::types_error::{
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNTRANSLATABLE_CHARACTER,
@@ -127,26 +128,6 @@ static KEYWORDS: &[Keyword] = &[
     Keyword { len: 10, lowercase: false, val: Token::LikeRegexP, keyword: b"like_regex" },
     Keyword { len: 12, lowercase: false, val: Token::TimestampTzP, keyword: b"timestamp_tz" },
 ];
-
-fn pg_strncasecmp(a: &[u8], b: &[u8], n: usize) -> i32 {
-    for i in 0..n {
-        let mut ca = a.get(i).copied().unwrap_or(0);
-        let mut cb = b.get(i).copied().unwrap_or(0);
-        if ca.is_ascii_uppercase() {
-            ca += b'a' - b'A';
-        }
-        if cb.is_ascii_uppercase() {
-            cb += b'a' - b'A';
-        }
-        if ca != cb {
-            return ca as i32 - cb as i32;
-        }
-        if ca == 0 {
-            return 0;
-        }
-    }
-    0
-}
 
 fn strncmp(a: &[u8], b: &[u8], n: usize) -> i32 {
     for i in 0..n {

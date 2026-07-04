@@ -18,7 +18,9 @@ init_small = { path = "../../../utils/init/init_small" }
 ipc = { path = "../../../storage/ipc/ipc" }
 pgarch = { path = "../../../postmaster/pgarch" }
 postmaster_startup = { path = "../../../postmaster/startup" }
-shell_archive = { path = "../../../archive/shell_archive" }
+archive = { path = "../../../../common/archive" }
+percentrepl = { path = "../../../../common/percentrepl" }
+wait_error = { path = "../../../../common/wait_error" }
 transam_xlog = { path = "../transam_xlog" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 xlogarchive_seams = { path = "../xlogarchive_seams" }

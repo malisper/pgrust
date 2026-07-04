@@ -17,6 +17,7 @@ xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+pg_bitutils = { path = "../../../../port/pg_bitutils" }
 
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }
