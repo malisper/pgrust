@@ -1,20 +1,26 @@
-//! nbtdedup.c write side: _bt_dedup_pass + single value strategy. Loud:
-//! _bt_bottomupdel_pass (deletion lane), _bt_update_posting (vacuum lane).
+//! nbtdedup.c write side: _bt_dedup_pass + single value strategy +
+//! _bt_bottomupdel_pass. Loud: _bt_update_posting (vacuum lane).
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
+use ::mcx::{vec_with_capacity_in, Mcx};
+use ::tableam::{TM_IndexDelete, TM_IndexDeleteOp, TM_IndexStatus};
 use ::types_core::{OffsetNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult};
 use ::types_nbtree::dedup::BTDedupState;
 use ::types_nbtree::{
-    BTMaxItemSize, BTPageOpaqueData, BTP_HAS_GARBAGE, BTREE_SINGLEVAL_FILLFACTOR,
-    P_FIRSTDATAKEY, P_HAS_GARBAGE, P_HIKEY, P_RIGHTMOST, XLOG_BTREE_DEDUP,
+    BTMaxItemSize, BTPageOpaqueData, MaxTIDsPerBTreePage, BTP_HAS_GARBAGE,
+    BTREE_SINGLEVAL_FILLFACTOR, P_FIRSTDATAKEY, P_HAS_GARBAGE, P_HIKEY, P_RIGHTMOST,
+    XLOG_BTREE_DEDUP,
 };
 use ::types_rel::Relation;
-use ::types_storage::bufpage::{PageMut, SizeOfPageHeaderData};
-use ::types_tuple::itemptr::ItemPointerData;
+use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
+use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
 
-use crate::itup::{maxalign, ITup, INDEX_SIZE_MASK};
+use crate::itup::{
+    bt_tuple_get_max_heap_tid, bt_tuple_get_nposting, bt_tuple_get_posting_n,
+    bt_tuple_is_posting, maxalign, t_tid, ITup, INDEX_SIZE_MASK,
+};
 use crate::page::{page_item, page_of_mut, page_opaque, write_opaque};
 use crate::relation_needs_wal;
 use crate::utils::bt_keep_natts_fast;
@@ -161,6 +167,135 @@ pub(crate) unsafe fn bt_dedup_pass(
         pagesaving < newitemsz || buf.page().exact_free_space() >= newitemsz
     );
     Ok(())
+}
+
+/// _bt_bottomupdel_pass: returns true when enough space was freed (or when a
+/// follow-up dedup pass would be useless).
+/// # Safety
+/// As [`bt_dedup_pass`]; page has no LP_DEAD items.
+pub(crate) unsafe fn bt_bottomupdel_pass<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    buf: &BufferPin,
+    heap_rel: &Relation<'mcx>,
+    newitemsz: usize,
+) -> PgResult<bool> {
+    let page = buf.page();
+    let opaque = page_opaque(&page);
+    let nkeyatts = rel.indnkeyatts();
+
+    let newitemsz = newitemsz + SizeOfItemId;
+
+    // "not really deduplicating": TIDs feed delstate, never a posting image
+    let mut state = BTDedupState::new(BLCKSZ);
+
+    let mut delstate = TM_IndexDeleteOp {
+        irel: rel.alias(),
+        iblknum: buf.block_number(),
+        bottomup: true,
+        bottomupfreespace: (BLCKSZ / 16).max(newitemsz) as i32,
+        ndeltids: 0,
+        deltids: vec_with_capacity_in(mcx, MaxTIDsPerBTreePage)?,
+        status: vec_with_capacity_in(mcx, MaxTIDsPerBTreePage)?,
+    };
+
+    let minoff = P_FIRSTDATAKEY(&opaque);
+    let maxoff = page.max_offset_number();
+    for offnum in minoff..=maxoff {
+        let itemid = page.item_id(offnum);
+        let itup = page_item(&page, itemid);
+        debug_assert!(!itemid.is_dead());
+
+        if offnum == minoff {
+            state.start_pending(itup, offnum);
+        } else if bt_keep_natts_fast(rel, state.base, itup) > nkeyatts && state.save_htid(itup) {
+        } else {
+            bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate);
+            state.start_pending(itup, offnum);
+        }
+    }
+    bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate);
+
+    // zero promising tuples: still ask the tableam, but tell caller to skip
+    // the pointless deduplication pass that would otherwise follow
+    let neverdedup = state.nintervals == 0;
+
+    crate::delete::bt_delitems_delete_check(mcx, rel, buf, heap_rel, &mut delstate)?;
+
+    if neverdedup {
+        return Ok(true);
+    }
+
+    Ok(buf.page().exact_free_space() >= (BLCKSZ / 24).max(newitemsz))
+}
+
+// _bt_bottomupdel_finish_pending: intervals become deletion candidates.
+unsafe fn bt_bottomupdel_finish_pending(
+    page: &PageRef<'_>,
+    state: &mut BTDedupState,
+    delstate: &mut TM_IndexDeleteOp<'_>,
+) {
+    let dupinterval = state.nitems > 1;
+    debug_assert!(state.nitems > 0);
+    debug_assert!(state.nitems <= state.nhtids);
+    debug_assert!(state.intervals[state.nintervals].baseoff == state.baseoff);
+
+    for i in 0..state.nitems {
+        let offnum = state.baseoff + i as OffsetNumber;
+        let itemid = page.item_id(offnum);
+        let itup = page_item(page, itemid);
+
+        if !bt_tuple_is_posting(itup) {
+            delstate.deltids.push(TM_IndexDelete {
+                tid: t_tid(itup),
+                id: delstate.deltids.len() as i16,
+            });
+            delstate.status.push(TM_IndexStatus {
+                idxoffnum: offnum,
+                knowndeletable: false,
+                promising: dupinterval,
+                freespace: (itemid.lp_len() as usize + SizeOfItemId) as i16,
+            });
+        } else {
+            // at most one promising TID per posting list: first or last, and
+            // only when its table block predominates within the posting list
+            let nitem = bt_tuple_get_nposting(itup);
+            let mut firstpromising = false;
+            let mut lastpromising = false;
+
+            if dupinterval {
+                let minblk = ItemPointerGetBlockNumber(&bt_tuple_get_posting_n(itup, 0));
+                let midblk = ItemPointerGetBlockNumber(&bt_tuple_get_posting_n(itup, nitem / 2));
+                let maxblk = ItemPointerGetBlockNumber(&bt_tuple_get_max_heap_tid(itup));
+                firstpromising = minblk == midblk;
+                lastpromising = !firstpromising && midblk == maxblk;
+            }
+
+            for p in 0..nitem {
+                delstate.deltids.push(TM_IndexDelete {
+                    tid: bt_tuple_get_posting_n(itup, p),
+                    id: delstate.deltids.len() as i16,
+                });
+                delstate.status.push(TM_IndexStatus {
+                    idxoffnum: offnum,
+                    knowndeletable: false,
+                    promising: (firstpromising && p == 0)
+                        || (lastpromising && p == nitem - 1),
+                    freespace: core::mem::size_of::<ItemPointerData>() as i16, // at worst
+                });
+            }
+        }
+    }
+    delstate.ndeltids = delstate.deltids.len() as i32;
+
+    if dupinterval {
+        state.intervals[state.nintervals].nitems = state.nitems as u16;
+        state.nintervals += 1;
+    }
+
+    state.nhtids = 0;
+    state.nitems = 0;
+    state.phystupsize = 0;
 }
 
 /// _bt_do_singleval.

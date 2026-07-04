@@ -1122,6 +1122,58 @@ fn posting_split_page_split_coincidence_keeps_every_tid() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
+fn bottomup_deletion_avoids_split_when_chains_are_dead() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    HEAP_PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.push(leak_page(build_dead_heap_page(220)));
+        pages.push(leak_page(build_dead_heap_page(220)));
+    });
+
+    // indexUnchanged inserts over all-dead HOT chains: page fill triggers
+    // _bt_bottomupdel_pass (no LP_DEAD bits anywhere), which must free space
+    // instead of splitting.
+    let unchanged_insert = |k: i32, htid: ItemPointerData| {
+        let icx = MemoryContext::new("ins");
+        crate::btinsert(
+            icx.mcx(),
+            &rel,
+            &[Datum::from_i32(k)],
+            &[false],
+            &htid,
+            &heap,
+            ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
+            true,
+        )
+        .unwrap();
+    };
+
+    for k in 1..=440u32 {
+        let (blk, pos) = ((k - 1) / 220, ((k - 1) % 220 + 1) as u16);
+        unchanged_insert(k as i32, tid(blk, pos));
+    }
+
+    let infos = wal_infos();
+    assert!(
+        infos.contains(&::types_nbtree::XLOG_BTREE_DELETE),
+        "bottom-up deletion must have fired: {infos:?}"
+    );
+    assert!(
+        !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_L)
+            && !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R),
+        "page split avoided: {infos:?}"
+    );
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     install();
     build_empty_index(true);

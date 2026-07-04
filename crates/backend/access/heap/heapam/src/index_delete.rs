@@ -1,7 +1,7 @@
-//! heapam.c index-deletion arm: heap_index_delete_tuples (simple deletion) +
-//! index_delete_sort/index_delete_check_htid. Loud: bottom-up deletion
-//! (bottomup_sort_and_shrink and its costing). C divergence (recorded):
-//! index_delete_prefetch_buffer elided — PrefetchBuffer substrate unported.
+//! heapam.c index-deletion arm: heap_index_delete_tuples (simple + bottom-up)
+//! + index_delete_sort/index_delete_check_htid + bottomup_sort_and_shrink.
+//! C divergence (recorded): index_delete_prefetch_buffer elided —
+//! PrefetchBuffer substrate unported.
 
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use ::mcx::Mcx;
@@ -18,7 +18,18 @@ use ::types_tuple::{
 };
 
 use crate::fetch::heap_hot_search_buffer;
-use crate::{unported, HeapTupleHeaderAdvanceConflictHorizon, HeapTupleHeaderGetUpdateXid};
+use crate::{HeapTupleHeaderAdvanceConflictHorizon, HeapTupleHeaderGetUpdateXid};
+
+const BOTTOMUP_MAX_NBLOCKS: usize = 6;
+const BOTTOMUP_TOLERANCE_NBLOCKS: i64 = 3;
+
+// IndexDeleteCounts (heapam.c)
+#[derive(Clone, Copy)]
+struct IndexDeleteCounts {
+    npromisingtids: i16,
+    ntids: i16,
+    ifirsttid: i32,
+}
 
 const _: () = assert!(core::mem::size_of::<TM_IndexDelete>() == 8);
 
@@ -33,10 +44,13 @@ pub fn heap_index_delete_tuples<'mcx>(
     let mut blkno = InvalidBlockNumber;
     let mut pin: Option<BufferPin> = None;
     let mut maxoff: OffsetNumber = 0;
+    let mut nblocksaccessed = 0usize;
 
-    if delstate.bottomup {
-        unported("heap_index_delete_tuples bottom-up arm (bottomup_sort_and_shrink)");
-    }
+    let mut nblocksfavorable = 0usize;
+    let mut curtargetfreespace = delstate.bottomupfreespace;
+    let mut lastfreespace = 0i32;
+    let mut actualfreespace = 0i32;
+    let mut bottomup_final_block = false;
 
     // InitNonVacuumableSnapshot(SnapshotNonVacuumable, GlobalVisTestFor(rel))
     let mut snapshot = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_NON_VACUUMABLE);
@@ -44,6 +58,10 @@ pub fn heap_index_delete_tuples<'mcx>(
 
     let n = delstate.ndeltids as usize;
     index_delete_sort(&mut delstate.deltids[..n]);
+
+    if delstate.bottomup {
+        nblocksfavorable = bottomup_sort_and_shrink(mcx, delstate)?;
+    }
 
     debug_assert!(delstate.ndeltids > 0);
     let mut finalndeltids = 0usize;
@@ -54,12 +72,33 @@ pub fn heap_index_delete_tuples<'mcx>(
         let htid = ideltid.tid;
 
         if blkno == InvalidBlockNumber || ItemPointerGetBlockNumber(&htid) != blkno {
+            if delstate.bottomup {
+                if bottomup_final_block {
+                    break;
+                }
+                // main cost-control rule: the last page must have freed space
+                if nblocksaccessed >= 1 && actualfreespace == lastfreespace {
+                    break;
+                }
+                lastfreespace = actualfreespace;
+
+                // decay the target unless the next block is favorable/contiguous
+                debug_assert!(nblocksaccessed > 0 || nblocksfavorable > 0);
+                if nblocksfavorable > 0 {
+                    nblocksfavorable -= 1;
+                } else {
+                    curtargetfreespace /= 2;
+                }
+            }
+
             if let Some(old) = pin.take() {
                 unlock_release(old)?;
             }
             blkno = ItemPointerGetBlockNumber(&htid);
             let p = BufferPin::adopt(bufmgr_seams::read_buffer::call(rel, blkno)?)
                 .expect("ReadBuffer returned InvalidBuffer");
+            nblocksaccessed += 1;
+            debug_assert!(!delstate.bottomup || nblocksaccessed <= BOTTOMUP_MAX_NBLOCKS);
             bufmgr_seams::lock_buffer::call(p.buffer(), BUFFER_LOCK_SHARE)?;
             maxoff = p.page().max_offset_number();
             pin = Some(p);
@@ -84,7 +123,14 @@ pub fn heap_index_delete_tuples<'mcx>(
                 continue;
             }
             delstate.status[id].knowndeletable = true;
-            // bottomup freespace accounting lives behind the loud arm above
+
+            if delstate.bottomup {
+                debug_assert!(delstate.status[id].freespace > 0);
+                actualfreespace += delstate.status[id].freespace as i32;
+                if actualfreespace >= curtargetfreespace {
+                    bottomup_final_block = true;
+                }
+            }
         }
 
         // advance the conflict horizon along the HOT chain (prune-style walk)
@@ -220,4 +266,113 @@ fn index_delete_check_htid(
 #[inline(never)]
 fn index_corrupted(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INDEX_CORRUPTED))
+}
+
+fn bottomup_nblocksfavorable(
+    blockgroups: &[IndexDeleteCounts],
+    deltids: &[TM_IndexDelete],
+) -> usize {
+    let mut lastblock: i64 = -1;
+    let mut nblocksfavorable = 0usize;
+
+    debug_assert!(!blockgroups.is_empty() && blockgroups.len() <= BOTTOMUP_MAX_NBLOCKS);
+
+    // tolerate slightly out-of-order blocks (bucketing blips)
+    for group in blockgroups {
+        let firstdtid = &deltids[group.ifirsttid as usize];
+        let block = ItemPointerGetBlockNumber(&firstdtid.tid) as i64;
+
+        if lastblock != -1
+            && (block < lastblock - BOTTOMUP_TOLERANCE_NBLOCKS
+                || block > lastblock + BOTTOMUP_TOLERANCE_NBLOCKS)
+        {
+            break;
+        }
+        nblocksfavorable += 1;
+        lastblock = block;
+    }
+
+    debug_assert!(nblocksfavorable >= 1);
+    nblocksfavorable
+}
+
+fn bottomup_sort_and_shrink_cmp(g1: &IndexDeleteCounts, g2: &IndexDeleteCounts) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    // npromisingtids desc (caller bucketed to powers of two)
+    match g2.npromisingtids.cmp(&g1.npromisingtids) {
+        Ordering::Equal => {}
+        o => return o,
+    }
+    // ntids desc, bucketed dynamically
+    let ntids1 = (g1.ntids as u32).max(1).next_power_of_two();
+    let ntids2 = (g2.ntids as u32).max(1).next_power_of_two();
+    match ntids2.cmp(&ntids1) {
+        Ordering::Equal => {}
+        o => return o,
+    }
+    // ifirsttid asc == heap block number asc among equals
+    g1.ifirsttid.cmp(&g2.ifirsttid)
+}
+
+// bottomup_sort_and_shrink: regroup deltids by promising-ness of their heap
+// blocks and keep only the BOTTOMUP_MAX_NBLOCKS best blocks.
+fn bottomup_sort_and_shrink<'mcx>(
+    mcx: Mcx<'mcx>,
+    delstate: &mut TM_IndexDeleteOp<'mcx>,
+) -> PgResult<usize> {
+    debug_assert!(delstate.bottomup);
+    debug_assert!(delstate.ndeltids > 0);
+    let n = delstate.ndeltids as usize;
+
+    let mut blockgroups: ::mcx::PgVec<'mcx, IndexDeleteCounts> =
+        ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut curblock = InvalidBlockNumber;
+    for i in 0..n {
+        let ideltid = &delstate.deltids[i];
+        let promising = delstate.status[ideltid.id as usize].promising;
+
+        if curblock != ItemPointerGetBlockNumber(&ideltid.tid) {
+            debug_assert!(
+                curblock == InvalidBlockNumber
+                    || curblock < ItemPointerGetBlockNumber(&ideltid.tid)
+            );
+            curblock = ItemPointerGetBlockNumber(&ideltid.tid);
+            blockgroups.push(IndexDeleteCounts {
+                ifirsttid: i as i32,
+                ntids: 1,
+                npromisingtids: 0,
+            });
+        } else {
+            blockgroups.last_mut().expect("group started").ntids += 1;
+        }
+        if promising {
+            blockgroups.last_mut().expect("group started").npromisingtids += 1;
+        }
+    }
+
+    // power-of-two bucketing: small npromisingtids differences are noise
+    for group in blockgroups.iter_mut() {
+        if group.npromisingtids <= 4 {
+            group.npromisingtids = 4;
+        } else {
+            group.npromisingtids =
+                (group.npromisingtids as u32).next_power_of_two() as i16;
+        }
+    }
+
+    blockgroups.sort_unstable_by(bottomup_sort_and_shrink_cmp);
+    let nblockgroups = blockgroups.len().min(BOTTOMUP_MAX_NBLOCKS);
+    let nblocksfavorable =
+        bottomup_nblocksfavorable(&blockgroups[..nblockgroups], &delstate.deltids);
+
+    let mut reordered: ::mcx::PgVec<'mcx, TM_IndexDelete> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for group in &blockgroups[..nblockgroups] {
+        let first = group.ifirsttid as usize;
+        reordered.extend_from_slice(&delstate.deltids[first..first + group.ntids as usize]);
+    }
+    let ncopied = reordered.len();
+    delstate.deltids[..ncopied].copy_from_slice(&reordered);
+    delstate.ndeltids = ncopied as i32;
+
+    Ok(nblocksfavorable)
 }

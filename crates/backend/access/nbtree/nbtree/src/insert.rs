@@ -978,7 +978,7 @@ unsafe fn bt_stepright<'mcx>(
     Ok(())
 }
 
-/// _bt_delete_or_dedup_one_page: simple deletion live; bottom-up loud.
+/// _bt_delete_or_dedup_one_page.
 ///
 /// # Safety
 /// As [`bt_findinsertloc`].
@@ -1044,7 +1044,10 @@ unsafe fn bt_delete_or_dedup_one_page<'mcx>(
 
     // C divergence: indexUnchanged folded into uniquedup (C only ORs them).
     if uniquedup {
-        unported_phase2("_bt_bottomupdel_pass (bottom-up deletion lane)");
+        let pin = insertstate.buf.as_ref().expect("pinned");
+        if crate::dedup::bt_bottomupdel_pass(mcx, rel, pin, heap_rel, insertstate.itemsz)? {
+            return Ok(());
+        }
     }
 
     // BTGetDeduplicateItems

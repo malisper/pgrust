@@ -15,8 +15,8 @@ const _: () = assert!(MaxIndexTuplesPerPage == 408);
 const IPD_SIZE: usize = core::mem::size_of::<ItemPointerData>();
 const _: () = assert!(IPD_SIZE == 6);
 
-// bound: maxpostingsize <= BTMaxItemSize (bottom-up's BLCKSZ arm = deletion lane)
-const MAX_HTIDS: usize = BTMaxItemSize / IPD_SIZE + 2;
+// bound: bottom-up deletion sets maxpostingsize = BLCKSZ (C pallocs that much)
+const MAX_HTIDS: usize = BLCKSZ / IPD_SIZE + 2;
 
 const fn maxalign(l: usize) -> usize {
     (l + 7) & !7
@@ -78,7 +78,9 @@ pub struct BTDedupState {
 
 impl BTDedupState {
     pub fn new(maxpostingsize: Size) -> BTDedupState {
-        debug_assert!(maxpostingsize <= BTMaxItemSize);
+        // BLCKSZ = bottom-up deletion ("not really deduplicating"): TIDs are
+        // collected but finish_pending/form_posting are never reached.
+        debug_assert!(maxpostingsize <= BTMaxItemSize || maxpostingsize == BLCKSZ);
         // SAFETY: POD; one zeroed frame-local per pass (C pallocs state + htids).
         let mut state: BTDedupState = unsafe { core::mem::zeroed() };
         state.deduplicate = true;
