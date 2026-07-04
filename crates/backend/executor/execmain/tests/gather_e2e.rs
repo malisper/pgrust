@@ -556,6 +556,7 @@ fn gather_runs_child_in_workers_and_leader() {
 // thread plays maybe_start_bgworkers until the leader's run completes.
 fn spawn_postmaster_standin() -> std::thread::JoinHandle<Vec<std::thread::JoinHandle<i32>>> {
     std::thread::spawn(|| {
+        thread_globals();
         let mut joins = Vec::new();
         for _ in 0..600 {
             std::thread::sleep(std::time::Duration::from_millis(10));
