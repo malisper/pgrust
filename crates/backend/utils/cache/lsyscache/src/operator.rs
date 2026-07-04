@@ -43,15 +43,17 @@ pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)> {
     }
 }
 
+const F_BTARRAYCMP: Oid = 382;
+const F_BTRECORDCMP: Oid = 2987;
+const F_HASH_ARRAY: Oid = 626;
+const F_HASH_RECORD: Oid = 6192;
+
 pub fn op_mergejoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
-    if opno == ARRAY_EQ_OP || opno == RECORD_EQ_OP {
-        // C asks the typcache (lookup_type_cache TYPECACHE_CMP_PROC) whether
-        // the element/field types are sortable.
-        panic!(
-            "op_mergejoinable({opno}, {inputtype}): typcache crate landed but lsyscache \
-             cannot dep it (cycle) — needs a typcache_seams lookup seam; RECORD_EQ also \
-             needs typcache's composite cmp_proc lane"
-        );
+    if opno == RECORD_EQ_OP {
+        return Ok(typcache_seams::type_cache_cmp_proc::call(inputtype)? == F_BTRECORDCMP);
+    }
+    if opno == ARRAY_EQ_OP {
+        return Ok(typcache_seams::type_cache_cmp_proc::call(inputtype)? == F_BTARRAYCMP);
     }
     Ok(match syscache_seams::lookup_pg_operator_shape::call(opno)? {
         Some(optup) => optup.oprcanmerge,
@@ -60,12 +62,11 @@ pub fn op_mergejoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
 }
 
 pub fn op_hashjoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
-    if opno == ARRAY_EQ_OP || opno == RECORD_EQ_OP {
-        panic!(
-            "op_hashjoinable({opno}, {inputtype}): typcache crate landed but lsyscache \
-             cannot dep it (cycle) — needs a typcache_seams lookup seam; RECORD_EQ also \
-             needs typcache's composite hash_proc lane"
-        );
+    if opno == RECORD_EQ_OP {
+        return Ok(typcache_seams::type_cache_hash_proc::call(inputtype)? == F_HASH_RECORD);
+    }
+    if opno == ARRAY_EQ_OP {
+        return Ok(typcache_seams::type_cache_hash_proc::call(inputtype)? == F_HASH_ARRAY);
     }
     Ok(match syscache_seams::lookup_pg_operator_shape::call(opno)? {
         Some(optup) => optup.oprcanhash,

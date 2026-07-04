@@ -414,14 +414,19 @@ pub fn heap_multi_insert<'mcx>(
                     let ht = t.as_tuple_mut();
                     // SAFETY: image owned by toast_ctx, kept alive in
                     // toast_ctxs past the last use (page_tuple model).
-                    unsafe {
+                    let erased = unsafe {
                         HeapTupleData::from_raw_parts(
                             ht.header_ptr().cast_mut(),
                             ht.t_len,
                             ht.t_self,
                             ht.t_tableOid,
                         )
-                    }
+                    };
+                    // Dropping t is heap_freetuple: the aset free-list header
+                    // would overwrite t_choice before placement. The image is
+                    // bulk-freed with toast_ctx (C: dies with caller context).
+                    core::mem::forget(t);
+                    erased
                 })
             };
             match erased {

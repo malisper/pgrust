@@ -31,6 +31,7 @@ pub fn init_seams() {
         index::relation_init_index_access_info,
     );
     relcache_build_seams::scan_pg_index_shapes::set(index::scan_pg_index_shapes);
+    relcache_build_seams::scan_exclusion_ops::set(index::scan_exclusion_ops);
     relcache_build_seams::build_trigger_desc::set(triggers::build_trigger_desc);
     typcache_seams::scan_domain_check_constraints::set(domain::scan_domain_check_constraints);
     relcache_build_seams::scan_pg_statistic_ext_oids::set(index::scan_pg_statistic_ext_oids);
