@@ -93,6 +93,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn query_supports_distinctness<'a, 'mcx>(query: &'a Query<'mcx>) -> bool
+);
+
+seam_core::seam!(
+    pub fn query_is_distinct_for<'a, 'mcx>(
+        query: &'a Query<'mcx>,
+        colnos: &'a [i16],
+        opids: &'a [Oid],
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    pub fn make_pathkey_from_sortop<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        expr: Node<'mcx>,
+        ordering_op: Oid,
+        reverse_sort: bool,
+        nulls_first: bool,
+        sortref: u32,
+    ) -> PgResult<PathKey>
+);
+
+seam_core::seam!(
+    pub fn pathkey_is_redundant<'a, 'mcx>(
+        run: &'a PlannerRun<'mcx>,
+        new_pathkey: PathKey,
+        pathkeys: &'a [PathKey],
+    ) -> bool
+);
+
+seam_core::seam!(
     pub fn mergejoinscansel<'a, 'mcx>(
         run: &'a mut PlannerRun<'mcx>,
         rinfo: RinfoId,

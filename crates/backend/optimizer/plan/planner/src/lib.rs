@@ -138,6 +138,12 @@ pub fn init_seams() {
     planner_seams::estimate_num_groups::set(crate::selfuncs::estimate_num_groups);
     planner_seams::estimate_num_groups_estinfo::set(crate::selfuncs::estimate_num_groups_estinfo);
     planner_seams::estimate_array_length::set(crate::selfuncs::estimate_array_length);
+    planner_seams::query_supports_distinctness::set(
+        crate::analyzejoins::query_supports_distinctness,
+    );
+    planner_seams::query_is_distinct_for::set(crate::analyzejoins::query_is_distinct_for);
+    planner_seams::make_pathkey_from_sortop::set(crate::pathkeys::make_pathkey_from_sortop);
+    planner_seams::pathkey_is_redundant::set(crate::pathkeys::pathkey_is_redundant);
     planner_seams::mergejoinscansel::set(crate::selfuncs::mergejoinscansel);
     planner_seams::estimate_hash_bucket_stats::set(crate::selfuncs::estimate_hash_bucket_stats);
     planner_seams::estimate_multivariate_bucketsize::set(
