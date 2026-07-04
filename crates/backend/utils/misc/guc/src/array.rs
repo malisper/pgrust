@@ -1,9 +1,9 @@
 use elog::ereport;
 use types_error::{ErrorLevel, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
-use types_guc::{GucAction::GUC_ACTION_SET, GucContext, GucSource};
+use types_guc::{GucContext, GucSource};
 
 use crate::store::with_store_mut;
-use crate::{set_config_option, valid_custom_variable_name, ParseLongOption};
+use crate::{set_config_option, valid_custom_variable_name, GucAction, ParseLongOption, GUC_ACTION_SET};
 
 // GUC option arrays travel as flat "name=value" string lists; the text[]
 // image lives with the catalog owners (pg_db_role_setting et al.).
@@ -165,7 +165,7 @@ pub fn ProcessGUCArray(
     array: &[String],
     context: GucContext,
     source: GucSource,
-    action: types_guc::GucAction,
+    action: GucAction,
 ) -> PgResult<()> {
     for (name, value) in TransformGUCArray(array)? {
         set_config_option(
