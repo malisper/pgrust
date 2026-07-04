@@ -30,7 +30,11 @@ fn install_fakes() {
         miscinit_seams::get_user_id::set(|| USER.with(Cell::get));
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         aclchk_seams::object_aclcheck::set(|_classid, objid, _roleid, _mode| {
-            Ok(if ACL_DENIED.with(|d| d.borrow().contains(&objid)) { 1 } else { 0 })
+            Ok(if ACL_DENIED.with(|d| d.borrow().contains(&objid)) {
+                1
+            } else {
+                0
+            })
         });
         aclchk_seams::aclcheck_error::set(|_result, _objtype, name| {
             Err(Box::new(types_error::PgError::error(format!(
@@ -53,7 +57,9 @@ fn install_fakes() {
             }))
         });
         syscache_seams::lookup_pg_namespace_oid_by_name::set(|nspname| {
-            Ok(NS_BY_NAME.with(|m| m.borrow().get(nspname).copied()).unwrap_or(InvalidOid))
+            Ok(NS_BY_NAME
+                .with(|m| m.borrow().get(nspname).copied())
+                .unwrap_or(InvalidOid))
         });
         syscache_seams::lookup_pg_class_relid_by_name::set(|relname, nsp| {
             Ok(RELS
@@ -182,13 +188,19 @@ fn user_change_invalidates_path() {
     install_fakes();
     set_search_path("public");
     let ctx = MemoryContext::new("test");
-    assert_eq!(fetch_search_path(ctx.mcx(), false).unwrap().as_slice(), &[NS_PUBLIC]);
+    assert_eq!(
+        fetch_search_path(ctx.mcx(), false).unwrap().as_slice(),
+        &[NS_PUBLIC]
+    );
 
     ACL_DENIED.with(|d| d.borrow_mut().push(NS_PUBLIC));
     crate::path::invalidate_search_path_cache();
     USER.with(|u| u.set(USER_A + 1));
     // Different roleid forces recompute even though the string is unchanged.
-    assert_eq!(fetch_search_path(ctx.mcx(), false).unwrap().as_slice(), &[] as &[Oid]);
+    assert_eq!(
+        fetch_search_path(ctx.mcx(), false).unwrap().as_slice(),
+        &[] as &[Oid]
+    );
 }
 
 #[test]
@@ -240,7 +252,10 @@ fn range_var_lookups() {
     };
 
     assert_eq!(RangeVarGetRelid(&rv(None, "t1"), 1, false).unwrap(), REL_T1);
-    assert_eq!(RangeVarGetRelid(&rv(None, "gone"), 1, true).unwrap(), InvalidOid);
+    assert_eq!(
+        RangeVarGetRelid(&rv(None, "gone"), 1, true).unwrap(),
+        InvalidOid
+    );
 
     let err = RangeVarGetRelid(&rv(None, "gone"), 1, false).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
@@ -249,7 +264,10 @@ fn range_var_lookups() {
     let err = RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, false).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_SCHEMA);
 
-    assert_eq!(RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, true).unwrap(), InvalidOid);
+    assert_eq!(
+        RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, true).unwrap(),
+        InvalidOid
+    );
 }
 
 #[test]
@@ -273,7 +291,10 @@ fn lookup_namespace_helpers() {
     install_fakes();
 
     assert_eq!(LookupNamespaceNoError("pg_temp").unwrap(), InvalidOid);
-    assert_eq!(LookupExplicitNamespace("pg_temp", true).unwrap(), InvalidOid);
+    assert_eq!(
+        LookupExplicitNamespace("pg_temp", true).unwrap(),
+        InvalidOid
+    );
 
     let denied: PgResult<Oid> = {
         ACL_DENIED.with(|d| d.borrow_mut().push(NS_S1));
@@ -323,9 +344,55 @@ fn install_proc_candidates() {
                     v.push(cand(9010, PG_CATALOG_NAMESPACE, &[23, 1007], 23, 0));
                     v.push(cand(9011, PG_CATALOG_NAMESPACE, &[1007], 23, 0));
                 }
+                "nf" => {
+                    v.push(cand(
+                        9020,
+                        PG_CATALOG_NAMESPACE,
+                        &[23, 25, 23],
+                        InvalidOid,
+                        1,
+                    ));
+                }
+                "outp" => {
+                    v.push(cand(9021, PG_CATALOG_NAMESPACE, &[23], InvalidOid, 0));
+                }
                 _ => {}
             }
             Ok(v)
+        });
+        fn strs<'m>(mcx: mcx::Mcx<'m>, names: &[&str]) -> mcx::PgVec<'m, mcx::PgString<'m>> {
+            let mut v = mcx::PgVec::new_in(mcx);
+            for n in names {
+                v.push(mcx::PgString::from_str_in(n, mcx).unwrap());
+            }
+            v
+        }
+        fn oids<'m>(mcx: mcx::Mcx<'m>, types: &[Oid]) -> mcx::PgVec<'m, Oid> {
+            let mut v = mcx::vec_with_capacity_in(mcx, types.len()).unwrap();
+            v.extend_from_slice(types);
+            v
+        }
+        fn modes<'m>(mcx: mcx::Mcx<'m>, ms: &[u8]) -> mcx::PgVec<'m, i8> {
+            let mut v = mcx::vec_with_capacity_in(mcx, ms.len()).unwrap();
+            for &m in ms {
+                v.push(m as i8);
+            }
+            v
+        }
+        syscache_seams::pg_proc_result_arrays::set(|mcx, funcid| {
+            Ok(match funcid {
+                9020 => Some(syscache_seams::PgProcResultArraysShape {
+                    proallargtypes: None,
+                    proargmodes: None,
+                    proargnames: Some(strs(mcx, &["a", "b", "c"])),
+                }),
+                9021 => Some(syscache_seams::PgProcResultArraysShape {
+                    proallargtypes: Some(oids(mcx, &[23, 25])),
+                    proargmodes: Some(modes(mcx, b"io")),
+                    proargnames: Some(strs(mcx, &["a", "b"])),
+                }),
+                _ => None,
+            })
         });
     });
 }
@@ -413,4 +480,158 @@ fn undecidable_duplicate_marked_ambiguous() {
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].oid, InvalidOid);
     assert_eq!(cands[0].args.as_slice(), &[23, 23]);
+}
+
+#[test]
+fn named_notation_builds_argnumbers_mapping() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    // nf(a int, b text, c int DEFAULT ...): nf(1, c => 2, b => 't').
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["nf"],
+        3,
+        &["c", "b"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9020);
+    assert_eq!(cands[0].nargs, 3);
+    assert_eq!(cands[0].ndargs, 0);
+    assert_eq!(cands[0].argnumbers.as_ref().unwrap().as_slice(), &[0, 2, 1]);
+    assert_eq!(cands[0].args.as_slice(), &[23, 23, 25]);
+}
+
+#[test]
+fn named_notation_fills_defaults_after_supplied_args() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    // nf(1, b => 't'): c is defaulted, mapped after the supplied arguments.
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["nf"],
+        2,
+        &["b"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9020);
+    assert_eq!(cands[0].nargs, 3);
+    assert_eq!(cands[0].ndargs, 1);
+    assert_eq!(cands[0].argnumbers.as_ref().unwrap().as_slice(), &[0, 1, 2]);
+    assert_eq!(cands[0].args.as_slice(), &[23, 25, 23]);
+
+    // b unsupplied and undefaulted: no candidate.
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["nf"],
+        2,
+        &["c"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(cands.is_empty());
+
+    // Unknown parameter name: no candidate.
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["nf"],
+        3,
+        &["z", "b"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(cands.is_empty());
+
+    // A named argument colliding with a positional one: no candidate.
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["nf"],
+        3,
+        &["a", "b"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(cands.is_empty());
+}
+
+#[test]
+fn include_out_arguments_substitutes_proallargtypes() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    // outp(a int, OUT b text): pronargs 1 in proargtypes, 2 with OUT args.
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["outp"],
+        2,
+        &[],
+        false,
+        false,
+        true,
+        false,
+    )
+    .unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9021);
+    assert_eq!(cands[0].nargs, 2);
+    assert_eq!(cands[0].nominal_nargs, 2);
+    assert_eq!(cands[0].args.as_slice(), &[23, 25]);
+    assert!(cands[0].argnumbers.is_none());
+
+    // Without include_out_arguments the OUT column is invisible.
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["outp"],
+        2,
+        &[],
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(cands.is_empty());
+
+    // Named notation against proallargtypes positions (b is an OUT arg).
+    let cands = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["outp"],
+        2,
+        &["b"],
+        false,
+        false,
+        true,
+        false,
+    )
+    .unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9021);
+    assert_eq!(cands[0].argnumbers.as_ref().unwrap().as_slice(), &[0, 1]);
+    assert_eq!(cands[0].args.as_slice(), &[23, 25]);
 }

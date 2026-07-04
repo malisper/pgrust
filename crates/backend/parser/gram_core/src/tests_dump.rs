@@ -269,18 +269,16 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "location", wd.location);
         out.push('}');
     } else if let Some(f) = n.as_func_call() {
-        out.push_str("{FUNCCALL");
-        list_field(out, "funcname", &f.funcname);
-        list_field(out, "args", &f.args);
-        list_field(out, "agg_order", &f.agg_order);
-        node_field(out, "agg_filter", f.agg_filter);
-        node_field(out, "over", f.over);
-        bool_field(out, "agg_within_group", f.agg_within_group);
-        bool_field(out, "agg_star", f.agg_star);
-        bool_field(out, "agg_distinct", f.agg_distinct);
-        bool_field(out, "func_variadic", f.func_variadic);
-        int_field(out, "funcformat", f.funcformat as i32);
-        int_field(out, "location", f.location);
+        func_call(out, f);
+    } else if let Some(cs) = n.as_call_stmt() {
+        out.push_str("{CALLSTMT :funccall ");
+        match cs.funccall {
+            Some(f) => func_call(out, f),
+            None => out.push_str("<>"),
+        }
+        assert!(cs.funcexpr.is_none(), "raw CallStmt carries no funcexpr");
+        out.push_str(" :funcexpr <>");
+        list_field(out, "outargs", &cs.outargs);
         out.push('}');
     } else if let Some(na) = n.as_named_arg_expr() {
         out.push_str("{NAMEDARGEXPR");
@@ -1603,6 +1601,22 @@ fn alias(out: &mut String, a: &types_nodes::Alias<'_>) {
     out.push_str("{ALIAS");
     string_field(out, "aliasname", a.aliasname);
     list_field(out, "colnames", &a.colnames);
+    out.push('}');
+}
+
+fn func_call(out: &mut String, f: &types_nodes::rawnodes::FuncCall<'_>) {
+    out.push_str("{FUNCCALL");
+    list_field(out, "funcname", &f.funcname);
+    list_field(out, "args", &f.args);
+    list_field(out, "agg_order", &f.agg_order);
+    node_field(out, "agg_filter", f.agg_filter);
+    node_field(out, "over", f.over);
+    bool_field(out, "agg_within_group", f.agg_within_group);
+    bool_field(out, "agg_star", f.agg_star);
+    bool_field(out, "agg_distinct", f.agg_distinct);
+    bool_field(out, "func_variadic", f.func_variadic);
+    int_field(out, "funcformat", f.funcformat as i32);
+    int_field(out, "location", f.location);
     out.push('}');
 }
 

@@ -831,6 +831,16 @@ fn raw_expr_node_field_order_matches_c() {
 }
 
 #[test]
+fn call_stmt_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    assert_eq!(c_struct_fields(parse_h, "CallStmt"), ["funccall", "funcexpr", "outargs"]);
+    let crate::rawnodes::CallStmt { funccall: _, funcexpr: _, outargs: _ } =
+        crate::rawnodes::CallStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "CallContext"), ["atomic"]);
+}
+
+#[test]
 fn variable_set_stmt_field_order_matches_c() {
     let parse_h = include_str!("../vendor/parsenodes.h");
     assert_eq!(

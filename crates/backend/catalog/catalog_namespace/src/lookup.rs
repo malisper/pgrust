@@ -35,7 +35,10 @@ fn undefined_schema(nspname: &str) -> Box<PgError> {
 #[inline(never)]
 fn undefined_relation(relation: &RangeVar<'_>) -> Box<PgError> {
     let msg = match relation.schemaname {
-        Some(schema) => format!("relation \"{}.{}\" does not exist", schema, relation.relname),
+        Some(schema) => format!(
+            "relation \"{}.{}\" does not exist",
+            schema, relation.relname
+        ),
         None => format!("relation \"{}\" does not exist", relation.relname),
     };
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_UNDEFINED_TABLE))
@@ -181,8 +184,10 @@ fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
 #[inline(never)]
 fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("improper qualified name (too many dotted names): {joined}"))
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        PgError::error(format!(
+            "improper qualified name (too many dotted names): {joined}"
+        ))
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
 }
 
@@ -216,7 +221,10 @@ pub fn OpernameGetOprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult
         let namespaceId = LookupExplicitNamespace(schemaname, true)?;
         if OidIsValid(namespaceId) {
             let result = syscache_seams::lookup_pg_operator_oid_exact::call(
-                opername, oprleft, oprright, namespaceId,
+                opername,
+                oprleft,
+                oprright,
+                namespaceId,
             )?;
             if OidIsValid(result) {
                 return Ok(result);
@@ -324,7 +332,10 @@ pub fn OpernameGetCandidates<'mcx>(
                 }
             }
         }
-        result.push(OperCandidate { oid: cand.oid, args: [cand.oprleft, cand.oprright] });
+        result.push(OperCandidate {
+            oid: cand.oid,
+            args: [cand.oprleft, cand.oprright],
+        });
         pathposes.push(pathpos);
     }
     result.reverse();
@@ -432,8 +443,12 @@ pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
 #[inline(never)]
 fn undefined_ts_object(kind: &str, names: &[&str]) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("text search {} \"{}\" does not exist", kind, names.join(".")))
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        PgError::error(format!(
+            "text search {} \"{}\" does not exist",
+            kind,
+            names.join(".")
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
     )
 }
 
@@ -443,8 +458,10 @@ pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
     if let Some(schemaname) = schemaname {
         let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
         if !(missing_ok && !OidIsValid(namespace_id)) {
-            cfgoid =
-                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+            cfgoid = syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(
+                config_name,
+                namespace_id,
+            )?;
         }
     } else {
         recomputeNamespacePath()?;
@@ -454,8 +471,10 @@ pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {
             if namespace_id == mtn {
                 continue;
             }
-            cfgoid =
-                syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(config_name, namespace_id)?;
+            cfgoid = syscache_seams::lookup_pg_ts_config_oid_by_name_nsp::call(
+                config_name,
+                namespace_id,
+            )?;
             if OidIsValid(cfgoid) {
                 break;
             }
@@ -523,8 +542,7 @@ pub fn OpfamilynameGetOpfid(amid: Oid, opfname: &str) -> PgResult<Oid> {
         if namespaceId == mtn {
             continue;
         }
-        let opfid =
-            syscache_seams::lookup_pg_opfamily_oid_exact::call(amid, opfname, namespaceId)?;
+        let opfid = syscache_seams::lookup_pg_opfamily_oid_exact::call(amid, opfname, namespaceId)?;
         if OidIsValid(opfid) {
             return Ok(opfid);
         }
@@ -563,7 +581,10 @@ pub fn TypeIsVisible(typid: Oid) -> PgResult<bool> {
         if namespace_id == t.typnamespace {
             return Ok(true);
         }
-        if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?) {
+        if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(
+            typname,
+            namespace_id,
+        )?) {
             return Ok(false);
         }
     }
@@ -593,7 +614,8 @@ pub fn RangeVarGetRelidExtended(
     debug_assert!(!((flags & RVR_NOWAIT) != 0 && (flags & RVR_SKIP_LOCKED) != 0));
 
     if let Some(catalogname) = relation.catalogname {
-        let dbname = dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+        let dbname =
+            dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
         if dbname.as_deref() != Some(catalogname) {
             return Err(cross_database_reference(relation));
         }
@@ -689,49 +711,68 @@ pub struct FuncCandidate<'mcx> {
     pub ndargs: i16,
     pub va_elem_type: Oid,
     pathpos: i32,
-    // Named/mixed notation: argnumbers[k] = proargtypes index of the k'th
-    // call argument; args is then in call order, not declaration order.
+    // argnumbers[k] = proargtypes/proallargtypes index of the k'th call
+    // argument; Some whenever argnames was non-empty (C's non-NULL array).
     pub argnumbers: Option<mcx::PgVec<'mcx, i32>>,
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
-// MatchNamedCall (namespace.c), include_out_arguments always false. Returns
-// the call-position -> proargtypes-position map, or None on no match.
-fn match_named_call<'mcx>(
+const FUNC_MAX_ARGS: usize = 100;
+const FUNC_PARAM_IN: i8 = b'i' as i8;
+const FUNC_PARAM_INOUT: i8 = b'b' as i8;
+const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
+
+// MatchNamedCall (namespace.c): Ok(None) is C's `return false`.
+fn MatchNamedCall<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    cand: &syscache_seams::PgProcCandidate<'mcx>,
+    arrays: &syscache_seams::PgProcResultArraysShape<'mcx>,
+    proc_pronargs: i16,
+    pronargdefaults: i16,
     nargs: i16,
     argnames: &[&str],
+    include_out_arguments: bool,
+    pronargs: i16,
 ) -> PgResult<Option<mcx::PgVec<'mcx, i32>>> {
-    const FUNC_PARAM_IN: i8 = b'i' as i8;
-    const FUNC_PARAM_INOUT: i8 = b'b' as i8;
-    const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
-    let pronargs = cand.pronargs as usize;
+    debug_assert!(!argnames.is_empty());
+    debug_assert!(nargs as usize >= argnames.len());
+    debug_assert!(nargs <= pronargs);
     let numposargs = nargs as usize - argnames.len();
-    assert!(nargs as usize <= pronargs);
 
-    let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)? else {
+    let Some(p_argnames) = arrays.proargnames.as_ref() else {
         return Ok(None);
     };
-    let Some(p_argnames) = arrays.proargnames else {
-        return Ok(None);
-    };
-    let p_argmodes = arrays.proargmodes;
-    let pronallargs = p_argnames.len();
+    // get_func_arg_info (funcapi.c): all-args count comes from proallargtypes
+    // when present, else proargtypes.
+    let pronallargs = arrays
+        .proallargtypes
+        .as_ref()
+        .map_or(proc_pronargs as usize, |v| v.len());
+    let p_argmodes = arrays.proargmodes.as_ref();
+    debug_assert!(if include_out_arguments {
+        pronargs as usize == pronallargs
+    } else {
+        pronargs as usize <= pronallargs
+    });
+    let pronargs = pronargs as usize;
 
     let mut argnumbers: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, pronargs)?;
-    let mut arggiven = [false; types_core::FUNC_MAX_ARGS];
+    let mut arggiven = [false; FUNC_MAX_ARGS];
+
     for ap in 0..numposargs {
         argnumbers.push(ap as i32);
         arggiven[ap] = true;
     }
+
     for argname in argnames {
         let mut pp = 0usize;
         let mut found = false;
         for i in 0..pronallargs {
-            if let Some(modes) = &p_argmodes {
-                if !matches!(modes[i], FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC) {
-                    continue;
+            if !include_out_arguments {
+                if let Some(modes) = p_argmodes {
+                    let m = modes[i];
+                    if m != FUNC_PARAM_IN && m != FUNC_PARAM_INOUT && m != FUNC_PARAM_VARIADIC {
+                        continue;
+                    }
                 }
             }
             if p_argnames[i].as_str() == *argname {
@@ -749,27 +790,28 @@ fn match_named_call<'mcx>(
             return Ok(None);
         }
     }
+    debug_assert_eq!(argnumbers.len(), nargs as usize);
+
     if (nargs as usize) < pronargs {
-        let first_arg_with_default = pronargs - cand.pronargdefaults as usize;
-        for (pp, given) in arggiven.iter().enumerate().take(pronargs).skip(numposargs) {
-            if *given {
+        let first_arg_with_default = pronargs as i32 - pronargdefaults as i32;
+        for pp in numposargs..pronargs {
+            if arggiven[pp] {
                 continue;
             }
-            if pp < first_arg_with_default {
+            if (pp as i32) < first_arg_with_default {
                 return Ok(None);
             }
             argnumbers.push(pp as i32);
         }
     }
-    assert_eq!(argnumbers.len(), pronargs);
+    debug_assert_eq!(argnumbers.len(), pronargs);
+
     Ok(Some(argnumbers))
 }
 
-// FuncnameGetCandidates (namespace.c); include_out_arguments has no in-tree
-// caller and stays on the loud path in parse_func. An oid of InvalidOid marks
-// C's ambiguous-set placeholder. Divergence: C's argnumbers array is applied
-// to candidate args here but not returned (parse_func's named-call transform
-// is unported).
+// FuncnameGetCandidates (namespace.c) with argnames = NIL,
+// include_out_arguments = false, missing_ok = false. An oid of InvalidOid
+// marks C's ambiguous-set placeholder.
 pub fn FuncnameGetCandidates<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     names: &[&str],
@@ -786,6 +828,7 @@ pub fn FuncnameGetCandidates<'mcx>(
         expand_variadic,
         expand_defaults,
         false,
+        false,
     )
 }
 
@@ -796,6 +839,7 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
     argnames: &[&str],
     expand_variadic: bool,
     expand_defaults: bool,
+    include_out_arguments: bool,
     missing_ok: bool,
 ) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
     // nargs == -1: any arity, no variadic/default expansion (C convention).
@@ -820,7 +864,7 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
     let mut any_special = false;
     let mtn = my_temp_namespace();
     for cand in raw {
-        let pronargs = cand.pronargs;
+        let mut pronargs = cand.pronargs;
         let mut pathpos: i32 = 0;
         match namespace_id {
             Some(id) => {
@@ -843,40 +887,83 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             }
         }
 
-        let mut argnumbers: Option<mcx::PgVec<'mcx, i32>> = None;
-        let (variadic, va_elem_type, use_defaults);
+        // C reads proallargtypes/proargmodes/proargnames off the tuple in
+        // hand; the equivalent PROCOID re-probe cannot miss under the list.
+        let arrays = if include_out_arguments || !argnames.is_empty() {
+            Some(
+                syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)?.unwrap_or_else(|| {
+                    panic!(
+                        "cache lookup failed for function {} (namespace.c)",
+                        cand.oid
+                    )
+                }),
+            )
+        } else {
+            None
+        };
+
+        let mut proargtypes: &[Oid] = cand.proargtypes.as_slice();
+        if include_out_arguments {
+            if let Some(all) = arrays.as_ref().and_then(|a| a.proallargtypes.as_ref()) {
+                pronargs = all.len() as i16;
+                debug_assert!(pronargs >= cand.pronargs);
+                proargtypes = all.as_slice();
+            }
+        }
+
+        let variadic;
+        let va_elem_type;
+        let use_defaults;
+        let argnumbers;
         if !argnames.is_empty() {
-            // Named or mixed notation matches a variadic function only with
-            // expand_variadic off (C: no way to name the expanded params).
+            // Named/mixed notation cannot match a variadic function when
+            // expand_variadic is on: the expanded parameters are nameless.
             if OidIsValid(cand.provariadic) && expand_variadic {
                 continue;
             }
-            variadic = false;
             va_elem_type = InvalidOid;
-            assert!(nargs >= 0);
-            use_defaults = pronargs > nargs && expand_defaults && {
+            variadic = false;
+            debug_assert!(nargs >= 0);
+
+            use_defaults = if pronargs > nargs && expand_defaults {
                 if nargs + cand.pronargdefaults < pronargs {
                     continue;
                 }
                 true
+            } else {
+                false
             };
+
             if pronargs != nargs && !use_defaults {
                 continue;
             }
-            match match_named_call(mcx, &cand, nargs, argnames)? {
-                None => continue,
-                some => argnumbers = some,
-            }
+
+            let Some(nums) = MatchNamedCall(
+                mcx,
+                arrays.as_ref().unwrap(),
+                cand.pronargs,
+                cand.pronargdefaults,
+                nargs,
+                argnames,
+                include_out_arguments,
+                pronargs,
+            )?
+            else {
+                continue;
+            };
+            argnumbers = Some(nums);
             any_special = true;
         } else {
             // C considers variadic expansion only when pronargs <= nargs; an
             // undersupplied variadic candidate falls through to the arg-count
             // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
-            (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
+            let (v, vet) = if pronargs <= nargs && expand_variadic {
                 (OidIsValid(cand.provariadic), cand.provariadic)
             } else {
                 (false, InvalidOid)
             };
+            variadic = v;
+            va_elem_type = vet;
             any_special |= variadic;
 
             use_defaults = pronargs > nargs && expand_defaults && {
@@ -890,18 +977,22 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             if nargs >= 0 && pronargs != nargs && !variadic && !use_defaults {
                 continue;
             }
+            argnumbers = None;
         }
 
         let effective_nargs = pronargs.max(nargs);
         let mut args = mcx::vec_with_capacity_in(mcx, effective_nargs as usize)?;
-        if let Some(argnumbers) = &argnumbers {
-            // Re-order the argument types into the call's logical order.
-            for &j in argnumbers.iter() {
-                args.push(cand.proargtypes[j as usize]);
+        match &argnumbers {
+            // C: re-order the argument types into the call's logical order.
+            Some(nums) => {
+                for j in 0..pronargs as usize {
+                    args.push(proargtypes[nums[j] as usize]);
+                }
             }
-        } else {
-            for &a in cand.proargtypes.iter() {
-                args.push(a);
+            None => {
+                for &a in proargtypes.iter() {
+                    args.push(a);
+                }
             }
         }
         let nvargs = if variadic {

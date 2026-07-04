@@ -51,7 +51,7 @@ pub use primnodes::{
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
     A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, AlterEnumStmt, CompositeTypeStmt,
-    AlterSeqStmt, CollateClause, ColumnRef,
+    AlterSeqStmt, CallStmt, CollateClause, ColumnRef,
     CreateDomainStmt, CreateEnumStmt, CreateSeqStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem, IndexStmt,
     InferClause, InsertStmt, JsonAggConstructor, JsonArgument, JsonArrayAgg,
     JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
