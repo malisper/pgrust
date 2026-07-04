@@ -448,10 +448,16 @@ fn regprocedureout_formats() {
 }
 
 #[test]
-#[should_panic(expected = "parseTypeString")]
-fn regtypein_name_arm_is_loud() {
+fn regtypein_name_arm() {
     with_mcx(|mcx| {
-        let _ = regtypein(mcx, "integer", None);
+        assert_eq!(regtypein(mcx, "-", None).unwrap(), Some(0));
+        assert_eq!(regtypein(mcx, "23", None).unwrap(), Some(23));
+        assert_eq!(regtypein(mcx, "integer", None).unwrap(), Some(23));
+        let err = regtypein(mcx, "no_such_type", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regtypein(mcx, "no_such_type", Some(&mut soft)).unwrap(), None);
+        assert!(soft.error_occurred());
     });
 }
 
