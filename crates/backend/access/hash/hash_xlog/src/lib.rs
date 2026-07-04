@@ -875,10 +875,30 @@ pub fn hash_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
 }
 
-/// hash_mask: wal_consistency_checking lane; bufmask.c is unported
-/// repo-wide (btree_mask/heap_mask are the same loud stubs in rmgr).
-pub fn hash_mask(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-    panic!("unported: hash_mask (bufmask.c lane; land backend-access-common-small)")
+pub fn hash_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    bufmask::mask_unused_space(pagedata);
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: pagedata is a full BLCKSZ page image, exclusively borrowed here.
+    let pm = unsafe { PageMut::from_raw(ptr) };
+    let mut opaque = page_opaque(&pm.as_ref());
+    let pagetype = opaque.hasho_flag & LH_PAGE_TYPE;
+    drop(pm);
+
+    if pagetype == LH_UNUSED_PAGE {
+        bufmask::mask_page_content(pagedata);
+    } else if pagetype == LH_BUCKET_PAGE || pagetype == LH_OVERFLOW_PAGE {
+        bufmask::mask_lp_flags(pagedata);
+    }
+
+    opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: as above.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    write_opaque(&mut pm, &opaque);
+    Ok(())
 }
 
 pub fn init_seams() {}

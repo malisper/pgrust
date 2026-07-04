@@ -1,5 +1,4 @@
-//! spgxlog.c — spgist rmgr redo, all record types. spg_mask is the repo-wide
-//! bufmask.c LOUD lane.
+//! spgxlog.c — spgist rmgr redo, all record types.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -7,7 +6,7 @@ use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber};
 use types_error::PgResult;
 use types_spgist::xlog::*;
 use types_spgist::*;
-use types_storage::bufpage::PageMut;
+use types_storage::bufpage::{PageMut, SizeOfPageHeaderData};
 
 use types_spgist::{spgFormDeadTuple, spgPageIndexMultiDelete, spgUpdateNodeLink};
 use xlogreader_seams::XLogReaderState;
@@ -725,8 +724,12 @@ pub fn spg_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
 }
 
-/// spg_mask: wal_consistency_checking lane; bufmask.c unported repo-wide.
-pub fn spg_mask(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-    panic!("unported: spg_mask (bufmask.c lane)")
+pub fn spg_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    if u16::from_ne_bytes([pagedata[12], pagedata[13]]) as usize >= SizeOfPageHeaderData {
+        bufmask::mask_unused_space(pagedata);
+    }
+    Ok(())
 }
 

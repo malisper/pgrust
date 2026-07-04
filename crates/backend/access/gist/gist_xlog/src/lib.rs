@@ -1,6 +1,5 @@
 //! gistxlog.c — gist rmgr redo. Live arms: PAGE_UPDATE, DELETE, PAGE_SPLIT,
 //! PAGE_DELETE, PAGE_REUSE (nop outside hot standby), ASSIGN_LSN (nop).
-//! gist_mask is the repo-wide bufmask.c LOUD lane (btree/hash parity).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -341,8 +340,28 @@ pub fn gist_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
 }
 
-/// gist_mask: wal_consistency_checking lane; bufmask.c is unported
-/// repo-wide (btree_mask/heap_mask are the same loud stubs in rmgr).
-pub fn gist_mask(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-    panic!("unported: gist_mask (bufmask.c lane)")
+pub fn gist_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    bufmask::mask_unused_space(pagedata);
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: pagedata is a full BLCKSZ page image, exclusively borrowed here.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    types_gist::page_opaque_update(&mut pm, |op| {
+        op.nsn = 0;
+        op.flags |= F_FOLLOW_RIGHT;
+    });
+    let is_leaf = page_is_leaf(&pm.as_ref());
+    drop(pm);
+
+    if is_leaf {
+        bufmask::mask_lp_flags(pagedata);
+    }
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: as above.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    types_gist::page_opaque_update(&mut pm, |op| op.flags &= !F_HAS_GARBAGE);
+    Ok(())
 }
