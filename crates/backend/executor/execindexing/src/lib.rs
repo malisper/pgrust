@@ -730,7 +730,7 @@ pub fn IndexCheckExclusion<'mcx>(
     let mut scan = heapam::heap_beginscan(
         mcx,
         heap_relation,
-        Some(snapshot),
+        Some(snapshot.clone()),
         0,
         PgVec::new_in(mcx),
         None,
