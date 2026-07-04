@@ -1874,9 +1874,9 @@ fn brincostestimate(
             panic!("brincostestimate: not an IndexPath")
         };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
-        let mut attnums: Vec<(i32, i16)> = Vec::new();
+        let mut attnums: Vec<(i16, i16)> = Vec::new();
         for ic in ip.indexclauses.iter() {
-            attnums.push((ic.indexcol, index.indexkeys[ic.indexcol as usize] as i16));
+            attnums.push((ic.indexcol as i16, index.indexkeys[ic.indexcol as usize] as i16));
         }
         (
             get_quals_from_indexclauses(run, path_id),
