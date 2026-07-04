@@ -173,17 +173,24 @@ fn unlink_waits_for_next_checkpoint_cycle() {
 fn fsync_failure_abort_child() {
     setup();
     RegisterSyncRequest(md_tag(20009), SyncRequestType::SYNC_REQUEST, false).unwrap();
-    let _ = ProcessSyncRequests();
-    // data_sync_retry=off: the fsync-failure ereport must abort, not return.
-    std::process::exit(0);
+    // data_sync_retry=off: the fsync-failure ereport must not return control
+    // (fsyncgate); elog PANIC unwinds PanicExitThread under the thread model
+    // (notes/crash-restart-design.md) and the postmaster maps it to
+    // WTERMSIG(SIGABRT).
+    let r = std::panic::catch_unwind(|| ProcessSyncRequests());
+    match r {
+        Err(payload) if payload.is::<types_error::PanicExitThread>() => std::process::exit(42),
+        _ => std::process::exit(0),
+    }
 }
 
 #[test]
 fn fsync_failure_aborts_process() {
-    use std::os::unix::process::ExitStatusExt;
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["tests::fsync_failure_abort_child", "--exact", "--ignored", "--test-threads=1"])
         .output()
         .unwrap();
-    assert_eq!(out.status.signal(), Some(libc::SIGABRT), "child must SIGABRT: {out:?}");
+    assert_eq!(out.status.code(), Some(42), "child must unwind PanicExitThread: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("PANIC:  could not fsync file"), "missing PANIC report: {stderr}");
 }
