@@ -822,6 +822,7 @@ fn vacuum_reclaims_dead_rows_e2e() {
     shmem::init_seams();
     fd::init_seams();
     guc_tables::init_seams();
+    postgres_seams::check_for_interrupts::set(|| Ok(()));
     guc_tables::vars::VacuumCostDelay.install_if_absent(guc_tables::GucVarAccessors {
         get: init_small::globals::VacuumCostDelay,
         set: init_small::globals::SetVacuumCostDelay,
