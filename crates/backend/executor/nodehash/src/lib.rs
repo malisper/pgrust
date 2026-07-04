@@ -855,7 +855,7 @@ pub fn exec_hash_table_create<'mcx>(
 ) -> PgResult<HashJoinTable<'mcx>> {
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
-        exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true);
+        exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true, false, 0);
     let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
     let bloom_est = want_filter.then_some(hs.ntuples_est);
     HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, bloom_est)
@@ -963,8 +963,20 @@ pub fn get_hash_memory_limit() -> usize {
 }
 
 /// `ExecChooseHashTableSize` -> (numbuckets, numbatches, num_skew_mcvs).
-pub fn exec_choose_hash_table_size(ntuples: f64, tupwidth: i32, useskew: bool) -> (u32, i32, i32) {
-    let (b, n, s, _) = exec_choose_hash_table_size_full(ntuples, tupwidth, useskew);
+pub fn exec_choose_hash_table_size(
+    ntuples: f64,
+    tupwidth: i32,
+    useskew: bool,
+    try_combined_hash_mem: bool,
+    parallel_workers: i32,
+) -> (u32, i32, i32) {
+    let (b, n, s, _) = exec_choose_hash_table_size_full(
+        ntuples,
+        tupwidth,
+        useskew,
+        try_combined_hash_mem,
+        parallel_workers,
+    );
     (b, n, s)
 }
 
@@ -973,6 +985,8 @@ pub fn exec_choose_hash_table_size_full(
     ntuples: f64,
     tupwidth: i32,
     useskew: bool,
+    try_combined_hash_mem: bool,
+    parallel_workers: i32,
 ) -> (u32, i32, i32, usize) {
     let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
 
@@ -980,6 +994,12 @@ pub fn exec_choose_hash_table_size_full(
     let inner_rel_bytes = ntuples * tupsize as f64;
 
     let mut hash_table_bytes = get_hash_memory_limit();
+    // Parallel hash pools every worker's hash_mem; if the combined budget
+    // still needs batching, the recursive call falls back to per-worker.
+    if try_combined_hash_mem {
+        let newlimit = hash_table_bytes as f64 * (parallel_workers as f64 + 1.0);
+        hash_table_bytes = newlimit.min(usize::MAX as f64) as usize;
+    }
     let mut space_allowed = hash_table_bytes;
 
     let mut num_skew_mcvs: i64 = 0;
@@ -1009,6 +1029,11 @@ pub fn exec_choose_hash_table_size_full(
     let mut nbatch: i64 = 1;
     let bucket_bytes = SIZEOF_HASHJOINTUPLE * nbuckets;
     if inner_rel_bytes + bucket_bytes as f64 > hash_table_bytes as f64 {
+        if try_combined_hash_mem {
+            return exec_choose_hash_table_size_full(
+                ntuples, tupwidth, useskew, false, parallel_workers,
+            );
+        }
         let bucket_size = tupsize * (NTUP_PER_BUCKET as usize) + SIZEOF_HASHJOINTUPLE;
         let mut sbuckets = if hash_table_bytes <= bucket_size {
             1

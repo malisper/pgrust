@@ -64,6 +64,7 @@ bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partiti
 bool_guc!(ENABLE_PARTITIONWISE_JOIN, enable_partitionwise_join, set_enable_partitionwise_join, false);
 bool_guc!(ENABLE_PARTITIONWISE_AGGREGATE, enable_partitionwise_aggregate, set_enable_partitionwise_aggregate, false);
 bool_guc!(ENABLE_GATHERMERGE, enable_gathermerge, set_enable_gathermerge, true);
+bool_guc!(ENABLE_PARALLEL_HASH, enable_parallel_hash, set_enable_parallel_hash, true);
 
 // Read through the slot: execmain install_if_absent's a stand-in accessor,
 // whichever install wins must serve every reader.
@@ -137,6 +138,8 @@ pub fn install() {
         .install(GucVarAccessors { get: parallel_setup_cost, set: set_parallel_setup_cost });
     guc_tables::vars::enable_gathermerge
         .install(GucVarAccessors { get: enable_gathermerge, set: set_enable_gathermerge });
+    guc_tables::vars::enable_parallel_hash
+        .install(GucVarAccessors { get: enable_parallel_hash, set: set_enable_parallel_hash });
     guc_tables::vars::parallel_leader_participation.install_if_absent(GucVarAccessors {
         get: parallel_leader_participation_backing,
         set: set_parallel_leader_participation_backing,

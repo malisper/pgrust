@@ -2762,7 +2762,10 @@ pub fn final_cost_nestloop(
         Some(ppi) => ppi.ppi_rows,
         None => run.root.rel(path.jpath.path.parent).rows,
     };
-    debug_assert!(path.jpath.path.parallel_workers == 0);
+    if path.jpath.path.parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(path.jpath.path.parallel_workers);
+        path.jpath.path.rows = clamp_row_est(path.jpath.path.rows / parallel_divisor);
+    }
 
     let early_stop = matches!(
         path.jpath.jointype,
@@ -2822,10 +2825,11 @@ pub fn initial_cost_hashjoin(
     hashclauses: &[RinfoId],
     outer_path: PathId,
     inner_path: PathId,
+    parallel_hash: bool,
 ) -> JoinCostWorkspace {
-    let (o_rows, o_startup, o_total, o_disabled) = {
+    let (o_rows, o_startup, o_total, o_disabled, o_workers) = {
         let o = run.root.path(outer_path).base();
-        (o.rows, o.startup_cost, o.total_cost, o.disabled_nodes)
+        (o.rows, o.startup_cost, o.total_cost, o.disabled_nodes, o.parallel_workers)
     };
     let (i_rows, i_startup, i_total, i_disabled) = {
         let i = run.root.path(inner_path).base();
@@ -2846,9 +2850,22 @@ pub fn initial_cost_hashjoin(
         .mul_add(i_rows, startup_cost);
     run_cost = (gucs::cpu_operator_cost() * num_hashclauses).mul_add(o_rows, run_cost);
 
+    // A parallel hash build divides inner rows across participants; undo the
+    // split so hash-table sizing sees the whole relation (C initial_cost_hashjoin).
+    let inner_rows_total = if parallel_hash {
+        i_rows * get_parallel_divisor(run.root.path(inner_path).base().parallel_workers)
+    } else {
+        i_rows
+    };
+
     let inner_width = run.root.path_pathtarget(inner_path).width;
-    let (numbuckets, numbatches, _skew) =
-        ::nodehash::exec_choose_hash_table_size(i_rows, inner_width, true);
+    let (numbuckets, numbatches, _skew) = ::nodehash::exec_choose_hash_table_size(
+        inner_rows_total,
+        inner_width,
+        true,
+        parallel_hash,
+        o_workers,
+    );
 
     if numbatches > 1 {
         let outer_width = run.root.path_pathtarget(outer_path).width;
@@ -2865,7 +2882,7 @@ pub fn initial_cost_hashjoin(
         disabled_nodes,
         numbuckets: numbuckets as i32,
         numbatches,
-        inner_rows_total: i_rows,
+        inner_rows_total,
         ..Default::default()
     }
 }
@@ -2903,7 +2920,10 @@ pub fn final_cost_hashjoin(
         Some(ppi) => ppi.ppi_rows,
         None => run.root.rel(path.jpath.path.parent).rows,
     };
-    debug_assert!(path.jpath.path.parallel_workers == 0);
+    if path.jpath.path.parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(path.jpath.path.parallel_workers);
+        path.jpath.path.rows = clamp_row_est(path.jpath.path.rows / parallel_divisor);
+    }
 
     path.num_batches = numbatches;
     path.inner_rows_total = workspace.inner_rows_total;
@@ -3332,7 +3352,10 @@ pub fn final_cost_mergejoin(
         Some(ppi) => ppi.ppi_rows,
         None => run.root.rel(path.jpath.path.parent).rows,
     };
-    debug_assert!(path.jpath.path.parallel_workers == 0);
+    if path.jpath.path.parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(path.jpath.path.parallel_workers);
+        path.jpath.path.rows = clamp_row_est(path.jpath.path.rows / parallel_divisor);
+    }
 
     let mergeclauses =
         types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_mergeclauses);

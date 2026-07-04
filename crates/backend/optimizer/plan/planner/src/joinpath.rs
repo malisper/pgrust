@@ -1,6 +1,7 @@
 //! joinpath.c nestloop + mergejoin + hashjoin arms (incl. SEMI/ANTI and
 //! unique-ified semijoin inputs) with their pathnode.c/costsize.c join-cost
-//! slices. Lateral-driven parameterized inners and Memoize are live.
+//! slices. Lateral-driven parameterized inners and Memoize are live, as are
+//! the partial (parallel) nestloop/merge/hash arms.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -21,8 +22,9 @@ use crate::costsize::{
     initial_cost_hashjoin, initial_cost_mergejoin, initial_cost_nestloop, JoinCostWorkspace,
 };
 use crate::pathnode::{
-    add_path_precheck, compare_path_costs, create_hashjoin_path, create_material_path,
-    create_memoize_path, create_mergejoin_path, create_nestloop_path, tag16, CostSelector,
+    add_partial_path, add_partial_path_precheck, add_path_precheck, compare_path_costs,
+    create_hashjoin_path, create_material_path, create_memoize_path, create_mergejoin_path,
+    create_nestloop_path, get_cheapest_parallel_safe_total_inner, tag16, CostSelector,
 };
 pub use types_pathnodes::{is_outer_join, SemiAntiJoinFactors};
 use crate::run::PlannerRun;
@@ -294,6 +296,7 @@ fn sort_inner_and_outer<'mcx>(
     param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
+    let save_jointype = jointype;
     if jointype == types_pathnodes::JOIN_RIGHT_SEMI {
         return Ok(());
     }
@@ -315,9 +318,6 @@ fn sort_inner_and_outer<'mcx>(
     {
         return Ok(());
     }
-    // DIVERGENCE: C also builds partial merge-join paths from the outer
-    // rel's partial_pathlist (consider_parallel_mergejoin); partial join
-    // paths are a follow-up lane, so parallel plans stop below joins here.
     if jointype == types_pathnodes::JOIN_UNIQUE_OUTER {
         outer_path = crate::pathnode::create_unique_path(run, outerrel, outer_path, sjinfo)?
             .expect("unique-ify was proven possible");
@@ -327,6 +327,31 @@ fn sort_inner_and_outer<'mcx>(
             .expect("unique-ify was proven possible");
         jointype = JOIN_INNER;
     }
+
+    // A parallel-safe joinrel can carry a partial merge join: cheapest partial
+    // outer joined to a parallel-safe complete inner. UNIQUE_OUTER/FULL/RIGHT/
+    // RIGHT_ANTI can't (false null-extended rows or lost uniqueness).
+    let (cheapest_partial_outer, cheapest_safe_inner) = if run.root.rel(joinrel).consider_parallel
+        && save_jointype != types_pathnodes::JOIN_UNIQUE_OUTER
+        && save_jointype != types_pathnodes::JOIN_FULL
+        && save_jointype != JOIN_RIGHT
+        && save_jointype != types_pathnodes::JOIN_RIGHT_ANTI
+        && !run.root.rel(outerrel).partial_pathlist.is_empty()
+        && crate::relnode::relids_is_empty(&run.root.rel(joinrel).lateral_relids)
+    {
+        let cpo = run.root.rel(outerrel).partial_pathlist[0];
+        let csi = if run.root.path(inner_path).base().parallel_safe {
+            Some(inner_path)
+        } else if save_jointype != types_pathnodes::JOIN_UNIQUE_INNER {
+            let pl = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(innerrel).pathlist);
+            get_cheapest_parallel_safe_total_inner(run, &pl)
+        } else {
+            None
+        };
+        (Some(cpo), csi)
+    } else {
+        (None, None)
+    };
 
     let all_pathkeys = select_outer_pathkeys_for_merge(run, mergeclause_list, joinrel)?;
 
@@ -349,6 +374,17 @@ fn sort_inner_and_outer<'mcx>(
         debug_assert_eq!(cur_mergeclauses.len(), mergeclause_list.len());
         let innerkeys = make_inner_pathkeys_for_merge(run, &cur_mergeclauses, &outerkeys)?;
         let merge_pathkeys = build_join_pathkeys(run, joinrel, jointype, &outerkeys)?;
+        let want_partial = cheapest_partial_outer.is_some() && cheapest_safe_inner.is_some();
+        let (pk2, mc2, ok2, ik2) = if want_partial {
+            (
+                crate::relnode::pgvec_clone_shallow(run.mcx, &merge_pathkeys),
+                crate::relnode::pgvec_clone_shallow(run.mcx, &cur_mergeclauses),
+                crate::relnode::pgvec_clone_shallow(run.mcx, &outerkeys),
+                crate::relnode::pgvec_clone_shallow(run.mcx, &innerkeys),
+            )
+        } else {
+            (PgVec::new_in(run.mcx), PgVec::new_in(run.mcx), PgVec::new_in(run.mcx), PgVec::new_in(run.mcx))
+        };
         try_mergejoin_path(
             run,
             joinrel,
@@ -364,12 +400,29 @@ fn sort_inner_and_outer<'mcx>(
             restrictlist,
             param_source_rels,
             semifactors,
+            false,
         )?;
+        if want_partial {
+            try_partial_mergejoin_path(
+                run,
+                joinrel,
+                cheapest_partial_outer.unwrap(),
+                cheapest_safe_inner.unwrap(),
+                pk2,
+                mc2,
+                ok2,
+                ik2,
+                jointype,
+                inner_unique,
+                sjinfo,
+                restrictlist,
+            )?;
+        }
     }
     Ok(())
 }
 
-// generate_mergejoin_paths (joinpath.c); partial paths are dead.
+// generate_mergejoin_paths (joinpath.c).
 #[allow(clippy::too_many_arguments)]
 fn generate_mergejoin_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -386,6 +439,7 @@ fn generate_mergejoin_paths<'mcx>(
     merge_pathkeys: &[PathKey],
     param_source_rels: &Relids<'mcx>,
     semifactors: Option<SemiAntiJoinFactors>,
+    is_partial: bool,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     let save_jointype = jointype;
@@ -427,6 +481,7 @@ fn generate_mergejoin_paths<'mcx>(
         restrictlist,
         param_source_rels,
         semifactors,
+        is_partial,
     )?;
 
     if save_jointype == types_pathnodes::JOIN_UNIQUE_INNER {
@@ -459,7 +514,7 @@ fn generate_mergejoin_paths<'mcx>(
             &inner_pathlist,
             trialsortkeys,
             CostSelector::Total,
-            false,
+            is_partial,
         );
         if let Some(ip) = innerpath {
             let cheaper = match cheapest_total_inner {
@@ -498,6 +553,7 @@ fn generate_mergejoin_paths<'mcx>(
                     restrictlist,
                     param_source_rels,
                     semifactors,
+                    is_partial,
                 )?;
                 cheapest_total_inner = Some(ip);
             }
@@ -508,7 +564,7 @@ fn generate_mergejoin_paths<'mcx>(
             &inner_pathlist,
             trialsortkeys,
             CostSelector::Startup,
-            false,
+            is_partial,
         );
         if let Some(ip) = innerpath {
             let cheaper = match cheapest_startup_inner {
@@ -556,6 +612,7 @@ fn generate_mergejoin_paths<'mcx>(
                         restrictlist,
                         param_source_rels,
                         semifactors,
+                        is_partial,
                     )?;
                 }
                 cheapest_startup_inner = Some(ip);
@@ -692,11 +749,172 @@ fn match_unsorted_outer<'mcx>(
                 &merge_pathkeys,
                 param_source_rels,
                 semifactors,
+                false,
             )?;
         }
     }
-    // DIVERGENCE: C's consider_parallel_nestloop / partial hash joins over
-    // outerrel->partial_pathlist are a follow-up lane (see above).
+
+    // Partial nestloop/mergejoin over the outer rel's partial paths. Excluded
+    // for the same reasons as sort_inner_and_outer's partial merge leg, plus
+    // partial paths must not be parameterized (lateral_relids empty).
+    if run.root.rel(joinrel).consider_parallel
+        && save_jointype != JOIN_UNIQUE_OUTER
+        && save_jointype != types_pathnodes::JOIN_FULL
+        && save_jointype != JOIN_RIGHT
+        && save_jointype != JOIN_RIGHT_ANTI
+        && !run.root.rel(outerrel).partial_pathlist.is_empty()
+        && crate::relnode::relids_is_empty(&run.root.rel(joinrel).lateral_relids)
+    {
+        if nestjoin_ok {
+            consider_parallel_nestloop(
+                run, joinrel, outerrel, innerrel, save_jointype, inner_unique, sjinfo,
+                restrictlist, param_source_rels, semifactors,
+            )?;
+        }
+        let mut pict = inner_cheapest_total;
+        let need_alt = match pict {
+            None => true,
+            Some(p) => !run.root.path(p).base().parallel_safe,
+        };
+        if need_alt {
+            if save_jointype == JOIN_UNIQUE_INNER {
+                return Ok(());
+            }
+            let pl = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(innerrel).pathlist);
+            pict = get_cheapest_parallel_safe_total_inner(run, &pl);
+        }
+        if let Some(ict) = pict {
+            consider_parallel_mergejoin(
+                run, joinrel, outerrel, innerrel, save_jointype, inner_unique, sjinfo,
+                restrictlist, mergeclause_list, ict, semifactors,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// consider_parallel_nestloop (joinpath.c): partial nestloops joining a partial
+// outer path to a complete inner.
+#[allow(clippy::too_many_arguments)]
+fn consider_parallel_nestloop<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outerrel: RelId,
+    innerrel: RelId,
+    mut jointype: u32,
+    inner_unique: bool,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[RinfoId],
+    param_source_rels: &Relids<'mcx>,
+    semifactors: Option<SemiAntiJoinFactors>,
+) -> PgResult<()> {
+    use types_pathnodes::JOIN_UNIQUE_INNER;
+    let save_jointype = jointype;
+    let inner_cheapest_total = run
+        .root
+        .rel(innerrel)
+        .cheapest_total_path
+        .expect("inner rel has a cheapest total path");
+    if jointype == JOIN_UNIQUE_INNER {
+        jointype = JOIN_INNER;
+    }
+    let mut matpath = None;
+    if save_jointype != JOIN_UNIQUE_INNER
+        && gucs::enable_material()
+        && run.root.path(inner_cheapest_total).base().parallel_safe
+        && !path_param_by_rel(run, inner_cheapest_total, outerrel)
+        && !exec_materializes_output(run.root.path(inner_cheapest_total).base().pathtype)
+    {
+        matpath = Some(create_material_path(run, innerrel, inner_cheapest_total));
+    }
+
+    let outer_paths =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(outerrel).partial_pathlist);
+    for &outerpath in outer_paths.iter() {
+        let outer_pathkeys =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.path(outerpath).base().pathkeys);
+        let pathkeys = build_join_pathkeys(run, joinrel, jointype, &outer_pathkeys)?;
+        let inner_candidates = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel(innerrel).cheapest_parameterized_paths,
+        );
+        for &raw_inner in inner_candidates.iter() {
+            if !run.root.path(raw_inner).base().parallel_safe {
+                continue;
+            }
+            let innerpath = if save_jointype == JOIN_UNIQUE_INNER {
+                if Some(raw_inner) != run.root.rel(innerrel).cheapest_total_path {
+                    continue;
+                }
+                crate::pathnode::create_unique_path(run, innerrel, raw_inner, sjinfo)?
+                    .expect("unique-ify was proven possible")
+            } else {
+                raw_inner
+            };
+            try_partial_nestloop_path(
+                run, joinrel, outerpath, innerpath, &pathkeys, jointype, inner_unique,
+                sjinfo, restrictlist, param_source_rels, semifactors,
+            )?;
+            if let Some(mpath) = get_memoize_path(
+                run, innerrel, outerrel, innerpath, outerpath, jointype, inner_unique,
+                restrictlist,
+            )? {
+                try_partial_nestloop_path(
+                    run, joinrel, outerpath, mpath, &pathkeys, jointype, inner_unique,
+                    sjinfo, restrictlist, param_source_rels, semifactors,
+                )?;
+            }
+        }
+        if let Some(mp) = matpath {
+            try_partial_nestloop_path(
+                run, joinrel, outerpath, mp, &pathkeys, jointype, inner_unique,
+                sjinfo, restrictlist, param_source_rels, semifactors,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// consider_parallel_mergejoin (joinpath.c): partial mergejoins for each partial
+// outer path joined to a complete inner.
+#[allow(clippy::too_many_arguments)]
+fn consider_parallel_mergejoin<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outerrel: RelId,
+    innerrel: RelId,
+    jointype: u32,
+    inner_unique: bool,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[RinfoId],
+    mergeclause_list: &[RinfoId],
+    inner_cheapest_total: PathId,
+    semifactors: Option<SemiAntiJoinFactors>,
+) -> PgResult<()> {
+    let outer_paths =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(outerrel).partial_pathlist);
+    for &outerpath in outer_paths.iter() {
+        let outer_pathkeys =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.path(outerpath).base().pathkeys);
+        let merge_pathkeys = build_join_pathkeys(run, joinrel, jointype, &outer_pathkeys)?;
+        generate_mergejoin_paths(
+            run,
+            joinrel,
+            innerrel,
+            outerpath,
+            jointype,
+            inner_unique,
+            sjinfo,
+            restrictlist,
+            mergeclause_list,
+            false,
+            inner_cheapest_total,
+            &merge_pathkeys,
+            &None,
+            semifactors,
+            true,
+        )?;
+    }
     Ok(())
 }
 
@@ -1007,7 +1225,64 @@ fn try_nestloop_path<'mcx>(
     Ok(())
 }
 
-// try_mergejoin_path (joinpath.c); required_outer/partial legs are dead.
+// try_partial_nestloop_path (joinpath.c). Partial paths are never
+// parameterized: the joinrel has no lateral rels and the outer path no
+// required_outer; a parameterized inner must be fully satisfied by the outer.
+#[allow(clippy::too_many_arguments)]
+fn try_partial_nestloop_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outer_path: PathId,
+    inner_path: PathId,
+    pathkeys: &[PathKey],
+    jointype: u32,
+    inner_unique: bool,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[RinfoId],
+    _param_source_rels: &Relids<'mcx>,
+    semifactors: Option<SemiAntiJoinFactors>,
+) -> PgResult<()> {
+    use crate::relnode::{relids_copy, relids_is_empty, relids_is_subset};
+    let mcx = run.mcx;
+    debug_assert!(relids_is_empty(&run.root.rel(joinrel).lateral_relids));
+    debug_assert!(relids_is_empty(crate::pathnode::path_req_outer(
+        run.root.path(outer_path).base()
+    )));
+    let inner_paramrels =
+        relids_copy(mcx, crate::pathnode::path_req_outer(run.root.path(inner_path).base()));
+    if !relids_is_empty(&inner_paramrels) {
+        let outer_parent = run.root.path(outer_path).base().parent;
+        let outerrelids = if relids_is_empty(&run.root.rel(outer_parent).top_parent_relids) {
+            relids_copy(mcx, &run.root.rel(outer_parent).relids)
+        } else {
+            relids_copy(mcx, &run.root.rel(outer_parent).top_parent_relids)
+        };
+        if !relids_is_subset(&inner_paramrels, &outerrelids) {
+            return Ok(());
+        }
+    }
+    {
+        let outer_parent = run.root.path(outer_path).base().parent;
+        if path_param_by_parent(run, inner_path, outer_parent)
+            && !crate::createplan::path_is_reparameterizable_by_child(run, inner_path, outer_parent)
+        {
+            return Ok(());
+        }
+    }
+
+    let workspace = initial_cost_nestloop(run, jointype, inner_unique, outer_path, inner_path)?;
+    if !add_partial_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.total_cost, pathkeys) {
+        return Ok(());
+    }
+    let path = create_nestloop_path(
+        run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
+        pathkeys, restrictlist, &None, semifactors,
+    )?;
+    add_partial_path(run, joinrel, path);
+    Ok(())
+}
+
+// try_mergejoin_path (joinpath.c); is_partial delegates to the partial arm.
 #[allow(clippy::too_many_arguments)]
 fn try_mergejoin_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1024,8 +1299,15 @@ fn try_mergejoin_path<'mcx>(
     restrictlist: &[RinfoId],
     param_source_rels: &Relids<'mcx>,
     _semifactors: Option<SemiAntiJoinFactors>,
+    is_partial: bool,
 ) -> PgResult<()> {
     use crate::relnode::{relids_is_empty, relids_is_member, relids_overlap};
+    if is_partial {
+        return try_partial_mergejoin_path(
+            run, joinrel, outer_path, inner_path, pathkeys, mergeclauses, outersortkeys,
+            innersortkeys, jointype, inner_unique, sjinfo, restrictlist,
+        );
+    }
     if sjinfo.ojrelid != 0
         && (relids_is_member(
             sjinfo.ojrelid as i32,
@@ -1099,7 +1381,72 @@ fn try_mergejoin_path<'mcx>(
     Ok(())
 }
 
-// hash_inner_and_outer (joinpath.c), non-parallel arm.
+// try_partial_mergejoin_path (joinpath.c). required_outer is always empty here.
+#[allow(clippy::too_many_arguments)]
+fn try_partial_mergejoin_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outer_path: PathId,
+    inner_path: PathId,
+    pathkeys: PgVec<'mcx, PathKey>,
+    mergeclauses: PgVec<'mcx, RinfoId>,
+    mut outersortkeys: PgVec<'mcx, PathKey>,
+    mut innersortkeys: PgVec<'mcx, PathKey>,
+    jointype: u32,
+    inner_unique: bool,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[RinfoId],
+) -> PgResult<()> {
+    use crate::relnode::relids_is_empty;
+    debug_assert!(relids_is_empty(&run.root.rel(joinrel).lateral_relids));
+    debug_assert!(relids_is_empty(crate::pathnode::path_req_outer(
+        run.root.path(outer_path).base()
+    )));
+    if !relids_is_empty(crate::pathnode::path_req_outer(run.root.path(inner_path).base())) {
+        return Ok(());
+    }
+
+    let mut outer_presorted_keys = 0usize;
+    if !outersortkeys.is_empty() {
+        let (contained, n) = pathkeys_count_contained_in(
+            &outersortkeys,
+            &run.root.path(outer_path).base().pathkeys,
+        );
+        if contained {
+            outersortkeys.clear();
+        } else {
+            outer_presorted_keys = n;
+        }
+    }
+    if !innersortkeys.is_empty()
+        && pathkeys_contained_in(&innersortkeys, &run.root.path(inner_path).base().pathkeys)
+    {
+        innersortkeys.clear();
+    }
+
+    let workspace = initial_cost_mergejoin(
+        run,
+        jointype,
+        &mergeclauses,
+        outer_path,
+        inner_path,
+        &outersortkeys,
+        &innersortkeys,
+        outer_presorted_keys,
+    )?;
+    if !add_partial_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.total_cost, &pathkeys) {
+        return Ok(());
+    }
+    let path = create_mergejoin_path(
+        run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
+        restrictlist, pathkeys, &None, mergeclauses, outersortkeys, innersortkeys,
+        outer_presorted_keys,
+    )?;
+    add_partial_path(run, joinrel, path);
+    Ok(())
+}
+
+// hash_inner_and_outer (joinpath.c).
 #[allow(clippy::too_many_arguments)]
 fn hash_inner_and_outer<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1114,6 +1461,7 @@ fn hash_inner_and_outer<'mcx>(
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<()> {
     use types_pathnodes::{JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER};
+    let save_jointype = jointype;
     let isouterjoin = is_outer_join(jointype);
     let joinrelids = crate::relnode::relids_copy(run.mcx, &run.root.rel(joinrel).relids);
     let mut hashclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(run.mcx);
@@ -1219,6 +1567,48 @@ fn hash_inner_and_outer<'mcx>(
             )?;
         }
     }
+
+    // Partial hash join. A partial inner (shared table built in parallel) needs
+    // enable_parallel_hash; otherwise a parallel-safe complete inner is copied
+    // per worker. RIGHT_SEMI is excluded (no cross-worker match-flag coherence);
+    // FULL/RIGHT/RIGHT_ANTI can't share match bits across backends.
+    if run.root.rel(joinrel).consider_parallel
+        && save_jointype != JOIN_UNIQUE_OUTER
+        && save_jointype != types_pathnodes::JOIN_RIGHT_SEMI
+        && !run.root.rel(outerrel).partial_pathlist.is_empty()
+        && crate::relnode::relids_is_empty(&run.root.rel(joinrel).lateral_relids)
+    {
+        let cheapest_partial_outer = run.root.rel(outerrel).partial_pathlist[0];
+        if !run.root.rel(innerrel).partial_pathlist.is_empty()
+            && save_jointype != JOIN_UNIQUE_INNER
+            && gucs::enable_parallel_hash()
+        {
+            let cheapest_partial_inner = run.root.rel(innerrel).partial_pathlist[0];
+            try_partial_hashjoin_path(
+                run, joinrel, cheapest_partial_outer, cheapest_partial_inner, &hashclauses,
+                jointype, inner_unique, sjinfo, restrictlist, semifactors, true,
+            )?;
+        }
+        let cheapest_safe_inner = if save_jointype == types_pathnodes::JOIN_FULL
+            || save_jointype == JOIN_RIGHT
+            || save_jointype == types_pathnodes::JOIN_RIGHT_ANTI
+        {
+            None
+        } else if run.root.path(cheapest_total_inner).base().parallel_safe {
+            Some(cheapest_total_inner)
+        } else if save_jointype != JOIN_UNIQUE_INNER {
+            let pl = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(innerrel).pathlist);
+            get_cheapest_parallel_safe_total_inner(run, &pl)
+        } else {
+            None
+        };
+        if let Some(csi) = cheapest_safe_inner {
+            try_partial_hashjoin_path(
+                run, joinrel, cheapest_partial_outer, csi, &hashclauses, jointype, inner_unique,
+                sjinfo, restrictlist, semifactors, false,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1285,7 +1675,7 @@ fn try_hashjoin_path<'mcx>(
     if !relids_is_empty(&required_outer) && !relids_overlap(&required_outer, param_source_rels) {
         return Ok(());
     }
-    let workspace = initial_cost_hashjoin(run, hashclauses, outer_path, inner_path);
+    let workspace = initial_cost_hashjoin(run, hashclauses, outer_path, inner_path, false);
     if add_path_precheck(
         run,
         joinrel,
@@ -1304,6 +1694,7 @@ fn try_hashjoin_path<'mcx>(
             sjinfo,
             outer_path,
             inner_path,
+            false,
             restrictlist,
             &required_outer,
             hashclauses,
@@ -1311,6 +1702,42 @@ fn try_hashjoin_path<'mcx>(
         )?;
         crate::pathnode::add_path(run, joinrel, path);
     }
+    Ok(())
+}
+
+// try_partial_hashjoin_path (joinpath.c). parallel_hash => shared table built
+// from a partial inner; otherwise the complete inner is copied per worker.
+#[allow(clippy::too_many_arguments)]
+fn try_partial_hashjoin_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+    outer_path: PathId,
+    inner_path: PathId,
+    hashclauses: &[RinfoId],
+    jointype: u32,
+    inner_unique: bool,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    restrictlist: &[RinfoId],
+    semifactors: Option<SemiAntiJoinFactors>,
+    parallel_hash: bool,
+) -> PgResult<()> {
+    use crate::relnode::relids_is_empty;
+    debug_assert!(relids_is_empty(&run.root.rel(joinrel).lateral_relids));
+    debug_assert!(relids_is_empty(crate::pathnode::path_req_outer(
+        run.root.path(outer_path).base()
+    )));
+    if !relids_is_empty(crate::pathnode::path_req_outer(run.root.path(inner_path).base())) {
+        return Ok(());
+    }
+    let workspace = initial_cost_hashjoin(run, hashclauses, outer_path, inner_path, parallel_hash);
+    if !add_partial_path_precheck(run, joinrel, workspace.disabled_nodes, workspace.total_cost, &[]) {
+        return Ok(());
+    }
+    let path = create_hashjoin_path(
+        run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
+        parallel_hash, restrictlist, &None, hashclauses, semifactors,
+    )?;
+    add_partial_path(run, joinrel, path);
     Ok(())
 }
 
