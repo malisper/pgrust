@@ -164,7 +164,6 @@ struct ProcInfo {
     /// One mode per argtypes entry; empty when proargmodes is null (all IN).
     argmodes: Vec<i8>,
     argnames: Vec<String>,
-    argmodes: Option<Vec<i8>>,
     rettype: Oid,
     retset: bool,
     prokind: i8,
