@@ -571,14 +571,22 @@ fn gin_jsonpath_extraction_shapes() {
         extract_jsp_query(mcx, &image[4..], JsonbJsonpathExistsStrategyNumber, true).unwrap();
     assert!(entries.is_empty());
 
-    // jsonb_ops EXISTS ('$.a.b') extracts the key chain.
+    // Plain EXISTS ('$.a.b', statement of the 2nd kind) extracts nothing
+    // in jsonb_ops either — C skips it to not confuse the optimizer.
     let image = jp(b"$.a.b");
+    let (entries, _) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathExistsStrategyNumber, false).unwrap();
+    assert!(entries.is_empty());
+
+    // EXISTS with an equality filter extracts the key chain + scalar.
+    let image = jp(b"$.a ? (@.b == 1)");
     let (entries, ops) =
         extract_jsp_query(mcx, &image[4..], JsonbJsonpathExistsStrategyNumber, false).unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(ops[0].kind, JSP_GIN_AND);
+    assert_eq!(entries.len(), 3);
+    assert_eq!((ops[0].kind, ops[0].val), (JSP_GIN_AND, 3));
     assert_eq!(key_of(entries[0]), b"\x01b");
     assert_eq!(key_of(entries[1]), b"\x01a");
+    assert_eq!(key_of(entries[2]), b"\x041");
 }
 
 #[test]
