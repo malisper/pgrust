@@ -775,14 +775,13 @@ fn runtime_key_qual_builds_deferred_scan_key() {
 }
 
 #[test]
-fn saop_runtime_array_qual_panics_loudly_at_init() {
+fn saop_runtime_array_qual_builds_deferred_search_array_key() {
     let _g = serial();
     with_mcx(|mcx| {
         let heap_oid = fresh_oid();
         let index_oid = fresh_oid();
         register_indexed_table(heap_oid, index_oid, &[1]);
         let index_rel = index_relation(mcx, index_oid, heap_oid);
-        // Const-array SAOP is live; a non-Const (runtime) array stays loud.
         let lvar = Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
         let rvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
         let saop = Node::mk(
@@ -800,16 +799,14 @@ fn saop_runtime_array_qual_panics_loudly_at_init() {
         )
         .unwrap();
         let quals = NodeList::make1(mcx, saop).unwrap();
-        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE)
-                .map(|(k, _)| k.len());
-        }))
-        .unwrap_err();
-        let msg = err
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        assert!(msg.contains("runtime array key"), "unexpected panic: {msg}");
+        let (keys, runtime) =
+            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].scan_key, 0);
+        assert!(runtime[0].key_toastable);
+        assert_eq!(keys[0].sk_flags, SK_SEARCHARRAY);
+        assert_eq!(keys[0].sk_argument, Datum::from_usize(0));
+        assert_eq!(keys[0].sk_strategy, BTEqualStrategyNumber);
     });
 }
