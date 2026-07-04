@@ -88,22 +88,7 @@ fn resolve_backend(form: &FormData_pg_class) -> PgResult<(ProcNumber, bool)> {
 // relcache_build_seams surfaces. Returns None when no pg_class row exists.
 // On error the in_progress frame stays, exactly like C: AtEOXact_RelationCache
 // clears it during abort.
-thread_local! {
-    static BUILD_DEPTH: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
-}
-struct BuildDepthGuard;
-impl Drop for BuildDepthGuard {
-    fn drop(&mut self) {
-        BUILD_DEPTH.with(|d| d.set(d.get() - 1));
-    }
-}
-
 pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationData<'static>>> {
-    BUILD_DEPTH.with(|d| {
-        d.set(d.get() + 1);
-        assert!(d.get() < 30, "PUBTRACE build_desc depth {} rel {target_rel_id}", d.get());
-    });
-    let _bd_guard = BuildDepthGuard;
     let offset = with_state(|st| {
         st.in_progress.push(InProgressEnt { reloid: target_rel_id, invalidated: false });
         st.in_progress.len() - 1
