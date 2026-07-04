@@ -92,6 +92,16 @@ pub fn transformExprRecurse<'mcx>(
             }
         }
         NodeTag::T_BooleanTest => transformBooleanTest(mcx, pstate, expr),
+        NodeTag::T_NamedArgExpr => {
+            let raw = expr.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg");
+            let arg = transformExprRecurse(mcx, pstate, raw)?;
+            // SAFETY: parse analysis exclusively owns the just-built raw tree.
+            unsafe {
+                expr.with_mut::<types_nodes::primnodes::NamedArgExpr, _>(|n| n.arg = Some(arg))
+            }
+            .expect("node checked as NamedArgExpr");
+            Ok(expr)
+        }
         NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
         NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
         NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),

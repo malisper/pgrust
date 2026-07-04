@@ -358,9 +358,6 @@ fn interpret_function_parameter_list<'mcx>(
             FUNC_PARAM_DEFAULT => FUNC_PARAM_IN,
             m => m,
         };
-        if fp.defexpr.is_some() {
-            unported("parameter DEFAULT expressions");
-        }
         let tn_node: Node<'mcx> = fp.argType.expect("FunctionParameter.argType");
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
         let toid = resolve_type_name(mcx, tn)?;
@@ -441,6 +438,10 @@ fn interpret_function_parameter_list<'mcx>(
             have_names = true;
         }
         names.push(name);
+
+        if fp.defexpr.is_some() {
+            unported("parameter DEFAULT expressions");
+        }
     }
 
     let have_out_or_variadic = out_count > 0 || var_count > 0;
