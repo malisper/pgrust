@@ -1043,8 +1043,10 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     funccolcollations.lappend(mcx, attrcollation)?;
                 }
                 catalog_heap::CheckAttributeNamesTypes(
+                    mcx,
                     &d,
                     types_rel::RELKIND_COMPOSITE_TYPE,
+                    catalog_heap::CHKATYPE_ANYRECORD,
                 )?;
                 d
             }

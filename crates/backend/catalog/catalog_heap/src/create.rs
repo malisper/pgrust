@@ -34,54 +34,195 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
-pub fn CheckAttributeNamesTypes(tupdesc: &TupleDescData<'_>, relkind: u8) -> PgResult<()> {
+pub const CHKATYPE_ANYARRAY: i32 = 0x01;
+pub const CHKATYPE_ANYRECORD: i32 = 0x02;
+pub const CHKATYPE_IS_PARTKEY: i32 = 0x04;
+pub const CHKATYPE_IS_VIRTUAL: i32 = 0x08;
+
+pub fn CheckAttributeNamesTypes<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    relkind: u8,
+    flags: i32,
+) -> PgResult<()> {
     let natts = tupdesc.natts as usize;
-    for i in 0..natts {
-        let att = &tupdesc.attrs[i];
-        let name = core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname");
-        if relkind != RELKIND_VIEW
-            && relkind != RELKIND_COMPOSITE_TYPE
-            && crate::SystemAttributeByName(name).is_some()
-        {
-            return Err(err(
-                format!("column name \"{name}\" conflicts with a system column name"),
-                ERRCODE_DUPLICATE_COLUMN,
-            ));
+    if natts > types_tuple::htup::MaxHeapAttributeNumber as usize {
+        return Err(err(
+            format!(
+                "tables can have at most {} columns",
+                types_tuple::htup::MaxHeapAttributeNumber
+            ),
+            types_error::ERRCODE_TOO_MANY_COLUMNS,
+        ));
+    }
+    if relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE {
+        for att in &tupdesc.attrs[..natts] {
+            let name = core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname");
+            if crate::SystemAttributeByName(name).is_some() {
+                return Err(err(
+                    format!("column name \"{name}\" conflicts with a system column name"),
+                    ERRCODE_DUPLICATE_COLUMN,
+                ));
+            }
         }
+    }
+    for i in 1..natts {
         for j in 0..i {
-            if tupdesc.attrs[j].attname.name_str() == att.attname.name_str() {
+            if tupdesc.attrs[j].attname.name_str() == tupdesc.attrs[i].attname.name_str() {
+                let name = core::str::from_utf8(tupdesc.attrs[j].attname.name_str())
+                    .expect("non-UTF-8 attname");
                 return Err(err(
                     format!("column name \"{name}\" specified more than once"),
                     ERRCODE_DUPLICATE_COLUMN,
                 ));
             }
         }
-        if !att.attisdropped && att.atttypid == InvalidOid {
-            panic!("CheckAttributeType (heap.c): full type validation unported; got InvalidOid for \"{name}\"");
+    }
+    let mut containing_rowtypes: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 4)?;
+    for att in &tupdesc.attrs[..natts] {
+        let name = core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname");
+        CheckAttributeType(
+            mcx,
+            name,
+            att.atttypid,
+            att.attcollation,
+            &mut containing_rowtypes,
+            flags
+                | if att.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+                    CHKATYPE_IS_VIRTUAL
+                } else {
+                    0
+                },
+        )?;
+    }
+    Ok(())
+}
+
+pub fn CheckAttributeType<'mcx>(
+    mcx: Mcx<'mcx>,
+    attname: &str,
+    atttypid: Oid,
+    attcollation: Oid,
+    containing_rowtypes: &mut mcx::PgVec<'mcx, Oid>,
+    flags: i32,
+) -> PgResult<()> {
+    let att_typtype = lsyscache::typ::get_typtype(atttypid)?;
+
+    stack_depth::check_stack_depth()?;
+
+    if att_typtype == lsyscache::typ::TYPTYPE_PSEUDO {
+        if !((atttypid == types_core::catalog::ANYARRAYOID && flags & CHKATYPE_ANYARRAY != 0)
+            || (atttypid == types_core::catalog::RECORDOID && flags & CHKATYPE_ANYRECORD != 0)
+            || (atttypid == types_core::catalog::RECORDARRAYOID
+                && flags & CHKATYPE_ANYRECORD != 0))
+        {
+            let tname = format_type::format_type_be(atttypid)?;
+            let msg = if flags & CHKATYPE_IS_PARTKEY != 0 {
+                format!("partition key column {attname} has pseudo-type {tname}")
+            } else {
+                format!("column \"{attname}\" has pseudo-type {tname}")
+            };
+            return Err(err(msg, types_error::ERRCODE_INVALID_TABLE_DEFINITION));
         }
-        // C divergence: CheckAttributeType's CHKATYPE_IS_VIRTUAL checks applied
-        // flat here, without recursing through domains/composites/ranges/arrays.
-        if !att.attisdropped && att.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
-            if lsyscache::typ::get_typtype(att.atttypid)? == lsyscache::typ::TYPTYPE_DOMAIN {
-                return Err(err(
-                    format!("virtual generated column \"{name}\" cannot have a domain type"),
-                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                ));
-            }
-            if att.atttypid >= types_core::FirstUnpinnedObjectId {
-                return Err(Box::new(
-                    (*err(
-                        format!(
-                            "virtual generated column \"{name}\" cannot have a user-defined type"
-                        ),
-                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    ))
-                    .with_detail(
-                        "Virtual generated columns that make use of user-defined types are not yet supported.",
-                    ),
-                ));
-            }
+    } else if att_typtype == lsyscache::typ::TYPTYPE_DOMAIN {
+        if flags & CHKATYPE_IS_VIRTUAL != 0 {
+            return Err(err(
+                format!("virtual generated column \"{attname}\" cannot have a domain type"),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
+        CheckAttributeType(
+            mcx,
+            attname,
+            lsyscache::typ::getBaseType(atttypid)?,
+            attcollation,
+            containing_rowtypes,
+            flags,
+        )?;
+    } else if att_typtype == lsyscache::typ::TYPTYPE_COMPOSITE {
+        if containing_rowtypes.contains(&atttypid) {
+            return Err(err(
+                format!(
+                    "composite type {} cannot be made a member of itself",
+                    format_type::format_type_be(atttypid)?
+                ),
+                types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+            ));
+        }
+        containing_rowtypes.push(atttypid);
+        let rel = relation::relation_open(
+            mcx,
+            lsyscache::typ::get_typ_typrelid(atttypid)?,
+            AccessShareLock,
+        )?;
+        for i in 0..rel.rd_att.natts as usize {
+            let attr = rel.rd_att.attr(i);
+            if attr.attisdropped {
+                continue;
+            }
+            let inner_name =
+                core::str::from_utf8(attr.attname.name_str()).expect("non-UTF-8 attname");
+            CheckAttributeType(
+                mcx,
+                inner_name,
+                attr.atttypid,
+                attr.attcollation,
+                containing_rowtypes,
+                flags & !CHKATYPE_IS_PARTKEY,
+            )?;
+        }
+        rel.close(AccessShareLock)?;
+        containing_rowtypes.pop();
+    } else if att_typtype == lsyscache::typ::TYPTYPE_RANGE {
+        CheckAttributeType(
+            mcx,
+            attname,
+            lsyscache::misc::get_range_subtype(atttypid)?,
+            lsyscache::misc::get_range_collation(atttypid)?,
+            containing_rowtypes,
+            flags,
+        )?;
+    } else {
+        let att_typelem = lsyscache::typ::get_element_type(atttypid)?;
+        if att_typelem != InvalidOid {
+            CheckAttributeType(
+                mcx,
+                attname,
+                att_typelem,
+                attcollation,
+                containing_rowtypes,
+                flags,
+            )?;
+        }
+    }
+
+    if flags & CHKATYPE_IS_VIRTUAL != 0 && atttypid >= types_core::FirstUnpinnedObjectId {
+        return Err(Box::new(
+            (*err(
+                format!("virtual generated column \"{attname}\" cannot have a user-defined type"),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ))
+            .with_detail(
+                "Virtual generated columns that make use of user-defined types are not yet supported.",
+            ),
+        ));
+    }
+
+    if attcollation == InvalidOid && lsyscache::typ::type_is_collatable(atttypid)? {
+        let tname = format_type::format_type_be(atttypid)?;
+        let msg = if flags & CHKATYPE_IS_PARTKEY != 0 {
+            format!(
+                "no collation was derived for partition key column {attname} with collatable type {tname}"
+            )
+        } else {
+            format!(
+                "no collation was derived for column \"{attname}\" with collatable type {tname}"
+            )
+        };
+        return Err(Box::new(
+            (*err(msg, types_error::ERRCODE_INVALID_TABLE_DEFINITION))
+                .with_hint("Use the COLLATE clause to set the collation explicitly."),
+        ));
     }
     Ok(())
 }
@@ -428,7 +569,12 @@ pub fn heap_create_with_catalog<'mcx>(
         && p.relkind != types_rel::RELKIND_SEQUENCE;
     let pg_class_desc = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
-    CheckAttributeNamesTypes(tupdesc, p.relkind)?;
+    CheckAttributeNamesTypes(
+        mcx,
+        tupdesc,
+        p.relkind,
+        if p.allow_system_table_mods { CHKATYPE_ANYARRAY } else { 0 },
+    )?;
 
     if lsyscache::get_relname_relid(p.relname, p.relnamespace)? != InvalidOid {
         return Err(err(
@@ -771,4 +917,83 @@ pub fn StoreAttrMissingVal<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
     attrrel.close(RowExclusiveLock)
+}
+
+// SetAttrMissing (heap.c): binary upgrade only; stores a pre-parsed
+// attmissingval array literal.
+pub fn SetAttrMissing<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attname: &str,
+    value: &str,
+) -> PgResult<()> {
+    let tablerel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+    if tablerel.rd_rel.relkind != RELKIND_RELATION {
+        return tablerel.close(AccessExclusiveLock);
+    }
+
+    let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let attnum = syscache_seams::lookup_pg_attribute_attnum_by_name::call(relid, attname)?;
+    if attnum == 0 {
+        panic!("cache lookup failed for attribute {attname} of relation {relid}");
+    }
+    let keys = [
+        crate::drop::oid_scankey(1, relid),
+        crate::drop::int2_scankey(5, attnum),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &attrrel,
+        2659, // AttributeRelidNumIndexId
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+        panic!("cache lookup failed for attribute {attname} of relation {relid}")
+    });
+    let desc = attrrel.descr();
+    let get = |anum: i32| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_attribute columns under its descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) };
+        debug_assert!(!isnull);
+        d
+    };
+    let atttypid = get(3).as_oid();
+    let atttypmod = get(6).as_i32();
+
+    let mut cval: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
+    cval.resize(value.len() + 1, 0);
+    cval[..value.len()].copy_from_slice(value.as_bytes());
+    let mut flinfo = fmgr::FmgrInfo::unresolved();
+    fmgr_core::fmgr_info_into(pg_type::F_ARRAY_IN, &mut flinfo)?;
+    let missingval = fmgr_core::function_call3_coll_in(
+        &mut flinfo,
+        InvalidOid,
+        mcx,
+        Datum::from_usize(cval.as_ptr() as usize),
+        Datum::from_oid(atttypid),
+        Datum::from_i32(atttypmod),
+    )?;
+
+    let natts = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+    values[14 - 1] = Datum::from_bool(true); // atthasmissing
+    replace[14 - 1] = true;
+    values[25 - 1] = missingval; // attmissingval
+    replace[25 - 1] = true;
+
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
+
+    attrrel.close(RowExclusiveLock)?;
+    tablerel.close(AccessExclusiveLock)
 }
