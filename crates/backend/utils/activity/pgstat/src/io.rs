@@ -77,6 +77,12 @@ const IO_STATS_ZERO: PgStat_IO = PgStat_IO {
     stats: [BKTYPE_IO_ZERO; BACKEND_NUM_TYPES],
 };
 
+impl Default for PgStat_IO {
+    fn default() -> Self {
+        IO_STATS_ZERO
+    }
+}
+
 // Pending half: times kept in ns ticks, converted to microseconds at flush.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PgStat_PendingIO {

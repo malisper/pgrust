@@ -49,7 +49,8 @@ thread_local! {
 
 pub fn pgstat_report_archiver(xlog: &str, failed: bool) {
     let now = timestamp_seams::get_current_timestamp::call();
-    let mut shared = SHARED_ARCHIVER.lock().unwrap();
+    let mut guard = SHARED_ARCHIVER.lock().unwrap();
+    let shared = &mut *guard;
     let (dst, count, ts) = if failed {
         (&mut shared.last_failed_wal, &mut shared.failed_count, &mut shared.last_failed_timestamp)
     } else {
