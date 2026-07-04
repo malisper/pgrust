@@ -1647,7 +1647,9 @@ fn fix_upper_expr<'mcx>(
     }
 }
 
-// search_indexed_tlist_for_var (setrefs.c); a miss is C's elog(ERROR).
+// search_indexed_tlist_for_var (setrefs.c), upper leg (NRM_EQUAL callers);
+// a miss is C's elog(ERROR). The nullingrels cross-check mirrors C's elog
+// guard; the emitted Var keeps the reference Var's nullingrels (C copyVar).
 fn search_indexed_tlist_for_var<'mcx>(
     run: &mut PlannerRun<'mcx>,
     var: &types_nodes::primnodes::Var<'mcx>,
@@ -1655,18 +1657,24 @@ fn search_indexed_tlist_for_var<'mcx>(
     rtoffset: i32,
     newvarno: i32,
 ) -> PgResult<Node<'mcx>> {
-    debug_assert!(var.varlevelsup == 0 && var.varnullingrels.is_empty());
+    debug_assert!(var.varlevelsup == 0);
     for tle_node in subplan_tlist {
         let tle = tle_node.as_target_entry().expect("TargetEntry");
         let Some(sub) = tle.expr.as_var() else { continue };
         if sub.varno == var.varno && sub.varattno == var.varattno {
+            assert!(
+                var.varattno <= 0 || sub.varnullingrels.equal(&var.varnullingrels),
+                "wrong varnullingrels for Var {}/{}",
+                var.varno,
+                var.varattno
+            );
             let mut newvar = types_nodes::primnodes::Var {
                 varno: newvarno,
                 varattno: tle.resno,
                 vartype: var.vartype,
                 vartypmod: var.vartypmod,
                 varcollid: var.varcollid,
-                varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                varnullingrels: var.varnullingrels.clone_in(run.mcx)?,
                 varlevelsup: 0,
                 varreturningtype: var.varreturningtype,
                 varnosyn: var.varnosyn,
