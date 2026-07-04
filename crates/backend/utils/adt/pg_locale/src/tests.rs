@@ -225,7 +225,10 @@ fn collation_actual_versions_match_c() {
         None
     );
 
-    assert_eq!(get_collation_actual_version(COLLPROVIDER_ICU, "en").unwrap(), None);
+    // ICU: version comes from the system libicu (ucol_getVersion); pinned
+    // catalog-exactness is gated by collate-e2e against the in-pod C twin.
+    let icu_ver = get_collation_actual_version(COLLPROVIDER_ICU, "en").unwrap();
+    assert!(icu_ver.is_some_and(|v| !v.is_empty() && v.contains('.')));
 }
 
 #[test]
