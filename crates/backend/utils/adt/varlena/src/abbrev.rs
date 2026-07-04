@@ -65,6 +65,46 @@ impl VarStrAbbrevState {
         u64::from_be_bytes(prefix)
     }
 
+    /// C divergence (structural lever): the C-collation arm skips the
+    /// full-key HyperLogLog (`hash_bytes` of up to 128 payload bytes per
+    /// value); `abort_slim` bounds key cardinality by memtupcount instead.
+    /// Sort output is byte-identical for ANY abort decision — a nonzero
+    /// abbrev compare never disagrees with the authoritative comparator and
+    /// ties re-compare originals, so per-pair compare results are identical
+    /// armed or aborted. Only the on/off timing (a perf property) diverges.
+    pub fn convert_slim(&mut self, payload: &[u8]) -> u64 {
+        let data = self.trimmed(payload);
+
+        let mut prefix = [0u8; 8];
+        let n = data.len().min(8);
+        prefix[..n].copy_from_slice(&data[..n]);
+        let res = u64::from_ne_bytes(prefix);
+        let hash = hashfn::hash_bytes_uint32(res as u32 ^ (res >> 32) as u32);
+        self.abbr_card.add(hash);
+
+        u64::from_be_bytes(prefix)
+    }
+
+    /// `varstr_abbrev_abort` with `key_distinct := memtupcount` (an upper
+    /// bound of the full-key cardinality C estimates): aborts whenever C
+    /// would, plus on duplicate-heavy inputs where full compares resolve in
+    /// the same leading bytes the abbrev would.
+    pub fn abort_slim(&mut self, memtupcount: i32) -> bool {
+        if memtupcount < 100 {
+            return false;
+        }
+        let abbrev_distinct = self.abbr_card.estimate().max(1.0);
+        let key_distinct = memtupcount as f64;
+
+        if abbrev_distinct > key_distinct * self.prop_card {
+            if memtupcount > 10000 {
+                self.prop_card *= 0.65;
+            }
+            return false;
+        }
+        true
+    }
+
     /// `varstr_abbrev_abort`.
     pub fn abort(&mut self, memtupcount: i32) -> bool {
         if memtupcount < 100 {
@@ -135,6 +175,40 @@ mod tests {
         let mut st = VarStrAbbrevState::new(true);
         assert_eq!(st.convert(b"ab   "), st.convert(b"ab"));
         assert!(st.convert(b"ab c") != st.convert(b"ab"));
+    }
+
+    #[test]
+    fn convert_slim_matches_convert_word() {
+        let mut a = VarStrAbbrevState::new(false);
+        let mut b = VarStrAbbrevState::new(false);
+        for v in [&b""[..], b"a", b"abcdefgh", b"abcdefghijkl", b"zz  ", &[0xffu8; 20]] {
+            assert_eq!(a.convert(v), b.convert_slim(v));
+        }
+        let mut a = VarStrAbbrevState::new(true);
+        let mut b = VarStrAbbrevState::new(true);
+        assert_eq!(a.convert(b"ab   "), b.convert_slim(b"ab   "));
+    }
+
+    #[test]
+    fn abort_slim_heuristics() {
+        let mut st = VarStrAbbrevState::new(false);
+        assert!(!st.abort_slim(99));
+
+        // One abbrev bucket: aborts (memtupcount bounds key cardinality).
+        let mut st = VarStrAbbrevState::new(false);
+        for i in 0..20000u32 {
+            let mut v = vec![b'z'; 8];
+            v.extend_from_slice(&i.to_be_bytes());
+            st.convert_slim(&v);
+        }
+        assert!(st.abort_slim(20000));
+
+        // Distinct prefixes tracking row count: keeps abbreviation.
+        let mut st = VarStrAbbrevState::new(false);
+        for i in 0..20000u32 {
+            st.convert_slim(&i.to_be_bytes());
+        }
+        assert!(!st.abort_slim(20000));
     }
 
     #[test]
