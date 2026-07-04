@@ -2436,6 +2436,203 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
+    // Kernelized programs never run their steps: skipping the peephole keeps
+    // compile-per-query lanes (point/select1) free of the pass cost.
+    if matches!(state.kernel, Kernel::Program) {
+        fuse_program(state);
+    }
+    if dump_programs_enabled() {
+        dump_program(state);
+    }
+}
+
+fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
+    match step {
+        Step::Qual { jumpdone }
+        | Step::Jump { jumpdone }
+        | Step::JumpIfNotTrue { jumpdone, .. }
+        | Step::JumpIfNotNull { jumpdone, .. }
+        | Step::JumpIfNull { jumpdone, .. }
+        | Step::BoolAndStepFirst { jumpdone, .. }
+        | Step::BoolAndStep { jumpdone, .. }
+        | Step::BoolOrStepFirst { jumpdone, .. }
+        | Step::BoolOrStep { jumpdone, .. }
+        | Step::SbsrefSubscripts { jumpdone, .. }
+        | Step::FuncStrict2Qual { jumpdone, .. } => Some(jumpdone),
+        Step::AggStrictInputCheck { jumpnull, .. }
+        | Step::AggStrictInputCheck1 { jumpnull, .. } => Some(jumpnull),
+        _ => None,
+    }
+}
+
+fn arg_index_of(call: &FuncCall, out: OutRef) -> Option<u8> {
+    if call.nargs != 2 {
+        return None;
+    }
+    // SAFETY: args 0/1 of the call's live 2-arg fcinfo image.
+    unsafe {
+        if out.0 == crate::steps::arg_slot_of(call.fcinfo, 0) {
+            Some(0)
+        } else if out.0 == crate::steps::arg_slot_of(call.fcinfo, 1) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
+fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
+    match (a, b) {
+        (Step::ScanVar { attnum, vartype, out }, Step::FuncExprStrict2 { call, out: fout }) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::ScanVarFuncStrict2 {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: (*call).into(),
+                out: *fout,
+            })
+        }
+        (
+            Step::FuncExprStrict2 { call: call1, out: out1 },
+            Step::FuncExprStrict2 { call: call2, out: fout },
+        ) => {
+            if call1.fcinfo == call2.fcinfo {
+                return None;
+            }
+            let argno = arg_index_of(call2, *out1)?;
+            Some(Step::FuncFuncStrict2 {
+                call1: (*call1).into(),
+                argno,
+                call2: (*call2).into(),
+                out: *fout,
+            })
+        }
+        (Step::FuncExprStrict2 { call, out }, Step::Qual { jumpdone }) => {
+            Some(Step::FuncStrict2Qual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
+        }
+        (Step::OuterVar { attnum, vartype, out }, Step::NotDistinct { call, out: fout }) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::OuterVarNotDistinct {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: (*call).into(),
+                out: *fout,
+            })
+        }
+        (Step::NotDistinct { call, out }, Step::Qual { jumpdone }) if call.nargs == 2 => {
+            Some(Step::NotDistinctQual { call: (*call).into(), jumpdone: *jumpdone, out: *out })
+        }
+        (
+            Step::OuterVar { attnum, vartype, out },
+            Step::AggTransByValIndirect { call, base, transno },
+        ) => {
+            let argno = arg_index_of(call, *out)?;
+            Some(Step::OuterVarAggTransByValIndirect {
+                attnum: *attnum,
+                vartype: *vartype,
+                argno,
+                call: (*call).into(),
+                base: *base,
+                transno: *transno,
+            })
+        }
+        (
+            Step::AssignScanVar { attnum: attnum1, resultnum: resultnum1 },
+            Step::AssignScanVar { attnum: attnum2, resultnum: resultnum2 },
+        ) => Some(Step::AssignScanVar2 {
+            attnum1: *attnum1,
+            resultnum1: *resultnum1,
+            attnum2: *attnum2,
+            resultnum2: *resultnum2,
+        }),
+        _ => None,
+    }
+}
+
+// Ready-time superinstruction peephole: measured-dominant adjacent step
+// pairs collapse into fused steps (one dispatch + arg-slot round trip per
+// pair). Runs after select_kernel (kernel matchers see raw shapes); a pair
+// whose second step is a jump target stays unfused.
+pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
+    let len = state.steps.len();
+    if len < 3 {
+        return;
+    }
+    if !state
+        .steps
+        .as_slice()
+        .windows(2)
+        .any(|w| try_fuse(&w[0], &w[1]).is_some())
+    {
+        return;
+    }
+    let mcx = *state.steps.allocator();
+    let steps = state.steps.as_slice();
+    let mut is_target = ::mcx::vec_with_capacity_in_infallible::<bool>(mcx, len);
+    is_target.resize(len, false);
+    for s in steps {
+        let mut s = *s;
+        if let Some(j) = jump_field_mut(&mut s) {
+            is_target[*j as usize] = true;
+        }
+    }
+    let mut map = ::mcx::vec_with_capacity_in_infallible::<u32>(mcx, len);
+    let mut out = ::mcx::vec_with_capacity_in_infallible::<Step>(mcx, len);
+    let mut i = 0usize;
+    while i < len {
+        map.push(out.len() as u32);
+        if i + 1 < len && !is_target[i + 1] {
+            if let Some(f) = try_fuse(&steps[i], &steps[i + 1]) {
+                map.push(out.len() as u32);
+                out.push(f);
+                i += 2;
+                continue;
+            }
+        }
+        out.push(steps[i]);
+        i += 1;
+    }
+    debug_assert_eq!(map.len(), len);
+    for s in out.iter_mut() {
+        if let Some(j) = jump_field_mut(s) {
+            *j = map[*j as usize];
+        }
+    }
+    state.steps = out;
+}
+
+fn dump_programs_enabled() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static FLAG: AtomicU8 = AtomicU8::new(0);
+    match FLAG.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var_os("PGRUST_DUMP_EXPR_PROGRAMS").is_some();
+            FLAG.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dump_program(state: &ExprState<'_>) {
+    fn tag(dbg: &str) -> &str {
+        dbg.split([' ', '(']).next().unwrap_or(dbg)
+    }
+    let mut line = std::string::String::new();
+    for s in state.steps.as_slice() {
+        if !line.is_empty() {
+            line.push(',');
+        }
+        let d = std::format!("{s:?}");
+        line.push_str(tag(&d));
+    }
+    let k = std::format!("{:?}", state.kernel);
+    std::eprintln!("EXPRDUMP kernel={} steps={}", tag(&k), line);
 }
 
 fn var_src(step: &Step) -> Option<(SlotSrc, u16, OutRef)> {

@@ -24,3 +24,12 @@ CREATE FUNCTION inl_imm_volatile_body(int) RETURNS int
     AS 'SELECT $1 + (random() * 0)::int' LANGUAGE sql IMMUTABLE;
 CREATE FUNCTION inl_setconf(int) RETURNS int AS 'SELECT $1 + 1' LANGUAGE sql
     SET search_path = public;
+
+-- Non-inlined calls bind row-sourced args: short-header varlena datums reach
+-- the body plan's bound-param substitution (collate.icu.utf8 SIGSEGV repro).
+CREATE TABLE inl_short (a int, b text NOT NULL);
+INSERT INTO inl_short VALUES (1, 'abc'), (2, 'xbc'), (3, 'bbc'), (4, 'ABC');
+CREATE FUNCTION inl_lt_noninline(text, text) RETURNS boolean
+    AS 'SELECT $1 < $2 LIMIT 1' LANGUAGE sql;
+CREATE FUNCTION inl_selfrec(int) RETURNS int
+    AS 'SELECT inl_selfrec($1)' LANGUAGE sql;

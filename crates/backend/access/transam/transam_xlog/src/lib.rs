@@ -106,6 +106,13 @@ pub const WAL_SYNC_METHOD_OPEN: i32 = 2;
 pub const WAL_SYNC_METHOD_FSYNC_WRITETHROUGH: i32 = 3;
 pub const WAL_SYNC_METHOD_OPEN_DSYNC: i32 = 4;
 
+// xlogdefs.h DEFAULT_WAL_SYNC_METHOD: port/linux.h pins fdatasync; elsewhere
+// O_DSYNC != O_SYNC selects open_datasync (macOS).
+#[cfg(target_os = "linux")]
+pub const DEFAULT_WAL_SYNC_METHOD: i32 = WAL_SYNC_METHOD_FDATASYNC;
+#[cfg(not(target_os = "linux"))]
+pub const DEFAULT_WAL_SYNC_METHOD: i32 = WAL_SYNC_METHOD_OPEN_DSYNC;
+
 pub const NUM_XLOGINSERT_LOCKS: usize = 8;
 
 pub const fn MAXALIGN(n: usize) -> usize {

@@ -76,11 +76,14 @@ pub struct ModifyTableState<'mcx> {
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
     // is perf-only (values are immutable functions of non-generated columns).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    // ri_GenVirtualNotNullConstraintExprs.
+    virtual_nn_exprs: Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
     // Partitioned-target INSERT routing (execPartition.c); per-leaf insert
     // state is indexed by the router's leaf index.
     router: Option<execpartition::PartitionTupleRouting<'mcx>>,
     leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
     leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
+    leaf_virtual_nn: Vec<Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
     merge: Option<MergeState<'mcx>>,
 }
 
@@ -103,7 +106,12 @@ struct MergeActionExec<'mcx> {
     set_attnos: mcx::PgVec<'mcx, u16>,
 }
 
-struct GeneratedExpr<'mcx> {
+pub struct GeneratedExpr<'mcx> {
+    attnum: usize,
+    state: PgBox<'mcx, ExprState<'mcx>>,
+}
+
+pub struct VirtualNnExpr<'mcx> {
     attnum: usize,
     state: PgBox<'mcx, ExprState<'mcx>>,
 }
@@ -506,9 +514,11 @@ pub fn exec_init_modify_table<'mcx>(
         trig_fmgr: ::trigger::TriggerFmgrCache::default(),
         trig_old_slot: None,
         generated_exprs: None,
+        virtual_nn_exprs: None,
         router: None,
         leaf_indexes: Vec::new(),
         leaf_checks: Vec::new(),
+        leaf_virtual_nn: Vec::new(),
         merge,
     })
 }
@@ -946,7 +956,7 @@ fn merge_update_act<'mcx>(
             mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
         }
 
-        exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
+        exec_constraints(mcx, &mut mt.check_exprs, &mut mt.virtual_nn_exprs, rel, slot)?;
 
         tableam::table_tuple_update(
             mcx,
@@ -1133,6 +1143,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.trigdesc = None;
     mt.trig_fmgr = ::trigger::TriggerFmgrCache::default();
     mt.generated_exprs = None;
+    mt.virtual_nn_exprs = None;
     mt.merge = None;
     // ExecCleanupTupleRouting: close routed leaves (Relation Drop = NoLock
     // close, lock kept to commit as C) and their per-leaf insert state.
@@ -1521,7 +1532,7 @@ fn exec_update<'mcx>(
                 }
                 exec_with_check_options(&mut mt.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
             }
-            exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
+            exec_constraints(mcx, &mut mt.check_exprs, &mut mt.virtual_nn_exprs, rel, slot)?;
 
             tableam::table_tuple_update(
                 mcx,
@@ -2139,6 +2150,7 @@ fn exec_insert<'mcx>(
             while mt.leaf_indexes.len() <= idx {
                 mt.leaf_indexes.push(None);
                 mt.leaf_checks.push(None);
+                mt.leaf_virtual_nn.push(None);
             }
             Some(idx)
         } else {
@@ -2149,11 +2161,12 @@ fn exec_insert<'mcx>(
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
         let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, indexes, check_exprs) = match leaf_idx {
+        let (rel, indexes, check_exprs, virtual_nn_exprs) = match leaf_idx {
             Some(idx) => (
                 mt.router.as_ref().unwrap().leaf_rel(idx),
                 &mut mt.leaf_indexes[idx],
                 &mut mt.leaf_checks[idx],
+                &mut mt.leaf_virtual_nn[idx],
             ),
             None => (
                 es_relations[(mt.result_rti - 1) as usize]
@@ -2161,6 +2174,7 @@ fn exec_insert<'mcx>(
                     .expect("result relation opened"),
                 &mut mt.indexes,
                 &mut mt.check_exprs,
+                &mut mt.virtual_nn_exprs,
             ),
         };
         if leaf_idx.is_some() && rel.rd_hastriggers {
@@ -2190,7 +2204,7 @@ fn exec_insert<'mcx>(
             exec_with_check_options(&mut mt.wco_exprs, wco_kind, slot)?;
         }
 
-        exec_constraints(mcx, check_exprs, rel, slot)?;
+        exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot)?;
     }
 
     let num_indices = mt.indexes.as_ref().map_or(0, |x| x.num_indices());
@@ -2594,7 +2608,7 @@ fn cardinality_violation() -> Box<PgError> {
 // ExecComputeStoredGenerated + ExecInitGenerated (nodeModifyTable.c). The
 // slot must be virtual: retained by-ref values point at subplan/projection
 // memory that survives the clear+restore (C datumCopies instead).
-fn exec_compute_stored_generated<'mcx>(
+pub fn exec_compute_stored_generated<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
     rel: &Relation<'mcx>,
@@ -2759,15 +2773,18 @@ fn wco_violation(w: &WcoExpr<'_>) -> Box<PgError> {
 fn exec_constraints<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
-        if constr.has_generated_virtual {
-            panic!("unported: virtual generated columns");
-        }
         if constr.has_not_null {
             exec_not_null_constraints(mcx, rel, slot)?;
+            if constr.has_generated_virtual {
+                if let Some(i) = exec_rel_gen_virtual_notnull(mcx, virtual_nn_exprs, rel, slot)? {
+                    return Err(not_null_violation(mcx, rel, slot, i));
+                }
+            }
         }
         if constr.num_check > 0 {
             if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
@@ -2806,7 +2823,11 @@ fn exec_rel_check<'mcx>(
                 continue;
             }
             let ccbin = c.ccbin.as_ref().expect("ccbin");
-            let node = readfuncs::stringToNode(mcx, ccbin.as_str())?;
+            let mut node = readfuncs::stringToNode(mcx, ccbin.as_str())?;
+            if constr.has_generated_virtual {
+                // execMain.c:1818 expand_generated_columns_in_expr.
+                node = expand_generated_columns_in_expr(mcx, node, rel, 1)?.unwrap_or(node);
+            }
             let state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
                 .expect("check constraint expr");
             compiled.push(CheckExpr { name, state: Some(state) });
@@ -2832,11 +2853,126 @@ fn exec_not_null_constraints<'mcx>(
 ) -> PgResult<()> {
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
+        if att.attgenerated == VIRTUAL_GEN {
+            continue;
+        }
         if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
             return Err(not_null_violation(mcx, rel, slot, i));
         }
     }
     Ok(())
+}
+
+const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+
+// build_generation_expression (rewriteHandler.c:4520), adbin-direct copy: the
+// rewrite_handler home is unreachable (planner -> execmain -> this crate
+// cycle) and cookDefault stored a coerced tree, so re-coercion is a no-op.
+fn build_generation_expression<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    let adbin = constr
+        .defval
+        .iter()
+        .find(|d| d.adnum == attrno as i16)
+        .and_then(|d| d.adbin.as_ref())
+        .unwrap_or_else(|| {
+            panic!(
+                "no generation expression found for column number {} of table \"{}\"",
+                attrno,
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            )
+        });
+    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    if att.attcollation != 0 && att.attcollation != nodes_core::node_funcs::expr_collation(expr) {
+        return types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr {
+                arg: expr,
+                collOid: att.attcollation,
+                location: -1,
+            },
+        );
+    }
+    Ok(expr)
+}
+
+// expand_generated_columns_in_expr (rewriteHandler.c:4493): Vars naming a
+// virtual generated column of rel at varno become the generation expression.
+fn expand_generated_columns_in_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    rel: &Relation<'mcx>,
+    varno: i32,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    if let Some(v) = node.as_var() {
+        if v.varlevelsup != 0 || v.varno != varno {
+            return Ok(None);
+        }
+        if v.varattno == 0 {
+            panic!(
+                "expand_generated_columns_in_expr (rewriteHandler.c): whole-row Var \
+                 over a virtual-generated relation unported"
+            );
+        }
+        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+            return Ok(None);
+        }
+        let e = build_generation_expression(mcx, rel, v.varattno as usize)?;
+        debug_assert!(varno == 1, "generation expression Vars are varno 1");
+        return Ok(Some(e));
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        expand_generated_columns_in_expr(mcx, n, rel, varno)
+    })
+}
+
+// ExecRelGenVirtualNotNull (execMain.c:2098): NullTest(IS NOT NULL) over the
+// generation expression per virtual not-null column; compiled once.
+pub fn exec_rel_gen_virtual_notnull<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<Option<usize>> {
+    if virtual_nn_exprs.is_none() {
+        let mut compiled: mcx::PgVec<'mcx, VirtualNnExpr<'mcx>> = mcx::PgVec::new_in(mcx);
+        for i in 0..rel.rd_att.natts as usize {
+            let att = rel.rd_att.attr(i);
+            if !(att.attnotnull && att.attgenerated == VIRTUAL_GEN) {
+                continue;
+            }
+            let arg = build_generation_expression(mcx, rel, i + 1)?;
+            let nulltest = types_nodes::Node::mk(
+                mcx,
+                types_nodes::primnodes::NullTest {
+                    arg: Some(arg),
+                    nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                    argisrow: false,
+                    location: -1,
+                },
+            )?;
+            let mut state =
+                execexpr::exec_init_expr(mcx, Some(nulltest), execexpr::ParamBind::NONE)?
+                    .expect("virtual not-null expr");
+            state.arm_result_mcx(mcx);
+            compiled.push(VirtualNnExpr { attnum: i, state });
+        }
+        *virtual_nn_exprs = Some(compiled);
+    }
+    exectuples::slot_getallattrs(slot);
+    for e in virtual_nn_exprs.as_mut().expect("just built").iter_mut() {
+        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+        let r = execexpr::exec_eval_expr(&mut e.state, &mut slots)?;
+        if !r.isnull && !r.value.as_bool() {
+            return Ok(Some(e.attnum));
+        }
+    }
+    Ok(None)
 }
 
 // ExecBuildSlotValueDescription (execMain.c), table-SELECT-permission arm
@@ -2859,6 +2995,10 @@ fn slot_value_description<'mcx>(
             buf.push_str(", ");
         }
         write_comma = true;
+        if att.attgenerated == VIRTUAL_GEN {
+            buf.push_str("virtual");
+            continue;
+        }
         let base = slot.base();
         if base.tts_isnull[i] {
             buf.push_str("null");
@@ -2972,11 +3112,13 @@ const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
     CheckExpr<'_> { name; state },
     GeneratedExpr<'_> { attnum; state },
+    VirtualNnExpr<'_> { attnum; state },
     WcoExpr<'_> { kind, relname, polname; state },
     ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc, trig_fmgr, trig_old_slot, generated_exprs, router,
-        leaf_indexes, leaf_checks, index_eval_cx, wco_exprs, merge },
+        check_exprs, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
+        virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn,
+        index_eval_cx, wco_exprs, merge },
 );

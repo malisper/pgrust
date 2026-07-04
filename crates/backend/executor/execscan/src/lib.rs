@@ -270,7 +270,7 @@ pub fn exec_scan<'mcx, N: ScanNode<'mcx>>(
     }
 }
 
-fn slot_pair<'a, 'mcx>(
+pub fn slot_pair<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     a: ExecSlotId,
     b: ExecSlotId,

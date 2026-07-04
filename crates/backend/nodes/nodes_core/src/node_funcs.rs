@@ -64,6 +64,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 _ => types_core::catalog::BOOLOID,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_type(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprType", other),
     }
 }
@@ -187,6 +190,9 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_typmod(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprTypmod", other),
     }
 }
@@ -246,6 +252,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 _ => 0,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_collation(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprCollation", other),
     }
 }
@@ -445,4 +454,54 @@ pub fn apply_relabel_type<'mcx>(
             location: rlocation,
         },
     )
+}
+
+pub fn expr_input_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Aggref => node.as_aggref().unwrap().inputcollid,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().inputcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().inputcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().inputcollid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().inputcollid,
+        NodeTag::T_ScalarArrayOpExpr => node.as_scalar_array_op_expr().unwrap().inputcollid,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().inputcollid,
+        _ => types_core::InvalidOid,
+    }
+}
+
+pub fn relabel_to_typmod<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+    typmod: i32,
+) -> types_error::PgResult<Node<'mcx>> {
+    apply_relabel_type(
+        mcx,
+        expr,
+        expr_type(expr),
+        typmod,
+        expr_collation(expr),
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+    )
+}
+
+// C set_opfuncid/set_sa_opfuncid memo-write into the node; sealed nodes are
+// immutable here, so the resolved oid is returned (check_functions_in_node
+// precedent).
+pub fn set_opfuncid(o: &types_nodes::primnodes::OpExpr<'_>) -> types_error::PgResult<Oid> {
+    if o.opfuncid == types_core::InvalidOid {
+        lsyscache::operator::get_opcode(o.opno)
+    } else {
+        Ok(o.opfuncid)
+    }
+}
+
+pub fn set_sa_opfuncid(
+    o: &types_nodes::primnodes::ScalarArrayOpExpr<'_>,
+) -> types_error::PgResult<Oid> {
+    if o.opfuncid == types_core::InvalidOid {
+        lsyscache::operator::get_opcode(o.opno)
+    } else {
+        Ok(o.opfuncid)
+    }
 }

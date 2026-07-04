@@ -923,10 +923,13 @@ fn cached_plan_cost(stmt_list: &[PlannedStmt<'_>], include_planner: bool) -> f64
 fn AcquirePlannerLocks(query_list: &[Query<'static>], acquire: bool) -> PgResult<()> {
     for query in query_list {
         if query.commandType == CmdType::CMD_UTILITY {
-            panic!(
-                "AcquirePlannerLocks (plancache.c): UtilityContainsQuery probe is the \
-                 EXPLAIN/CTAS/DECLARE lane"
-            );
+            let contained = query
+                .utilityStmt
+                .and_then(|s| utility_seams::utility_contains_query::call(s));
+            if let Some(q) = contained {
+                ScanQueryForLocks(q.as_query().expect("contained Query"), acquire)?;
+            }
+            continue;
         }
         ScanQueryForLocks(query, acquire)?;
     }
@@ -936,10 +939,14 @@ fn AcquirePlannerLocks(query_list: &[Query<'static>], acquire: bool) -> PgResult
 fn AcquireExecutorLocks(stmt_list: &[PlannedStmt<'static>], acquire: bool) -> PgResult<()> {
     for stmt in stmt_list {
         if stmt.commandType == CmdType::CMD_UTILITY {
-            panic!(
-                "AcquireExecutorLocks (plancache.c): UtilityContainsQuery probe is the \
-                 EXPLAIN/CTAS/DECLARE lane"
-            );
+            // C: unplanned Query inside EXPLAIN/DECLARE still needs its locks.
+            let contained = stmt
+                .utilityStmt
+                .and_then(|s| utility_seams::utility_contains_query::call(s));
+            if let Some(q) = contained {
+                ScanQueryForLocks(q.as_query().expect("contained Query"), acquire)?;
+            }
+            continue;
         }
         for rte_node in stmt.rtable.iter() {
             let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");

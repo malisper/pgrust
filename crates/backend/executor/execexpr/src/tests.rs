@@ -465,6 +465,29 @@ fn just_func_kernel_strict_null_const() {
     });
 }
 
+// Miri repro: the Hash32Var arg write must not invalidate the fcinfo reborrow.
+#[test]
+fn hash32_var_kernel_arg_write_then_call() {
+    with_mcx(|mcx| {
+        let desc = desc_int4(mcx, 1);
+        let mut state =
+            crate::compile::exec_build_hash32_from_attrs(mcx, &desc, &[450], &[0], &[1], 0)
+                .unwrap();
+        assert!(matches!(state.kernel(), Kernel::Hash32Var { .. }));
+        fn hash_of<'m>(mcx: Mcx<'m>, state: &mut ExprState<'m>, v: Option<i32>) -> u32 {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: None, inner: Some(&mut slot), outer: None };
+            let r = exec_eval_expr(state, &mut slots).unwrap();
+            assert!(!r.isnull);
+            r.value.as_u32()
+        }
+        let h42 = hash_of(mcx, &mut state, Some(42));
+        assert_eq!(h42, hash_of(mcx, &mut state, Some(42)));
+        assert_ne!(h42, hash_of(mcx, &mut state, Some(7)));
+        assert_eq!(hash_of(mcx, &mut state, None), 0);
+    });
+}
+
 #[test]
 fn func_strict2_with_var_arg_null_propagation() {
     with_mcx(|mcx| {
@@ -569,16 +592,21 @@ fn step_footprint_and_program_shapes() {
     with_mcx(|mcx| {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
             .unwrap();
-        let state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        assert_eq!(state.steps().len(), 5);
+        assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
+        state.force_program_kernel();
         let shapes: alloc::vec::Vec<core::mem::Discriminant<Step>> =
             state.steps().iter().map(core::mem::discriminant).collect();
-        assert_eq!(state.steps().len(), 5);
+        assert_eq!(state.steps().len(), 4);
         assert!(matches!(state.steps()[0], Step::ScanFetchSome { last_var: 1 }));
-        assert!(matches!(state.steps()[1], Step::ScanVar { attnum: 0, .. }));
-        assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
-        assert!(matches!(state.steps()[3], Step::Qual { jumpdone: 4 }));
-        assert!(matches!(state.steps()[4], Step::DoneReturn));
-        assert_eq!(shapes.len(), 5);
+        assert!(matches!(
+            state.steps()[1],
+            Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }
+        ));
+        assert!(matches!(state.steps()[2], Step::Qual { jumpdone: 3 }));
+        assert!(matches!(state.steps()[3], Step::DoneReturn));
+        assert_eq!(shapes.len(), 4);
     });
 }
 
@@ -1412,4 +1440,157 @@ fn array_expr_builds_array_consumable_by_saop() {
         assert!(!r.isnull);
         assert!(r.value.as_bool());
     });
+}
+
+#[test]
+fn fused_func_chain_evaluates_like_unfused() {
+    with_mcx(|mcx| {
+        let mut expr = mk_scan_var(mcx, 1, INT4OID);
+        for k in 1..=8 {
+            let args = NodeList::make2(mcx, expr, mk_int4_const(mcx, Some(k))).unwrap();
+            expr = mk_opexpr(mcx, 177, INT4OID, args);
+        }
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        assert_eq!(state.steps().len(), 7);
+        assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2 { attnum: 0, argno: 0, .. }));
+        assert!(matches!(state.steps()[2], Step::FuncFuncStrict2 { argno: 0, .. }));
+        assert!(matches!(state.steps()[4], Step::FuncFuncStrict2 { .. }));
+        assert!(matches!(state.steps()[5], Step::FuncExprStrict2 { .. }));
+        for v in [Some(5), Some(-1000), None] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            match v {
+                Some(x) => {
+                    assert!(!r.isnull);
+                    assert_eq!(r.value.as_i32(), x + 36);
+                }
+                None => assert!(r.isnull),
+            }
+        }
+    });
+}
+
+#[test]
+fn fused_two_clause_qual_matches() {
+    with_mcx(|mcx| {
+        let a_lt0 = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                    .unwrap();
+            mk_opexpr(mcx, 66, BOOLOID, args)
+        };
+        let b_gt5 = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(5)))
+                    .unwrap();
+            mk_opexpr(mcx, 147, BOOLOID, args)
+        };
+        let qual = NodeList::make2(mcx, a_lt0, b_gt5).unwrap();
+        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+        assert!(matches!(state.kernel(), Kernel::Program));
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2 { .. })));
+        for (a, b, want) in [
+            (Some(-1), Some(6), true),
+            (Some(-1), Some(5), false),
+            (Some(1), Some(6), false),
+            (None, Some(6), false),
+            (Some(-1), None, false),
+        ] {
+            assert_eq!(run_qual(mcx, &mut state, &[a, b]), want, "a={a:?} b={b:?}");
+        }
+    });
+}
+
+#[test]
+fn fusion_skips_jump_targets() {
+    with_mcx(|mcx| {
+        // CASE arm heads are jump targets; results stay correct across arms.
+        let cond = {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                    .unwrap();
+            mk_opexpr(mcx, 66, BOOLOID, args)
+        };
+        let then_expr = {
+            let a1 =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(1)))
+                    .unwrap();
+            let inner = mk_opexpr(mcx, 177, INT4OID, a1);
+            let a2 = NodeList::make2(mcx, inner, mk_int4_const(mcx, Some(2))).unwrap();
+            mk_opexpr(mcx, 177, INT4OID, a2)
+        };
+        let when = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseWhen {
+                expr: Some(cond),
+                result: Some(then_expr),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let case = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseExpr {
+                casetype: INT4OID,
+                casecollid: 0,
+                arg: None,
+                args: NodeList::make1(mcx, when).unwrap(),
+                defresult: Some(mk_int4_const(mcx, Some(7))),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        for (v, want) in [(Some(-4), Some(-1)), (Some(3), Some(7)), (None, Some(7))] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, want.unwrap()), "v={v:?}");
+        }
+    });
+}
+
+#[test]
+fn qual_bitmap_matches_scalar_cmp() {
+    use crate::steps::qual_bitmap_cmp_const;
+    let n = 291usize;
+    let mut values = alloc::vec::Vec::new();
+    let mut isnull = alloc::vec::Vec::new();
+    for i in 0..n {
+        values.push(Datum::from_i32((i as i32 % 7) - 3));
+        isnull.push(i % 11 == 0);
+    }
+    let konst = Datum::from_i32(0);
+    for cmp in [
+        CmpOp::Int4Eq,
+        CmpOp::Int4Ne,
+        CmpOp::Int4Lt,
+        CmpOp::Int4Le,
+        CmpOp::Int4Gt,
+        CmpOp::Int4Ge,
+    ] {
+        let mut sel = [0u64; 5];
+        qual_bitmap_cmp_const(cmp, konst, &values, &isnull, &mut sel);
+        for i in 0..n {
+            let want = !isnull[i] && cmp.eval(values[i], konst);
+            let got = sel[i / 64] & (1u64 << (i % 64)) != 0;
+            assert_eq!(got, want, "{cmp:?} row {i}");
+        }
+        for i in n..5 * 64 {
+            assert!(sel[i / 64] & (1u64 << (i % 64)) == 0, "tail bit {i}");
+        }
+    }
+    let mut sel = [0u64; 5];
+    qual_bitmap_cmp_const(
+        CmpOp::Int84Lt,
+        Datum::from_i32(1),
+        &[Datum::from_i64(-9), Datum::from_i64(1), Datum::from_i64(0)],
+        &[false, false, false],
+        &mut sel,
+    );
+    assert_eq!(sel[0], 0b101);
 }

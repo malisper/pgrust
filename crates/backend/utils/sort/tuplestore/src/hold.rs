@@ -93,6 +93,15 @@ pub fn puttupleslot(h: TuplestoreHandle, slot: &mut SlotData<'_>) -> PgResult<()
     with_store(h, |store| store.puttupleslot(slot, mcx))
 }
 
+pub fn putvalues(
+    h: TuplestoreHandle,
+    tdesc: &::types_tuple::TupleDescData<'_>,
+    values: &[::datum::Datum],
+    isnull: &[bool],
+) -> PgResult<()> {
+    with_store(h, |store| store.putvalues(tdesc, values, isnull))
+}
+
 fn begin_heap_hold(random_access: bool) -> PgResult<TuplestoreHandle> {
     let work_mem = init_small::globals::work_mem();
     Ok(register(Tuplestore::begin_heap(random_access, true, work_mem)))

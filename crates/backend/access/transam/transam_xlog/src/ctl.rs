@@ -7,8 +7,10 @@ use types_core::{TimeLineID, XLogRecPtr};
 
 use crate::{CheckPoint, RecoveryState, InvalidXLogRecPtr, NUM_XLOGINSERT_LOCKS, RECOVERY_STATE_CRASH, XLOG_BLCKSZ};
 
-// s_lock.h shape: TAS spin with exponential backoff elided (uncontended in
-// the M1 single-backend profile; contention shape is an M4 lever).
+// s_lock.h shape: single TAS on the uncontended path; contended acquires go
+// through C's perform_spin_delay backoff (unbounded busy-spin collapsed the
+// multi-client write gate when clients > vCPU: swp1_acq dominated cycles,
+// job pgrust-m4mc-gate-1783128775-95788).
 pub struct SpinLock(AtomicBool);
 
 impl SpinLock {
@@ -17,9 +19,21 @@ impl SpinLock {
     }
     #[inline]
     pub fn acquire(&self) {
-        while self.0.swap(true, Ordering::Acquire) {
-            std::hint::spin_loop();
+        if self.0.swap(true, Ordering::Acquire) {
+            self.acquire_contended();
         }
+    }
+    #[cold]
+    #[inline(never)]
+    fn acquire_contended(&self) {
+        let mut delay = s_lock_seams::SpinDelayStatus::new(file!(), line!() as i32, "XLogCtl");
+        loop {
+            if !self.0.load(Ordering::Relaxed) && !self.0.swap(true, Ordering::Acquire) {
+                break;
+            }
+            s_lock_seams::perform_spin_delay::call(&mut delay);
+        }
+        s_lock_seams::finish_spin_delay::call(&delay);
     }
     #[inline]
     pub fn release(&self) {

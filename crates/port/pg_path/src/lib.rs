@@ -78,6 +78,21 @@ pub fn first_dir_separator(filename: &str) -> Option<usize> {
     filename.bytes().position(is_dir_sep)
 }
 
+// Sound only on canonicalized paths: ".." can then appear only at the start.
+pub fn path_contains_parent_reference(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.starts_with(b"..") && (b.len() == 2 || is_dir_sep(b[2]))
+}
+
+pub fn path_is_relative_and_below_cwd(path: &str) -> bool {
+    !is_absolute_path(path) && !path_contains_parent_reference(path)
+}
+
+pub fn path_is_prefix_of_path(path1: &str, path2: &str) -> bool {
+    let (b1, b2) = (path1.as_bytes(), path2.as_bytes());
+    b2.starts_with(b1) && (b2.len() == b1.len() || is_dir_sep(b2[b1.len()]))
+}
+
 pub fn first_path_var_separator(pathlist: &str) -> Option<usize> {
     pathlist.bytes().position(is_path_var_sep)
 }

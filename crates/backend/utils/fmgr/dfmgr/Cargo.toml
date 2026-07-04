@@ -1,0 +1,13 @@
+[package]
+name = "dfmgr"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dfmgr"
+path = "src/lib.rs"
+
+[dependencies]
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }

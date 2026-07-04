@@ -155,4 +155,101 @@ ANALYZE seljoin;
 EXPLAIN SELECT count(*) FROM selb t1, seljoin t2 WHERE t1.x <> t2.x;
 EXPLAIN SELECT count(*) FROM selb t1 WHERE EXISTS (SELECT 1 FROM seljoin t2 WHERE t1.x <> t2.x);
 
-DROP TABLE selr, selm, seln, selb, seljoin;
+-- eqjoinsel MCV x MCV (both sides carry MCV lists): inner/left/full/semi/
+-- anti/reversed-semi/neq, plus a restricted inner (nd2 clamp in the semi arm).
+CREATE TABLE selmcv1(v int4, w text);
+CREATE TABLE selmcv2(v int4, w text);
+INSERT INTO selmcv1 SELECT g % 7, 'r' || (g % 7) FROM generate_series(1, 500) g;
+INSERT INTO selmcv1 SELECT 100 + g, 'r' || (100 + g) FROM generate_series(1, 1500) g;
+INSERT INTO selmcv2 SELECT g % 5, 'q' || (g % 5) FROM generate_series(1, 500) g;
+INSERT INTO selmcv2 SELECT 100000 + g, 'q' || (100000 + g) FROM generate_series(1, 1000) g;
+INSERT INTO selmcv1 SELECT NULL, NULL FROM generate_series(1, 50);
+INSERT INTO selmcv2 SELECT NULL, NULL FROM generate_series(1, 30);
+ANALYZE selmcv1;
+ANALYZE selmcv2;
+EXPLAIN SELECT count(*) FROM selmcv1 a, selmcv2 b WHERE a.v = b.v;
+EXPLAIN SELECT count(*) FROM selmcv1 a LEFT JOIN selmcv2 b ON a.v = b.v;
+EXPLAIN SELECT count(*) FROM selmcv1 a FULL JOIN selmcv2 b ON a.v = b.v;
+EXPLAIN SELECT count(*) FROM selmcv1 a WHERE EXISTS (SELECT 1 FROM selmcv2 b WHERE a.v = b.v);
+EXPLAIN SELECT count(*) FROM selmcv1 a WHERE NOT EXISTS (SELECT 1 FROM selmcv2 b WHERE a.v = b.v);
+EXPLAIN SELECT count(*) FROM selmcv1 a WHERE EXISTS (SELECT 1 FROM selmcv2 b WHERE b.v = a.v);
+EXPLAIN SELECT count(*) FROM selmcv2 b WHERE EXISTS (SELECT 1 FROM selmcv1 a WHERE a.v = b.v);
+EXPLAIN SELECT count(*) FROM selmcv1 a, selmcv2 b WHERE a.v <> b.v;
+EXPLAIN SELECT count(*) FROM selmcv1 a WHERE EXISTS (SELECT 1 FROM selmcv2 b WHERE a.v = b.v AND b.w LIKE 'q1%');
+EXPLAIN SELECT count(*) FROM selmcv1 a, selmcv2 b WHERE a.w = b.w;
+
+-- convert_bytea_to_scalar: histogram interpolation over bytea bounds.
+CREATE TABLE selbytea(b bytea);
+INSERT INTO selbytea SELECT decode(substr(md5(g::text), 1, 8), 'hex') FROM generate_series(1, 400) g;
+ANALYZE selbytea;
+EXPLAIN SELECT * FROM selbytea WHERE b > '\x80'::bytea;
+EXPLAIN SELECT * FROM selbytea WHERE b < '\x40ff'::bytea;
+EXPLAIN SELECT * FROM selbytea WHERE b >= '\x20'::bytea AND b <= '\xa0'::bytea;
+
+-- estimate_multivariate_bucketsize: ndistinct extended stats on the inner.
+CREATE TABLE selmvb1(a int4, b int4);
+CREATE TABLE selmvb2(a int4, b int4);
+INSERT INTO selmvb1 SELECT g % 50, (g % 50) / 10 FROM generate_series(1, 2000) g;
+INSERT INTO selmvb2 SELECT g % 100, g % 10 FROM generate_series(1, 3000) g;
+CREATE STATISTICS selmvb1_nd (ndistinct) ON a, b FROM selmvb1;
+ANALYZE selmvb1;
+ANALYZE selmvb2;
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+EXPLAIN SELECT count(*) FROM selmvb2 t2 JOIN selmvb1 t1 ON t1.a = t2.a AND t1.b = t2.b;
+RESET enable_mergejoin;
+RESET enable_nestloop;
+
+-- gincost_scalararrayopexpr: SAOP quals against a GIN jsonb index.
+CREATE TABLE selgin(j jsonb);
+INSERT INTO selgin SELECT jsonb_build_object('k' || (g % 20), g, 'tag', g % 7) FROM generate_series(1, 800) g;
+CREATE INDEX selgin_idx ON selgin USING gin (j);
+ANALYZE selgin;
+EXPLAIN SELECT count(*) FROM selgin WHERE j ? ANY (ARRAY['k1', 'k2', 'k3']);
+EXPLAIN SELECT count(*) FROM selgin WHERE j ? ANY (ARRAY['tag', NULL]);
+EXPLAIN SELECT count(*) FROM selgin WHERE j ? ANY (ARRAY['tag', 'k1']);
+
+-- examine_indexcol_variable expression arm: skip-scan gap over an
+-- expression index column (btree) and a BRIN expression index. Keys stay
+-- distinct: pgrust's CREATE INDEX build lacks btree deduplication, so
+-- duplicate-heavy keys give a different index size than C (dedup lane).
+CREATE TABLE selexpr(a int4, b int4, c int4);
+INSERT INTO selexpr SELECT g % 5, g % 11, g FROM generate_series(1, 3000) g;
+CREATE INDEX selexpr_idx ON selexpr (a, (b + 1), c);
+ANALYZE selexpr;
+SELECT staattnum, stadistinct FROM pg_statistic WHERE starelid = 'selexpr_idx'::regclass ORDER BY staattnum;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 101;
+SET enable_indexonlyscan = off;
+EXPLAIN SELECT count(*) FROM selexpr WHERE a = 1 AND c = 101;
+RESET enable_indexonlyscan;
+EXPLAIN SELECT * FROM selexpr WHERE a = 1 AND (b + 1) = 5 AND c = 101;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+CREATE TABLE selbrin(x int4);
+INSERT INTO selbrin SELECT g FROM generate_series(1, 5000) g;
+CREATE INDEX selbrin_idx ON selbrin USING brin ((x * 2));
+ANALYZE selbrin;
+SET enable_seqscan = off;
+EXPLAIN SELECT count(*) FROM selbrin WHERE x * 2 < 100;
+RESET enable_seqscan;
+
+-- all_rows_selectable: table-privilege path; numeric_eq is not leakproof, so
+-- MCV use keys off acl_ok. (Partitioned ANALYZE/pruning and column-level
+-- GRANT are unported lanes; the appendrel/column walk is covered by audit.)
+CREATE TABLE selacl(i int4, n numeric);
+INSERT INTO selacl SELECT g % 200, (g % 40) * 0.5 FROM generate_series(1, 1000) g;
+ANALYZE selacl;
+GRANT SELECT ON selacl TO pg_checkpoint;
+SET SESSION AUTHORIZATION pg_checkpoint;
+EXPLAIN SELECT i FROM selacl WHERE i = 5;
+EXPLAIN SELECT n FROM selacl WHERE n = 2.5;
+RESET SESSION AUTHORIZATION;
+EXPLAIN SELECT n FROM selacl WHERE n = 2.5;
+REVOKE SELECT ON selacl FROM pg_checkpoint;
+SET SESSION AUTHORIZATION pg_checkpoint;
+EXPLAIN SELECT n FROM selacl WHERE n = 2.5;
+RESET SESSION AUTHORIZATION;
+
+DROP TABLE selr, selm, seln, selb, seljoin, selmcv1, selmcv2, selbytea, selmvb1, selmvb2, selgin, selexpr, selbrin, selacl;

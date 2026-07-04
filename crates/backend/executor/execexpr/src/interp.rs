@@ -305,7 +305,11 @@ fn eval_kernel<'mcx>(
             let f = &mut state.frames[frame as usize];
             // SAFETY: 'mcx-live frame fcinfo image + boxed FmgrInfo, sole refs.
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
-            unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
+            // SAFETY: arg 0 of the live image, via the reborrow — an older-tag write would invalidate fcinfo.
+            unsafe {
+                crate::steps::arg_slot_of(core::ptr::NonNull::from(&mut *fcinfo).cast(), 0)
+                    .write(NullableDatum { value: v, isnull: false })
+            };
             fcinfo.isnull = false;
             let flinfo = unsafe { &mut *f.flinfo.as_ptr() };
             let value = (flinfo.fn_addr)(Some(flinfo), fcinfo)?;
@@ -1168,6 +1172,106 @@ fn run_program<'mcx>(
                     write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
+            Step::ScanVarFuncStrict2 { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut scan), *attnum);
+                // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let (value, isnull) = invoke2(call)?;
+                    write_out(*out, value, isnull);
+                }
+            }
+            Step::FuncFuncStrict2 { call1, argno, call2, out } => {
+                let r1 = strict2_eval(call1)?;
+                // SAFETY: as ScanVarFuncStrict2, for call2's image.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call2.fcinfo, *argno as usize).write(r1);
+                    crate::steps::arg_slot_of(call2.fcinfo, 1 - *argno as usize).read()
+                };
+                if r1.isnull || other.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let (value, isnull) = invoke2(call2)?;
+                    write_out(*out, value, isnull);
+                }
+            }
+            Step::FuncStrict2Qual { call, jumpdone, out } => {
+                let r = strict2_eval(call)?;
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarNotDistinct { attnum, argno, call, out, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: as ScanVarFuncStrict2.
+                let other = unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
+                };
+                if nd.isnull && other.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else if nd.isnull || other.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else {
+                    let (value, isnull) = invoke2(call)?;
+                    write_out(*out, value, isnull);
+                }
+            }
+            Step::NotDistinctQual { call, jumpdone, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let r = if a0.isnull && a1.isnull {
+                    NullableDatum { value: Datum::from_bool(true), isnull: false }
+                } else if a0.isnull || a1.isnull {
+                    NullableDatum { value: Datum::from_bool(false), isnull: false }
+                } else {
+                    let (value, isnull) = invoke2(call)?;
+                    NullableDatum { value, isnull }
+                };
+                if r.isnull || !r.value.as_bool() {
+                    write_out(*out, Datum::from_bool(false), false);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::OuterVarAggTransByValIndirect { attnum, argno, call, base: pgbase, transno, .. } => {
+                let nd = read_var(need_slot(&mut outer), *attnum);
+                // SAFETY: as ScanVarFuncStrict2 + AggTransByValIndirect.
+                unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
+                    let pg = pgbase.read().as_ptr().add(*transno as usize);
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke2(call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Step::AssignScanVar2 { attnum1, resultnum1, attnum2, resultnum2 } => {
+                let nd1 = read_var(need_slot(&mut scan), *attnum1);
+                let nd2 = read_var(need_slot(&mut scan), *attnum2);
+                let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+                assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
+                assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
+            }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
                 let (a0, a1) = unsafe {
@@ -1536,6 +1640,33 @@ fn eval_array_expr(
 }
 
 #[inline(always)]
+fn invoke2(call: &crate::steps::Call2) -> PgResult<(Datum, bool)> {
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references.
+    let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
+    let fn_addr = flinfo.fn_addr;
+    let fcinfo = unsafe { fcinfo_mut(call.fcinfo, 2) };
+    fcinfo.isnull = false;
+    let d = fn_addr(Some(flinfo), fcinfo)?;
+    Ok((d, fcinfo.isnull))
+}
+
+#[inline(always)]
+fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        return Ok(NullableDatum::null());
+    }
+    let (value, isnull) = invoke2(call)?;
+    Ok(NullableDatum { value, isnull })
+}
+
+#[inline(always)]
 fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
     // during the call.
@@ -1665,9 +1796,14 @@ fn check_still_valid_slow<'mcx>(
 ) -> PgResult<()> {
     for step in state.steps.as_slice() {
         let (src, attnum, vartype) = match *step {
-            Step::ScanVar { attnum, vartype, .. } => (SlotSrc::Scan, attnum, vartype),
+            Step::ScanVar { attnum, vartype, .. }
+            | Step::ScanVarFuncStrict2 { attnum, vartype, .. } => (SlotSrc::Scan, attnum, vartype),
             Step::InnerVar { attnum, vartype, .. } => (SlotSrc::Inner, attnum, vartype),
-            Step::OuterVar { attnum, vartype, .. } => (SlotSrc::Outer, attnum, vartype),
+            Step::OuterVar { attnum, vartype, .. }
+            | Step::OuterVarNotDistinct { attnum, vartype, .. }
+            | Step::OuterVarAggTransByValIndirect { attnum, vartype, .. } => {
+                (SlotSrc::Outer, attnum, vartype)
+            }
             _ => continue,
         };
         let slot = slots.get(src);

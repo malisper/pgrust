@@ -801,3 +801,52 @@ fn inline_recursion_guard_stops_self_expansion() {
     let f = out.as_func_expr().expect("one expansion, inner call kept");
     assert_eq!(f.funcid, F_FAKE_SQL_REC);
 }
+
+#[test]
+fn mbms_int_members_and_is_member() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut a, 0, 3).unwrap();
+    mbms_add_member(mcx, &mut a, 1, 7).unwrap();
+    mbms_add_member(mcx, &mut a, 2, 70).unwrap();
+
+    assert!(mbms_is_member(0, 3, &a));
+    assert!(mbms_is_member(2, 70, &a));
+    assert!(!mbms_is_member(2, 71, &a));
+    assert!(!mbms_is_member(3, 0, &a));
+
+    let mut b: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut b, 0, 3).unwrap();
+    mbms_add_member(mcx, &mut b, 1, 8).unwrap();
+
+    mbms_int_members(&mut a, &b);
+    assert_eq!(a.len(), 2);
+    assert!(mbms_is_member(0, 3, &a));
+    assert!(!mbms_is_member(1, 7, &a));
+    assert!(!mbms_is_member(2, 70, &a));
+
+    let empty: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_int_members(&mut a, &empty);
+    assert!(a.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "negative multibitmapset member index")]
+fn mbms_is_member_negative_is_loud() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut a, 0, 1).unwrap();
+    mbms_is_member(0, -1, &a);
+}
+
+#[test]
+#[should_panic(expected = "negative multibitmapset member index")]
+fn mbms_add_member_negative_is_loud() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    let _ = mbms_add_member(mcx, &mut a, -1, 1);
+}

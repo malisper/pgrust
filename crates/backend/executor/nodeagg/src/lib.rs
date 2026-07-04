@@ -1451,6 +1451,22 @@ pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
         && node.evaltrans.is_some()
 }
 
+/// Outer-slot deform prefix the batched drive reads per row (evaltrans
+/// FETCHSOME bound + hashed grouping columns); None = shape unknown, the
+/// SoA batch deform stays disarmed.
+pub fn agg_batch_outer_prefix(node: &AggStateData<'_>) -> Option<i32> {
+    debug_assert!(agg_batch_drainable(node));
+    let mut p = node
+        .evaltrans
+        .as_deref()
+        .expect("drainable Agg has evaltrans")
+        .max_fetch(::execexpr::SlotSrc::Outer)?;
+    if node.plan.aggstrategy == AGG_HASHED {
+        p = p.max(node.perhash.as_ref().expect("hashed Agg has perhash").largest_grp_col_idx);
+    }
+    Some(p)
+}
+
 /// `exec_agg` over a page-batch source: identical per-row transition order,
 /// minus the per-tuple node recursion (and minus the slot store for
 /// input-free transition kernels).

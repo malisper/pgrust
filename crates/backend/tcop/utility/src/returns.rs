@@ -99,3 +99,28 @@ pub fn UtilityTupleDescriptor(
         _ => Ok(None),
     }
 }
+
+// UtilityContainsQuery (utility.c); CTAS nesting is the CTAS lane.
+pub fn UtilityContainsQuery<'mcx>(parsetree: Node<'mcx>) -> Option<Node<'mcx>> {
+    let qry_node = match parsetree.node_tag() {
+        NodeTag::T_DeclareCursorStmt => parsetree
+            .as_declare_cursor_stmt()
+            .expect("tag checked")
+            .query
+            .expect("analyzed DECLARE holds a Query"),
+        NodeTag::T_ExplainStmt => parsetree
+            .as_explain_stmt()
+            .expect("tag checked")
+            .query
+            .expect("analyzed EXPLAIN holds a Query"),
+        NodeTag::T_CreateTableAsStmt => {
+            payload_gap("UtilityContainsQuery", "CreateTableAsStmt")
+        }
+        _ => return None,
+    };
+    let qry = qry_node.as_query().expect("analyzed statement holds a Query");
+    if qry.commandType == types_nodes::nodes_enums::CmdType::CMD_UTILITY {
+        return UtilityContainsQuery(qry.utilityStmt.expect("utility Query holds its stmt"));
+    }
+    Some(qry_node)
+}

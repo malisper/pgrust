@@ -2,11 +2,25 @@
 
 use ::datum::Datum;
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
+use pgstat::pending::{
+    PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_FUNCTION,
+    PGSTAT_KIND_IO, PGSTAT_KIND_RELATION, PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
+};
+
 mod activity;
+mod backend;
 pub use activity::fc_pg_stat_get_activity;
+
+fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
+    // SAFETY: catalog arg type text — non-null varlena (null-checked by caller
+    // for non-strict functions).
+    let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
+    core::str::from_utf8(v.data())
+        .map_err(|_| Box::new(PgError::error("invalid UTF-8 in text argument")))
+}
 
 fn tabentry(fcinfo: &Fcinfo) -> Option<pgstat::PgStat_StatTabEntry> {
     pgstat::pgstat_fetch_stat_tabentry(fcinfo.args_n::<1>()[0].value.as_oid())
@@ -215,12 +229,155 @@ pub fn fc_pg_stat_clear_snapshot(
     Ok(Datum::from_usize(0))
 }
 
+macro_rules! xact_rel_i64 {
+    ($($fc:ident $field:ident;)*) => {$(
+        pub fn $fc(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let relid = fcinfo.args_n::<1>()[0].value.as_oid();
+            Ok(Datum::from_i64(
+                pgstat::relation::find_tabstat_entry(relid).map_or(0, |c| c.$field),
+            ))
+        }
+    )*};
+}
+
+xact_rel_i64! {
+    fc_pg_stat_get_xact_numscans numscans;
+    fc_pg_stat_get_xact_tuples_returned tuples_returned;
+    fc_pg_stat_get_xact_tuples_fetched tuples_fetched;
+    fc_pg_stat_get_xact_tuples_inserted tuples_inserted;
+    fc_pg_stat_get_xact_tuples_updated tuples_updated;
+    fc_pg_stat_get_xact_tuples_deleted tuples_deleted;
+    fc_pg_stat_get_xact_tuples_hot_updated tuples_hot_updated;
+    fc_pg_stat_get_xact_tuples_newpage_updated tuples_newpage_updated;
+    fc_pg_stat_get_xact_blocks_fetched blocks_fetched;
+    fc_pg_stat_get_xact_blocks_hit blocks_hit;
+}
+
+pub fn fc_pg_stat_get_snapshot_timestamp(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    match pgstat::pgstat_get_stat_snapshot_timestamp() {
+        Some(ts) => Ok(Datum::from_i64(ts)),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_pg_stat_have_stats(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let kind = pgstat::pgstat_get_kind_from_str(arg_text_str(fcinfo, 0)?)?;
+    let dboid = fcinfo.arg(1).as_oid();
+    let objid = fcinfo.arg(2).as_i64() as u64;
+    Ok(Datum::from_bool(pgstat::pgstat_have_entry(kind.0, dboid, objid)))
+}
+
+pub fn fc_pg_stat_reset(_fl: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    pgstat::pgstat_reset_counters();
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_shared(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_ARCHIVER);
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER);
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER);
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO);
+        panic!("pg_stat_reset_shared (pgstatfuncs.c:1884): XLogPrefetchResetStats unported");
+    }
+    match arg_text_str(fcinfo, 0)? {
+        "archiver" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_ARCHIVER),
+        "bgwriter" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER),
+        "checkpointer" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER),
+        "io" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO),
+        "recovery_prefetch" => panic!(
+            "pg_stat_reset_shared (pgstatfuncs.c:1884): XLogPrefetchResetStats unported"
+        ),
+        "slru" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU),
+        "wal" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_WAL),
+        target => {
+            return Err(Box::new(
+                PgError::error(format!("unrecognized reset target: \"{target}\""))
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                    .with_hint(
+                        "Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \
+                         \"recovery_prefetch\", \"slru\", or \"wal\".",
+                    ),
+            ))
+        }
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_single_table_counters(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let taboid = fcinfo.args_n::<1>()[0].value.as_oid();
+    let dboid = if catalog_seams::is_shared_relation::call(taboid) {
+        types_core::InvalidOid
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    pgstat::pgstat_reset(PGSTAT_KIND_RELATION, dboid, taboid as u64);
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_single_function_counters(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let funcoid = fcinfo.args_n::<1>()[0].value.as_oid();
+    pgstat::pgstat_reset(PGSTAT_KIND_FUNCTION, init_small::globals::MyDatabaseId(), funcoid as u64);
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_slru(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
+    } else {
+        let target = arg_text_str(fcinfo, 0)?;
+        panic!(
+            "pg_stat_reset_slru (pgstatfuncs.c:1989): pgstat_reset_slru(\"{target}\") \
+             unported — SLRU shared stats lane"
+        );
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_backend_stats(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let backend_pid = fcinfo.args_n::<1>()[0].value.as_i32();
+    let mut proc = procarray::BackendPidGetProc(backend_pid);
+    if proc.is_none() {
+        proc = activity::aux_pid_get_proc(backend_pid);
+    }
+    if proc.is_none() {
+        return Ok(Datum::from_usize(0));
+    }
+    panic!(
+        "pg_stat_reset_backend_stats (pgstatfuncs.c:1956): PGSTAT_KIND_BACKEND \
+         stats unported — pgstat_backend lane"
+    );
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
 const fn srf_nonstrict(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: false, retset: true, func }
+}
+
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+}
+
+const fn nonstrict(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
 }
 
 pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
@@ -318,4 +475,59 @@ pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
         func: fc_pg_stat_clear_snapshot,
     },
     srf_nonstrict(2022, "pg_stat_get_activity", 1, fc_pg_stat_get_activity),
+    srf(1936, "pg_stat_get_backend_idset", 0, backend::fc_pg_stat_get_backend_idset),
+    b(1937, "pg_stat_get_backend_pid", 1, backend::fc_pg_stat_get_backend_pid),
+    b(1938, "pg_stat_get_backend_dbid", 1, backend::fc_pg_stat_get_backend_dbid),
+    b(1939, "pg_stat_get_backend_userid", 1, backend::fc_pg_stat_get_backend_userid),
+    b(1940, "pg_stat_get_backend_activity", 1, backend::fc_pg_stat_get_backend_activity),
+    b(
+        2788,
+        "pg_stat_get_backend_wait_event_type",
+        1,
+        backend::fc_pg_stat_get_backend_wait_event_type,
+    ),
+    b(2853, "pg_stat_get_backend_wait_event", 1, backend::fc_pg_stat_get_backend_wait_event),
+    b(
+        2094,
+        "pg_stat_get_backend_activity_start",
+        1,
+        backend::fc_pg_stat_get_backend_activity_start,
+    ),
+    b(2857, "pg_stat_get_backend_xact_start", 1, backend::fc_pg_stat_get_backend_xact_start),
+    b(1391, "pg_stat_get_backend_start", 1, backend::fc_pg_stat_get_backend_start),
+    b(1392, "pg_stat_get_backend_client_addr", 1, backend::fc_pg_stat_get_backend_client_addr),
+    b(1393, "pg_stat_get_backend_client_port", 1, backend::fc_pg_stat_get_backend_client_port),
+    b(3037, "pg_stat_get_xact_numscans", 1, fc_pg_stat_get_xact_numscans),
+    b(3038, "pg_stat_get_xact_tuples_returned", 1, fc_pg_stat_get_xact_tuples_returned),
+    b(3039, "pg_stat_get_xact_tuples_fetched", 1, fc_pg_stat_get_xact_tuples_fetched),
+    b(3040, "pg_stat_get_xact_tuples_inserted", 1, fc_pg_stat_get_xact_tuples_inserted),
+    b(3041, "pg_stat_get_xact_tuples_updated", 1, fc_pg_stat_get_xact_tuples_updated),
+    b(3042, "pg_stat_get_xact_tuples_deleted", 1, fc_pg_stat_get_xact_tuples_deleted),
+    b(3043, "pg_stat_get_xact_tuples_hot_updated", 1, fc_pg_stat_get_xact_tuples_hot_updated),
+    b(
+        6218,
+        "pg_stat_get_xact_tuples_newpage_updated",
+        1,
+        fc_pg_stat_get_xact_tuples_newpage_updated,
+    ),
+    b(3044, "pg_stat_get_xact_blocks_fetched", 1, fc_pg_stat_get_xact_blocks_fetched),
+    b(3045, "pg_stat_get_xact_blocks_hit", 1, fc_pg_stat_get_xact_blocks_hit),
+    b(3788, "pg_stat_get_snapshot_timestamp", 0, fc_pg_stat_get_snapshot_timestamp),
+    b(6230, "pg_stat_have_stats", 3, fc_pg_stat_have_stats),
+    nonstrict(2274, "pg_stat_reset", 0, fc_pg_stat_reset),
+    nonstrict(3775, "pg_stat_reset_shared", 1, fc_pg_stat_reset_shared),
+    b(
+        3776,
+        "pg_stat_reset_single_table_counters",
+        1,
+        fc_pg_stat_reset_single_table_counters,
+    ),
+    b(
+        3777,
+        "pg_stat_reset_single_function_counters",
+        1,
+        fc_pg_stat_reset_single_function_counters,
+    ),
+    nonstrict(2307, "pg_stat_reset_slru", 1, fc_pg_stat_reset_slru),
+    b(6387, "pg_stat_reset_backend_stats", 1, fc_pg_stat_reset_backend_stats),
 ];

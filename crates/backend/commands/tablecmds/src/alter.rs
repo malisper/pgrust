@@ -23,6 +23,7 @@ const AT_NUM_PASSES: usize = 12;
 const AT_PASS_DROP: usize = 0;
 const AT_PASS_ALTER_TYPE: usize = 1;
 const AT_PASS_ADD_COL: usize = 2;
+const AT_PASS_SET_EXPRESSION: usize = 3;
 const AT_PASS_ADD_CONSTR: usize = 6;
 const AT_PASS_COL_ATTRS: usize = 7;
 const AT_PASS_ADD_INDEX: usize = 9;
@@ -42,6 +43,7 @@ const Anum_pg_attribute_attstorage: usize = 10;
 const Anum_pg_attribute_attcompression: usize = 11;
 pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
 const Anum_pg_attribute_atthasmissing: usize = 14;
+const Anum_pg_attribute_attgenerated: usize = 16;
 const Anum_pg_attribute_attcollation: usize = 20;
 
 const AttributeRelidNumIndexId: Oid = 2659;
@@ -80,6 +82,8 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_SetNotNull
             | AlterTableType::AT_AlterColumnType
             | AlterTableType::AT_CookedColumnDefault
+            | AlterTableType::AT_SetExpression
+            | AlterTableType::AT_DropExpression
             | AlterTableType::AT_DropConstraint
             | AlterTableType::AT_AddIndex
             | AlterTableType::AT_AddIndexConstraint
@@ -196,9 +200,12 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     Ok(())
 }
 
+// expr is over *old* table values, except when is_generated: then it is
+// over the new tuple (tablecmds.c NewColumnValue).
 struct NewColumnValue<'mcx> {
     attnum: AttrNumber,
     expr: Node<'mcx>,
+    is_generated: bool,
 }
 
 struct NewConstraint<'mcx> {
@@ -317,6 +324,12 @@ fn ATPrepCmd<'mcx>(
             ATPrepAlterColumnType(mcx, tab, rel, cmd, query_string)?;
             AT_PASS_ALTER_TYPE
         }
+        // ATSimpleRecursion: children are loud at exec (no inheritance).
+        AlterTableType::AT_SetExpression => AT_PASS_SET_EXPRESSION,
+        AlterTableType::AT_DropExpression => {
+            ATPrepDropExpression(mcx, rel, cmd, recurse)?;
+            AT_PASS_DROP
+        }
         AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
         AlterTableType::AT_EnableRule
         | AlterTableType::AT_EnableAlwaysRule
@@ -415,6 +428,12 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_AlterColumnType => {
                     ATExecAlterColumnType(mcx, tab, &rel, cmd)?;
                 }
+                AlterTableType::AT_SetExpression => {
+                    ATExecSetExpression(mcx, tab, &rel, cmd, query_string)?;
+                }
+                AlterTableType::AT_DropExpression => {
+                    ATExecDropExpression(mcx, &rel, cmd)?;
+                }
                 AlterTableType::AT_EnableRule => {
                     rewrite_define::EnableDisableRule(
                         mcx,
@@ -486,8 +505,8 @@ fn ATRewriteTables<'mcx>(
     // find_composite_type_dependencies: composite-type columns are unported,
     // so no dependent rowtype uses can exist.
     if tab.rewrite > 0 {
-        if tab.rewrite & !AT_REWRITE_COLUMN_REWRITE != 0 {
-            unported("ATRewriteTable rewrite (volatile-default ADD COLUMN)");
+        if tab.rewrite & !(AT_REWRITE_COLUMN_REWRITE | AT_REWRITE_DEFAULT_VAL) != 0 {
+            unported("ATRewriteTable rewrite flags (persistence/access-method)");
         }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
         let persistence = old_heap.rd_rel.relpersistence;
@@ -550,12 +569,12 @@ fn ATRewriteTable<'mcx>(
     }
     let mut newval_states: PgVec<
         'mcx,
-        (AttrNumber, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>),
+        (AttrNumber, bool, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>),
     > = PgVec::new_in(mcx);
     for nv in tab.newvals.iter() {
         let state = execexpr::exec_init_expr(mcx, Some(nv.expr), execexpr::ParamBind::NONE)?
             .expect("transform expr");
-        newval_states.push((nv.attnum, state));
+        newval_states.push((nv.attnum, nv.is_generated, state));
     }
 
     let mut notnull_attrs: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
@@ -563,7 +582,9 @@ fn ATRewriteTable<'mcx>(
         for i in 0..new_tupdesc.natts as usize {
             let att = new_tupdesc.attr(i);
             if att.attnotnull && !att.attisdropped {
-                debug_assert!(att.attgenerated == 0);
+                if att.attgenerated == b'v' as i8 {
+                    unported("ATRewriteTable notnull_virtual_attrs (ExecRelGenVirtualNotNull)");
+                }
                 notnull_attrs.push(att.attnum);
             }
         }
@@ -633,7 +654,10 @@ fn ATRewriteTable<'mcx>(
                         nsb.tts_isnull[i] = true;
                     }
                 }
-                for (attnum, state) in newval_states.iter_mut() {
+                for (attnum, is_generated, state) in newval_states.iter_mut() {
+                    if *is_generated {
+                        continue;
+                    }
                     let mut slots = execexpr::EvalSlots {
                         scan: Some(&mut oldslot),
                         inner: None,
@@ -646,6 +670,24 @@ fn ATRewriteTable<'mcx>(
                 }
                 exectuples::exec_store_virtual_tuple(ns);
                 ns.base_mut().tts_tableOid = oldrel.rd_id;
+                // Generated expressions read the NEW tuple (assumed not to
+                // reference each other, as in C).
+                for (attnum, is_generated, state) in newval_states.iter_mut() {
+                    if !*is_generated {
+                        continue;
+                    }
+                    let r = {
+                        let mut slots = execexpr::EvalSlots {
+                            scan: Some(&mut *ns),
+                            inner: None,
+                            outer: None,
+                        };
+                        execexpr::exec_eval_expr(state, &mut slots)?
+                    };
+                    let nsb = ns.base_mut();
+                    nsb.tts_values[*attnum as usize - 1] = r.value;
+                    nsb.tts_isnull[*attnum as usize - 1] = r.isnull;
+                }
                 insertslot = ns;
             } else {
                 insertslot = &mut oldslot;
@@ -825,7 +867,7 @@ fn ATExecAddColumn<'mcx>(
                 has_missing = true;
             }
         } else {
-            tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
+            unported("ATExecAddColumn volatile default (phase-3 rewrite fill)");
         }
     }
     if !has_missing {
@@ -1016,10 +1058,26 @@ fn ATExecColumnDefault<'mcx>(
     }
     let att = rel.rd_att.attr(attnum as usize - 1);
     if att.attidentity != 0 {
-        unported("ATExecColumnDefault on an identity column (C 42809 + SET GENERATED hint)");
+        unported("ATExecColumnDefault on an identity column (C 42601 + DROP IDENTITY hint)");
     }
     if att.attgenerated != 0 {
-        unported("ATExecColumnDefault on a generated column (C 42809 + DROP EXPRESSION hint)");
+        let e = PgError::new(
+            ERROR,
+            format!("column \"{col_name}\" of relation \"{relname}\" is a generated column"),
+        )
+        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR);
+        let e = if cmd.def.is_some() {
+            e.with_hint(
+                "Use ALTER TABLE ... ALTER COLUMN ... SET EXPRESSION instead.".to_string(),
+            )
+        } else if att.attgenerated == b's' as i8 {
+            e.with_hint(
+                "Use ALTER TABLE ... ALTER COLUMN ... DROP EXPRESSION instead.".to_string(),
+            )
+        } else {
+            e
+        };
+        return Err(Box::new(e));
     }
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, cmd.def.is_some())?;
     if let Some(def) = cmd.def {
@@ -1057,6 +1115,224 @@ fn RemoveAttrDefault<'mcx>(
         types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
         if internal { catalog_dependency::PERFORM_DELETION_INTERNAL } else { 0 },
     )
+}
+
+// ATExecSetExpression (tablecmds.c).
+fn ATExecSetExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+    query_string: &str,
+) -> PgResult<()> {
+    let col_name = cmd.name.expect("AT_SetExpression name");
+    let relname = rel.name().to_string();
+    if find_inheritance_children_exist(mcx, rel.rd_id)? {
+        unported("ATExecSetExpression inheritance recursion");
+    }
+    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &relname));
+    };
+    if attnum <= 0 {
+        return Err(cannot_alter_system_column(col_name));
+    }
+    let att = rel.rd_att.attr(attnum as usize - 1);
+    let attgenerated = att.attgenerated;
+    if attgenerated == 0 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column \"{col_name}\" of relation \"{relname}\" is not a generated column"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    if attgenerated == b'v' as i8
+        && rel.rd_att.constr.as_deref().map(|c| c.num_check).unwrap_or(0) > 0
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "ALTER TABLE / SET EXPRESSION is not supported for virtual generated \
+                 columns in tables with check constraints"
+                    .to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(format!(
+                "Column \"{col_name}\" of relation \"{relname}\" is a virtual generated \
+                 column."
+            )),
+        ));
+    }
+    if attgenerated == b'v' as i8 && att.attnotnull {
+        tab.verify_new_notnull = true;
+    }
+    // DIVERGENCE: C rejects virtual columns when GetRelationPublications is
+    // non-empty (0A000 "... part of a publication"); publications unported.
+    let rewrite = attgenerated == b's' as i8;
+
+    if rewrite {
+        catalog_heap::RelationClearMissing(mcx, rel.rd_id)?;
+        xact::CommandCounterIncrement()?;
+        remember_dependents_or_loud(mcx, rel, attnum, col_name, false)?;
+    }
+
+    let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    if attrdefoid == InvalidOid {
+        panic!(
+            "could not find attrdef tuple for relation {} attnum {attnum}",
+            rel.rd_id
+        );
+    }
+    pg_depend::deleteDependencyRecordsFor(
+        mcx,
+        types_core::ATTR_DEFAULT_RELATION_ID,
+        attrdefoid,
+        false,
+    )?;
+    xact::CommandCounterIncrement()?;
+    RemoveAttrDefault(mcx, rel.rd_id, attnum, false, false)?;
+
+    let newexpr = cmd.def.expect("AT_SetExpression expression");
+    crate::constraints::add_relation_new_constraints(
+        mcx,
+        rel,
+        &[(attnum, newexpr, attgenerated as u8)],
+        &NodeList::nil(),
+        query_string,
+    )?;
+    xact::CommandCounterIncrement()?;
+
+    if rewrite {
+        let rel2 = table::table_open(mcx, rel.rd_id, NoLock)?;
+        let defval = rewrite_handler::build_column_default(mcx, &rel2, attnum as usize)?;
+        let defval = clauses::eval_const_expressions(mcx, defval)?;
+        rel2.close(NoLock)?;
+        tab.newvals.push(NewColumnValue { attnum, expr: defval, is_generated: true });
+        tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
+    }
+
+    catalog_heap::RemoveStatistics(mcx, rel.rd_id, attnum)?;
+    Ok(())
+}
+
+// ATPrepDropExpression (tablecmds.c).
+fn ATPrepDropExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+    recurse: bool,
+) -> PgResult<()> {
+    if find_inheritance_children_exist(mcx, rel.rd_id)? {
+        if !recurse {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "ALTER TABLE / DROP EXPRESSION must be applied to child tables too"
+                        .to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        unported("ATPrepDropExpression recursion");
+    }
+    let col_name = cmd.name.expect("AT_DropExpression name");
+    let Some((_, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &rel.name().to_string()));
+    };
+    if attinhcount > 0 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot drop generation expression from inherited column".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    Ok(())
+}
+
+// ATExecDropExpression (tablecmds.c).
+fn ATExecDropExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+) -> PgResult<()> {
+    let col_name = cmd.name.expect("AT_DropExpression name");
+    let relname = rel.name().to_string();
+    let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+        return Err(undefined_column(col_name, &relname));
+    };
+    if attnum <= 0 {
+        return Err(cannot_alter_system_column(col_name));
+    }
+    let attgenerated = rel.rd_att.attr(attnum as usize - 1).attgenerated;
+    // C errors on 'v' even with missing_ok, so the column is never silently
+    // left generated.
+    if attgenerated == b'v' as i8 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "ALTER TABLE / DROP EXPRESSION is not supported for virtual generated \
+                 columns"
+                    .to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(format!(
+                "Column \"{col_name}\" of relation \"{relname}\" is a virtual generated \
+                 column."
+            )),
+        ));
+    }
+    if attgenerated == 0 {
+        if !cmd.missing_ok {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "column \"{col_name}\" of relation \"{relname}\" is not a \
+                         generated column"
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
+        elog_seams::ereport_msg::call(
+            NOTICE,
+            format!(
+                "column \"{col_name}\" of relation \"{relname}\" is not a generated \
+                 column, skipping"
+            ),
+            None,
+        )?;
+        return Ok(());
+    }
+
+    // atthasdef clears via RemoveAttrDefault below, as in C.
+    update_pg_attribute(
+        mcx,
+        rel.rd_id,
+        attnum,
+        &[(Anum_pg_attribute_attgenerated, Datum::from_i8(0))],
+    )?;
+
+    let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    if attrdefoid == InvalidOid {
+        panic!(
+            "could not find attrdef tuple for relation {} attnum {attnum}",
+            rel.rd_id
+        );
+    }
+    pg_depend::deleteDependencyRecordsFor(
+        mcx,
+        types_core::ATTR_DEFAULT_RELATION_ID,
+        attrdefoid,
+        false,
+    )?;
+    xact::CommandCounterIncrement()?;
+    RemoveAttrDefault(mcx, rel.rd_id, attnum, false, false)
 }
 
 // ATExecDropNotNull + the reachable dropconstraint_internal slice.
@@ -1784,9 +2060,6 @@ fn ATPrepAlterColumnType<'mcx>(
     let relname = rel.name().to_string();
     let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
-    if def.raw_default.is_some() || def.cooked_default.is_some() {
-        unported("ATPrepAlterColumnType USING transform");
-    }
     let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
 
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
@@ -1794,6 +2067,20 @@ fn ATPrepAlterColumnType<'mcx>(
     };
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
+    }
+    let att = *rel.rd_att.attr(attnum as usize - 1);
+    if att.attgenerated != 0 && (def.raw_default.is_some() || def.cooked_default.is_some()) {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot specify USING when altering type of generated column".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION)
+            .with_detail(format!("Column \"{col_name}\" is a generated column.")),
+        ));
+    }
+    if def.raw_default.is_some() || def.cooked_default.is_some() {
+        unported("ATPrepAlterColumnType USING transform");
     }
     if attinhcount > 0 {
         return Err(Box::new(
@@ -1806,7 +2093,15 @@ fn ATPrepAlterColumnType<'mcx>(
         unported("ATPrepAlterColumnType COLLATE clause (GetColumnDefCollation)");
     }
     // GetColumnDefCollation: no COLLATE clause -> type default.
-    let att = *rel.rd_att.attr(attnum as usize - 1);
+
+    if att.attgenerated == b'v' as i8 {
+        // C builds no transform for virtual generated columns: no newval,
+        // no rewrite of the column itself.
+        if find_inheritance_children_exist(mcx, rel.rd_id)? {
+            unported("ATPrepAlterColumnType inheritance recursion");
+        }
+        return Ok(());
+    }
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
@@ -1838,27 +2133,28 @@ fn ATPrepAlterColumnType<'mcx>(
         Some(t) => t,
         None => {
             let want = format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
-            let withmod = format_type::format_type_with_typemod(targettype, targettypmod)
-                .unwrap_or_else(|_| "???".into());
-            let qcol = format_type::quote_identifier(col_name);
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    format!(
-                        "column \"{col_name}\" cannot be cast automatically to type {want}"
-                    ),
-                )
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
-                .with_hint(format!(
+            let e = PgError::new(
+                ERROR,
+                format!("column \"{col_name}\" cannot be cast automatically to type {want}"),
+            )
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+            let e = if att.attgenerated == 0 {
+                let withmod = format_type::format_type_with_typemod(targettype, targettypmod)
+                    .unwrap_or_else(|_| "???".into());
+                let qcol = format_type::quote_identifier(col_name);
+                e.with_hint(format!(
                     "You might need to specify \"USING {qcol}::{withmod}\"."
-                )),
-            ));
+                ))
+            } else {
+                e
+            };
+            return Err(Box::new(e));
         }
     };
     parse_collate::assign_expr_collations(mcx, &mut pstate, transform)?;
     // expression_planner.
     let transform = clauses::eval_const_expressions(mcx, transform)?;
-    tab.newvals.push(NewColumnValue { attnum, expr: transform });
+    tab.newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
     if at_column_change_requires_rewrite(transform, attnum) {
         tab.rewrite |= AT_REWRITE_COLUMN_REWRITE;
     }
@@ -1944,15 +2240,19 @@ fn ATExecAlterColumnType<'mcx>(
             None => {
                 let want =
                     format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
-                return Err(Box::new(
-                    PgError::new(
-                        ERROR,
-                        format!(
-                            "default for column \"{col_name}\" cannot be cast automatically \
-                             to type {want}"
-                        ),
+                let msg = if att.attgenerated != 0 {
+                    format!(
+                        "generation expression for column \"{col_name}\" cannot be cast \
+                         automatically to type {want}"
                     )
-                    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+                } else {
+                    format!(
+                        "default for column \"{col_name}\" cannot be cast automatically \
+                         to type {want}"
+                    )
+                };
+                return Err(Box::new(
+                    PgError::new(ERROR, msg).with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
                 ));
             }
         }
@@ -1960,7 +2260,7 @@ fn ATExecAlterColumnType<'mcx>(
         None
     };
 
-    remember_dependents_or_loud(mcx, rel, attnum)?;
+    remember_dependents_or_loud(mcx, rel, attnum, col_name, true)?;
     delete_column_type_dependencies(mcx, rel.rd_id, attnum, &att)?;
 
     if att.atthasmissing && tab.rewrite == 0 {
@@ -1996,6 +2296,23 @@ fn ATExecAlterColumnType<'mcx>(
     catalog_heap::RemoveStatistics(mcx, rel.rd_id, attnum)?;
 
     if let Some(defexpr) = defaultexpr {
+        // A GENERATED default's INTERNAL dependency on the column would make
+        // dependency.c refuse the deletion; drop the records first.
+        if att.attgenerated != 0 {
+            let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+            if attrdefoid == InvalidOid {
+                panic!(
+                    "could not find attrdef tuple for relation {} attnum {attnum}",
+                    rel.rd_id
+                );
+            }
+            pg_depend::deleteDependencyRecordsFor(
+                mcx,
+                types_core::ATTR_DEFAULT_RELATION_ID,
+                attrdefoid,
+                false,
+            )?;
+        }
         xact::CommandCounterIncrement()?;
         RemoveAttrDefault(mcx, rel.rd_id, attnum, true, true)?;
         let rel2 = table::table_open(mcx, rel.rd_id, NoLock)?;
@@ -2005,12 +2322,14 @@ fn ATExecAlterColumnType<'mcx>(
     Ok(())
 }
 
-// RememberAllDependentForRebuilding: any dependent object beyond the column's
-// own pg_attrdef row means an index/constraint rebuild lane — loud.
+// RememberAllDependentForRebuilding: any dependent object beyond pg_attrdef
+// rows of this relation means an index/constraint rebuild lane — loud.
 fn remember_dependents_or_loud<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
+    col_name: &str,
+    is_alter_type: bool,
 ) -> PgResult<()> {
     let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
     let keys = [
@@ -2034,10 +2353,31 @@ fn remember_dependents_or_loud<'mcx>(
             unsafe { types_tuple::heap_getattr(tup, 1, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
         let objid = unsafe { types_tuple::heap_getattr(tup, 2, desc, &mut isnull) }.as_oid();
-        if classid == types_core::ATTR_DEFAULT_RELATION_ID
-            && objid == pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?
-        {
-            continue;
+        if classid == types_core::ATTR_DEFAULT_RELATION_ID {
+            let (adrelid, adnum) = pg_attrdef::GetAttrDefaultColumnAddress(mcx, objid)?;
+            if adrelid == rel.rd_id && adnum == attnum {
+                // The column's own default expression; the caller deals
+                // with it.
+                continue;
+            }
+            if !is_alter_type {
+                continue;
+            }
+            // Only a same-table generated column can reference this column.
+            assert!(adrelid == rel.rd_id, "attrdef dependency from another relation");
+            let gen_att = rel.rd_att.attr(adnum as usize - 1);
+            let genname =
+                core::str::from_utf8(gen_att.attname.name_str()).expect("attname UTF-8");
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot alter type of a column used by a generated column".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(format!(
+                    "Column \"{col_name}\" is used by generated column \"{genname}\"."
+                )),
+            ));
         }
         unported(&format!(
             "RememberAllDependentForRebuilding: dependent object (class {classid}, oid \

@@ -733,6 +733,25 @@ pub fn build_column_default<'mcx>(
     }
 }
 
+// build_generation_expression (rewriteHandler.c:4520).
+pub fn build_generation_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    debug_assert!(att.attgenerated != 0);
+    let defexpr = build_column_default(mcx, rel, attrno)?;
+    let attcollid = att.attcollation;
+    if attcollid != InvalidOid && attcollid != nodes_core::node_funcs::expr_collation(defexpr) {
+        return Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr { arg: defexpr, collOid: attcollid, location: -1 },
+        );
+    }
+    Ok(defexpr)
+}
+
 #[cold]
 #[inline(never)]
 fn generated_always_insert_error(

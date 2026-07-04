@@ -138,11 +138,12 @@ pub fn BTScanPosInvalidate(scanpos: &mut BTScanPosData) {
 }
 
 // C divergence: sksup (SkipSupport) is omitted until the skipsupport substrate
-// exists; the nbtpreprocesskeys port must add it.
+// exists; the nbtpreprocesskeys port must add it. num_elems == -1 (skip array)
+// never occurs (skip scan is phase 2, rejected in preprocessing).
 pub struct BTArrayKeyInfo<'mcx> {
     pub scan_key: i32,
     pub num_elems: i32,
-    pub elem_values: &'mcx [Datum],
+    pub elem_values: PgVec<'mcx, Datum>,
     pub cur_elem: i32,
     pub attlen: i16,
     pub attbyval: bool,
@@ -151,7 +152,6 @@ pub struct BTArrayKeyInfo<'mcx> {
     pub high_compare: Option<&'mcx ScanKeyData>,
 }
 
-const _: () = assert!(!core::mem::needs_drop::<BTArrayKeyInfo>());
 
 // C divergence: arrayContext is dropped — the PgVec allocations' 'mcx IS the
 // scan-lifespan context.
