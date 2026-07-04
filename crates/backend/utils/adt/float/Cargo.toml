@@ -9,6 +9,7 @@ name = "adt_float"
 path = "src/lib.rs"
 
 [dependencies]
+hashfn = { path = "../../../../common/hashfn" }
 datum = { path = "../../../../_support/types/datum" }
 ryu = { path = "../../../../common/ryu" }
 types_array = { path = "../../../../_support/types/array" }

@@ -223,3 +223,19 @@ fn fmgr_wrappers_and_table() {
         assert_eq!(b.retset, matches!(b.foid, 1068 | 1069));
     }
 }
+
+// hashint8 folds the high half so int2/int4/int8 hash equal for equal values
+// (hashfunc.c cross-type hash joins).
+#[test]
+fn hashint8_folds_to_int4_hash() {
+    for v in [0i64, 1, 42, -1, -42, 550273, i32::MAX as i64, i32::MIN as i64] {
+        let lohalf = v as u32;
+        let hihalf = (v >> 32) as u32;
+        let folded = lohalf ^ if v >= 0 { hihalf } else { !hihalf };
+        assert_eq!(
+            ::hashfn::hash_bytes_uint32(folded),
+            ::hashfn::hash_bytes_uint32(v as i32 as u32),
+            "v={v}"
+        );
+    }
+}

@@ -897,3 +897,73 @@ fn not_an_enum(type_oid: Oid) -> PgResult<Box<PgError>> {
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
     ))
 }
+
+// DefineCompositeType (typecmds.c): a CreateStmt shell over the coldeflist,
+// relkind 'c'; the relation machinery creates the rowtype.
+pub fn DefineCompositeType<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::rawnodes::CompositeTypeStmt<'mcx>,
+    query_string: &str,
+) -> PgResult<Oid> {
+    use types_nodes::rawnodes::{CreateStmt, OnCommitAction};
+
+    let typevar = stmt.typevar.expect("CompositeTypeStmt.typevar");
+    let create = CreateStmt {
+        relation: Some(typevar),
+        tableElts: types_nodes::NodeList::from_slice(mcx, stmt.coldeflist.as_slice())?,
+        inhRelations: types_nodes::NodeList::nil(),
+        partbound: None,
+        partspec: None,
+        ofTypename: None,
+        constraints: types_nodes::NodeList::nil(),
+        nnconstraints: types_nodes::NodeList::nil(),
+        options: types_nodes::NodeList::nil(),
+        oncommit: OnCommitAction::ONCOMMIT_NOOP,
+        tablespacename: None,
+        accessMethod: None,
+        if_not_exists: false,
+    };
+
+    let relname = typevar.relname.expect("RangeVar.relname");
+    let creation_rv = rel_vocab::RangeVar {
+        catalogname: typevar.catalogname,
+        schemaname: typevar.schemaname,
+        relname,
+        inh: typevar.inh,
+        relpersistence: typevar.relpersistence,
+        location: typevar.location,
+    };
+    let type_namespace = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
+    let old_type_oid = syscache_seams::lookup_pg_type_oid_by_name::call(relname, type_namespace)?;
+    if old_type_oid != InvalidOid
+        && !pg_type::moveArrayTypeName(old_type_oid, relname, type_namespace)?
+    {
+        return Err(type_already_exists(relname));
+    }
+
+    tablecmds::DefineRelation(
+        mcx,
+        &create,
+        types_rel::RELKIND_COMPOSITE_TYPE,
+        InvalidOid,
+        query_string,
+    )
+}
+
+// RemoveObjects (dropcmds.c), DROP TYPE arm only: resolve each TypeName and
+// hand the batch to the dependency machinery.
+pub fn RemoveTypes<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::DropStmt<'mcx>,
+) -> PgResult<()> {
+    if stmt.missing_ok {
+        unported("DROP TYPE IF EXISTS (does-not-exist NOTICE path)");
+    }
+    let mut objects = catalog_dependency::ObjectAddresses::new();
+    for obj in stmt.objects.iter() {
+        let tn = obj.as_type_name().expect("DROP TYPE object is a TypeName");
+        let (typoid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+        objects.add_exact_object_address(pg_depend::ObjectAddress::set(TYPE_RELATION_ID, typoid));
+    }
+    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)
+}

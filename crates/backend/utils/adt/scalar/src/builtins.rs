@@ -405,6 +405,36 @@ pub fn fc_oidvectoreq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_bool(read(a.value) == read(b.value)))
 }
 
+// SAFETY: strict catalog arg is a non-null plain-storage oidvector (the
+// fc_oidvectoreq read contract).
+unsafe fn oidvector_bytes(fcinfo: &Fcinfo, i: usize) -> &[u8] {
+    let p = fcinfo.arg(i).as_usize() as *const ::array::oidvector;
+    let v = unsafe { &*p };
+    debug_assert!(v.ndim == 1 && v.dataoffset == 0);
+    unsafe {
+        core::slice::from_raw_parts(
+            p.add(1) as *const u8,
+            (v.dim1.max(0) as usize) * core::mem::size_of::<Oid>(),
+        )
+    }
+}
+
+pub fn fc_hashoidvector(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: as fc_oidvectoreq.
+    let b = unsafe { oidvector_bytes(fcinfo, 0) };
+    Ok(Datum::from_u32(::hashfn::hash_bytes(b)))
+}
+
+pub fn fc_hashoidvectorextended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: as fc_oidvectoreq.
+    let b = unsafe { oidvector_bytes(fcinfo, 0) };
+    let seed = fcinfo.arg_i64(1) as u64;
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(b, seed)))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -424,6 +454,8 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(184, "oideq", 2, fc_oideq),
     b(185, "oidne", 2, fc_oidne),
     b(679, "oidvectoreq", 2, fc_oidvectoreq),
+    b(457, "hashoidvector", 1, fc_hashoidvector),
+    b(776, "hashoidvectorextended", 2, fc_hashoidvectorextended),
     b(716, "oidlt", 2, fc_oidlt),
     b(717, "oidle", 2, fc_oidle),
     b(1638, "oidgt", 2, fc_oidgt),

@@ -617,3 +617,25 @@ fn sql_value_function_negative_precision_is_22023() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
     assert!(err.message().contains("precision must not be negative"));
 }
+
+#[test]
+fn empty_array_without_cast_errors() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let a = Node::mk(
+        mcx,
+        types_nodes::rawnodes::A_ArrayExpr {
+            elements: NodeList::nil(),
+            list_start: 6,
+            list_end: 7,
+            location: 0,
+        },
+    )
+    .unwrap();
+    let err = transformExpr(mcx, &mut pstate, a, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .err()
+        .expect("empty ARRAY[] must error");
+    assert_eq!(err.message(), "cannot determine type of empty array");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INDETERMINATE_DATATYPE);
+}

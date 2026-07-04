@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+hashfn = { path = "../../../../common/hashfn" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }

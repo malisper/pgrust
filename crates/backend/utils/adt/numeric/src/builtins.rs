@@ -2,7 +2,7 @@
 //! Numeric results follow the result-mcx convention with the pool-backed
 //! NumericImage as call scratch (notes/fc-result-convention.md); numeric_out
 //! keeps the retained-cstring-scratch precedent. recv/send ride the
-//! binary-wire fmgr frame (types_fmgr::wire). Still deferred: sortsupport/hash
+//! binary-wire fmgr frame (types_fmgr::wire). Still deferred: sortsupport
 //! (see ops.rs).
 
 use ::datum::Datum;
@@ -632,12 +632,70 @@ pub fn fc_numeric_trim_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     img_result(fcinfo, &img)
 }
 
+// Leading/trailing zero digits are excluded from the hash and the weight is
+// XORed in; scale and sign are deliberately not hashed (numeric.c).
+fn numeric_hash_parts(num: crate::Num<'_>) -> Option<(&[crate::NumericDigit], i32)> {
+    if num.is_special() {
+        return None;
+    }
+    let digits = num.digits();
+    let lead = digits.iter().take_while(|&&d| d == 0).count();
+    if lead == digits.len() {
+        return Some((&[], 0));
+    }
+    let trail = digits.iter().rev().take_while(|&&d| d == 0).count();
+    Some((&digits[lead..digits.len() - trail], num.weight() - lead as i32))
+}
+
+fn digit_bytes(digits: &[crate::NumericDigit]) -> &[u8] {
+    // SAFETY: i16 slice reinterpreted as its raw bytes (C hashes the digit
+    // array bytes in native endianness).
+    unsafe {
+        core::slice::from_raw_parts(digits.as_ptr() as *const u8, core::mem::size_of_val(digits))
+    }
+}
+
+#[cfg(test)]
+pub fn numeric_hash_parts_for_tests(num: crate::Num<'_>) -> Option<(Vec<crate::NumericDigit>, i32)> {
+    numeric_hash_parts(num).map(|(d, w)| (d.to_vec(), w))
+}
+
+pub fn fc_hash_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(match numeric_hash_parts(num) {
+        None => Datum::from_u32(0),
+        Some((digits, _)) if digits.is_empty() => Datum::from_u32(u32::MAX),
+        Some((digits, weight)) => {
+            Datum::from_u32(::hashfn::hash_bytes(digit_bytes(digits)) ^ weight as u32)
+        }
+    })
+}
+
+pub fn fc_hash_numeric_extended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    let seed = fcinfo.arg_i64(1) as u64;
+    Ok(match numeric_hash_parts(num) {
+        None => Datum::from_u64(seed),
+        Some((digits, _)) if digits.is_empty() => Datum::from_u64(seed.wrapping_sub(1)),
+        Some((digits, weight)) => Datum::from_u64(
+            ::hashfn::hash_bytes_extended(digit_bytes(digits), seed) ^ (weight as i64 as u64),
+        ),
+    })
+}
+
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict, retset: false, func }
 }
 
 // pg_proc.dat rows, OID-ascending (1840/1841 proisstrict 'f', rest 't').
 pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
+    b(432, "hash_numeric", 1, true, fc_hash_numeric),
+    b(780, "hash_numeric_extended", 2, true, fc_hash_numeric_extended),
     b(1376, "factorial", 1, true, fc_numeric_fac),
     b(1701, "numeric_in", 3, true, fc_numeric_in),
     b(1702, "numeric_out", 1, true, fc_numeric_out),

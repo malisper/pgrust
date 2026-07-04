@@ -389,11 +389,17 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
         C_LANGUAGE_ID => {
             // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
             // resolve against the registered PL entry points, then the
-            // in-process ported-library registry keyed by probin (dfmgr).
+            // shipped native-library tables, then the in-process
+            // ported-library registry keyed by probin (dfmgr).
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
             let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                 .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
-            match registered_c_lang_fn(&prosrc) {
+            match registered_c_lang_fn(&prosrc).or_else(|| {
+                ::dict_snowball::builtins::SNOWBALL_CLANG
+                    .iter()
+                    .find(|(name, _, _)| *name == prosrc.as_str())
+                    .map(|&(_, _, func)| func)
+            }) {
                 Some(f) => f,
                 None => {
                     let probin =

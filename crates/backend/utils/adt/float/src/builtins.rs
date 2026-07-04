@@ -285,6 +285,51 @@ fc_in_range! {
     fc_in_range_float4_float8: in_range_float4_float8(as_f32, as_f32, as_f64);
 }
 
+// hashfloat4 widens to float8 first (cross-type hash joins); ±0 hashes as 0 /
+// bare seed, NaNs collapse to the standard float8 NaN bit pattern (hashfunc.c).
+pub(crate) fn float8_hash_image(key: f64) -> [u8; 8] {
+    let key = if key.is_nan() { f64::NAN } else { key };
+    key.to_ne_bytes()
+}
+
+pub fn fc_hashfloat4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let key = a.value.as_f32();
+    if key == 0.0 {
+        return Ok(Datum::from_u32(0));
+    }
+    Ok(Datum::from_u32(::hashfn::hash_bytes(&float8_hash_image(key as f64))))
+}
+
+pub fn fc_hashfloat4extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, seed] = fcinfo.args_n::<2>();
+    let key = a.value.as_f32();
+    let seed = seed.value.as_i64() as u64;
+    if key == 0.0 {
+        return Ok(Datum::from_u64(seed));
+    }
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(&float8_hash_image(key as f64), seed)))
+}
+
+pub fn fc_hashfloat8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let key = a.value.as_f64();
+    if key == 0.0 {
+        return Ok(Datum::from_u32(0));
+    }
+    Ok(Datum::from_u32(::hashfn::hash_bytes(&float8_hash_image(key))))
+}
+
+pub fn fc_hashfloat8extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, seed] = fcinfo.args_n::<2>();
+    let key = a.value.as_f64();
+    let seed = seed.value.as_i64() as u64;
+    if key == 0.0 {
+        return Ok(Datum::from_u64(seed));
+    }
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(&float8_hash_image(key), seed)))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -304,6 +349,10 @@ pub const FLOAT_BUILTINS: &[FmgrBuiltin] = &[
     b(2425, "float4send", 1, fc_float4send),
     b(2426, "float8recv", 1, fc_float8recv),
     b(2427, "float8send", 1, fc_float8send),
+    b(451, "hashfloat4", 1, fc_hashfloat4),
+    b(443, "hashfloat4extended", 2, fc_hashfloat4extended),
+    b(452, "hashfloat8", 1, fc_hashfloat8),
+    b(444, "hashfloat8extended", 2, fc_hashfloat8extended),
     b(200, "float4in", 1, fc_float4in),
     b(201, "float4out", 1, fc_float4out),
     b(202, "float4mul", 2, fc_float4mul),

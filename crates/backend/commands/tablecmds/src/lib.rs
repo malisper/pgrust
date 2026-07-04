@@ -174,6 +174,7 @@ pub fn DefineRelation<'mcx>(
             || relkind == RELKIND_SEQUENCE
             || relkind == types_rel::RELKIND_VIEW
             || relkind == types_rel::RELKIND_MATVIEW
+            || relkind == types_rel::RELKIND_COMPOSITE_TYPE
     );
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };

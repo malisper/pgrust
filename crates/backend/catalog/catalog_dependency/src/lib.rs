@@ -854,6 +854,25 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
             object.objectId,
         )?,
+        // C routes pg_ts_dict through generic DropObjectById and pg_ts_config
+        // through RemoveTSConfigurationById (tsearchcmds.c) — hosted here
+        // because dependency deletion cannot call back into tsearchcmds.
+        TSDictionaryRelationId => {
+            drop_row_by_oid(mcx, TSDictionaryRelationId, TSDictionaryOidIndexId, object.objectId)?
+        }
+        TSConfigRelationId => {
+            drop_row_by_oid(mcx, TSConfigRelationId, TSConfigOidIndexId, object.objectId)?;
+            let rel = table::table_open(mcx, TSConfigMapRelationId, RowExclusiveLock)?;
+            let keys = [oid_key(1, object.objectId)];
+            let mut scan =
+                genam::systable_beginscan(mcx, &rel, TSConfigMapIndexId, true, None, &keys)?;
+            while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+                let tid = tup.t_self;
+                catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            }
+            genam::systable_endscan(mcx, scan)?;
+            rel.close(RowExclusiveLock)?;
+        }
         DefaultAclRelationId => {
             drop_row_by_oid(mcx, DefaultAclRelationId, DefaultAclOidIndexId, object.objectId)?
         }
@@ -882,6 +901,13 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
     }
     Ok(())
 }
+
+const TSDictionaryRelationId: Oid = 3600;
+const TSDictionaryOidIndexId: Oid = 3605;
+const TSConfigRelationId: Oid = 3602;
+const TSConfigOidIndexId: Oid = 3712;
+const TSConfigMapRelationId: Oid = 3603;
+const TSConfigMapIndexId: Oid = 3609;
 
 // deleteDependencyRecordsFor (pg_depend.c).
 pub fn deleteDependencyRecordsFor<'mcx>(
