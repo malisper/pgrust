@@ -318,13 +318,22 @@ fn get_object_address_relobject<'mcx>(
     let reloid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, missing_ok)?;
     if !OidIsValid(reloid) {
         debug_assert!(missing_ok);
-        return Ok((ObjectAddress::set(RewriteRelationId, InvalidOid), None));
+        let class_id = match objtype {
+            ObjectType::OBJECT_RULE => RewriteRelationId,
+            ObjectType::OBJECT_TRIGGER => TriggerRelationId,
+            other => unported(&format!("get_object_address_relobject {other:?}")),
+        };
+        return Ok((ObjectAddress::set(class_id, InvalidOid), None));
     }
     let relation = relation::relation_open(mcx, reloid, types_rel::NoLock)?;
     let address = match objtype {
         ObjectType::OBJECT_RULE => ObjectAddress::set(
             RewriteRelationId,
             rewrite_define_seams::get_rewrite_oid::call(mcx, reloid, depname, missing_ok)?,
+        ),
+        ObjectType::OBJECT_TRIGGER => ObjectAddress::set(
+            TriggerRelationId,
+            trigger::get_trigger_oid(mcx, reloid, depname, missing_ok)?,
         ),
         other => unported(&format!("get_object_address_relobject {other:?}")),
     };
@@ -391,10 +400,10 @@ pub fn get_object_address<'mcx>(
                 lockmode,
                 missing_ok,
             )?,
-            OBJECT_RULE => get_object_address_relobject(
+            OBJECT_RULE | OBJECT_TRIGGER => get_object_address_relobject(
                 mcx,
                 objtype,
-                object.as_list().expect("rule object is a name list"),
+                object.as_list().expect("relation-attached object is a name list"),
                 missing_ok,
             )?,
             OBJECT_TYPE | OBJECT_DOMAIN => {
@@ -480,7 +489,7 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
             .map(|(_, nsp)| nsp)
             .unwrap_or(InvalidOid)),
         NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
-        | RewriteRelationId => Ok(InvalidOid),
+        | RewriteRelationId | TriggerRelationId => Ok(InvalidOid),
         ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
             .map(|s| s.pronamespace)
             .unwrap_or(InvalidOid)),

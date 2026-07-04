@@ -46,6 +46,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::commands_async::builtins::ASYNC_BUILTINS,
     ::cryptohashfuncs::CRYPTOHASH_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
+    ::trigfuncs::TRIGFUNCS_BUILTINS,
 ];
 
 const fn total() -> usize {

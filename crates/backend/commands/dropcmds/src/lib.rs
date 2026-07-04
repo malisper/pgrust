@@ -1,5 +1,6 @@
 // dropcmds.c RemoveObjects over the objtypes get_object_address serves
-// (TYPE/DOMAIN/SCHEMA/RULE/EXTENSION/OPERATOR/OPCLASS/OPFAMILY); ownership
+// (TYPE/DOMAIN/SCHEMA/RULE/TRIGGER/EXTENSION/OPERATOR/OPCLASS/OPFAMILY);
+// ownership
 // checks run the superuser fast path only — non-superuser DROP is a named
 // panic (aclchk object_ownercheck unported).
 #![allow(non_snake_case)]
@@ -101,19 +102,20 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
             let name = object.as_string().expect("extension name is a String node").sval;
             format!("extension \"{name}\" does not exist, skipping")
         }
-        ObjectType::OBJECT_RULE => {
-            let names = object.as_list().expect("rule object is a name list");
+        ObjectType::OBJECT_RULE | ObjectType::OBJECT_TRIGGER => {
+            let names = object.as_list().expect("relation-attached object is a name list");
             match owningrel_does_not_exist_skipping(&names)? {
                 Some(msg) => msg,
                 None => {
-                    let rulename = names
+                    let depname = names
                         .last()
                         .and_then(|n| n.as_string())
-                        .expect("rule name is a String node")
+                        .expect("dependent object name is a String node")
                         .sval;
+                    let noun = if objtype == ObjectType::OBJECT_RULE { "rule" } else { "trigger" };
                     let parent = string_parts(&names, names.len() - 1);
                     format!(
-                        "rule \"{rulename}\" for relation \"{}\" does not exist, skipping",
+                        "{noun} \"{depname}\" for relation \"{}\" does not exist, skipping",
                         parent.join(".")
                     )
                 }

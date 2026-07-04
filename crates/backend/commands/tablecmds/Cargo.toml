@@ -73,6 +73,7 @@ array = { package = "types_array", path = "../../../_support/types/array" }
 relcache = { path = "../../utils/cache/relcache" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 trigger = { path = "../trigger" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
 exectuples = { path = "../../executor/exectuples" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 heapam = { path = "../../access/heap/heapam" }

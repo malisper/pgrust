@@ -68,5 +68,6 @@ xact_seams = { path = "../../access/transam/xact_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+file_seams = { path = "../../storage/file/file_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 aio_config = { path = "../../storage/aio/aio_config" }

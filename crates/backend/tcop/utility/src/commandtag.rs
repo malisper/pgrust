@@ -130,6 +130,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 | types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
                     CMDTAG_ALTER_TABLE
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }

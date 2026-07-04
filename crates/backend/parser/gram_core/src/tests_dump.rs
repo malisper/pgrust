@@ -462,6 +462,58 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "missing_ok", d.missing_ok);
         bool_field(out, "concurrent", d.concurrent);
         out.push('}');
+    } else if let Some(t) = n.as_create_trig_stmt() {
+        out.push_str("{CREATETRIGSTMT");
+        bool_field(out, "replace", t.replace);
+        bool_field(out, "isconstraint", t.isconstraint);
+        string_field(out, "trigname", t.trigname);
+        out.push_str(" :relation ");
+        match t.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "funcname", &t.funcname);
+        list_field(out, "args", &t.args);
+        bool_field(out, "row", t.row);
+        int_field(out, "timing", t.timing as i32);
+        int_field(out, "events", t.events as i32);
+        list_field(out, "columns", &t.columns);
+        node_field(out, "whenClause", t.whenClause);
+        list_field(out, "transitionRels", &t.transitionRels);
+        bool_field(out, "deferrable", t.deferrable);
+        bool_field(out, "initdeferred", t.initdeferred);
+        out.push_str(" :constrrel ");
+        match t.constrrel {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
+    } else if let Some(t) = n.as_trigger_transition() {
+        out.push_str("{TRIGGERTRANSITION");
+        string_field(out, "name", t.name);
+        bool_field(out, "isNew", t.isNew);
+        bool_field(out, "isTable", t.isTable);
+        out.push('}');
+    } else if let Some(c) = n.as_constraints_set_stmt() {
+        out.push_str("{CONSTRAINTSSETSTMT");
+        list_field(out, "constraints", &c.constraints);
+        bool_field(out, "deferred", c.deferred);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::RenameStmt>() {
+        out.push_str("{RENAMESTMT");
+        int_field(out, "renameType", r.renameType as i32);
+        int_field(out, "relationType", r.relationType as i32);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", r.object);
+        string_field(out, "subname", r.subname);
+        string_field(out, "newname", r.newname);
+        int_field(out, "behavior", r.behavior as i32);
+        bool_field(out, "missing_ok", r.missing_ok);
+        out.push('}');
     } else if let Some(v) = n.as_variable_set_stmt() {
         out.push_str("{VARIABLESETSTMT");
         int_field(out, "kind", v.kind as i32);
