@@ -6,7 +6,7 @@ extern crate alloc;
 
 use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState, INDEX_VAR};
 use ::execscan::{ScanNode, ScanState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, ExecSlotId};
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
@@ -33,19 +33,13 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
-pub struct IossRuntimeKeys<'mcx> {
-    pub keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
-    pub ready: bool,
-    pub ecxt: EcxtId,
-}
-
 pub struct IndexOnlyScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     pub recheckqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     pub ioss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub ioss_RelationDesc: Option<Relation<'mcx>>,
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
-    pub ioss_Runtime: Option<PgBox<'mcx, IossRuntimeKeys<'mcx>>>,
+    pub ioss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
     pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
@@ -371,7 +365,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
     } else {
         Some(::mcx::alloc_in(
             mcx,
-            IossRuntimeKeys {
+            RuntimeKeysState {
                 keys: runtime_keys,
                 ready: false,
                 ecxt: estate.exec_assign_expr_context(),
