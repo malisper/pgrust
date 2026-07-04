@@ -205,12 +205,13 @@ impl<'mcx> YYSTYPE<'mcx> {
         self.tag() == T_JOIN_USING
     }
 
-    pub fn join_using(self) -> &'mcx JoinQualUsing<'mcx> {
+    pub fn join_using(self) -> (NodeList<'mcx>, Option<&'mcx Alias<'mcx>>) {
         if self.tag() != T_JOIN_USING {
             confusion("JoinQualUsing");
         }
         // SAFETY: built by JoinUsing() from &'mcx mut; moved, never duplicated.
-        unsafe { &*(self.p as *const JoinQualUsing<'mcx>) }
+        let j = unsafe { &mut *(self.p as *mut JoinQualUsing<'mcx>) };
+        (core::mem::replace(&mut j.cols, NodeList::nil()), j.alias)
     }
 
     pub fn key_action(self) -> &'mcx mut KeyAction<'mcx> {

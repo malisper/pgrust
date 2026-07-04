@@ -4822,8 +4822,8 @@ impl<'mcx> Parser<'mcx> {
                 } else {
                     let q = view.v(qual_at);
                     if q.is_join_using() {
-                        let u = q.join_using();
-                        (u.cols, u.alias, None)
+                        let (cols, alias) = q.join_using();
+                        (cols, alias, None)
                     } else {
                         (NodeList::nil(), None, q.node())
                     }
