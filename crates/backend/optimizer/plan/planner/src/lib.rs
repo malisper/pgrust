@@ -29,6 +29,7 @@ pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
 pub mod rangetypes_selfuncs;
 pub mod selfuncs;
+pub mod ts_selfuncs;
 pub mod planmain;
 pub mod prep;
 pub mod prepunion;

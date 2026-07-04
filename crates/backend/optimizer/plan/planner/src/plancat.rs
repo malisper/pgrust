@@ -839,6 +839,7 @@ pub fn restriction_selectivity<'mcx>(
         3169 => crate::rangetypes_selfuncs::rangesel(run, operatorid, args, varrelid)?,
         4243 => crate::multirangetypes_selfuncs::multirangesel(run, operatorid, args, varrelid)?,
         3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
+        3686 => crate::ts_selfuncs::tsmatchsel(run, args, varrelid)?,
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
         ),
@@ -889,6 +890,8 @@ pub fn join_selectivity<'mcx>(
         3561 => crate::network_selfuncs::networkjoinsel(run, operatorid, args, sjinfo)?,
         // matchingjoinsel (selfuncs.c) punts.
         5041 => crate::selfuncs::DEFAULT_MATCHING_SEL,
+        // tsmatchjoinsel (ts_selfuncs.c) punts.
+        3687 => crate::ts_selfuncs::DEFAULT_TS_MATCH_SEL,
         other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
     };
     if !(0.0..=1.0).contains(&result) {
