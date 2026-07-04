@@ -5956,6 +5956,7 @@ dependencies = [
  "equivclass",
  "lsyscache",
  "mcx",
+ "nodes_core",
  "pathnode",
  "planner_seams",
  "syscache_seams",
