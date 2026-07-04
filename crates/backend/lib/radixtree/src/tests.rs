@@ -97,7 +97,7 @@ fn test_random() {
 
     // Limit memory use by limiting the key space (test_radixtree.c).
     let filter: u64 = (0x07 << 24) | (0xFF << 16) | 0xFF;
-    let num_keys = 100_000;
+    let num_keys = if cfg!(miri) { 2_000 } else { 100_000 };
     let seed = 0x1234_5678_9ABC_DEF0u64;
 
     let mut prng = SplitMix64(seed);
@@ -120,10 +120,10 @@ fn test_random() {
         }
         assert!(tree.find(keys[i] + 1).is_none());
     }
-    for key in 0..keys[0].min(10_000) {
+    for key in 0..keys[0].min(if cfg!(miri) { 500 } else { 10_000 }) {
         assert!(tree.find(key).is_none());
     }
-    for i in 1..10_000u64 {
+    for i in 1..(if cfg!(miri) { 500 } else { 10_000u64 }) {
         assert!(tree.find(keys[num_keys - 1] + i).is_none());
     }
 
@@ -181,7 +181,7 @@ fn test_model_random_ops() {
         let mut model: BTreeMap<u64, u64> = BTreeMap::new();
         let mut prng = SplitMix64(seed);
 
-        for step in 0..30_000usize {
+        for step in 0..(if cfg!(miri) { 1_200 } else { 30_000usize }) {
             let r = prng.next();
             let key = match r % 4 {
                 0 => prng.next() % 512,
@@ -367,7 +367,7 @@ fn test_memory_usage_tracks_growth() {
     let initial = tree.memory_usage();
     assert!(initial > 0);
 
-    for i in 0..50_000u64 {
+    for i in 0..(if cfg!(miri) { 3_000 } else { 50_000u64 }) {
         tree.set(i, &i).unwrap();
     }
     let grown = tree.memory_usage();
@@ -378,7 +378,7 @@ fn test_memory_usage_tracks_growth() {
 fn test_shared_tree_threads() {
     let shared: SharedRadixTree<u64> = SharedRadixTree::create().unwrap();
     let nthreads = 4u64;
-    let per_thread = 5_000u64;
+    let per_thread = if cfg!(miri) { 300 } else { 5_000u64 };
 
     std::thread::scope(|s| {
         for t in 0..nthreads {
