@@ -102,6 +102,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
         t if t == tag16(NodeTag::T_CteScan) => true,
+        t if t == tag16(NodeTag::T_WorkTableScan) => true,
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
@@ -992,6 +993,56 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
+// create_worktablescan_path (pathnode.c); required_outer empty on this lane.
+pub fn create_worktablescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_WorkTableScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    costsize::cost_ctescan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_recursiveunion_path (pathnode.c); distinct_list empty and num_groups
+// zero for UNION ALL.
+#[allow(clippy::too_many_arguments)]
+pub fn create_recursiveunion_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    leftpath: PathId,
+    rightpath: PathId,
+    target_id: PtId,
+    distinct_list: PgVec<'mcx, types_pathnodes::NodeId>,
+    wt_param: i32,
+    num_groups: f64,
+) -> PathId {
+    let (l_safe, l_workers) = {
+        let l = run.root.path(leftpath).base();
+        (l.parallel_safe, l.parallel_workers)
+    };
+    let r_safe = run.root.path(rightpath).base().parallel_safe;
+    let mut path =
+        base_path(run, NodeTag::T_RecursiveUnionPath, NodeTag::T_RecursiveUnion, rel_id);
+    path.pathtarget_id = Some(target_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel && l_safe && r_safe;
+    path.parallel_workers = l_workers;
+    let id = run.root.alloc_path(PathNode::RecursiveUnionPath(
+        types_pathnodes::RecursiveUnionPath {
+            path,
+            leftpath: Some(leftpath),
+            rightpath: Some(rightpath),
+            distinctList: distinct_list,
+            wtParam: wt_param,
+            numGroups: num_groups,
+        },
+    ));
+    costsize::cost_recursive_union(run, id, leftpath, rightpath);
+    id
+}
 
 // create_tidscan_path (pathnode.c); required_outer is empty on this lane.
 pub fn create_tidscan_path<'mcx>(

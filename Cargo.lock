@@ -3351,12 +3351,14 @@ dependencies = [
  "nodemergejoin",
  "nodemodifytable",
  "nodenestloop",
+ "noderecursiveunion",
  "nodeseqscan",
  "nodesetop",
  "nodesort",
  "nodeunique",
  "nodevaluesscan",
  "nodewindowagg",
+ "nodeworktablescan",
  "pgstat_seams",
  "postgres_seams",
  "predicate_seams",
@@ -6303,6 +6305,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "noderecursiveunion"
+version = "0.1.0"
+dependencies = [
+ "execgrouping",
+ "executils",
+ "init_small",
+ "mcx",
+ "postgres_seams",
+ "tuplestore",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
@@ -6478,6 +6496,21 @@ dependencies = [
  "types_nodes",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "nodeworktablescan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
 ]
 
 [[package]]
@@ -7737,6 +7770,7 @@ dependencies = [
  "nodehash",
  "nodememoize",
  "nodes_core",
+ "outfuncs",
  "parse_agg",
  "parse_relation",
  "parser_analyze",
@@ -7755,6 +7789,7 @@ dependencies = [
  "relcache",
  "relcache_build_seams",
  "relcache_seams",
+ "rewrite_manip",
  "spgist",
  "statistics",
  "syscache_seams",

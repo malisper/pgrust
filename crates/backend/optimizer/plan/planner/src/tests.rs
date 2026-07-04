@@ -958,7 +958,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     let mcx = cx.mcx();
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.0, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.0, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     // The bitmap heap path was generated but is dominated by the plain index
     // scan (as C); rebuild one over the surviving index path to plan it.
@@ -1049,7 +1049,7 @@ fn competing_paths_pick_cheapest_total_and_startup() {
     // tuple_fraction > 0 sets consider_startup: the seqscan (startup 0) and
     // the index scan (cheaper total) both survive add_path's fuzzy compare.
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.1, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.1, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     let rel = run.root.rel(final_rel);
     assert_eq!(rel.pathlist.len(), 2);
@@ -1295,12 +1295,32 @@ fn with_cte_query(mcx: Mcx<'_>, cterefcount: i32) -> Query<'_> {
 }
 
 #[test]
-fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+fn single_ref_cte_inlines_to_plain_scan() {
     let cx = cx();
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
         with_cte_query(mcx, 1),
+        "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.subplans.len(), 0);
+    assert_eq!(stmt.paramExecTypes.len(), 0);
+    assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_SeqScan);
+}
+
+// Default-policy CTE referenced more than once stays materialized (C
+// SS_process_ctes refcount > 1 arm).
+#[test]
+fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let stmt = planner(
+        mcx,
+        with_cte_query(mcx, 2),
         "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,

@@ -116,7 +116,11 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             set_subquery_pathlist(run, rel, rti)?;
         }
         RTEKind::RTE_CTE => {
-            crate::cte::set_cte_pathlist(run, rel, rti)?;
+            if rte.self_reference {
+                crate::cte::set_worktable_pathlist(run, rel, rti)?;
+            } else {
+                crate::cte::set_cte_pathlist(run, rel, rti)?;
+            }
         }
         RTEKind::RTE_RESULT => {
             crate::costsize::set_result_size_estimates(run, rel)?;
@@ -169,7 +173,7 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         rte.subquery.expect("RTE_SUBQUERY has a subquery"),
     )?;
     run.push_root()?;
-    crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
     run.root.rel_mut(rel).subroot_idx = Some(idx);
     // Isolate the params needed by this specific subplan.

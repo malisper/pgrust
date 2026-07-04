@@ -9,8 +9,8 @@ use parser_small1::{parser_errposition, ParseExprKind, ParseState};
 use types_core::{Index, Oid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GROUPING_ERROR,
-    ERRCODE_STATEMENT_TOO_COMPLEX, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WINDOWING_ERROR, ERROR,
+    ERRCODE_INVALID_RECURSION, ERRCODE_STATEMENT_TOO_COMPLEX, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR, ERROR,
 };
 use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, Query, RTEKind};
 use types_nodes::primnodes::{Aggref, GroupingFunc, WindowFunc};
@@ -892,7 +892,114 @@ pub fn parseCheckAggregates<'mcx>(
         }
         check_ungrouped_columns(pstate, qry, hnvg, 0, false, having)?;
     }
+
+    // C: per spec, aggregates can't appear in a recursive term.
+    let has_self_ref_rtes = qry.rtable.iter().any(|rte_node| {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE && rte.self_reference
+    });
+    if pstate.p_hasAggs && has_self_ref_rtes {
+        let location = locate_agg_of_level(qry, 0)?;
+        return Err(agg_in_recursive_term(pstate, location));
+    }
     Ok(())
+}
+
+// locate_agg_of_level (rewriteManip.c): parse location of the first agg of
+// the given query level, or -1. The entry Query arrives as a plain reborrow,
+// so its fields are walked directly (query_tree_walker wants an arena &'mcx).
+fn locate_agg_of_level<'mcx>(qry: &Query<'mcx>, levelsup: Index) -> PgResult<ParseLoc> {
+    let mut w = LocateAggOfLevel { agg_location: -1, sublevels_up: levelsup };
+    locate_agg_walk_query_fields(qry, &mut w)?;
+    Ok(w.agg_location)
+}
+
+struct LocateAggOfLevel {
+    agg_location: ParseLoc,
+    sublevels_up: Index,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for LocateAggOfLevel {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Aggref => {
+                let a = node.as_aggref().expect("tag checked");
+                if a.agglevelsup == self.sublevels_up && a.location >= 0 {
+                    self.agg_location = a.location;
+                    return Ok(true);
+                }
+                nodes_core::expression_tree_walker(node, self)
+            }
+            NodeTag::T_GroupingFunc => {
+                let g = node.as_grouping_func().expect("tag checked");
+                if g.agglevelsup == self.sublevels_up && g.location >= 0 {
+                    self.agg_location = g.location;
+                    return Ok(true);
+                }
+                nodes_core::expression_tree_walker(node, self)
+            }
+            NodeTag::T_Query => self.visit_query_ref(node.as_query().expect("tag checked")),
+            _ => nodes_core::expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let result = nodes_core::query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        result
+    }
+}
+
+// query_tree_walker's field walk at flags == 0, over a non-arena borrow.
+fn locate_agg_walk_query_fields<'mcx>(
+    q: &Query<'mcx>,
+    w: &mut LocateAggOfLevel,
+) -> PgResult<bool> {
+    if nodes_core::walk_list(&q.targetList, w)?
+        || nodes_core::walk_list(&q.withCheckOptions, w)?
+        || nodes_core::walk_opt(q.onConflict, w)?
+        || nodes_core::walk_list(&q.mergeActionList, w)?
+        || nodes_core::walk_opt(q.mergeJoinCondition, w)?
+        || nodes_core::walk_list(&q.returningList, w)?
+    {
+        return Ok(true);
+    }
+    if let Some(jt) = q.jointree {
+        if nodes_core::walk_list(&jt.fromlist, w)? || nodes_core::walk_opt(jt.quals, w)? {
+            return Ok(true);
+        }
+    }
+    if nodes_core::walk_opt(q.setOperations, w)?
+        || nodes_core::walk_opt(q.havingQual, w)?
+        || nodes_core::walk_opt(q.limitOffset, w)?
+        || nodes_core::walk_opt(q.limitCount, w)?
+    {
+        return Ok(true);
+    }
+    for wc_node in &q.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause element");
+        if nodes_core::walk_opt(wc.startOffset, w)? || nodes_core::walk_opt(wc.endOffset, w)? {
+            return Ok(true);
+        }
+    }
+    if nodes_core::walk_list(&q.cteList, w)? {
+        return Ok(true);
+    }
+    nodes_core::range_table_walker(&q.rtable, w, 0)
+}
+
+#[cold]
+#[inline(never)]
+fn agg_in_recursive_term(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_RECURSION)
+            .errmsg("aggregate functions are not allowed in a recursive query's recursive term")
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "parseCheckAggregates")),
+    )
 }
 
 // C exprLocation over the groupingSets list: first member with a location.
