@@ -105,7 +105,7 @@ pub fn remove_useless_result_rtes<'mcx>(
     }
 
     if !dropped_outer_joins.is_empty() {
-        crate::prepjointree::remove_nulling_relids(parse, &dropped_outer_joins, None)?;
+        crate::prepjointree::remove_nulling_relids(run, parse, &dropped_outer_joins, None)?;
     }
     check_rowmarks_on_result(run, parse);
     Ok(())

@@ -410,7 +410,7 @@ pub fn subquery_planner<'mcx>(
         };
     }
     if has_outer_joins {
-        crate::prepjointree::reduce_outer_joins(mcx, &mut parse)?;
+        crate::prepjointree::reduce_outer_joins(run, &mut parse)?;
     }
     if has_result_rtes {
         remove_useless_result_rtes(run, &mut parse)?;
