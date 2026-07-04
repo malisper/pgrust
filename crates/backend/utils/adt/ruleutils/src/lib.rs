@@ -621,6 +621,10 @@ const FKCONSTR_ACTION_SETNULL: i8 = b'n' as i8;
 const FKCONSTR_ACTION_SETDEFAULT: i8 = b'd' as i8;
 
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
+const ANUM_PG_CONSTRAINT_CONDEFERRABLE: i32 = 5;
+const ANUM_PG_CONSTRAINT_CONDEFERRED: i32 = 6;
+const ANUM_PG_CONSTRAINT_CONENFORCED: i32 = 7;
+const ANUM_PG_CONSTRAINT_CONVALIDATED: i32 = 8;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_CONSTRAINT_CONTYPID: i32 = 10;
 const ANUM_PG_CONSTRAINT_CONINDID: i32 = 11;
@@ -784,6 +788,18 @@ pub fn pg_get_constraintdef_worker(
             "pg_get_constraintdef",
             &format!("constraint type '{}'", (other as u8) as char),
         ),
+    }
+
+    if getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool() {
+        buf.push_str(" DEFERRABLE");
+    }
+    if getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool() {
+        buf.push_str(" INITIALLY DEFERRED");
+    }
+    if !getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool() {
+        buf.push_str(" NOT ENFORCED");
+    } else if !getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool() {
+        buf.push_str(" NOT VALID");
     }
     Ok(Some(buf))
 }
