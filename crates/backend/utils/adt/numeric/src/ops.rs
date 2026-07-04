@@ -1053,3 +1053,12 @@ pub fn numeric_sign(num: Num<'_>) -> PgResult<NumericImage> {
         _ => make_result(crate::var::CONST_MINUS_ONE),
     }
 }
+
+pub fn numeric_inc(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+    let mut result = NumericVar::new();
+    add_var(num.view(), CONST_ONE, &mut result);
+    make_result(result.view())
+}

@@ -637,6 +637,7 @@ fc_num_unary_res! {
     fc_numeric_ceil: numeric_ceil;
     fc_numeric_floor: numeric_floor;
     fc_numeric_sign: numeric_sign;
+    fc_numeric_inc: numeric_inc;
 }
 
 // C's numeric_support folds no-op typmod coercions into RelabelType; this
@@ -883,6 +884,7 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1706, "sign", 1, true, fc_numeric_sign),
     b(1711, "ceil", 1, true, fc_numeric_ceil),
     b(1712, "floor", 1, true, fc_numeric_floor),
+    b(1764, "numeric_inc", 1, true, fc_numeric_inc),
     b(2167, "ceiling", 1, true, fc_numeric_ceil),
     b(3157, "numeric_support", 1, true, fc_numeric_support),
     b(432, "hash_numeric", 1, true, fc_hash_numeric),

@@ -913,3 +913,17 @@ fn generate_series_numeric_rows_estimate() {
             .is_none()
     );
 }
+
+#[test]
+fn numeric_sign_and_inc() {
+    assert_eq!(out(&numeric_sign(n("0.000").num()).unwrap()), "0");
+    assert_eq!(out(&numeric_sign(n("-7.3").num()).unwrap()), "-1");
+    assert_eq!(out(&numeric_sign(n("12").num()).unwrap()), "1");
+    assert_eq!(out(&numeric_sign(n("nan").num()).unwrap()), "NaN");
+    assert_eq!(out(&numeric_sign(n("inf").num()).unwrap()), "1");
+    assert_eq!(out(&numeric_sign(n("-inf").num()).unwrap()), "-1");
+    assert_eq!(out(&numeric_inc(n("41").num()).unwrap()), "42");
+    assert_eq!(out(&numeric_inc(n("-1.5").num()).unwrap()), "-0.5");
+    assert_eq!(out(&numeric_inc(n("nan").num()).unwrap()), "NaN");
+    assert_eq!(out(&numeric_inc(n("-inf").num()).unwrap()), "-Infinity");
+}
