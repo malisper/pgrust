@@ -15,8 +15,8 @@ use types_nodes::primnodes::{BoolExpr, BoolExprType};
 use types_nodes::{Node, NodeTag};
 
 use crate::format::{
-    append, ExplainCloseGroup, ExplainOpenGroup, ExplainPropertyBool, ExplainPropertyFloat,
-    ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
+    append, ExplainCloseGroup, ExplainIndentText, ExplainOpenGroup, ExplainPropertyBool,
+    ExplainPropertyFloat, ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
 };
 use define::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
