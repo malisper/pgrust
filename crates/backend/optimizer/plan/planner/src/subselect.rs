@@ -1775,21 +1775,24 @@ pub fn ss_finalize_plan<'mcx>(
             }
         }
     }
-    finalize_plan(run, root, plan, &valid)?;
+    finalize_plan(run, root, plan, &valid, &types_nodes::bitmapset::Bitmapset::empty())?;
     Ok(())
 }
 
-// finalize_plan (subselect.c) over the ported node set; gather_param and
-// scan_params legs (parallel, EPQ) are dead here.
+// finalize_plan (subselect.c) over the ported node set; the gather_param leg
+// (parallel) is dead here.
 fn finalize_plan<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &types_pathnodes::PlannerInfo<'mcx>,
     plan: Node<'mcx>,
     valid_params: &types_nodes::bitmapset::Bitmapset<'mcx>,
+    scan_params: &types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<types_nodes::bitmapset::Bitmapset<'mcx>> {
     let mcx = run.mcx;
     let mut paramids = types_nodes::bitmapset::Bitmapset::empty();
     let mut locally_added_param: i32 = -1;
+    // LockRows/ModifyTable extend scan_params for their descendants only.
+    let mut scan_owned: Option<types_nodes::bitmapset::Bitmapset<'mcx>> = None;
     let base = plan.as_plan().expect("plan node");
 
     let mut init_ext_param = types_nodes::bitmapset::Bitmapset::empty();
@@ -1818,9 +1821,11 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, root, rcq, &mut paramids)?;
             }
         }
+        NodeTag::T_SeqScan => {
+            paramids.add_members(mcx, scan_params)?;
+        }
         // Agg skips C's AGG_HASHED aggParams scan: no executor consumer yet.
-        NodeTag::T_SeqScan
-        | NodeTag::T_Sort
+        NodeTag::T_Sort
         | NodeTag::T_IncrementalSort
         | NodeTag::T_Agg
         | NodeTag::T_Material
@@ -1837,6 +1842,7 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_TidScan => {
             finalize_primnode_list(run, root, &plan.as_tid_scan().unwrap().tidquals, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_TidRangeScan => {
             finalize_primnode_list(
@@ -1845,6 +1851,7 @@ fn finalize_plan<'mcx>(
                 &plan.as_tid_range_scan().unwrap().tidrangequals,
                 &mut paramids,
             )?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_Memoize => {
             finalize_primnode_list(run, root, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
@@ -1858,17 +1865,20 @@ fn finalize_plan<'mcx>(
             );
             let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
             paramids.add_members(mcx, &cteplan.as_plan().expect("plan node").extParam)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
             finalize_primnode_list(run, root, &s.indexqual, &mut paramids)?;
             finalize_primnode_list(run, root, &s.indexorderby, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_IndexOnlyScan => {
             let s = plan.as_index_only_scan().unwrap();
             finalize_primnode_list(run, root, &s.indexqual, &mut paramids)?;
             finalize_primnode_list(run, root, &s.recheckqual, &mut paramids)?;
             finalize_primnode_list(run, root, &s.indexorderby, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_BitmapIndexScan => {
             finalize_primnode_list(
@@ -1885,28 +1895,29 @@ fn finalize_plan<'mcx>(
                 &plan.as_bitmap_heap_scan().unwrap().bitmapqualorig,
                 &mut paramids,
             )?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_Append => {
             for sub in &plan.as_append().unwrap().appendplans {
-                let child = finalize_plan(run, root, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_MergeAppend => {
             for sub in &plan.as_merge_append().unwrap().mergeplans {
-                let child = finalize_plan(run, root, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_BitmapAnd => {
             for sub in &plan.as_bitmap_and().unwrap().bitmapplans {
-                let child = finalize_plan(run, root, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
         NodeTag::T_BitmapOr => {
             for sub in &plan.as_bitmap_or().unwrap().bitmapplans {
-                let child = finalize_plan(run, root, sub, &valid)?;
+                let child = finalize_plan(run, root, sub, &valid, scan_params)?;
                 paramids.add_members(mcx, &child)?;
             }
         }
@@ -1919,10 +1930,14 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, root, cnt, &mut paramids)?;
             }
         }
-        // epqParam becomes valid for descendants; never propagated up.
+        // epqParam becomes valid for descendants (and forced onto their scan
+        // nodes); never propagated up.
         NodeTag::T_LockRows => {
             locally_added_param = plan.as_lock_rows().unwrap().epqParam;
             valid.add_member(mcx, locally_added_param)?;
+            let mut s = scan_params.clone_in(mcx)?;
+            s.add_member(mcx, locally_added_param)?;
+            scan_owned = Some(s);
         }
         // Child nodes may reference wtParam; it never joins extParams
         // (WorkTableScan's wtParam is a local of the RecursiveUnion level).
@@ -1932,6 +1947,7 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_WorkTableScan => {
             paramids.add_member(mcx, plan.as_work_table_scan().unwrap().wtParam)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_NestLoop => {
             let nl = plan.as_nest_loop().unwrap();
@@ -1958,10 +1974,12 @@ fn finalize_plan<'mcx>(
                 }
                 .expect("RangeTblFunction");
             }
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_ValuesScan => {
             let vs = plan.as_values_scan().unwrap();
             finalize_primnode_list(run, root, &vs.values_lists, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_SubqueryScan => {
             let ss = plan.as_subquery_scan().unwrap();
@@ -1973,6 +1991,7 @@ fn finalize_plan<'mcx>(
             ss_finalize_plan(run, subroot, subplan, sub_outer)?;
             paramids
                 .add_members(mcx, &subplan.as_plan().expect("plan node").extParam)?;
+            paramids.add_members(mcx, scan_params)?;
         }
         NodeTag::T_MergeJoin => {
             let mj = plan.as_merge_join().unwrap();
@@ -1991,15 +2010,28 @@ fn finalize_plan<'mcx>(
         NodeTag::T_TableFuncScan => {
             let tf = plan.as_table_func_scan().unwrap().tablefunc.expect("tablefunc");
             finalize_primnode(run, root, tf, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
         }
+        // exclRelTlist contains only Vars, no examination needed.
         NodeTag::T_ModifyTable => {
-            panic!("finalize_plan (subselect.c): ModifyTable with exec params; M2 DML lane")
+            let mt = plan.as_modify_table().unwrap();
+            locally_added_param = mt.epqParam;
+            valid.add_member(mcx, locally_added_param)?;
+            let mut s = scan_params.clone_in(mcx)?;
+            s.add_member(mcx, locally_added_param)?;
+            scan_owned = Some(s);
+            finalize_primnode_list(run, root, &mt.returningLists, &mut paramids)?;
+            finalize_primnode_list(run, root, &mt.onConflictSet, &mut paramids)?;
+            if let Some(w) = mt.onConflictWhere {
+                finalize_primnode(run, root, w, &mut paramids)?;
+            }
         }
         other => panic!("finalize_plan (subselect.c): {other:?}; M2 plan lane"),
     }
 
+    let scan_params = scan_owned.as_ref().unwrap_or(scan_params);
     if let Some(child) = base.lefttree {
-        let child_params = finalize_plan(run, root, child, &valid)?;
+        let child_params = finalize_plan(run, root, child, &valid, scan_params)?;
         paramids.add_members(mcx, &child_params)?;
     }
     if let Some(child) = base.righttree {
@@ -2013,12 +2045,12 @@ fn finalize_plan<'mcx>(
             }
         }
         if nestloop_params.is_empty() {
-            let child_params = finalize_plan(run, root, child, &valid)?;
+            let child_params = finalize_plan(run, root, child, &valid, scan_params)?;
             paramids.add_members(mcx, &child_params)?;
         } else {
             let mut inner_valid = valid.clone_in(mcx)?;
             inner_valid.add_members(mcx, &nestloop_params)?;
-            let mut child_params = finalize_plan(run, root, child, &inner_valid)?;
+            let mut child_params = finalize_plan(run, root, child, &inner_valid, scan_params)?;
             child_params.del_members(&nestloop_params);
             paramids.add_members(mcx, &child_params)?;
         }
