@@ -16,7 +16,8 @@ use types_error::{
 };
 use types_nodes::parsenodes::ACL_SELECT;
 use types_nodes::{
-    Alias, Node, NodeList, RTEKind, RTEPermissionInfo, RangeTblEntry, Var, VarReturningType,
+    Alias, Node, NodeList, NodeTag, RTEKind, RTEPermissionInfo, RangeTblEntry, Var,
+    VarReturningType,
 };
 use types_rel::{AccessShareLock, NoLock, Relation, RowShareLock, LOCKMODE};
 use types_tuple::htup::{FirstLowInvalidHeapAttributeNumber, TableOidAttributeNumber};

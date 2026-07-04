@@ -706,7 +706,7 @@ fn buildMergedJoinVar<'mcx>(
         types_nodes::JoinType::JOIN_RIGHT => r_node,
         types_nodes::JoinType::JOIN_FULL => Node::mk(
             mcx,
-            types_nodes::CoalesceExpr {
+            types_nodes::primnodes::CoalesceExpr {
                 coalescetype: outcoltype,
                 coalescecollid: InvalidOid,
                 args: NodeList::make2(mcx, l_node, r_node)?,
