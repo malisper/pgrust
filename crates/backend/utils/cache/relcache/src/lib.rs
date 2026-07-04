@@ -166,6 +166,7 @@ pub fn init_seams() {
     relcache_seams::critical_shared_relcaches_built::set(criticalSharedRelcachesBuilt);
     relcache_seams::relation_id_get_relation::set(store::RelationIdGetRelation);
     relcache_seams::relation_get_index_list::set(indexlist::RelationGetIndexList);
+    relcache_seams::relation_get_trigger_desc::set(trigdesc::RelationGetTriggerDesc);
     relcache_seams::relation_get_stat_ext_list::set(statextlist::RelationGetStatExtList);
     relcache_seams::relation_get_fkey_list::set(fkeylist::RelationGetFKeyList);
     relcache_seams::relation_get_index_attr_bitmap::set(indexattr::RelationGetIndexAttrBitmap);

@@ -34,6 +34,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // RelationGetTriggerDesc (relcache.c trigdesc half); Rc clone replaces
+    // C's per-query CopyTriggerDesc.
+    pub fn relation_get_trigger_desc(
+        relid: Oid,
+    ) -> PgResult<Option<Rc<types_trigger::TriggerDesc<'static>>>>
+);
+
+seam_core::seam!(
     pub fn relation_cache_invalidate(debug_discard: bool) -> PgResult<()>
 );
 

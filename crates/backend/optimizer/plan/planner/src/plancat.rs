@@ -1308,7 +1308,7 @@ pub fn has_row_triggers(
 ) -> PgResult<bool> {
     use types_nodes::CmdType::*;
     let rte = run.rte(rti);
-    let trig_desc = relcache::RelationGetTriggerDesc(rte.relid)?;
+    let trig_desc = relcache_seams::relation_get_trigger_desc::call(rte.relid)?;
     let Some(t) = trig_desc else { return Ok(false) };
     Ok(match event {
         CMD_INSERT => t.trig_insert_after_row || t.trig_insert_before_row,
@@ -1330,7 +1330,7 @@ pub fn has_transition_tables(
     if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
         return Ok(false);
     }
-    let trig_desc = relcache::RelationGetTriggerDesc(rte.relid)?;
+    let trig_desc = relcache_seams::relation_get_trigger_desc::call(rte.relid)?;
     let Some(t) = trig_desc else { return Ok(false) };
     Ok(match event {
         CMD_INSERT => t.trig_insert_new_table,
