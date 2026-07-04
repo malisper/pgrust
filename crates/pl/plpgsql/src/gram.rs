@@ -108,6 +108,27 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         Ok(t)
     }
 
+    // opt_transaction_chain (pl_gram.y): [AND [NO] CHAIN] ';'.
+    fn parse_opt_transaction_chain(&mut self) -> PgResult<bool> {
+        let t = self.yylex()?;
+        let chain = if Self::tok_is_keyword(&t, K_AND, "and") {
+            let t2 = self.yylex()?;
+            if Self::tok_is_keyword(&t2, K_NO, "no") {
+                self.expect(K_CHAIN, "syntax error")?;
+                false
+            } else {
+                self.push_back(&t2)?;
+                self.expect(K_CHAIN, "syntax error")?;
+                true
+            }
+        } else {
+            self.push_back(&t)?;
+            false
+        };
+        self.expect(';' as i32, "syntax error")?;
+        Ok(chain)
+    }
+
     fn tok_is_keyword(t: &Tok, kw_token: i32, kw_str: &str) -> bool {
         if t.0 == kw_token {
             return true;
@@ -1031,10 +1052,15 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_DO => panic!(
                 "stmt_call (pl_gram.y): DO unported — unit backend-pl-plpgsql-gram"
             ),
-            K_COMMIT | K_ROLLBACK => panic!(
-                "stmt_commit/rollback (pl_gram.y): transaction control in PL \
-                 unported — unit backend-pl-plpgsql-gram"
-            ),
+            K_COMMIT | K_ROLLBACK => {
+                let lineno = self.lineno(lloc);
+                let chain = self.parse_opt_transaction_chain()?;
+                Ok(Some(if t.0 == K_COMMIT {
+                    PlStmt::Commit { lineno, chain }
+                } else {
+                    PlStmt::Rollback { lineno, chain }
+                }))
+            }
             K_NULL => {
                 self.expect(';' as i32, "syntax error")?;
                 Ok(None)

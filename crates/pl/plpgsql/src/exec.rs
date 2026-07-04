@@ -1331,6 +1331,8 @@ impl<'a> Estate<'a> {
                 Ok(RC_OK)
             }
             PlStmt::Call { expr, is_call, .. } => self.exec_stmt_call(expr, *is_call),
+            PlStmt::Commit { chain, .. } => self.exec_stmt_commit_rollback(true, *chain),
+            PlStmt::Rollback { chain, .. } => self.exec_stmt_commit_rollback(false, *chain),
             PlStmt::DynExecute { query, into, strict, target, params, .. } => {
                 self.exec_stmt_dynexecute(query, *into, *strict, *target, params)
             }
@@ -2119,6 +2121,10 @@ impl<'a> Estate<'a> {
         let mut rc = RC_OK;
         let prefetch_ok = prefetch_ok && self.atomic;
 
+        // C pins the loop portal so an intra-loop COMMIT/ROLLBACK converts it
+        // to held (HoldPinnedPortals) instead of dropping it. On error the
+        // pin is cleared by AtCleanup_Portals, as in C.
+        portalmem::PinPortal(&cursor.portal)?;
         SPI_cursor_fetch(cursor, true, if prefetch_ok { 10 } else { 1 })?;
         let mut tuptab = spi::SPI_tuptable();
         let mut n = spi::SPI_processed();
@@ -2156,6 +2162,7 @@ impl<'a> Estate<'a> {
         }
 
         self.exec_set_found(found);
+        portalmem::UnpinPortal(&cursor.portal)?;
         Ok(rc)
     }
 
@@ -2840,11 +2847,7 @@ impl<'a> Estate<'a> {
         }
         let after_lxid = current_lxid();
         if before_lxid != after_lxid {
-            panic!(
-                "exec_stmt_call (pl_exec.c): transaction ended during CALL — \
-                 simple-expression rebuild (plpgsql_create_econtext) unported — \
-                 unit backend-pl-plpgsql-exec"
-            );
+            self.rebuild_simple_exprs();
         }
 
         let n = spi::SPI_processed();
@@ -2875,6 +2878,31 @@ impl<'a> Estate<'a> {
             let _ = spi::SPI_freetuptable(t);
         }
         Ok(RC_OK)
+    }
+
+    // exec_stmt_commit / exec_stmt_rollback (pl_exec.c:4956/4980).
+    fn exec_stmt_commit_rollback(&mut self, commit: bool, chain: bool) -> PgResult<i32> {
+        match (commit, chain) {
+            (true, false) => spi::SPI_commit()?,
+            (true, true) => spi::SPI_commit_and_chain()?,
+            (false, false) => spi::SPI_rollback()?,
+            (false, true) => spi::SPI_rollback_and_chain()?,
+        }
+        self.rebuild_simple_exprs();
+        Ok(RC_OK)
+    }
+
+    // C's post-xact-end econtext rebuild (simple_eval_estate = NULL +
+    // plpgsql_create_econtext): compiled states and pins here are
+    // estate-owned, so dropping the caches and rebuilding lazily is the
+    // whole rebuild. Cast states follow C's cast_lxid revalidation.
+    fn rebuild_simple_exprs(&mut self) {
+        for (_, e) in self.simple_cache.drain() {
+            if let Some(se) = e {
+                plancache::ReleaseCachedPlan(se.cplan);
+            }
+        }
+        self.cast_cache.clear();
     }
 
     // make_callstmt_target (pl_exec.c:2288): OUT-arg Params -> row varnos,

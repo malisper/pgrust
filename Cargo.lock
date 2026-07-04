@@ -8761,6 +8761,7 @@ dependencies = [
  "parser_small1",
  "pg_proc",
  "plancache",
+ "portalmem",
  "rel_vocab",
  "resowner",
  "rustc-hash",
