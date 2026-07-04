@@ -66,6 +66,57 @@ pub fn fc_pg_create_physical_replication_slot(
     Ok(result)
 }
 
+pub fn fc_pg_create_logical_replication_slot(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_create_logical_replication_slot: resolved FmgrInfo required");
+    let name = arg_name(fcinfo, 0);
+    let plugin = arg_name(fcinfo, 1);
+    let temporary = fcinfo.arg_bool(2);
+    let two_phase = fcinfo.arg_bool(3);
+    let failover = fcinfo.arg_bool(4);
+
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(not_row_type());
+    }
+    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+
+    slot::CheckSlotPermissions()?;
+    logical::CheckLogicalDecodingRequirements()?;
+
+    let created = crate::create_logical_replication_slot(
+        &name, &plugin, temporary, two_phase, failover, 0, true,
+    );
+    if let Err(e) = created {
+        // C drops the ephemeral slot via resource-owner abort.
+        if slot::MyReplicationSlot().is_some() {
+            let _ = slot::ReplicationSlotRelease();
+        }
+        return Err(e);
+    }
+
+    let s = slot::MyReplicationSlot().unwrap();
+    let d = s.data.get();
+
+    let mut values = [Datum::from_usize(0); 2];
+    let nulls = [false; 2];
+    values[0] = byref_result(mcx, &d.name.data)?;
+    values[1] = Datum::from_u64(d.confirmed_flush);
+
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    let result = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+
+    if !temporary {
+        slot::ReplicationSlotPersist()?;
+    }
+    slot::ReplicationSlotRelease()?;
+    Ok(result)
+}
+
 pub fn fc_pg_drop_replication_slot(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -283,4 +334,5 @@ pub const SLOTFUNCS_BUILTINS: &[FmgrBuiltin] = &[
         retset: true,
         func: fc_pg_get_replication_slots,
     },
+    b(3786, "pg_create_logical_replication_slot", 5, fc_pg_create_logical_replication_slot),
 ];

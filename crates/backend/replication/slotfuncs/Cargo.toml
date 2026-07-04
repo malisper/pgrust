@@ -24,3 +24,5 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 varlena = { path = "../../utils/adt/varlena" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 heaptuple = { path = "../../access/common/heaptuple" }
+logical = { path = "../logical/logical" }
+logical_decode = { path = "../logical/logical_decode" }

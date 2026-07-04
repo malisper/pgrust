@@ -4492,7 +4492,6 @@ dependencies = [
  "portalmem",
  "pseudorandomfuncs",
  "sequence_seams",
- "slotfuncs",
  "stringinfo",
  "syscache_seams",
  "to_tsany",
@@ -5365,6 +5364,7 @@ name = "heapam_visibility"
 version = "0.0.0"
 dependencies = [
  "autovacuum_seams",
+ "bufmgr",
  "bufmgr_seams",
  "combocid_seams",
  "condition_variable_seams",
@@ -5384,6 +5384,7 @@ dependencies = [
  "pmsignal_seams",
  "procarray",
  "procarray_seams",
+ "reorderbuffer",
  "s_lock_seams",
  "shmem_seams",
  "snapmgr",
@@ -5396,6 +5397,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_snapshot",
+ "types_storage",
  "types_tuple",
  "varsup",
  "waitevent_seams",
@@ -6236,14 +6238,47 @@ dependencies = [
 name = "logical"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "dfmgr",
+ "elog",
+ "init_small",
+ "logical_seams",
+ "lwlock",
+ "mcx",
+ "procarray",
+ "reorderbuffer",
+ "slot",
+ "snapbuild",
+ "snapmgr",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xlogreader",
 ]
 
 [[package]]
 name = "logical_decode"
 version = "0.0.0"
 dependencies = [
+ "elog",
+ "heapam_xlog",
+ "heaptuple",
+ "logical",
+ "mcx",
+ "reorderbuffer",
+ "snapbuild",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xlogreader",
 ]
 
 [[package]]
@@ -6268,7 +6303,24 @@ dependencies = [
 name = "logicalfuncs"
 version = "0.0.0"
 dependencies = [
+ "adt_regproc",
+ "arrayfuncs",
+ "datum",
+ "detoast",
+ "elog",
+ "funcapi",
+ "inval",
+ "logical",
+ "logical_decode",
+ "mcx",
+ "slot",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "xlogreader",
 ]
 
 [[package]]
@@ -10688,6 +10740,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "relfilenumbermap"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "init_small",
+ "inval",
+ "mcx",
+ "relfilenumbermap_seams",
+ "relmapper",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
+name = "relfilenumbermap_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "relmapper"
 version = "0.0.0"
 dependencies = [
@@ -10782,6 +10864,7 @@ dependencies = [
  "inval",
  "mcx",
  "relcache",
+ "relfilenumbermap_seams",
  "reorderbuffer_seams",
  "snapmgr",
  "transam_xlog_seams",
@@ -11492,6 +11575,8 @@ dependencies = [
  "lmgr",
  "lmgr_proc",
  "lock",
+ "logical",
+ "logicalfuncs",
  "lsyscache",
  "mbutils",
  "miscinit",
@@ -11563,6 +11648,7 @@ dependencies = [
  "relation",
  "relcache",
  "relcache_build",
+ "relfilenumbermap",
  "relmapper",
  "relpath",
  "reorderbuffer",
@@ -11580,7 +11666,9 @@ dependencies = [
  "shmem",
  "sinval",
  "slot",
+ "slotfuncs",
  "smgr",
+ "snapbuild",
  "snapmgr",
  "spgist_text",
  "spi",
@@ -11596,6 +11684,7 @@ dependencies = [
  "tableam",
  "tablecmds",
  "tcop_dest",
+ "test_decoding",
  "timeout",
  "transam",
  "transam_xlog",
@@ -11863,6 +11952,8 @@ dependencies = [
  "guc_tables",
  "heaptuple",
  "init_small",
+ "logical",
+ "logical_decode",
  "lwlock",
  "mcx",
  "slot",
@@ -11942,7 +12033,27 @@ dependencies = [
 name = "snapbuild"
 version = "0.0.0"
 dependencies = [
+ "crc32c",
+ "elog",
+ "fd",
+ "heapam_xlog",
+ "init_small",
+ "libc",
+ "lmgr",
+ "mcx",
+ "reorderbuffer",
+ "seam_core",
+ "slot",
+ "snapbuild_seams",
+ "snapmgr",
+ "standby",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_snapshot",
+ "types_storage",
+ "xact",
+ "xact_seams",
 ]
 
 [[package]]
@@ -12950,7 +13061,24 @@ dependencies = [
 name = "test_decoding"
 version = "0.0.0"
 dependencies = [
+ "adt_bool",
+ "adt_timestamp",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "elog",
+ "fmgr_seams",
+ "format_type",
+ "logical",
+ "lsyscache",
+ "mcx",
+ "reorderbuffer",
+ "ruleutils",
+ "types_core",
  "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]

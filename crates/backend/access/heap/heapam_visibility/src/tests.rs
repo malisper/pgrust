@@ -8,7 +8,8 @@ use std::sync::{Mutex, Once};
 use types_core::xact::FirstNormalTransactionId;
 use types_core::BackendType;
 
-const MAX_CONNECTIONS: i32 = 16;
+// one PGPROC per test thread (libtest never reuses threads); keep headroom
+const MAX_CONNECTIONS: i32 = 40;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + 2 + 2 + 2;
 const BUF: Buffer = 1;
 
@@ -434,4 +435,177 @@ fn toast_rejects_super_deleted_xmin() {
 
     let mut t = TestTuple::new(5, 0, HEAP_XMIN_COMMITTED);
     assert!(HeapTupleSatisfiesToast(&mut t.htup(), BUF).unwrap());
+}
+
+pub(crate) fn test_historic_rlocator() -> types_storage::RelFileLocator {
+    types_storage::RelFileLocator::new(1663, 5, 16384)
+}
+
+fn historic_snapshot<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    xmin: TransactionId,
+    xmax: TransactionId,
+    xip: &[TransactionId],
+    subxip: &[TransactionId],
+    curcid: CommandId,
+) -> SnapshotData<'m> {
+    let mut s = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_HISTORIC_MVCC);
+    s.xmin = xmin;
+    s.xmax = xmax;
+    s.xip.extend_from_slice(xip);
+    s.xcnt = xip.len() as u32;
+    s.subxip.extend_from_slice(subxip);
+    s.subxcnt = subxip.len() as i32;
+    s.curcid.set(curcid);
+    s
+}
+
+fn historic_boot() {
+    boot();
+    TEST_HISTORIC_RLOCATOR.with(|c| c.set(Some(test_historic_rlocator())));
+    ::snapmgr::TeardownHistoricSnapshot(false);
+}
+
+#[test]
+fn historic_xmin_states_without_cid_resolution() {
+    let _g = test_lock();
+    historic_boot();
+    let cx = MemoryContext::new("test");
+
+    let snap = historic_snapshot(cx.mcx(), 50, 100, &[], &[], 10);
+    let mut t = TestTuple::new(60, 0, HEAP_XMIN_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(40, 0, HEAP_XMIN_COMMITTED | HEAP_XMAX_INVALID);
+    DID_COMMIT.set(true);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    DID_COMMIT.set(false);
+    let mut t = TestTuple::new(40, 0, HEAP_XMAX_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    DID_COMMIT.set(true);
+    let mut t = TestTuple::new(40, 0, HEAP_XMAX_INVALID);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(100, 0, HEAP_XMAX_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let snap = historic_snapshot(cx.mcx(), 50, 100, &[60], &[], 10);
+    let mut t = TestTuple::new(60, 0, HEAP_XMAX_INVALID);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(61, 0, HEAP_XMAX_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+}
+
+#[test]
+fn historic_xmax_states_without_cid_resolution() {
+    let _g = test_lock();
+    historic_boot();
+    let cx = MemoryContext::new("test");
+    let snap = historic_snapshot(cx.mcx(), 50, 100, &[60, 70], &[], 10);
+
+    let mut t = TestTuple::new(60, 90, HEAP_XMIN_COMMITTED | HEAP_XMAX_LOCK_ONLY);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(60, 40, HEAP_XMIN_COMMITTED | HEAP_XMAX_COMMITTED);
+    DID_COMMIT.set(true);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(60, 40, 0);
+    DID_COMMIT.set(true);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    DID_COMMIT.set(false);
+    let mut t = TestTuple::new(60, 40, 0);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(60, 100, 0);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(60, 70, 0);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    let mut t = TestTuple::new(60, 71, 0);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+}
+
+fn install_tuplecids(cmin: CommandId, cmax: CommandId) {
+    use ::reorderbuffer::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let cx: &'static ::mcx::MemoryContext =
+        Box::leak(Box::new(::mcx::MemoryContext::new("historic test")));
+    let mut hash: TupleCidHash =
+        ::mcx::PgFxHashMap::with_hasher_in(Default::default(), cx.mcx());
+    hash.insert(
+        ReorderBufferTupleCidKey {
+            rlocator: test_historic_rlocator(),
+            tid: ::types_tuple::ItemPointerData::new(0, 1),
+        },
+        ReorderBufferTupleCidEnt { cmin, cmax, combocid: InvalidCommandId },
+    );
+    let dummy = Rc::new(SnapshotData::sentinel(
+        cx.mcx(),
+        SnapshotType::SNAPSHOT_HISTORIC_MVCC,
+    ));
+    ::snapmgr::SetupHistoricSnapshot(dummy, Some(Rc::new(RefCell::new(hash))));
+}
+
+#[test]
+fn historic_own_transaction_cid_resolution() {
+    let _g = test_lock();
+    historic_boot();
+    let cx = MemoryContext::new("test");
+    let snap = historic_snapshot(cx.mcx(), 50, 100, &[], &[80], 10);
+
+    let mut t = TestTuple::new(80, 0, HEAP_XMAX_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    install_tuplecids(5, InvalidCommandId);
+    let mut t = TestTuple::new(80, 0, HEAP_XMAX_INVALID);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    ::snapmgr::TeardownHistoricSnapshot(false);
+
+    install_tuplecids(10, InvalidCommandId);
+    let mut t = TestTuple::new(80, 0, HEAP_XMAX_INVALID);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    ::snapmgr::TeardownHistoricSnapshot(false);
+}
+
+#[test]
+fn historic_own_transaction_cmax_resolution() {
+    let _g = test_lock();
+    historic_boot();
+    let cx = MemoryContext::new("test");
+    let snap = historic_snapshot(cx.mcx(), 50, 100, &[60], &[80], 10);
+
+    let mut t = TestTuple::new(60, 80, HEAP_XMIN_COMMITTED);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+
+    install_tuplecids(5, InvalidCommandId);
+    let mut t = TestTuple::new(60, 80, HEAP_XMIN_COMMITTED);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    ::snapmgr::TeardownHistoricSnapshot(false);
+
+    install_tuplecids(5, 10);
+    let mut t = TestTuple::new(60, 80, HEAP_XMIN_COMMITTED);
+    assert!(HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    ::snapmgr::TeardownHistoricSnapshot(false);
+
+    install_tuplecids(5, 9);
+    let mut t = TestTuple::new(60, 80, HEAP_XMIN_COMMITTED);
+    assert!(!HeapTupleSatisfiesHistoricMVCC(&mut t.htup(), &snap, BUF).unwrap());
+    ::snapmgr::TeardownHistoricSnapshot(false);
+}
+
+#[test]
+fn historic_dispatch_through_satisfies_visibility() {
+    let _g = test_lock();
+    historic_boot();
+    let cx = MemoryContext::new("test");
+    let mut snap = historic_snapshot(cx.mcx(), 50, 100, &[60], &[], 10);
+    let mut t = TestTuple::new(60, 0, HEAP_XMAX_INVALID);
+    assert!(HeapTupleSatisfiesVisibility(&mut t.htup(), &mut snap, BUF).unwrap());
 }

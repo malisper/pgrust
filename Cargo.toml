@@ -524,6 +524,7 @@ members = [
     "crates/backend/access/gist/gistproc",
     "crates/backend/utils/adt/geo",
     "crates/backend/utils/cache/relmapper",
+    "crates/backend/utils/cache/relfilenumbermap",
     "crates/common/pg_prng",
     "crates/backend/utils/misc/conffiles_seams",
     "crates/backend/utils/misc/conffiles",

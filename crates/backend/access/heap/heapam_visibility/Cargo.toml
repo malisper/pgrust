@@ -14,6 +14,9 @@ xact = { path = "../../transam/xact" }
 procarray = { path = "../../../storage/ipc/procarray" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 heapam = { path = "../heapam" }
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+reorderbuffer = { path = "../../../replication/logical/reorderbuffer" }
+types_storage = { path = "../../../../_support/types/types_storage" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }

@@ -107,6 +107,9 @@ pub fn init_all() {
     walsender_config::init_seams();
     slot::init_seams();
     reorderbuffer::init_seams();
+    snapbuild::init_seams();
+    logical::init_seams();
+    test_decoding::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
@@ -177,6 +180,7 @@ pub fn init_all() {
     relcache::init_seams();
     relcache_build::init_seams();
     relmapper::init_seams();
+    relfilenumbermap::init_seams();
     typcache::init_seams();
     clauses::init_seams();
     pg_enum::init_seams();
@@ -185,6 +189,8 @@ pub fn init_all() {
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
+    fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
+    fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
     fmgr_core::register_late_builtins(rewrite_handler::REWRITE_BUILTINS);
     fmgr_core::register_late_builtins(opclasscmds::builtins::OPCLASS_BUILTINS);
