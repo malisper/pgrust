@@ -774,7 +774,7 @@ fn vacuum_error_mid_scan_abort_releases_all_pins() {
     // VACUUM through the real grammar; the injected WAL failure surfaces from
     // lazy_scan_prune with the heap buffer still pinned.
     let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("vac")));
-    let stmt = parse_vacuum("VACUUM t", ctx.mcx());
+    let stmt = parse_vacuum("VACUUM (SKIP_DATABASE_STATS) t", ctx.mcx());
     xact::StartTransactionCommand().unwrap();
     INJECT_ARMED.store(true, Relaxed);
     let err = commands_vacuum::ExecVacuum(ctx.mcx(), stmt, true)

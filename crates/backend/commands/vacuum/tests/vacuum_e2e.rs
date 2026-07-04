@@ -951,7 +951,7 @@ fn vacuum_reclaims_dead_rows_e2e() {
     assert!(rel_pages_before >= 4, "expected several heap pages");
 
     // --- The first VACUUM, through the real grammar. ---
-    run_vacuum("VACUUM t");
+    run_vacuum("VACUUM (SKIP_DATABASE_STATS) t");
 
     // (a) The committed read path sees exactly the 400 survivors.
     xact::StartTransactionCommand().unwrap();
