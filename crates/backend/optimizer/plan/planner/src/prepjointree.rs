@@ -298,21 +298,6 @@ fn pull_up_simple_subquery<'mcx>(
     if shared_sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
-    for srte_node in &shared_sub.rtable {
-        let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-        if srte.rtekind != RTEKind::RTE_RELATION {
-            continue;
-        }
-        let srel = table::table_open(mcx, srte.relid, types_rel::NoLock)?;
-        let virt = srel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual);
-        table::table_close(srel, types_rel::NoLock)?;
-        if virt {
-            panic!(
-                "pull_up_simple_subquery (prepjointree.c:1360): \
-                 expand_virtual_generated_columns on a pulled-up subquery unported"
-            );
-        }
-    }
     parse.hasRowSecurity |= shared_sub.hasRowSecurity;
     assert!(
         shared_sub.rowMarks.is_nil(),
@@ -2137,6 +2122,11 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
 // the pullup replace machinery. build_generation_expression (rewriteHandler.c)
 // is mirrored here: rewrite_handler depends on this crate, and cookDefault
 // stored a coerced tree so build_column_default's re-coercion is a no-op.
+// DIVERGENCE: C expands before pull_up_subqueries plus per pulled-up subquery
+// (prepjointree.c:1360); here one pass runs after pull-up, when every merged
+// relation RTE is in the parent rtable (pull-up never opens relations, and
+// generation expressions are immutable, so pullability is unaffected).
+// Retained RTE_SUBQUERYs expand in their own subquery_planner pass.
 pub fn expand_virtual_generated_columns<'mcx>(
     mcx: Mcx<'mcx>,
     parse: &mut Query<'mcx>,
@@ -2146,7 +2136,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
     for rt_index in 1..=nrte {
         let rte_node = parse.rtable.nth(rt_index - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        if rte.rtekind != RTEKind::RTE_RELATION {
+        if rte.rtekind != RTEKind::RTE_RELATION || !matches!(rte.relkind, b'r' | b'p') {
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
