@@ -5900,6 +5900,34 @@ impl<'mcx> Parser<'mcx> {
                 owa.args_unspecified = true;
                 *yyval = YYSTYPE::Node(Some(owa.seal()));
             }
+            // DropOpClassStmt / DropOpFamilyStmt: DROP OPERATOR CLASS|FAMILY
+            // [IF_P EXISTS] any_name USING name opt_drop_behavior
+            912 | 913 | 914 | 915 => {
+                let (an, nm, bh) = if rule == 912 || rule == 914 { (4, 6, 7) } else { (6, 8, 9) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule <= 913 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut any_name = view.v(an).list();
+                any_name.lcons(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 913 || rule == 915;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RemoveOperStmt: DROP OPERATOR [IF_P EXISTS]
+            // operator_with_argtypes_list opt_drop_behavior
+            1232 | 1233 => {
+                let (ls, bh) = if rule == 1232 { (3, 4) } else { (5, 6) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = ObjectType::OBJECT_OPERATOR;
+                n.objects = view.v(ls).list();
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 1233;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // oper_argtypes: NONE arms (1236/1237) stay loud — NodeList cells
             // cannot carry C's NULL TypeName cell.
             1234 => {
