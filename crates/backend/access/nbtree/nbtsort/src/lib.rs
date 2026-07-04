@@ -206,13 +206,14 @@ fn pagestate<'mcx>(wstate: &mut BTWriteState<'_, '_>, level: u32) -> BTPageState
     BTPageState { buf, blkno, lowkey: None, lastoff: P_HIKEY, lastextra: 0, level, full }
 }
 
-// BTGetDeduplicateItems; the reloption rides the reloptions lane (default
-// true; relcache panics on any non-null pg_class.reloptions until then).
+// BTGetDeduplicateItems
 fn bt_get_deduplicate_items(index: &Relation<'_>) -> bool {
-    if index.rd_options.is_some() {
-        unported("BTGetDeduplicateItems: btree reloptions");
-    }
-    true
+    index
+        .rd_options
+        .as_ref()
+        .and_then(|o| o.btree())
+        .map(|o| o.deduplicate_items)
+        .unwrap_or(true)
 }
 
 /// _bt_dedup_start_pending over an owned base copy (C's CopyIndexTuple).
