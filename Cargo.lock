@@ -339,12 +339,14 @@ name = "adt_jsonb"
 version = "0.1.0"
 dependencies = [
  "adt_json",
+ "adt_jsonpath",
  "adt_numeric",
  "arrayfuncs",
  "datum",
  "detoast_seams",
  "fmgr_seams",
  "funcapi",
+ "gin_vocab",
  "hashfn",
  "heaptuple",
  "lsyscache",

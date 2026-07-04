@@ -498,3 +498,107 @@ fn mutations_match_c_on_disk() {
         );
     }
 }
+
+#[test]
+fn gin_jsonpath_extraction_shapes() {
+    setup();
+    let ctx = MemoryContext::new_bump("test");
+    let mcx = ctx.mcx();
+    let jp = |s: &[u8]| {
+        adt_jsonpath::path::jsonpath_in(mcx, s, None)
+            .unwrap()
+            .expect("valid jsonpath")
+    };
+    let key_of = |d: datum::Datum| {
+        let p = d.as_usize() as *const u8;
+        unsafe {
+            let len = types_tuple::varatt::varsize_4b(p);
+            std::slice::from_raw_parts(p.add(4), len - 4).to_vec()
+        }
+    };
+
+    use crate::gin::*;
+    use gin_vocab::{JSP_GIN_AND, JSP_GIN_ENTRY, JSP_GIN_OR};
+
+    // lax '$.tag == "x"': AND(key tag, OR(x-as-key, x-as-value)).
+    let image = jp(b"$.tag == \"x\"");
+    let (entries, ops) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathPredicateStrategyNumber, false).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        ops.iter().map(|o| (o.kind, o.val)).collect::<Vec<_>>(),
+        vec![
+            (JSP_GIN_AND, 2),
+            (JSP_GIN_ENTRY, 0),
+            (JSP_GIN_OR, 2),
+            (JSP_GIN_ENTRY, 1),
+            (JSP_GIN_ENTRY, 2)
+        ]
+    );
+    assert_eq!(key_of(entries[0]), b"\x01tag");
+    assert_eq!(key_of(entries[1]), b"\x01x");
+    assert_eq!(key_of(entries[2]), b"\x05x");
+
+    // strict '$.tag == "x"': AND(key tag, x-as-value).
+    let image = jp(b"strict $.tag == \"x\"");
+    let (entries, ops) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathPredicateStrategyNumber, false).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(ops[0].kind, JSP_GIN_AND);
+    assert_eq!(key_of(entries[1]), b"\x05x");
+
+    // '$.a != 1' is not extractable: full-scan signal.
+    let image = jp(b"$.a != 1");
+    let (entries, ops) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathPredicateStrategyNumber, false).unwrap();
+    assert!(entries.is_empty() && ops.is_empty());
+
+    // path_ops '$.a.b == 5': one hash-chain entry.
+    let image = jp(b"$.a.b == 5");
+    let (entries, ops) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathPredicateStrategyNumber, true).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(ops.len(), 1);
+    // Same chain as gin_extract_jsonb_path over {"a": {"b": 5}}.
+    let doc = jsonb_image(mcx, b"{\"a\": {\"b\": 5}}");
+    let doc_entries = gin_extract_jsonb_path(mcx, &doc[4..]).unwrap();
+    assert_eq!(doc_entries.len(), 1);
+    assert_eq!(entries[0].as_usize(), doc_entries[0].as_usize());
+
+    // path_ops EXISTS ('$.a') extracts nothing.
+    let image = jp(b"$.a");
+    let (entries, _) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathExistsStrategyNumber, true).unwrap();
+    assert!(entries.is_empty());
+
+    // jsonb_ops EXISTS ('$.a.b') extracts the key chain.
+    let image = jp(b"$.a.b");
+    let (entries, ops) =
+        extract_jsp_query(mcx, &image[4..], JsonbJsonpathExistsStrategyNumber, false).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(ops[0].kind, JSP_GIN_AND);
+    assert_eq!(key_of(entries[0]), b"\x01b");
+    assert_eq!(key_of(entries[1]), b"\x01a");
+}
+
+#[test]
+fn gin_jsonpath_execute_ops() {
+    use crate::gin::execute_jsp_gin_ops;
+    use gin_vocab::{JspGinOp, JSP_GIN_AND, JSP_GIN_ENTRY, JSP_GIN_OR};
+    let op = |kind, val| JspGinOp { kind, val };
+    // AND(e0, OR(e1, e2)).
+    let ops = [
+        op(JSP_GIN_AND, 2),
+        op(JSP_GIN_ENTRY, 0),
+        op(JSP_GIN_OR, 2),
+        op(JSP_GIN_ENTRY, 1),
+        op(JSP_GIN_ENTRY, 2),
+    ];
+    assert_eq!(execute_jsp_gin_ops(&ops, &[1, 0, 1], false), 1);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[1, 0, 0], false), 0);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[0, 1, 1], false), 0);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[1, 2, 0], true), 2);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[2, 1, 0], true), 2);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[1, 1, 0], true), 1);
+    assert_eq!(execute_jsp_gin_ops(&ops, &[0, 1, 1], true), 0);
+}
