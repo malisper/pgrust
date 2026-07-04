@@ -396,6 +396,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"SETTODEFAULT" => self.read_set_to_default(),
             b"BOOLEANTEST" => self.read_boolean_test(),
             b"DISTINCTEXPR" => self.read_distinct_expr(),
+            b"NULLIFEXPR" => self.read_null_if_expr(),
+            b"ONCONFLICTEXPR" => self.read_on_conflict_expr(),
+            b"INFERENCEELEM" => self.read_inference_elem(),
             b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
@@ -427,6 +430,43 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         d.args = self.read_node_list("args")?;
         d.location = self.read_location("location");
         Ok(d.seal())
+    }
+
+    fn read_null_if_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::primnodes::NullIfExpr>(mcx)?;
+        d.opno = self.read_u32("opno");
+        d.opfuncid = self.read_u32("opfuncid");
+        d.opresulttype = self.read_u32("opresulttype");
+        d.opretset = self.read_bool("opretset");
+        d.opcollid = self.read_u32("opcollid");
+        d.inputcollid = self.read_u32("inputcollid");
+        d.args = self.read_node_list("args")?;
+        d.location = self.read_location("location");
+        Ok(d.seal())
+    }
+
+    fn read_on_conflict_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<types_nodes::primnodes::OnConflictExpr>(mcx)?;
+        c.action = on_conflict_action(self.read_u32("action"));
+        c.arbiterElems = self.read_node_list("arbiterElems")?;
+        c.arbiterWhere = self.read_node("arbiterWhere")?;
+        c.constraint = self.read_u32("constraint");
+        c.onConflictSet = self.read_node_list("onConflictSet")?;
+        c.onConflictWhere = self.read_node("onConflictWhere")?;
+        c.exclRelIndex = self.read_i32("exclRelIndex");
+        c.exclRelTlist = self.read_node_list("exclRelTlist")?;
+        Ok(c.seal())
+    }
+
+    fn read_inference_elem(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut ie = Node::build::<types_nodes::primnodes::InferenceElem>(mcx)?;
+        ie.expr = self.read_node("expr")?;
+        ie.infercollid = self.read_u32("infercollid");
+        ie.inferopclass = self.read_u32("inferopclass");
+        Ok(ie.seal())
     }
 
     fn read_subscripting_ref(&mut self) -> PgResult<Node<'mcx>> {
@@ -1405,6 +1445,16 @@ fn sub_link_type(v: u32) -> SubLinkType {
         6 => SubLinkType::ARRAY_SUBLINK,
         7 => SubLinkType::CTE_SUBLINK,
         other => panic!("readfuncs.c: bad SubLinkType {other}"),
+    }
+}
+
+fn on_conflict_action(v: u32) -> types_nodes::primnodes::OnConflictAction {
+    use types_nodes::primnodes::OnConflictAction as A;
+    match v {
+        0 => A::ONCONFLICT_NONE,
+        1 => A::ONCONFLICT_NOTHING,
+        2 => A::ONCONFLICT_UPDATE,
+        other => panic!("readfuncs.c: bad OnConflictAction {other}"),
     }
 }
 

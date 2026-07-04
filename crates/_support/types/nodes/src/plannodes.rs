@@ -251,6 +251,20 @@ impl Default for Append<'_> {
     }
 }
 
+/// Flat setrefs copy of the planner AppendRelInfo (pathnodes.h) for
+/// PlannedStmt.appendRelations. Divergence: translated_vars is not carried —
+/// it holds planner NodeIds and no flat-tree consumer reads it.
+#[derive(Default)]
+pub struct AppendRelInfo<'mcx> {
+    pub parent_relid: Index,
+    pub child_relid: Index,
+    pub parent_reltype: Oid,
+    pub child_reltype: Oid,
+    pub num_child_cols: i32,
+    pub parent_colnos: &'mcx [i16],
+    pub parent_reloid: Oid,
+}
+
 /// `scanstatus` carries the C SubqueryScanStatus value (0 = UNKNOWN).
 #[derive(Default)]
 #[repr(C)]
@@ -725,6 +739,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Append<'mcx> {
     const TAG: NodeTag = NodeTag::T_Append;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for AppendRelInfo<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AppendRelInfo;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SubqueryScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubqueryScan;
 }
@@ -1123,6 +1140,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_append(self) -> Option<&'mcx Append<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_append_rel_info(self) -> Option<&'mcx AppendRelInfo<'mcx>> {
         self.as_variant()
     }
 
