@@ -336,8 +336,9 @@ mod tests {
     #[should_panic(expected = "external toast pointer")]
     fn construct_array_rejects_external_input() {
         let ctx = MemoryContext::new_bump("arr-ext");
-        let mut ext = vec![0x01u8, 18];
-        ext.extend_from_slice(&[0u8; 16]);
+        let mut ext = [0u8; 18];
+        ext[0] = 0x01;
+        ext[1] = 18;
         let vals = [Datum::from_usize(ext.as_ptr() as usize)];
         let _ = construct_array_image(ctx.mcx(), &vals, 25, -1, false, b'i');
     }
