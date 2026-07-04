@@ -974,78 +974,163 @@ pub fn get_function_rows(funcid: Oid, node: Option<types_nodes::Node<'_>>) -> Pg
     Ok(shape.prorows as f64)
 }
 
-// infer_arbiter_indexes (plancat.c): plain-Var inference elements matched
-// against unique, valid, non-partial, non-expression btree indexes. ON
-// CONSTRAINT, expression/COLLATE/opclass elements, and arbiter WHERE are loud.
+// infer_arbiter_indexes (plancat.c).
 pub fn infer_arbiter_indexes<'mcx>(
     run: &crate::run::PlannerRun<'mcx>,
     oc: &types_nodes::primnodes::OnConflictExpr<'mcx>,
 ) -> PgResult<types_nodes::list::OidList<'mcx>> {
+    use types_nodes::equal::equal;
+
     let mcx = run.mcx;
     let mut results = types_nodes::list::OidList::nil();
     if oc.arbiterElems.is_nil() && oc.constraint == 0 {
         return Ok(results);
     }
-    if oc.constraint != 0 {
-        panic!("infer_arbiter_indexes (plancat.c): ON CONSTRAINT arbiter; M2 upsert lane");
-    }
-    if oc.arbiterWhere.is_some() {
-        panic!("infer_arbiter_indexes (plancat.c): arbiter WHERE; M2 partial-index lane");
-    }
 
     let parse = run.parse();
-    let rte = run.rte(parse.resultRelation as usize);
-    let mut infer_attrs: Vec<i16> = Vec::new();
+    let varno = parse.resultRelation;
+    let rte = run.rte(varno as usize);
+
+    let mut infer_attrs = types_nodes::Bitmapset::empty();
+    let mut infer_elems: Vec<types_nodes::Node<'mcx>> = Vec::new();
     for elem_node in &oc.arbiterElems {
         let elem = elem_node.as_inference_elem().expect("arbiterElems cell");
-        if elem.infercollid != 0 || elem.inferopclass != 0 {
-            panic!("infer_arbiter_indexes (plancat.c): COLLATE/opclass element; M2 upsert lane");
-        }
-        let var = elem
-            .expr
-            .and_then(|e| e.as_var())
-            .unwrap_or_else(|| {
-                panic!("infer_arbiter_indexes (plancat.c): expression element; M2 upsert lane")
-            });
-        if var.varattno == 0 {
-            return Err(Box::new(
-                types_error::PgError::error(
-                    "whole row unique index inference specifications are not supported",
-                )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
-        if !infer_attrs.contains(&var.varattno) {
-            infer_attrs.push(var.varattno);
+        let expr = elem.expr.expect("InferenceElem has expr");
+        match expr.as_var() {
+            None => infer_elems.push(expr),
+            Some(var) => {
+                if var.varattno == 0 {
+                    return Err(Box::new(
+                        types_error::PgError::error(
+                            "whole row unique index inference specifications are not supported",
+                        )
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                infer_attrs
+                    .add_member(mcx, var.varattno as i32 - FirstLowInvalidHeapAttributeNumber)?;
+            }
         }
     }
-    infer_attrs.sort_unstable();
+
+    let index_oid_from_constraint = if oc.constraint != 0 {
+        let indexoid = lsyscache::get_constraint_index(oc.constraint)?;
+        if indexoid == 0 {
+            return Err(Box::new(
+                types_error::PgError::error(
+                    "constraint in ON CONFLICT clause has no associated index",
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+            ));
+        }
+        indexoid
+    } else {
+        0
+    };
 
     let relation = table::table_open(mcx, rte.relid, NoLock)?;
     let indexoidlist = relcache_seams::relation_get_index_list::call(mcx, rte.relid)?;
     for &indexoid in indexoidlist.iter() {
         let idx_rel = indexam::index_open(mcx, indexoid, rte.rellockmode)?;
-        let ind = idx_rel.rd_index.as_ref().expect("index relation carries rd_index");
-        let matches = ind.indisvalid && ind.indisunique && !ind.indisexclusion && {
-            let mut indexed_attrs: Vec<i16> = Vec::new();
-            let mut has_expr_col = false;
+        let _matched = 'matched: {
+            let ind = idx_rel.rd_index.as_ref().expect("index relation carries rd_index");
+            if !ind.indisvalid {
+                break 'matched false;
+            }
+            if index_oid_from_constraint == ind.indexrelid {
+                if ind.indisexclusion
+                    && oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE
+                {
+                    return Err(Box::new(
+                        types_error::PgError::error(
+                            "ON CONFLICT DO UPDATE not supported with exclusion constraints",
+                        )
+                        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+                    ));
+                }
+                results.lappend(mcx, ind.indexrelid)?;
+                indexam::index_close(idx_rel, NoLock)?;
+                table::table_close(relation, NoLock)?;
+                return Ok(results);
+            } else if index_oid_from_constraint != 0 {
+                break 'matched false;
+            }
+            if !ind.indisunique || ind.indisexclusion {
+                break 'matched false;
+            }
+            let mut indexed_attrs = types_nodes::Bitmapset::empty();
             for natt in 0..ind.indnkeyatts as usize {
                 let attno = ind.indkey[natt];
-                if attno == 0 {
-                    has_expr_col = true;
-                } else if !indexed_attrs.contains(&attno) {
-                    indexed_attrs.push(attno);
+                if attno != 0 {
+                    indexed_attrs
+                        .add_member(mcx, attno as i32 - FirstLowInvalidHeapAttributeNumber)?;
                 }
             }
-            indexed_attrs.sort_unstable();
-            // Expression columns can't be matched without expression elements,
-            // and a partial index's predicate is never implied by the absent
-            // (loud) arbiter WHERE: both fall through to no-match, as in C.
-            !has_expr_col && !ind.has_indpred && indexed_attrs == infer_attrs
-        };
-        if matches {
+            if !indexed_attrs.equal(&infer_attrs) {
+                break 'matched false;
+            }
+            // RelationGetIndexExpressions shape: stringToNode only, no
+            // const-folding (equal() against raw parser output relies on it).
+            let mut idx_exprs: Vec<types_nodes::Node<'mcx>> = Vec::new();
+            if let Some(src) = ind.indexprs_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                for e in node.as_list().expect("indexprs is a List").iter() {
+                    if varno != 1 {
+                        change_var_nodes(e, varno);
+                    }
+                    idx_exprs.push(e);
+                }
+            }
+            for elem_node in &oc.arbiterElems {
+                let elem = elem_node.as_inference_elem().expect("arbiterElems cell");
+                if !infer_collation_opclass_match(elem, &idx_rel, &idx_exprs)? {
+                    break 'matched false;
+                }
+                let expr = elem.expr.expect("InferenceElem has expr");
+                if expr.as_var().is_some() {
+                    continue;
+                }
+                if elem.infercollid != 0
+                    || elem.inferopclass != 0
+                    || idx_exprs.iter().any(|&e| equal(e, expr))
+                {
+                    continue;
+                }
+                break 'matched false;
+            }
+            if idx_exprs
+                .iter()
+                .any(|&e| !infer_elems.iter().any(|&ie| equal(e, ie)))
+            {
+                break 'matched false;
+            }
+            // RelationGetIndexPredicate shape: const-fold + canonicalize +
+            // implicit-AND, as relcache does.
+            let mut pred_exprs: Vec<types_nodes::Node<'mcx>> = Vec::new();
+            if let Some(src) = ind.indpred_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                let folded = clauses::eval_const_expressions(mcx, node)?;
+                let canon = crate::prepqual::canonicalize_qual(mcx, folded, false)?;
+                let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
+                for e in implicit.iter() {
+                    if varno != 1 {
+                        change_var_nodes(e, varno);
+                    }
+                    pred_exprs.push(e);
+                }
+            }
+            let mut arbiter_where: Vec<types_nodes::Node<'mcx>> = Vec::new();
+            if let Some(w) = oc.arbiterWhere {
+                for e in w.as_list().expect("preprocessed arbiterWhere is a List").iter() {
+                    arbiter_where.push(e);
+                }
+            }
+            if !crate::predtest::predicate_implied_by(mcx, &pred_exprs, &arbiter_where, false)? {
+                break 'matched false;
+            }
             results.lappend(mcx, ind.indexrelid)?;
-        }
+            true
+        };
         indexam::index_close(idx_rel, NoLock)?;
     }
     table::table_close(relation, NoLock)?;
@@ -1059,6 +1144,60 @@ pub fn infer_arbiter_indexes<'mcx>(
         ));
     }
     Ok(results)
+}
+
+// infer_collation_opclass_match (plancat.c). rd_opfamily/rd_opcintype cover
+// only key columns; INCLUDE columns read as 0 where C reads past the palloc
+// (they can never satisfy an opclass/collation requirement either way).
+fn infer_collation_opclass_match<'mcx>(
+    elem: &types_nodes::primnodes::InferenceElem<'mcx>,
+    idx_rel: &Relation<'mcx>,
+    idx_exprs: &[types_nodes::Node<'mcx>],
+) -> PgResult<bool> {
+    use types_nodes::equal::equal;
+
+    if elem.infercollid == 0 && elem.inferopclass == 0 {
+        return Ok(true);
+    }
+    let mut inferopfamily = 0;
+    let mut inferopcinputtype = 0;
+    if elem.inferopclass != 0 {
+        inferopfamily = lsyscache::get_opclass_family(elem.inferopclass)?;
+        inferopcinputtype = lsyscache::get_opclass_input_type(elem.inferopclass)?;
+    }
+    let ind = idx_rel.rd_index.as_ref().expect("index relation carries rd_index");
+    let elem_expr = elem.expr.expect("InferenceElem has expr");
+    let mut nplain = 0usize;
+    for natt in 1..=idx_rel.rd_att.natts as usize {
+        let opfamily = idx_rel.rd_opfamily.get(natt - 1).copied().unwrap_or(0);
+        let opcinputtype = idx_rel.rd_opcintype.get(natt - 1).copied().unwrap_or(0);
+        let collation = idx_rel.rd_indcollation.get(natt - 1).copied().unwrap_or(0);
+        let attno = ind.indkey[natt - 1];
+        if attno != 0 {
+            nplain += 1;
+        }
+        if elem.inferopclass != 0
+            && (inferopfamily != opfamily || inferopcinputtype != opcinputtype)
+        {
+            continue;
+        }
+        if elem.infercollid != 0 && elem.infercollid != collation {
+            continue;
+        }
+        match elem_expr.as_var() {
+            Some(var) => {
+                if var.varattno == attno {
+                    return Ok(true);
+                }
+            }
+            None => {
+                if attno == 0 && equal(elem_expr, idx_exprs[(natt - 1) - nplain]) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 // get_relation_constraints (plancat.c) for the constraint-exclusion refutation
@@ -1147,4 +1286,104 @@ pub fn get_relation_constraints<'mcx>(
     }
     relation.close(NoLock)?;
     Ok(result)
+}
+
+// get_relation_data_width (plancat.c).
+pub fn get_relation_data_width(
+    mcx: mcx::Mcx<'_>,
+    relid: Oid,
+    attr_widths: Option<&mut [i32]>,
+) -> PgResult<i32> {
+    let relation = table::table_open(mcx, relid, NoLock)?;
+    let result = get_rel_data_width(&relation, attr_widths, 1)?;
+    table::table_close(relation, NoLock)?;
+    Ok(result)
+}
+
+// has_row_triggers (plancat.c).
+pub fn has_row_triggers(
+    run: &PlannerRun<'_>,
+    rti: usize,
+    event: types_nodes::CmdType,
+) -> PgResult<bool> {
+    use types_nodes::CmdType::*;
+    let rte = run.rte(rti);
+    let trig_desc = relcache::RelationGetTriggerDesc(rte.relid)?;
+    let Some(t) = trig_desc else { return Ok(false) };
+    Ok(match event {
+        CMD_INSERT => t.trig_insert_after_row || t.trig_insert_before_row,
+        CMD_UPDATE => t.trig_update_after_row || t.trig_update_before_row,
+        CMD_DELETE => t.trig_delete_after_row || t.trig_delete_before_row,
+        CMD_MERGE => false,
+        other => panic!("unrecognized CmdType: {other:?}"),
+    })
+}
+
+// has_transition_tables (plancat.c).
+pub fn has_transition_tables(
+    run: &PlannerRun<'_>,
+    rti: usize,
+    event: types_nodes::CmdType,
+) -> PgResult<bool> {
+    use types_nodes::CmdType::*;
+    let rte = run.rte(rti);
+    if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        return Ok(false);
+    }
+    let trig_desc = relcache::RelationGetTriggerDesc(rte.relid)?;
+    let Some(t) = trig_desc else { return Ok(false) };
+    Ok(match event {
+        CMD_INSERT => t.trig_insert_new_table,
+        CMD_UPDATE => t.trig_update_old_table || t.trig_update_new_table,
+        CMD_DELETE => t.trig_delete_old_table,
+        CMD_MERGE => false,
+        other => panic!("unrecognized CmdType: {other:?}"),
+    })
+}
+
+// has_stored_generated_columns (plancat.c).
+pub fn has_stored_generated_columns(run: &PlannerRun<'_>, rti: usize) -> PgResult<bool> {
+    let rte = run.rte(rti);
+    let relation = table::table_open(run.mcx, rte.relid, NoLock)?;
+    let result = relation
+        .rd_att
+        .constr
+        .as_deref()
+        .is_some_and(|c| c.has_generated_stored);
+    table::table_close(relation, NoLock)?;
+    Ok(result)
+}
+
+// get_dependent_generated_columns (plancat.c); attnos in both bitmapsets are
+// offset by FirstLowInvalidHeapAttributeNumber.
+pub fn get_dependent_generated_columns<'mcx>(
+    run: &PlannerRun<'mcx>,
+    rti: usize,
+    target_cols: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let mcx = run.mcx;
+    let mut dependent_cols = types_nodes::Bitmapset::empty();
+    let rte = run.rte(rti);
+    let relation = table::table_open(mcx, rte.relid, NoLock)?;
+    if let Some(constr) = relation.rd_att.constr.as_deref() {
+        if constr.has_generated_stored {
+            for defval in constr.defval.iter() {
+                if relation.rd_att.attrs[defval.adnum as usize - 1].attgenerated == 0 {
+                    continue;
+                }
+                let adbin = defval.adbin.as_ref().expect("generated column has adbin");
+                let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+                let mut attrs_used = types_nodes::Bitmapset::empty();
+                vars::pull_varattnos(mcx, expr, 1, &mut attrs_used)?;
+                if target_cols.overlap(&attrs_used) {
+                    dependent_cols.add_member(
+                        mcx,
+                        defval.adnum as i32 - FirstLowInvalidHeapAttributeNumber,
+                    )?;
+                }
+            }
+        }
+    }
+    table::table_close(relation, NoLock)?;
+    Ok(dependent_cols)
 }
