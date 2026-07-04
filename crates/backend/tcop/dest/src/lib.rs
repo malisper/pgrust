@@ -29,6 +29,7 @@ pub enum DestReceiver<'mcx> {
     Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
     IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
     TransientRel(matview_seams::TransientRelState<'mcx>), // CreateTransientRelDestReceiver (matview.c)
+    SqlFunction(sql_functions_seams::SqlFunctionDestState<'mcx>), // CreateSQLFunctionDestReceiver (functions.c)
 }
 
 impl<'mcx> DestReceiver<'mcx> {
@@ -43,6 +44,9 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::IntoRel(state) => createas_seams::intorel_receive::call(state, slot),
             DestReceiver::TransientRel(state) => {
                 matview_seams::transientrel_receive::call(state, slot)
+            }
+            DestReceiver::SqlFunction(state) => {
+                sql_functions_seams::sqlfunction_receive::call(state, slot)
             }
             other => other.unported("receiveSlot"),
         }
@@ -60,6 +64,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::TransientRel(state) => {
                 matview_seams::transientrel_startup::call(state, operation, typeinfo)
             }
+            DestReceiver::SqlFunction(_) => Ok(()),
             other => other.unported("rStartup"),
         }
     }
@@ -69,7 +74,8 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::DoNothing
             | DestReceiver::DebugTup
             | DestReceiver::PrintSimple
-            | DestReceiver::SpiPrintTup => Ok(()),
+            | DestReceiver::SpiPrintTup
+            | DestReceiver::SqlFunction(_) => Ok(()),
             DestReceiver::PrintTup(dr) => {
                 dr.shutdown();
                 Ok(())
@@ -96,6 +102,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::Tuplestore(_) => CommandDest::Tuplestore,
             DestReceiver::IntoRel(_) => CommandDest::IntoRel,
             DestReceiver::TransientRel(_) => CommandDest::TransientRel,
+            DestReceiver::SqlFunction(_) => CommandDest::SqlFunction,
         }
     }
 
@@ -147,7 +154,8 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
         CommandDest::Debug => DestReceiver::DebugTup,
         CommandDest::Spi => DestReceiver::SpiPrintTup,
         CommandDest::Tuplestore => DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR()),
-        // Constructors owned by unported units.
+        // Constructors owned by unported units (DestSqlFunction is built
+        // directly by sql_functions; its state needs junkfilter params).
         CommandDest::IntoRel
         | CommandDest::CopyOut
         | CommandDest::SqlFunction
