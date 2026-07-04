@@ -58,6 +58,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::BitmapHeapPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
+        PathNode::MergeAppendPath(_) => create_merge_append_plan(run, path_id, flags),
         PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
         PathNode::RecursiveUnionPath(_) => create_recursiveunion_plan(run, path_id),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
@@ -2586,16 +2587,18 @@ struct SortColumns<'mcx> {
 }
 
 // prepare_sort_from_pathkeys (createplan.c): every pathkey must match an
-// existing tlist column (the resjunk-entry-injection leg is loud).
+// existing tlist column (the resjunk-entry-injection leg is loud). req_col_idx
+// pins each key to the given column, as when building MergeAppend children.
 fn prepare_sort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    lefttree: Node<'mcx>,
+    input_tlist: &NodeList<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
     relids: &types_pathnodes::Relids<'mcx>,
+    req_col_idx: Option<&[i16]>,
 ) -> PgResult<SortColumns<'mcx>> {
     let mcx = run.mcx;
     // C shares lefttree->targetlist by pointer; flat cell copy, shared nodes.
-    let tlist = NodeList::from_slice(mcx, lefttree.as_plan().expect("plan node").targetlist.as_slice())?;
+    let tlist = NodeList::from_slice(mcx, input_tlist.as_slice())?;
     let mut sort_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
     let mut sort_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
     let mut collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
@@ -2608,11 +2611,25 @@ fn prepare_sort_from_pathkeys<'mcx>(
             "prepare_sort_from_pathkeys (createplan.c): volatile sortref leg; M2 lane"
         );
         let mut found: Option<(i16, u32)> = None;
-        for tle_node in &tlist {
-            let tle = tle_node.as_target_entry().expect("TargetEntry");
-            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, relids) {
-                found = Some((tle.resno, run.root.em(em_id).em_datatype));
+        if let Some(req) = req_col_idx {
+            let want = req[sort_col_idx.len()];
+            for tle_node in &tlist {
+                let tle = tle_node.as_target_entry().expect("TargetEntry");
+                if tle.resno != want {
+                    continue;
+                }
+                if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, relids) {
+                    found = Some((tle.resno, run.root.em(em_id).em_datatype));
+                }
                 break;
+            }
+        } else {
+            for tle_node in &tlist {
+                let tle = tle_node.as_target_entry().expect("TargetEntry");
+                if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, relids) {
+                    found = Some((tle.resno, run.root.em(em_id).em_datatype));
+                    break;
+                }
             }
         }
         let Some((resno, pk_datatype)) = found else {
@@ -2669,7 +2686,13 @@ fn make_sort_from_pathkeys<'mcx>(
     pathkeys: &[types_pathnodes::PathKey],
     relids: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys, relids)?;
+    let cols = prepare_sort_from_pathkeys(
+        run,
+        &lefttree.as_plan().expect("plan node").targetlist,
+        pathkeys,
+        relids,
+        None,
+    )?;
     let mut plan = Node::build::<types_nodes::plannodes::Sort>(run.mcx)?;
     fill_sort_fields(run, &mut plan, lefttree, cols)?;
     Ok(plan.seal())
@@ -2685,7 +2708,13 @@ fn make_incrementalsort_from_pathkeys<'mcx>(
     relids: &types_pathnodes::Relids<'mcx>,
     n_presorted_cols: i32,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys, relids)?;
+    let cols = prepare_sort_from_pathkeys(
+        run,
+        &lefttree.as_plan().expect("plan node").targetlist,
+        pathkeys,
+        relids,
+        None,
+    )?;
     let mut plan = Node::build::<types_nodes::plannodes::IncrementalSort>(run.mcx)?;
     fill_sort_fields(run, &mut plan.sort, lefttree, cols)?;
     plan.sort.plan.disabled_nodes = 0;
@@ -3486,9 +3515,7 @@ fn create_mergejoin_plan<'mcx>(
     Ok(join_plan.seal())
 }
 
-// create_append_plan (createplan.c), unordered serial arm: the pathkeys/
-// prepare_sort_from_pathkeys leg is the MergeAppend/ordered-append lane, and
-// async/partition-pruning legs have no lane.
+// create_append_plan (createplan.c), serial arm; async legs have no lane.
 fn create_append_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -3496,22 +3523,19 @@ fn create_append_plan<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let _ = flags;
     let mcx = run.mcx;
-    let (rel_id, target_id, subpaths, first_partial, pathkeys_empty, has_param_info) =
+    let (rel_id, target_id, subpaths, first_partial, pathkeys, limit_tuples, has_param_info) =
         match run.root.path(path_id) {
             PathNode::AppendPath(a) => (
                 a.path.parent,
                 a.path.pathtarget_id.expect("Append path has a pathtarget"),
                 crate::relnode::pgvec_clone_shallow(mcx, &a.subpaths),
                 a.first_partial_path,
-                a.path.pathkeys.is_empty(),
+                crate::relnode::pgvec_clone_shallow(mcx, &a.path.pathkeys),
+                a.limit_tuples,
                 a.path.param_info.is_some(),
             ),
             _ => unreachable!(),
         };
-    assert!(
-        pathkeys_empty,
-        "create_append_plan (createplan.c): ordered append; MergeAppend lane unported (set-ops lane)"
-    );
     let tlist = build_path_tlist(run, target_id)?;
 
     if subpaths.is_empty() {
@@ -3524,9 +3548,22 @@ fn create_append_plan<'mcx>(
         return Ok(plan.seal());
     }
 
+    let node_cols = if pathkeys.is_empty() {
+        None
+    } else {
+        let relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel_id).relids);
+        Some(prepare_sort_from_pathkeys(run, &tlist, &pathkeys, &relids, None)?)
+    };
+
     let mut appendplans = NodeList::nil();
     for &sp in subpaths.iter() {
-        appendplans.lappend(mcx, create_plan_recurse(run, sp, CP_EXACT_TLIST)?)?;
+        let mut subplan = create_plan_recurse(run, sp, CP_EXACT_TLIST)?;
+        if let Some(cols) = &node_cols {
+            subplan = prepare_ordered_append_child(
+                run, subplan, sp, &pathkeys, cols, limit_tuples, "Append",
+            )?;
+        }
+        appendplans.lappend(mcx, subplan)?;
     }
 
     let mut apprelids = types_nodes::bitmapset::Bitmapset::empty();
@@ -3561,6 +3598,124 @@ fn create_append_plan<'mcx>(
     plan.appendplans = appendplans;
     plan.nasyncplans = 0;
     plan.first_partial_plan = first_partial;
+    plan.part_prune_index = part_prune_index;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// Ordered Append/MergeAppend child (create_append_plan / create_merge_append_
+// plan, createplan.c): pin the child's sort columns to the parent's and add a
+// Sort when the subpath isn't sufficiently ordered.
+fn prepare_ordered_append_child<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    subplan: Node<'mcx>,
+    subpath_id: PathId,
+    pathkeys: &[types_pathnodes::PathKey],
+    node_cols: &SortColumns<'mcx>,
+    limit_tuples: f64,
+    parent_label: &str,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let child_relids = {
+        let parent = run.root.path(subpath_id).base().parent;
+        types_pathnodes::relids::relids_copy(mcx, &run.root.rel(parent).relids)
+    };
+    let sub_cols = prepare_sort_from_pathkeys(
+        run,
+        &subplan.as_plan().expect("plan node").targetlist,
+        pathkeys,
+        &child_relids,
+        Some(&node_cols.sort_col_idx),
+    )?;
+    debug_assert_eq!(sub_cols.sort_col_idx.len(), node_cols.sort_col_idx.len());
+    assert!(
+        sub_cols.sort_col_idx.as_slice() == node_cols.sort_col_idx.as_slice(),
+        "{parent_label} child's targetlist doesn't match {parent_label}"
+    );
+    debug_assert!(sub_cols.sort_operators.as_slice() == node_cols.sort_operators.as_slice());
+    debug_assert!(sub_cols.collations.as_slice() == node_cols.collations.as_slice());
+    debug_assert!(sub_cols.nulls_first.as_slice() == node_cols.nulls_first.as_slice());
+
+    if crate::pathkeys::pathkeys_contained_in(
+        pathkeys,
+        &run.root.path(subpath_id).base().pathkeys,
+    ) {
+        return Ok(subplan);
+    }
+    let mut sort = Node::build::<types_nodes::plannodes::Sort>(mcx)?;
+    fill_sort_fields(run, &mut sort, subplan, sub_cols)?;
+    let sort = sort.seal();
+    label_sort_with_costsize(run, sort, limit_tuples);
+    Ok(sort)
+}
+
+// create_merge_append_plan (createplan.c). prepare_sort_from_pathkeys never
+// adds resjunk sort columns here (that leg is loud), so the tlist-was-changed
+// projection cleanup is dead.
+fn create_merge_append_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let _ = flags;
+    let mcx = run.mcx;
+    let (rel_id, target_id, subpaths, pathkeys, limit_tuples, has_param_info) =
+        match run.root.path(path_id) {
+            PathNode::MergeAppendPath(m) => (
+                m.path.parent,
+                m.path.pathtarget_id.expect("MergeAppend path has a pathtarget"),
+                crate::relnode::pgvec_clone_shallow(mcx, &m.subpaths),
+                crate::relnode::pgvec_clone_shallow(mcx, &m.path.pathkeys),
+                m.limit_tuples,
+                m.path.param_info.is_some(),
+            ),
+            _ => unreachable!(),
+        };
+    let tlist = build_path_tlist(run, target_id)?;
+    let relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel_id).relids);
+    let node_cols = prepare_sort_from_pathkeys(run, &tlist, &pathkeys, &relids, None)?;
+
+    let mut mergeplans = NodeList::nil();
+    for &sp in subpaths.iter() {
+        let subplan = create_plan_recurse(run, sp, CP_EXACT_TLIST)?;
+        let subplan = prepare_ordered_append_child(
+            run, subplan, sp, &pathkeys, &node_cols, limit_tuples, "MergeAppend",
+        )?;
+        mergeplans.lappend(mcx, subplan)?;
+    }
+
+    let mut apprelids = types_nodes::bitmapset::Bitmapset::empty();
+    for m in crate::relnode::relids_members(&run.root.rel(rel_id).relids) {
+        apprelids.add_member(mcx, m)?;
+    }
+
+    let mut part_prune_index = -1;
+    if crate::gucs::enable_partition_pruning() {
+        debug_assert!(!has_param_info);
+        let rinfos =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).baserestrictinfo);
+        let mut prunequal: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        for &rid in rinfos.iter() {
+            if run.root.rinfo(rid).pseudoconstant {
+                continue;
+            }
+            prunequal.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        if !prunequal.is_empty() {
+            part_prune_index =
+                crate::partprune::make_partition_pruneinfo(run, rel_id, &subpaths, &prunequal)?;
+        }
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::MergeAppend<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.apprelids = apprelids;
+    plan.mergeplans = mergeplans;
+    plan.numCols = node_cols.sort_col_idx.len() as i32;
+    plan.sortColIdx = mcx::slice_borrow_in(mcx, &node_cols.sort_col_idx)?;
+    plan.sortOperators = mcx::slice_borrow_in(mcx, &node_cols.sort_operators)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &node_cols.collations)?;
+    plan.nullsFirst = mcx::slice_borrow_in(mcx, &node_cols.nulls_first)?;
     plan.part_prune_index = part_prune_index;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())

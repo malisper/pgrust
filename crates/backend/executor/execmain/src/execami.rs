@@ -220,6 +220,15 @@ pub fn exec_re_scan<'mcx>(
             ::nodeappend::exec_rescan_append(&mut a.state);
             Ok(())
         }
+        // ExecReScanMergeAppend: every subplan rescanned (chgParam always NULL).
+        PlanStateNode::MergeAppend(m) => {
+            let m = &mut **m;
+            for sub in m.substates.iter_mut() {
+                exec_re_scan(sub, estate)?;
+            }
+            ::nodemergeappend::exec_rescan_merge_append(&mut m.state);
+            Ok(())
+        }
         // ExecReScanSubqueryScan: subplan rescanned (chgParam always NULL).
         PlanStateNode::SubqueryScan(s) => {
             let s = &mut **s;
@@ -521,6 +530,14 @@ pub fn exec_re_scan_with_chg<'mcx>(
                 exec_re_scan_with_chg(sub, subplans.nth(origin as usize), estate, chg)?;
             }
             ::nodeappend::exec_rescan_append_chg(&mut a.state, chg);
+        }
+        PlanStateNode::MergeAppend(m) => {
+            let m = &mut **m;
+            let subplans = &plan.as_merge_append().expect("MergeAppend plan").mergeplans;
+            for (sub, &origin) in m.substates.iter_mut().zip(m.subplan_origin.iter()) {
+                exec_re_scan_with_chg(sub, subplans.nth(origin as usize), estate, chg)?;
+            }
+            ::nodemergeappend::exec_rescan_merge_append_chg(&mut m.state, chg);
         }
         PlanStateNode::SubqueryScan(s) => {
             let s = &mut **s;

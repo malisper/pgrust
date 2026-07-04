@@ -292,6 +292,7 @@ fn generate_union_paths<'mcx>(
     }
 
     let mut cheapest_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut ordered_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
     let mut consider_parallel = true;
     let mut relids: Relids<'mcx> = None;
     for &(rel, _, _) in rellist.iter() {
@@ -300,16 +301,16 @@ fn generate_union_paths<'mcx>(
         if try_sorted {
             let paths =
                 crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel).pathlist);
-            if crate::pathkeys::get_cheapest_path_for_pathkeys(
+            match crate::pathkeys::get_cheapest_path_for_pathkeys(
                 run,
                 &paths,
                 &union_pathkeys,
                 crate::pathnode::CostSelector::Total,
                 false,
-            )
-            .is_none()
-            {
-                try_sorted = false;
+            ) {
+                Some(ordered_path) => ordered_pathlist.push(ordered_path),
+                // Type coercion in the union tlist can defeat child sorting.
+                None => try_sorted = false,
             }
         }
         if !run.root.rel(rel).consider_parallel {
@@ -329,7 +330,13 @@ fn generate_union_paths<'mcx>(
     }
     run.root.rel_mut(result_rel).consider_startup = run.root.tuple_fraction > 0.0;
 
-    let apath = crate::pathnode::create_append_path(run, result_rel, cheapest_pathlist, -1.0)?;
+    let apath = crate::pathnode::create_append_path(
+        run,
+        result_rel,
+        cheapest_pathlist,
+        PgVec::new_in(mcx),
+        -1.0,
+    )?;
     let apath_rows = run.root.path(apath).base().rows;
     run.root.rel_mut(result_rel).rows = apath_rows;
 
@@ -375,7 +382,20 @@ fn generate_union_paths<'mcx>(
         }
 
         if try_sorted && !group_list.is_nil() {
-            panic!("MergeAppend lane unported (set-ops lane)");
+            let path = crate::pathnode::create_merge_append_path(
+                run,
+                result_rel,
+                ordered_pathlist,
+                crate::relnode::pgvec_clone_shallow(mcx, &union_pathkeys),
+            )?;
+            let unique = crate::pathnode::create_upper_unique_path(
+                run,
+                result_rel,
+                path,
+                tlist.len() as i32,
+                d_num_groups,
+            );
+            add_path(run, result_rel, unique);
         }
     } else {
         add_path(run, result_rel, apath);

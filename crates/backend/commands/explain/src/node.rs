@@ -152,13 +152,19 @@ fn ExplainPreScanNode<'mcx>(
                 rels_used.add_member(mcx, mt.resultRelations.as_slice()[0])?;
             }
         }
-        NodeTag::T_Append => {
+        NodeTag::T_Append | NodeTag::T_MergeAppend => {
             // C walks the PLANSTATE tree: initially-pruned subplans have no
             // state and never reach rels_used (their RTEs get no name).
-            let a = node.as_append().unwrap();
-            rels_used.add_members(mcx, &a.apprelids)?;
-            let valid: Option<Vec<i32>> = if a.part_prune_index >= 0 && !qd.is_null() {
-                execmain_seams::query_desc_prune_result::call(qd, a.part_prune_index)
+            let (apprelids, children, part_prune_index) = match node.as_append() {
+                Some(a) => (&a.apprelids, &a.appendplans, a.part_prune_index),
+                None => {
+                    let m = node.as_merge_append().unwrap();
+                    (&m.apprelids, &m.mergeplans, m.part_prune_index)
+                }
+            };
+            rels_used.add_members(mcx, apprelids)?;
+            let valid: Option<Vec<i32>> = if part_prune_index >= 0 && !qd.is_null() {
+                execmain_seams::query_desc_prune_result::call(qd, part_prune_index)
             } else {
                 None
             };
@@ -167,7 +173,7 @@ fn ExplainPreScanNode<'mcx>(
                     for &i in &v {
                         ExplainPreScanNode(
                             mcx,
-                            a.appendplans.nth(i as usize),
+                            children.nth(i as usize),
                             subplans,
                             qd,
                             rels_used,
@@ -175,7 +181,7 @@ fn ExplainPreScanNode<'mcx>(
                     }
                 }
                 None => {
-                    for child in &a.appendplans {
+                    for child in children {
                         ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
                     }
                 }
@@ -225,6 +231,10 @@ fn plan_is_disabled(node: Node<'_>) -> bool {
     let mut child_disabled = 0;
     if let Some(a) = node.as_append() {
         for child in &a.appendplans {
+            child_disabled += plan_of(child).disabled_nodes;
+        }
+    } else if let Some(m) = node.as_merge_append() {
+        for child in &m.mergeplans {
             child_disabled += plan_of(child).disabled_nodes;
         }
     } else if let Some(sq) = node.as_subquery_scan() {
@@ -411,9 +421,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Result => "Result",
         NodeTag::T_ProjectSet => "ProjectSet",
         NodeTag::T_Append => "Append",
-        NodeTag::T_MergeAppend => {
-            node_gap("ExplainNode", "MergeAppend display; MergeAppend lane unported (set-ops lane)")
-        }
+        NodeTag::T_MergeAppend => "Merge Append",
         NodeTag::T_SubqueryScan => "Subquery Scan",
         NodeTag::T_SetOp => match node.as_set_op().expect("SetOp plan node").strategy {
             SETOP_SORTED => "SetOp",
@@ -808,6 +816,9 @@ pub fn ExplainNode<'mcx>(
             show_sort_keys(node, ancestors, es)?;
             show_sort_info(node, es)?;
         }
+        NodeTag::T_MergeAppend => {
+            show_merge_append_keys(node, ancestors, es)?;
+        }
         NodeTag::T_IncrementalSort => {
             show_incremental_sort_keys(node, ancestors, es)?;
             show_incremental_sort_info(node, es)?;
@@ -854,14 +865,18 @@ pub fn ExplainNode<'mcx>(
     }
 
     // ExplainMissingMembers: subplans removed by initial runtime pruning.
-    let append_valid: Option<Vec<i32>> = match node.as_append() {
-        Some(a) if a.part_prune_index >= 0 && !es.qd.is_null() => {
-            execmain_seams::query_desc_prune_result::call(es.qd, a.part_prune_index)
+    let append_children = match node.as_append() {
+        Some(a) => Some((&a.appendplans, a.part_prune_index)),
+        None => node.as_merge_append().map(|m| (&m.mergeplans, m.part_prune_index)),
+    };
+    let append_valid: Option<Vec<i32>> = match append_children {
+        Some((_, ppi)) if ppi >= 0 && !es.qd.is_null() => {
+            execmain_seams::query_desc_prune_result::call(es.qd, ppi)
         }
         _ => None,
     };
-    if let Some(a) = node.as_append() {
-        let nchildren = a.appendplans.len() as i64;
+    if let Some((children, _)) = append_children {
+        let nchildren = children.len() as i64;
         let nplans = append_valid.as_ref().map_or(nchildren, |v| v.len() as i64);
         if nplans < nchildren || es.format != EXPLAIN_FORMAT_TEXT {
             ExplainPropertyInteger("Subplans Removed", None, nchildren - nplans, es);
@@ -877,6 +892,7 @@ pub fn ExplainNode<'mcx>(
     let haschildren = plan.lefttree.is_some()
         || plan.righttree.is_some()
         || node.node_tag() == NodeTag::T_Append
+        || node.node_tag() == NodeTag::T_MergeAppend
         || node.node_tag() == NodeTag::T_SubqueryScan
         || node.node_tag() == NodeTag::T_BitmapAnd
         || node.node_tag() == NodeTag::T_BitmapOr;
@@ -889,15 +905,15 @@ pub fn ExplainNode<'mcx>(
     if let Some(r) = plan.righttree {
         ExplainNode(r, Some("Inner"), None, Some(&pushed), es)?;
     }
-    if let Some(a) = node.as_append() {
+    if let Some((children, _)) = append_children {
         match &append_valid {
             Some(valid) => {
                 for &i in valid {
-                    ExplainNode(a.appendplans.nth(i as usize), Some("Member"), None, Some(&pushed), es)?;
+                    ExplainNode(children.nth(i as usize), Some("Member"), None, Some(&pushed), es)?;
                 }
             }
             None => {
-                for child in &a.appendplans {
+                for child in children {
                     ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
                 }
             }
@@ -956,7 +972,7 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx
     if plan.targetlist.is_nil() {
         return Ok(());
     }
-    if node.node_tag() == NodeTag::T_Append {
+    if matches!(node.node_tag(), NodeTag::T_Append | NodeTag::T_MergeAppend) {
         return Ok(());
     }
     let mcx = es.str.allocator();
@@ -998,16 +1014,63 @@ fn show_sort_node_keys<'mcx>(
     ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
-    if sort.numCols <= 0 {
+    show_sort_group_keys(
+        node,
+        &sort.plan.targetlist,
+        sort.numCols,
+        sort.sortColIdx,
+        sort.sortOperators,
+        sort.collations,
+        sort.nullsFirst,
+        n_presorted_keys,
+        ancestors,
+        es,
+    )
+}
+
+fn show_merge_append_keys<'mcx>(
+    node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    let m = node.as_merge_append().expect("MergeAppend node");
+    show_sort_group_keys(
+        node,
+        &m.plan.targetlist,
+        m.numCols,
+        m.sortColIdx,
+        m.sortOperators,
+        m.collations,
+        m.nullsFirst,
+        0,
+        ancestors,
+        es,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_sort_group_keys<'mcx>(
+    node: Node<'mcx>,
+    targetlist: &types_nodes::list::NodeList<'mcx>,
+    num_cols: i32,
+    sort_col_idx: &[i16],
+    sort_operators: &[u32],
+    collations: &[u32],
+    nulls_first: &[bool],
+    n_presorted_keys: usize,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    if num_cols <= 0 {
         return Ok(());
     }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1 || es.verbose;
     let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
     let mut presorted: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
-    for keyno in 0..sort.numCols as usize {
-        let resno = sort.sortColIdx[keyno];
-        let tle = get_tle_by_resno(&sort.plan.targetlist, resno)
+    for keyno in 0..num_cols as usize {
+        let resno = sort_col_idx[keyno];
+        let tle = get_tle_by_resno(targetlist, resno)
             .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
         let mut buf = PgString::new_in(mcx);
         deparse_expr(es, node, ancestors, tle.expr, useprefix, true, &mut buf)?;
@@ -1017,9 +1080,9 @@ fn show_sort_node_keys<'mcx>(
         show_sortorder_options(
             &mut buf,
             tle.expr,
-            sort.sortOperators[keyno],
-            sort.collations[keyno],
-            sort.nullsFirst[keyno],
+            sort_operators[keyno],
+            collations[keyno],
+            nulls_first[keyno],
         )?;
         result.push(buf);
     }

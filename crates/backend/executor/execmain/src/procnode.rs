@@ -62,6 +62,7 @@ pub enum PlanStateNode<'mcx> {
     MergeJoin(PgBox<'mcx, MergeJoinNode<'mcx>>),
     WindowAgg(PgBox<'mcx, WindowAggNode<'mcx>>),
     Append(PgBox<'mcx, AppendNode<'mcx>>),
+    MergeAppend(PgBox<'mcx, MergeAppendNode<'mcx>>),
     SubqueryScan(PgBox<'mcx, SubqueryScanNode<'mcx>>),
     SetOp(PgBox<'mcx, SetOpNode<'mcx>>),
     Memoize(PgBox<'mcx, MemoizeNode<'mcx>>),
@@ -78,6 +79,13 @@ pub struct AppendNode<'mcx> {
     pub state: ::nodeappend::AppendState<'mcx>,
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
     /// Original appendplans index per substate (initial pruning skips some).
+    pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
+}
+
+pub struct MergeAppendNode<'mcx> {
+    pub state: ::nodemergeappend::MergeAppendState<'mcx>,
+    pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+    /// Original mergeplans index per substate (initial pruning skips some).
     pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
 }
 
@@ -305,8 +313,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeJoin(mj) => Some(mj.state.ps_ExprContext),
             PlanStateNode::WindowAgg(w) => Some(w.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
-            // C's ExecInitAppend assigns no ExprContext.
+            // C's ExecInitAppend/ExecInitMergeAppend assign no ExprContext.
             PlanStateNode::Append(_) => None,
+            PlanStateNode::MergeAppend(_) => None,
             PlanStateNode::SubqueryScan(s) => Some(s.ss.ps_ExprContext),
             PlanStateNode::SetOp(s) => Some(s.state.ps_ExprContext),
             // Divergence: C's RU has no ExprContext, only the tempContext here.
@@ -352,6 +361,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::LockRows(_)
             | PlanStateNode::BitmapHeapScan(_)
             | PlanStateNode::Append(_)
+            | PlanStateNode::MergeAppend(_)
             | PlanStateNode::SubqueryScan(_)
             | PlanStateNode::RecursiveUnion(_)
             | PlanStateNode::WorkTableScan(_)
@@ -902,6 +912,52 @@ pub fn exec_init_node<'mcx>(
                 AppendNode { state, substates, subplan_origin },
             )?)
         }
+        NodeTag::T_MergeAppend => {
+            let mcx = estate.es_query_cxt;
+            let ma_plan = node.as_merge_append().unwrap();
+            let n_total = ma_plan.mergeplans.len();
+            let (prune_state, valid) = if ma_plan.part_prune_index >= 0 {
+                let (ps, valid) = ::execpartition::pruning::exec_init_partition_exec_pruning(
+                    estate,
+                    n_total as i32,
+                    ma_plan.part_prune_index,
+                    &ma_plan.apprelids,
+                )?;
+                (ps.map(Box::new), valid)
+            } else {
+                let mut all = ::types_nodes::bitmapset::Bitmapset::empty();
+                if n_total > 0 {
+                    ::partprune::bms_add_range(mcx, &mut all, 0, n_total as i32 - 1)?;
+                }
+                (None, all)
+            };
+            let mut substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>> =
+                ::mcx::PgVec::new_in(mcx);
+            let mut subplan_origin: ::mcx::PgVec<'mcx, i32> = ::mcx::PgVec::new_in(mcx);
+            let nvalid = valid.num_members() as usize;
+            substates.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
+            subplan_origin.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
+            let mut i = valid.next_member(-1);
+            while i >= 0 {
+                let subplan = ma_plan.mergeplans.nth(i as usize);
+                let state = exec_init_node(Some(subplan), estate, eflags)?
+                    .expect("MergeAppend subplan list holds plan nodes");
+                substates.push(state);
+                subplan_origin.push(i);
+                i = valid.next_member(i);
+            }
+            let state = ::nodemergeappend::exec_init_merge_append(
+                ma_plan,
+                estate,
+                eflags,
+                substates.len(),
+                prune_state,
+            )?;
+            PlanStateNode::MergeAppend(::mcx::alloc_in(
+                mcx,
+                MergeAppendNode { state, substates, subplan_origin },
+            )?)
+        }
         NodeTag::T_SubqueryScan => {
             let mcx = estate.es_query_cxt;
             let sq_plan = node.as_subquery_scan().unwrap();
@@ -1049,7 +1105,6 @@ pub fn exec_init_node<'mcx>(
             )?)
         }
         tag => unported_nodes!(tag, {
-            T_MergeAppend => "nodeMergeAppend.c",
             T_SampleScan => "nodeSamplescan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
@@ -1161,6 +1216,7 @@ pub fn exec_proc_node<'mcx>(
         }
         PlanStateNode::ModifyTable(mps) => modify_table_arm(mps, estate),
         PlanStateNode::Append(a) => append_arm(a, estate),
+        PlanStateNode::MergeAppend(m) => merge_append_arm(m, estate),
         PlanStateNode::SubqueryScan(s) => subquery_scan_arm(s, estate),
         PlanStateNode::SetOp(s) => set_op_arm(s, estate),
         PlanStateNode::RecursiveUnion(ru) => recursive_union_arm(ru, estate),
@@ -1830,6 +1886,17 @@ fn append_arm<'mcx>(
 }
 
 #[inline(never)]
+fn merge_append_arm<'mcx>(
+    m: &mut PgBox<'mcx, MergeAppendNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let MergeAppendNode { state, substates, subplan_origin: _ } = &mut **m;
+    ::nodemergeappend::exec_merge_append(state, estate, |e, i| {
+        exec_proc_node(&mut substates[i], e)
+    })
+}
+
+#[inline(never)]
 fn subquery_scan_arm<'mcx>(
     s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
@@ -2255,6 +2322,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         PlanStateNode::HashJoin(hj) => hj.probe_batch.filter = None,
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
+        | PlanStateNode::MergeAppend(_)
         | PlanStateNode::SetOp(_)
         | PlanStateNode::RecursiveUnion(_)
         | PlanStateNode::IncrementalSort(_)
@@ -2330,6 +2398,14 @@ pub fn planstate_instr_extra<'mcx>(
         }
         PlanStateNode::Append(a) => {
             for sub in a.substates.iter_mut() {
+                if let Some(x) = planstate_instr_extra(sub, estate, plan_node_id) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::MergeAppend(m) => {
+            for sub in m.substates.iter_mut() {
                 if let Some(x) = planstate_instr_extra(sub, estate, plan_node_id) {
                     return Some(x);
                 }
@@ -2502,6 +2578,14 @@ fn exec_end_node_inner<'mcx>(
             }
             Ok(())
         }
+        PlanStateNode::MergeAppend(m) => {
+            let m = &mut **m;
+            ::nodemergeappend::exec_end_merge_append(&mut m.state);
+            for sub in m.substates.iter_mut() {
+                exec_end_node(sub, estate)?;
+            }
+            Ok(())
+        }
         PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
         PlanStateNode::WorkTableScan(_) => Ok(()),
         // C frees the exec state only; the tuplestore stays with its
@@ -2588,6 +2672,11 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
                 exec_shutdown_node(sub, estate);
             }
         }
+        PlanStateNode::MergeAppend(m) => {
+            for sub in m.substates.iter_mut() {
+                exec_shutdown_node(sub, estate);
+            }
+        }
         PlanStateNode::SubqueryScan(s) => exec_shutdown_node(&mut s.subplan, estate),
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
@@ -2630,6 +2719,11 @@ pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'
         }
         PlanStateNode::Append(a) => {
             for sub in a.substates.iter_mut() {
+                exec_set_tuple_bound(tuples_needed, sub);
+            }
+        }
+        PlanStateNode::MergeAppend(m) => {
+            for sub in m.substates.iter_mut() {
                 exec_set_tuple_bound(tuples_needed, sub);
             }
         }
@@ -2856,6 +2950,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     SortNode<'_> { state, outer; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin },
+    MergeAppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
     RecursiveUnionNode<'_> { state, outer, inner },
@@ -2872,7 +2967,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         Result(x), SeqScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
         IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
-        BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
+        BitmapIndexScan(x), Append(x), MergeAppend(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
         MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x),
         RecursiveUnion(x), WorkTableScan(x), NamedTuplestoreScan(x), Instrumented(x),

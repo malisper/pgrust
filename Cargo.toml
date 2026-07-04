@@ -175,6 +175,7 @@ members = [
     "crates/backend/executor/nodeincrementalsort",
     "crates/backend/executor/nodeunique",
     "crates/backend/executor/nodeappend",
+    "crates/backend/executor/nodemergeappend",
     "crates/backend/executor/nodesetop",
     "crates/backend/executor/nodelimit",
     "crates/backend/executor/nodelockrows",

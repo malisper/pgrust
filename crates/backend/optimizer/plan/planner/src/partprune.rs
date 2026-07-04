@@ -34,6 +34,24 @@ const PARTITION_STRATEGY_HASH: u8 = b'h';
 const PARTITION_STRATEGY_LIST: u8 = b'l';
 const PARTITION_STRATEGY_RANGE: u8 = b'r';
 
+// partitions_are_ordered (partbounds.c): RANGE unless a live DEFAULT
+// partition; LIST unless live interleaved partitions; HASH never.
+pub(crate) fn partitions_are_ordered(
+    boundinfo: &types_pathnodes::PartitionBoundInfoData<'_>,
+    live_parts: &types_pathnodes::Relids<'_>,
+) -> bool {
+    match boundinfo.strategy as u8 {
+        PARTITION_STRATEGY_RANGE => {
+            boundinfo.default_index < 0
+                || !types_pathnodes::relids::relids_is_member(boundinfo.default_index, live_parts)
+        }
+        PARTITION_STRATEGY_LIST => {
+            !types_pathnodes::relids::relids_overlap(live_parts, &boundinfo.interleaved_parts)
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum PartClauseTarget {
     Planner,
