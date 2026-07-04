@@ -2793,7 +2793,9 @@ fn exec_end_node_inner<'mcx>(
 }
 
 /// `ExecShutdownNode` (execProcnode.c). PgResult because the Gather arms wait
-/// on workers, whose errors rethrow here (C ereports out of ExecParallelFinish).
+/// on workers, whose errors rethrow here (C ereports out of ExecParallelFinish);
+/// only the Gather arms can Err, so the caller's ? arm stays predicted-cold.
+#[inline]
 pub fn exec_shutdown_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,

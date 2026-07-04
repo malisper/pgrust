@@ -572,7 +572,7 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
     if use_parallel_mode {
-        xact::EnterParallelMode();
+        enter_parallel_mode_outlined();
     }
 
     let mut current_tuple_count: u64 = 0;
@@ -614,9 +614,23 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         exec_shutdown_node(planstate, estate)?;
     }
     if use_parallel_mode {
-        xact::ExitParallelMode();
+        exit_parallel_mode_outlined();
     }
     Ok(())
+}
+
+// The pre-parallel shape kept these arms compiler-cold (panic!); serial
+// queries pay only the predicted-false test, as C does.
+#[cold]
+#[inline(never)]
+fn enter_parallel_mode_outlined() {
+    xact::EnterParallelMode();
+}
+
+#[cold]
+#[inline(never)]
+fn exit_parallel_mode_outlined() {
+    xact::ExitParallelMode();
 }
 
 /// `standard_ExecutorFinish` (execMain.c).
