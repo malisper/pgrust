@@ -5,6 +5,7 @@
 
 #![allow(non_snake_case)]
 
+use datum::Datum;
 use mcx::Mcx;
 use pg_collation::CollationForm;
 use pg_depend::ObjectAddress;
@@ -388,6 +389,151 @@ fn creation_namespace<'mcx, 'a>(
         ));
     }
     Ok((namespace, name))
+}
+
+fn text_datum_to_string(d: Datum) -> String {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null in-line text column datum from a pg_collation row.
+    unsafe {
+        let (off, len) = if types_tuple::varatt::varatt_is_1b(p) {
+            (
+                types_tuple::varatt::VARHDRSZ_SHORT,
+                types_tuple::varatt::varsize_1b(p) - types_tuple::varatt::VARHDRSZ_SHORT,
+            )
+        } else {
+            (
+                types_tuple::varatt::VARHDRSZ,
+                types_tuple::varatt::varsize_4b(p) - types_tuple::varatt::VARHDRSZ,
+            )
+        };
+        core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
+            .expect("catalog text is valid UTF-8")
+            .to_string()
+    }
+}
+
+// ALTER COLLATION ... REFRESH VERSION (collationcmds.c AlterCollation).
+pub fn AlterCollation<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::AlterCollationStmt<'mcx>,
+) -> PgResult<Oid> {
+    const Anum_pg_collation_collprovider: i32 = 5;
+    const Anum_pg_collation_collcollate: i32 = 8;
+    const Anum_pg_collation_colllocale: i32 = 10;
+    const Anum_pg_collation_collversion: i32 = 12;
+
+    let rel = table::table_open(mcx, COLLATION_RELATION_ID, types_rel::RowExclusiveLock)?;
+    let coll_oid = catalog_namespace::get_collation_oid_list(&stmt.collname, false)?;
+
+    if coll_oid == types_core::catalog::DEFAULT_COLLATION_OID {
+        return Err(Box::new(
+            PgError::error("cannot refresh version of default collation")
+                .with_hint("Use ALTER DATABASE ... REFRESH COLLATION VERSION instead."),
+        ));
+    }
+
+    if !aclchk::object_ownercheck(COLLATION_RELATION_ID, coll_oid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_COLLATION,
+            &catalog_objectaddress::NameListToString(&stmt.collname),
+        )?;
+    }
+
+    let td = rel.descr();
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = pg_collation::Anum_pg_collation_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(coll_oid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        pg_collation::CollationOidIndexId,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for collation {coll_oid}"
+        ))));
+    };
+
+    let getattr = |attno: i32| -> (Datum, bool) {
+        let mut isnull = false;
+        // SAFETY: tup is a pg_collation row read under pg_collation's descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, attno, td, &mut isnull) };
+        (d, isnull)
+    };
+
+    let (version_datum, version_isnull) = getattr(Anum_pg_collation_collversion);
+    let oldversion =
+        if version_isnull { None } else { Some(text_datum_to_string(version_datum)) };
+
+    let collprovider = getattr(Anum_pg_collation_collprovider).0.as_u8();
+    let locale_attno = if collprovider == COLLPROVIDER_LIBC {
+        Anum_pg_collation_collcollate
+    } else {
+        Anum_pg_collation_colllocale
+    };
+    let (locale_datum, locale_isnull) = getattr(locale_attno);
+    assert!(!locale_isnull, "unexpected null locale in pg_collation row");
+    let locale = text_datum_to_string(locale_datum);
+
+    let newversion = pg_locale::get_collation_actual_version(collprovider, &locale)?;
+
+    let loc = |line: u32| {
+        types_error::ErrorLocation::new(
+            "src/backend/commands/collationcmds.c",
+            line,
+            "AlterCollation",
+        )
+    };
+    let mut version_image = None;
+    let mut replacements: Vec<(i32, Datum)> = Vec::new();
+    match (&oldversion, &newversion) {
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(Box::new(PgError::error("invalid collation version change")));
+        }
+        (Some(old), Some(new)) if new != old => {
+            elog::ereport(types_error::NOTICE)
+                .errmsg(format!("changing version from {old} to {new}"))
+                .finish(loc(476))?;
+            let img = version_image.insert(varlena::cstring_to_text(mcx, new.as_bytes())?);
+            replacements.push((
+                Anum_pg_collation_collversion,
+                Datum::from_usize(img.as_bytes().as_ptr() as usize),
+            ));
+        }
+        _ => {
+            elog::ereport(types_error::NOTICE)
+                .errmsg("version has not changed".to_string())
+                .finish(loc(491))?;
+        }
+    }
+    let _ = &version_image;
+
+    let natts = td.natts as usize;
+    let mut repl_values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl_isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    repl_values.resize(natts, Datum::null());
+    repl_isnull.resize(natts, false);
+    repl.resize(natts, false);
+    for &(attnum, d) in &replacements {
+        repl_values[(attnum - 1) as usize] = d;
+        repl[(attnum - 1) as usize] = true;
+    }
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, td, &repl_values, &repl_isnull, &repl)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    rel.close(types_rel::NoLock)?;
+    Ok(coll_oid)
 }
 
 // IsThereCollationInNamespace (collationcmds.c): friendliness check ahead of

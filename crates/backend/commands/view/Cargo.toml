@@ -24,3 +24,11 @@ types_portal = { path = "../../../_support/types/portal" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_relation = { path = "../../parser/parse_relation" }
 elog = { path = "../../utils/error/elog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+relation_seams = { path = "../../access/common/relation_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_depend = { path = "../../catalog/pg_depend" }
+format_type = { path = "../../utils/adt/format_type" }

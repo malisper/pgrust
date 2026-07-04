@@ -25,3 +25,6 @@ pg_class_seams = { path = "../../catalog/pg_class_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
 xact = { path = "../../access/transam/xact" }
 table = { path = "../../access/table/table" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+nodes_core = { path = "../../nodes/nodes_core" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }

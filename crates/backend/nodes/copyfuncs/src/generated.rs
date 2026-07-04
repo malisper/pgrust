@@ -29,7 +29,7 @@ use types_nodes::primnodes::{
 };
 use types_nodes::parsenodes::{
     AccessPriv, AlterDatabaseRefreshCollStmt, AlterDatabaseSetStmt, AlterDatabaseStmt,
-    AlterDefaultPrivilegesStmt, AlterDomainStmt, AlterEventTrigStmt, AlterFunctionStmt,
+    AlterCollationStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt, AlterEventTrigStmt, AlterFunctionStmt,
     AlterObjectSchemaStmt, AlterOpFamilyStmt, AlterOperatorStmt, AlterOwnerStmt,
     AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt, AlterRoleStmt,
     AlterSubscriptionStmt, AlterTableCmd, AlterTableSpaceOptionsStmt, AlterTableStmt,
@@ -128,6 +128,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterDefaultPrivilegesStmt => {
             let s = node.as_variant::<AlterDefaultPrivilegesStmt>().expect("AlterDefaultPrivilegesStmt");
             Node::mk(mcx, copy_AlterDefaultPrivilegesStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterCollationStmt => {
+            let s = node.as_variant::<AlterCollationStmt>().expect("AlterCollationStmt");
+            Node::mk(mcx, copy_AlterCollationStmt(mcx, s)?)?
         }
         NodeTag::T_AlterDomainStmt => {
             let s = node.as_variant::<AlterDomainStmt>().expect("AlterDomainStmt");
@@ -1437,6 +1441,12 @@ pub(crate) fn copy_AlterDefaultPrivilegesStmt<'d>(mcx: Mcx<'d>, s: &AlterDefault
     Ok(AlterDefaultPrivilegesStmt {
         options: copy_node_list(mcx, &s.options)?,
         action: match s.action { Some(v) => Some(mk_ref(mcx, copy_GrantStmt(mcx, v)?)?), None => None },
+    })
+}
+
+pub(crate) fn copy_AlterCollationStmt<'d>(mcx: Mcx<'d>, s: &AlterCollationStmt<'_>) -> PgResult<AlterCollationStmt<'d>> {
+    Ok(AlterCollationStmt {
+        collname: copy_node_list(mcx, &s.collname)?,
     })
 }
 
