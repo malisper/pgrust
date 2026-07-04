@@ -15,6 +15,7 @@ indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 mcx = { path = "../../../../_support/mcx" }
 parse_expr = { path = "../../../parser/parse_expr" }
+genam_seams = { path = "../../../access/index/genam_seams" }
 parse_func = { path = "../../../parser/parse_func" }
 parse_oper = { path = "../../../parser/parse_oper" }
 parser_small1 = { path = "../../../parser/parser_small1" }

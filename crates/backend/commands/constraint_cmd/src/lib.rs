@@ -1,0 +1,110 @@
+//! commands/constraint.c: unique_key_recheck (deferred exclusion arm; the
+//! deferred-unique index_insert arm stays loud with its DDL).
+#![allow(non_snake_case)]
+
+use datum::Datum;
+use types_core::{Oid, INDEX_MAX_KEYS};
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_trigger::{
+    TRIGGER_FIRED_AFTER, TRIGGER_FIRED_BY_INSERT, TRIGGER_FIRED_BY_UPDATE, TRIGGER_FIRED_FOR_ROW,
+};
+use types_trigger_call::trigger_data_from_fcinfo;
+
+#[cold]
+#[inline(never)]
+fn protocol_err(msg: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("unique_key_recheck: {msg}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+pub fn fc_unique_key_recheck(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: the trigger call machinery keeps the TriggerData live for the
+    // duration of the call.
+    let Some(td) = (unsafe { trigger_data_from_fcinfo(fcinfo) }) else {
+        return Err(protocol_err("not fired by trigger manager"));
+    };
+    if !TRIGGER_FIRED_AFTER(td.tg_event) || !TRIGGER_FIRED_FOR_ROW(td.tg_event) {
+        return Err(protocol_err("must be fired AFTER ROW"));
+    }
+    let new_row = if TRIGGER_FIRED_BY_INSERT(td.tg_event) {
+        td.tg_trigtuple
+    } else if TRIGGER_FIRED_BY_UPDATE(td.tg_event) {
+        td.tg_newtuple
+    } else {
+        return Err(protocol_err("must be fired for INSERT or UPDATE"));
+    };
+    // SAFETY: live tuple per the trigger call contract.
+    let mut tmptid = unsafe { new_row.expect("trigger row").as_ref() }.t_self;
+
+    let mcx = fcinfo.result_mcx();
+    let trig_rel = td.tg_relation;
+
+    // SnapshotSelf re-find: a dead HOT member resolves to its live successor.
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        ::types_slot::TupleSlotKind::BufferHeapTuple,
+        Some(trig_rel.rd_att.clone()),
+    );
+    let self_snap = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        mcx,
+        ::types_snapshot::SnapshotType::SNAPSHOT_SELF,
+    ));
+    let mut fetch = tableam::table_index_fetch_begin(trig_rel);
+    let mut call_again = false;
+    let mut all_dead = false;
+    let found = tableam::table_index_fetch_tuple(
+        mcx,
+        &mut fetch,
+        &mut tmptid,
+        &mut Some(self_snap),
+        &mut slot,
+        &mut call_again,
+        Some(&mut all_dead),
+    )?;
+    tableam::table_index_fetch_end(fetch);
+    if !found {
+        return Ok(Datum::from_usize(0));
+    }
+
+    let index_rel = indexam::index_open(
+        mcx,
+        td.tg_trigger.tgconstrindid,
+        ::types_rel::RowShareLock,
+    )?;
+    let mut index_info = execindexing::BuildIndexInfo(mcx, &index_rel)?;
+
+    let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    execindexing::FormIndexDatum(mcx, mcx, &mut index_info, &mut slot, &mut values, &mut isnull)?;
+
+    if index_info.ii_HasExclusion {
+        execindexing::check_exclusion_constraint(
+            mcx,
+            mcx,
+            trig_rel,
+            &index_rel,
+            &mut index_info,
+            &tmptid,
+            &values,
+            &isnull,
+            false,
+        )?;
+    } else {
+        panic!("unported: unique_key_recheck deferred-unique index_insert(UNIQUE_CHECK_EXISTING)");
+    }
+
+    indexam::index_close(index_rel, ::types_rel::RowShareLock)?;
+    Ok(Datum::from_usize(0))
+}
+
+const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
+}
+
+pub const CONSTRAINT_BUILTINS: &[FmgrBuiltin] = &[b(1250, "unique_key_recheck", 1, fc_unique_key_recheck)];

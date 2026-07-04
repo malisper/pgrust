@@ -103,6 +103,7 @@ pub struct ConstraintEntry<'a> {
     pub fk_del_type: u8,
     pub fk_del_set_cols: &'a [i16],
     pub fk_match_type: u8,
+    pub excl_op: &'a [Oid],
     pub conbin: Option<&'a str>,
     pub con_expr: Option<types_nodes::Node<'a>>,
     pub is_local: bool,
@@ -136,6 +137,7 @@ impl<'a> ConstraintEntry<'a> {
             fk_del_type: b' ',
             fk_del_set_cols: &[],
             fk_match_type: b' ',
+            excl_op: &[],
             conbin: None,
             con_expr: None,
             is_local: true,
@@ -207,6 +209,7 @@ pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> P
         (Anum_pg_constraint_conppeqop, oid_array(e.pp_eq_op)?),
         (Anum_pg_constraint_conffeqop, oid_array(e.ff_eq_op)?),
         (Anum_pg_constraint_confdelsetcols, i16_array(e.fk_del_set_cols)?),
+        (Anum_pg_constraint_conexclop, oid_array(e.excl_op)?),
     ];
     for (anum, img) in &arrays {
         if let Some(img) = img {

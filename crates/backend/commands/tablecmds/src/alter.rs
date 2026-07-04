@@ -447,7 +447,9 @@ fn ATRewriteCatalogs<'mcx>(
                     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
                     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
                     match constr.contype {
-                        ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
+                        ConstrType::CONSTR_PRIMARY
+                        | ConstrType::CONSTR_UNIQUE
+                        | ConstrType::CONSTR_EXCLUSION => {
                             let (istmt, nnconstraints) =
                                 parse_utilcmd::transformIndexConstraintForAlter(
                                     mcx, &rel, defnode, query_string,
