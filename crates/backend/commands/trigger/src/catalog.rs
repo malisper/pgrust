@@ -194,7 +194,7 @@ pub fn get_trigger_oid<'mcx>(
 ) -> PgResult<Oid> {
     const TRIGGER_RELID_NAME_INDEX_ID: Oid = 2701;
     const Anum_pg_trigger_tgrelid: AttrNumber = 2;
-    const Anum_pg_trigger_tgname: AttrNumber = 3;
+    const Anum_pg_trigger_tgname: AttrNumber = 4;
     let tgrel = table::table_open(mcx, TRIGGER_RELATION_ID, types_rel::AccessShareLock)?;
     let namebuf = name_arg(mcx, trigname)?;
     let mut keys = [ScanKeyData::empty(), ScanKeyData::empty()];
