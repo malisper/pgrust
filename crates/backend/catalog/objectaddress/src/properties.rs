@@ -100,6 +100,14 @@ pub fn get_object_property_data(class_id: Oid) -> &'static ObjectPropertyType {
         .unwrap_or_else(|| panic!("unrecognized class ID: {class_id}"))
 }
 
+pub fn is_objectclass_supported(class_id: Oid) -> bool {
+    OBJECT_PROPERTY.iter().any(|p| p.class_oid == class_id)
+}
+
+pub fn get_object_namensp_unique(class_id: Oid) -> bool {
+    get_object_property_data(class_id).is_nsp_name_unique
+}
+
 pub fn get_object_catcache_oid(class_id: Oid) -> i32 {
     get_object_property_data(class_id).oid_catcache_id
 }

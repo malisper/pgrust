@@ -1,5 +1,5 @@
-//! dbsize.c: pg_size_bytes only; the relation/database size probes stay
-//! unregistered (storage access).
+//! dbsize.c: pg_size_bytes, pg_size_pretty (int8/numeric), pg_relation_size,
+//! pg_database_size (name/oid).
 
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 

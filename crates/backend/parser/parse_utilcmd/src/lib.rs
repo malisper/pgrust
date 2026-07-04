@@ -277,7 +277,7 @@ fn shell_type(name: &str) -> Box<PgError> {
 // typeStringToTypeName (parse_type.c); escontext=NULL shape (hard errors) —
 // misc.c's pg_input_* callers pass NULL there too. pts_error_callback rides
 // as with_context on raw-parse errors only, matching the C callback's span.
-fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
+pub fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
     if s.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)) {
         return Err(invalid_type_name(s));
     }

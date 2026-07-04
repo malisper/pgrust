@@ -5,6 +5,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod builtins;
 mod description;
 mod identity;
 mod properties;
@@ -51,11 +52,22 @@ pub const TSParserRelationId: Oid = 3601;
 pub const TSDictionaryRelationId: Oid = 3600;
 pub const TSTemplateRelationId: Oid = 3764;
 pub const TSConfigRelationId: Oid = 3602;
+pub const AccessMethodOperatorRelationId: Oid = 2602;
+pub const AccessMethodOperatorOidIndexId: Oid = 2756;
+pub const AccessMethodProcedureRelationId: Oid = 2603;
+pub const AccessMethodProcedureOidIndexId: Oid = 2757;
+pub const AuthMemRelationId: Oid = 1261;
+pub const AuthMemOidIndexId: Oid = 6303;
+pub const DefaultAclRelationId: Oid = 826;
+pub const DefaultAclOidIndexId: Oid = 828;
+pub const ParameterAclRelationId: Oid = 6243;
+pub const TransformRelationId: Oid = 3576;
 
 pub fn init_seams() {
     objectaddress_seams::get_object_description::set(get_object_description_by_oids);
     objectaddress_seams::get_object_address::set(get_object_address_marshal);
     objectaddress_seams::check_object_ownership::set(check_object_ownership_marshal);
+    fmgr_core::register_late_builtins(builtins::OBJECTADDRESS_BUILTINS);
 }
 
 fn get_object_address_marshal<'mcx>(
@@ -621,9 +633,13 @@ fn get_object_address_relobject<'mcx>(
                 None => InvalidOid,
             },
         ),
-        ObjectType::OBJECT_POLICY => {
-            unported("get_object_address_relobject OBJECT_POLICY (rls lane)")
-        }
+        ObjectType::OBJECT_POLICY => (
+            PolicyRelationId,
+            match &rel {
+                Some(_) => get_relation_policy_oid(mcx, reloid, depname, missing_ok)?,
+                None => InvalidOid,
+            },
+        ),
         other => panic!("unrecognized object type: {other:?}"),
     };
     let address = ObjectAddress::set(classId, objectId);
@@ -662,6 +678,372 @@ fn get_object_address_opcf<'mcx>(
         )),
         other => unported(&format!("get_object_address_opcf {other:?}")),
     }
+}
+
+// get_relation_policy_oid (policy.c), inlined: commands_policy would cycle
+// through catalog_dependency back into this crate.
+fn get_relation_policy_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    policy_name: &str,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    const POLICY_POLRELID_POLNAME_INDEX_ID: Oid = 3258;
+    let rel = table::table_open(mcx, PolicyRelationId, types_rel::AccessShareLock)?;
+    let mut namebuf = [0u8; 64];
+    let n = policy_name.len().min(63);
+    namebuf[..n].copy_from_slice(&policy_name.as_bytes()[..n]);
+    let mut keys = [types_scan::scankey::ScanKeyData::empty(), types_scan::scankey::ScanKeyData::empty()];
+    keys[0].sk_attno = 3;
+    keys[0].sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    keys[0].sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)?;
+    keys[0].sk_argument = datum::Datum::from_oid(relid);
+    keys[1].sk_attno = 2;
+    keys[1].sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    keys[1].sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_NAMEEQ)?;
+    keys[1].sk_argument = datum::Datum::from_usize(namebuf.as_ptr() as usize);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        POLICY_POLRELID_POLNAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let oid = match genam::systable_getnext(mcx, &mut scan)? {
+        Some(tup) => description::getattr(tup, 1, rel.descr()).as_oid(),
+        None => {
+            if !missing_ok {
+                let relname = lsyscache::relation::get_rel_name(mcx, relid)?
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default();
+                return Err(err(
+                    ERRCODE_UNDEFINED_OBJECT,
+                    format!("policy \"{policy_name}\" for table \"{relname}\" does not exist"),
+                ));
+            }
+            InvalidOid
+        }
+    };
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(oid)
+}
+
+// get_object_address_attrdef (objectaddress.c). C additionally gates on
+// tupdesc->constr; GetAttrDefaultOid returning InvalidOid is result-equal.
+fn get_object_address_attrdef<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &NodeList<'mcx>,
+    lockmode: LOCKMODE,
+    missing_ok: bool,
+) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
+    let nnames = object.len();
+    if nnames < 2 {
+        return Err(err(ERRCODE_SYNTAX_ERROR, "column name must be qualified".into()));
+    }
+    let parts: Vec<&'mcx str> = object
+        .iter()
+        .map(|n| n.as_string().expect("qualified name component is a String node").sval)
+        .collect();
+    let attname = parts[nnames - 1];
+    let relparts = &parts[..nnames - 1];
+    let relname_str = relparts.join(".");
+    let rv = fill_range_var(relparts);
+    let rel = relation::relation_openrv(mcx, &rv, lockmode)?;
+    let reloid = rel.rd_id;
+    let attnum = lsyscache::get_attnum(reloid, attname)?;
+    let defoid = if attnum != 0 {
+        pg_attrdef::GetAttrDefaultOid(mcx, reloid, attnum)?
+    } else {
+        InvalidOid
+    };
+    if !OidIsValid(defoid) {
+        if !missing_ok {
+            return Err(err(
+                ERRCODE_UNDEFINED_COLUMN,
+                format!(
+                    "default value for column \"{attname}\" of relation \"{relname_str}\" does not exist"
+                ),
+            ));
+        }
+        rel.close(lockmode)?;
+        return Ok((ObjectAddress::set(AttrDefaultRelationId, InvalidOid), None));
+    }
+    Ok((ObjectAddress::set(AttrDefaultRelationId, defoid), Some(rel)))
+}
+
+// get_transform_oid (functioncmds.c), inlined: functioncmds depends on this
+// crate.
+fn get_transform_oid(
+    type_id: Oid,
+    langname: &str,
+    lang_id: Oid,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::TRFTYPELANG,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(type_id)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(lang_id)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!(
+                "transform for type {} language \"{langname}\" does not exist",
+                format_type::format_type_be(type_id)?
+            ),
+        ));
+    }
+    Ok(oid)
+}
+
+// get_object_address_usermapping (objectaddress.c).
+fn get_object_address_usermapping(
+    object: &NodeList<'_>,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let username = object
+        .first()
+        .and_then(|n| n.as_string())
+        .expect("user mapping user name is a String node")
+        .sval;
+    let servername = object
+        .last()
+        .and_then(|n| n.as_string())
+        .expect("user mapping server name is a String node")
+        .sval;
+    let mut address = ObjectAddress::set(types_core::USER_MAPPING_RELATION_ID, InvalidOid);
+    let userid = if username == "public" {
+        InvalidOid
+    } else {
+        let oid = cache_syscache::GetSysCacheOid(
+            cache_syscache::cacheinfo::AUTHNAME,
+            1,
+            cache_syscache::SysCacheKey::Str(username),
+            cache_syscache::SysCacheKey::UNUSED,
+            cache_syscache::SysCacheKey::UNUSED,
+            cache_syscache::SysCacheKey::UNUSED,
+        )?;
+        if !OidIsValid(oid) {
+            if !missing_ok {
+                return Err(err(
+                    ERRCODE_UNDEFINED_OBJECT,
+                    format!(
+                        "user mapping for user \"{username}\" on server \"{servername}\" does not exist"
+                    ),
+                ));
+            }
+            return Ok(address);
+        }
+        oid
+    };
+    let serverid = foreigncmds_seams::get_foreign_server_oid::call(servername, true)?;
+    if !OidIsValid(serverid) {
+        if !missing_ok {
+            return Err(err(
+                ERRCODE_UNDEFINED_OBJECT,
+                format!("server \"{servername}\" does not exist"),
+            ));
+        }
+        return Ok(address);
+    }
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::USERMAPPINGUSERSERVER,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(userid)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(serverid)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) {
+        if !missing_ok {
+            return Err(err(
+                ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "user mapping for user \"{username}\" on server \"{servername}\" does not exist"
+                ),
+            ));
+        }
+        return Ok(address);
+    }
+    address.objectId = oid;
+    Ok(address)
+}
+
+// get_object_address_defacl (objectaddress.c).
+fn get_object_address_defacl(
+    object: &NodeList<'_>,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let cells = object.as_slice();
+    let sval = |i: usize| {
+        cells[i]
+            .as_string()
+            .expect("default ACL component is a String node")
+            .sval
+    };
+    let username = sval(1);
+    let schema = if cells.len() >= 3 { Some(sval(2)) } else { None };
+    let objtype = sval(0).as_bytes().first().copied().unwrap_or(0);
+    let objtype_str = match objtype {
+        b'r' => "tables",
+        b'S' => "sequences",
+        b'f' => "functions",
+        b'T' => "types",
+        b'n' => "schemas",
+        b'L' => "large objects",
+        other => {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "unrecognized default ACL object type \"{}\"",
+                    other as char
+                ))
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .with_hint(
+                    "Valid object types are \"r\", \"S\", \"f\", \"T\", \"n\", \"L\".",
+                ),
+            ))
+        }
+    };
+    let address = ObjectAddress::set(DefaultAclRelationId, InvalidOid);
+    let not_found = || -> PgResult<ObjectAddress> {
+        if !missing_ok {
+            return Err(err(
+                ERRCODE_UNDEFINED_OBJECT,
+                match schema {
+                    Some(s) => format!(
+                        "default ACL for user \"{username}\" in schema \"{s}\" on {objtype_str} does not exist"
+                    ),
+                    None => format!(
+                        "default ACL for user \"{username}\" on {objtype_str} does not exist"
+                    ),
+                },
+            ));
+        }
+        Ok(address)
+    };
+    let userid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::AUTHNAME,
+        1,
+        cache_syscache::SysCacheKey::Str(username),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(userid) {
+        return not_found();
+    }
+    let schemaid = match schema {
+        Some(s) => {
+            let oid = catalog_namespace::get_namespace_oid(s, true)?;
+            if !OidIsValid(oid) {
+                return not_found();
+            }
+            oid
+        }
+        None => InvalidOid,
+    };
+    let oid = cache_syscache::GetSysCacheOid(
+        cache_syscache::cacheinfo::DEFACLROLENSPOBJ,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(userid)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(schemaid)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_char(objtype as i8)),
+        cache_syscache::SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) {
+        return not_found();
+    }
+    Ok(ObjectAddress::set(DefaultAclRelationId, oid))
+}
+
+// atoi(3) shape: optional sign + leading digits, 0 on no parse.
+fn c_atoi(s: &str) -> i32 {
+    let b = s.trim_start().as_bytes();
+    let (sign, rest) = match b.first() {
+        Some(b'-') => (-1i64, &b[1..]),
+        Some(b'+') => (1i64, &b[1..]),
+        _ => (1i64, b),
+    };
+    let mut v = 0i64;
+    for &c in rest {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        v = (v * 10 + (c - b'0') as i64).min(i32::MAX as i64);
+    }
+    (sign * v).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+// get_object_address_opf_member (objectaddress.c).
+fn get_object_address_opf_member<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    object: &NodeList<'mcx>,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let name_list = object
+        .first()
+        .and_then(|n| n.as_list())
+        .expect("opfamily member leads with a name list");
+    let args_list = object
+        .last()
+        .and_then(|n| n.as_list())
+        .expect("opfamily member args are a list");
+    let names = name_list.as_slice();
+    let membernum = c_atoi(
+        names
+            .last()
+            .and_then(|n| n.as_string())
+            .expect("member number is a String node")
+            .sval,
+    );
+    let copy = NodeList::from_slice(mcx, &names[..names.len() - 1])?;
+    let famaddr = get_object_address_opcf(mcx, ObjectType::OBJECT_OPFAMILY, &copy, false)?;
+    let mut typenames: [Option<&TypeName<'mcx>>; 2] = [None, None];
+    let mut typeoids: [Oid; 2] = [InvalidOid, InvalidOid];
+    for (i, cell) in args_list.iter().take(2).enumerate() {
+        let tn = cell.as_type_name().expect("opfamily member arg is a TypeName");
+        typenames[i] = Some(tn);
+        typeoids[i] = get_object_address_type(ObjectType::OBJECT_TYPE, tn, missing_ok)?.objectId;
+    }
+    let (cacheid, class_id, noun) = match objtype {
+        ObjectType::OBJECT_AMOP => (
+            cache_syscache::cacheinfo::AMOPSTRATEGY,
+            AccessMethodOperatorRelationId,
+            "operator",
+        ),
+        ObjectType::OBJECT_AMPROC => (
+            cache_syscache::cacheinfo::AMPROCNUM,
+            AccessMethodProcedureRelationId,
+            "function",
+        ),
+        other => panic!("unrecognized object type: {other:?}"),
+    };
+    let oid = cache_syscache::GetSysCacheOid(
+        cacheid,
+        1,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(famaddr.objectId)),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(typeoids[0])),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(typeoids[1])),
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_i16(membernum as i16)),
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        let famdesc = getObjectDescription(mcx, &famaddr, false)?.expect("missing_ok=false");
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!(
+                "{noun} {membernum} ({}, {}) of {famdesc} does not exist",
+                typenames[0].map(TypeNameToString).unwrap_or_default(),
+                typenames[1].map(TypeNameToString).unwrap_or_default(),
+            ),
+        ));
+    }
+    Ok(ObjectAddress::set(class_id, oid))
 }
 
 // get_object_address (objectaddress.c). Returns the resolved address plus the
@@ -871,6 +1253,56 @@ pub fn get_object_address<'mcx>(
                 let oid = lsyscache::get_cast_oid(sourcetypeid, targettypeid, missing_ok)?;
                 (ObjectAddress::set(CastRelationId, oid), None)
             }
+            OBJECT_DEFAULT => get_object_address_attrdef(
+                mcx,
+                object.as_list().expect("default value object is a name list"),
+                lockmode,
+                missing_ok,
+            )?,
+            OBJECT_TRANSFORM => {
+                let objlist = object.as_list().expect("transform object is a list");
+                let tn = objlist
+                    .first()
+                    .and_then(|n| n.as_type_name())
+                    .expect("transform type TypeName");
+                let langname = objlist
+                    .last()
+                    .and_then(|n| n.as_string())
+                    .expect("transform language is a String node")
+                    .sval;
+                let type_id = LookupTypeNameOid(tn, missing_ok)?;
+                let lang_id = proclang::get_language_oid(langname, missing_ok)?;
+                (
+                    ObjectAddress::set(
+                        TransformRelationId,
+                        get_transform_oid(type_id, langname, lang_id, missing_ok)?,
+                    ),
+                    None,
+                )
+            }
+            OBJECT_USER_MAPPING => (
+                get_object_address_usermapping(
+                    &object.as_list().expect("user mapping object is a list"),
+                    missing_ok,
+                )?,
+                None,
+            ),
+            OBJECT_DEFACL => (
+                get_object_address_defacl(
+                    &object.as_list().expect("default ACL object is a list"),
+                    missing_ok,
+                )?,
+                None,
+            ),
+            OBJECT_AMOP | OBJECT_AMPROC => (
+                get_object_address_opf_member(
+                    mcx,
+                    objtype,
+                    &object.as_list().expect("opfamily member object is a list"),
+                    missing_ok,
+                )?,
+                None,
+            ),
             other => unported(&format!("get_object_address {other:?}")),
         };
 
