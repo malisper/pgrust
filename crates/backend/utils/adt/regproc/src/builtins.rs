@@ -37,6 +37,7 @@ macro_rules! fc_reg_in {
 
 fc_reg_in! {
     fc_regprocin: regprocin;
+    fc_regprocedurein: regprocedurein;
     fc_regclassin: regclassin;
     fc_regtypein: regtypein;
     fc_regnamespacein: regnamespacein;
@@ -72,6 +73,7 @@ macro_rules! fc_reg_out {
 
 fc_reg_out! {
     fc_regprocout: regprocout;
+    fc_regprocedureout: regprocedureout;
     fc_regclassout: regclassout;
     fc_regtypeout: regtypeout;
     fc_regnamespaceout: regnamespaceout;
@@ -100,6 +102,7 @@ macro_rules! fc_to_reg {
 
 fc_to_reg! {
     fc_to_regproc: regprocin;
+    fc_to_regprocedure: regprocedurein;
     fc_to_regclass: regclassin;
     fc_to_regtype: regtypein;
     fc_to_regnamespace: regnamespacein;
@@ -138,16 +141,21 @@ pub const REGPROC_BUILTINS: &[FmgrBuiltin] = &[
     b(44, "regprocin", 1, fc_regprocin),
     b(45, "regprocout", 1, fc_regprocout),
     b(1079, "text_regclass", 1, fc_text_regclass),
+    b(2212, "regprocedurein", 1, fc_regprocedurein),
+    b(2213, "regprocedureout", 1, fc_regprocedureout),
     b(2218, "regclassin", 1, fc_regclassin),
     b(2219, "regclassout", 1, fc_regclassout),
     b(2220, "regtypein", 1, fc_regtypein),
     b(2221, "regtypeout", 1, fc_regtypeout),
     b(2444, "regprocrecv", 1, fc_reg_recv),
     b(2445, "regprocsend", 1, fc_reg_send),
+    b(2446, "regprocedurerecv", 1, fc_reg_recv),
+    b(2447, "regproceduresend", 1, fc_reg_send),
     b(2452, "regclassrecv", 1, fc_reg_recv),
     b(2453, "regclasssend", 1, fc_reg_send),
     b(2454, "regtyperecv", 1, fc_reg_recv),
     b(2455, "regtypesend", 1, fc_reg_send),
+    b(3479, "to_regprocedure", 1, fc_to_regprocedure),
     b(3493, "to_regtype", 1, fc_to_regtype),
     b(3494, "to_regproc", 1, fc_to_regproc),
     b(3495, "to_regclass", 1, fc_to_regclass),

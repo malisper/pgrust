@@ -13,6 +13,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_rel = { path = "../../../../_support/types/rel" }
 rel_vocab = { path = "../../../../_support/types/rel_vocab" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }
+regproc_seams = { path = "../regproc_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
 lsyscache = { path = "../../cache/lsyscache" }

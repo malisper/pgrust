@@ -47,8 +47,9 @@ pub use path::{
     SearchPathMatchesCurrentEnvironment,
 };
 pub use visibility::{
-    FunctionIsVisible, FunctionIsVisibleExt, RelationIsVisible, RelationIsVisibleExt,
-    TypeIsVisible, TypeIsVisibleExt,
+    FunctionIsVisible, FunctionIsVisibleExt, OpclassIsVisible, OpclassIsVisibleExt,
+    OperatorIsVisible, OperatorIsVisibleExt, OpfamilyIsVisible, OpfamilyIsVisibleExt,
+    RelationIsVisible, RelationIsVisibleExt, TypeIsVisible, TypeIsVisibleExt,
 };
 
 pub(crate) fn OidIsValid(oid: Oid) -> bool {
