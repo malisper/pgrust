@@ -361,11 +361,11 @@ pub fn cursor_to_xmlschema(
     let r = (|| -> PgResult<String> {
         let cursor = spi::SPI_cursor_find(name).ok_or_else(|| undefined_cursor(name))?;
         let td = cursor.portal.borrow().tupDesc.clone().ok_or_else(|| {
-            ereport(ERROR)
+            let e = ereport(ERROR)
                 .errcode(ERRCODE_INVALID_CURSOR_STATE)
                 .errmsg(format!("portal \"{name}\" does not return tuples"))
-                .into_error()
-                .into()
+                .into_error();
+            Box::new(e)
         })?;
         map_sql_table_to_xmlschema(&td, InvalidOid, nulls, tableforest, targetns)
     })();
