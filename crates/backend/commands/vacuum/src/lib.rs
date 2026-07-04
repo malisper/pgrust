@@ -1091,7 +1091,10 @@ fn vac_truncate_clog(
 
     async_seams::async_notify_freeze_xids::call(frozen_xid)?;
 
-    if guc_tables::vars::track_commit_timestamp.read() {
+    // Slot uninstalled == commit_ts unported == off (startup.rs shape).
+    if guc_tables::vars::track_commit_timestamp.installed()
+        && guc_tables::vars::track_commit_timestamp.read()
+    {
         unported("vac_truncate_clog: commit_ts truncation (AdvanceOldestCommitTsXid/TruncateCommitTs)");
     }
 
