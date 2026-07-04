@@ -42,6 +42,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 nodememoize = { path = "../../../executor/nodememoize" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+format_type = { path = "../../../utils/adt/format_type" }
 mbutils = { path = "../../../utils/mb/mbutils" }
 pg_locale = { path = "../../../utils/adt/pg_locale" }
 regexp_seams = { path = "../../../utils/adt/regexp_seams" }

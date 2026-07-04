@@ -2835,10 +2835,21 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
-            2121 => panic!(
-                "gram_core: ARRAY_SUBLINK (ARRAY select_with_parens) not ported \
-                 (unit backend-parser-gram)"
-            ),
+            // c_expr: ARRAY select_with_parens
+            2121 => {
+                let subselect = view.v(2).node().expect("select_with_parens");
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::ARRAY_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: None,
+                        operName: NodeList::nil(),
+                        subselect,
+                        location: view.l(1),
+                    },
+                )?));
+            }
             // c_expr: ARRAY array_expr (point outermost A_ArrayExpr at ARRAY)
             2122 => {
                 let n = view.v(2).node().expect("array_expr");
