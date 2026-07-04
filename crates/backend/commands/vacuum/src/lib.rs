@@ -1209,6 +1209,7 @@ pub fn init_seams() {
     if !vacuum_seams::vac_update_relstats::is_installed() {
         vacuum_seams::vac_update_relstats::set(vac_update_relstats);
     }
+    vacuum_seams::vacuum_delay_point::set(vacuum_delay_point);
 }
 
 /// vac_open_indexes: just the ready indexes, each locked with `lockmode`.
