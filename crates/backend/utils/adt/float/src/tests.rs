@@ -9,7 +9,7 @@ use ::types_error::{
     ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
-use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+use ::types_fmgr::{FmgrInfo, LocalFcinfo, PGFunction};
 
 fn out8(v: f64) -> String {
     let mut buf = [0u8; MAXDOUBLEWIDTH];
@@ -492,7 +492,7 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 132);
+    assert_eq!(n, 153);
     for b in FLOAT_BUILTINS {
         assert!(b.strict && !b.retset);
         let c = fmgr_core::CANONICAL
@@ -517,4 +517,109 @@ fn float_hash_image_rules() {
     let h0 = ::hashfn::hash_bytes(&float8_hash_image(0.0));
     let hneg0 = ::hashfn::hash_bytes(&float8_hash_image(-0.0));
     assert_eq!(h0, hneg0);
+}
+
+// fmgr frames for the float8[] transvalue family: the agg-context leg
+// updates arg0 in place (C's AggCheckCallContext cheat); the bare leg
+// builds a fresh construct_array image in the result mcx.
+#[test]
+#[cfg_attr(miri, ignore)] // exact-value KATs shared with aggregates_match_live_pg
+fn float_agg_fmgr_frames() {
+    use ::mcx::MemoryContext;
+    use ::types_fmgr::AggStateNode;
+
+    let ctx = MemoryContext::new_bump("float-agg-test");
+    let read3 = |d: Datum| {
+        // SAFETY: a live float8[3] image datum from the frame under test.
+        let img = unsafe {
+            core::slice::from_raw_parts(d.as_usize() as *const u8, float8_transarray_size(3))
+        };
+        check_float8_array::<3>(img, "t").unwrap()
+    };
+
+    // Bare call: fresh image, source untouched.
+    let mut img = [0u8; float8_transarray_size(3)];
+    write_float8_transarray(&[0.0; 3], &mut img);
+    let mut fci = LocalFcinfo::<2>::fresh(0);
+    // SAFETY: ctx outlives every call through the frame.
+    unsafe { fci.set_result_mcx(ctx.mcx()) };
+    fci.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+    fci.set_arg(1, Datum::from_f64(2.0));
+    let d = fc_float8_accum(None, &mut fci).unwrap();
+    assert_ne!(d.as_usize(), img.as_ptr() as usize);
+    assert_eq!(read3(d), [1.0, 2.0, 0.0]);
+    assert_eq!(check_float8_array::<3>(&img, "t").unwrap(), [0.0; 3]);
+
+    // Agg frame: in-place, avg/stddev finals match the kernel KATs.
+    let mut agg = AggStateNode::new(MemoryContext::new_bump("float-aggctx"));
+    let mut trans = [0u8; float8_transarray_size(3)];
+    write_float8_transarray(&[0.0; 3], &mut trans);
+    let tp = trans.as_ptr() as usize;
+    for v in [1.0f64, 2.5, 4.25, -3.5] {
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        fci.context = agg.fm_node_ptr();
+        fci.set_arg(0, Datum::from_usize(tp));
+        fci.set_arg(1, Datum::from_f64(v));
+        assert_eq!(fc_float8_accum(None, &mut fci).unwrap().as_usize(), tp);
+    }
+    let mut fci = LocalFcinfo::<1>::fresh(0);
+    fci.set_arg(0, Datum::from_usize(tp));
+    assert_eq!(out8(fc_float8_avg(None, &mut fci).unwrap().as_f64()), "1.0625");
+    assert!(!fci.isnull);
+    let mut fci = LocalFcinfo::<1>::fresh(0);
+    fci.set_arg(0, Datum::from_usize(tp));
+    assert_eq!(
+        out8(fc_float8_stddev_samp(None, &mut fci).unwrap().as_f64()),
+        "3.3189795118379384"
+    );
+
+    // Empty-state final: SQL NULL.
+    let mut empty = [0u8; float8_transarray_size(3)];
+    write_float8_transarray(&[0.0; 3], &mut empty);
+    let mut fci = LocalFcinfo::<1>::fresh(0);
+    fci.set_arg(0, Datum::from_usize(empty.as_ptr() as usize));
+    fc_float8_avg(None, &mut fci).unwrap();
+    assert!(fci.isnull);
+
+    // combine in the agg frame folds t2 into t1 in place.
+    let mut t1 = [0u8; float8_transarray_size(3)];
+    write_float8_transarray(&float8_accum(float8_accum([0.0; 3], 1.0).unwrap(), 2.5).unwrap(), &mut t1);
+    let mut t2 = [0u8; float8_transarray_size(3)];
+    write_float8_transarray(&float8_accum(float8_accum([0.0; 3], 4.25).unwrap(), -3.5).unwrap(), &mut t2);
+    let mut fci = LocalFcinfo::<2>::fresh(0);
+    fci.context = agg.fm_node_ptr();
+    fci.set_arg(0, Datum::from_usize(t1.as_ptr() as usize));
+    fci.set_arg(1, Datum::from_usize(t2.as_ptr() as usize));
+    let d = fc_float8_combine(None, &mut fci).unwrap();
+    assert_eq!(d.as_usize(), t1.as_ptr() as usize);
+    let c = check_float8_array::<3>(&t1, "t").unwrap();
+    assert_eq!(c[0], 4.0);
+    assert_eq!(out8(float8_avg(c).unwrap()), "1.0625");
+
+    // regr transfn (state, Y, X) + finals through the frame.
+    let mut r = [0u8; float8_transarray_size(6)];
+    write_float8_transarray(&[0.0; 6], &mut r);
+    let rp = r.as_ptr() as usize;
+    for (y, x) in [(1.0, 2.0), (2.5, 4.1), (4.25, 7.9), (-3.5, -6.0)] {
+        let mut fci = LocalFcinfo::<3>::fresh(0);
+        fci.context = agg.fm_node_ptr();
+        fci.set_arg(0, Datum::from_usize(rp));
+        fci.set_arg(1, Datum::from_f64(y));
+        fci.set_arg(2, Datum::from_f64(x));
+        assert_eq!(fc_float8_regr_accum(None, &mut fci).unwrap().as_usize(), rp);
+    }
+    let final6 = |f: PGFunction| {
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        fci.set_arg(0, Datum::from_usize(rp));
+        out8(f(None, &mut fci).unwrap().as_f64())
+    };
+    assert_eq!(final6(fc_float8_regr_slope), "0.5650552218562294");
+    assert_eq!(final6(fc_float8_corr), "0.9986369273154668");
+    assert_eq!(final6(fc_float8_covar_samp), "19.441666666666666");
+
+    // Wrong-shape transarray: C's elog text.
+    let mut fci = LocalFcinfo::<1>::fresh(0);
+    fci.set_arg(0, Datum::from_usize(tp));
+    let err = fc_float8_regr_sxx(None, &mut fci).unwrap_err();
+    assert_eq!(err.message(), "float8_regr_sxx: expected 6-element float8 array");
 }
