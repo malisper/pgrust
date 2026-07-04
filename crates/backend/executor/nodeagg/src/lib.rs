@@ -629,8 +629,8 @@ pub fn exec_init_agg<'mcx>(
             num_direct_args as u16 + 1
         };
         let finalfn = if shape.aggfinalfn != 0 {
-            // Divergence: C aclchecks as the aggregate owner (proowner
-            // projection unported); differs only under SET ROLE.
+            // Divergence: C aclchecks as the aggregate owner; differs only
+            // under SET ROLE.
             let aclresult = aclchk_seams::object_aclcheck::call(
                 PROCEDURE_RELATION_ID,
                 shape.aggfinalfn,
@@ -641,8 +641,7 @@ pub fn exec_init_agg<'mcx>(
                 return Err(agg_permission_denied(shape.aggfinalfn));
             }
             let mut flinfo = fmgr_core::fmgr_info(shape.aggfinalfn)?;
-            // build_aggregate_finalfn_expr: [transtype, input types..] for
-            // get_fn_expr_argtype consumers (hypothetical_check_argtypes).
+            // build_aggregate_finalfn_expr's [transtype, input types..].
             let mut fnexpr_types: PgVec<'mcx, Oid> =
                 vec_with_capacity_in(mcx, num_final_args as usize)?;
             fnexpr_types.push(aggref.aggtranstype);
@@ -650,7 +649,7 @@ pub fn exec_init_agg<'mcx>(
                 fnexpr_types.push(t);
             }
             // SAFETY: leaked into the query arena; the flinfo dies with the
-            // plan it serves (init_pertrans_sort's carrier precedent).
+            // plan (init_pertrans_sort's carrier precedent).
             let fnexpr_types: &'static [Oid] =
                 unsafe { core::mem::transmute(fnexpr_types.leak()) };
             let carrier =
@@ -776,8 +775,6 @@ pub fn exec_init_agg<'mcx>(
         // SAFETY: transno < numtrans elements of the once-allocated pergroup.
         let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(transno)) };
         let is_ordered_set = aggref.aggkind != AGGKIND_NORMAL;
-        // C: ordered-set transfns take only the aggregated args
-        // (numTransInputs = list_length(aggref->args)).
         let num_direct_args = if is_ordered_set { aggref.aggdirectargs.len() } else { 0 };
         let mut arg_types: PgVec<'mcx, Oid> =
             vec_with_capacity_in(mcx, aggref.aggargtypes.len() - num_direct_args + 1)?;
@@ -1750,8 +1747,6 @@ pub(crate) fn finalize_aggregates<'mcx>(
         } else {
             pg.trans_value
         };
-        // C evaluates direct args even without a finalfn (side-effects); they
-        // run in the output econtext with the group's first tuple bound.
         let mut direct: [NullableDatum; MAX_FINAL_ARGS] =
             [NullableDatum::null(); MAX_FINAL_ARGS];
         let mut anynull = false;
@@ -2178,13 +2173,11 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     unsafe { node.agg_node.as_mut() }.reset();
 }
 
-/// C `AggGetAggref` (nodeAgg.c): the Aggref of the currently-executing
-/// aggregate trans/final fn, via the fcinfo context's cur-agg slot.
+/// C `AggGetAggref` (nodeAgg.c).
 ///
 /// # Safety
 /// `fcinfo.context`, if set, points at a live node outliving `'a`; the
-/// cur-agg slot only ever holds `&'query Aggref` pointers (exec_init_agg /
-/// execexpr's AggSetCurrent are the sole writers).
+/// cur-agg slot only ever holds `&'query Aggref` pointers.
 pub unsafe fn agg_get_aggref<'a>(
     fcinfo: &::types_fmgr::FunctionCallInfoBaseData,
 ) -> Option<&'a Aggref<'a>> {
@@ -2195,8 +2188,7 @@ pub unsafe fn agg_get_aggref<'a>(
     Some(unsafe { p.cast::<Aggref<'a>>().as_ref() })
 }
 
-/// C `AggStateIsShared` (nodeAgg.c); true (conservative) outside an
-/// aggregate call.
+/// C `AggStateIsShared` (nodeAgg.c); true (conservative) outside an agg call.
 ///
 /// # Safety
 /// As [`agg_get_aggref`].
@@ -2208,7 +2200,7 @@ pub unsafe fn agg_state_is_shared(fcinfo: &::types_fmgr::FunctionCallInfoBaseDat
     }
 }
 
-/// C `AggRegisterCallback` (nodeAgg.c): group-lifetime shutdown callback.
+/// C `AggRegisterCallback` (nodeAgg.c).
 ///
 /// # Safety
 /// As [`agg_get_aggref`], plus `AggStateNode::register_shutdown_callback`'s
