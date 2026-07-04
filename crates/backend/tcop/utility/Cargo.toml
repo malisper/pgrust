@@ -15,6 +15,7 @@ aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
 tablecmds = { path = "../../commands/tablecmds" }
+trigger = { path = "../../commands/trigger" }
 typecmds = { path = "../../commands/typecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
