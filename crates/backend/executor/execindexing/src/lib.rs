@@ -20,6 +20,8 @@ mod tests;
 
 mod build_scan;
 pub use build_scan::table_index_build_scan;
+mod validate_scan;
+pub use validate_scan::{table_index_validate_scan, ValidateIndexState};
 
 #[cold]
 #[inline(never)]

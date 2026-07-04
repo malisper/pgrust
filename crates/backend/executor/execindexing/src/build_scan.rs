@@ -28,9 +28,7 @@ pub fn table_index_build_scan<'mcx, F>(
 where
     F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
 {
-    if index_info.ii_Concurrent {
-        unported("heapam_index_build_range_scan: concurrent (MVCC-snapshot) build");
-    }
+    let concurrent = index_info.ii_Concurrent;
     let is_system_catalog = catalog::IsSystemRelation(heap_relation);
     let checking_uniqueness = index_info.ii_Unique;
 
@@ -40,8 +38,21 @@ where
         Some(heap_relation.rd_att.clone()),
     );
 
-    let oldest_xmin = procarray::GetOldestNonRemovableTransactionId(heap_relation)?;
-    debug_assert!(oldest_xmin != 0);
+    // Concurrent builds scan under a registered MVCC snapshot; OldestXmin is
+    // only for the SnapshotAny lane's HTSV routing.
+    let registered = if concurrent {
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        Some(snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot"))
+    } else {
+        None
+    };
+    let oldest_xmin = if concurrent {
+        types_core::InvalidTransactionId
+    } else {
+        let x = procarray::GetOldestNonRemovableTransactionId(heap_relation)?;
+        debug_assert!(x != 0);
+        x
+    };
 
     let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT;
     if allow_sync {
@@ -50,7 +61,7 @@ where
     let mut scan = heapam::heap_beginscan(
         mcx,
         heap_relation,
-        None, // SnapshotAny
+        registered.clone(), // None is SnapshotAny
         0,
         PgVec::new_in(mcx),
         None,
@@ -83,7 +94,12 @@ where
 
         let tuple_is_alive;
         let index_it;
-        {
+        if concurrent {
+            // MVCC-snapshot lane: every returned tuple is visible and indexed.
+            index_it = true;
+            tuple_is_alive = true;
+            reltuples += 1.0;
+        } else {
             let pin = scan.rs_cbuf.as_ref().expect("pinned page for returned tuple");
             let guard = pin.lock_share()?;
             let htsv = heapam_visibility::HeapTupleSatisfiesVacuum(&mut tuple, oldest_xmin, buffer)?;
@@ -199,6 +215,9 @@ where
 
     exectuples::exec_clear_tuple(&mut slot, mcx);
     heapam::heap_endscan(scan)?;
+    if let Some(snap) = registered {
+        snapmgr::UnregisterSnapshot(Some(&snap));
+    }
     Ok(reltuples)
 }
 

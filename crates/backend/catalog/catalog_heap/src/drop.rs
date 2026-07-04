@@ -227,6 +227,48 @@ pub fn RemoveStatistics<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) ->
     rel.close(RowExclusiveLock)
 }
 
+// CopyStatistics (heap.c): copy pg_statistic rows from one relation to another.
+pub fn CopyStatistics<'mcx>(mcx: Mcx<'mcx>, fromrelid: Oid, torelid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, StatisticRelationId, RowExclusiveLock)?;
+    let key = oid_scankey(Anum_pg_statistic_starelid, fromrelid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        StatisticRelidAttnumInhIndexId,
+        true,
+        None,
+        &[key],
+    )?;
+    let desc = rel.descr();
+    let natts = desc.natts as usize;
+    let mut indstate = None;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        nulls.resize(natts, false);
+        replace.resize(natts, false);
+        values[Anum_pg_statistic_starelid - 1] = Datum::from_oid(torelid);
+        replace[Anum_pg_statistic_starelid - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+        if indstate.is_none() {
+            indstate = Some(catalog_indexing::CatalogOpenIndexes(mcx, &rel)?);
+        }
+        catalog_indexing::CatalogTupleInsertWithInfo(
+            mcx,
+            &rel,
+            &mut newtup,
+            indstate.as_mut().unwrap(),
+        )?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    if let Some(st) = indstate {
+        catalog_indexing::CatalogCloseIndexes(st)?;
+    }
+    rel.close(RowExclusiveLock)
+}
+
 pub fn DeleteAttributeTuples<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     let attrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let key = oid_scankey(Anum_pg_attribute_attrelid, relid);

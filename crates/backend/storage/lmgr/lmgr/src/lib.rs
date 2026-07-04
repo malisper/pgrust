@@ -138,6 +138,17 @@ pub fn UnlockRelationOid(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
     Ok(())
 }
 
+pub fn LockRelationIdForSession(relid: &LockRelId, lockmode: LOCKMODE) -> PgResult<()> {
+    let tag = LOCKTAG::relation(relid.dbId, relid.relId);
+    lock_seams::lock_acquire_extended::call(tag, lockmode, true, false, true, false)?;
+    Ok(())
+}
+
+pub fn UnlockRelationIdForSession(relid: &LockRelId, lockmode: LOCKMODE) -> PgResult<()> {
+    lock_seams::lock_release::call(LOCKTAG::relation(relid.dbId, relid.relId), lockmode, true)?;
+    Ok(())
+}
+
 pub fn LockRelation(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()> {
     let tag = rel_tag(rel);
     let res = acquire(tag, lockmode, false)?;

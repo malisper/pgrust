@@ -1496,3 +1496,19 @@ pub fn init_seams() {
         );
     }
 }
+
+// set_indexsafe_procflags (indexcmds.c:4612): mark this backend safe to skip
+// in other sessions' concurrent-index snapshot waits; reset at xact end with
+// the other status flags. Must run before any xid/xmin is installed.
+pub fn SetIndexsafeProcflags() -> PgResult<()> {
+    let procno = MyProc().expect("SetIndexsafeProcflags requires MyProc");
+    let proc = GetPGProcByNumber(procno);
+    debug_assert!(!TransactionIdIsValid(proc.xid.read()));
+    debug_assert!(!TransactionIdIsValid(proc.xmin.read()));
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, procno)?;
+    let flags = proc.statusFlags.load(Relaxed) | types_storage::storage::PROC_IN_SAFE_IC;
+    proc.statusFlags.store(flags, Relaxed);
+    ProcGlobal().statusFlags[proc.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
+    LWLockRelease(ProcArrayLock())?;
+    Ok(())
+}

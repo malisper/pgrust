@@ -48,6 +48,9 @@ pub(crate) struct BTVacState<'a, 'mcx> {
     pub info: &'a IndexVacuumInfo<'a, 'mcx>,
     pub stats: &'a mut IndexBulkDeleteResult,
     pub dead_items: Option<&'a [ItemPointerData]>,
+    // C's IndexBulkDeleteCallback shape for callers that never delete
+    // (validate_index): every live heap TID is reported, nothing is removed.
+    pub collect: Option<&'a mut dyn FnMut(&ItemPointerData) -> PgResult<()>>,
     pub cycleid: BTCycleId,
     pub pendingpages: PgVec<'mcx, ::types_nbtree::BTPendingFSM>,
     pub maxbufsize: usize,
@@ -80,10 +83,25 @@ pub fn btbulkdelete<'mcx>(
     // C's PG_ENSURE_ERROR_CLEANUP: the slot is freed on the PgResult error
     // path; a panic aborts the backend, so the leak C guards against is moot.
     let cycleid = bt_start_vacuum(rel)?;
-    let res = btvacuumscan(mcx, info, &mut stats, Some(dead_items), cycleid);
+    let res = btvacuumscan(mcx, info, &mut stats, Some(dead_items), None, cycleid);
     bt_end_vacuum(rel);
     res?;
 
+    Ok(stats)
+}
+
+// btbulkdelete with C's never-delete callback shape (validate_index).
+pub fn btbulkdelete_collect<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    callback: &mut dyn FnMut(&ItemPointerData) -> PgResult<()>,
+) -> PgResult<IndexBulkDeleteResult> {
+    let rel = info.index;
+    let mut stats = IndexBulkDeleteResult::default();
+    let cycleid = bt_start_vacuum(rel)?;
+    let res = btvacuumscan(mcx, info, &mut stats, None, Some(callback), cycleid);
+    bt_end_vacuum(rel);
+    res?;
     Ok(stats)
 }
 
@@ -104,7 +122,7 @@ pub fn btvacuumcleanup<'mcx>(
                 return Ok(None);
             }
             let mut stats = IndexBulkDeleteResult::default();
-            btvacuumscan(mcx, info, &mut stats, None, 0)?;
+            btvacuumscan(mcx, info, &mut stats, None, None, 0)?;
             stats.estimated_count = true;
             stats
         }
@@ -126,6 +144,7 @@ fn btvacuumscan<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     stats: &mut IndexBulkDeleteResult,
     dead_items: Option<&[ItemPointerData]>,
+    collect: Option<&mut dyn FnMut(&ItemPointerData) -> PgResult<()>>,
     cycleid: BTCycleId,
 ) -> PgResult<()> {
     let rel = info.index;
@@ -135,15 +154,17 @@ fn btvacuumscan<'mcx>(
     stats.pages_deleted = 0;
     stats.pages_free = 0;
 
+    let cleanuponly = dead_items.is_none() && collect.is_none();
     let mut vstate = BTVacState {
         info,
         stats,
         dead_items,
+        collect,
         cycleid,
         pendingpages: PgVec::new_in(mcx),
         maxbufsize: 0,
     };
-    bt_pendingfsm_init(&mut vstate, dead_items.is_none())?;
+    bt_pendingfsm_init(&mut vstate, cleanuponly)?;
 
     let mut scratch = MemoryContext::new("btvacuumpage");
 
@@ -292,6 +313,29 @@ fn btvacuumpage(
                     }
                     offnum += 1;
                 }
+            } else if vstate.collect.is_some() {
+                let mut offnum = minoff;
+                while offnum <= maxoff {
+                    let page = pin.page();
+                    let itup = page_item(&page, page.item_id(offnum));
+                    // SAFETY: on-page tuple under the cleanup lock.
+                    unsafe {
+                        debug_assert!(!bt_tuple_is_pivot(itup));
+                        if !bt_tuple_is_posting(itup) {
+                            let tid = t_tid(itup);
+                            (vstate.collect.as_mut().expect("checked"))(&tid)?;
+                            nhtidslive += 1;
+                        } else {
+                            let nposting = bt_tuple_get_nposting(itup);
+                            for i in 0..nposting {
+                                let tid = bt_tuple_get_posting_n(itup, i);
+                                (vstate.collect.as_mut().expect("checked"))(&tid)?;
+                            }
+                            nhtidslive += nposting;
+                        }
+                    }
+                    offnum += 1;
+                }
             }
 
             if ndeletable > 0 || !updatable.is_empty() {
@@ -317,7 +361,7 @@ fn btvacuumpage(
 
             if minoff > maxoff {
                 attempt_pagedel = blkno == scanblkno;
-            } else if vstate.dead_items.is_some() {
+            } else if vstate.dead_items.is_some() || vstate.collect.is_some() {
                 vstate.stats.num_index_tuples += nhtidslive as f64;
             } else {
                 vstate.stats.num_index_tuples += (maxoff - minoff + 1) as f64;

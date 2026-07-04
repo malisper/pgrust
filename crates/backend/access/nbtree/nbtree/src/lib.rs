@@ -27,7 +27,7 @@ mod tests;
 
 pub use insert::btinsert;
 pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion, bt_pageinit};
-pub use vacuum::{btbulkdelete, btvacuumcleanup, IndexVacuumInfo};
+pub use vacuum::{btbulkdelete, btbulkdelete_collect, btvacuumcleanup, IndexVacuumInfo};
 
 use ::mcx::Mcx;
 use ::types_core::{BLCKSZ, InvalidSubTransactionId};

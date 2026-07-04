@@ -24,6 +24,7 @@ indexam = { path = "../../access/index/indexam" }
 inval = { path = "../../utils/cache/inval" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 guc = { path = "../../utils/misc/guc" }
+init_small = { path = "../../utils/init/init_small" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
@@ -32,6 +33,9 @@ spgist_build = { path = "../../access/spgist/spgist_build" }
 brin_build = { path = "../../access/brin/brin_build" }
 gistbuild = { path = "../../access/gist/gistbuild" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
+nbtree = { path = "../../access/nbtree/nbtree" }
+readfuncs = { path = "../../nodes/readfuncs" }
+types_array = { package = "types_array", path = "../../../_support/types/array" }
 hashsort = { path = "../../access/hash/hashsort" }
 types_nodes = { path = "../../../_support/types/nodes" }
 nodes_core = { path = "../../nodes/nodes_core" }

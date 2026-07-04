@@ -154,6 +154,14 @@ pub(crate) fn drop_entry(key: PgStat_HashKey) {
     SHARED_STATS.lock().unwrap().remove(&key);
 }
 
+// pgstat_copy_relation_stats' shared-entry copy.
+pub(crate) fn copy_entry(src: PgStat_HashKey, dst: PgStat_HashKey) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    if let Some(&e) = store.get(&src) {
+        store.insert(dst, e);
+    }
+}
+
 struct SnapshotState {
     mode: i32,
     snapshot_timestamp: TimestampTz,
