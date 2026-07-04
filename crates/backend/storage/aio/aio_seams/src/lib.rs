@@ -16,6 +16,43 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // method_io_uring.c read subset: submit one read SQE for (fd, offset)
+    // landing directly in shared buffer `buffer`'s pool page. Caller has the
+    // buffer pinned with BM_IO_IN_PROGRESS; the submit arms desc.io_wref
+    // before the SQE is visible. false = ring unavailable/full — caller backs
+    // the IO out and falls back to advisory prefetch.
+    pub fn uring_buf_read(fd: i32, offset: i64, buffer: i32) -> bool
+);
+
+seam_core::seam!(
+    // pgaio_wref_wait shape for uring buffer reads: any thread drains the
+    // owning ring until (aio_index, generation) completes or is stale.
+    pub fn uring_buf_read_wait(aio_index: u32, generation: u64)
+);
+
+seam_core::seam!(
+    // Nonblocking: fills `out` with buffer ids of this thread's completed
+    // reads (slots freed); caller drops the issuer pins.
+    pub fn uring_collect_done(out: &mut [i32]) -> usize
+);
+
+seam_core::seam!(
+    // Blocking form: waits out every in-flight read on this thread's ring,
+    // then collects as uring_collect_done.
+    pub fn uring_drain_own(out: &mut [i32]) -> usize
+);
+
+seam_core::seam!(
+    pub fn uring_available() -> bool
+);
+
+seam_core::seam!(
+    // Crash-cycle reset (postmaster, all children dead): wait out every ring's
+    // in-flight DMA into the pool WITHOUT running completions.
+    pub fn uring_drain_all_raw()
+);
+
+seam_core::seam!(
     pub fn pgaio_error_cleanup()
 );
 

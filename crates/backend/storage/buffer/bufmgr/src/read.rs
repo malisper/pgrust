@@ -148,7 +148,7 @@ fn PinBufferForBlock(
 }
 
 /// The partitioned mapping lookup, warm-hit pin, and victim install.
-fn BufferAlloc(
+pub(crate) fn BufferAlloc(
     smgr: RelFileLocatorBackend,
     relpersistence: u8,
     forknum: ForkNumber,
@@ -280,19 +280,25 @@ fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
     Ok(true)
 }
 
-/// WaitIO (bufmgr.c) with the pgaio wait arm collapsed away (io_method=sync).
+/// WaitIO (bufmgr.c): the pgaio_wref_wait arm routes to the uring ring drain
+/// (any thread may complete any IO — C's deadlock rule).
 pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
     let cv = BufferDescriptorGetIOCV(desc);
     ConditionVariablePrepareToSleep(cv);
     loop {
         let buf_state = LockBufHdr(desc);
-        let wref_armed = desc.io_wref_armed();
+        let wref = desc.io_wref();
         UnlockBufHdr(desc, buf_state);
         if buf_state & BM_IO_IN_PROGRESS == 0 {
             break;
         }
-        if wref_armed {
-            panic!("unported callee reached from bufmgr.c WaitIO: pgaio_wref_wait (aio; sync reads never arm io_wref)");
+        if wref.aio_index != 0 || wref.generation_upper != 0 || wref.generation_lower != 0 {
+            if !aio_seams::uring_buf_read_wait::is_installed() {
+                panic!("unported callee reached from bufmgr.c WaitIO: pgaio_wref_wait (io_wref armed with no uring backend)");
+            }
+            let gen = ((wref.generation_upper as u64) << 32) | wref.generation_lower as u64;
+            aio_seams::uring_buf_read_wait::call(wref.aio_index, gen);
+            continue;
         }
         if let Err(e) = ConditionVariableSleep(cv, WAIT_EVENT_BUFFER_IO) {
             // C divergence: C cancels at abort; PgResult must de-list here.
@@ -304,7 +310,12 @@ pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
     Ok(())
 }
 
-pub(crate) fn StartBufferIO(desc: &BufferDesc, for_input: bool, nowait: bool) -> PgResult<bool> {
+pub(crate) fn StartBufferIO(
+    desc: &BufferDesc,
+    for_input: bool,
+    nowait: bool,
+    remember_owner: bool,
+) -> PgResult<bool> {
     resowner::ResourceOwnerEnlarge(resowner::CurrentResourceOwner())?;
     let buf_state = loop {
         let buf_state = LockBufHdr(desc);
@@ -327,12 +338,16 @@ pub(crate) fn StartBufferIO(desc: &BufferDesc, for_input: bool, nowait: bool) ->
         return Ok(false);
     }
     UnlockBufHdr(desc, buf_state | BM_IO_IN_PROGRESS);
-    resowner::ResourceOwnerRemember(
-        resowner::CurrentResourceOwner(),
-        Datum::from_i32(BufferDescriptorGetBuffer(desc)),
-        &BUFFER_IO_DESC,
-    )
-    .expect("ResourceOwnerRememberBufferIO");
+    // remember_owner=false: uring reads track abort cleanup via the ring drain
+    // in AtEOXact_Buffers, not AbortBufferIO (C 18 buffer AIO shape).
+    if remember_owner {
+        resowner::ResourceOwnerRemember(
+            resowner::CurrentResourceOwner(),
+            Datum::from_i32(BufferDescriptorGetBuffer(desc)),
+            &BUFFER_IO_DESC,
+        )
+        .expect("ResourceOwnerRememberBufferIO");
+    }
     Ok(true)
 }
 
@@ -430,7 +445,7 @@ fn complete_read_sync(
         return complete_read_local(smgr, forknum, blkno, buffer, zero_on_error);
     }
     let desc = GetBufferDescriptor(buffer - 1);
-    if !StartBufferIO(desc, true, false)? {
+    if !StartBufferIO(desc, true, false, true)? {
         return Ok(());
     }
     let blk = BufferGetBlockPtr(buffer);
@@ -470,7 +485,7 @@ fn complete_read_sync(
 
 /// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
 /// ControlFile (tracked divergence: checksum-enabled clusters unverified).
-fn page_is_verified(page: *const u8) -> bool {
+pub(crate) fn page_is_verified(page: *const u8) -> bool {
     // SAFETY: caller owns a pinned BLCKSZ page image; u16 fields are 2-aligned
     // (page images are MAXALIGNed).
     unsafe {
@@ -519,7 +534,7 @@ fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) 
     let desc = GetBufferDescriptor(buffer - 1);
     let mut need_to_zero = false;
     if !already_valid {
-        need_to_zero = StartBufferIO(desc, true, false)?;
+        need_to_zero = StartBufferIO(desc, true, false, true)?;
     }
     if need_to_zero {
         let blk = BufferGetBlockPtr(buffer);
@@ -615,6 +630,14 @@ pub fn PrefetchBuffer(
     }
     if fd::io_direct_flags() & types_storage::IO_DIRECT_DATA != 0 {
         return Ok(PrefetchOutcome::Skipped);
+    }
+    if aio_seams::uring_available::is_installed() && aio_seams::uring_available::call() {
+        if let Some(outcome) =
+            crate::uring::start_read(smgr, rel.rd_rel.relpersistence, forknum, blkno)?
+        {
+            return Ok(outcome);
+        }
+        // Ring momentarily full or submit failed: advisory fallback below.
     }
     Ok(if smgr_seams::smgr_prefetch::call(smgr, forknum, blkno, 1)? {
         PrefetchOutcome::Issued

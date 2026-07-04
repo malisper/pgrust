@@ -23,7 +23,7 @@ pub use desc::{
 };
 pub use io::{
     FileClose, FileFallocate, FileGetRawDesc, FileGetRawFlags, FileGetRawMode, FilePathName,
-    FilePrefetch, FileRead, FileReadV, FileSize, FileStartReadV, FileSync, FileTruncate,
+    FilePrefetch, FileRead, FileReadV, FileSize, FileStartBufferRead, FileStartReadV, FileSync, FileTruncate,
     FileWrite, FileWriteV, FileWriteback, FileZero, PathNameOpenFile, PathNameOpenFilePerm,
 };
 pub use sync::{
