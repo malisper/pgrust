@@ -560,6 +560,8 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "hashfn",
+ "hyperloglog",
  "init_small",
  "mcx",
  "pg_prng",
@@ -11433,6 +11435,7 @@ version = "0.1.0"
 dependencies = [
  "adt_datetime",
  "adt_network",
+ "adt_numeric",
  "adt_timestamp",
  "adt_uuid",
  "datum",
