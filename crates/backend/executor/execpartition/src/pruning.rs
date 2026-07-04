@@ -418,6 +418,15 @@ fn get_matching_partitions<'mcx>(
     let ctx = if initial { pprune.initial_ctx.as_mut() } else { pprune.exec_ctx.as_mut() }
         .expect("prune context initialized for this pass");
 
+    // ExecEvalParamExec pending-initplan arm, hoisted (execScan precedent).
+    let mut deps: Vec<u32> = Vec::new();
+    for st in ctx.exprstates.iter().flatten() {
+        deps.extend_from_slice(st.param_exec_deps());
+    }
+    if !deps.is_empty() {
+        executils::exec_eval_param_exec_params(estate, &deps)?;
+    }
+
     let mut results: Vec<Option<PruneStepResult<'mcx>>> = Vec::new();
     results.resize_with(num_steps, || None);
     for step in steps.iter() {
