@@ -369,7 +369,7 @@ fn pg_class(relname: &str, oid: Oid, relam: Oid, relkind: u8, hasindex: bool) ->
 
 fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
     RelationData {
-        rd_locator: ::types_storage::RelFileLocator::new(1663, 5, HEAP_OID),
+        rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, HEAP_OID)),
         rd_smgr: Default::default(),
         rd_id: HEAP_OID,
         rd_backend: INVALID_PROC_NUMBER,
