@@ -1587,7 +1587,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                                 headisnull || !currisnull
                             }
                         } else {
-                            fmgr_core::function_call5_coll_in(
+                            ::types_fmgr::function_call5_coll_in(
                                 start_in_range.as_mut().unwrap(),
                                 plan.inRangeColl,
                                 mcx,
@@ -1816,7 +1816,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                                 !currisnull
                             }
                         } else {
-                            !fmgr_core::function_call5_coll_in(
+                            !::types_fmgr::function_call5_coll_in(
                                 end_in_range.as_mut().unwrap(),
                                 plan.inRangeColl,
                                 mcx,
