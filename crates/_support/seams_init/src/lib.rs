@@ -177,6 +177,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
     sql_functions::init_seams();
+    pg_proc::init_seams();
+    regress_lib::init_seams();
     plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);

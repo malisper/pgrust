@@ -3028,6 +3028,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dfmgr"
+version = "0.1.0"
+dependencies = [
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "discard"
 version = "0.1.0"
 dependencies = [
@@ -3715,6 +3723,7 @@ dependencies = [
  "cryptohashfuncs",
  "datum",
  "dbsize",
+ "dfmgr",
  "extension_seams",
  "fmgr_seams",
  "mcx",
@@ -7346,6 +7355,7 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "dfmgr",
  "elog",
  "fmgr_core",
  "format_type",
@@ -7354,6 +7364,7 @@ dependencies = [
  "pg_depend",
  "pquery",
  "superuser",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",
@@ -8775,6 +8786,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "regress_lib"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "arrayfuncs",
+ "catalog",
+ "coerce",
+ "datum",
+ "detoast_seams",
+ "dfmgr",
+ "elog_seams",
+ "init_small",
+ "libc",
+ "mbutils",
+ "mcx",
+ "pg_path",
+ "relpath",
+ "superuser",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "types_trigger_call",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "rel_vocab"
 version = "0.1.0"
 
@@ -9633,6 +9674,7 @@ dependencies = [
  "pg_enum",
  "pg_locale",
  "pg_prng",
+ "pg_proc",
  "pg_sema",
  "pg_string",
  "pgstat",
@@ -9658,6 +9700,7 @@ dependencies = [
  "ps_status",
  "queryenvironment",
  "regex_core",
+ "regress_lib",
  "relation",
  "relcache",
  "relcache_build",

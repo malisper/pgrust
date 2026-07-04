@@ -123,6 +123,8 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+pg_proc = { path = "../../backend/catalog/pg_proc" }
+regress_lib = { path = "../../backend/test_regress" }
 plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
