@@ -1361,6 +1361,13 @@ fn expand_function_arguments_opt<'mcx>(
 ) -> PgResult<Option<NodeList<'mcx>>> {
     let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
         .ok_or_else(|| func_lookup_failed(funcid))?;
+    let has_named_args = args.iter().any(|a| a.node_tag() == NodeTag::T_NamedArgExpr);
+    // Fast path mirrors C's fall-through: no catalog array reads when there
+    // is nothing to expand.
+    if !include_out_arguments && !has_named_args && args.len() >= shape.pronargs as usize {
+        return Ok(None);
+    }
+
     let (_, proargtypes) = syscache_seams::lookup_pg_proc_signature::call(mcx, funcid)?
         .ok_or_else(|| func_lookup_failed(funcid))?;
     let mut pronargs = shape.pronargs as usize;
@@ -1374,8 +1381,6 @@ fn expand_function_arguments_opt<'mcx>(
             proargtypes = all;
         }
     }
-
-    let has_named_args = args.iter().any(|a| a.node_tag() == NodeTag::T_NamedArgExpr);
 
     if has_named_args {
         let args = reorder_function_arguments(mcx, args, pronargs, funcid)?;
