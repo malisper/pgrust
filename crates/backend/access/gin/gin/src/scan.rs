@@ -284,6 +284,8 @@ pub(crate) fn ginNewScanKey(
 
     if work.keys.is_empty() && !so.isVoidRes {
         has_null_query = true;
+        // SAFETY: vector stored in the key inside work (kcx contract).
+        let empty_ops = mcx::vec_new_in(unsafe { work.kcx() });
         fill_scan_key(
             &state,
             &mut work,
@@ -293,8 +295,7 @@ pub(crate) fn ginNewScanKey(
             Datum::null(),
             &[],
             &[],
-            // SAFETY: vector stored in the key inside work (kcx contract).
-            mcx::vec_new_in(unsafe { work.kcx() }),
+            empty_ops,
         )?;
     }
 
