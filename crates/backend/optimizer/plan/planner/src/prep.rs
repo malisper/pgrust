@@ -39,7 +39,9 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
 // remove_useless_result_rtes + remove_useless_results_recurse
 // (prepjointree.c:3596). remove_result_refs and the find_dependent_phvs
 // checks are vacuous here: PlaceHolderVar creation is loud, so lastPHId is
-// always 0 and no PHV can reference a dropped rel.
+// always 0 and no PHV can reference a dropped rel. C mutates in place; here
+// the recursion returns None for untouched subtrees so the unchanged case
+// (every RESULT-bearing query pays this pass) allocates nothing.
 pub fn remove_useless_result_rtes<'mcx>(
     run: &PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -47,27 +49,40 @@ pub fn remove_useless_result_rtes<'mcx>(
     let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
     let mut dropped_outer_joins = types_nodes::bitmapset::Bitmapset::empty();
-    let mut quals = f.quals;
-    let mut children: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut slot = QualSlot { node: f.quals, changed: false };
+    let mut children: mcx::PgVec<'mcx, Option<Node<'mcx>>> = mcx::PgVec::new_in(mcx);
+    let mut any_child_changed = false;
     for child in &f.fromlist {
-        children.push(remove_useless_results_recurse(
+        match remove_useless_results_recurse(
             run,
             parse,
             child,
-            Some(&mut quals),
+            Some(&mut slot),
             &mut dropped_outer_joins,
-        )?);
+        )? {
+            Some(n) => {
+                any_child_changed = true;
+                children.push(Some(n));
+            }
+            None => children.push(Some(child)),
+        }
     }
     let mut remaining = children.len();
-    let mut fromlist = NodeList::nil();
-    for child in children.iter() {
-        if remaining > 1 && get_result_relid(parse, *child) != 0 {
+    let mut ndropped = 0usize;
+    for child in children.iter_mut() {
+        if remaining > 1 && get_result_relid(parse, child.expect("live child")) != 0 {
             remaining -= 1;
-            continue;
+            ndropped += 1;
+            *child = None;
         }
-        fromlist.lappend(mcx, *child)?;
     }
-    parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals })?);
+    if any_child_changed || slot.changed || ndropped > 0 {
+        let mut fromlist = NodeList::nil();
+        for child in children.iter().flatten() {
+            fromlist.lappend(mcx, *child)?;
+        }
+        parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: slot.node })?);
+    }
 
     if !dropped_outer_joins.is_empty() {
         crate::prepjointree::remove_nulling_relids(parse, &dropped_outer_joins, None)?;
@@ -91,6 +106,11 @@ pub fn remove_useless_result_rtes<'mcx>(
     Ok(())
 }
 
+struct QualSlot<'mcx> {
+    node: Option<Node<'mcx>>,
+    changed: bool,
+}
+
 fn get_result_relid<'mcx>(parse: &Query<'mcx>, jtnode: Node<'mcx>) -> i32 {
     let Some(rtr) = jtnode.as_range_tbl_ref() else { return 0 };
     let rte = parse
@@ -105,125 +125,168 @@ fn get_result_relid<'mcx>(parse: &Query<'mcx>, jtnode: Node<'mcx>) -> i32 {
 fn merge_quals<'mcx>(
     mcx: Mcx<'mcx>,
     child: Option<Node<'mcx>>,
-    parent: &mut Option<Node<'mcx>>,
+    parent: &mut QualSlot<'mcx>,
 ) -> PgResult<()> {
     let Some(c) = child else { return Ok(()) };
     let mut merged = c
         .as_list()
         .expect("preprocessed quals are a list")
         .clone_in(mcx)?;
-    if let Some(p) = *parent {
+    if let Some(p) = parent.node {
         for q in p.as_list().expect("preprocessed quals are a list") {
             merged.lappend(mcx, q)?;
         }
     }
-    *parent = Some(Node::mk_list(mcx, merged)?);
+    parent.node = Some(Node::mk_list(mcx, merged)?);
+    parent.changed = true;
     Ok(())
 }
 
+// Returns Some(replacement) when the subtree changed, None when untouched.
 fn remove_useless_results_recurse<'mcx>(
     run: &PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     jtnode: Node<'mcx>,
-    mut parent_quals: Option<&mut Option<Node<'mcx>>>,
+    mut parent_quals: Option<&mut QualSlot<'mcx>>,
     dropped_outer_joins: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<Option<Node<'mcx>>> {
     use types_nodes::jointype::JoinType;
     let mcx = run.mcx;
     match jtnode.node_tag() {
-        NodeTag::T_RangeTblRef => Ok(jtnode),
+        NodeTag::T_RangeTblRef => Ok(None),
         NodeTag::T_FromExpr => {
             let f = jtnode.as_from_expr().expect("FromExpr");
-            let mut quals = f.quals;
-            let mut children: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+            let mut slot = QualSlot { node: f.quals, changed: false };
+            let mut children: mcx::PgVec<'mcx, Option<Node<'mcx>>> = mcx::PgVec::new_in(mcx);
+            let mut any_child_changed = false;
             for child in &f.fromlist {
-                children.push(remove_useless_results_recurse(
+                match remove_useless_results_recurse(
                     run,
                     parse,
                     child,
-                    Some(&mut quals),
+                    Some(&mut slot),
                     dropped_outer_joins,
-                )?);
+                )? {
+                    Some(n) => {
+                        any_child_changed = true;
+                        children.push(Some(n));
+                    }
+                    None => children.push(Some(child)),
+                }
             }
             let mut remaining = children.len();
-            let mut fromlist = NodeList::nil();
-            for child in children.iter() {
-                if remaining > 1 && get_result_relid(parse, *child) != 0 {
+            let mut ndropped = 0usize;
+            for child in children.iter_mut() {
+                if remaining > 1 && get_result_relid(parse, child.expect("live child")) != 0 {
                     remaining -= 1;
-                    continue;
+                    ndropped += 1;
+                    *child = None;
                 }
+            }
+            if remaining == 1 && (slot.node.is_none() || parent_quals.is_some()) {
+                let kept = children.iter().flatten().next().copied().expect("one child");
+                if let Some(p) = parent_quals {
+                    merge_quals(mcx, slot.node, p)?;
+                }
+                return Ok(Some(kept));
+            }
+            if !any_child_changed && !slot.changed && ndropped == 0 {
+                return Ok(None);
+            }
+            let mut fromlist = NodeList::nil();
+            for child in children.iter().flatten() {
                 fromlist.lappend(mcx, *child)?;
             }
-            if fromlist.len() == 1 && (quals.is_none() || parent_quals.is_some()) {
-                if let Some(p) = parent_quals {
-                    merge_quals(mcx, quals, p)?;
-                }
-                return Ok(fromlist.nth(0));
-            }
-            Node::mk(mcx, FromExpr { fromlist, quals })
+            Ok(Some(Node::mk(mcx, FromExpr { fromlist, quals: slot.node })?))
         }
         NodeTag::T_JoinExpr => {
             let j = jtnode.as_join_expr().expect("JoinExpr");
-            let mut quals = j.quals;
-            let larg = remove_useless_results_recurse(
-                run,
-                parse,
-                j.larg,
-                match j.jointype {
-                    JoinType::JOIN_INNER => Some(&mut quals),
-                    JoinType::JOIN_LEFT => parent_quals.as_deref_mut(),
-                    _ => None,
-                },
-                dropped_outer_joins,
-            )?;
-            let rarg = remove_useless_results_recurse(
-                run,
-                parse,
-                j.rarg,
-                match j.jointype {
-                    JoinType::JOIN_INNER | JoinType::JOIN_LEFT => Some(&mut quals),
-                    _ => None,
-                },
-                dropped_outer_joins,
-            )?;
+            let mut slot = QualSlot { node: j.quals, changed: false };
+            let lres = match j.jointype {
+                JoinType::JOIN_INNER => remove_useless_results_recurse(
+                    run,
+                    parse,
+                    j.larg,
+                    Some(&mut slot),
+                    dropped_outer_joins,
+                )?,
+                JoinType::JOIN_LEFT => remove_useless_results_recurse(
+                    run,
+                    parse,
+                    j.larg,
+                    parent_quals.as_deref_mut(),
+                    dropped_outer_joins,
+                )?,
+                _ => remove_useless_results_recurse(
+                    run,
+                    parse,
+                    j.larg,
+                    None,
+                    dropped_outer_joins,
+                )?,
+            };
+            let rres = match j.jointype {
+                JoinType::JOIN_INNER | JoinType::JOIN_LEFT => remove_useless_results_recurse(
+                    run,
+                    parse,
+                    j.rarg,
+                    Some(&mut slot),
+                    dropped_outer_joins,
+                )?,
+                _ => remove_useless_results_recurse(
+                    run,
+                    parse,
+                    j.rarg,
+                    None,
+                    dropped_outer_joins,
+                )?,
+            };
+            let larg = lres.unwrap_or(j.larg);
+            let rarg = rres.unwrap_or(j.rarg);
 
             match j.jointype {
                 JoinType::JOIN_INNER => {
-                    let lres = get_result_relid(parse, larg);
-                    let rres = get_result_relid(parse, rarg);
-                    if lres != 0 || rres != 0 {
-                        let keep = if lres != 0 { rarg } else { larg };
-                        if quals.is_some() && parent_quals.is_none() {
-                            return Node::mk(
+                    let lrel = get_result_relid(parse, larg);
+                    let rrel = get_result_relid(parse, rarg);
+                    if lrel != 0 || rrel != 0 {
+                        let keep = if lrel != 0 { rarg } else { larg };
+                        if slot.node.is_some() && parent_quals.is_none() {
+                            return Ok(Some(Node::mk(
                                 mcx,
-                                FromExpr { fromlist: NodeList::make1(mcx, keep)?, quals },
-                            );
+                                FromExpr {
+                                    fromlist: NodeList::make1(mcx, keep)?,
+                                    quals: slot.node,
+                                },
+                            )?));
                         }
                         if let Some(p) = parent_quals {
-                            merge_quals(mcx, quals, p)?;
+                            merge_quals(mcx, slot.node, p)?;
                         }
-                        return Ok(keep);
+                        return Ok(Some(keep));
                     }
                 }
                 JoinType::JOIN_LEFT => {
                     if get_result_relid(parse, rarg) != 0 {
                         dropped_outer_joins.add_member(mcx, j.rtindex)?;
-                        return Ok(larg);
+                        return Ok(Some(larg));
                     }
                 }
                 JoinType::JOIN_SEMI => {
                     if get_result_relid(parse, rarg) != 0 {
                         debug_assert_eq!(j.rtindex, 0);
-                        if quals.is_some() && parent_quals.is_none() {
-                            return Node::mk(
+                        if slot.node.is_some() && parent_quals.is_none() {
+                            return Ok(Some(Node::mk(
                                 mcx,
-                                FromExpr { fromlist: NodeList::make1(mcx, larg)?, quals },
-                            );
+                                FromExpr {
+                                    fromlist: NodeList::make1(mcx, larg)?,
+                                    quals: slot.node,
+                                },
+                            )?));
                         }
                         if let Some(p) = parent_quals {
-                            merge_quals(mcx, quals, p)?;
+                            merge_quals(mcx, slot.node, p)?;
                         }
-                        return Ok(larg);
+                        return Ok(Some(larg));
                     }
                 }
                 JoinType::JOIN_FULL | JoinType::JOIN_ANTI => {}
@@ -231,7 +294,10 @@ fn remove_useless_results_recurse<'mcx>(
                     "remove_useless_results_recurse (prepjointree.c): join type {other:?}"
                 ),
             }
-            Node::mk(
+            if lres.is_none() && rres.is_none() && !slot.changed {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
                 mcx,
                 types_nodes::JoinExpr {
                     jointype: j.jointype,
@@ -240,11 +306,11 @@ fn remove_useless_results_recurse<'mcx>(
                     rarg,
                     usingClause: j.usingClause.clone_in(mcx)?,
                     join_using_alias: j.join_using_alias,
-                    quals,
+                    quals: slot.node,
                     alias: j.alias,
                     rtindex: j.rtindex,
                 },
-            )
+            )?))
         }
         other => panic!("remove_useless_results_recurse (prepjointree.c): {other:?}"),
     }
