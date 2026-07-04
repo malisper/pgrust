@@ -6,6 +6,7 @@ members = [
     "crates/_support/mcx",
     "crates/_support/types/datum",
     "crates/_support/seam_core",
+    "crates/_support/test_boot",
     "crates/_support/types/types_tuple",
     "crates/_support/types/types_trigger",
     "crates/_support/types/types_trigger_call",
