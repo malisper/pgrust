@@ -112,6 +112,10 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_WorkTableScan => {
+            rels_used
+                .add_member(mcx, node.as_work_table_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_ValuesScan => {
             rels_used.add_member(mcx, node.as_values_scan().unwrap().scan.scanrelid as i32)?;
         }
@@ -324,6 +328,8 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_ValuesScan => "Values Scan",
         NodeTag::T_CteScan => "CTE Scan",
+        NodeTag::T_WorkTableScan => "WorkTable Scan",
+        NodeTag::T_RecursiveUnion => "Recursive Union",
         // C interpolates the join type into the node name in TEXT format:
         // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
         // " Join"); see the jointype append below.
@@ -439,6 +445,9 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
+    if node.node_tag() == NodeTag::T_WorkTableScan {
+        ExplainScanTarget(node.as_work_table_scan().unwrap().scan.scanrelid, es)?;
+    }
     if node.node_tag() == NodeTag::T_ValuesScan {
         ExplainScanTarget(node.as_values_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -507,7 +516,10 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan | NodeTag::T_CteScan | NodeTag::T_ValuesScan => {
+        NodeTag::T_SeqScan
+        | NodeTag::T_CteScan
+        | NodeTag::T_ValuesScan
+        | NodeTag::T_WorkTableScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
@@ -660,7 +672,7 @@ pub fn ExplainNode<'mcx>(
         // extra without ANALYZE.
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
         | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
-        | NodeTag::T_ProjectSet => {}
+        | NodeTag::T_ProjectSet | NodeTag::T_RecursiveUnion => {}
         _ => unreachable!(),
     }
 
