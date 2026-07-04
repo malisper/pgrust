@@ -430,6 +430,9 @@ fn string_conversion<'mcx>(
 
 struct FormatArgs<'a> {
     elements: Option<(PgVec<'a, Datum>, PgVec<'a, bool>, Oid)>,
+    // By-ref element Datums borrow this detoasted image; dropping it before
+    // the last args.get read is the rowtypes deform_record UAF.
+    _array: Option<PgVec<'a, u8>>,
     nargs: usize,
 }
 
@@ -461,7 +464,7 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let args = if fmgr_seams::get_fn_expr_variadic::call(flinfo) {
         debug_assert_eq!(fcinfo.nargs(), 2);
         if fcinfo.argisnull(1) {
-            FormatArgs { elements: None, nargs: 1 }
+            FormatArgs { elements: None, _array: None, nargs: 1 }
         } else {
             let array = fetch_array_image(fcinfo, 1, mcx)?;
             let element_type = arrayfuncs::arr_elemtype(&array);
@@ -475,10 +478,14 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
                 true,
             )?;
             let nitems = elems.len();
-            FormatArgs { elements: Some((elems, nulls, element_type)), nargs: nitems + 1 }
+            FormatArgs {
+                elements: Some((elems, nulls, element_type)),
+                _array: Some(array),
+                nargs: nitems + 1,
+            }
         }
     } else {
-        FormatArgs { elements: None, nargs: fcinfo.nargs() }
+        FormatArgs { elements: None, _array: None, nargs: fcinfo.nargs() }
     };
 
     // SAFETY: arg 0 checked non-null; live text varlena.

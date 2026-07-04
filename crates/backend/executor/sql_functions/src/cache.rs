@@ -127,6 +127,7 @@ pub(crate) fn read_input_argnames<'mcx>(
     let scratch = MemoryContext::new("sqlfn argnames");
     let smcx = scratch.mcx();
     let img = varlena_bytes(smcx, names_d)?;
+    // elems borrow img: every read below copies before img drops.
     let elems = datum::array_build::deconstruct_array_image(smcx, &img, -1, false, b'i')?;
     let modes: Option<PgVec<'_, Datum>> = if modes_null {
         None

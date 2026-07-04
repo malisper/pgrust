@@ -908,3 +908,101 @@ fn bytea_reverse_cases() {
     assert_eq!(bytea::bytea_reverse(mcx, b"").unwrap().data(), b"");
     assert_eq!(bytea::bytea_reverse(mcx, b"x").unwrap().data(), b"x");
 }
+
+// format(VARIADIC text[]): element Datums borrow the detoasted array image
+// (FormatArgs._array keepalive). Run under both allocator disciplines: Aset
+// free-list header clobber AND bump rewind-reuse corrupt a dropped image.
+mod format_variadic {
+    use super::*;
+    use datum::Datum;
+    use types_fmgr::{FmgrInfo, LocalFcinfo};
+
+    const TEXTOID: types_core::Oid = 25;
+    const TEXTOUT: types_core::Oid = 46;
+
+    fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            detoast::init_seams();
+            syscache_seams::lookup_pg_type_shape::set(|typid| {
+                Ok((typid == TEXTOID).then_some(::types_tuple::PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typstorage: b'x' as i8,
+                    typcollation: 100,
+                }))
+            });
+            syscache_seams::pg_type_io_shape::set(|typid| {
+                Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
+                    oid: TEXTOID,
+                    typinput: 1,
+                    typoutput: TEXTOUT,
+                    typreceive: 1,
+                    typsend: 1,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }))
+            });
+            fmgr_seams::fmgr_info::set(|oid| {
+                assert_eq!(oid, TEXTOUT);
+                Ok(FmgrInfo::new(crate::builtins::fc_textout, TEXTOUT, 1, true, false))
+            });
+            fmgr_seams::get_fn_expr_variadic::set(|_flinfo| true);
+            fmgr_seams::get_fn_expr_argtype::set(|_flinfo, _argnum| TEXTOID);
+        });
+    }
+
+    fn run(armed: &MemoryContext) {
+        install();
+        let ctx = MemoryContext::new("format args");
+        let mcx = ctx.mcx();
+        let elems = [
+            cstring_to_text(mcx, b"a").unwrap(),
+            cstring_to_text(mcx, b"bb").unwrap(),
+            cstring_to_text(mcx, b"ccc").unwrap(),
+        ];
+        let datums: Vec<Datum> = elems
+            .iter()
+            .map(|t| Datum::from_usize(t.as_bytes().as_ptr() as usize))
+            .collect();
+        let array =
+            arrayfuncs::construct_array(mcx, &datums, TEXTOID, -1, false, b'i').unwrap();
+        let fmt = cstring_to_text(mcx, b"%s+%s+%s").unwrap();
+
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(fmt.as_bytes().as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(array.as_ptr() as usize));
+        // SAFETY: armed outlives the call and the result reads below.
+        unsafe { fcinfo.set_result_mcx(armed.mcx()) };
+
+        let mut flinfo = FmgrInfo::unresolved();
+        let out = crate::concat_format::fc_text_format(Some(&mut flinfo), &mut fcinfo).unwrap();
+        let p = out.as_usize() as *const u8;
+        // SAFETY: live text varlena result.
+        let (len, data) = unsafe {
+            let n = types_tuple::varatt::varsize_any(p);
+            (n, core::slice::from_raw_parts(p.add(4), n - 4))
+        };
+        assert_eq!(len - 4, 8);
+        assert_eq!(data, b"a+bb+ccc", "element datums read after the detoast temporary's scope");
+    }
+
+    #[test]
+    fn survives_aset_free_list() {
+        let armed = MemoryContext::new("t");
+        run(&armed);
+    }
+
+    #[test]
+    fn survives_bump_rewind() {
+        let armed = MemoryContext::new_bump("t");
+        run(&armed);
+    }
+}
