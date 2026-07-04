@@ -53,7 +53,6 @@ large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 catalog_objectaddress = { path = "../../backend/catalog/objectaddress" }
-statistics = { path = "../../backend/statistics/statistics" }
 event_trigger = { path = "../../backend/commands/event_trigger" }
 commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
