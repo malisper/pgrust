@@ -30,6 +30,7 @@ use pg_type::TYPTYPE_DOMAIN;
 const Anum_pg_type_typname: AttrNumber = 2;
 const Anum_pg_type_typnamespace: AttrNumber = 3;
 const Anum_pg_type_typowner: AttrNumber = 4;
+const Anum_pg_type_typlen: AttrNumber = 5;
 const Anum_pg_type_typtype: AttrNumber = 7;
 const Anum_pg_type_typrelid: AttrNumber = 12;
 const Anum_pg_type_typsubscript: AttrNumber = 13;
@@ -42,6 +43,7 @@ const Anum_pg_type_typsend: AttrNumber = 19;
 const Anum_pg_type_typmodin: AttrNumber = 20;
 const Anum_pg_type_typmodout: AttrNumber = 21;
 const Anum_pg_type_typanalyze: AttrNumber = 22;
+const Anum_pg_type_typstorage: AttrNumber = 24;
 const Anum_pg_type_typnotnull: AttrNumber = 25;
 const Anum_pg_type_typbasetype: AttrNumber = 26;
 const Anum_pg_type_typtypmod: AttrNumber = 27;
@@ -50,7 +52,7 @@ const Anum_pg_type_typdefaultbin: AttrNumber = 30;
 const Anum_pg_type_typdefault: AttrNumber = 31;
 const Anum_pg_type_typacl: AttrNumber = 32;
 
-const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
+use pg_type::F_ARRAY_SUBSCRIPT_HANDLER;
 
 const Anum_pg_constraint_oid: AttrNumber = 1;
 const Anum_pg_constraint_contype: AttrNumber = 4;
@@ -64,7 +66,9 @@ struct TypeRow {
     typname: String,
     typnamespace: Oid,
     typowner: Oid,
+    typlen: i16,
     typtype: i8,
+    typstorage: i8,
     typrelid: Oid,
     typsubscript: Oid,
     typelem: Oid,
@@ -80,6 +84,7 @@ struct TypeRow {
     typbasetype: Oid,
     typtypmod: i32,
     typcollation: Oid,
+    typdefaultbin: Option<String>,
     typacl_isnull: bool,
 }
 
@@ -133,11 +138,24 @@ fn fetch_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<TypeRow> {
     let typname = core::str::from_utf8(&namebytes[..end]).expect("typname UTF-8").to_string();
     let mut acl_isnull = false;
     get(Anum_pg_type_typacl, &mut acl_isnull);
+    let mut bin_isnull = false;
+    let bin_datum = get(Anum_pg_type_typdefaultbin, &mut bin_isnull);
+    let typdefaultbin = if bin_isnull {
+        None
+    } else {
+        let p = bin_datum.as_usize() as *const u8;
+        // SAFETY: live text varlena image through its extent.
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(mcx, image)?;
+        Some(core::str::from_utf8(payload.as_bytes()).expect("typdefaultbin UTF-8").to_string())
+    };
     let row = TypeRow {
         typname,
         typnamespace: get(Anum_pg_type_typnamespace, &mut isnull).as_oid(),
         typowner: get(Anum_pg_type_typowner, &mut isnull).as_oid(),
+        typlen: get(Anum_pg_type_typlen, &mut isnull).as_i16(),
         typtype: get(Anum_pg_type_typtype, &mut isnull).as_i8(),
+        typstorage: get(Anum_pg_type_typstorage, &mut isnull).as_i8(),
         typrelid: get(Anum_pg_type_typrelid, &mut isnull).as_oid(),
         typsubscript: get(Anum_pg_type_typsubscript, &mut isnull).as_oid(),
         typelem: get(Anum_pg_type_typelem, &mut isnull).as_oid(),
@@ -153,6 +171,7 @@ fn fetch_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<TypeRow> {
         typbasetype: get(Anum_pg_type_typbasetype, &mut isnull).as_oid(),
         typtypmod: get(Anum_pg_type_typtypmod, &mut isnull).as_i32(),
         typcollation: get(Anum_pg_type_typcollation, &mut isnull).as_oid(),
+        typdefaultbin,
         typacl_isnull: acl_isnull,
     };
     genam::systable_endscan(mcx, scan)?;
@@ -1135,5 +1154,376 @@ fn is_a_table_row_type(type_oid: Oid) -> PgResult<Box<PgError>> {
         PgError::new(ERROR, format!("{name} is a table's row type"))
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
             .with_hint("Use ALTER TABLE instead."),
+    ))
+}
+
+#[derive(Default)]
+struct AlterTypeRecurseParams {
+    update_storage: bool,
+    update_receive: bool,
+    update_send: bool,
+    update_typmodin: bool,
+    update_typmodout: bool,
+    update_analyze: bool,
+    update_subscript: bool,
+    storage: i8,
+    receive_oid: Oid,
+    send_oid: Oid,
+    typmodin_oid: Oid,
+    typmodout_oid: Oid,
+    analyze_oid: Oid,
+    subscript_oid: Oid,
+}
+
+pub fn AlterType<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::rawnodes::AlterTypeStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
+    use crate::{
+        findTypeAnalyzeFunction, findTypeInputFunction, findTypeOutputFunction,
+        findTypeSubscriptingFunction, findTypeTypmodFunction, objdef_err, param_err,
+        TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
+    };
+
+    let typename = typename_from_list(mcx, &stmt.typeName)?;
+    let (type_oid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
+    let row = fetch_type_row(mcx, type_oid)?;
+
+    let mut require_super = false;
+    let mut p = AlterTypeRecurseParams::default();
+    for n in stmt.options.iter() {
+        let defel = n.as_def_elem().expect("ALTER TYPE options: DefElem list");
+        match defel.defname.unwrap_or("") {
+            "storage" => {
+                let a = commands_define::defGetString(mcx, defel)?;
+                p.storage = if a.eq_ignore_ascii_case("plain") {
+                    TYPSTORAGE_PLAIN
+                } else if a.eq_ignore_ascii_case("external") {
+                    TYPSTORAGE_EXTERNAL
+                } else if a.eq_ignore_ascii_case("extended") {
+                    TYPSTORAGE_EXTENDED
+                } else if a.eq_ignore_ascii_case("main") {
+                    TYPSTORAGE_MAIN
+                } else {
+                    return Err(param_err(format!("storage \"{a}\" not recognized")));
+                };
+                if p.storage != TYPSTORAGE_PLAIN && row.typlen != -1 {
+                    return Err(objdef_err("fixed-size types must have storage PLAIN".into()));
+                }
+                if p.storage != TYPSTORAGE_PLAIN && row.typstorage == TYPSTORAGE_PLAIN {
+                    require_super = true;
+                } else if p.storage == TYPSTORAGE_PLAIN && row.typstorage != TYPSTORAGE_PLAIN {
+                    return Err(objdef_err("cannot change type's storage to PLAIN".into()));
+                }
+                p.update_storage = true;
+            }
+            "receive" => {
+                p.receive_oid = match defel.arg {
+                    Some(_) => findTypeInputFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                        type_oid,
+                        true,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_receive = true;
+                require_super = true;
+            }
+            "send" => {
+                p.send_oid = match defel.arg {
+                    Some(_) => findTypeOutputFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                        type_oid,
+                        true,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_send = true;
+                require_super = true;
+            }
+            "typmod_in" => {
+                p.typmodin_oid = match defel.arg {
+                    Some(_) => findTypeTypmodFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                        false,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_typmodin = true;
+                require_super = true;
+            }
+            "typmod_out" => {
+                p.typmodout_oid = match defel.arg {
+                    Some(_) => findTypeTypmodFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                        true,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_typmodout = true;
+                require_super = true;
+            }
+            "analyze" => {
+                p.analyze_oid = match defel.arg {
+                    Some(_) => findTypeAnalyzeFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_analyze = true;
+                require_super = true;
+            }
+            "subscript" => {
+                p.subscript_oid = match defel.arg {
+                    Some(_) => findTypeSubscriptingFunction(
+                        mcx,
+                        commands_define::defGetQualifiedName(mcx, defel)?,
+                    )?,
+                    None => InvalidOid,
+                };
+                p.update_subscript = true;
+                require_super = true;
+            }
+            attr @ ("input" | "output" | "internallength" | "passedbyvalue" | "alignment"
+            | "like" | "category" | "preferred" | "default" | "element" | "delimiter"
+            | "collatable") => {
+                return Err(type_attribute_error(attr, "cannot be changed"));
+            }
+            attr => return Err(type_attribute_error(attr, "not recognized")),
+        }
+    }
+
+    if require_super {
+        if !superuser::superuser()? {
+            return Err(Box::new(
+                PgError::new(ERROR, "must be superuser to alter a type".to_string())
+                    .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+            ));
+        }
+    } else if !aclchk::object_ownercheck(TYPE_RELATION_ID, type_oid, miscinit::GetUserId())? {
+        return Err(must_be_owner_of_type(type_oid)?);
+    }
+
+    if row.typtype != pg_type::TYPTYPE_BASE {
+        return Err(not_a_base_type(type_oid)?);
+    }
+    if row.typelem != InvalidOid && row.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
+        return Err(not_a_base_type(type_oid)?);
+    }
+
+    AlterTypeRecurse(mcx, type_oid, false, &mut p)?;
+
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, type_oid))
+}
+
+fn AlterTypeRecurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    is_implicit_array: bool,
+    p: &mut AlterTypeRecurseParams,
+) -> PgResult<()> {
+    stack_depth::check_stack_depth()?;
+
+    let mut row = fetch_type_row(mcx, type_oid)?;
+    update_type_row(mcx, type_oid, |values, _nulls, replace| {
+        let mut set = |anum: AttrNumber, d: Datum| {
+            let ix = (anum - 1) as usize;
+            values[ix] = d;
+            replace[ix] = true;
+        };
+        if p.update_storage {
+            set(Anum_pg_type_typstorage, Datum::from_char(p.storage));
+        }
+        if p.update_receive {
+            set(Anum_pg_type_typreceive, Datum::from_oid(p.receive_oid));
+        }
+        if p.update_send {
+            set(Anum_pg_type_typsend, Datum::from_oid(p.send_oid));
+        }
+        if p.update_typmodin {
+            set(Anum_pg_type_typmodin, Datum::from_oid(p.typmodin_oid));
+        }
+        if p.update_typmodout {
+            set(Anum_pg_type_typmodout, Datum::from_oid(p.typmodout_oid));
+        }
+        if p.update_analyze {
+            set(Anum_pg_type_typanalyze, Datum::from_oid(p.analyze_oid));
+        }
+        if p.update_subscript {
+            set(Anum_pg_type_typsubscript, Datum::from_oid(p.subscript_oid));
+        }
+        Ok(())
+    })?;
+    if p.update_receive {
+        row.typreceive = p.receive_oid;
+    }
+    if p.update_send {
+        row.typsend = p.send_oid;
+    }
+    if p.update_typmodin {
+        row.typmodin = p.typmodin_oid;
+    }
+    if p.update_typmodout {
+        row.typmodout = p.typmodout_oid;
+    }
+    if p.update_analyze {
+        row.typanalyze = p.analyze_oid;
+    }
+    if p.update_subscript {
+        row.typsubscript = p.subscript_oid;
+    }
+
+    rebuild_alter_type_dependencies(mcx, type_oid, &row, is_implicit_array)?;
+
+    if !is_implicit_array
+        && (p.update_typmodin || p.update_typmodout)
+        && row.typarray != InvalidOid
+    {
+        let mut arrparams = AlterTypeRecurseParams {
+            update_typmodin: p.update_typmodin,
+            update_typmodout: p.update_typmodout,
+            typmodin_oid: p.typmodin_oid,
+            typmodout_oid: p.typmodout_oid,
+            ..Default::default()
+        };
+        AlterTypeRecurse(mcx, row.typarray, true, &mut arrparams)?;
+    }
+
+    // Domains inherit neither typreceive (F_DOMAIN_RECV), typmods, nor
+    // subscripting.
+    p.update_receive = false;
+    p.update_typmodin = false;
+    p.update_typmodout = false;
+    p.update_subscript = false;
+    if !(p.update_storage || p.update_send || p.update_analyze) {
+        return Ok(());
+    }
+
+    let rel = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+    let keys = [oid_key(Anum_pg_type_typbasetype, type_oid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &keys)?;
+    loop {
+        let desc = rel.descr();
+        let (domain_oid, typtype) = {
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_type columns under its descriptor.
+            unsafe {
+                (
+                    types_tuple::heap_getattr(tup, pg_type::Anum_pg_type_oid as i32, desc, &mut isnull)
+                        .as_oid(),
+                    types_tuple::heap_getattr(tup, Anum_pg_type_typtype as i32, desc, &mut isnull)
+                        .as_i8(),
+                )
+            }
+        };
+        if typtype != TYPTYPE_DOMAIN {
+            continue;
+        }
+        AlterTypeRecurse(mcx, domain_oid, false, p)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}
+
+// GenerateTypeDependencies (pg_type.c) rebuild arm as invoked from
+// AlterTypeRecurse: relationKind 0 (composites rejected), dependent iff
+// implicit array, defaultExpr/typacl re-read from the row.
+fn rebuild_alter_type_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    row: &TypeRow,
+    is_implicit_array: bool,
+) -> PgResult<()> {
+    pg_depend::deleteDependencyRecordsFor(mcx, TYPE_RELATION_ID, type_oid, true)?;
+    pg_shdepend::deleteSharedDependencyRecordsFor(mcx, TYPE_RELATION_ID, type_oid, 0)?;
+
+    let myself = ObjectAddress::set(TYPE_RELATION_ID, type_oid);
+    let mut addrs_normal = [ObjectAddress::set(InvalidOid, InvalidOid); 12];
+    let mut n = 0;
+    if !is_implicit_array {
+        addrs_normal[n] = ObjectAddress::set(types_core::NAMESPACE_RELATION_ID, row.typnamespace);
+        n += 1;
+        pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, type_oid, row.typowner)?;
+        assert!(
+            row.typacl_isnull,
+            "AlterTypeRecurse: non-null typacl dependency rebuild (recordDependencyOnNewAcl) unported"
+        );
+    }
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, true)?;
+    const PROCEDURE_RELATION_ID: Oid = 1255;
+    for proc in [
+        row.typinput,
+        row.typoutput,
+        row.typreceive,
+        row.typsend,
+        row.typmodin,
+        row.typmodout,
+        row.typanalyze,
+        row.typsubscript,
+    ] {
+        if proc != InvalidOid {
+            addrs_normal[n] = ObjectAddress::set(PROCEDURE_RELATION_ID, proc);
+            n += 1;
+        }
+    }
+    if row.typbasetype != InvalidOid {
+        addrs_normal[n] = ObjectAddress::set(TYPE_RELATION_ID, row.typbasetype);
+        n += 1;
+    }
+    const COLLATION_RELATION_ID: Oid = 3456;
+    if row.typcollation != InvalidOid && row.typcollation != DEFAULT_COLLATION_OID {
+        addrs_normal[n] = ObjectAddress::set(COLLATION_RELATION_ID, row.typcollation);
+        n += 1;
+    }
+    pg_depend::record_object_address_dependencies(
+        mcx,
+        &myself,
+        &mut addrs_normal[..n],
+        DependencyType::Normal,
+    )?;
+    if row.typelem != InvalidOid {
+        let referenced = ObjectAddress::set(TYPE_RELATION_ID, row.typelem);
+        let behavior = if is_implicit_array {
+            DependencyType::Internal
+        } else {
+            DependencyType::Normal
+        };
+        pg_depend::recordDependencyOn(mcx, &myself, &referenced, behavior)?;
+    }
+    if let Some(bin) = &row.typdefaultbin {
+        let expr = readfuncs::stringToNode(mcx, bin)?;
+        catalog_dependency::recordDependencyOnExpr(
+            mcx,
+            &myself,
+            expr,
+            &NodeList::nil(),
+            DependencyType::Normal,
+        )?;
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn type_attribute_error(attr: &str, tail: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("type attribute \"{attr}\" {tail}"))
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn not_a_base_type(type_oid: Oid) -> PgResult<Box<PgError>> {
+    let name = format_type::format_type_be(type_oid)?;
+    Ok(Box::new(
+        PgError::new(ERROR, format!("{name} is not a base type"))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
     ))
 }

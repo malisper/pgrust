@@ -1460,6 +1460,13 @@ fn slow_switch<'mcx>(
             let address = typecmds::AlterEnum(mcx, stmt)?;
             Ok(Some(address))
         }
+        T_AlterTypeStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_alter_type_stmt().expect("AlterTypeStmt");
+            let address = typecmds::AlterType(mcx, stmt)?;
+            Ok(Some(address))
+        }
         T_AlterDomainStmt => {
             // Retention contract as unify_stmt_lifetime.
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };

@@ -12,7 +12,7 @@ pub fn init_seams() {
 }
 pub use range::DefineRange;
 pub use alter::{
-    checkDomainOwner, AlterDomain, AlterTypeNamespace, AlterTypeNamespace_oid,
+    checkDomainOwner, AlterDomain, AlterType, AlterTypeNamespace, AlterTypeNamespace_oid,
     AlterTypeNamespaceInternal, AlterTypeOwner, AlterTypeOwner_oid, AlterTypeOwnerInternal,
     RenameDomainConstraint, RenameType,
 };
