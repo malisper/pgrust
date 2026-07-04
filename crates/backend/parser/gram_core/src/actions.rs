@@ -6126,6 +6126,201 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = def_elem(mcx, view.v(1).str_val(), view.v(2).node(), view.l(1))?;
             }
             734 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?)),
+            // handler_name: name | name attrs.
+            670 => {
+                let s = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
+            }
+            671 => {
+                let mut list = view.v(2).list();
+                list.lcons(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // CreateFdwStmt / AlterFdwStmt.
+            710 => {
+                let mut n = Node::build::<types_nodes::rawnodes::CreateFdwStmt>(mcx)?;
+                n.fdwname = Some(view.v(5).str_val());
+                n.func_options = view.v(6).list();
+                n.options = view.v(7).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // fdw_option: [NO] HANDLER/VALIDATOR handler_name.
+            711 | 713 => {
+                let name = if rule == 711 { "handler" } else { "validator" };
+                let arg = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, name, Some(arg), view.l(1))?;
+            }
+            712 | 714 => {
+                let name = if rule == 712 { "handler" } else { "validator" };
+                *yyval = def_elem(mcx, name, None, view.l(1))?;
+            }
+            // fdw_options: fdw_option | fdw_options fdw_option.
+            715 => {
+                let d = view.v(1).node().expect("fdw_option");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            716 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("fdw_option"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            719 | 720 => {
+                let mut n = Node::build::<types_nodes::rawnodes::AlterFdwStmt>(mcx)?;
+                n.fdwname = Some(view.v(5).str_val());
+                n.func_options = view.v(6).list();
+                n.options = if rule == 719 { view.v(7).list() } else { NodeList::nil() };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // generic_option_list: generic_option_elem [, ...].
+            723 => {
+                let d = view.v(1).node().expect("generic_option_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            724 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("generic_option_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // CreateForeignServerStmt.
+            735 | 736 => {
+                let base = if rule == 735 { 0 } else { 3 };
+                let mut n = Node::build::<types_nodes::rawnodes::CreateForeignServerStmt>(mcx)?;
+                n.servername = Some(view.v(3 + base).str_val());
+                n.servertype = opt_str(view.v(4 + base));
+                n.version = opt_str(view.v(5 + base));
+                n.fdwname = Some(view.v(9 + base).str_val());
+                n.options = view.v(10 + base).list();
+                n.if_not_exists = rule == 736;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterForeignServerStmt: name [foreign_server_version] [options].
+            743 | 744 | 745 => {
+                let mut n = Node::build::<types_nodes::rawnodes::AlterForeignServerStmt>(mcx)?;
+                n.servername = Some(view.v(3).str_val());
+                if rule != 745 {
+                    n.version = opt_str(view.v(4));
+                    n.has_version = true;
+                }
+                match rule {
+                    743 => n.options = view.v(5).list(),
+                    745 => n.options = view.v(4).list(),
+                    _ => {}
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateForeignTableStmt, plain and PARTITION OF forms.
+            746 | 747 => {
+                let base = if rule == 746 { 0 } else { 3 };
+                let rv = view.v(4 + base).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    rv.with_mut::<RangeVar, _>(|r| r.relpersistence = RELPERSISTENCE_PERMANENT)
+                        .expect("qualified_name is RangeVar");
+                }
+                let mut n = Node::build::<types_nodes::rawnodes::CreateForeignTableStmt>(mcx)?;
+                n.base.relation = rv.as_variant::<RangeVar>();
+                n.base.tableElts = view.v(6 + base).list();
+                n.base.inhRelations = view.v(8 + base).list();
+                n.base.oncommit = OnCommitAction::ONCOMMIT_NOOP;
+                n.base.if_not_exists = rule == 747;
+                n.servername = Some(view.v(10 + base).str_val());
+                n.options = view.v(11 + base).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            748 | 749 => {
+                let base = if rule == 748 { 0 } else { 3 };
+                let rv = view.v(4 + base).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    rv.with_mut::<RangeVar, _>(|r| r.relpersistence = RELPERSISTENCE_PERMANENT)
+                        .expect("qualified_name is RangeVar");
+                }
+                let parent = view.v(7 + base).node().expect("qualified_name");
+                let mut n = Node::build::<types_nodes::rawnodes::CreateForeignTableStmt>(mcx)?;
+                n.base.relation = rv.as_variant::<RangeVar>();
+                n.base.inhRelations = NodeList::make1(mcx, parent)?;
+                n.base.tableElts = view.v(8 + base).list();
+                n.base.partbound = view.v(9 + base).node();
+                n.base.oncommit = OnCommitAction::ONCOMMIT_NOOP;
+                n.base.if_not_exists = rule == 749;
+                n.servername = Some(view.v(11 + base).str_val());
+                n.options = view.v(12 + base).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ImportForeignSchemaStmt; import_qualification rides the
+            // KeyAction carrier (u8 list_type + table list).
+            750 => {
+                let q = view.v(5).key_action();
+                let mut n = Node::build::<types_nodes::rawnodes::ImportForeignSchemaStmt>(mcx)?;
+                n.server_name = Some(view.v(8).str_val());
+                n.remote_schema = Some(view.v(4).str_val());
+                n.local_schema = Some(view.v(10).str_val());
+                n.list_type = match q.action {
+                    0 => types_nodes::rawnodes::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_ALL,
+                    1 => {
+                        types_nodes::rawnodes::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO
+                    }
+                    _ => types_nodes::rawnodes::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_EXCEPT,
+                };
+                n.table_list = core::mem::replace(&mut q.cols, NodeList::nil());
+                n.options = view.v(11).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            751 => *yyval = YYSTYPE::Ival(1),
+            752 => *yyval = YYSTYPE::Ival(2),
+            753 => {
+                *yyval = YYSTYPE::KeyActionV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    KeyAction { action: view.v(1).ival() as u8, cols: view.v(3).list() },
+                )?));
+            }
+            754 => {
+                *yyval = YYSTYPE::KeyActionV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    KeyAction { action: 0, cols: NodeList::nil() },
+                )?));
+            }
+            // CreateUserMappingStmt / auth_ident / DropUserMappingStmt /
+            // AlterUserMappingStmt.
+            755 | 756 => {
+                let base = if rule == 755 { 0 } else { 3 };
+                let mut n = Node::build::<types_nodes::rawnodes::CreateUserMappingStmt>(mcx)?;
+                n.user = view
+                    .v(5 + base)
+                    .node()
+                    .map(|u| u.as_role_spec().expect("auth_ident is RoleSpec"));
+                n.servername = Some(view.v(7 + base).str_val());
+                n.options = view.v(8 + base).list();
+                n.if_not_exists = rule == 756;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            758 => {
+                let mut n = Node::build::<RoleSpec>(mcx)?;
+                n.roletype = RoleSpecType::ROLESPEC_CURRENT_USER;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            759 | 760 => {
+                let base = if rule == 759 { 0 } else { 2 };
+                let mut n = Node::build::<types_nodes::rawnodes::DropUserMappingStmt>(mcx)?;
+                n.user = view
+                    .v(5 + base)
+                    .node()
+                    .map(|u| u.as_role_spec().expect("auth_ident is RoleSpec"));
+                n.servername = Some(view.v(7 + base).str_val());
+                n.missing_ok = rule == 760;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            761 => {
+                let mut n = Node::build::<types_nodes::rawnodes::AlterUserMappingStmt>(mcx)?;
+                n.user = view
+                    .v(5)
+                    .node()
+                    .map(|u| u.as_role_spec().expect("auth_ident is RoleSpec"));
+                n.servername = Some(view.v(7).str_val());
+                n.options = view.v(8).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // opt_with_data: WITH DATA | WITH NO DATA | EMPTY.
             623 | 625 => *yyval = YYSTYPE::Boolean(true),
             624 => *yyval = YYSTYPE::Boolean(false),
