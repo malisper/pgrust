@@ -24,7 +24,7 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
 use types_nodes::{
-    CoerceToDomain, CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param,
+    CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const, FuncExpr, Node, NodeList, NodeTag, Param,
     RelabelType,
 };
 
@@ -174,7 +174,8 @@ pub fn coerce_type<'mcx>(
             return Ok(node);
         }
     }
-    // Push the coercion underneath the COLLATE so it acts before collation.
+    // Push the coercion underneath the COLLATE so it acts before collation —
+    // unless the target type is not collatable, where COLLATE is dropped.
     if let Some(coll) = node.as_collate_expr() {
         let arg = coerce_type(
             mcx,
@@ -187,6 +188,9 @@ pub fn coerce_type<'mcx>(
             cformat,
             location,
         )?;
+        if !lsyscache::type_is_collatable(targetTypeId)? {
+            return Ok(arg);
+        }
         return Node::mk(
             mcx,
             types_nodes::CollateExpr { arg, collOid: coll.collOid, location: coll.location },
@@ -1599,16 +1603,26 @@ pub fn coerce_to_target_type<'mcx>(
     if !can_coerce_type(&[exprtype], &[targettype], ccontext)? {
         return Ok(None);
     }
-    if expr.node_tag() == NodeTag::T_CollateExpr {
-        unported("coerce_to_target_type (parse_coerce.c): CollateExpr strip/reinstall arm");
+    // C: strip ALL stacked CollateExprs, coerce, and reinstall only the
+    // topmost — and only when the target type is collatable.
+    let mut inner = expr;
+    while inner.node_tag() == NodeTag::T_CollateExpr {
+        inner = inner.as_collate_expr().unwrap().arg;
     }
     let result = coerce_type(
-        mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,
+        mcx, pstate, inner, exprtype, targettype, targettypmod, ccontext, cformat, location,
     )?;
     let hide = exprtype != targettype && result.as_variant::<Const>().is_none();
     let result = coerce_type_typmod(
         mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
     )?;
+    if expr.node_tag() == NodeTag::T_CollateExpr && lsyscache::type_is_collatable(targettype)? {
+        let coll = expr.as_collate_expr().unwrap();
+        return Ok(Some(Node::mk(
+            mcx,
+            CollateExpr { arg: result, collOid: coll.collOid, location: coll.location },
+        )?));
+    }
     Ok(Some(result))
 }
 
@@ -1796,6 +1810,12 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => expression_returns_set(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_CollateExpr => expression_returns_set(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_CoalesceExpr => {
+            node.as_coalesce_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_MinMaxExpr => {
+            node.as_min_max_expr().unwrap().args.iter().any(expression_returns_set)
+        }
         NodeTag::T_SQLValueFunction => false,
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
@@ -1834,6 +1854,19 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         // SubLink is not set-returning; C's walker does not enter subselects.
         NodeTag::T_SubLink => {
             node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            node.as_scalar_array_op_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_ArrayExpr => {
+            node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            sr.refupperindexpr.iter().flatten().any(expression_returns_set)
+                || sr.reflowerindexpr.iter().flatten().any(expression_returns_set)
+                || sr.refexpr.is_some_and(expression_returns_set)
+                || sr.refassgnexpr.is_some_and(expression_returns_set)
         }
         other => panic!(
             "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \

@@ -44,3 +44,4 @@ outfuncs = { path = "../../nodes/outfuncs" }
 varlena = { path = "../../utils/adt/varlena" }
 inval = { path = "../../utils/cache/inval" }
 types_nodes = { path = "../../../_support/types/nodes" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }

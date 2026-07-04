@@ -653,7 +653,7 @@ fn offset_and_pull_down<'mcx>(
             if v.varlevelsup == 0 {
                 nv.varno += rtoffset;
                 if nv.varnosyn > 0 {
-                    nv.varnosyn += rtoffset as u32;
+                    nv.varnosyn = nv.varnosyn.wrapping_add(rtoffset as u32);
                 }
             } else {
                 nv.varlevelsup -= 1;
@@ -1737,8 +1737,43 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_NestLoop => {
             let nl = plan.as_nest_loop().unwrap();
-            debug_assert!(nl.nestParams.is_nil());
             finalize_primnode_list(run, &nl.join.joinqual, &mut paramids)?;
+        }
+        NodeTag::T_FunctionScan => {
+            // Per-function param sets are recorded in funcparams; the
+            // executor rescans re-evaluate only functions whose params
+            // changed.
+            let fs = plan.as_function_scan().unwrap();
+            for f_node in &fs.functions {
+                let f = f_node.as_range_tbl_function().expect("functions cell");
+                let mut func_params = types_nodes::bitmapset::Bitmapset::empty();
+                if let Some(e) = f.funcexpr {
+                    finalize_primnode(run, e, &mut func_params)?;
+                }
+                paramids.add_members(mcx, &func_params)?;
+                // SAFETY: plan tree is exclusively owned by this planning
+                // invocation (C writes rtfunc->funcparams in place).
+                unsafe {
+                    f_node.with_mut::<types_nodes::parsenodes::RangeTblFunction, _>(|rf| {
+                        rf.funcparams = func_params;
+                    })
+                }
+                .expect("RangeTblFunction");
+            }
+        }
+        NodeTag::T_ValuesScan => {
+            let vs = plan.as_values_scan().unwrap();
+            finalize_primnode_list(run, &vs.values_lists, &mut paramids)?;
+        }
+        NodeTag::T_SubqueryScan => {
+            let ss = plan.as_subquery_scan().unwrap();
+            let rel = crate::relnode::find_base_rel(&run.root, ss.scan.scanrelid as i32);
+            let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
+            let sub_outer = &run.rel_subroots[idx].root.outer_params;
+            let subplan = ss.subplan.expect("SubqueryScan subplan");
+            ss_finalize_plan(run, subplan, sub_outer)?;
+            paramids
+                .add_members(mcx, &subplan.as_plan().expect("plan node").extParam)?;
         }
         NodeTag::T_MergeJoin => {
             let mj = plan.as_merge_join().unwrap();
@@ -1765,8 +1800,25 @@ fn finalize_plan<'mcx>(
         paramids.add_members(mcx, &child_params)?;
     }
     if let Some(child) = base.righttree {
-        let child_params = finalize_plan(run, child, &valid)?;
-        paramids.add_members(mcx, &child_params)?;
+        // A nestloop's inner side may consume this join's nestParams; those
+        // are valid below and do not count as used at this level.
+        let mut nestloop_params = types_nodes::bitmapset::Bitmapset::empty();
+        if let Some(nl) = plan.as_nest_loop() {
+            for nlp_node in &nl.nestParams {
+                let nlp = nlp_node.as_nest_loop_param().expect("nestParams cell");
+                nestloop_params.add_member(mcx, nlp.paramno)?;
+            }
+        }
+        if nestloop_params.is_empty() {
+            let child_params = finalize_plan(run, child, &valid)?;
+            paramids.add_members(mcx, &child_params)?;
+        } else {
+            let mut inner_valid = valid.clone_in(mcx)?;
+            inner_valid.add_members(mcx, &nestloop_params)?;
+            let mut child_params = finalize_plan(run, child, &inner_valid)?;
+            child_params.del_members(&nestloop_params);
+            paramids.add_members(mcx, &child_params)?;
+        }
     }
 
     assert!(

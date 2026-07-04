@@ -116,6 +116,9 @@ fn install_fixture() {
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
                 F_INT48 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: INT8OID,
                     provariadic: InvalidOid,
@@ -129,6 +132,9 @@ fn install_fixture() {
                     proleakproof: true,
                 }),
                 1066 | 1067 => Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: INT4OID,
                     provariadic: InvalidOid,

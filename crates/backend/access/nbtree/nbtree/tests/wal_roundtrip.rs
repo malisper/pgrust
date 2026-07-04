@@ -132,6 +132,8 @@ fn install_seams() {
     smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
 
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
 
     // xloginsert marshal for fake buffers -> the real record-assembly path.
@@ -291,6 +293,8 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         }),
         rd_opcintype: one(23),
         rd_opfamily: one(1976),
@@ -299,12 +303,12 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }

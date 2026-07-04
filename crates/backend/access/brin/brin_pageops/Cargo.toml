@@ -17,3 +17,4 @@ freespace = { path = "../../../storage/freespace/freespace" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+smgr = { path = "../../../storage/smgr/smgr" }

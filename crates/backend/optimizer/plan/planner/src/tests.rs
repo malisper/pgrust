@@ -15,11 +15,12 @@ use crate::planner;
 // Serializes tests that flip or observe planner strategy GUCs.
 pub(crate) static GUC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn install_fixtures() {
+pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         crate::init_seams();
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 23 => Some(PgTypeShape {
@@ -112,6 +113,9 @@ fn install_scan_fixtures() {
     });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         let shape = |rettype, nargs, kind: u8, strict| syscache_seams::PgProcShape {
+            prolang: 12,
+            prosecdef: false,
+            proconfig_isnull: true,
             pronamespace: 11,
             prorettype: rettype,
             provariadic: 0,
@@ -531,7 +535,7 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false,
+            relchecks: 0, relhastriggers: false, relhasrules: false,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
@@ -641,12 +645,12 @@ fn make_rel_data<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: mcx::PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -804,6 +808,8 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
         indisready: true,
         indkey,
         has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
     });
     data.rd_opfamily.push(INT4_BTREE_FAM);
     data.rd_opcintype.push(23);
@@ -4854,22 +4860,40 @@ mod grouping_sets {
         );
     }
 
-    // Default settings: C would consider the hashed/AGG_MIXED strategies,
-    // which this lane leaves loud.
+    // Default settings: the !is_sorted consider_groupingsets_paths arm wins
+    // for ROLLUP(val) over an unsorted seqscan — MixedAggregate with the
+    // hashed (val) rollup on top and the empty-set AGG_PLAIN chain entry
+    // (no vestigial Sort: it consumes the shared input).
     #[test]
-    #[should_panic(expected = "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED")]
-    fn rollup_with_hashagg_panics_loud() {
+    fn rollup_with_hashagg_builds_mixed() {
         let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cx = cx();
         ensure_work_mem();
         let mcx = cx.mcx();
-        let _ = planner(
+        let stmt = planner(
             mcx,
             rollup_val_query(mcx),
             "SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val)",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
-        );
+        )
+        .unwrap();
+        let agg = stmt.planTree.unwrap().as_agg().expect("top plan is Agg");
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_MIXED);
+        assert_eq!(agg.numCols, 1);
+        // The unsorted subplan keeps the seqscan physical tlist: val is
+        // column 2 of t.
+        assert_eq!(agg.grpColIdx, &[2i16]);
+        assert_eq!(agg.numGroups, 200);
+        let gsets: Vec<Vec<i32>> =
+            agg.groupingSets.iter().map(|n| n.as_int_list().unwrap().iter().collect()).collect();
+        assert_eq!(gsets, vec![vec![0]]);
+        assert_eq!(agg.chain.len(), 1);
+        let chain0 = agg.chain.nth(0).as_agg().unwrap();
+        assert_eq!(chain0.aggstrategy, types_pathnodes::AGG_PLAIN);
+        assert_eq!(chain0.numCols, 0);
+        assert!(chain0.plan.lefttree.is_none());
+        assert_eq!(agg.plan.lefttree.unwrap().node_tag(), NodeTag::T_SeqScan);
     }
 
     // SELECT val, pk, count(*) FROM t GROUP BY GROUPING SETS ((val),(pk)):

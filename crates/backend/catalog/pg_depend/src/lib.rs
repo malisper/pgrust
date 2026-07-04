@@ -143,6 +143,164 @@ fn isObjectPinned(object: &ObjectAddress) -> bool {
     catalog::IsPinnedObject(object.classId, object.objectId)
 }
 
+const RELATION_CLASS: Oid = types_core::RELATION_RELATION_ID;
+const TYPE_CLASS: Oid = types_core::TYPE_RELATION_ID;
+const PROC_CLASS: Oid = 1255;
+const OPER_CLASS: Oid = 2617;
+const COLL_CLASS: Oid = 3456;
+const DEFAULT_COLLATION_OID: Oid = 100;
+
+struct FindExprRefs<'a, 'mcx> {
+    rel_id: Oid,
+    addrs: &'a mut mcx::PgVec<'mcx, ObjectAddress>,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
+    fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+        use types_nodes::NodeTag::*;
+        let addrs = &mut *self.addrs;
+        let rel_id = self.rel_id;
+        match node.node_tag() {
+            T_Var => {
+                let v = node.as_var().expect("Var");
+                assert!(
+                    v.varlevelsup == 0 && v.varno == 1,
+                    "find_expr_references_walker (dependency.c): var beyond the \
+                     single-rel rtable; unported lane"
+                );
+                if v.varattno != 0 {
+                    addrs.push(ObjectAddress::sub_set(RELATION_CLASS, rel_id, v.varattno as i32));
+                }
+                return Ok(false);
+            }
+            T_Const => {
+                let c = node.as_const().expect("Const");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, c.consttype));
+                if c.constcollid != 0 && c.constcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, c.constcollid));
+                }
+                const REG_TYPES: [Oid; 11] =
+                    [24, 2202, 2203, 2204, 2205, 2206, 4191, 3734, 3769, 4089, 4096];
+                assert!(
+                    !REG_TYPES.contains(&c.consttype),
+                    "find_expr_references_walker (dependency.c): reg* literal; unported lane"
+                );
+                return Ok(false);
+            }
+            T_Param => {
+                let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, p.paramtype));
+                if p.paramcollid != 0 && p.paramcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, p.paramcollid));
+                }
+            }
+            T_FuncExpr => {
+                addrs.push(ObjectAddress::set(
+                    PROC_CLASS,
+                    node.as_func_expr().expect("FuncExpr").funcid,
+                ));
+            }
+            T_OpExpr => {
+                addrs.push(ObjectAddress::set(
+                    OPER_CLASS,
+                    node.as_op_expr().expect("OpExpr").opno,
+                ));
+            }
+            T_DistinctExpr => {
+                addrs.push(ObjectAddress::set(
+                    OPER_CLASS,
+                    node.as_distinct_expr().expect("DistinctExpr").opno,
+                ));
+            }
+            T_ScalarArrayOpExpr => {
+                addrs.push(ObjectAddress::set(
+                    OPER_CLASS,
+                    node.as_scalar_array_op_expr().expect("SAOP").opno,
+                ));
+            }
+            T_RelabelType => {
+                let r = node.as_relabel_type().expect("RelabelType");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, r.resulttype));
+                if r.resultcollid != 0 && r.resultcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, r.resultcollid));
+                }
+            }
+            T_CoerceViaIO => {
+                let c = node
+                    .as_variant::<types_nodes::primnodes::CoerceViaIO>()
+                    .expect("CoerceViaIO");
+                addrs.push(ObjectAddress::set(TYPE_CLASS, c.resulttype));
+                if c.resultcollid != 0 && c.resultcollid != DEFAULT_COLLATION_OID {
+                    addrs.push(ObjectAddress::set(COLL_CLASS, c.resultcollid));
+                }
+            }
+            T_BoolExpr | T_NullTest | T_BooleanTest | T_CaseExpr | T_CaseWhen
+            | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List => {}
+            other => panic!(
+                "find_expr_references_walker (dependency.c): {other:?}; unported lane"
+            ),
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+}
+
+// recordDependencyOnSingleRelExpr (dependency.c), reverse_self=false lane over
+// the committed expression node set.
+pub fn recordDependencyOnSingleRelExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    depender: &ObjectAddress,
+    expr: types_nodes::Node<'mcx>,
+    rel_id: Oid,
+    behavior: DependencyType,
+    self_behavior: DependencyType,
+) -> PgResult<()> {
+    let mut addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
+    nodes_core::NodeWalker::visit(&mut FindExprRefs { rel_id, addrs: &mut addrs }, expr)?;
+    eliminate_duplicate_dependencies(&mut addrs);
+
+    if behavior != self_behavior && !addrs.is_empty() {
+        let mut self_addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
+        let mut rest: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
+        for a in addrs.iter() {
+            if a.classId == RELATION_CLASS && a.objectId == rel_id {
+                self_addrs.push(*a);
+            } else {
+                rest.push(*a);
+            }
+        }
+        recordMultipleDependencies(mcx, depender, &self_addrs, self_behavior)?;
+        return recordMultipleDependencies(mcx, depender, &rest, behavior);
+    }
+    recordMultipleDependencies(mcx, depender, &addrs, behavior)
+}
+
+// eliminate_duplicate_dependencies (dependency.c): sort, drop identicals; a
+// whole-object ref (subId 0 sorts first) collapses into the first column ref
+// of the same object that follows it.
+fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
+    if addrs.len() <= 1 {
+        return;
+    }
+    addrs.sort_by(object_address_comparator);
+    let mut kept = 1;
+    for i in 1..addrs.len() {
+        let this = addrs[i];
+        let prior = addrs[kept - 1];
+        if prior.classId == this.classId && prior.objectId == this.objectId {
+            if prior.objectSubId == this.objectSubId {
+                continue;
+            }
+            if prior.objectSubId == 0 {
+                addrs[kept - 1].objectSubId = this.objectSubId;
+                continue;
+            }
+        }
+        addrs[kept] = this;
+        kept += 1;
+    }
+    addrs.truncate(kept);
+}
+
 // deleteDependencyRecordsFor (pg_depend.c).
 pub fn deleteDependencyRecordsFor<'mcx>(
     mcx: Mcx<'mcx>,
@@ -188,6 +346,98 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)?;
     Ok(count)
+}
+
+// creating_extension / CurrentExtensionObject (extension.c:79-80) are hosted
+// here, one layer below their C home: extension depends on this crate, and
+// recordDependencyOnCurrentExtension reads them per row.
+thread_local! {
+    static CREATING_EXTENSION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    static CURRENT_EXTENSION_OBJECT: core::cell::Cell<Oid> =
+        const { core::cell::Cell::new(types_core::InvalidOid) };
+}
+
+pub fn creating_extension() -> bool {
+    CREATING_EXTENSION.with(|c| c.get())
+}
+
+pub fn CurrentExtensionObject() -> Oid {
+    CURRENT_EXTENSION_OBJECT.with(|c| c.get())
+}
+
+pub fn set_creating_extension(v: bool) {
+    CREATING_EXTENSION.with(|c| c.set(v));
+}
+
+pub fn set_current_extension_object(oid: Oid) {
+    CURRENT_EXTENSION_OBJECT.with(|c| c.set(oid));
+}
+
+pub fn getExtensionOfObject<'mcx>(mcx: Mcx<'mcx>, classId: Oid, objectId: Oid) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let mut result = types_core::InvalidOid;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid()
+            == types_core::EXTENSION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
+                == DependencyType::Extension.as_char()
+        {
+            result = dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid();
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+pub fn recordDependencyOnCurrentExtension<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    is_replace: bool,
+) -> PgResult<()> {
+    debug_assert!(object.objectSubId == 0);
+
+    if !creating_extension() {
+        return Ok(());
+    }
+
+    if is_replace {
+        let oldext = getExtensionOfObject(mcx, object.classId, object.objectId)?;
+        if oldext != types_core::InvalidOid {
+            if oldext == CurrentExtensionObject() {
+                return Ok(());
+            }
+            // The 55000 report needs getObjectDescription (objectaddress lane).
+            panic!(
+                "recordDependencyOnCurrentExtension (pg_depend.c): object \
+                 {}/{} is already a member of extension {oldext}",
+                object.classId, object.objectId
+            );
+        }
+        panic!(
+            "recordDependencyOnCurrentExtension (pg_depend.c): free-standing object \
+             {}/{} replaced by extension {} (needs getObjectDescription for the 55000 report)",
+            object.classId,
+            object.objectId,
+            CurrentExtensionObject()
+        );
+    }
+
+    let extension = ObjectAddress::set(types_core::EXTENSION_RELATION_ID, CurrentExtensionObject());
+    recordDependencyOn(mcx, object, &extension, DependencyType::Extension)
 }
 
 // A pinned owner records nothing; pg_shdepend writes unported → loud.

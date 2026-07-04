@@ -1,0 +1,16 @@
+[package]
+name = "createas_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../_support/seam_core" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

@@ -225,8 +225,9 @@ fn GenerateTypeDependencies<'mcx>(
     if !isDependentType {
         pg_depend::recordDependencyOnOwner(TYPE_RELATION_ID, typeObjectId, p.ownerId);
     }
-    // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION scripts
-    // (extension.c creating_extension) are unported, so it can never fire.
+    // C: makeExtensionDep is true on every TypeCreate path (dependent types
+    // get explicit membership too); rebuild is false for fresh rows.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
     for proc in [
         p.inputProcedure,
         p.outputProcedure,
@@ -278,8 +279,11 @@ fn GenerateTypeDependencies<'mcx>(
     Ok(())
 }
 
-// AssignTypeArrayOid (typecmds.c); IsBinaryUpgrade arm out of scope.
+// AssignTypeArrayOid (typecmds.c); IsBinaryUpgrade arm loud below.
 pub fn AssignTypeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_type: binary-upgrade array-OID override (typecmds.c AssignTypeArrayOid) unported");
+    }
     let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
     let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
     pg_type.close(AccessShareLock)?;

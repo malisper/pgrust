@@ -82,9 +82,14 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         return Ok(Datum::null());
     }
 
-    // Soft-error divergence: constraint failures always hard-error (C errsave
-    // routes them into an armed escontext).
-    typcache_seams::domain_check_input::call(value, string.is_none(), domainType)?;
+    // SAFETY: fcinfo.context, if set, is a live ErrorSaveNode armed for this call.
+    let esc = unsafe { fcinfo.error_save_node() };
+    typcache_seams::domain_check_input::call(
+        value,
+        string.is_none(),
+        domainType,
+        esc.map(|n| &mut n.ctx),
+    )?;
 
     if string.is_none() {
         fcinfo.isnull = true;

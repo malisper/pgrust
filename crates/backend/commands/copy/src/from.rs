@@ -58,6 +58,15 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) attnames: PgVec<'mcx, NameData>,
     pub(crate) force_notnull_flags: PgVec<'mcx, bool>,
     pub(crate) force_null_flags: PgVec<'mcx, bool>,
+    // Per physical attribute; defmap lists attrs absent from attnumlist whose
+    // default fills the column, defaults[] carries per-row DEFAULT markers.
+    pub(crate) defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
+    pub(crate) defmap: PgVec<'mcx, usize>,
+    pub(crate) defaults: PgVec<'mcx, bool>,
+    pub(crate) where_clause: NodeList<'mcx>,
+    pub(crate) relname: String,
+    pub(crate) escontext: Option<Box<types_fmgr::ErrorSaveNode>>,
+    pub(crate) num_errors: u64,
     pub(crate) bytes_processed: u64,
 }
 
@@ -75,11 +84,19 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 pub fn BeginCopyFrom<'mcx, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    where_clause: NodeList<'mcx>,
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
+    source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
-    let opts = ProcessCopyOptions(true, options)?;
+    let opts = ProcessCopyOptions(true, options, source_text)?;
+    if opts.binary {
+        unported("FORMAT binary (text-only lane)");
+    }
+    if opts.convert_selectively {
+        unported("convert_selectively (file_fdw-only option)");
+    }
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
@@ -140,15 +157,42 @@ pub fn BeginCopyFrom<'mcx, 's>(
         typioparams.push(typioparam);
         atttypmods.push(att.atttypmod);
     }
+    let mut defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> =
+        PgVec::new_in(mcx);
+    let mut defmap: PgVec<'mcx, usize> = PgVec::new_in(mcx);
+    let mut volatile_defexprs = false;
     for i in 0..num_phys_attrs {
         let att = tup_desc.attr(i);
         attnames.push(att.attname);
-        // build_column_default/ExecInitExpr are the rewrite gap: a column the
-        // input does not supply keeps NULL here, which silently diverges when
-        // a default exists.
-        if (att.atthasdef || att.attidentity != 0) && !attnumlist.contains(&(i as i16 + 1)) {
-            unported("FROM with omitted defaulted column (build_column_default lane)");
+        defexprs.push(None);
+        if att.attisdropped {
+            continue;
         }
+        let in_list = attnumlist.contains(&(i as i16 + 1));
+        if (opts.default_print.is_some() || !in_list)
+            && att.attgenerated == 0
+            && (att.atthasdef || att.attidentity != 0)
+        {
+            let defexpr = rewrite_handler::build_column_default(mcx, rel, i + 1)?;
+            let defexpr = clauses::eval_const_expressions(mcx, defexpr)?;
+            nodes_core::fix_opfuncids(defexpr)?;
+            let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
+                .expect("column default expression");
+            // SAFETY: default results land in the statement mcx, which
+            // outlives every next_copy_from call (C per-tuple econtext;
+            // WATCH: unbounded for very large loads, as the input values).
+            unsafe { state.arm_result_mcx_raw(mcx) };
+            defexprs[i] = Some(state);
+            if !in_list {
+                defmap.push(i);
+            }
+            if !volatile_defexprs {
+                volatile_defexprs = clauses::contain_volatile_functions_not_nextval(defexpr)?;
+            }
+        }
+    }
+    if volatile_defexprs {
+        unported("FROM with volatile default expressions (CIM_SINGLE lane)");
     }
     if tup_desc
         .constr
@@ -193,6 +237,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
     };
 
     let max_fields = attnumlist.len();
+    let opts_on_error = opts.on_error;
     Ok(CopyFromState {
         opts,
         src,
@@ -225,6 +270,14 @@ pub fn BeginCopyFrom<'mcx, 's>(
         attnames,
         force_notnull_flags,
         force_null_flags,
+        defexprs,
+        defmap,
+        defaults: vec_from_elem_in(mcx, false, num_phys_attrs),
+        where_clause,
+        relname: rel.name().to_string(),
+        escontext: (opts_on_error == crate::CopyOnErrorChoice::Ignore)
+            .then(|| Box::new(types_fmgr::ErrorSaveNode::new(false))),
+        num_errors: 0,
         bytes_processed: 0,
     })
 }
@@ -259,10 +312,41 @@ pub fn CopyFrom<'mcx>(
     if rel.rd_rel.relkind != RELKIND_RELATION {
         return Err(cannot_copy_to_relkind(rel));
     }
+    // New-in-transaction storage: probing the FSM is a waste of time
+    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
+    let mut ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
+        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
+    {
+        tableam_vocab::TABLE_INSERT_SKIP_FSM
+    } else {
+        0
+    };
+    if cstate.opts.freeze {
+        snapmgr::InvalidateCatalogSnapshot();
+        if !snapmgr::ThereAreNoPriorRegisteredSnapshots() || !portalmem::ThereAreNoReadyPortals()
+        {
+            return Err(Box::new(
+                PgError::error("cannot perform COPY FREEZE because of prior transaction activity")
+                    .with_sqlstate(types_error::ERRCODE_INVALID_TRANSACTION_STATE),
+            ));
+        }
+        let cur = xact::GetCurrentSubTransactionId();
+        if rel.rd_createSubid.get() != cur && rel.rd_newRelfilelocatorSubid.get() != cur {
+            return Err(Box::new(
+                PgError::error(
+                    "cannot perform COPY FREEZE because the table was not created or truncated \
+                     in the current subtransaction",
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
+        ti_options |= tableam_vocab::TABLE_INSERT_FROZEN;
+    }
     // CopyFromErrorCallback scope: C installs error_context_stack here, after
-    // the relkind checks; buffered-but-unflushed slots on the Err path are
-    // simply dropped, as C's are (the aborted xact kills flushed ones).
-    match copy_from_body(mcx, cstate, rel) {
+    // the relkind + FREEZE checks; buffered-but-unflushed slots on the Err
+    // path are simply dropped, as C's are (the aborted xact kills flushed
+    // ones).
+    match copy_from_body(mcx, cstate, rel, ti_options) {
         Ok(n) => Ok(n),
         Err(e) => Err(copy_from_error_context(cstate, rel, e)),
     }
@@ -272,19 +356,24 @@ fn copy_from_body<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
+    ti_options: i32,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
-    // New-in-transaction storage: probing the FSM is a waste of time
-    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
-    let ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
-        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
-    {
-        tableam_vocab::TABLE_INSERT_SKIP_FSM
-    } else {
-        0
-    };
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
+
+    for wc in cstate.where_clause.iter() {
+        if clauses::contain_volatile_functions(wc)? {
+            unported("FROM ... WHERE with volatile functions (CIM_SINGLE lane)");
+        }
+    }
+    let mut qualexpr =
+        execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
+    if let Some(q) = qualexpr.as_mut() {
+        // SAFETY: qual scratch results land in the statement mcx, which
+        // outlives every per-row evaluation.
+        unsafe { q.arm_result_mcx_raw(mcx) };
+    }
 
     // std Vec: SlotData owns droppy state via the arena-erased views; the
     // slot pool itself is per-statement (CopyMultiInsertBuffer.slots).
@@ -314,8 +403,24 @@ fn copy_from_body<'mcx>(
                 break;
             }
         }
+        if cstate.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
+            cstate.escontext.as_mut().unwrap().ctx.reset_error_occurred();
+            if cstate.opts.reject_limit > 0 && cstate.num_errors > cstate.opts.reject_limit as u64
+            {
+                return Err(reject_limit_exceeded(cstate.opts.reject_limit));
+            }
+            continue;
+        }
+
         exectuples::exec_store_virtual_tuple(slot);
         slot.base_mut().tts_tableOid = rel.rd_id;
+
+        if qualexpr.is_some() {
+            let mut eval = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+            if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+                continue;
+            }
+        }
 
         if let Some(constr) = rel.rd_att.constr.as_deref() {
             if constr.num_check > 0 || !constr.check.is_empty() {
@@ -364,6 +469,18 @@ fn copy_from_body<'mcx>(
     }
 
     tableam::table_finish_bulk_insert(rel, ti_options)?;
+
+    if cstate.num_errors > 0
+        && cstate.opts.log_verbosity >= crate::CopyLogVerbosityChoice::Default
+    {
+        let n = cstate.num_errors;
+        let msg = if n == 1 {
+            format!("{n} row was skipped due to data type incompatibility")
+        } else {
+            format!("{n} rows were skipped due to data type incompatibility")
+        };
+        ereport(types_error::NOTICE).errmsg(msg).finish(loc("CopyFrom"))?;
+    }
     Ok(processed)
 }
 
@@ -390,9 +507,21 @@ fn flush_multi_insert<'mcx>(
     tableam::table_multi_insert(mcx, rel, &mut refs, mycid, ti_options, Some(bistate))?;
 
     if index_state.num_indices() > 0 {
+        // C resets the per-tuple econtext per buffered row (CopyMultiInsertBufferFlush).
+        let mut eval_cx = MemoryContext::new_bump("CopyIndexEvalPerTuple");
         for (i, slot) in refs.into_iter().enumerate() {
+            eval_cx.reset();
             cstate.cur_lineno = linenos[i];
-            execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot, false, None, &[])?;
+            execindexing::ExecInsertIndexTuples(
+                mcx,
+                eval_cx.mcx(),
+                index_state,
+                rel,
+                slot,
+                false,
+                None,
+                &[],
+            )?;
         }
     }
 
@@ -441,7 +570,7 @@ fn copy_from_error_context(
 
 const MAX_COPY_DATA_DISPLAY: i32 = 100;
 
-fn limit_printout_length(bytes: &[u8]) -> String {
+pub(crate) fn limit_printout_length(bytes: &[u8]) -> String {
     let slen = bytes.len() as i32;
     if slen <= MAX_COPY_DATA_DISPLAY {
         return String::from_utf8_lossy(bytes).into_owned();
@@ -491,6 +620,17 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
         }
     }
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn reject_limit_exceeded(limit: i64) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
+        ))
+        .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+    )
 }
 
 #[cold]

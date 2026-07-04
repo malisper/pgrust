@@ -129,18 +129,16 @@ pub fn get_relation_info<'mcx>(
             let am_is_gin = relam == types_core::GIN_AM_OID;
             let am_is_gist = relam == types_core::GIST_AM_OID;
             let am_is_brin = relam == types_core::BRIN_AM_OID;
+            let am_is_spgist = relam == types_core::SPGIST_AM_OID;
             if !am_is_btree
                 && !am_is_gin
                 && !am_is_gist
                 && !am_is_brin
+                && !am_is_spgist
                 && relam != types_core::HASH_AM_OID
             {
                 panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
             }
-            if ind.has_indpred {
-                panic!("get_relation_info (plancat.c): partial index; M2 partial-index lane");
-            }
-
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -150,11 +148,7 @@ pub fn get_relation_info<'mcx>(
             info.ncolumns = ncolumns;
             info.nkeycolumns = nkeycolumns;
             for i in 0..ncolumns as usize {
-                let key = ind.indkey[i] as i32;
-                if key == 0 {
-                    panic!("get_relation_info (plancat.c): expression index; M2 lane");
-                }
-                info.indexkeys.push(key);
+                info.indexkeys.push(ind.indkey[i] as i32);
                 info.indexcollations.push(
                     index_rel.rd_indcollation.get(i).copied().unwrap_or(0),
                 );
@@ -165,15 +159,19 @@ pub fn get_relation_info<'mcx>(
                 info.canreturn.push(match index_rel.rd_rel.relam {
                     BTREE_AM_OID => btcanreturn(),
                     types_core::GIST_AM_OID => gist::gistcanreturn(&index_rel, i as i32 + 1),
+                    types_core::SPGIST_AM_OID => {
+                        spgist::spgcanreturn(&index_rel, i as i32 + 1)?
+                    }
                     _ => false,
                 });
             }
             info.relam = relam;
             // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers).
-            info.amcanorderbyop = am_is_gist;
-            info.amoptionalkey = am_is_btree || am_is_gin || am_is_gist || am_is_brin;
+            info.amcanorderbyop = am_is_gist || am_is_spgist;
+            info.amoptionalkey =
+                am_is_btree || am_is_gin || am_is_gist || am_is_spgist || am_is_brin;
             info.amsearcharray = am_is_btree;
-            info.amsearchnulls = am_is_btree || am_is_gist || am_is_brin;
+            info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
             info.amcanparallel = am_is_btree;
             info.amhasgettuple = !am_is_gin && !am_is_brin;
             info.amhasgetbitmap = true;
@@ -190,26 +188,65 @@ pub fn get_relation_info<'mcx>(
                 }
             }
 
-            // build_index_tlist (plancat.c): simple columns only (expression
-            // columns panicked above); system attrs are unreachable in an
-            // index key.
+            // RelationGetIndexExpressions/Predicate + ChangeVarNodes(1, varno):
+            // parsed from the Form's nodeToString sources (pg_index.rs note).
+            if let Some(src) = ind.indexprs_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                let list = node.as_list().expect("indexprs is a List");
+                for e in list.iter() {
+                    let e = clauses::eval_const_expressions(mcx, e)?;
+                    if varno != 1 {
+                        change_var_nodes(e, varno as i32);
+                    }
+                    info.indexprs.push(run.intern_expr(e));
+                }
+            }
+            if let Some(src) = ind.indpred_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                let folded = clauses::eval_const_expressions(mcx, node)?;
+                let canon = crate::prepqual::canonicalize_qual(mcx, folded, false)?;
+                let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
+                for e in implicit.iter() {
+                    if varno != 1 {
+                        change_var_nodes(e, varno as i32);
+                    }
+                    info.indpred.push(run.intern_expr(e));
+                }
+            }
+
+            // build_index_tlist (plancat.c); system attrs are unreachable in
+            // an index key.
+            let mut indexpr_next = 0usize;
             for i in 0..ncolumns as usize {
                 let indexkey = info.indexkeys[i];
-                assert!(indexkey > 0, "build_index_tlist: system-attribute index key");
-                let att = relation.rd_att.attrs[indexkey as usize - 1];
-                let var = types_nodes::Node::mk_var(
-                    mcx,
-                    varno as i32,
-                    indexkey as i16,
-                    att.atttypid,
-                    att.atttypmod,
-                    att.attcollation,
-                    0,
-                )?;
+                let expr = if indexkey != 0 {
+                    assert!(indexkey > 0, "build_index_tlist: system-attribute index key");
+                    let att = relation.rd_att.attrs[indexkey as usize - 1];
+                    types_nodes::Node::mk_var(
+                        mcx,
+                        varno as i32,
+                        indexkey as i16,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        0,
+                    )?
+                } else {
+                    let id = *info
+                        .indexprs
+                        .get(indexpr_next)
+                        .expect("wrong number of index expressions");
+                    indexpr_next += 1;
+                    *run.root.expr_node(id)
+                };
                 let tle =
-                    types_nodes::Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
+                    types_nodes::Node::mk_target_entry(mcx, expr, (i + 1) as i16, None, false)?;
                 info.indextlist.push(run.intern_expr(tle));
             }
+            assert!(
+                indexpr_next == info.indexprs.len(),
+                "wrong number of index expressions"
+            );
 
             info.indrestrictinfo = RefCell::new(PgVec::new_in(mcx));
             info.predOK = Cell::new(false);
@@ -218,11 +255,17 @@ pub fn get_relation_info<'mcx>(
             info.immediate = ind.indimmediate;
             info.hypothetical = false;
 
-            info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-                &index_rel,
-                types_core::ForkNumber::MAIN_FORKNUM,
-            )?;
-            info.tuples = run.root.rel(rel).tuples;
+            if info.indpred.is_empty() {
+                info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                    &index_rel,
+                    types_core::ForkNumber::MAIN_FORKNUM,
+                )?;
+                info.tuples = run.root.rel(rel).tuples;
+            } else {
+                let (pages, tuples, _) = estimate_rel_size(&index_rel, None, 1)?;
+                info.pages = pages;
+                info.tuples = tuples.min(run.root.rel(rel).tuples);
+            }
             info.tree_height = Cell::new(if am_is_btree {
                 nbtree::bt_getrootheight(&index_rel)?
             } else {
@@ -269,6 +312,53 @@ fn btcanreturn() -> bool {
     true
 }
 
+// ChangeVarNodes (rewriteManip.c), rt_index 1 arm over freshly parsed index
+// expression trees (exclusively owned, so in-place mutation is safe).
+fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {
+    use types_nodes::NodeTag;
+    let walk_list = |l: &types_nodes::NodeList<'_>| {
+        for e in l {
+            change_var_nodes(e, new_varno);
+        }
+    };
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            // SAFETY: tree is freshly parsed and exclusively owned here.
+            unsafe {
+                node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
+                    if v.varno == 1 && v.varlevelsup == 0 {
+                        v.varno = new_varno;
+                    }
+                })
+            }
+            .expect("Var");
+        }
+        NodeTag::T_Const | NodeTag::T_Param => {}
+        NodeTag::T_OpExpr => walk_list(&node.as_op_expr().unwrap().args),
+        NodeTag::T_DistinctExpr => walk_list(&node.as_distinct_expr().unwrap().args),
+        NodeTag::T_FuncExpr => walk_list(&node.as_func_expr().unwrap().args),
+        NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args),
+        NodeTag::T_ScalarArrayOpExpr => {
+            walk_list(&node.as_scalar_array_op_expr().unwrap().args)
+        }
+        NodeTag::T_RelabelType => {
+            change_var_nodes(node.as_relabel_type().unwrap().arg, new_varno)
+        }
+        NodeTag::T_NullTest => {
+            change_var_nodes(node.as_null_test().unwrap().arg.expect("NullTest.arg"), new_varno)
+        }
+        NodeTag::T_BooleanTest => change_var_nodes(
+            node.as_boolean_test().unwrap().arg.expect("BooleanTest.arg"),
+            new_varno,
+        ),
+        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args),
+        NodeTag::T_ArrayExpr => walk_list(&node.as_array_expr().unwrap().elements),
+        NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args),
+        NodeTag::T_List => walk_list(node.as_list().unwrap()),
+        other => panic!("ChangeVarNodes (rewriteManip.c): {other:?}; unported lane"),
+    }
+}
+
 const HEAP_OVERHEAD_BYTES_PER_TUPLE: usize = 24 + 4;
 const HEAP_USABLE_BYTES_PER_PAGE: usize = 8192 - 24;
 
@@ -280,6 +370,40 @@ pub fn estimate_rel_size(
 ) -> PgResult<(BlockNumber, f64, f64)> {
     let relkind = rel.rd_rel.relkind;
     if !relkind_has_table_am(relkind) {
+        if relkind == types_rel::RELKIND_INDEX {
+            let reported_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                rel,
+                types_core::ForkNumber::MAIN_FORKNUM,
+            )?;
+            if reported_pages == 0 {
+                return Ok((0, 0.0, 0.0));
+            }
+            let mut curpages = reported_pages;
+            let mut relpages = rel.rd_rel.relpages as BlockNumber;
+            let reltuples = rel.rd_rel.reltuples as f64;
+            let relallvisible = rel.rd_rel.relallvisible as BlockNumber;
+            // Discount the metapage (OK for btree/hash/GIN, suspect for GiST).
+            if relpages > 0 {
+                curpages -= 1;
+                relpages -= 1;
+            }
+            let density = if reltuples >= 0.0 && relpages > 0 {
+                reltuples / relpages as f64
+            } else {
+                let tuple_width = get_rel_data_width(rel, None, 1)? as usize
+                    + HEAP_OVERHEAD_BYTES_PER_TUPLE;
+                (HEAP_USABLE_BYTES_PER_PAGE / tuple_width) as f64
+            };
+            let tuples = (density * curpages as f64).round_ties_even();
+            let allvisfrac = if relallvisible == 0 || curpages == 0 {
+                0.0
+            } else if relallvisible as f64 >= curpages as f64 {
+                1.0
+            } else {
+                relallvisible as f64 / curpages as f64
+            };
+            return Ok((reported_pages, tuples, allvisfrac));
+        }
         if relkind == RELKIND_SEQUENCE || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
             // C final else arm: just use whatever's in pg_class (partitioned
             // tables are storageless; reached with ONLY / zero partitions).
@@ -614,4 +738,86 @@ pub fn infer_arbiter_indexes<'mcx>(
         ));
     }
     Ok(results)
+}
+
+// get_relation_constraints (plancat.c) for the constraint-exclusion refutation
+// leg. include_partition is loud: partition_qual/set_baserel_partition_constraint
+// are unported (reachable only under constraint_exclusion=on on a directly
+// named partition).
+pub fn get_relation_constraints<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    relation_object_id: Oid,
+    rel: RelId,
+    include_noinherit: bool,
+    include_notnull: bool,
+    include_partition: bool,
+) -> PgResult<PgVec<'mcx, types_nodes::Node<'mcx>>> {
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid;
+    let mut result: PgVec<'mcx, types_nodes::Node<'mcx>> = PgVec::new_in(mcx);
+
+    let relation = table::table_open(mcx, relation_object_id, NoLock)?;
+    if let Some(constr) = relation.rd_att.constr.as_deref() {
+        for check in constr.check.iter() {
+            if !check.ccvalid {
+                continue;
+            }
+            debug_assert!(check.ccenforced);
+            if check.ccnoinherit && !include_noinherit {
+                continue;
+            }
+            let ccbin = check.ccbin.as_ref().expect("CHECK constraint has ccbin");
+            let cexpr = readfuncs::stringToNode(mcx, ccbin.as_str())?;
+            let cexpr = clauses::eval_const_expressions(mcx, cexpr)?;
+            let cexpr = crate::prepqual::canonicalize_qual(mcx, cexpr, true)?;
+            if varno != 1 {
+                change_var_nodes(cexpr, varno as i32);
+            }
+            let implicit = clauses::make_ands_implicit(mcx, Some(cexpr))?;
+            for item in implicit.iter() {
+                result.push(item);
+            }
+        }
+        if include_notnull && constr.has_not_null {
+            let natts = relation.rd_att.natts;
+            for i in 1..=natts {
+                let att = &relation.rd_att.compact_attrs[(i - 1) as usize];
+                if att.attnullability == ATTNULLABLE_VALID && !att.attisdropped {
+                    let wholeatt = relation.rd_att.attrs[(i - 1) as usize];
+                    let var = types_nodes::Node::mk_var(
+                        mcx,
+                        varno as i32,
+                        i as i16,
+                        wholeatt.atttypid,
+                        wholeatt.atttypmod,
+                        wholeatt.attcollation,
+                        0,
+                    )?;
+                    // argisrow=false is correct even for a composite column
+                    // (attnotnull is IS DISTINCT FROM NULL there, not SQL-spec).
+                    let ntest = types_nodes::Node::mk(
+                        mcx,
+                        types_nodes::primnodes::NullTest {
+                            arg: Some(var),
+                            nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                            argisrow: false,
+                            location: -1,
+                        },
+                    )?;
+                    result.push(ntest);
+                }
+            }
+        }
+        assert!(
+            !constr.has_generated_virtual || result.is_empty(),
+            "get_relation_constraints (plancat.c): expand_generated_columns_in_expr unported"
+        );
+    }
+    assert!(
+        !(include_partition && relation.rd_rel.relispartition),
+        "get_relation_constraints (plancat.c): partition constraint under \
+         constraint_exclusion=on; set_baserel_partition_constraint unported"
+    );
+    relation.close(NoLock)?;
+    Ok(result)
 }

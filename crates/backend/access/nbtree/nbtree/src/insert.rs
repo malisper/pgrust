@@ -5,14 +5,13 @@
 //! (dedup.rs). Loud: posting split during a page split, deletion, deferred
 //! unique rechecks (UNIQUE_CHECK_EXISTING), !heapkeyspace.
 
-use std::cell::Cell;
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{
-    AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, TransactionId, INDEX_MAX_KEYS,
+    AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId, INDEX_MAX_KEYS,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use ::types_nbtree::{
@@ -56,23 +55,28 @@ pub(crate) struct StackEntry {
     pub(crate) offset: OffsetNumber,
 }
 
-// RelationGetTargetBlock/RelationSetTargetBlock over the index relation
-// (rd_smgr targblock cache); keyed thread-local since rd_smgr is unported.
-thread_local! {
-    static TARGET_BLOCK: Cell<(Oid, BlockNumber)> = const { Cell::new((0, InvalidBlockNumber)) };
-}
-
+// RelationGetTargetBlock/RelationSetTargetBlock: the cache is C's
+// rd_smgr->smgr_targblock, so RelationTruncate's smgr reset invalidates it.
 fn target_block(rel: &Relation<'_>) -> BlockNumber {
-    let (oid, blk) = TARGET_BLOCK.get();
-    if oid == rel.rd_id {
-        blk
-    } else {
-        InvalidBlockNumber
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return InvalidBlockNumber;
     }
+    smgr::smgrgettargblock(::types_storage::RelFileLocatorBackend {
+        locator,
+        backend: rel.rd_backend,
+    })
 }
 
 fn set_target_block(rel: &Relation<'_>, blk: BlockNumber) {
-    TARGET_BLOCK.set((rel.rd_id, blk));
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return;
+    }
+    let key = ::types_storage::RelFileLocatorBackend { locator, backend: rel.rd_backend };
+    if smgr::smgropen(key.locator, key.backend).is_ok() {
+        smgr::smgrsettargblock(key, blk);
+    }
 }
 
 struct InsertState<'k> {

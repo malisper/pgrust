@@ -46,7 +46,7 @@ pub(crate) fn out_of_shmem_error() -> Box<PgError> {
 
 // Snapshot the locallock tags into the retained scratch vector;
 // RemoveLocalLock mutates the table during the sweeps.
-fn snapshot_locallock_tags() -> PgVec<'static, LOCALLOCKTAG> {
+pub(crate) fn snapshot_locallock_tags() -> PgVec<'static, LOCALLOCKTAG> {
     with_local(|state| {
         let mut scratch = std::mem::replace(&mut state.scratch, PgVec::new_in(state.mcx));
         scratch.clear();
@@ -55,7 +55,7 @@ fn snapshot_locallock_tags() -> PgVec<'static, LOCALLOCKTAG> {
     })
 }
 
-fn return_scratch(scratch: PgVec<'static, LOCALLOCKTAG>) {
+pub(crate) fn return_scratch(scratch: PgVec<'static, LOCALLOCKTAG>) {
     with_local(|state| state.scratch = scratch);
 }
 

@@ -62,7 +62,7 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 return Ok(false);
             }
 
-            check_for_interrupts();
+            check_for_interrupts()?;
 
             // Lossy page or candidate match: recheck the original quals
             // against the heap tuple (ExecQualAndReset shape).
@@ -215,17 +215,12 @@ pub fn exec_rescan_bitmap_heap_scan<'mcx>(
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("nodebitmapheapscan: ProcessInterrupts (tcop/postgres.c) unported")
-}
-
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> types_error::PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        postgres_seams::check_for_interrupts::call()?;
     }
+    Ok(())
 }
 
 // Exempt: bitmapqualorig is released in exec_end_bitmap_heap_scan.

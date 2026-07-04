@@ -62,6 +62,7 @@ fn setexpr_for(mcx: Mcx<'_>, returns_set: bool) -> SetExprState<'_> {
         args: PgVec::new_in(mcx),
         collation: 0,
         returns_set,
+        returns_tuple: false,
     }
 }
 

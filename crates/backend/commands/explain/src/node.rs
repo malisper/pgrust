@@ -111,6 +111,9 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_ValuesScan => {
+            rels_used.add_member(mcx, node.as_values_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_SubqueryScan => {
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
@@ -371,6 +374,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_BitmapAnd => "BitmapAnd",
         NodeTag::T_BitmapOr => "BitmapOr",
         NodeTag::T_FunctionScan => "Function Scan",
+        NodeTag::T_ValuesScan => "Values Scan",
         NodeTag::T_CteScan => "CTE Scan",
         // C interpolates the join type into the node name in TEXT format:
         // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
@@ -486,6 +490,9 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
+    if node.node_tag() == NodeTag::T_ValuesScan {
+        ExplainScanTarget(node.as_values_scan().unwrap().scan.scanrelid, es)?;
+    }
     if node.node_tag() == NodeTag::T_SubqueryScan {
         ExplainScanTarget(node.as_subquery_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -551,7 +558,7 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan | NodeTag::T_CteScan => {
+        NodeTag::T_SeqScan | NodeTag::T_CteScan | NodeTag::T_ValuesScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
@@ -1647,6 +1654,18 @@ fn deparse_expr<'mcx>(
                 )
             }
         }
+        NodeTag::T_CoerceViaIO => {
+            let io = expr.as_coerce_via_io().unwrap();
+            if io.coerceformat == types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+                && !showimplicit
+            {
+                deparse_expr(es, plan_node, ancestors, io.arg, useprefix, false, buf)
+            } else {
+                get_coercion_expr(
+                    es, plan_node, ancestors, io.arg, io.resulttype, -1, useprefix, buf,
+                )
+            }
+        }
         // get_rule_expr T_BoolExpr, non-pretty form: outer parens always.
         NodeTag::T_BoolExpr => {
             use types_nodes::primnodes::BoolExprType;
@@ -1798,6 +1817,39 @@ fn deparse_expr<'mcx>(
                     | Op::SVFOP_LOCALTIMESTAMP_N
             ) {
                 write!(buf, "({})", svf.typmod).expect("PgString write");
+            }
+            Ok(())
+        }
+        // get_rule_expr T_SubscriptingRef (fetch form; stores never reach
+        // EXPLAIN expressions).
+        NodeTag::T_SubscriptingRef => {
+            let sr = expr.as_subscripting_ref().unwrap();
+            if sr.refassgnexpr.is_some() {
+                node_gap("get_rule_expr", "SubscriptingRef store deparse (ruleutils lane)");
+            }
+            let refexpr = sr.refexpr.expect("SubscriptingRef.refexpr");
+            let need_parens = refexpr.node_tag() != NodeTag::T_Var;
+            if need_parens {
+                buf.try_push('(')?;
+            }
+            deparse_expr(es, plan_node, ancestors, refexpr, useprefix, showimplicit, buf)?;
+            if need_parens {
+                buf.try_push(')')?;
+            }
+            let mut low = sr.reflowerindexpr.iter();
+            let has_lower = !sr.reflowerindexpr.is_nil();
+            for up in sr.refupperindexpr.iter() {
+                buf.try_push('[')?;
+                if has_lower {
+                    if let Some(Some(l)) = low.next() {
+                        deparse_expr(es, plan_node, ancestors, l, useprefix, false, buf)?;
+                    }
+                    buf.try_push(':')?;
+                }
+                if let Some(u) = up {
+                    deparse_expr(es, plan_node, ancestors, u, useprefix, false, buf)?;
+                }
+                buf.try_push(']')?;
             }
             Ok(())
         }
@@ -1983,6 +2035,19 @@ fn deparse_expr<'mcx>(
             buf.try_push_str("))")?;
             Ok(())
         }
+        // get_rule_expr T_ArrayExpr.
+        NodeTag::T_ArrayExpr => {
+            let a = expr.as_array_expr().unwrap();
+            buf.try_push_str("ARRAY[")?;
+            for (i, e) in a.elements.iter().enumerate() {
+                if i > 0 {
+                    buf.try_push_str(", ")?;
+                }
+                deparse_expr(es, plan_node, ancestors, e, useprefix, true, buf)?;
+            }
+            buf.try_push(']')?;
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
@@ -2042,9 +2107,29 @@ fn deparse_param<'mcx>(
 ) -> PgResult<()> {
     use types_nodes::primnodes::ParamKind;
     if p.paramkind == ParamKind::PARAM_EXEC {
-        // find_param_referent: an ancestral SubPlan passing this param down.
+        // find_param_referent: a NestLoop transmitting this param to its
+        // inner side, or an ancestral SubPlan passing it down.
         let mut chain = ancestors;
+        let mut child = plan_node;
         while let Some(a) = chain {
+            if let AncestorEntry::Plan(pn) = a.entry {
+                if let Some(nl) = pn.as_nest_loop() {
+                    if nl.join.plan.righttree.is_some_and(|rt| rt.ptr_eq(child)) {
+                        for nlp_node in &nl.nestParams {
+                            let nlp = nlp_node
+                                .as_nest_loop_param()
+                                .expect("nestParams cell");
+                            if nlp.paramno == p.paramid {
+                                // push_ancestor_plan: deparse the outer Var
+                                // in the NestLoop's context, prefixes forced.
+                                deparse_expr(es, pn, a.parent, nlp.paramval, true, false, buf)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                child = pn;
+            }
             if let AncestorEntry::Sub(sp) = a.entry {
                 if let Some(i) = sp.parParam.iter().position(|id| id == p.paramid) {
                     let arg = sp.args.nth(i);
@@ -2152,6 +2237,8 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }
@@ -2229,10 +2316,12 @@ fn resolve_plan_var<'mcx>(plan_node: Node<'mcx>, varno: i32, varattno: i16) -> R
             node_gap("get_variable", "INDEX_VAR outside IndexOnlyScan (ruleutils lane)");
         };
         let tle = find_tle_by_resno(&ios.indextlist, varattno);
-        let Some(v) = tle.expr.as_var() else {
-            node_gap("get_variable", "non-Var indextlist deparse (ruleutils lane)");
+        return match tle.expr.as_var() {
+            Some(v) => ResolvedVar::Base(v.varno, v.varattno),
+            // Expression index column: deparse the heap-var expression in the
+            // scan's own context (C get_variable non-Var index_tlist arm).
+            None => ResolvedVar::Expr(tle.expr, plan_node),
         };
-        return ResolvedVar::Base(v.varno, v.varattno);
     }
     let child = match varno {
         types_nodes::primnodes::OUTER_VAR => outer_child(plan_node),
@@ -2436,7 +2525,7 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
             relname.as_ref().map(|s| s.as_str())
         }
         RTEKind::RTE_CTE => rte.ctename,
-        RTEKind::RTE_SUBQUERY => None,
+        RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => None,
         other => node_gap(
             "ExplainTargetRel",
             &format!("{other:?} target arm unported (M2+ plan lanes)"),

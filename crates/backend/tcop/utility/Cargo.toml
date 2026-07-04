@@ -8,10 +8,14 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+dropcmds = { path = "../../commands/dropcmds" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parse_clause = { path = "../../parser/parse_clause" }
 tablecmds = { path = "../../commands/tablecmds" }
 trigger = { path = "../../commands/trigger" }
+typecmds = { path = "../../commands/typecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
@@ -19,8 +23,8 @@ statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
-typecmds = { path = "../../commands/typecmds" }
 parser_small1 = { path = "../../parser/parser_small1" }
+commands_view = { path = "../../commands/view" }
 types_rel = { path = "../../../_support/types/rel" }
 commands_analyze = { path = "../../commands/analyze" }
 commands_async = { path = "../../commands/commands_async" }
@@ -28,6 +32,8 @@ commands_vacuum = { path = "../../commands/vacuum" }
 copy_cmd = { path = "../../commands/copy" }
 discard = { path = "../../commands/discard" }
 explain = { path = "../../commands/explain" }
+commands_createas = { path = "../../commands/createas" }
+commands_matview = { path = "../../commands/matview" }
 portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
@@ -60,6 +66,12 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
+
+operatorcmds = { path = "../../commands/operatorcmds" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+extension = { path = "../../commands/extension" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

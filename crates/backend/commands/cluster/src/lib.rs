@@ -15,7 +15,7 @@ use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::PgResult;
-use types_rel::{AccessExclusiveLock, NoLock, RowExclusiveLock, LOCKMODE};
+use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 const Anum_pg_class_relam: usize = 7;
@@ -90,9 +90,11 @@ pub fn make_new_heap<'mcx>(
         // C creates the new toast with the old toast's reloptions and
         // relrewrite = old toast oid; relrewrite is reset to 0 at swap end
         // either way (single-backend: mid-xact catalog state only).
-        let old_toast = table::table_open(mcx, old_heap.rd_rel.reltoastrelid, NoLock)?;
+        // C reads toast reloptions via syscache, lock-free; this open needs a
+        // lock only for the strict-open assert (parent is exclusively locked).
+        let old_toast = table::table_open(mcx, old_heap.rd_rel.reltoastrelid, AccessShareLock)?;
         let has_opts = old_toast.rd_options.is_some();
-        old_toast.close(NoLock)?;
+        old_toast.close(AccessShareLock)?;
         if has_opts {
             unported("make_new_heap: toast reloptions copy");
         }
@@ -171,9 +173,9 @@ pub fn finish_heap_swap<'mcx>(
         newrel.close(NoLock)?;
         if cur_toast != InvalidOid {
             let toastidx = {
-                let toastrel = table::table_open(mcx, cur_toast, NoLock)?;
+                let toastrel = table::table_open(mcx, cur_toast, AccessShareLock)?;
                 let idxs = relcache::RelationGetIndexList(mcx, cur_toast)?;
-                toastrel.close(NoLock)?;
+                toastrel.close(AccessShareLock)?;
                 assert!(idxs.len() == 1, "toast table with {} indexes", idxs.len());
                 idxs[0]
             };

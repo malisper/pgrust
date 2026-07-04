@@ -141,6 +141,9 @@ fn install_domain_seams() {
     });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok((funcid == 147).then_some(syscache_seams::PgProcShape {
+            prolang: 12,
+            prosecdef: false,
+            proconfig_isnull: true,
             pronamespace: 11,
             prorettype: BOOLOID,
             provariadic: 0,
@@ -1346,10 +1349,10 @@ fn coerce_to_domain_null_is_23502() {
 #[test]
 fn domain_check_input_engine_matches() {
     install_seams();
-    assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID).is_ok());
-    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID).unwrap_err();
+    assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID, None).is_ok());
+    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID, None).unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
-    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID).unwrap_err();
+    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID, None).unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }
 #[test]

@@ -19,13 +19,28 @@ parse_func = { path = "../../../parser/parse_func" }
 parse_oper = { path = "../../../parser/parse_oper" }
 parser_small1 = { path = "../../../parser/parser_small1" }
 readfuncs = { path = "../../../nodes/readfuncs" }
+relcache = { path = "../../cache/relcache" }
+genam = { path = "../../../access/index/genam" }
+table = { path = "../../../access/table/table" }
+detoast = { path = "../../../access/common/detoast" }
+parse_relation = { path = "../../../parser/parse_relation" }
+rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
+guc = { path = "../../misc/guc" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+typcache = { path = "../../cache/typcache" }
+vars = { path = "../../../optimizer/util/vars" }
+varlena = { path = "../varlena" }
+mbutils = { path = "../../mb/mbutils" }
+rel_vocab = { path = "../../../../_support/types/rel_vocab" }
+types_rel = { path = "../../../../_support/types/rel" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+syscache_seams = { path = "../../cache/syscache_seams" }
 
 [dev-dependencies]
 namespace_seams = { path = "../../../catalog/namespace_seams" }
-syscache_seams = { path = "../../cache/syscache_seams" }
 

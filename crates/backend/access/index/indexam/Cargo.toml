@@ -22,6 +22,7 @@ relation_seams = { path = "../../common/relation_seams" }
 tableam = { path = "../../table/tableam" }
 indexam_seams = { path = "../indexam_seams" }
 types_relscan = { path = "../relscan" }
+spgist = { path = "../../spgist/spgist" }
 gist = { path = "../../gist/gist" }
 nbtree = { path = "../../nbtree/nbtree" }
 hash = { path = "../../hash/hash" }

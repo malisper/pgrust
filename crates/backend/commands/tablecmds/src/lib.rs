@@ -11,7 +11,7 @@ mod oncommit;
 mod rename;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
-pub use rename::{renameatt, RenameRelation, RenameRelationInternal};
+pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
@@ -90,6 +90,30 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
+// GetColumnDefCollation (parse_type.c).
+fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid> {
+    let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+        .expect("pg_type row vanished")
+        .typcollation;
+    let result = if let Some(cc) = coldef.collClause {
+        let cc = cc.as_collate_clause().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)?
+    } else if coldef.collOid != types_core::InvalidOid {
+        coldef.collOid
+    } else {
+        typcollation
+    };
+    if result != types_core::InvalidOid && typcollation == types_core::InvalidOid {
+        return Err(types_error::PgError::error(format!(
+            "collations are not supported by type {}",
+            format_type::format_type_be(type_oid)?
+        ))
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+        .into());
+    }
+    Ok(result)
+}
+
 // BuildDescForRelation (tablecmds.c in 18.3).
 pub fn BuildDescForRelation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -111,15 +135,7 @@ pub fn BuildDescForRelation<'mcx>(
             .as_variant::<TypeName>()
             .expect("TypeName");
         let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-        // GetColumnDefCollation: collClause is loud upstream; collOid is the
-        // pre-cooked (LIKE) carrier, else the type's default.
-        let attcollation = if entry.collOid != InvalidOid {
-            entry.collOid
-        } else {
-            syscache_seams::lookup_pg_type_shape::call(atttypid)?
-                .expect("pg_type row vanished")
-                .typcollation
-        };
+        let attcollation = GetColumnDefCollation(entry, atttypid)?;
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 
@@ -149,7 +165,12 @@ pub fn DefineRelation<'mcx>(
     owner_id: Oid,
     query_string: &str,
 ) -> PgResult<Oid> {
-    debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
+    debug_assert!(
+        relkind == RELKIND_RELATION
+            || relkind == RELKIND_SEQUENCE
+            || relkind == types_rel::RELKIND_VIEW
+            || relkind == types_rel::RELKIND_MATVIEW
+    );
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");

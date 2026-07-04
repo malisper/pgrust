@@ -127,6 +127,28 @@ pub struct ReturningClause<'mcx> {
     pub exprs: NodeList<'mcx>,
 }
 
+/// `relation` is a RangeVar node; `sourceRelation` a table_ref;
+/// `mergeWhenClauses` cells are MergeWhenClause.
+#[derive(Default)]
+pub struct MergeStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub sourceRelation: Option<Node<'mcx>>,
+    pub joinCondition: Option<Node<'mcx>>,
+    pub mergeWhenClauses: NodeList<'mcx>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct MergeWhenClause<'mcx> {
+    pub matchKind: crate::primnodes::MergeMatchKind,
+    pub commandType: crate::nodes_enums::CmdType,
+    pub r#override: crate::primnodes::OverridingKind,
+    pub condition: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub values: NodeList<'mcx>,
+}
+
 /// `infer` is an InferClause node; `targetList` cells are ResTarget.
 #[derive(Default)]
 pub struct OnConflictClause<'mcx> {
@@ -230,6 +252,27 @@ pub struct ParamRef {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct A_Star;
+
+#[derive(Default)]
+pub struct A_Indices<'mcx> {
+    pub is_slice: bool,
+    pub lidx: Option<Node<'mcx>>,
+    pub uidx: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct A_Indirection<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub indirection: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct A_ArrayExpr<'mcx> {
+    pub elements: NodeList<'mcx>,
+    pub list_start: ParseLoc,
+    pub list_end: ParseLoc,
+    pub location: ParseLoc,
+}
 
 #[derive(Default)]
 pub struct SortBy<'mcx> {
@@ -355,6 +398,38 @@ pub enum OnCommitAction {
     ONCOMMIT_DROP,
 }
 
+/// `rel` is a RangeVar node handle (the grammar scribbles its
+/// relpersistence); `viewQuery` is a Query node handle (matview lane).
+#[derive(Default)]
+pub struct IntoClause<'mcx> {
+    pub rel: Option<Node<'mcx>>,
+    pub colNames: NodeList<'mcx>,
+    pub accessMethod: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub onCommit: OnCommitAction,
+    pub tableSpaceName: Option<&'mcx str>,
+    pub viewQuery: Option<Node<'mcx>>,
+    pub skipData: bool,
+}
+
+/// `query` is a raw statement node until parse analysis rewrites it into a
+/// Query node in place; `into` is an IntoClause node handle.
+#[derive(Default)]
+pub struct CreateTableAsStmt<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub into: Option<Node<'mcx>>,
+    pub objtype: crate::parsenodes::ObjectType,
+    pub is_select_into: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct RefreshMatViewStmt<'mcx> {
+    pub concurrent: bool,
+    pub skipData: bool,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct CreateStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
@@ -370,6 +445,34 @@ pub struct CreateStmt<'mcx> {
     pub tablespacename: Option<&'mcx str>,
     pub accessMethod: Option<&'mcx str>,
     pub if_not_exists: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ViewCheckOption {
+    #[default]
+    NO_CHECK_OPTION = 0,
+    LOCAL_CHECK_OPTION,
+    CASCADED_CHECK_OPTION,
+}
+
+#[derive(Default)]
+pub struct ViewStmt<'mcx> {
+    pub view: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub aliases: NodeList<'mcx>,
+    pub query: Option<Node<'mcx>>,
+    pub replace: bool,
+    pub options: NodeList<'mcx>,
+    pub withCheckOption: ViewCheckOption,
+}
+
+pub struct RuleStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub rulename: &'mcx str,
+    pub whereClause: Option<Node<'mcx>>,
+    pub event: crate::nodes_enums::CmdType,
+    pub instead: bool,
+    pub actions: NodeList<'mcx>,
+    pub replace: bool,
 }
 
 #[derive(Default)]
@@ -601,21 +704,71 @@ pub struct CreateDomainStmt<'mcx> {
     pub constraints: NodeList<'mcx>,
 }
 
+#[derive(Default)]
+pub struct CreateEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub vals: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub oldVal: Option<&'mcx str>,
+    pub newVal: Option<&'mcx str>,
+    pub newValNeighbor: Option<&'mcx str>,
+    pub newValIsAfter: bool,
+    pub skipIfNewValExists: bool,
+}
+
+/// `val` is a SelectStmt node (the PLpgSQL_Expr production's result).
+#[derive(Default)]
+pub struct PLAssignStmt<'mcx> {
+    pub name: &'mcx str,
+    pub indirection: NodeList<'mcx>,
+    pub nnames: i32,
+    pub val: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for PLAssignStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PLAssignStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateEnumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterEnumStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IntoClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IntoClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableAsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTableAsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RefreshMatViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RefreshMatViewStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReturningClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeWhenClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeWhenClause;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_OnConflictClause;
@@ -650,6 +803,15 @@ unsafe impl NodeVariant<'_> for ParamRef {
 unsafe impl NodeVariant<'_> for A_Star {
     const TAG: NodeTag = NodeTag::T_A_Star;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indices<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indices;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indirection<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indirection;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_ArrayExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_ArrayExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
     const TAG: NodeTag = NodeTag::T_SortBy;
 }
@@ -673,6 +835,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TypeCast<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ViewStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RuleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RuleStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;
@@ -778,6 +946,26 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ConstraintsSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ConstraintsSetStmt;
 }
 
+#[derive(Default)]
+pub struct CreateExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateExtensionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterExtensionStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,
@@ -843,6 +1031,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_pl_assign_stmt(self) -> Option<&'mcx PLAssignStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_select_stmt(self) -> Option<&'mcx SelectStmt<'mcx>> {
         self.as_variant()
     }
@@ -859,6 +1052,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_on_conflict_clause(self) -> Option<&'mcx OnConflictClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_stmt(self) -> Option<&'mcx MergeStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_when_clause(self) -> Option<&'mcx MergeWhenClause<'mcx>> {
         self.as_variant()
     }
 
@@ -947,6 +1150,7 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 
+
     #[inline]
     pub fn as_locking_clause(self) -> Option<&'mcx LockingClause<'mcx>> {
         self.as_variant()
@@ -958,7 +1162,17 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_create_enum_stmt(self) -> Option<&'mcx CreateEnumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_enum_stmt(self) -> Option<&'mcx AlterEnumStmt<'mcx>> {
         self.as_variant()
     }
 
@@ -973,12 +1187,27 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_a_indices(self) -> Option<&'mcx A_Indices<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_trigger_transition(self) -> Option<&'mcx TriggerTransition<'mcx>> {
         self.as_variant()
     }
 
     #[inline]
+    pub fn as_a_indirection(self) -> Option<&'mcx A_Indirection<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_constraints_set_stmt(self) -> Option<&'mcx ConstraintsSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_array_expr(self) -> Option<&'mcx A_ArrayExpr<'mcx>> {
         self.as_variant()
     }
 }

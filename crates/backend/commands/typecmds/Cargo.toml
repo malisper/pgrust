@@ -23,6 +23,7 @@ coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
 outfuncs = { path = "../../nodes/outfuncs" }
 pg_type = { path = "../../catalog/pg_type" }
+pg_enum = { path = "../../catalog/pg_enum" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 aclchk = { path = "../../catalog/aclchk" }
@@ -31,6 +32,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
 xact = { path = "../../access/transam/xact" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }

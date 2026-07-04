@@ -14,6 +14,7 @@ pub struct ScannedPgClass {
     // dropped from it).
     pub relchecks: i16,
     pub relhastriggers: bool,
+    pub relhasrules: bool,
     pub options: Option<RdOptions>,
 }
 

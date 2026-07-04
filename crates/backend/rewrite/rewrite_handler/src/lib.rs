@@ -13,6 +13,8 @@ use types_rel::{
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
 
+mod fire;
+
 #[cfg(test)]
 mod tests;
 
@@ -30,7 +32,8 @@ pub fn QueryRewrite<'mcx>(
     let input_query_id = parsetree.queryId;
     let orig_cmd_type = parsetree.commandType;
 
-    let mut results = RewriteQuery(mcx, parsetree)?;
+    let mut rewrite_events: PgVec<'mcx, (Oid, CmdType)> = PgVec::new_in(mcx);
+    let mut results = RewriteQuery(mcx, parsetree, &mut rewrite_events, 0, 0)?;
 
     for query in results.iter_mut() {
         let mut active_rirs: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
@@ -69,11 +72,23 @@ pub fn QueryRewrite<'mcx>(
 fn RewriteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     mut parsetree: Query<'mcx>,
+    rewrite_events: &mut PgVec<'mcx, (Oid, CmdType)>,
+    orig_rt_length: usize,
+    num_ctes_processed: usize,
 ) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
     let event = parsetree.commandType;
+    let mut instead = false;
+    let mut returning = false;
+    let mut qual_product: Option<Node<'mcx>> = None;
+    let mut rewritten: PgVec<'mcx, Query<'mcx>> = PgVec::new_in(mcx);
 
-    // C's CTE loop only acts on data-modifying CTEs; SELECT CTEs `continue`.
-    for cte_node in &parsetree.cteList {
+    // C's CTE loop only acts on data-modifying CTEs; SELECT CTEs `continue`,
+    // and already-processed CTEs at the list tail are skipped on recursion.
+    let cte_len = parsetree.cteList.len();
+    for (i, cte_node) in parsetree.cteList.iter().enumerate() {
+        if i >= cte_len - num_ctes_processed {
+            break;
+        }
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
         if ctequery.commandType != CmdType::CMD_SELECT {
@@ -83,132 +98,268 @@ fn RewriteQuery<'mcx>(
             );
         }
     }
+    let num_ctes_processed = cte_len;
 
-    match event {
-        CmdType::CMD_SELECT | CmdType::CMD_UTILITY => {}
-        CmdType::CMD_INSERT => rewrite_insert_query(mcx, &mut parsetree)?,
-        CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
-            rewrite_update_delete_query(mcx, &mut parsetree)?
+    let mut product_count = 0usize;
+    let mut has_update = false;
+    if event != CmdType::CMD_SELECT && event != CmdType::CMD_UTILITY {
+        if !matches!(
+            event,
+            CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+        ) {
+            panic!("unrecognized commandType: {event:?}");
         }
-        other => panic!(
-            "RewriteQuery (rewriteHandler.c): {other:?} rewrite needs the \
-             mergeActionList arm (MERGE vocab unported)"
-        ),
+        let result_relation = parsetree.resultRelation;
+        debug_assert!(result_relation != 0);
+        let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
+        debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
+
+        let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
+        if rel.rd_rel.relkind == RELKIND_VIEW {
+            panic!(
+                "RewriteQuery (rewriteHandler.c): DML on view needs \
+                 rewriteTargetView (auto-updatable view lane)"
+            );
+        }
+
+        match event {
+            CmdType::CMD_INSERT => {
+                let mut values_rte = None;
+                let jointree = parsetree.jointree.expect("INSERT jointree is a FromExpr");
+                for rtr_node in &jointree.fromlist {
+                    if let Some(rtr) = rtr_node.as_range_tbl_ref() {
+                        if rtr.rtindex as usize <= orig_rt_length {
+                            // Product queries re-encounter the original query's
+                            // already-processed VALUES RTEs; skip them (C).
+                            continue;
+                        }
+                        let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
+                        let rte = rte_of(rte_node);
+                        if rte.rtekind == RTEKind::RTE_VALUES {
+                            debug_assert!(
+                                values_rte.is_none(),
+                                "more than one VALUES RTE found"
+                            );
+                            values_rte = Some((rte, rtr.rtindex, rte_node));
+                        }
+                    }
+                }
+
+                let mut unused_values_attrnos: PgVec<'_, i16> = PgVec::new_in(mcx);
+                parsetree.targetList = rewriteTargetListIU(
+                    mcx,
+                    &parsetree.targetList,
+                    CmdType::CMD_INSERT,
+                    parsetree.r#override,
+                    &rel,
+                    values_rte.map(|(rte, rti, _)| (rte, rti)),
+                    Some(&mut unused_values_attrnos),
+                )?;
+
+                if let Some((rte, rti, rte_node)) = values_rte {
+                    rewriteValuesRTE(
+                        mcx,
+                        &parsetree,
+                        rte,
+                        rti,
+                        rte_node,
+                        &rel,
+                        &unused_values_attrnos,
+                    )?;
+                }
+
+                if let Some(oc_node) = parsetree.onConflict {
+                    let oc =
+                        oc_node.as_on_conflict_expr().expect("onConflict is an OnConflictExpr");
+                    if oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE {
+                        let new_set = rewriteTargetListIU(
+                            mcx,
+                            &oc.onConflictSet,
+                            CmdType::CMD_UPDATE,
+                            parsetree.r#override,
+                            &rel,
+                            None,
+                            None,
+                        )?;
+                        // SAFETY: exclusive Query-tree ownership during rewrite.
+                        unsafe {
+                            oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                                o.onConflictSet = new_set;
+                            })
+                        }
+                        .expect("OnConflictExpr node");
+                    }
+                }
+            }
+            CmdType::CMD_UPDATE => {
+                debug_assert!(
+                    parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
+                );
+                parsetree.targetList = rewriteTargetListIU(
+                    mcx,
+                    &parsetree.targetList,
+                    CmdType::CMD_UPDATE,
+                    parsetree.r#override,
+                    &rel,
+                    None,
+                    None,
+                )?;
+            }
+            CmdType::CMD_DELETE => {}
+            CmdType::CMD_MERGE => {
+                debug_assert!(
+                    parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
+                );
+                for action_node in &parsetree.mergeActionList {
+                    let action = action_node
+                        .as_merge_action()
+                        .expect("mergeActionList cell is a MergeAction");
+                    match action.commandType {
+                        CmdType::CMD_NOTHING | CmdType::CMD_DELETE => {}
+                        CmdType::CMD_UPDATE | CmdType::CMD_INSERT => {
+                            // MERGE actions do not permit multi-row INSERTs: no VALUES RTE.
+                            let new_tlist = rewriteTargetListIU(
+                                mcx,
+                                &action.targetList,
+                                action.commandType,
+                                action.r#override,
+                                &rel,
+                                None,
+                                None,
+                            )?;
+                            // SAFETY: exclusive Query-tree ownership during rewrite.
+                            unsafe {
+                                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                                    a.targetList = new_tlist;
+                                })
+                            }
+                            .expect("MergeAction node");
+                        }
+                        other => panic!("unrecognized commandType: {other:?}"),
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let rules_rc = if rel.rd_hasrules {
+            relcache::RelationGetRules(mcx, rt_entry.relid)?
+        } else {
+            None
+        };
+        let empty: [RewriteRuleMeta; 0] = [];
+        let rules: &[RewriteRuleMeta] = match &rules_rc {
+            Some(r) => &r.rules,
+            None => &empty,
+        };
+        let locks =
+            fire::matchLocks(event, rules, result_relation, rel.name(), &parsetree, &mut has_update)?;
+
+        let product_orig_rt_length = parsetree.rtable.len();
+        let product_queries = fire::fireRules(
+            mcx,
+            &parsetree,
+            result_relation,
+            event,
+            rules,
+            &locks,
+            &mut instead,
+            &mut returning,
+            &mut qual_product,
+        )?;
+        product_count = product_queries.len();
+
+        if !product_queries.is_empty() {
+            for ev in rewrite_events.iter() {
+                if ev.0 == rt_entry.relid && ev.1 == event {
+                    let err = infinite_recursion(rel.name());
+                    table::table_close(rel, NoLock)?;
+                    return Err(err);
+                }
+            }
+            rewrite_events.push((rt_entry.relid, event));
+            for pt_node in product_queries.iter() {
+                let ptq = rewrite_manip::flat_copy_query(mcx, pt_node.as_query().expect("Query"))?;
+                let newstuff = RewriteQuery(
+                    mcx,
+                    ptq,
+                    rewrite_events,
+                    product_orig_rt_length,
+                    num_ctes_processed,
+                )?;
+                rewritten.extend(newstuff);
+            }
+            rewrite_events.pop();
+        }
+
+        if (instead || qual_product.is_some())
+            && !parsetree.returningList.is_nil()
+            && !returning
+        {
+            let err = returning_needs_instead_rule(event, rel.name());
+            table::table_close(rel, NoLock)?;
+            return Err(err);
+        }
+
+        if parsetree.onConflict.is_some() && (product_count > 0 || has_update) {
+            table::table_close(rel, NoLock)?;
+            return Err(Box::new(
+                PgError::error(
+                    "INSERT with ON CONFLICT clause cannot be used with table that has INSERT or UPDATE rules",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+
+        table::table_close(rel, NoLock)?;
     }
 
-    let mut rewritten = mcx::vec_with_capacity_in(mcx, 1)?;
-    rewritten.push(parsetree);
+    // INSERT products run after the original; UPDATE/DELETE products before.
+    if !instead {
+        let final_q = match qual_product {
+            Some(n) => rewrite_manip::flat_copy_query(mcx, n.as_query().expect("Query"))?,
+            None => parsetree,
+        };
+        if event == CmdType::CMD_INSERT {
+            rewritten.insert(0, final_q);
+        } else {
+            rewritten.push(final_q);
+        }
+    }
+
+    if cte_len > 0 {
+        let qcount =
+            rewritten.iter().filter(|q| q.commandType != CmdType::CMD_UTILITY).count();
+        if qcount > 1 {
+            return Err(Box::new(
+                PgError::error(
+                    "WITH cannot be used in a query that is rewritten by rules into multiple queries",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+    }
+
     Ok(rewritten)
 }
 
-// The CMD_INSERT arm of RewriteQuery's DML block: adjust the targetlist, then
-// fire INSERT rules. The trimmed relcache entry has no rd_rules, so a table
-// carrying user CREATE RULE rules is undetectable until pg_rewrite lands
-// (matchLocks = NIL in a stock initdb; same divergence as fireRIRrules).
-fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> PgResult<()> {
-    let result_relation = parsetree.resultRelation;
-    debug_assert!(result_relation != 0);
-    let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
-    debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
-
-    let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
-    if rel.rd_rel.relkind == RELKIND_VIEW {
-        panic!(
-            "RewriteQuery (rewriteHandler.c): auto-updatable view INSERT needs \
-             rewriteTargetView (pg_rewrite vocab unported)"
-        );
-    }
-
-    let mut values_rte = None;
-    let jointree = parsetree.jointree.expect("INSERT jointree is a FromExpr");
-    for rtr_node in &jointree.fromlist {
-        if let Some(rtr) = rtr_node.as_range_tbl_ref() {
-            let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
-            let rte = rte_of(rte_node);
-            if rte.rtekind == RTEKind::RTE_VALUES {
-                debug_assert!(values_rte.is_none(), "more than one VALUES RTE found");
-                values_rte = Some((rte, rtr.rtindex, rte_node));
-            }
-        }
-    }
-
-    let mut unused_values_attrnos: PgVec<'_, i16> = PgVec::new_in(mcx);
-    parsetree.targetList = rewriteTargetListIU(
-        mcx,
-        &parsetree.targetList,
-        CmdType::CMD_INSERT,
-        parsetree.r#override,
-        &rel,
-        values_rte.map(|(rte, rti, _)| (rte, rti)),
-        Some(&mut unused_values_attrnos),
-    )?;
-
-    if let Some((rte, rti, rte_node)) = values_rte {
-        rewriteValuesRTE(mcx, parsetree, rte, rti, rte_node, &rel, &unused_values_attrnos)?;
-    }
-
-    if let Some(oc_node) = parsetree.onConflict {
-        let oc = oc_node.as_on_conflict_expr().expect("onConflict is an OnConflictExpr");
-        if oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE {
-            let new_set = rewriteTargetListIU(
-                mcx,
-                &oc.onConflictSet,
-                CmdType::CMD_UPDATE,
-                parsetree.r#override,
-                &rel,
-                None,
-                None,
-            )?;
-            // SAFETY: exclusive Query-tree ownership during rewrite.
-            unsafe {
-                oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
-                    o.onConflictSet = new_set;
-                })
-            }
-            .expect("OnConflictExpr node");
-        }
-    }
-    table::table_close(rel, NoLock)?;
-    Ok(())
-}
-
-// The CMD_UPDATE/CMD_DELETE arm of RewriteQuery's DML block: same relation
-// prologue as INSERT; UPDATE additionally reorders its targetlist. Same
-// rd_rules divergence as rewrite_insert_query.
-fn rewrite_update_delete_query<'mcx>(
-    mcx: Mcx<'mcx>,
-    parsetree: &mut Query<'mcx>,
-) -> PgResult<()> {
-    let result_relation = parsetree.resultRelation;
-    debug_assert!(result_relation != 0);
-    let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
-    debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
-
-    let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
-    if rel.rd_rel.relkind == RELKIND_VIEW {
-        panic!(
-            "RewriteQuery (rewriteHandler.c): auto-updatable view UPDATE/DELETE \
-             needs rewriteTargetView (pg_rewrite vocab unported)"
-        );
-    }
-
-    if parsetree.commandType == CmdType::CMD_UPDATE {
-        debug_assert!(
-            parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
-        );
-        parsetree.targetList = rewriteTargetListIU(
-            mcx,
-            &parsetree.targetList,
-            CmdType::CMD_UPDATE,
-            parsetree.r#override,
-            &rel,
-            None,
-            None,
-        )?;
-    }
-
-    table::table_close(rel, NoLock)?;
-    Ok(())
+#[cold]
+#[inline(never)]
+fn returning_needs_instead_rule(event: CmdType, relname: &str) -> Box<PgError> {
+    let (verb, hint_evt) = match event {
+        CmdType::CMD_INSERT => ("INSERT", "INSERT"),
+        CmdType::CMD_UPDATE => ("UPDATE", "UPDATE"),
+        _ => ("DELETE", "DELETE"),
+    };
+    Box::new(
+        PgError::error(format!(
+            "cannot perform {verb} RETURNING on relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint(format!(
+            "You need an unconditional ON {hint_evt} DO INSTEAD rule with a RETURNING clause."
+        )),
+    )
 }
 
 // rewriteTargetListIU, INSERT/UPDATE arms: reorder non-junk TLEs into
@@ -697,11 +848,7 @@ fn fireRIRrules<'mcx>(
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, NoLock)?;
-        // C divergence: the trimmed pg_class Form has no relhasrules, so the
-        // rd_rules probe is keyed on relkind — a non-view relation carrying
-        // user CREATE RULE rules is undetectable (none exist in a stock
-        // initdb; CREATE RULE is unported).
-        if rel.rd_rel.relkind == RELKIND_VIEW {
+        if rel.rd_hasrules {
             if let Some(rules) = relcache::RelationGetRules(mcx, rte.relid)? {
                 let is_select = |r: &&RewriteRuleMeta| r.event == CmdType::CMD_SELECT as i32;
                 if rules.rules.iter().any(|r| is_select(&r)) {
