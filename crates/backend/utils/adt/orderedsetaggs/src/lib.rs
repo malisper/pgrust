@@ -612,9 +612,10 @@ fn array_shape(param: &[u8]) -> (i32, [i32; 6], [i32; 6]) {
     let ndim = rd(4);
     let mut dims = [0i32; 6];
     let mut lbs = [0i32; 6];
-    for i in 0..ndim.clamp(0, 6) as usize {
-        dims[i] = rd(16 + 8 * i);
-        lbs[i] = rd(20 + 8 * i);
+    let n = ndim.clamp(0, 6) as usize;
+    for i in 0..n {
+        dims[i] = rd(16 + 4 * i);
+        lbs[i] = rd(16 + 4 * n + 4 * i);
     }
     (ndim, dims, lbs)
 }
