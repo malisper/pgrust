@@ -19,6 +19,7 @@ rewrite_handler_seams = { path = "../rewrite_handler_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 rewrite_manip = { path = "../rewrite_manip" }
+rewrite_search_cycle = { path = "../rewrite_search_cycle" }
 relcache = { path = "../../utils/cache/relcache" }
 rowsecurity = { path = "../rowsecurity" }
 coerce = { path = "../../parser/coerce" }

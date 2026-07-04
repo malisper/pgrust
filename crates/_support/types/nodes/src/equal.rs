@@ -17,8 +17,8 @@ use crate::parsenodes::{
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
-    RangeVar, RelabelType, RowExpr,
+    CurrentOfExpr, DistinctExpr, FieldSelect, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr,
+    Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     XmlExpr,
 };
@@ -67,6 +67,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
+        NodeTag::T_FieldSelect => cmp!(as_field_select),
         NodeTag::T_CollateExpr => cmp!(as_collate_expr),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
@@ -450,6 +451,16 @@ fn equal_opt_pair(a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
 impl NodeEqual for BoolExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.boolop == b.boolop && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for FieldSelect<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.fieldnum == b.fieldnum
+            && self.resulttype == b.resulttype
+            && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
     }
 }
 

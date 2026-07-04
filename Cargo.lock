@@ -7144,6 +7144,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tupdesc",
+ "typcache",
  "types_core",
  "types_error",
  "types_nodes",
@@ -9513,6 +9514,7 @@ dependencies = [
  "resowner",
  "rewrite_handler_seams",
  "rewrite_manip",
+ "rewrite_search_cycle",
  "rls_seams",
  "rmgr",
  "rowsecurity",
@@ -9580,6 +9582,20 @@ dependencies = [
  "nodes_core",
  "outfuncs",
  "readfuncs",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
+name = "rewrite_search_cycle"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "nodes_core",
+ "parser_analyze",
+ "rewrite_manip",
  "types_core",
  "types_error",
  "types_nodes",

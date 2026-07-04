@@ -1022,6 +1022,7 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(e, info);
             }
         }
+        NodeTag::T_FieldSelect => setup_walker(node.as_field_select().unwrap().arg, info),
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_CoalesceExpr => {
@@ -1364,6 +1365,27 @@ pub(crate) fn init_expr_rec<'mcx>(
         }
         NodeTag::T_RelabelType => {
             init_expr_rec(node.as_relabel_type().unwrap().arg, state, mcx, out, agg, params, sub)
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            init_expr_rec(f.arg, state, mcx, out, agg, params, sub)?;
+            let frame_ix = state.frames.len() as u32;
+            let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+            state
+                .frames
+                .try_reserve(1)
+                .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+            state.frames.push(frame);
+            push_step(
+                state,
+                mcx,
+                Step::FieldSelect {
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    frame: frame_ix,
+                    out,
+                },
+            )
         }
         NodeTag::T_NextValueExpr => {
             let nve = node

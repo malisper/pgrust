@@ -178,6 +178,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         }
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_FieldSelect => w.visit(node.as_field_select().unwrap().arg),
         NodeTag::T_CollateExpr => w.visit(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),

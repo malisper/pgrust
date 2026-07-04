@@ -1183,6 +1183,20 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_upper_expr(run, f.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
             let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
@@ -1709,6 +1723,20 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_scan_expr_mutator(run, f.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
@@ -2070,6 +2098,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_CurrentOfExpr => Ok(()),
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_FieldSelect => {
+            fix_scan_expr_walker(run, node.as_field_select().unwrap().arg)
         }
         NodeTag::T_CoerceToDomain => {
             fix_scan_expr_walker(run, node.as_coerce_to_domain().unwrap().arg)
@@ -2660,6 +2691,20 @@ fn fix_join_expr_mutator<'mcx>(
                     resultcollid: c.resultcollid,
                     coercionformat: c.coercionformat,
                     location: c.location,
+                },
+            )
+        }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            let arg = fix_join_expr_mutator(run, f.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldSelect {
+                    arg,
+                    fieldnum: f.fieldnum,
+                    resulttype: f.resulttype,
+                    resulttypmod: f.resulttypmod,
+                    resultcollid: f.resultcollid,
                 },
             )
         }

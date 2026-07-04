@@ -870,6 +870,15 @@ fn fireRIRrules<'mcx>(
         has_sub_links: false,
         with_check_options: PgVec::new_in(mcx),
     };
+    // SEARCH/CYCLE expansion precedes the RIR recursion into each ctequery
+    // (C runs the expansion loop at the top of fireRIRrules); C copyObject's
+    // the CTE and replaces the cell — the arena tree is mutated in place.
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
+            rewrite_search_cycle::rewriteSearchAndCycle(mcx, cte_node)?;
+        }
+    }
     // C reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
     // argument mutated in place, so the shared-ref recursion is equivalent.
     for cte_node in &parsetree.cteList {
@@ -879,9 +888,6 @@ fn fireRIRrules<'mcx>(
         let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
         stamp_query_flags(cte_query_node, &rir);
         out.has_row_security |= rir.has_row_security;
-        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
-            panic!("rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE lane");
-        }
     }
     // The EXCLUDED pseudo-relation must stay RTE_RELATION; never expand it.
     let excl_rel_index = parsetree

@@ -418,6 +418,15 @@ pub struct NextValueExpr {
     pub typeId: Oid,
 }
 
+// C `Expr *arg` is never NULL in a live FieldSelect; modeled non-optional.
+pub struct FieldSelect<'mcx> {
+    pub arg: Node<'mcx>,
+    pub fieldnum: AttrNumber,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
+}
+
 // C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
 pub struct CoerceViaIO<'mcx> {
     pub arg: Node<'mcx>,
@@ -825,6 +834,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SubscriptingRef<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for FieldSelect<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FieldSelect;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceViaIO;
 }
@@ -1093,6 +1105,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_relabel_type(self) -> Option<&'mcx RelabelType<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_field_select(self) -> Option<&'mcx FieldSelect<'mcx>> {
         self.as_variant()
     }
 

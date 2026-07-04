@@ -26,6 +26,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_BoolExpr
@@ -134,6 +135,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Var => node.as_var().unwrap().vartypmod,
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttypmod,
         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
@@ -226,6 +228,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resultcollid,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_BoolExpr
@@ -330,6 +333,8 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let r = node.as_relabel_type().unwrap();
             leftmost_loc(r.location, expr_location(r.arg))
         }
+        // C: FieldSelect has no location; report the argument's.
+        NodeTag::T_FieldSelect => expr_location(node.as_field_select().unwrap().arg),
         // C: CollateExpr just uses the argument's location.
         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
         NodeTag::T_Aggref => node.as_aggref().unwrap().location,
