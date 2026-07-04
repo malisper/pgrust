@@ -645,7 +645,7 @@ pub struct TidPath<'mcx> {
 #[derive(Clone, Debug)]
 pub struct TidRangePath<'mcx> {
     pub path: Path<'mcx>,
-    pub tidrangequals: PgVec<'mcx, NodeId>,
+    pub tidrangequals: PgVec<'mcx, RinfoId>,
 }
 
 #[derive(Clone, Debug)]

@@ -715,8 +715,12 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
 fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     debug_assert!(run.root.rel(rel).lateral_relids.is_none());
 
-    // create_tidscan_paths: TID quals can't exist on this lane (M2 tidscan
-    // lane); create_plain_partial_paths: M3 parallel lane (Gather is loud).
+    // A CurrentOfExpr qual forces the TID path: the executor handles no other.
+    if crate::tidpath::create_tidscan_paths(run, rel)? {
+        return Ok(());
+    }
+
+    // create_plain_partial_paths: M3 parallel lane (Gather is loud).
     let seqscan = crate::pathnode::create_seqscan_path(run, rel, 0)?;
     add_path(run, rel, seqscan);
 

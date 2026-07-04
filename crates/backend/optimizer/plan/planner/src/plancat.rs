@@ -19,7 +19,7 @@ const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
 const RELKIND_MATVIEW: u8 = b'm';
 const RELKIND_TOASTVALUE: u8 = b't';
 const RELKIND_SEQUENCE: u8 = b'S';
-const AMFLAG_HAS_TID_RANGE: u32 = 1 << 0;
+pub(crate) const AMFLAG_HAS_TID_RANGE: u32 = 1 << 0;
 
 fn relkind_has_table_am(relkind: u8) -> bool {
     matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE)

@@ -50,6 +50,8 @@ fn create_plan_recurse<'mcx>(
             create_scan_plan(run, path_id, flags)
         }
         PathNode::IndexPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::TidPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::TidRangePath(_) => create_scan_plan(run, path_id, flags),
         PathNode::BitmapHeapPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
@@ -327,6 +329,12 @@ fn create_scan_plan<'mcx>(
         t if t == crate::pathnode::tag16(NodeTag::T_BitmapHeapScan) => {
             create_bitmap_scan_plan(run, best_path, tlist, scan_clauses)?
         }
+        t if t == crate::pathnode::tag16(NodeTag::T_TidScan) => {
+            create_tidscan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_TidRangeScan) => {
+            create_tidrangescan_plan(run, best_path, tlist, scan_clauses)?
+        }
         t if t == crate::pathnode::tag16(NodeTag::T_FunctionScan) => {
             create_functionscan_plan(run, best_path, tlist, scan_clauses)?
         }
@@ -514,6 +522,130 @@ fn create_seqscan_plan<'mcx>(
     plan.scan.plan.targetlist = tlist;
     plan.scan.plan.qual = qpqual;
     plan.scan.scanrelid = scan_relid;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// is_redundant_derived_clause (equivclass.c).
+fn is_redundant_derived_clause(run: &PlannerRun<'_>, rid: RinfoId, others: &[RinfoId]) -> bool {
+    let Some(parent_ec) = run.root.rinfo(rid).parent_ec else {
+        return false;
+    };
+    others.iter().any(|&o| run.root.rinfo(o).parent_ec == Some(parent_ec))
+}
+
+// create_tidscan_plan (createplan.c). tidquals has OR semantics, so qpqual
+// dedup differs by arity: single tidqual dedups in RestrictInfo form,
+// multiple dedup as an explicit OR clause via equal() after stripping.
+fn create_tidscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    debug_assert!(run.root.rel(rel_id).rtekind == types_pathnodes::RTE_RELATION);
+    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+
+    let tidqual_rids: mcx::PgVec<'mcx, RinfoId> = {
+        let PathNode::TidPath(tp) = run.root.path(best_path) else {
+            unreachable!("TidPath");
+        };
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.extend(tp.tidquals.iter().copied());
+        v
+    };
+
+    let scan_clauses = if tidqual_rids.len() == 1 {
+        let mut qpqual = mcx::PgVec::new_in(mcx);
+        for &rid in scan_clauses.iter() {
+            if run.root.rinfo(rid).pseudoconstant {
+                continue;
+            }
+            if tidqual_rids.iter().any(|&t| t == rid) {
+                continue;
+            }
+            if is_redundant_derived_clause(run, rid, &tidqual_rids) {
+                continue;
+            }
+            qpqual.push(rid);
+        }
+        qpqual
+    } else {
+        scan_clauses
+    };
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let tidquals = extract_actual_clauses(run, &tidqual_rids);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if tidquals.len() > 1 {
+        // list_difference(scan_clauses, list_make1(make_orclause(tidquals)))
+        let orclause = clauses::make_orclause(mcx, tidquals.clone_in(mcx)?)?;
+        let mut kept = NodeList::nil();
+        for c in &qpqual {
+            if !types_nodes::equal::equal(c, orclause) {
+                kept.lappend(mcx, c)?;
+            }
+        }
+        qpqual = kept;
+    }
+
+    let mut plan = Node::build::<types_nodes::TidScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.tidquals = tidquals;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_tidrangescan_plan (createplan.c). tidrangequals has AND semantics.
+fn create_tidrangescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    debug_assert!(run.root.rel(rel_id).rtekind == types_pathnodes::RTE_RELATION);
+    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+
+    let tidrangequal_rids: mcx::PgVec<'mcx, RinfoId> = {
+        let PathNode::TidRangePath(tp) = run.root.path(best_path) else {
+            unreachable!("TidRangePath");
+        };
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.extend(tp.tidrangequals.iter().copied());
+        v
+    };
+
+    let mut qpqual_rids = mcx::PgVec::new_in(mcx);
+    for &rid in scan_clauses.iter() {
+        if run.root.rinfo(rid).pseudoconstant {
+            continue;
+        }
+        if tidrangequal_rids.iter().any(|&t| t == rid) {
+            continue;
+        }
+        qpqual_rids.push(rid);
+    }
+
+    let ordered = order_qual_clauses(run, &qpqual_rids)?;
+    let tidrangequals = extract_actual_clauses(run, &tidrangequal_rids);
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::TidRangeScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.tidrangequals = tidrangequals;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }

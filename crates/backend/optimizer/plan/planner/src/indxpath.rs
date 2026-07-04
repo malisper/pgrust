@@ -848,7 +848,7 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
 // runs make_sub_restrictinfos (orclause stays None), so the arm rinfos are
 // built on first use; the per-arm selectivity memo is scoped to this planning
 // pass, the numerics are C's.
-fn or_arm_rinfo<'mcx>(
+pub(crate) fn or_arm_rinfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parent: RinfoId,
     arm: Node<'mcx>,
