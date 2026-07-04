@@ -121,7 +121,8 @@ fn notification_equal(a: &Notification, b: &Notification) -> bool {
 pub fn Async_Notify(channel: &str, payload: Option<&str>) -> PgResult<()> {
     let my_level = xact::GetCurrentTransactionNestLevel();
 
-    if parallel::IsParallelWorker() {
+    // Seam, not the parallel crate: the direct edge cycles via bgworker→postgres.
+    if parallel_seams::is_parallel_worker::call() {
         elog(ERROR, "cannot send notifications from a parallel worker")?;
     }
     if trace_notify() {

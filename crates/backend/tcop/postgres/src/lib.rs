@@ -292,11 +292,15 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         procsignal_seams::process_proc_signal_barrier::call()?;
     }
 
+    if g::ParallelMessagePending() {
+        parallel_seams::process_parallel_messages::call()?;
+    }
+
     if g::LogMemoryContextPending() {
         mcxt_seams::process_log_memory_context_interrupt::call()?;
     }
-    // ParallelMessagePending / ParallelApplyMessagePending flags have no
-    // storage yet (parallel/logical-apply owners unported).
+    // ParallelApplyMessagePending flag has no storage yet (logical-apply
+    // owner unported).
 
     Ok(())
 }

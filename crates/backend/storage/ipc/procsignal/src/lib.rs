@@ -582,7 +582,7 @@ pub fn procsignal_sigusr1_handler() {
         async_seams::handle_notify_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_PARALLEL_MESSAGE) {
-        unported_handler("HandleParallelMessageInterrupt (access/transam/parallel.c)");
+        parallel_seams::handle_parallel_message_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_WALSND_INIT_STOPPING) {
         unported_handler("HandleWalSndInitStopping (replication/walsender.c)");
