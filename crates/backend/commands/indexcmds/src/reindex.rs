@@ -877,7 +877,7 @@ fn ReindexRelationConcurrently<'mcx>(
     {
         let mut objects = catalog_dependency::ObjectAddresses::new();
         for idx in index_ids.iter() {
-            objects.add_exact_object_address(catalog_dependency::ObjectAddress {
+            objects.add_exact_object_address(pg_depend::ObjectAddress {
                 classId: types_core::RELATION_RELATION_ID,
                 objectId: idx.index_id,
                 objectSubId: 0,
