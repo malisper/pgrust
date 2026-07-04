@@ -495,6 +495,27 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_AlternativeSubPlan => expr_collation(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
         ),
+        NodeTag::T_SubLink => {
+            use types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    let tent = sl
+                        .subselect
+                        .as_query()
+                        .unwrap_or_else(|| {
+                            panic!("cannot get collation for untransformed sublink")
+                        })
+                        .targetList
+                        .first()
+                        .expect("sublink tlist")
+                        .as_target_entry()
+                        .expect("tlist entry");
+                    expr_collation(tent.expr)
+                }
+                _ => 0,
+            }
+        }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,

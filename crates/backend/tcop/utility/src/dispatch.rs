@@ -449,7 +449,8 @@ fn dispatch_switch<'mcx>(
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
-            handler_gap("AfterTriggerSetState (trigger lane)")
+            let stmt = parsetree.as_constraints_set_stmt().unwrap();
+            trigger::AfterTriggerSetState(mcx, stmt)?;
         }
         T_CheckPointStmt => {
             if !acl_seams::has_privs_of_role::call(
@@ -579,6 +580,17 @@ fn dispatch_switch<'mcx>(
             exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
+        T_CreateTrigStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
+                .expect("CreateTrigStmt");
+            trigger::CreateTrigger(mcx, stmt, source_text)?;
+        }
+
         T_AlterTableStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
@@ -604,6 +616,9 @@ fn dispatch_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+                    trigger::renametrig(mcx, stmt)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
                     tablecmds::RenameConstraint(mcx, stmt)?;

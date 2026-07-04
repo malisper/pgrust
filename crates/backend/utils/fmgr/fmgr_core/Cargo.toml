@@ -58,6 +58,7 @@ commands_async = { path = "../../../commands/commands_async" }
 adt_windowfuncs = { path = "../../adt/windowfuncs" }
 cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
 pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
+trigfuncs = { path = "../../adt/trigfuncs" }
 conv = { path = "../../mb/conv" }
 mcx = { path = "../../../../_support/mcx" }
 syscache_seams = { path = "../../cache/syscache_seams" }

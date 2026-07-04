@@ -165,13 +165,17 @@ fn build_minmax_path<'mcx>(
     nulls_first: bool,
 ) -> PgResult<bool> {
     let mcx = run.mcx;
-    // C copyObject's the parse and IncrementVarSublevelsUp(1,1); at level 1 no
-    // uplevel Vars exist, so the cells-copy with shared nodes is C-equal.
-    assert!(
-        run.root.query_level == 1,
-        "IncrementVarSublevelsUp (rewriteManip.c): minmax rewrite inside a \
-         subquery; outer-Var bumping unported"
-    );
+    // C copyObject's the parse and IncrementVarSublevelsUp(1,1); with no
+    // uplevel Vars the bump is a no-op, so the cells-copy with shared nodes
+    // is C-equal. A correlated parse would need real bumping - loud.
+    if run.root.query_level != 1 {
+        let probe = Node::mk(mcx, crate::subselect::query_cells_copy(mcx, run.parse())?)?;
+        assert!(
+            !vars::contain_uplevel_vars(probe)?,
+            "IncrementVarSublevelsUp (rewriteManip.c): minmax rewrite of a \
+             correlated subquery; outer-Var bumping unported"
+        );
+    }
     let target = *run.root.expr_node(mminfo.target);
     let mut subparse = crate::subselect::query_cells_copy(mcx, run.parse())?;
 
