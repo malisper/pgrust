@@ -830,6 +830,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_xml"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "elog",
+ "guc_tables",
+ "libc",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3201,6 +3221,7 @@ dependencies = [
  "adt_datetime",
  "adt_int",
  "adt_timestamp",
+ "adt_xml",
  "arrayfuncs",
  "arrayutils",
  "clauses",
@@ -3388,6 +3409,7 @@ dependencies = [
  "nodeseqscan",
  "nodesetop",
  "nodesort",
+ "nodetablefuncscan",
  "nodetidrangescan",
  "nodetidscan",
  "nodeunique",
@@ -3800,6 +3822,7 @@ dependencies = [
  "adt_varbit",
  "adt_varchar",
  "adt_windowfuncs",
+ "adt_xml",
  "arrayfuncs",
  "commands_async",
  "conv",
@@ -6490,6 +6513,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodetablefuncscan"
+version = "0.1.0"
+dependencies = [
+ "adt_xml",
+ "datum",
+ "detoast_seams",
+ "execexpr",
+ "execscan",
+ "executils",
+ "fmgr_core",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "tupdesc",
+ "tuplestore",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodetidrangescan"
 version = "0.1.0"
 dependencies = [
@@ -6791,6 +6839,7 @@ dependencies = [
  "parse_oper",
  "parse_relation",
  "parse_target",
+ "parse_utilcmd",
  "parser_small1",
  "stack_depth",
  "syscache_seams",
@@ -6848,6 +6897,7 @@ name = "parse_expr"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
+ "adt_xml",
  "analyze_seams",
  "catalog_namespace",
  "coerce",
@@ -9826,6 +9876,7 @@ dependencies = [
  "adt_regproc",
  "adt_rowtypes",
  "adt_timestamp",
+ "adt_xml",
  "aio_config",
  "auth",
  "auth_scram",
@@ -11658,6 +11709,7 @@ dependencies = [
  "pg_shdepend",
  "pg_type",
  "readfuncs",
+ "rel_vocab",
  "relation_seams",
  "ruleutils",
  "snapmgr",
