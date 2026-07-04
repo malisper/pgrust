@@ -403,11 +403,6 @@ pub struct RangeFunction<'mcx> {
     pub coldeflist: NodeList<'mcx>,
 }
 
-#[derive(Default)]
-pub struct CompositeTypeStmt<'mcx> {
-    pub typevar: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
-    pub coldeflist: NodeList<'mcx>,
-}
 
 #[derive(Default)]
 pub struct RangeTableFunc<'mcx> {

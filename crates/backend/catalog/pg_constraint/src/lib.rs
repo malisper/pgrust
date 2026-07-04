@@ -1170,47 +1170,7 @@ pub fn get_relation_constraint_oid<'mcx>(
     Ok(found)
 }
 
-pub fn get_domain_constraint_oid<'mcx>(
-    mcx: Mcx<'mcx>,
-    typid: Oid,
-    conname: &str,
-    missing_ok: bool,
-) -> PgResult<Oid> {
-    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
-    let keys = [
-        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(InvalidOid)),
-        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
-    ];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &con_rel,
-        types_core::catalog::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
-        true,
-        None,
-        &keys,
-    )?;
-    let mut found = InvalidOid;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let this_name = name_str(mcx, getattr(&con_rel, tup, Anum_pg_constraint_conname).0)?;
-        if this_name == conname {
-            found = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
-            break;
-        }
-    }
-    genam::systable_endscan(mcx, scan)?;
-    con_rel.close(AccessShareLock)?;
-    if found == InvalidOid && !missing_ok {
-        let typname = format_type::format_type_be(typid)?;
-        return Err(Box::new(
-            types_error::PgError::new(
-                types_error::ERROR,
-                format!("constraint \"{conname}\" for domain {typname} does not exist"),
-            )
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
-        ));
-    }
-    Ok(found)
-}
+
 
 pub fn get_constraint_deferrability<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<(bool, bool)> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;

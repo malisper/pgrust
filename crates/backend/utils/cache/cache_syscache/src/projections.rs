@@ -1491,13 +1491,6 @@ fn lookup_pg_operator_candidates<'mcx>(
     Ok(out)
 }
 
-const ANUM_PG_TS_CONFIG_OID: i32 = 1;
-const ANUM_PG_TS_CONFIG_CFGNAME: i32 = 2;
-const ANUM_PG_TS_CONFIG_CFGNAMESPACE: i32 = 3;
-const ANUM_PG_TS_DICT_OID: i32 = 1;
-const ANUM_PG_TS_DICT_DICTNAME: i32 = 2;
-const ANUM_PG_TS_DICT_DICTNAMESPACE: i32 = 3;
-
 fn pg_operator_oprnamensp(opno: Oid) -> PgResult<Option<(NameData, Oid)>> {
     let Some(tuple) = SearchSysCache1(OPEROID, SysCacheKey::Value(Datum::from_oid(opno)))? else {
         return Ok(None);
