@@ -1360,112 +1360,38 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
     true
 }
 
+// pull_varattnos_walker (var.c) over a flat attno vec instead of a Bitmapset
+// (check_index_only sorts/dedups after the walk).
+struct CollectVarattnos<'a, 'v> {
+    relid: i32,
+    out: &'a mut mcx::PgVec<'v, i16>,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for CollectVarattnos<'_, '_> {
+    fn visit(&mut self, node: Node<'mcx>) -> types_error::PgResult<bool> {
+        if let Some(v) = node.as_var() {
+            if v.varno == self.relid && v.varlevelsup == 0 {
+                self.out.push(v.varattno);
+            }
+            return Ok(false);
+        }
+        assert!(
+            node.node_tag() != NodeTag::T_Query,
+            "pull_varattnos: unexpected unplanned Query subtree"
+        );
+        nodes_core::expression_tree_walker(node, self)
+    }
+}
+
 fn collect_varattnos(
-    run: &PlannerRun<'_>,
+    _run: &PlannerRun<'_>,
     node: Node<'_>,
     relid: i32,
     out: &mut mcx::PgVec<'_, i16>,
 ) {
-    match node.node_tag() {
-        NodeTag::T_Var => {
-            let v = node.as_var().unwrap();
-            if v.varno == relid && v.varlevelsup == 0 {
-                out.push(v.varattno);
-            }
-        }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => {}
-        NodeTag::T_OpExpr => {
-            for a in &node.as_op_expr().unwrap().args {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_RelabelType => {
-            collect_varattnos(run, node.as_relabel_type().unwrap().arg, relid, out)
-        }
-        NodeTag::T_ScalarArrayOpExpr => {
-            for a in &node.as_scalar_array_op_expr().unwrap().args {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_ArrayExpr => {
-            for e in &node.as_array_expr().unwrap().elements {
-                collect_varattnos(run, e, relid, out);
-            }
-        }
-        NodeTag::T_RowExpr => {
-            for e in &node.as_row_expr().unwrap().args {
-                collect_varattnos(run, e, relid, out);
-            }
-        }
-        NodeTag::T_NullTest => collect_varattnos(
-            run,
-            node.as_null_test().unwrap().arg.expect("NullTest.arg"),
-            relid,
-            out,
-        ),
-        NodeTag::T_BooleanTest => collect_varattnos(
-            run,
-            node.as_boolean_test()
-                .unwrap()
-                .arg
-                .expect("BooleanTest.arg"),
-            relid,
-            out,
-        ),
-        NodeTag::T_DistinctExpr => {
-            for a in &node.as_distinct_expr().unwrap().args {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_BoolExpr => {
-            for a in &node.as_bool_expr().unwrap().args {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_FuncExpr => {
-            for a in &node.as_func_expr().unwrap().args {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_CoerceViaIO => {
-            collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
-        }
-        NodeTag::T_ArrayCoerceExpr => {
-            let a = node.as_array_coerce_expr().unwrap();
-            collect_varattnos(run, a.arg, relid, out);
-            if let Some(e) = a.elemexpr {
-                collect_varattnos(run, e, relid, out);
-            }
-        }
-        NodeTag::T_ConvertRowtypeExpr => {
-            collect_varattnos(run, node.as_convert_rowtype_expr().unwrap().arg, relid, out)
-        }
-        NodeTag::T_SubscriptingRef => {
-            let sr = node.as_subscripting_ref().unwrap();
-            for e in sr.refupperindexpr.iter().flatten() {
-                collect_varattnos(run, e, relid, out);
-            }
-            for e in sr.reflowerindexpr.iter().flatten() {
-                collect_varattnos(run, e, relid, out);
-            }
-            if let Some(e) = sr.refexpr {
-                collect_varattnos(run, e, relid, out);
-            }
-            if let Some(e) = sr.refassgnexpr {
-                collect_varattnos(run, e, relid, out);
-            }
-        }
-        NodeTag::T_RowCompareExpr => {
-            let rc = node.as_row_compare_expr().unwrap();
-            for a in rc.largs.iter().chain(rc.rargs.iter()) {
-                collect_varattnos(run, a, relid, out);
-            }
-        }
-        NodeTag::T_FieldSelect => {
-            collect_varattnos(run, node.as_field_select().unwrap().arg, relid, out)
-        }
-        other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
-    }
+    use nodes_core::NodeWalker;
+    let mut w = CollectVarattnos { relid, out };
+    w.visit(node).expect("collect_varattnos walk is infallible");
 }
 
 // Sub-RestrictInfo for one OR arm. C divergence: make_restrictinfo here never
