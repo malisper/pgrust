@@ -205,6 +205,41 @@ fn log_smgrtruncate(
     )
 }
 
+// RelationCopyStorage (storage.c): requires no dirty src data in shared
+// buffers (callers flush first). Checksum verification pends ControlFile as
+// in bufmgr's read path (tracked divergence).
+pub fn RelationCopyStorage(
+    src: RelFileLocatorBackend,
+    dst: RelFileLocatorBackend,
+    fork_num: ForkNumber,
+    relpersistence: u8,
+) -> PgResult<()> {
+    let copying_initfork =
+        relpersistence == RELPERSISTENCE_UNLOGGED && fork_num == ForkNumber::INIT_FORKNUM;
+    let use_wal = transam_xlog::XLogIsNeeded()
+        && (relpersistence == RELPERSISTENCE_PERMANENT || copying_initfork);
+
+    let mut bulkstate = bulkwrite::smgr_bulk_start_smgr(dst, fork_num, use_wal)?;
+    let nblocks = smgr::smgrnblocks(src, fork_num)?;
+    for blkno in 0..nblocks {
+        if init_small::globals::InterruptPending() {
+            panic!("CHECK_FOR_INTERRUPTS: ProcessInterrupts (tcop/postgres.c) unported");
+        }
+        let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
+        smgr::smgrread(src, fork_num, blkno, buf.page_mut())?;
+        if !bufmgr::page_is_verified(buf.page_mut().as_ptr()) {
+            return Err(types_error::PgError::error(format!(
+                "invalid page in block {blkno} of relation \"{}\"",
+                bufmgr::relpath_desc(src.locator, fork_num)
+            ))
+            .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED)
+            .into());
+        }
+        bulkwrite::smgr_bulk_write(&mut bulkstate, blkno, buf, false)?;
+    }
+    bulkwrite::smgr_bulk_finish(bulkstate)
+}
+
 pub fn RelationDropStorage(rel: &types_rel::RelationData<'_>) -> PgResult<()> {
     PENDING.with_borrow_mut(|p| {
         p.insert(

@@ -55,6 +55,9 @@ fn indexdef(
         colno,
         None,
         colno != 0,
+        false,
+        false,
+        false,
         pretty_flags,
         true,
     )?;

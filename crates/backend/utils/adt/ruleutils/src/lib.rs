@@ -33,7 +33,7 @@ pub use format_type::quote_identifier;
 
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SysCacheKey, AMOID, AUTHOID, CONSTROID, INDEXRELID, OPEROID,
-    PARTRELID, PROCOID, RELOID, STATEXTOID,
+    PARTRELID, PROCOID, RELOID, STATEXTOID, TABLESPACEOID, TYPEOID,
 };
 use datum::Datum;
 use mcx::Mcx;
@@ -205,6 +205,23 @@ pub fn generate_qualified_relation_name(mcx: Mcx<'_>, relid: Oid) -> PgResult<St
     let nspname = namespace_name_or_temp(mcx, row.relnamespace)?
         .ok_or_else(|| cache_lookup_failed("namespace", row.relnamespace))?;
     Ok(quote_qualified_identifier(Some(&nspname), &row.relname))
+}
+
+const ANUM_PG_TYPE_TYPNAME: i32 = 2;
+const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
+
+pub fn generate_qualified_type_name(mcx: Mcx<'_>, typid: Oid) -> PgResult<String> {
+    let Some(ht) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Err(cache_lookup_failed("type", typid));
+    };
+    let t = ht.tuple();
+    let typname = name_at(getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNAME));
+    let typnamespace = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNAMESPACE).as_oid();
+    drop(t);
+    ReleaseSysCache(ht);
+    let nspname = namespace_name_or_temp(mcx, typnamespace)?
+        .ok_or_else(|| cache_lookup_failed("namespace", typnamespace))?;
+    Ok(quote_qualified_identifier(Some(&nspname), &typname))
 }
 
 const ANUM_PG_OPERATOR_OPRNAME: i32 = 2;
@@ -501,17 +518,30 @@ fn opclass_is_visible(opclass: Oid, opcname: &str, opcmethod: Oid) -> PgResult<b
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pg_get_indexdef_worker(
     mcx: Mcx<'_>,
     indexrelid: Oid,
     colno: i32,
     exclude_ops: Option<&[Oid]>,
     attrs_only: bool,
+    keys_only: bool,
+    show_tbl_spc: bool,
+    inherits: bool,
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
     pg_get_indexdef_worker_extended(
-        mcx, indexrelid, colno, exclude_ops, attrs_only, false, pretty_flags, missing_ok,
+        mcx,
+        indexrelid,
+        colno,
+        exclude_ops,
+        attrs_only,
+        keys_only,
+        show_tbl_spc,
+        inherits,
+        pretty_flags,
+        missing_ok,
     )
 }
 
@@ -528,6 +558,8 @@ pub fn pg_get_indexdef_columns_keys_only(
         None,
         true,
         true,
+        false,
+        false,
         PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA,
         false,
     )
@@ -541,6 +573,8 @@ fn pg_get_indexdef_worker_extended(
     exclude_ops: Option<&[Oid]>,
     attrs_only: bool,
     keys_only: bool,
+    show_tbl_spc: bool,
+    inherits: bool,
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
@@ -578,7 +612,7 @@ fn pg_get_indexdef_worker_extended(
                 "CREATE {}INDEX {} ON {}{} USING {} (",
                 if idx.indisunique { "UNIQUE " } else { "" },
                 quote_identifier(&idxrel.relname),
-                if idxrel.relkind == RELKIND_PARTITIONED_INDEX { "ONLY " } else { "" },
+                if idxrel.relkind == RELKIND_PARTITIONED_INDEX && !inherits { "ONLY " } else { "" },
                 relname,
                 quote_identifier(&amname),
             ));
@@ -591,6 +625,9 @@ fn pg_get_indexdef_worker_extended(
     let natts = if keys_only { idx.indnkeyatts as usize } else { idx.indnatts as usize };
     for keyno in 0..natts {
         let attnum = idx.indkey[keyno];
+        if keys_only && keyno >= idx.indnkeyatts as usize {
+            break;
+        }
         if colno == 0 && keyno == idx.indnkeyatts as usize {
             buf.push_str(") INCLUDE (");
             sep = "";
@@ -667,6 +704,14 @@ fn pg_get_indexdef_worker_extended(
         if idxrel.has_reloptions {
             gap("pg_get_indexdef", "index reloptions (WITH ...)");
         }
+        if show_tbl_spc {
+            let tblspc = lsyscache::get_rel_tablespace(indexrelid)?;
+            if tblspc != InvalidOid {
+                let spcname = get_tablespace_name(tblspc)?
+                    .unwrap_or_else(|| panic!("cache lookup failed for tablespace {tblspc}"));
+                buf.push_str(&format!(" TABLESPACE {}", quote_identifier(&spcname)));
+            }
+        }
         if let Some(predsrc) = &idx.indpred {
             let node = readfuncs::stringToNode(mcx, predsrc)?;
             let predstr =
@@ -696,6 +741,25 @@ fn looks_like_function(node: types_nodes::Node<'_>) -> bool {
         T_NullIfExpr | T_CoalesceExpr | T_MinMaxExpr | T_SQLValueFunction | T_XmlExpr => true,
         _ => false,
     }
+}
+
+pub fn pg_get_indexdef_string(mcx: Mcx<'_>, indexrelid: Oid) -> PgResult<String> {
+    Ok(pg_get_indexdef_worker(mcx, indexrelid, 0, None, false, false, true, true, 0, false)?
+        .expect("missing_ok=false returns Some"))
+}
+
+const ANUM_PG_TABLESPACE_SPCNAME: i32 = 2;
+
+// Divergence from C: get_tablespace_name (tablespace.c) seq-scans
+// pg_tablespace; this reads the TABLESPACEOID syscache.
+fn get_tablespace_name(spc_oid: Oid) -> PgResult<Option<String>> {
+    let Some(ht) = SearchSysCache1(TABLESPACEOID, SysCacheKey::Value(Datum::from_oid(spc_oid)))?
+    else {
+        return Ok(None);
+    };
+    let name = name_at(getattr(&ht.tuple(), TABLESPACEOID, ANUM_PG_TABLESPACE_SPCNAME));
+    ReleaseSysCache(ht);
+    Ok(Some(name))
 }
 
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
@@ -754,6 +818,43 @@ fn decompile_column_index_array(
         buf.push_str(&quote_identifier(colname.as_str()));
     }
     Ok(keys.len())
+}
+
+const ANUM_PG_CONSTRAINT_CONNAME: i32 = 2;
+
+pub fn pg_get_constraintdef_command(mcx: Mcx<'_>, constraint_id: Oid) -> PgResult<String> {
+    let Some(ht) = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constraint_id)))?
+    else {
+        return Err(PgError::error(format!(
+            "could not find tuple for constraint {constraint_id}"
+        ))
+        .into());
+    };
+    let t = ht.tuple();
+    let conname = name_at(getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAME));
+    let conrelid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid();
+    let contypid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid();
+    drop(t);
+    ReleaseSysCache(ht);
+    // C emits ALTER TABLE without ONLY: CHECK re-add wants recursion and the
+    // other contypes never inherit.
+    let prefix = if conrelid != InvalidOid {
+        format!(
+            "ALTER TABLE {} ADD CONSTRAINT {} ",
+            generate_qualified_relation_name(mcx, conrelid)?,
+            quote_identifier(&conname)
+        )
+    } else {
+        debug_assert!(contypid != InvalidOid);
+        format!(
+            "ALTER DOMAIN {} ADD CONSTRAINT {} ",
+            generate_qualified_type_name(mcx, contypid)?,
+            quote_identifier(&conname)
+        )
+    };
+    let body = pg_get_constraintdef_worker(mcx, constraint_id, 0, false)?
+        .expect("missing_ok=false returns Some");
+    Ok(prefix + &body)
 }
 
 // Divergence from C: pg_get_constraintdef_worker scans pg_constraint under a
@@ -893,6 +994,9 @@ pub fn pg_get_constraintdef_worker(
                 conindid,
                 0,
                 Some(&operators),
+                false,
+                false,
+                false,
                 false,
                 pretty_flags,
                 false,

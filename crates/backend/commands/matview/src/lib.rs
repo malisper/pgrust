@@ -178,7 +178,13 @@ pub fn RefreshMatViewByOid<'mcx>(
     // the loud match-merge panic below keeps that arm unreachable.
     let relpersistence = matview_rel.rd_rel.relpersistence;
 
-    let oid_new_heap = commands_cluster::make_new_heap(mcx, matview_oid, relpersistence, ExclusiveLock)?;
+    let oid_new_heap = commands_cluster::make_new_heap(
+        mcx,
+        matview_oid,
+        matview_rel.rd_rel.reltablespace,
+        relpersistence,
+        ExclusiveLock,
+    )?;
 
     let mut processed: u64 = 0;
     if !skip_data {

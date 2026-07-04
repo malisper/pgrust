@@ -114,12 +114,17 @@ pub fn heap_create<'mcx>(
     if !RELKIND_HAS_TABLESPACE(relkind) {
         reltablespace = InvalidOid;
     }
+    // A caller-supplied relfilenumber means existing storage is being adopted
+    // (index_create's TryReuseIndex path); binary upgrade's create-anyway arm
+    // is unported.
     let mut relfilenumber = relfilenumber;
     let create_storage = if RELKIND_HAS_STORAGE(relkind) {
         if relfilenumber == InvalidRelFileNumber {
             relfilenumber = relid;
+            true
+        } else {
+            false
         }
-        true
     } else {
         debug_assert!(relfilenumber == InvalidRelFileNumber);
         false

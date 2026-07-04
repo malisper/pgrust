@@ -343,7 +343,8 @@ fn rebuild_relation<'mcx>(
         mark_index_clustered(mcx, &old_heap, index.rd_id, true)?;
     }
 
-    let oid_new_heap = make_new_heap(mcx, table_oid, relpersistence, NoLock)?;
+    let oid_new_heap =
+        make_new_heap(mcx, table_oid, old_heap.rd_rel.reltablespace, relpersistence, NoLock)?;
     let new_heap = table::table_open(mcx, oid_new_heap, NoLock)?;
 
     let (frozen_xid, cutoff_multi) =

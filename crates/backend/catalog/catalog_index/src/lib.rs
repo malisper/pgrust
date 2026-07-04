@@ -430,6 +430,8 @@ pub struct IndexCreateExtra<'a> {
     pub parent_index_relid: Oid,
     pub parent_constraint_id: Oid,
     pub reloptions: Option<&'a [u8]>,
+    // C relFileNumber: valid means adopt this existing storage (TryReuseIndex).
+    pub old_number: types_core::RelFileNumber,
 }
 
 // index_create; relFileNumber/opclassOptions/stattargets fixed at their
@@ -461,9 +463,6 @@ pub fn index_create<'mcx>(
         unported("index_create: concurrent/if-not-exists flags");
     }
     assert!(!partitioned || skip_build, "partitioned indexes must never be built");
-    if skip_build && !partitioned {
-        unported("index_create: skip-build outside the partitioned lane");
-    }
     assert!(
         extra.constr_flags == 0 || extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0,
         "constr_flags without INDEX_CREATE_ADD_CONSTRAINT"
@@ -580,7 +579,7 @@ pub fn index_create<'mcx>(
         tableSpaceId,
         indexRelationId,
         InvalidOid,
-        types_core::InvalidRelFileNumber,
+        extra.old_number,
         accessMethodId,
         &indexTupDesc,
         relkind,

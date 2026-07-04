@@ -12,8 +12,22 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         table_id: Oid,
         stmt: types_nodes::Node<'mcx>,
+        is_rebuild: bool,
         skip_build: bool,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // CheckIndexCompatible (indexcmds.c) for tablecmds' TryReuseIndex; seam
+    // for the same dependency cycle.
+    pub fn check_index_compatible<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        old_id: Oid,
+        access_method_name: &str,
+        attribute_list: &types_nodes::NodeList<'mcx>,
+        exclusion_op_names: &types_nodes::NodeList<'mcx>,
+        is_without_overlaps: bool,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

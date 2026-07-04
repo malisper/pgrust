@@ -100,3 +100,9 @@ partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 planner = { path = "../../optimizer/plan/planner" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+parser_seams = { path = "../../parser/parser_seams" }
+commands_comment = { path = "../comment" }
+smgr = { path = "../../storage/smgr/smgr" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }

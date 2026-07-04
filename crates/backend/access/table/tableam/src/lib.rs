@@ -412,6 +412,44 @@ mod heap {
         Ok((freeze_xid, min_multi))
     }
 
+    pub(super) fn relation_copy_data(
+        rel: &Relation<'_>,
+        newrlocator: &RelFileLocator,
+    ) -> PgResult<()> {
+        if rel.rd_backend != ::types_core::INVALID_PROC_NUMBER {
+            unported("heapam_relation_copy_data temp-relation lane");
+        }
+        let src = ::types_storage::RelFileLocatorBackend {
+            locator: rel.rd_locator.get(),
+            backend: rel.rd_backend,
+        };
+        smgr::smgropen(src.locator, src.backend)?;
+        ::bufmgr_seams::flush_relations_all_buffers::call(&[src])?;
+        let persistence = rel.rd_rel.relpersistence;
+        let dstrel = catalog_storage::RelationCreateStorage(*newrlocator, persistence, true)?;
+        catalog_storage::RelationCopyStorage(
+            src,
+            dstrel,
+            ForkNumber::MAIN_FORKNUM,
+            persistence,
+        )?;
+        for fork_i in ForkNumber::MAIN_FORKNUM as i32 + 1..=::types_core::MAX_FORKNUM as i32 {
+            let fork = ForkNumber::from_i32(fork_i).expect("valid fork number");
+            if smgr::smgrexists(src, fork)? {
+                smgr::smgrcreate(dstrel, fork, false)?;
+                if rel.is_permanent()
+                    || (persistence == ::types_core::catalog::RELPERSISTENCE_UNLOGGED
+                        && fork == ForkNumber::INIT_FORKNUM)
+                {
+                    catalog_storage::log_smgrcreate(newrlocator, fork)?;
+                }
+                catalog_storage::RelationCopyStorage(src, dstrel, fork, persistence)?;
+            }
+        }
+        catalog_storage::RelationDropStorage(rel)?;
+        smgr::smgrclose(dstrel)
+    }
+
     pub(super) fn relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
         catalog_storage::RelationTruncate(rel, 0)
     }
@@ -1384,6 +1422,12 @@ pub fn table_relation_set_new_filelocator(
 ) -> PgResult<(TransactionId, TransactionId)> {
     match am(rel) {
         TableAm::Heap => heap::relation_set_new_filelocator(rel, newrlocator, relpersistence),
+    }
+}
+
+pub fn table_relation_copy_data(rel: &Relation<'_>, newrlocator: &RelFileLocator) -> PgResult<()> {
+    match am(rel) {
+        TableAm::Heap => heap::relation_copy_data(rel, newrlocator),
     }
 }
 
