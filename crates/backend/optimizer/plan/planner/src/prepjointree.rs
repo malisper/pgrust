@@ -1987,9 +1987,7 @@ pub(crate) fn copy_expr<'mcx>(
 }
 
 // reduce_outer_joins (prepjointree.c), including the LEFT -> ANTI reduction
-// and partial FULL reduction. append_rel_list is empty at this call site
-// (UNION ALL pull-up and inheritance expansion both run elsewhere), so C's
-// remove_nulling_relids pass over it is vacuous here.
+// and partial FULL reduction.
 struct RojPass1<'mcx> {
     relids: types_nodes::Bitmapset<'mcx>,
     contains_outer: bool,
@@ -2001,7 +1999,11 @@ struct RojPass2<'mcx> {
     partial_reduced: mcx::PgVec<'mcx, (i32, types_nodes::Bitmapset<'mcx>)>,
 }
 
-pub fn reduce_outer_joins<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+pub fn reduce_outer_joins<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
     let f = parse.jointree.expect("jointree is a FromExpr");
     let mut state1 = RojPass1 {
         relids: types_nodes::Bitmapset::empty(),
@@ -2048,11 +2050,11 @@ pub fn reduce_outer_joins<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgRe
     )?);
 
     if !state2.inner_reduced.is_empty() {
-        remove_nulling_relids(parse, &state2.inner_reduced, None)?;
+        remove_nulling_relids(run, parse, &state2.inner_reduced, None)?;
     }
     for (full_join_rti, unreduced_side) in state2.partial_reduced.iter() {
         let single = types_nodes::Bitmapset::make_singleton(mcx, *full_join_rti)?;
-        remove_nulling_relids(parse, &single, Some(unreduced_side))?;
+        remove_nulling_relids(run, parse, &single, Some(unreduced_side))?;
     }
     Ok(())
 }
@@ -2272,8 +2274,11 @@ fn reduce_outer_joins_pass2<'mcx>(
 // remove_nulling_relids (rewriteManip.c), in-place form: strips the reduced
 // joins' bits from every Var whose varlevelsup addresses this query level,
 // except Vars of rels in except_relids (partially-reduced FULL joins keep
-// the bits on their unreduced side).
+// the bits on their unreduced side). Both C call sites also run the mutator
+// over root->append_rel_list (UNION ALL pull-up populates it before these
+// passes), so the walk covers its translated_vars too.
 pub(crate) fn remove_nulling_relids<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     removable: &types_nodes::Bitmapset<'mcx>,
     except: Option<&types_nodes::Bitmapset<'mcx>>,
@@ -2324,6 +2329,14 @@ pub(crate) fn remove_nulling_relids<'mcx>(
     }
     let mut w = W { removable, except, sublevels_up: 0 };
     nodes_core::query_tree_walker(parse, &mut w, 0)?;
+    for appinfo in run.root.append_rel_list.iter() {
+        for &tid in appinfo.translated_vars.iter() {
+            if tid == types_pathnodes::NodeId::default() {
+                continue;
+            }
+            nodes_core::NodeWalker::visit(&mut w, *run.root.expr_node(tid))?;
+        }
+    }
     Ok(())
 }
 
