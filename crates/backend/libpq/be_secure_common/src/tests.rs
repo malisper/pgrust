@@ -16,6 +16,10 @@ fn setup() {
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         pgstat_seams::pgstat_report_tempfile::set(|_| {});
         pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
+        init_small_seams::my_proc_pid::set(|| 0);
+        // FATAL diverges through proc_exit; surface it as a typed panic the
+        // FATAL-path tests can catch.
+        ipc_seams::proc_exit::set(|code, _| std::panic::panic_any(format!("test proc_exit({code})")));
     });
     fd::InitFileAccess();
 }
@@ -56,9 +60,13 @@ fn key_file_permissions_group_access_rejected() {
     setup();
     let path = scratch_file("grp", 0o640);
     assert!(!crate::check_ssl_key_file_permissions(&path, false).unwrap());
-    let err = crate::check_ssl_key_file_permissions(&path, true).unwrap_err();
-    assert_eq!(err.sqlstate, types_error::ERRCODE_CONFIG_FILE_ERROR);
-    assert!(err.message.contains("has group or world access"));
+    // isServerStart is FATAL in C: it must not return, it exits the backend.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::check_ssl_key_file_permissions(&path, true)
+    }));
+    let payload = r.expect_err("FATAL must diverge through proc_exit");
+    let msg = payload.downcast_ref::<String>().map(String::as_str).unwrap_or("");
+    assert_eq!(msg, "test proc_exit(1)");
 }
 
 #[test]
