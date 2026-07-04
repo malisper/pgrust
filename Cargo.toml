@@ -421,6 +421,8 @@ members = [
     "crates/backend/access/transam/xlogreader",
     "crates/backend/access/transam/xlogrecovery",
     "crates/backend/access/transam/xloginsert",
+    "crates/backend/access/transam/generic_xlog",
+    "crates/backend/access/transam/xlogstats",
     "crates/backend/storage/ipc/sinval",
     "crates/backend/storage/ipc/ipc",
     "crates/backend/storage/ipc/waiteventset",
