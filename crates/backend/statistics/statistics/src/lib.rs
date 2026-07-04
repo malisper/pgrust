@@ -248,9 +248,9 @@ pub fn ComputeExtStatisticsRows(mcx: Mcx<'_>, relid: Oid, colstats: &[ColStats])
     Ok(300 * result)
 }
 
-pub fn BuildRelationExtStatistics<F: ExprStatsCompute>(
-    mcx: Mcx<'_>,
-    onerel: &Relation<'_>,
+pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
     inh: bool,
     totalrows: f64,
     rows: &[HeapTupleData<'_>],
@@ -287,7 +287,7 @@ pub fn BuildRelationExtStatistics<F: ExprStatsCompute>(
             continue;
         }
 
-        let data = make_build_data(bmcx, onerel, stat, rows, &stats, stattarget)?;
+        let data = make_build_data(mcx, bmcx, onerel, stat, rows, &stats, stattarget)?;
 
         let mut ndistinct: Option<PgVec<'_, u8>> = None;
         let mut deps: Option<PgVec<'_, u8>> = None;
@@ -310,7 +310,7 @@ pub fn BuildRelationExtStatistics<F: ExprStatsCompute>(
                     !stat.exprs.is_empty(),
                     "requested expression stats, but there are no expressions"
                 );
-                let rows_stats = expr_compute.compute(bmcx, &stat.exprs, stattarget, rows)?;
+                let rows_stats = expr_compute.compute(mcx, onerel, &stat.exprs, stattarget, rows)?;
                 exprstats = Some(expression::serialize_expr_stats(bmcx, &rows_stats)?);
             }
         }
@@ -378,28 +378,29 @@ fn statext_store(
     Ok(())
 }
 
-fn make_build_data<'mcx>(
+fn make_build_data<'mcx, 'b>(
     mcx: Mcx<'mcx>,
-    onerel: &Relation<'_>,
-    stat: &StatExtEntry<'_>,
+    bmcx: Mcx<'b>,
+    onerel: &Relation<'mcx>,
+    stat: &StatExtEntry<'mcx>,
     rows: &[HeapTupleData<'_>],
     stats: &[ColStats],
     stattarget: i32,
-) -> PgResult<StatsBuildData<'mcx>> {
+) -> PgResult<StatsBuildData<'b>> {
     let nkeys = stat.columns.len() + stat.exprs.len();
     let numrows = rows.len();
     let tupdesc = onerel.descr();
 
-    let mut attnums: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    let mut statsv: PgVec<'mcx, ColStats> = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    let mut values: PgVec<'mcx, PgVec<'mcx, Datum>> = PgVec::new_in(mcx);
-    let mut nulls: PgVec<'mcx, PgVec<'mcx, bool>> = PgVec::new_in(mcx);
+    let mut attnums: PgVec<'b, AttrNumber> = mcx::vec_with_capacity_in(bmcx, nkeys)?;
+    let mut statsv: PgVec<'b, ColStats> = mcx::vec_with_capacity_in(bmcx, nkeys)?;
+    let mut values: PgVec<'b, PgVec<'b, Datum>> = PgVec::new_in(bmcx);
+    let mut nulls: PgVec<'b, PgVec<'b, bool>> = PgVec::new_in(bmcx);
 
     for (idx, &k) in stat.columns.iter().enumerate() {
         attnums.push(k);
         statsv.push(stats[idx]);
-        let mut v: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, numrows)?;
-        let mut n: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, numrows)?;
+        let mut v: PgVec<'b, Datum> = mcx::vec_with_capacity_in(bmcx, numrows)?;
+        let mut n: PgVec<'b, bool> = mcx::vec_with_capacity_in(bmcx, numrows)?;
         for row in rows {
             let (d, isnull) = getattr(row, k as i32, tupdesc);
             v.push(d);
@@ -415,7 +416,7 @@ fn make_build_data<'mcx>(
         statsv.push(expression::expr_col_stats(e, stattarget)?);
     }
     if !stat.exprs.is_empty() {
-        expression::eval_exprs(mcx, onerel, &stat.exprs, rows, &mut values, &mut nulls)?;
+        expression::eval_exprs(mcx, bmcx, onerel, &stat.exprs, rows, &mut values, &mut nulls)?;
     }
 
     Ok(StatsBuildData { numrows, attnums, stats: statsv, values, nulls })

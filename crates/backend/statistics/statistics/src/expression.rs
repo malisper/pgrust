@@ -40,14 +40,15 @@ pub struct ExprStatsRow<'mcx> {
 // C's compute_expr_stats + serialize_expr_stats inputs live in analyze.c's
 // VacAttrStats; the analyze crate implements this (extended_stats.c's
 // compute_stats fn-pointer boundary).
-pub trait ExprStatsCompute {
-    fn compute<'b>(
+pub trait ExprStatsCompute<'mcx> {
+    fn compute(
         &mut self,
-        mcx: Mcx<'b>,
-        exprs: &[Node<'b>],
+        mcx: Mcx<'mcx>,
+        onerel: &Relation<'mcx>,
+        exprs: &[Node<'mcx>],
         stattarget: i32,
         rows: &[HeapTupleData<'_>],
-    ) -> PgResult<PgVec<'b, Option<ExprStatsRow<'b>>>>;
+    ) -> PgResult<PgVec<'mcx, Option<ExprStatsRow<'mcx>>>>;
 }
 
 fn varlena_image<'a>(d: Datum) -> &'a [u8] {
@@ -118,20 +119,23 @@ pub(crate) fn expr_col_stats(expr: Node<'_>, stattarget: i32) -> PgResult<ColSta
 
 // make_build_data's expression evaluation (extended_stats.c): results land in
 // the build context, as C's non-switching ExecEvalExpr does.
-pub(crate) fn eval_exprs<'b>(
-    mcx: Mcx<'b>,
-    onerel: &Relation<'_>,
-    exprs: &[Node<'b>],
+pub(crate) fn eval_exprs<'mcx, 'b>(
+    mcx: Mcx<'mcx>,
+    bmcx: Mcx<'b>,
+    onerel: &Relation<'mcx>,
+    exprs: &[Node<'mcx>],
     rows: &[HeapTupleData<'_>],
     values: &mut PgVec<'b, PgVec<'b, Datum>>,
     nulls: &mut PgVec<'b, PgVec<'b, bool>>,
 ) -> PgResult<()> {
-    let mut states: PgVec<'b, mcx::PgBox<'b, execexpr::ExprState<'b>>> =
+    let mut states: PgVec<'mcx, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>> =
         mcx::vec_with_capacity_in(mcx, exprs.len())?;
     for &e in exprs {
         let mut st = execexpr::exec_init_expr(mcx, Some(e), execexpr::ParamBind::NONE)?
             .expect("statistics expression");
-        st.arm_result_mcx(mcx);
+        // SAFETY: bmcx outlives the StatsBuildData consuming these datums;
+        // the build context is reset only after the builders finish.
+        unsafe { st.arm_result_mcx_raw(bmcx) };
         states.push(st);
     }
     let mut slot = exectuples::make_tuple_table_slot(
@@ -141,8 +145,8 @@ pub(crate) fn eval_exprs<'b>(
     );
     let base = values.len();
     for _ in exprs {
-        values.push(mcx::vec_with_capacity_in(mcx, rows.len())?);
-        nulls.push(mcx::vec_with_capacity_in(mcx, rows.len())?);
+        values.push(mcx::vec_with_capacity_in(bmcx, rows.len())?);
+        nulls.push(mcx::vec_with_capacity_in(bmcx, rows.len())?);
     }
     for row in rows {
         // SAFETY: the sample image outlives this loop; the reborrow mirrors

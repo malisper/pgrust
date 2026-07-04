@@ -461,7 +461,7 @@ fn do_analyze_rel<'mcx>(
             totalrows,
             &rows[..numrows as usize],
             &colstats,
-            &mut ExtStatsExprCompute { onerel },
+            &mut ExtStatsExprCompute,
         )?;
     }
 
@@ -881,22 +881,21 @@ fn examine_expression<'mcx>(
     Ok(Some(stats))
 }
 
-pub struct ExtStatsExprCompute<'a, 'r> {
-    onerel: &'a Relation<'r>,
-}
+pub struct ExtStatsExprCompute;
 
-impl statistics::ExprStatsCompute for ExtStatsExprCompute<'_, '_> {
+impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
     // compute_expr_stats + serialize_expr_stats row extraction
     // (extended_stats.c); expression stats are computed against the sample
     // only, so totalrows == samplerows per C.
-    fn compute<'b>(
+    fn compute(
         &mut self,
-        mcx: Mcx<'b>,
-        exprs: &[types_nodes::Node<'b>],
+        mcx: Mcx<'mcx>,
+        onerel: &Relation<'mcx>,
+        exprs: &[types_nodes::Node<'mcx>],
         stattarget: i32,
         rows: &[HeapTupleData<'_>],
-    ) -> PgResult<PgVec<'b, Option<statistics::ExprStatsRow<'b>>>> {
-        let mut out: PgVec<'b, Option<statistics::ExprStatsRow<'b>>> =
+    ) -> PgResult<PgVec<'mcx, Option<statistics::ExprStatsRow<'mcx>>>> {
+        let mut out: PgVec<'mcx, Option<statistics::ExprStatsRow<'mcx>>> =
             mcx::vec_with_capacity_in(mcx, exprs.len())?;
         let col_scratch = MemoryContext::new("Analyze Expression");
         let mut col_cx = col_scratch.new_child_bump("Analyze Expression scratch");
@@ -911,10 +910,10 @@ impl statistics::ExprStatsCompute for ExtStatsExprCompute<'_, '_> {
             let mut slot = exectuples::make_tuple_table_slot(
                 mcx,
                 types_slot::TupleSlotKind::HeapTuple,
-                Some(self.onerel.rd_att.clone()),
+                Some(onerel.rd_att.clone()),
             );
-            let mut exprvals: PgVec<'b, Datum> = mcx::vec_with_capacity_in(mcx, rows.len())?;
-            let mut exprnulls: PgVec<'b, bool> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+            let mut exprvals: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+            let mut exprnulls: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, rows.len())?;
             for row in rows {
                 per_tuple.reset();
                 // SAFETY: per_tuple outlives the eval; the result is copied
