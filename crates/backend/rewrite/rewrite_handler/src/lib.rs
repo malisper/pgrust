@@ -1474,6 +1474,8 @@ pub fn AcquireRewriteLocks<'mcx>(
         AcquireRewriteLocks(mcx, ctequery, forExecute, false)?;
     }
 
+    // acquireLocksOnSubLinks (rewriteHandler.c); rtable/CTE subqueries were
+    // recursed above (C passes QTW_IGNORE_RC_SUBQUERIES for the same reason).
     if parsetree.hasSubLinks {
         let mut w = LocksOnSubLinks { mcx, for_execute: forExecute };
         nodes_core::query_tree_walker(parsetree, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
