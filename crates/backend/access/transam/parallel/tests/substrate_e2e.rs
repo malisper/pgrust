@@ -107,6 +107,8 @@ fn stub_seams() {
         Ok(types_storage::lock::LOCKACQUIRE_OK)
     });
     timeout_seams::disable_timeouts::set(|_| {});
+    timeout_seams::initialize_timeouts::set(|| {});
+    timeout_seams::register_timeout::set(|id, _| id);
     aio_seams::pgaio_closing_fd::set(|_| {});
     aio_seams::pgaio_init_backend::set(|| {});
     aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
