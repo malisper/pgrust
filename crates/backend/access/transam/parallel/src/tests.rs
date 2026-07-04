@@ -11,6 +11,8 @@ fn guc_boot() {
     ONCE.call_once(|| {
         guc_tables::init_seams();
         guc::init_seams();
+        adt_bool::init_seams();
+        adt_float::init_seams();
     });
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
