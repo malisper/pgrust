@@ -49,6 +49,7 @@ trigger = { path = "../../commands/trigger" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 pgstat = { path = "../../utils/activity/pgstat" }
 relcache = { path = "../../utils/cache/relcache" }
+relmapper = { path = "../../utils/cache/relmapper" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 catalog_storage = { path = "../catalog_storage" }
 table = { path = "../../access/table/table" }

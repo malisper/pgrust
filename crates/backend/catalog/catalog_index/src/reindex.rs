@@ -30,18 +30,8 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
     rel: &Relation<'mcx>,
     persistence: u8,
 ) -> PgResult<()> {
-    if rel.is_mapped() {
-        unported("RelationSetNewRelfilenumber: mapped relations");
-    }
     let newrelfilenumber =
         catalog::GetNewRelFileNumber(mcx, rel.rd_rel.reltablespace, None, persistence)?;
-
-    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
-    let key = [oid_scankey(1, rel.rd_id)];
-    let mut scan =
-        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-    let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("could not find tuple for relation {}", rel.rd_id));
 
     catalog_storage::RelationDropStorage(rel)?;
 
@@ -64,33 +54,55 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
         k => panic!("relation \"{}\" does not have storage (relkind {k})", rel.name()),
     };
 
-    let mut values = [Datum::null(); Natts_pg_class];
-    let isnull = [false; Natts_pg_class];
-    let mut replace = [false; Natts_pg_class];
-    let mut set = |anum: usize, d: Datum| {
-        values[anum - 1] = d;
-        replace[anum - 1] = true;
-    };
-    set(Anum_pg_class_relfilenode, Datum::from_oid(newrelfilenumber));
-    set(Anum_pg_class_relpages, Datum::from_i32(0));
-    set(Anum_pg_class_reltuples, Datum::from_f32(-1.0));
-    set(Anum_pg_class_relallvisible, Datum::from_i32(0));
-    set(Anum_pg_class_relallfrozen, Datum::from_i32(0));
-    set(Anum_pg_class_relfrozenxid, Datum::from_transaction_id(freeze_xid));
-    set(Anum_pg_class_relminmxid, Datum::from_transaction_id(minmulti));
-    set(Anum_pg_class_relpersistence, Datum::from_char(persistence as i8));
-    let mut newtup = heaptuple::heap_modify_tuple(
-        mcx,
-        reltup,
-        pg_class.descr(),
-        &values,
-        &isnull,
-        &replace,
-    )?;
-    let otid = reltup.t_self;
-    genam::systable_endscan(mcx, scan)?;
-    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
-    pg_class.close(RowExclusiveLock)?;
+    if rel.is_mapped() {
+        // Mapped index: pg_class stays untouched (essential when reindexing
+        // pg_class itself); the relation mapper carries the new number.
+        debug_assert!(rel.rd_rel.relkind == types_rel::RELKIND_INDEX);
+        xact::GetCurrentTransactionId()?;
+        relmapper::RelationMapUpdateMap(
+            rel.rd_id,
+            newrelfilenumber,
+            rel.rd_rel.relisshared,
+            false,
+        )?;
+        inval::invalidate::CacheInvalidateRelcache(rel)?;
+    } else {
+        let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+        let key = [oid_scankey(1, rel.rd_id)];
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
+        let reltup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("could not find tuple for relation {}", rel.rd_id));
+        let mut values = [Datum::null(); Natts_pg_class];
+        let isnull = [false; Natts_pg_class];
+        let mut replace = [false; Natts_pg_class];
+        let mut set = |anum: usize, d: Datum| {
+            values[anum - 1] = d;
+            replace[anum - 1] = true;
+        };
+        set(Anum_pg_class_relfilenode, Datum::from_oid(newrelfilenumber));
+        if rel.rd_rel.relkind != types_rel::RELKIND_SEQUENCE {
+            set(Anum_pg_class_relpages, Datum::from_i32(0));
+            set(Anum_pg_class_reltuples, Datum::from_f32(-1.0));
+            set(Anum_pg_class_relallvisible, Datum::from_i32(0));
+            set(Anum_pg_class_relallfrozen, Datum::from_i32(0));
+        }
+        set(Anum_pg_class_relfrozenxid, Datum::from_transaction_id(freeze_xid));
+        set(Anum_pg_class_relminmxid, Datum::from_transaction_id(minmulti));
+        set(Anum_pg_class_relpersistence, Datum::from_char(persistence as i8));
+        let mut newtup = heaptuple::heap_modify_tuple(
+            mcx,
+            reltup,
+            pg_class.descr(),
+            &values,
+            &isnull,
+            &replace,
+        )?;
+        let otid = reltup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+        pg_class.close(RowExclusiveLock)?;
+    }
 
     // RelationAssumeNewRelfilelocator + the physical-addr refresh the C
     // in-place rebuild would perform on this same entry.
