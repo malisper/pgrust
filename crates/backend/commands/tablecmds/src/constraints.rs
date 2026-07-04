@@ -174,6 +174,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             expr,
             cdef.is_enforced,
             cdef.initially_valid,
+            cdef.is_no_inherit,
         )?;
         numchecks += 1;
         cooked.push(CookedCon {
@@ -514,6 +515,7 @@ fn store_rel_check<'mcx>(
     expr: Node<'mcx>,
     is_enforced: bool,
     is_validated: bool,
+    is_no_inherit: bool,
 ) -> PgResult<Oid> {
     let ccbin = outfuncs::nodeToString(mcx, expr)?;
     let var_list = vars::pull_var_clause(mcx, expr, 0)?;
@@ -534,6 +536,7 @@ fn store_rel_check<'mcx>(
     entry.n_keys = att_nos.len();
     entry.is_enforced = is_enforced;
     entry.is_validated = is_validated;
+    entry.is_no_inherit = is_no_inherit;
     entry.conbin = Some(ccbin.as_str());
     entry.con_expr = Some(expr);
     pg_constraint::CreateConstraintEntry(mcx, &entry)
