@@ -224,7 +224,10 @@ fn select_mergejoin_clauses<'mcx>(
         {
             let ri = run.root.rinfo(rid);
             if !ri.can_join || ri.mergeopfamilies.is_empty() {
-                if !ri.pseudoconstant {
+                // Constant extra joinquals stay mergeable: the executor
+                // handles them in right/full merge joins (FULL JOIN ON FALSE).
+                let clause = *run.root.expr_node(ri.clause);
+                if clause.node_tag() != NodeTag::T_Const {
                     have_nonmergeable_joinclause = true;
                 }
                 continue;
