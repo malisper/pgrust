@@ -278,6 +278,10 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "postgres_seams",
+ "pqformat",
+ "stack_depth",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -513,6 +517,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "timestamp_seams",
+ "transam_xlog",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -574,6 +579,7 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "funcapi_srf",
  "hashfn",
  "hyperloglog",
  "init_small",
@@ -584,6 +590,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_tuple",
 ]
 
@@ -678,15 +685,19 @@ dependencies = [
 name = "adt_regexp"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "datum",
+ "funcapi_srf",
  "mbutils",
  "mcx",
+ "postgres_seams",
  "regex",
  "regex_core",
  "regexp_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "varlena",
  "wchar",
 ]
 
@@ -760,6 +771,7 @@ dependencies = [
  "datum",
  "elog",
  "fd",
+ "funcapi",
  "guc_tables",
  "hashfn",
  "libc",
@@ -774,6 +786,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "xact",
  "xact_seams",
 ]
@@ -3226,6 +3239,7 @@ dependencies = [
 name = "cryptohashfuncs"
 version = "0.1.0"
 dependencies = [
+ "crc32c",
  "datum",
  "pg_md5",
  "pg_sha2",
@@ -4214,6 +4228,7 @@ dependencies = [
  "types_nodes",
  "varlena",
  "wparser_def",
+ "xid8funcs",
 ]
 
 [[package]]
@@ -12291,6 +12306,7 @@ name = "tuplesort"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_float",
  "adt_network",
  "adt_numeric",
  "adt_timestamp",
@@ -13096,7 +13112,11 @@ dependencies = [
  "numutils",
  "parser_small1",
  "pg_locale_seams",
+ "postgres_seams",
  "pqformat",
+ "regex",
+ "regex_core_seams",
+ "regexp_seams",
  "stringinfo",
  "syscache_seams",
  "types_core",
@@ -13411,6 +13431,29 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xid8funcs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "init_small",
+ "lwlock",
+ "mcx",
+ "pqformat",
+ "procarray_seams",
+ "snapmgr",
+ "stringinfo",
+ "transam_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varsup",
+ "xact",
 ]
 
 [[package]]

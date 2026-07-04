@@ -25,6 +25,8 @@ strftime = { path = "../../../timezone/strftime" }
 timestamp_seams = { path = "../timestamp_seams" }
 xact = { path = "../../../access/transam/xact" }
 elog = { path = "../../error/elog" }
+funcapi = { path = "../../fmgr/funcapi" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 libc = "0.2"
 
 [dev-dependencies]

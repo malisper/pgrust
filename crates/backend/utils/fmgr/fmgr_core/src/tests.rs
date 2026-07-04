@@ -88,8 +88,8 @@ fn fmgr_info_non_builtin_reads_pg_proc() {
 #[test]
 #[should_panic(expected = "not ported")]
 fn unported_builtin_invocation_panics() {
-    assert!(ported::PORTED.iter().all(|(o, _)| *o != 1158));
-    let mut f = fmgr_info(1158).unwrap();
+    assert!(ported::PORTED.iter().all(|(o, _)| *o != 1294));
+    let mut f = fmgr_info(1294).unwrap();
     let mut fci = LocalFcinfo::<0>::new(InvalidOid);
     let _ = f.invoke(&mut fci);
 }

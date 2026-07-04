@@ -1,0 +1,24 @@
+[package]
+name = "xid8funcs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+funcapi = { path = "../../fmgr/funcapi" }
+init_small = { path = "../../init/init_small" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr = { path = "../../time/snapmgr" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+varsup = { path = "../../../access/transam/varsup" }
+xact = { path = "../../../access/transam/xact" }

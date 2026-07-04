@@ -32,11 +32,56 @@ pub struct LSEG {
     pub p: [Point; 2],
 }
 
+impl LSEG {
+    #[inline]
+    pub fn from_datum_bytes(bytes: &[u8]) -> LSEG {
+        LSEG {
+            p: [
+                Point::from_datum_bytes(&bytes[0..16]),
+                Point::from_datum_bytes(&bytes[16..32]),
+            ],
+        }
+    }
+
+    #[inline]
+    pub fn to_datum_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[0..16].copy_from_slice(&self.p[0].to_datum_bytes());
+        out[16..32].copy_from_slice(&self.p[1].to_datum_bytes());
+        out
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LINE {
     pub A: f64,
     pub B: f64,
     pub C: f64,
+}
+
+impl LINE {
+    #[inline]
+    pub fn from_datum_bytes(bytes: &[u8]) -> LINE {
+        let f = |o: usize| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&bytes[o..o + 8]);
+            f64::from_ne_bytes(a)
+        };
+        LINE {
+            A: f(0),
+            B: f(8),
+            C: f(16),
+        }
+    }
+
+    #[inline]
+    pub fn to_datum_bytes(&self) -> [u8; 24] {
+        let mut out = [0u8; 24];
+        out[0..8].copy_from_slice(&self.A.to_ne_bytes());
+        out[8..16].copy_from_slice(&self.B.to_ne_bytes());
+        out[16..24].copy_from_slice(&self.C.to_ne_bytes());
+        out
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

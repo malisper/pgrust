@@ -14,6 +14,7 @@ pub mod bytea;
 pub mod concat_format;
 pub mod levenshtein;
 pub mod split_text;
+pub mod replace_regexp;
 pub mod string_agg;
 #[cfg(test)]
 mod tests;

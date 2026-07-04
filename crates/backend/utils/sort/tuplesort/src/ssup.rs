@@ -17,11 +17,14 @@ const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_RANGE_SORTSUPPORT: Oid = 6391;
+const F_MACADDR_SORTSUPPORT: Oid = 3359;
 const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 const F_BTNAMESORTSUPPORT: Oid = 3135;
 const F_BYTEA_SORTSUPPORT: Oid = 3331;
 const F_NUMERIC_SORTSUPPORT: Oid = 3283;
+const F_BTFLOAT4SORTSUPPORT: Oid = 3132;
+const F_BTFLOAT8SORTSUPPORT: Oid = 3133;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -37,6 +40,10 @@ pub enum SortComparator {
     Int16,
     /// `btoidfastcmp` (btoidsortsupport): unsigned 32-bit.
     Uint32,
+    /// `btfloat4fastcmp` (btfloat4sortsupport): NaN-aware total order.
+    Float32,
+    /// `btfloat8fastcmp` (btfloat8sortsupport): NaN-aware total order.
+    Float64,
     /// `varstrfastcmp_c`, no abbreviation (bttextsortsupport, collate-is-C
     /// only); datums must point at live untoasted varlenas.
     TextC,
@@ -106,6 +113,8 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let (x, y) = (x.as_u32(), y.as_u32());
             (x > y) as i32 - (x < y) as i32
         }
+        SortComparator::Float32 => ::adt_float::float4_cmp_internal(x.as_f32(), y.as_f32()),
+        SortComparator::Float64 => ::adt_float::float8_cmp_internal(x.as_f64(), y.as_f64()),
         // SAFETY: TextC contract (enum doc) — both datums are live untoasted
         // varlena pointers owned by the sort's tuplecontext.
         SortComparator::TextC => unsafe {
@@ -456,6 +465,8 @@ pub fn comparator_for_opfamily(
         lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
     Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
+        F_BTFLOAT4SORTSUPPORT => SortComparator::Float32,
+        F_BTFLOAT8SORTSUPPORT => SortComparator::Float64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         // btoidfastcmp: unsigned; the zero-extended datum word compares exact.
         F_BTOIDSORTSUPPORT => SortComparator::Unsigned,
@@ -470,9 +481,9 @@ pub fn comparator_for_opfamily(
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
         F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
-        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
-        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
-        0 | F_RANGE_SORTSUPPORT => {
+        // C DIVERGENCE: range_sortsupport 6391 + macaddr_sortsupport 3359 fast
+        // cmps unported; the BTORDER_PROC shim is order-identical (perf watch).
+        0 | F_RANGE_SORTSUPPORT | F_MACADDR_SORTSUPPORT => {
             // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
             // once; comparisons go through the resolved fn pointer.
             let sort_function =
@@ -529,6 +540,8 @@ pub fn comparator_for_index_col(
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTSORTSUPPORT_PROC as i16)?;
     Ok(match ssup_proc {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
+        F_BTFLOAT4SORTSUPPORT => SortComparator::Float32,
+        F_BTFLOAT8SORTSUPPORT => SortComparator::Float64,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTOIDSORTSUPPORT => SortComparator::Uint32,
@@ -540,9 +553,9 @@ pub fn comparator_for_index_col(
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,
         F_NUMERIC_SORTSUPPORT => SortComparator::Numeric,
-        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
-        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
-        0 | F_RANGE_SORTSUPPORT => {
+        // C DIVERGENCE: range_sortsupport 6391 + macaddr_sortsupport 3359 fast
+        // cmps unported; the BTORDER_PROC shim is order-identical (perf watch).
+        0 | F_RANGE_SORTSUPPORT | F_MACADDR_SORTSUPPORT => {
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
             if sort_function == 0 {

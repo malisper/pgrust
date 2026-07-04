@@ -776,3 +776,27 @@ fn date_bin_rows() {
         "timestamps cannot be binned into infinite intervals"
     );
 }
+
+#[test]
+fn float8_timestamptz_vectors() {
+    assert_eq!(float8_timestamptz(0.0).unwrap(), -946_684_800_000_000);
+    assert_eq!(float8_timestamptz(946_684_800.0).unwrap(), 0);
+    assert_eq!(
+        float8_timestamptz(1_262_349_296.789_012_3).unwrap(),
+        315_664_496_789_012
+    );
+    assert_eq!(float8_timestamptz(f64::INFINITY).unwrap(), DT_NOEND);
+    assert_eq!(float8_timestamptz(f64::NEG_INFINITY).unwrap(), DT_NOBEGIN);
+
+    let err = float8_timestamptz(f64::NAN).unwrap_err();
+    assert_eq!(err.message(), "timestamp cannot be NaN");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+
+    let err = float8_timestamptz(1e18).unwrap_err();
+    assert_eq!(err.message(), "timestamp out of range: \"1e+18\"");
+    let err = float8_timestamptz(-1e18).unwrap_err();
+    assert_eq!(err.message(), "timestamp out of range: \"-1e+18\"");
+    // passes the pre-check but overflows IS_VALID_TIMESTAMP after rounding
+    let err = float8_timestamptz(9224318015999999.0).unwrap_err();
+    assert_eq!(err.message(), "timestamp out of range: \"9.22432e+15\"");
+}

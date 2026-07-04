@@ -1675,3 +1675,63 @@ pub fn timestamp_scale(timestamp: Timestamp, typmod: i32) -> PgResult<Timestamp>
     AdjustTimestampForTypmod(&mut result, typmod, None)?;
     Ok(result)
 }
+
+// C %g (precision 6) for the float8_timestamptz range error text.
+#[cold]
+fn fmt_g6(v: f64) -> String {
+    let e_str = format!("{:.5e}", v);
+    let exp: i32 = e_str.rsplit('e').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let s = if exp < -4 || exp >= 6 {
+        let (mant, _) = e_str.split_once('e').unwrap();
+        let mant = mant.trim_end_matches('0').trim_end_matches('.');
+        format!("{mant}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
+    } else {
+        let fixed = format!("{:.*}", (5 - exp).max(0) as usize, v);
+        if fixed.contains('.') {
+            fixed.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            fixed
+        }
+    };
+    s
+}
+
+#[cold]
+fn float_timestamp_out_of_range(seconds: f64) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("timestamp out of range: \"{}\"", fmt_g6(seconds)))
+            .with_sqlstate(::types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+pub fn float8_timestamptz(seconds: f64) -> PgResult<TimestampTz> {
+    use adt_datetime::consts::{SECS_PER_DAY, UNIX_EPOCH_JDATE, USECS_PER_SEC};
+    const DATETIME_MIN_JULIAN: i32 = 0;
+    const TIMESTAMP_END_JULIAN: i32 = 109_203_528;
+
+    if seconds.is_nan() {
+        return Err(Box::new(
+            PgError::error("timestamp cannot be NaN")
+                .with_sqlstate(::types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    if seconds.is_infinite() {
+        return Ok(if seconds < 0.0 { DT_NOBEGIN } else { DT_NOEND });
+    }
+
+    let arg = seconds;
+    if seconds < SECS_PER_DAY as f64 * (DATETIME_MIN_JULIAN - UNIX_EPOCH_JDATE) as f64
+        || seconds >= SECS_PER_DAY as f64 * (TIMESTAMP_END_JULIAN - UNIX_EPOCH_JDATE) as f64
+    {
+        return Err(float_timestamp_out_of_range(arg));
+    }
+
+    let seconds = seconds - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as f64 * SECS_PER_DAY as f64);
+    let seconds = (seconds * USECS_PER_SEC as f64).round_ties_even();
+    let result = seconds as i64;
+
+    if !IS_VALID_TIMESTAMP(result) {
+        return Err(float_timestamp_out_of_range(arg));
+    }
+    Ok(result)
+}
