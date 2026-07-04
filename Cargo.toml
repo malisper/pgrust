@@ -161,6 +161,7 @@ members = [
     "crates/backend/utils/cache/inval",
     "crates/backend/access/common/bufmask",
     "crates/backend/executor/execreplication",
+    "crates/backend/executor/execreplication_seams",
     "crates/backend/executor/execgrouping",
     "crates/backend/executor/exectuples",
     "crates/backend/executor/execpartition",
