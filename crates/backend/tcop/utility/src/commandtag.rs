@@ -131,6 +131,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                     CMDTAG_ALTER_TABLE
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_POLICY => CMDTAG_ALTER_POLICY,
+                types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => CMDTAG_ALTER_DATABASE,
                 types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => CMDTAG_ALTER_TRIGGER,
                 types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
                 types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
@@ -183,6 +184,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
                     CMDTAG_ALTER_TABLESPACE
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => CMDTAG_ALTER_DATABASE,
                 _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
             }
         }

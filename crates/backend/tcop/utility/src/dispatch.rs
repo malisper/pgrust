@@ -1543,7 +1543,8 @@ fn slow_switch<'mcx>(
                     Ok(None)
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_PUBLICATION
-                | types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION => {
+                | types_nodes::parsenodes::ObjectType::OBJECT_SUBSCRIPTION
+                | types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
                     // C: address = ExecAlterOwnerStmt; no address collected yet.
                     collect_gap("ALTER OWNER");
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
