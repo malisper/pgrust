@@ -1,5 +1,4 @@
-// nodeFunctionscan.c simple case + execSRF.c's table-function half; ROWS
-// FROM, ORDINALITY and coldeflists are loud.
+// nodeFunctionscan.c + execSRF.c's table-function half.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -37,13 +36,26 @@ struct SetExprState<'mcx> {
     returns_tuple: bool,
 }
 
+struct FunctionScanPerFuncState<'mcx> {
+    setexpr: SetExprState<'mcx>,
+    tupdesc: Rc<TupleDescData<'mcx>>,
+    colcount: i32,
+    tstore: Option<Tuplestore>,
+    // 1 + the actual row count once known; -1 until then (backward scans).
+    rowcount: i64,
+    func_slot: Option<ExecSlotId>,
+    funcparams: &'mcx ::types_nodes::bitmapset::Bitmapset<'mcx>,
+}
+
 pub struct FunctionScanState<'mcx> {
     pub ss: ScanState<'mcx>,
-    setexpr: SetExprState<'mcx>,
-    tupdesc: Option<Rc<TupleDescData<'mcx>>>,
-    tstore: Option<Tuplestore>,
+    simple: bool,
+    ordinality: bool,
+    ordinal: i64,
+    funcstates: PgVec<'mcx, FunctionScanPerFuncState<'mcx>>,
+    // Retained per-row scratch for the general path's column copy.
+    scratch: PgVec<'mcx, NullableDatum>,
     eflags: i32,
-    funcparams: &'mcx ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
@@ -53,22 +65,106 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
     }
 
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        if self.tstore.is_none() {
-            let mut store = exec_make_table_function_result(
-                &mut self.setexpr,
-                self.tupdesc.as_ref().expect("function scan already ended"),
-                self.eflags & EXEC_FLAG_BACKWARD != 0,
-                estate,
-                self.ss.ps_ExprContext,
-            )?;
-            store.rescan();
-            self.tstore = Some(store);
-        }
         let forward =
             matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);
         let mcx = estate.es_query_cxt;
-        let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
-        self.tstore.as_mut().unwrap().gettupleslot(forward, false, slot, mcx)
+
+        if self.simple {
+            let fs = &mut self.funcstates[0];
+            if fs.tstore.is_none() {
+                let mut store = exec_make_table_function_result(
+                    &mut fs.setexpr,
+                    &fs.tupdesc,
+                    self.eflags & EXEC_FLAG_BACKWARD != 0,
+                    estate,
+                    self.ss.ps_ExprContext,
+                )?;
+                store.rescan();
+                fs.tstore = Some(store);
+            }
+            let fs = &mut self.funcstates[0];
+            let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
+            return fs.tstore.as_mut().unwrap().gettupleslot(forward, false, slot, mcx);
+        }
+
+        // Move the ordinal off either end by exactly one before the
+        // end-of-data check (C FunctionNext).
+        let oldpos = self.ordinal;
+        if forward {
+            self.ordinal += 1;
+        } else {
+            self.ordinal -= 1;
+        }
+
+        exectuples::exec_clear_tuple(estate.slot_mut(self.ss.ss_ScanTupleSlot), mcx);
+        let mut att = 0usize;
+        let mut alldone = true;
+
+        for funcno in 0..self.funcstates.len() {
+            let fs = &mut self.funcstates[funcno];
+            if fs.tstore.is_none() {
+                let mut store = exec_make_table_function_result(
+                    &mut fs.setexpr,
+                    &fs.tupdesc,
+                    self.eflags & EXEC_FLAG_BACKWARD != 0,
+                    estate,
+                    self.ss.ps_ExprContext,
+                )?;
+                store.rescan();
+                fs.tstore = Some(store);
+            }
+            let fs = &mut self.funcstates[funcno];
+            let func_slot = fs.func_slot.expect("general path has per-function slots");
+            let got = if fs.rowcount != -1 && fs.rowcount < oldpos {
+                exectuples::exec_clear_tuple(estate.slot_mut(func_slot), mcx);
+                false
+            } else {
+                fs.tstore.as_mut().unwrap().gettupleslot(
+                    forward,
+                    false,
+                    estate.slot_mut(func_slot),
+                    mcx,
+                )?
+            };
+
+            let colcount = fs.colcount as usize;
+            if !got {
+                if forward && fs.rowcount == -1 {
+                    fs.rowcount = self.ordinal;
+                }
+                self.scratch.clear();
+                self.scratch.resize(colcount, NullableDatum::null());
+            } else {
+                let fslot = estate.slot_mut(func_slot);
+                exectuples::slot_getallattrs(fslot);
+                let base = fslot.base_mut();
+                self.scratch.clear();
+                for i in 0..colcount {
+                    self.scratch.push(NullableDatum {
+                        value: base.tts_values[i],
+                        isnull: base.tts_isnull[i],
+                    });
+                }
+                alldone = false;
+            }
+            let base = estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut();
+            for d in self.scratch.iter() {
+                base.tts_values[att] = d.value;
+                base.tts_isnull[att] = d.isnull;
+                att += 1;
+            }
+        }
+
+        if self.ordinality {
+            let base = estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut();
+            base.tts_values[att] = ::datum::Datum::from_i64(self.ordinal);
+            base.tts_isnull[att] = false;
+        }
+
+        if !alldone {
+            exectuples::exec_store_virtual_tuple(estate.slot_mut(self.ss.ss_ScanTupleSlot));
+        }
+        Ok(!alldone)
     }
 }
 
@@ -84,7 +180,7 @@ pub fn exec_function_scan<'mcx>(
     }
 }
 
-/// `ExecInitFunctionScan`, simple case (nfuncs == 1, no ordinality).
+/// `ExecInitFunctionScan`.
 pub fn exec_init_function_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &FunctionScan<'mcx>,
@@ -92,29 +188,72 @@ pub fn exec_init_function_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<FunctionScanState<'mcx>> {
     debug_assert!(node.scan.plan.lefttree.is_none() && node.scan.plan.righttree.is_none());
-    if node.funcordinality || node.functions.len() != 1 {
-        panic!(
-            "ExecInitFunctionScan (nodeFunctionscan.c): ORDINALITY / multiple \
-             functions unported — unit backend-executor-nodeFunctionscan"
-        );
+    let nfuncs = node.functions.len();
+    let ordinality = node.funcordinality;
+    let simple = nfuncs == 1 && !ordinality;
+
+    let mut funcstates: PgVec<'mcx, FunctionScanPerFuncState<'mcx>> = PgVec::new_in(mcx);
+    let mut natts: i32 = 0;
+    for f in &node.functions {
+        let rtfunc = f
+            .as_range_tbl_function()
+            .expect("FunctionScan functions cell is RangeTblFunction");
+        let mut setexpr = exec_init_table_function_result(mcx, rtfunc, estate)?;
+        let (tupdesc, returns_tuple) = build_function_tupdesc(mcx, rtfunc)?;
+        setexpr.returns_tuple = returns_tuple;
+        natts += tupdesc.natts;
+        funcstates.push(FunctionScanPerFuncState {
+            setexpr,
+            colcount: tupdesc.natts,
+            tupdesc: Rc::new(tupdesc),
+            tstore: None,
+            rowcount: -1,
+            func_slot: None,
+            funcparams: &rtfunc.funcparams,
+        });
     }
 
-    let rtfunc = node
-        .functions
-        .nth(0)
-        .as_range_tbl_function()
-        .expect("FunctionScan functions cell is RangeTblFunction");
-    let mut setexpr = exec_init_table_function_result(mcx, rtfunc, estate)?;
-    let (tupdesc, returns_tuple) = build_function_tupdesc(mcx, rtfunc)?;
-    setexpr.returns_tuple = returns_tuple;
-
-    let mut scan_tupdesc = tupdesc::CreateTupleDescCopy(mcx, &tupdesc)?;
+    let mut scan_tupdesc = if simple {
+        tupdesc::CreateTupleDescCopy(mcx, &funcstates[0].tupdesc)?
+    } else {
+        let mut d =
+            tupdesc::CreateTemplateTupleDesc(mcx, natts + if ordinality { 1 } else { 0 })?;
+        let mut attno: i16 = 0;
+        for fs in funcstates.iter() {
+            for j in 1..=fs.tupdesc.natts {
+                attno += 1;
+                tupdesc::TupleDescCopyEntry(&mut d, attno, &fs.tupdesc, j as i16);
+            }
+        }
+        if ordinality {
+            attno += 1;
+            tupdesc::TupleDescInitEntry(
+                &mut d,
+                attno,
+                Some("ordinality"),
+                types_core::catalog::INT8OID,
+                -1,
+                0,
+            )?;
+        }
+        d
+    };
     scan_tupdesc.tdtypeid = types_core::catalog::RECORDOID;
     scan_tupdesc.tdtypmod = -1;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
-    let ss_ScanTupleSlot =
-        estate.exec_init_extra_tuple_slot(Some(Rc::new(scan_tupdesc)), TupleSlotKind::MinimalTuple);
+    let ss_ScanTupleSlot = estate.exec_init_extra_tuple_slot(
+        Some(Rc::new(scan_tupdesc)),
+        if simple { TupleSlotKind::MinimalTuple } else { TupleSlotKind::Virtual },
+    );
+    if !simple {
+        for fs in funcstates.iter_mut() {
+            fs.func_slot = Some(estate.exec_init_extra_tuple_slot(
+                Some(Rc::clone(&fs.tupdesc)),
+                TupleSlotKind::MinimalTuple,
+            ));
+        }
+    }
 
     let mut ss = ScanState {
         qual: None,
@@ -131,11 +270,12 @@ pub fn exec_init_function_scan<'mcx>(
 
     Ok(FunctionScanState {
         ss,
-        setexpr,
-        tupdesc: Some(Rc::new(tupdesc)),
-        tstore: None,
+        simple,
+        ordinality,
+        ordinal: 0,
+        funcstates,
+        scratch: PgVec::new_in(mcx),
         eflags,
-        funcparams: &rtfunc.funcparams,
     })
 }
 
@@ -173,22 +313,48 @@ fn build_function_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     rtfunc: &RangeTblFunction<'mcx>,
 ) -> PgResult<(TupleDescData<'mcx>, bool)> {
-    debug_assert!(rtfunc.funccolnames.is_nil());
     let fexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
     let resolved = funcapi::get_expr_result_type(mcx, Some(fexpr))?;
     match resolved.class {
         funcapi::TypeFuncClass::Scalar => {
+            debug_assert!(rtfunc.funccolnames.is_nil());
             let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
             tupdesc::TupleDescInitEntry(&mut d, 1, None, resolved.result_type_id, -1, 0)?;
             tupdesc::TupleDescInitEntryCollation(&mut d, 1, execscan::expr_collation(fexpr));
             debug_assert_eq!(rtfunc.funccolcount, 1);
             Ok((d, false))
         }
+        funcapi::TypeFuncClass::Record if !rtfunc.funccolnames.is_nil() => {
+            // BuildDescFromLists over the parse-time coldeflist; C also
+            // blesses the desc (record-registry typmods are unmodeled here).
+            let n = rtfunc.funccolnames.len();
+            debug_assert_eq!(rtfunc.funccolcount as usize, n);
+            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, n as i32)?;
+            for i in 0..n {
+                let attno = (i + 1) as i16;
+                let name = rtfunc
+                    .funccolnames
+                    .nth(i)
+                    .as_string()
+                    .expect("funccolnames cell is String")
+                    .sval;
+                tupdesc::TupleDescInitEntry(
+                    &mut d,
+                    attno,
+                    Some(name),
+                    rtfunc.funccoltypes.nth(i),
+                    rtfunc.funccoltypmods.nth(i),
+                    0,
+                )?;
+                tupdesc::TupleDescInitEntryCollation(&mut d, attno, rtfunc.funccolcollations.nth(i));
+            }
+            Ok((d, true))
+        }
         funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::Record => {
             let d = resolved.result_tuple_desc.unwrap_or_else(|| {
                 panic!(
                     "ExecInitFunctionScan (nodeFunctionscan.c): {:?} result without a \
-                     tupdesc (coldeflist lane unported)",
+                     tupdesc",
                     resolved.class
                 )
             });
@@ -364,39 +530,60 @@ fn put_composite_row<'mcx>(
 }
 
 pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
-    if let Some(store) = node.tstore.take() {
-        store.end();
+    for fs in node.funcstates.iter_mut() {
+        if let Some(store) = fs.tstore.take() {
+            store.end();
+        }
+        fs.setexpr.flinfo.fn_extra = None;
+        fs.setexpr.args.clear();
     }
-    node.setexpr.flinfo.fn_extra = None;
-    node.setexpr.args.clear();
-    node.tupdesc = None;
+    node.funcstates.clear();
 }
 
-/// `ExecReScanFunctionScan`, chgParam-NULL arm: rewind the tuplestore.
+/// `ExecReScanFunctionScan`, chgParam-NULL arm: rewind the tuplestores.
 pub fn exec_rescan_function_scan<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    for fs in node.funcstates.iter_mut() {
+        if let Some(slot) = fs.func_slot {
+            exectuples::exec_clear_tuple(estate.slot_mut(slot), mcx);
+        }
+    }
     execscan::exec_scan_rescan(&mut node.ss, estate);
-    if let Some(store) = node.tstore.as_mut() {
-        store.rescan();
+    node.ordinal = 0;
+    for fs in node.funcstates.iter_mut() {
+        if let Some(store) = fs.tstore.as_mut() {
+            store.rescan();
+        }
     }
     Ok(())
 }
 
-/// Changed-params rescan: drop the tuplestore; the next fetch re-evaluates.
+/// Changed-params rescan: drop affected tuplestores; the next fetch re-evaluates.
 pub fn exec_rescan_function_scan_chg<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<()> {
-    execscan::exec_scan_rescan(&mut node.ss, estate);
-    if chg.overlap(node.funcparams) {
-        if let Some(store) = node.tstore.take() {
-            store.end();
+    let mcx = estate.es_query_cxt;
+    for fs in node.funcstates.iter_mut() {
+        if let Some(slot) = fs.func_slot {
+            exectuples::exec_clear_tuple(estate.slot_mut(slot), mcx);
         }
-    } else if let Some(store) = node.tstore.as_mut() {
-        store.rescan();
+    }
+    execscan::exec_scan_rescan(&mut node.ss, estate);
+    node.ordinal = 0;
+    for fs in node.funcstates.iter_mut() {
+        if chg.overlap(fs.funcparams) {
+            if let Some(store) = fs.tstore.take() {
+                store.end();
+            }
+            fs.rowcount = -1;
+        } else if let Some(store) = fs.tstore.as_mut() {
+            store.rescan();
+        }
     }
     Ok(())
 }
@@ -404,5 +591,6 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
-    FunctionScanState<'_> { ss, setexpr, eflags, funcparams; tupdesc, tstore },
+    FunctionScanPerFuncState<'_> { colcount, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
+    FunctionScanState<'_> { ss, simple, ordinality, ordinal, eflags; funcstates, scratch },
 );

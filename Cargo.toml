@@ -199,6 +199,7 @@ members = [
     "crates/backend/parser/parse_collate_seams",
     "crates/backend/parser/parser_analyze",
     "crates/backend/parser/parse_utilcmd",
+    "crates/backend/parser/parse_utilcmd_seams",
     "crates/backend/utils/misc/queryenvironment",
     "crates/backend/access/common/tupdesc",
     "crates/backend/utils/hash/dynahash",

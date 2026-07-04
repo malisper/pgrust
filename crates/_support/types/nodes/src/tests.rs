@@ -754,6 +754,10 @@ fn raw_expr_node_field_order_matches_c() {
     use crate::primnodes::MinMaxOp;
     check_enum!(prim_h, "MinMaxOp", MinMaxOp, [IS_GREATEST, IS_LEAST]);
 
+    let mut na = c_struct_fields(prim_h, "NamedArgExpr");
+    assert_eq!(na.remove(0), "xpr");
+    assert_eq!(na, ["arg", "name", "argnumber", "location"]);
+
     assert_eq!(c_struct_fields(parse_h, "RangeSubselect"), ["lateral", "subquery", "alias"]);
     let crate::rawnodes::RangeSubselect { lateral: _, subquery: _, alias: _ } =
         crate::rawnodes::RangeSubselect::default();

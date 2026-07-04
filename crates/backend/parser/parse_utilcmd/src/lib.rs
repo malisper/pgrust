@@ -37,6 +37,10 @@ fn type_does_not_exist(name: &str) -> Box<PgError> {
     )
 }
 
+pub fn init_seams() {
+    parse_utilcmd_seams::typename_type_id_and_mod::set(typenameTypeIdAndMod);
+}
+
 // typenameTypeIdAndMod (parse_type.c); pstate feeds errposition around the
 // typmodin call (C's setup_parser_errposition_callback).
 pub fn typenameTypeIdAndMod<'mcx>(

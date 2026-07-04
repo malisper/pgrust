@@ -842,11 +842,11 @@ pub fn create_seqscan_path<'mcx>(
     Ok(id)
 }
 
-// create_functionscan_path (pathnode.c); pathkeys empty (ORDINALITY is loud
-// in the parser).
+// create_functionscan_path (pathnode.c).
 pub fn create_functionscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    pathkeys: PgVec<'mcx, types_pathnodes::PathKey>,
     required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
     let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
@@ -854,6 +854,7 @@ pub fn create_functionscan_path<'mcx>(
     path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.pathkeys = pathkeys;
     let id = run.root.alloc_path(PathNode::Path(path));
     costsize::cost_functionscan(run, id, rel_id)?;
     Ok(id)

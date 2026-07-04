@@ -200,6 +200,34 @@ pub fn get_useful_group_keys_orderings<'mcx>(
     infos
 }
 
+// build_expression_pathkey (pathkeys.c).
+pub fn build_expression_pathkey<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    expr: Node<'mcx>,
+    opno: u32,
+    create_it: bool,
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let (opfamily, opcintype, cmptype) = lsyscache::amop::get_ordering_op_properties(opno)?
+        .unwrap_or_else(|| panic!("operator {opno} is not a valid ordering operator"));
+    let collation = expr_collation(expr);
+    let cpathkey = make_pathkey_from_sortinfo(
+        run,
+        expr,
+        opfamily,
+        opcintype,
+        collation,
+        cmptype == COMPARE_GT,
+        false,
+        0,
+        create_it,
+    )?;
+    let mut pathkeys = PgVec::new_in(run.mcx);
+    if let Some(pk) = cpathkey {
+        pathkeys.push(pk);
+    }
+    Ok(pathkeys)
+}
+
 fn make_pathkey_from_sortop<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,

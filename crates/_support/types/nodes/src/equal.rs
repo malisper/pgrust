@@ -17,7 +17,7 @@ use crate::parsenodes::{
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
+    DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr, NullTest, OpExpr, Param, RangeTblRef,
     RangeVar, RelabelType, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
 };
@@ -59,6 +59,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_SQLValueFunction => cmp!(as_sql_value_function),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
+        NodeTag::T_NamedArgExpr => cmp!(as_named_arg_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
@@ -366,6 +367,12 @@ impl NodeEqual for FuncExpr<'_> {
             && self.funccollid == b.funccollid
             && self.inputcollid == b.inputcollid
             && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for NamedArgExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg) && self.name == b.name && self.argnumber == b.argnumber
     }
 }
 

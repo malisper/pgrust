@@ -672,6 +672,14 @@ pub struct FuncExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live NamedArgExpr; modeled non-optional.
+pub struct NamedArgExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub name: Option<&'mcx str>,
+    pub argnumber: i32,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors primnodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Alias<'mcx> {
     const TAG: NodeTag = NodeTag::T_Alias;
@@ -774,6 +782,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CoalesceExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for MinMaxExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_MinMaxExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NamedArgExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NamedArgExpr;
 }
 unsafe impl NodeVariant<'_> for SQLValueFunction {
     const TAG: NodeTag = NodeTag::T_SQLValueFunction;
@@ -1085,6 +1096,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_min_max_expr(self) -> Option<&'mcx MinMaxExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_named_arg_expr(self) -> Option<&'mcx NamedArgExpr<'mcx>> {
         self.as_variant()
     }
 

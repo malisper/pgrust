@@ -23,6 +23,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // recheck_cast_function_args' parser tail (clauses.c:
+    // enforce_generic_type_consistency + make_fn_arguments over a NULL
+    // pstate); installed by parse_func (a clauses->parser dep cycles).
+    pub fn recheck_cast_function_args<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        args: types_nodes::NodeList<'mcx>,
+        actual_arg_types: &'a [Oid],
+        declared_arg_types: &'a [Oid],
+        result_type: Oid,
+        prorettype: Oid,
+    ) -> PgResult<types_nodes::NodeList<'mcx>>
+);
+
+seam_core::seam!(
     // inline_function's parser-dependent middle (clauses.c body parse/gate +
     // functions.c prepare_sql_fn_parse_info/check_sql_fn_retval): returns the
     // SUBSTITUTED body expression, not yet re-simplified; None = C's `goto

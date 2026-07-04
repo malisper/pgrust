@@ -811,7 +811,7 @@ fn lookup_trigger_func<'mcx>(mcx: Mcx<'mcx>, funcname: &NodeList<'mcx>) -> PgRes
         buf[n] = part.as_string().expect("funcname String").sval;
         n += 1;
     }
-    let clist = catalog_namespace::FuncnameGetCandidates(mcx, &buf[..n], 0, false, false)?;
+    let clist = catalog_namespace::FuncnameGetCandidates(mcx, &buf[..n], 0, &[], false, false)?;
     match clist.len() {
         0 => Err(err(
             format!("function {}() does not exist", name_list_to_string(funcname)),
