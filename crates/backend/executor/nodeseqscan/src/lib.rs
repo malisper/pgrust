@@ -15,7 +15,9 @@ use ::tableam::{
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nodes::plannodes::SeqScan;
 use ::types_rel::Relation;
-use ::types_slot::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
+use ::types_slot::{
+    EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK, EXEC_FLAG_WITH_NO_DATA,
+};
 
 pub fn init_seams() {}
 
@@ -36,11 +38,53 @@ pub struct SeqScanState<'mcx> {
     variant: SeqScanVariant,
     // Boxed: PlanStateNode carries a 1024-byte size assert.
     batch_soa: Option<::mcx::PgBox<'mcx, BatchSoa<'mcx>>>,
+    scan_batch: ScanBatchMode,
+    batch_allowed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanBatchMode {
+    Unknown,
+    Off,
+    On,
 }
 
 struct BatchSoa<'mcx> {
     plan: ::exectuples::SoaDeformPlan<'mcx>,
     soa: ::exectuples::SoaBatch<'mcx>,
+    // Bitmap-able kernel qual (QualScanVarCmpConst on a prefix column).
+    qual_armed: bool,
+    qual_col: u16,
+    qual_cmp: ::execexpr::CmpOp,
+    qual_konst: ::datum::Datum,
+    sel: [u64; ::exectuples::SOA_BM_WORDS],
+    nwords: u32,
+    cur_word: u32,
+    cur_bits: u64,
+}
+
+impl BatchSoa<'_> {
+    #[inline(always)]
+    fn next_selected(&mut self) -> Option<u32> {
+        loop {
+            if self.cur_bits != 0 {
+                let bit = self.cur_bits.trailing_zeros();
+                self.cur_bits &= self.cur_bits - 1;
+                return Some(self.cur_word * 64 + bit);
+            }
+            if self.cur_word + 1 >= self.nwords {
+                return None;
+            }
+            self.cur_word += 1;
+            self.cur_bits = self.sel[self.cur_word as usize];
+        }
+    }
+
+    fn reset_staged(&mut self) {
+        self.nwords = 0;
+        self.cur_word = 0;
+        self.cur_bits = 0;
+    }
 }
 
 impl<'mcx> SeqScanState<'mcx> {
@@ -140,9 +184,35 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     let mcx = estate.es_query_cxt;
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     let atts: &[_] = &rel.rd_att.compact_attrs;
+    let qual = match node.ss.qual.as_deref().map(|q| q.kernel()) {
+        Some(::execexpr::Kernel::QualScanVarCmpConst { attnum, konst, cmp })
+            if (attnum as i32) < prefix =>
+        {
+            Some((attnum, cmp, konst))
+        }
+        _ => None,
+    };
+    // Break-even: at <=2 fixed columns the deform+gather double-copy loses to
+    // the per-row walk (distinct +2.3% instr) unless a bitmap qual skips the
+    // gather for non-survivors; group_agg's 3-column prefix wins -4.9%.
+    if qual.is_none() && prefix < 3 {
+        node.batch_soa = None;
+        return;
+    }
     node.batch_soa = ::exectuples::SoaDeformPlan::try_new(mcx, atts, prefix as usize).map(|plan| {
         ::mcx::PgBox::new_in(
-            BatchSoa { soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()), plan },
+            BatchSoa {
+                soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+                plan,
+                qual_armed: qual.is_some(),
+                qual_col: qual.map_or(0, |(a, _, _)| a),
+                qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
+                qual_konst: qual.map_or(::datum::Datum::null(), |(_, _, k)| k),
+                sel: [0; ::exectuples::SOA_BM_WORDS],
+                nwords: 0,
+                cur_word: 0,
+                cur_bits: 0,
+            },
             mcx,
         )
     });
@@ -159,11 +229,62 @@ pub fn seq_scan_next_pagebatch<'mcx>(
     let n = ::tableam::table_scan_getnextpagebatch(scandesc)?;
     if n > 0 {
         if let Some(b) = batch_soa.as_mut() {
-            let BatchSoa { plan, soa } = &mut **b;
-            ::tableam::table_scan_batch_deform(scandesc, plan, soa);
+            let b = &mut **b;
+            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa);
+            if b.qual_armed {
+                ::execexpr::qual_bitmap_cmp_const(
+                    b.qual_cmp,
+                    b.qual_konst,
+                    b.soa.col_values(b.qual_col as usize),
+                    b.soa.col_isnull(b.qual_col as usize),
+                    &mut b.sel,
+                );
+                let nwords = (n as usize).div_ceil(64);
+                // Skipped rows carry a forced bit; the fetch re-checks them.
+                for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
+                    *w |= fb;
+                }
+                b.nwords = nwords as u32;
+                b.cur_word = 0;
+                b.cur_bits = b.sel[0];
+            }
         }
     }
     Ok(n)
+}
+
+/// Store row `i` of the staged batch and apply the scan qual; false =
+/// filtered out (bitmap-armed batches test the selection bit instead of
+/// evaluating the kernel per row).
+pub fn seq_scan_batch_fetch<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    i: u32,
+) -> PgResult<bool> {
+    if let Some(b) = node.batch_soa.as_deref() {
+        if b.qual_armed {
+            if b.sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
+                return Ok(false);
+            }
+            if !b.soa.is_fallback(i) {
+                seq_scan_batch_store(node, estate, i);
+                return Ok(true);
+            }
+        }
+    }
+    seq_scan_batch_store(node, estate, i);
+    match node.ss.qual.as_deref_mut() {
+        None => Ok(true),
+        Some(q) => {
+            let slot_id = node.ss.ss_ScanTupleSlot;
+            let mut slots = ::execexpr::EvalSlots {
+                scan: Some(estate.slot_mut(slot_id)),
+                inner: None,
+                outer: None,
+            };
+            ::execexpr::exec_qual(Some(q), &mut slots)
+        }
+    }
 }
 
 pub fn seq_scan_batch_store<'mcx>(
@@ -189,10 +310,106 @@ pub fn exec_seq_scan<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     match node.variant {
         SeqScanVariant::Plain => exec_scan_extended::<_, false, false>(node, estate),
-        SeqScanVariant::WithQual => exec_scan_extended::<_, true, false>(node, estate),
+        SeqScanVariant::WithQual => {
+            if scan_batch_ready(node, estate)? {
+                return exec_seq_scan_batch::<false>(node, estate);
+            }
+            exec_scan_extended::<_, true, false>(node, estate)
+        }
         SeqScanVariant::WithProject => exec_scan_extended::<_, false, true>(node, estate),
-        SeqScanVariant::WithQualProject => exec_scan_extended::<_, true, true>(node, estate),
+        SeqScanVariant::WithQualProject => {
+            if scan_batch_ready(node, estate)? {
+                return exec_seq_scan_batch::<true>(node, estate);
+            }
+            exec_scan_extended::<_, true, true>(node, estate)
+        }
         SeqScanVariant::Epq => exec_scan_epq(node, estate),
+    }
+}
+
+#[inline(always)]
+fn scan_batch_ready<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    match node.scan_batch {
+        ScanBatchMode::On => Ok(true),
+        ScanBatchMode::Off => Ok(false),
+        ScanBatchMode::Unknown => scan_batch_probe(node, estate),
+    }
+}
+
+// Once per scan: the page-batch bitmap-qual drive covers uninstrumented
+// forward-only kernel-qual scans (subplan-free projection); everything else
+// keeps the per-tuple drive.
+#[inline(never)]
+fn scan_batch_probe<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    node.scan_batch = ScanBatchMode::Off;
+    if !node.batch_allowed || node.ss.instr_idx.is_some() || estate.es_epq_active {
+        return Ok(false);
+    }
+    if let Some(p) = node.ss.ps_ProjInfo.as_ref() {
+        if p.pi_state.has_subplan() || !p.pi_state.param_exec_deps().is_empty() {
+            return Ok(false);
+        }
+    }
+    let Some(q) = node.ss.qual.as_deref() else { return Ok(false) };
+    let ::execexpr::Kernel::QualScanVarCmpConst { attnum, .. } = q.kernel() else {
+        return Ok(false);
+    };
+    node.ensure_scandesc(estate)?;
+    if !::tableam::table_scan_supports_pagebatch(node.ss.ss_currentScanDesc.as_ref().unwrap()) {
+        return Ok(false);
+    }
+    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1);
+    if node.batch_soa.as_deref().is_some_and(|b| b.qual_armed) {
+        node.scan_batch = ScanBatchMode::On;
+        return Ok(true);
+    }
+    node.batch_soa = None;
+    Ok(false)
+}
+
+#[inline(never)]
+fn exec_seq_scan_batch<'mcx, const PROJ: bool>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    estate.ecxt_mut(node.ss.ps_ExprContext).reset();
+    loop {
+        let next = node.batch_soa.as_deref_mut().expect("batch drive armed").next_selected();
+        let Some(i) = next else {
+            let n = seq_scan_next_pagebatch(node, estate)?;
+            if n == 0 {
+                let mcx = estate.es_query_cxt;
+                if PROJ {
+                    let proj = node.ss.ps_ProjInfo.as_ref().unwrap();
+                    ::exectuples::exec_clear_tuple(estate.slot_mut(proj.pi_result_slot), mcx);
+                }
+                return Ok(None);
+            }
+            continue;
+        };
+        if !seq_scan_batch_fetch(node, estate, i)? {
+            continue;
+        }
+        let scan_id = node.ss.ss_ScanTupleSlot;
+        estate.ecxt_mut(node.ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
+        if !PROJ {
+            return Ok(Some(scan_id));
+        }
+        let mcx = estate.es_query_cxt;
+        let proj = node.ss.ps_ProjInfo.as_mut().unwrap();
+        let result_id = proj.pi_result_slot;
+        let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, result_id);
+        let mut slots =
+            ::execexpr::EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
+        ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+        return Ok(Some(result_id));
     }
 }
 
@@ -204,7 +421,9 @@ pub fn exec_init_seq_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<SeqScanState<'mcx>> {
     let rel = exec_open_scan_relation(estate, node, eflags)?;
-    exec_init_seq_scan_rel(mcx, node, estate, rel)
+    let mut state = exec_init_seq_scan_rel(mcx, node, estate, rel)?;
+    state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
+    Ok(state)
 }
 
 /// `ExecOpenScanRelation`.
@@ -275,7 +494,13 @@ pub fn exec_init_seq_scan_rel<'mcx>(
             (true, true) => SeqScanVariant::WithQualProject,
         }
     };
-    Ok(SeqScanState { ss, variant, batch_soa: None })
+    Ok(SeqScanState {
+        ss,
+        variant,
+        batch_soa: None,
+        scan_batch: ScanBatchMode::Unknown,
+        batch_allowed: false,
+    })
 }
 
 /// `ExecEndSeqScan`.
@@ -294,6 +519,9 @@ pub fn exec_rescan_seq_scan<'mcx>(
     let mcx = estate.es_query_cxt;
     if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
         table_rescan(mcx, scan, None)?;
+    }
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.reset_staged();
     }
     execscan::exec_scan_rescan(&mut node.ss, estate);
     Ok(())
@@ -317,7 +545,11 @@ pub fn exec_seq_scan_initialize_worker(_node: &mut SeqScanState<'_>) -> ! {
 
 mcx::forget_safe_nodrop!(SeqScanVariant);
 
+mcx::forget_safe_nodrop!(ScanBatchMode);
+
 mcx::forget_safe_struct!(
-    SeqScanState<'_> { ss, variant, batch_soa },
-    BatchSoa<'_> { plan, soa },
+    SeqScanState<'_> { ss, variant, batch_soa, scan_batch, batch_allowed },
+    BatchSoa<'_> {
+        plan, soa, qual_armed, qual_col, qual_cmp, qual_konst, sel, nwords, cur_word, cur_bits,
+    },
 );

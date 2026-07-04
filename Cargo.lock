@@ -6320,6 +6320,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_rel",
+ "types_scan",
  "types_slot",
  "types_snapshot",
  "types_storage",

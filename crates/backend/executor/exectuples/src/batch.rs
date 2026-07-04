@@ -10,7 +10,7 @@ use ::types_tuple::tupmacs::{att_isnull, att_nominal_alignby, fetch_att};
 use ::types_tuple::{CompactAttribute, HeapTupleData, SizeofHeapTupleHeader};
 
 pub const SOA_MAX_ROWS: usize = MaxHeapTuplesPerPage;
-const SOA_BM_WORDS: usize = SOA_MAX_ROWS.div_ceil(64);
+pub const SOA_BM_WORDS: usize = SOA_MAX_ROWS.div_ceil(64);
 
 /// Fixed-width prefix plan: every column below `ncols` has `attlen > 0`.
 pub struct SoaDeformPlan<'mcx> {
@@ -91,6 +91,12 @@ impl<'mcx> SoaBatch<'mcx> {
     #[inline]
     pub fn is_fallback(&self, i: u32) -> bool {
         self.fallback[(i / 64) as usize] & (1u64 << (i % 64)) != 0
+    }
+
+    /// Rows the deform skipped; a batched qual must re-check these per row.
+    #[inline]
+    pub fn fallback_words(&self) -> &[u64] {
+        &self.fallback
     }
 
     /// Column `c`'s values for the staged batch.
