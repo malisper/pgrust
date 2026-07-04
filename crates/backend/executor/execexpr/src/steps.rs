@@ -49,6 +49,11 @@ pub enum Step {
     FuncExprStrict1 { call: FuncCall, out: OutRef },
     FuncExprStrict2 { call: FuncCall, out: OutRef },
     FuncExprStrict { call: FuncCall, out: OutRef },
+    // EEOP_FUNCEXPR_FUSAGE / EEOP_FUNCEXPR_STRICT_FUSAGE: compiled only when
+    // track_functions covers fn_stats, so counting never touches the
+    // default-off path.
+    FuncExprFusage { call: FuncCall, out: OutRef },
+    FuncExprStrictFusage { call: FuncCall, out: OutRef },
     // EEOP_IOCOERCE: out fn of the arg type then in fn of the result type;
     // incall args 1/2 (typioparam, typmod -1) are compile-time consts. The
     // pair lives in the state's mcx (fcinfo-image precedent) to keep Step

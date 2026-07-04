@@ -633,6 +633,16 @@ fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool> {
     )
 }
 
+fn search_syscache_exists_procoid(funcid: Oid) -> PgResult<bool> {
+    SearchSysCacheExists(
+        PROCOID,
+        SysCacheKey::Value(Datum::from_oid(funcid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn search_syscache_exists_attnum(relid: Oid, attnum: i16) -> PgResult<bool> {
     SearchSysCacheExists(
         ATTNUM,
@@ -2436,6 +2446,7 @@ pub(crate) fn install() {
     syscache_seams::pg_attribute_attoptions::set(pg_attribute_attoptions);
     syscache_seams::pg_type_typnamespace::set(pg_type_typnamespace);
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
+    syscache_seams::search_syscache_exists_procoid::set(search_syscache_exists_procoid);
     syscache_seams::search_syscache_exists_attnum::set(search_syscache_exists_attnum);
     syscache_seams::search_syscache_exists_databaseoid::set(search_syscache_exists_databaseoid);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);

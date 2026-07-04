@@ -886,7 +886,7 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
     catalog_indexing::CatalogTupleDelete(&relation, &tid)?;
     genam::systable_endscan(mcx, scan)?;
     relation.close(types_rel::RowExclusiveLock)?;
-    // pgstat_drop_function: skipped (per-function stats unported).
+    pgstat::function::pgstat_drop_function(funcOid);
     if prokind == PROKIND_AGGREGATE {
         unported("RemoveFunctionById: pg_aggregate tuple deletion (aggregate DDL lane)");
     }

@@ -569,3 +569,97 @@ fn seams_are_wired() {
     xact::PostPrepare_PgStat();
     assert!(guc_tables::vars::pgstat_track_counts.read());
 }
+
+fn setup_function_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        inval_seams::accept_invalidation_messages::set(|| Ok(()));
+        syscache_seams::search_syscache_exists_procoid::set(|oid| Ok(oid != 66_666));
+    });
+}
+
+#[test]
+fn function_usage_accumulates_and_flushes() {
+    setup();
+    setup_function_seams();
+    let fcu = crate::function::pgstat_init_function_usage(7001).unwrap();
+    crate::function::pgstat_end_function_usage(&fcu, true);
+    let fcu = crate::function::pgstat_init_function_usage(7001).unwrap();
+    crate::function::pgstat_end_function_usage(&fcu, true);
+
+    let pending = crate::find_funcstat_entry(7001).unwrap();
+    assert_eq!(pending.numcalls, 2);
+    assert!(pending.total_time > 0);
+    assert!(pending.self_time > 0);
+    assert!(pending.total_time >= pending.self_time);
+
+    pending::pgstat_flush_pending_entries(false);
+    assert!(crate::find_funcstat_entry(7001).is_none());
+    let shared = crate::pgstat_fetch_stat_funcentry(7001).unwrap();
+    assert_eq!(shared.numcalls, 2);
+    assert!(crate::pgstat_have_entry(pending::PGSTAT_KIND_FUNCTION.0, 5, 7001));
+}
+
+#[test]
+fn function_usage_recursion_assigns_total_once() {
+    setup();
+    setup_function_seams();
+    let outer = crate::function::pgstat_init_function_usage(7002).unwrap();
+    let inner = crate::function::pgstat_init_function_usage(7002).unwrap();
+    crate::function::pgstat_end_function_usage(&inner, false);
+    crate::function::pgstat_end_function_usage(&outer, true);
+
+    let c = crate::find_funcstat_entry(7002).unwrap();
+    assert_eq!(c.numcalls, 1);
+    // recursive total is assigned, not doubled: total covers one outer span
+    assert!(c.total_time >= c.self_time);
+}
+
+#[test]
+fn function_usage_dropped_function_errors() {
+    setup();
+    setup_function_seams();
+    let err = crate::function::pgstat_init_function_usage(66_666).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FUNCTION);
+    assert!(crate::find_funcstat_entry(66_666).is_none());
+}
+
+#[test]
+fn statsfile_roundtrip_restores_entries() {
+    setup();
+    setup_function_seams();
+    let dir = std::env::temp_dir().join(format!("pgstat-file-test-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("pg_stat")).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+
+    relation::pgstat_count_heap_insert(8001, false, 4);
+    xact::AtEOXact_PgStat(true, false);
+    pending::pgstat_flush_pending_entries(false);
+    let before = relation::pgstat_fetch_stat_tabentry_ext(false, 8001).unwrap();
+    assert_eq!(before.tuples_inserted, 4);
+
+    crate::file::pgstat_write_statsfile().unwrap();
+
+    crate::pgstat_reset(pending::PGSTAT_KIND_RELATION, 5, 8001);
+    crate::pgstat_clear_snapshot();
+    assert_eq!(
+        relation::pgstat_fetch_stat_tabentry_ext(false, 8001).unwrap().tuples_inserted,
+        0
+    );
+
+    crate::file::pgstat_read_statsfile();
+    crate::pgstat_clear_snapshot();
+    let after = relation::pgstat_fetch_stat_tabentry_ext(false, 8001).unwrap();
+    assert_eq!(after.tuples_inserted, 4);
+    // C unlinks after a successful read
+    assert!(!dir.join("pg_stat/pgstat.stat").exists());
+}
+
+#[test]
+fn statsfile_corrupt_body_is_rejected() {
+    assert!(crate::file::read_statsfile_body(&[]).is_none());
+    assert!(crate::file::read_statsfile_body(&[1, 2, 3, 4, b'E']).is_none());
+    let mut good_header = crate::file::PGSTAT_FILE_FORMAT_ID.to_ne_bytes().to_vec();
+    good_header.push(b'X');
+    assert!(crate::file::read_statsfile_body(&good_header).is_none());
+}

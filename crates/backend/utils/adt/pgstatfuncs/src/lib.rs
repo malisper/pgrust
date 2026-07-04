@@ -253,6 +253,64 @@ xact_rel_i64! {
     fc_pg_stat_get_xact_blocks_hit blocks_hit;
 }
 
+pub fn fc_pg_stat_get_function_calls(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let funcid = fcinfo.args_n::<1>()[0].value.as_oid();
+    match pgstat::pgstat_fetch_stat_funcentry(funcid) {
+        Some(f) => Ok(Datum::from_i64(f.numcalls)),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+// C PG_STAT_GET_FUNCENTRY_FLOAT8_MS: stored microseconds, displayed milliseconds.
+macro_rules! func_f8_ms {
+    ($($fc:ident $field:ident;)*) => {$(
+        pub fn $fc(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let funcid = fcinfo.args_n::<1>()[0].value.as_oid();
+            match pgstat::pgstat_fetch_stat_funcentry(funcid) {
+                Some(f) => Ok(Datum::from_f64(f.$field as f64 / 1000.0)),
+                None => Ok(fcinfo.return_null()),
+            }
+        }
+    )*};
+}
+
+func_f8_ms! {
+    fc_pg_stat_get_function_total_time total_time;
+    fc_pg_stat_get_function_self_time self_time;
+}
+
+pub fn fc_pg_stat_get_xact_function_calls(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let funcid = fcinfo.args_n::<1>()[0].value.as_oid();
+    match pgstat::find_funcstat_entry(funcid) {
+        Some(f) => Ok(Datum::from_i64(f.numcalls)),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+// C PG_STAT_GET_XACT_FUNCENTRY_FLOAT8_MS: pending ns ticks, displayed ms.
+macro_rules! xact_func_f8_ms {
+    ($($fc:ident $field:ident;)*) => {$(
+        pub fn $fc(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let funcid = fcinfo.args_n::<1>()[0].value.as_oid();
+            match pgstat::find_funcstat_entry(funcid) {
+                Some(f) => Ok(Datum::from_f64(f.$field as f64 / 1_000_000.0)),
+                None => Ok(fcinfo.return_null()),
+            }
+        }
+    )*};
+}
+
+xact_func_f8_ms! {
+    fc_pg_stat_get_xact_function_total_time total_time;
+    fc_pg_stat_get_xact_function_self_time self_time;
+}
+
 pub fn fc_pg_stat_get_snapshot_timestamp(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -512,6 +570,12 @@ pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     ),
     b(3044, "pg_stat_get_xact_blocks_fetched", 1, fc_pg_stat_get_xact_blocks_fetched),
     b(3045, "pg_stat_get_xact_blocks_hit", 1, fc_pg_stat_get_xact_blocks_hit),
+    b(2978, "pg_stat_get_function_calls", 1, fc_pg_stat_get_function_calls),
+    b(2979, "pg_stat_get_function_total_time", 1, fc_pg_stat_get_function_total_time),
+    b(2980, "pg_stat_get_function_self_time", 1, fc_pg_stat_get_function_self_time),
+    b(3046, "pg_stat_get_xact_function_calls", 1, fc_pg_stat_get_xact_function_calls),
+    b(3047, "pg_stat_get_xact_function_total_time", 1, fc_pg_stat_get_xact_function_total_time),
+    b(3048, "pg_stat_get_xact_function_self_time", 1, fc_pg_stat_get_xact_function_self_time),
     b(3788, "pg_stat_get_snapshot_timestamp", 0, fc_pg_stat_get_snapshot_timestamp),
     b(6230, "pg_stat_have_stats", 3, fc_pg_stat_have_stats),
     nonstrict(2274, "pg_stat_reset", 0, fc_pg_stat_reset),
