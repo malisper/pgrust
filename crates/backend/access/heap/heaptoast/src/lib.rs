@@ -68,6 +68,7 @@ pub fn init_seams() {
     heaptoast_seams::heap_toast_insert_or_update::set(toast::heap_toast_insert_or_update);
     heaptoast_seams::heap_toast_delete::set(toast::heap_toast_delete);
     heaptoast_seams::toast_compress_datum::set(internals::toast_compress_datum);
+    heaptoast_seams::toast_flatten_tuple::set(toast::toast_flatten_tuple);
     toast_internals_seams::toast_fetch_datum::set(fetch::toast_fetch_datum);
     toast_internals_seams::toast_fetch_datum_slice::set(fetch::toast_fetch_datum_slice);
 }

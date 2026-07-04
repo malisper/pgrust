@@ -26,6 +26,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_pg_lsn::builtins::PG_LSN_BUILTINS,
     ::adt_xml::builtins::XML_BUILTINS,
     ::xid8funcs::builtins::XID8FUNCS_BUILTINS,
+    ::slotfuncs::builtins::SLOTFUNCS_BUILTINS,
     ::dbsize::builtins::DBSIZE_BUILTINS,
     ::adt_uuid::builtins::UUID_BUILTINS,
     ::adt_tsvector_core::builtins::TSVECTOR_BUILTINS,

@@ -44,6 +44,7 @@ xloginsert = { path = "../../transam/xloginsert" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
+heaptuple = { path = "../../common/heaptuple" }
 
 visibilitymap = { path = "../visibilitymap" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
@@ -51,7 +52,6 @@ lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 
 [dev-dependencies]
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
-heaptuple = { path = "../../common/heaptuple" }
 heapam_visibility = { path = "../heapam_visibility" }
 xact = { path = "../../transam/xact" }
 xlogreader = { path = "../../transam/xlogreader" }

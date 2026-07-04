@@ -14,7 +14,7 @@ use ::types_storage::RelFileLocator;
 use ::types_tuple::TupleDescData;
 
 use crate::lock::{LockInfoData, NoLock, LOCKMODE};
-use crate::pg_class::{FormData_pg_class, RELKIND_HAS_STORAGE, RELKIND_RELATION};
+use crate::pg_class::{FormData_pg_class, RELKIND_HAS_STORAGE, RELKIND_MATVIEW, RELKIND_RELATION};
 use crate::pg_index::FormData_pg_index;
 use crate::reloptions::RdOptions;
 
@@ -176,7 +176,7 @@ impl<'mcx> RelationData<'mcx> {
 
     #[inline]
     pub fn is_used_as_catalog_table(&self) -> bool {
-        self.rd_rel.relkind == RELKIND_RELATION
+        (self.rd_rel.relkind == RELKIND_RELATION || self.rd_rel.relkind == RELKIND_MATVIEW)
             && self
                 .rd_options
                 .as_ref()

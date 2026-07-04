@@ -106,6 +106,7 @@ pub fn init_all() {
     launcher::init_seams();
     walsender_config::init_seams();
     slot::init_seams();
+    reorderbuffer::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

@@ -234,6 +234,32 @@ pub fn ProcArrayShmemResetAfterCrash() {
     }
 }
 
+pub fn ProcArraySetReplicationSlotXmin(
+    xmin: TransactionId,
+    catalog_xmin: TransactionId,
+    already_locked: bool,
+) -> PgResult<()> {
+    let arrayP = procArray();
+    if !already_locked {
+        LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    }
+    arrayP.replication_slot_xmin.set(xmin);
+    arrayP.replication_slot_catalog_xmin.set(catalog_xmin);
+    if !already_locked {
+        LWLockRelease(ProcArrayLock())?;
+    }
+    Ok(())
+}
+
+pub fn ProcArrayGetReplicationSlotXmin() -> PgResult<(TransactionId, TransactionId)> {
+    let arrayP = procArray();
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    let xmin = arrayP.replication_slot_xmin.get();
+    let catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    LWLockRelease(ProcArrayLock())?;
+    Ok((xmin, catalog_xmin))
+}
+
 pub fn GetMaxSnapshotXidCount() -> usize {
     procArray().maxProcs as usize
 }

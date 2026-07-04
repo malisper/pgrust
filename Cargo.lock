@@ -4492,6 +4492,7 @@ dependencies = [
  "portalmem",
  "pseudorandomfuncs",
  "sequence_seams",
+ "slotfuncs",
  "stringinfo",
  "syscache_seams",
  "to_tsany",
@@ -5925,6 +5926,7 @@ dependencies = [
  "shmem",
  "shmem_seams",
  "sinval",
+ "slot",
  "subtrans",
  "syncscan",
  "transam_xlog",
@@ -10771,7 +10773,26 @@ dependencies = [
 name = "reorderbuffer"
 version = "0.0.0"
 dependencies = [
+ "catalog",
+ "datum",
+ "detoast",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "inval",
+ "mcx",
+ "relcache",
+ "reorderbuffer_seams",
+ "snapmgr",
+ "transam_xlog_seams",
+ "tupdesc",
+ "types_core",
  "types_error",
+ "types_rel",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact",
 ]
 
 [[package]]
@@ -11544,6 +11565,7 @@ dependencies = [
  "relcache_build",
  "relmapper",
  "relpath",
+ "reorderbuffer",
  "resowner",
  "rewrite_define",
  "rewrite_handler",
@@ -11791,10 +11813,37 @@ dependencies = [
 name = "slot"
 version = "0.0.0"
 dependencies = [
+ "adt_timestamp",
+ "condition_variable",
+ "crc32c",
  "datum",
+ "elog",
+ "fd",
+ "guc",
+ "guc_tables",
+ "init_small",
  "ipc_seams",
+ "libc",
+ "lmgr_proc",
+ "lwlock",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "miscinit_seams",
+ "procarray",
+ "s_lock_seams",
  "slot_seams",
+ "standby_seams",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_guc",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "walsender_config",
+ "wchar",
+ "xlogrecovery_seams",
 ]
 
 [[package]]
@@ -11809,7 +11858,21 @@ dependencies = [
 name = "slotfuncs"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "funcapi",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "lwlock",
+ "mcx",
+ "slot",
+ "transam_xlog",
+ "types_core",
  "types_error",
+ "types_fmgr",
+ "types_storage",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -13069,8 +13132,10 @@ dependencies = [
  "procarray_seams",
  "relcache_seams",
  "relmapper",
+ "reorderbuffer_seams",
  "s_lock_seams",
  "shmem",
+ "slot_seams",
  "snapbuild_seams",
  "standby_seams",
  "startup_seams",

@@ -25,6 +25,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn toast_flatten_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tup: &HeapTupleData<'_>,
+        tuple_desc: &types_tuple::TupleDescData<'_>,
+    ) -> PgResult<HeapTuple<'mcx>>
+);
+
+seam_core::seam!(
     pub fn heap_toast_delete(
         mcx: mcx::Mcx<'_>,
         rel: &RelationData<'_>,

@@ -255,6 +255,52 @@ fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
 }
 
 fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
+    test_relation_replident(mcx, oid, b'd')
+}
+
+fn test_relation_replident<'mcx>(mcx: Mcx<'mcx>, oid: Oid, replident: u8) -> Relation<'mcx> {
+    test_relation_opts(mcx, oid, replident, false)
+}
+
+fn user_catalog_std_options() -> ::types_rel::reloptions::StdRdOptions {
+    use ::types_rel::reloptions::*;
+    StdRdOptions {
+        fillfactor: 100,
+        toast_tuple_target: 2032,
+        autovacuum: AutoVacOpts {
+            enabled: true,
+            vacuum_threshold: 50,
+            vacuum_max_threshold: -1,
+            vacuum_ins_threshold: 1000,
+            analyze_threshold: 50,
+            vacuum_cost_limit: -1,
+            freeze_min_age: -1,
+            freeze_max_age: -1,
+            freeze_table_age: -1,
+            multixact_freeze_min_age: -1,
+            multixact_freeze_max_age: -1,
+            multixact_freeze_table_age: -1,
+            log_min_duration: -1,
+            vacuum_cost_delay: -1.0,
+            vacuum_scale_factor: 0.2,
+            vacuum_ins_scale_factor: 0.2,
+            analyze_scale_factor: 0.1,
+        },
+        user_catalog_table: true,
+        parallel_workers: -1,
+        vacuum_index_cleanup: STDRD_OPTION_VACUUM_INDEX_CLEANUP_AUTO,
+        vacuum_truncate: true,
+        vacuum_truncate_set: false,
+        vacuum_max_eager_freeze_failure_rate: -1.0,
+    }
+}
+
+fn test_relation_opts<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    replident: u8,
+    user_catalog: bool,
+) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t");
     let rd_rel = FormData_pg_class {
@@ -276,7 +322,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,
-        relreplident: b'd',
+        relreplident: replident,
         relispartition: false,
         relfrozenxid: 3,
         relminmxid: 1,
@@ -302,7 +348,9 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_opfamily: PgVec::new_in(mcx),
         rd_indoption: PgVec::new_in(mcx),
         rd_indcollation: PgVec::new_in(mcx),
-        rd_options: None,
+        rd_options: user_catalog.then(|| {
+            ::types_rel::reloptions::RdOptions::Std(user_catalog_std_options())
+        }),
         pgstat_enabled: std::cell::Cell::new(true),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
@@ -774,7 +822,7 @@ use ::types_tuple::{HEAP_KEYS_UPDATED, HEAP_UPDATED};
 const FAKE_XID: u32 = 100;
 
 static DML_INIT: Once = Once::new();
-static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize)>> = Mutex::new(Vec::new());
+static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize, Vec<(u8, Vec<u8>)>)>> = Mutex::new(Vec::new());
 static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
 
 pub(crate) fn wal_insert_record_hook(
@@ -788,7 +836,8 @@ pub(crate) fn wal_insert_record_hook(
     for frag in main_data {
         main.extend_from_slice(frag);
     }
-    XLOG_RECS.lock().unwrap().push((info, main, blocks.len()));
+    let regs = blocks.iter().map(|b| (b.flags, b.bufdata.concat())).collect();
+    XLOG_RECS.lock().unwrap().push((info, main, blocks.len(), regs));
     Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
 }
 
@@ -847,11 +896,48 @@ fn install_dml_seams() {
         freespace_seams::record_page_with_free_space::set(|_rel, _blk, _avail| Ok(()));
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_rel| false);
+        catalog_seams::is_toast_relation::set(|_rel| false);
         snapmgr_seams::transaction_xmin::set(|| FAKE_XID);
+        transam_xlog_seams::xlog_logical_info_active::set(|| {
+            LOGICAL.load(Ordering::Relaxed)
+        });
+        xact_seams::get_top_transaction_id_if_any::set(|| FAKE_XID);
+        combocid_seams::heap_tuple_header_get_cmin::set(|hdr| hdr.raw_command_id());
+        relcache_seams::relation_get_index_attr_bitmap::set(|_relid| {
+            let mcx = Box::leak(Box::new(MemoryContext::new("test indexattr"))).mcx();
+            let mut identity = PgVec::new_in(mcx);
+            for a in ID_ATTRS.lock().unwrap().iter() {
+                identity.push(*a);
+            }
+            Ok(Rc::new(relcache_seams::IndexAttrBitmaps {
+                hot_blocking: PgVec::new_in(mcx),
+                summarized: PgVec::new_in(mcx),
+                key: PgVec::new_in(mcx),
+                identity,
+            }))
+        });
     });
 }
 
-fn take_xlog() -> Vec<(u8, Vec<u8>, usize)> {
+static LOGICAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ID_ATTRS: Mutex<Vec<i16>> = Mutex::new(Vec::new());
+
+struct LogicalOn;
+impl LogicalOn {
+    fn new(id_attrs: &[i16]) -> Self {
+        LOGICAL.store(true, Ordering::Relaxed);
+        *ID_ATTRS.lock().unwrap() = id_attrs.to_vec();
+        LogicalOn
+    }
+}
+impl Drop for LogicalOn {
+    fn drop(&mut self) {
+        LOGICAL.store(false, Ordering::Relaxed);
+        ID_ATTRS.lock().unwrap().clear();
+    }
+}
+
+fn take_xlog() -> Vec<(u8, Vec<u8>, usize, Vec<(u8, Vec<u8>)>)> {
     core::mem::take(&mut *XLOG_RECS.lock().unwrap())
 }
 
@@ -1385,5 +1471,236 @@ fn multi_insert_toast_copy_survives_to_placement() {
 
     let plain = page_tuple_at(oid, 0, 2);
     assert_eq!(plain.t_data().xmin_raw(), FAKE_XID);
+    quiesced();
+}
+
+// --- logical decoding write side ---
+
+const KEEP_DATA: u8 = ::xloginsert_seams::REGBUF_KEEP_DATA;
+
+#[test]
+fn logical_insert_contains_new_tuple_and_keeps_data() {
+    install_dml_seams();
+    let _serial = serial();
+    let _logical = LogicalOn::new(&[]);
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(ctx.mcx(), oid);
+    let _ = take_xlog();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_INSERT | dml::XLOG_HEAP_INIT_PAGE);
+    assert_ne!(recs[0].1[2] & dml::XLH_INSERT_CONTAINS_NEW_TUPLE, 0);
+    assert_eq!(recs[0].1[2] & dml::XLH_INSERT_ON_TOAST_RELATION, 0);
+    assert_ne!(recs[0].3[0].0 & KEEP_DATA, 0);
+    quiesced();
+}
+
+#[test]
+fn logical_insert_catalog_rel_logs_new_cid() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    let _logical = LogicalOn::new(&[]);
+    register_table(oid, vec![]);
+    let rel = test_relation_opts(ctx.mcx(), oid, b'd', true);
+    let _ = take_xlog();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2);
+    let (info, main, nblocks, _) = &recs[0];
+    assert_eq!(*info, 0x70);
+    assert_eq!(*nblocks, 0);
+    assert_eq!(main.len(), 34);
+    let f = |r: core::ops::Range<usize>| u32::from_ne_bytes(main[r].try_into().unwrap());
+    assert_eq!(f(0..4), FAKE_XID);
+    assert_eq!(f(4..8), 7);
+    assert_eq!(f(8..12), !0u32);
+    assert_eq!(f(12..16), !0u32);
+    assert_eq!(f(16..20), 1663);
+    assert_eq!(f(20..24), 5);
+    assert_eq!(f(24..28), oid);
+    assert_eq!(u16::from_ne_bytes(main[32..34].try_into().unwrap()), 1);
+    assert_eq!(recs[1].0, dml::XLOG_HEAP_INSERT | dml::XLOG_HEAP_INIT_PAGE);
+    // user catalog tables are also logically logged (unlike system catalogs)
+    assert_ne!(recs[1].1[2] & dml::XLH_INSERT_CONTAINS_NEW_TUPLE, 0);
+    assert_ne!(recs[1].3[0].0 & KEEP_DATA, 0);
+    quiesced();
+}
+
+#[test]
+fn logical_delete_catalog_rel_logs_new_cid_cmax() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    let _logical = LogicalOn::new(&[]);
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation_opts(ctx.mcx(), oid, b'd', true);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let r = dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2);
+    let (info, main, _, _) = &recs[0];
+    assert_eq!(*info, 0x70);
+    let f = |r: core::ops::Range<usize>| u32::from_ne_bytes(main[r].try_into().unwrap());
+    assert_eq!(f(4..8), !0u32);
+    assert_eq!(f(8..12), 7);
+    assert_eq!(recs[1].0, dml::XLOG_HEAP_DELETE);
+    assert_eq!(recs[1].1.len(), 8, "empty identity: no replica identity payload");
+    quiesced();
+}
+
+#[test]
+fn logical_delete_full_replident_logs_old_tuple() {
+    install_dml_seams();
+    let _serial = serial();
+    let _logical = LogicalOn::new(&[]);
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation_replident(ctx.mcx(), oid, b'f');
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    let (info, main, _, _) = &recs[0];
+    assert_eq!(*info, dml::XLOG_HEAP_DELETE);
+    assert_ne!(main[7] & dml::XLH_DELETE_CONTAINS_OLD_TUPLE, 0);
+    assert_eq!(main[7] & dml::XLH_DELETE_CONTAINS_OLD_KEY, 0);
+    assert_eq!(main.len(), 8 + 5 + 5);
+    let stored = page_tuple_at(oid, 0, 1);
+    let hdr = stored.t_data();
+    assert_eq!(u16::from_ne_bytes(main[8..10].try_into().unwrap()), hdr.t_infomask2);
+    assert_eq!(u16::from_ne_bytes(main[10..12].try_into().unwrap()), hdr.t_infomask);
+    assert_eq!(main[12], hdr.t_hoff);
+    assert_eq!(i32::from_ne_bytes(main[14..18].try_into().unwrap()), 1);
+    quiesced();
+}
+
+#[test]
+fn logical_delete_identity_index_logs_old_key() {
+    install_dml_seams();
+    let _serial = serial();
+    let _logical = LogicalOn::new(&[1]);
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 7))], false)],
+    );
+    let rel = test_relation(ctx.mcx(), oid);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    let (_, main, _, _) = &recs[0];
+    assert_eq!(main[7] & dml::XLH_DELETE_CONTAINS_OLD_TUPLE, 0);
+    assert_ne!(main[7] & dml::XLH_DELETE_CONTAINS_OLD_KEY, 0);
+    assert_eq!(main.len(), 8 + 5 + 5);
+    assert_eq!(main[12], 24);
+    assert_eq!(i32::from_ne_bytes(main[14..18].try_into().unwrap()), 7);
+    quiesced();
+}
+
+#[test]
+fn logical_delete_empty_identity_logs_no_key() {
+    install_dml_seams();
+    let _serial = serial();
+    let _logical = LogicalOn::new(&[]);
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation(ctx.mcx(), oid);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].1.len(), 8);
+    assert_eq!(recs[0].1[7] & (dml::XLH_DELETE_CONTAINS_OLD_TUPLE | dml::XLH_DELETE_CONTAINS_OLD_KEY), 0);
+    quiesced();
+}
+
+#[test]
+fn logical_update_full_replident_logs_flags_and_old_tuple() {
+    install_dml_seams();
+    let _serial = serial();
+    let _logical = LogicalOn::new(&[]);
+    let ctx = MemoryContext::new("t");
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation_replident(ctx.mcx(), oid, b'f');
+    let _ = take_xlog();
+
+    let otid = ItemPointerData::new(0, 1);
+    let mut newtup = make_writable_tuple(&tuple_image(0, 0, 2));
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let r = dml::heap_update(
+        &rel,
+        &otid,
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    let (info, main, _, regs) = &recs[0];
+    assert_eq!(*info, dml::XLOG_HEAP_HOT_UPDATE);
+    let flags = main[7];
+    assert_ne!(flags & dml::XLH_UPDATE_CONTAINS_NEW_TUPLE, 0);
+    assert_ne!(flags & dml::XLH_UPDATE_CONTAINS_OLD_TUPLE, 0);
+    assert_eq!(flags & dml::XLH_UPDATE_CONTAINS_OLD_KEY, 0);
+    assert_eq!(main.len(), 14 + 5 + 5);
+    assert_eq!(i32::from_ne_bytes(main[20..24].try_into().unwrap()), 1);
+    assert_ne!(regs[0].0 & KEEP_DATA, 0);
+    assert_eq!(regs[0].1.len(), 5 + 5);
+    assert_eq!(i32::from_ne_bytes(regs[0].1[6..10].try_into().unwrap()), 2);
     quiesced();
 }
