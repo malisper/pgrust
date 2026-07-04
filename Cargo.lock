@@ -6238,6 +6238,7 @@ dependencies = [
 name = "logical"
 version = "0.0.0"
 dependencies = [
+ "cache_syscache",
  "datum",
  "dfmgr",
  "elog",
@@ -6245,11 +6246,13 @@ dependencies = [
  "logical_seams",
  "lwlock",
  "mcx",
+ "miscinit_seams",
  "procarray",
  "reorderbuffer",
  "slot",
  "snapbuild",
  "snapmgr",
+ "superuser",
  "transam_xlog",
  "types_core",
  "types_error",
