@@ -700,12 +700,20 @@ pub fn calc_non_nestloop_required_outer<'mcx>(
     use types_pathnodes::relids::{relids_copy, relids_is_empty, relids_overlap, relids_union};
     let outer_paramrels = relids_copy(mcx, path_req_outer(run.root.path(outer_path).base()));
     let inner_paramrels = relids_copy(mcx, path_req_outer(run.root.path(inner_path).base()));
-    let outer_parent = run.root.path(outer_path).base().parent;
-    let inner_parent = run.root.path(inner_path).base().parent;
-    debug_assert!(relids_is_empty(&run.root.rel(outer_parent).top_parent_relids));
-    debug_assert!(relids_is_empty(&run.root.rel(inner_parent).top_parent_relids));
-    debug_assert!(!relids_overlap(&outer_paramrels, &run.root.rel(inner_parent).relids));
-    debug_assert!(!relids_overlap(&inner_paramrels, &run.root.rel(outer_parent).relids));
+    // Input parameterizations refer to topmost parents until
+    // reparameterize_path_by_child runs, so the disallowed-parameterization
+    // tests use topmost-parent relids.
+    let top_or_self = |r: types_pathnodes::RelId| {
+        if relids_is_empty(&run.root.rel(r).top_parent_relids) {
+            relids_copy(mcx, &run.root.rel(r).relids)
+        } else {
+            relids_copy(mcx, &run.root.rel(r).top_parent_relids)
+        }
+    };
+    let outerrelids = top_or_self(run.root.path(outer_path).base().parent);
+    let innerrelids = top_or_self(run.root.path(inner_path).base().parent);
+    debug_assert!(!relids_overlap(&outer_paramrels, &innerrelids));
+    debug_assert!(!relids_overlap(&inner_paramrels, &outerrelids));
     relids_union(mcx, &outer_paramrels, &inner_paramrels)
 }
 

@@ -312,6 +312,223 @@ fn add_eq_member<'mcx>(
     em
 }
 
+// setup_eclass_member_iterator + eclass_member_iterator_next (equivclass.c),
+// flattened: all parent members plus child members stored under relids' rels.
+fn ec_members_for_relids<'mcx>(
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+    relids: &Relids<'mcx>,
+) -> PgVec<'mcx, EmId> {
+    let mcx = run.mcx;
+    let e = run.root.ec(ec);
+    let mut out: PgVec<'mcx, EmId> = PgVec::new_in(mcx);
+    out.extend(e.ec_members.iter().copied());
+    if !e.ec_childmembers.is_empty() {
+        for r in relids_members(relids) {
+            if let Some(list) = e.ec_childmembers.get(r as usize) {
+                out.extend(list.iter().copied());
+            }
+        }
+    }
+    out
+}
+
+// add_child_eq_member (equivclass.c): child members live in ec_childmembers
+// keyed by child relid, never in ec_members, and never affect ec_relids.
+#[allow(clippy::too_many_arguments)]
+fn add_child_eq_member<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    ec: EcId,
+    ec_index: Option<EcId>,
+    expr: Node<'mcx>,
+    relids: Relids<'mcx>,
+    jdomain: usize,
+    parent_em: EmId,
+    datatype: u32,
+    child_relid: usize,
+) -> EmId {
+    let mcx = run.mcx;
+    let em_expr = run.intern_expr(expr);
+    let em = run.root.alloc_em(EquivalenceMember {
+        em_expr,
+        em_relids: relids,
+        em_is_const: false,
+        em_is_child: true,
+        em_datatype: datatype,
+        em_jdomain: jdomain,
+        em_parent: Some(parent_em),
+    });
+    {
+        let e = run.root.ec_mut(ec);
+        while e.ec_childmembers.len() <= child_relid {
+            e.ec_childmembers.push(PgVec::new_in(mcx));
+        }
+        e.ec_childmembers[child_relid].push(em);
+        e.ec_childmembers_size = e.ec_childmembers.len() as i32;
+    }
+    if let Some(idx) = ec_index {
+        let rel_id = run.root.simple_rel_array[child_relid].expect("child rel exists");
+        let updated = relids_add_member(mcx, &run.root.rel(rel_id).eclass_indexes, idx.0);
+        run.root.rel_mut(rel_id).eclass_indexes = updated;
+    }
+    em
+}
+
+// add_child_rel_equivalences (equivclass.c).
+pub fn add_child_rel_equivalences<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    appinfo: &types_pathnodes::AppendRelInfo<'mcx>,
+    parent_rel: RelId,
+    child_rel: RelId,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(run.root.ec_merging_done);
+    debug_assert!(matches!(
+        run.root.rel(parent_rel).reloptkind,
+        RELOPT_BASEREL | types_pathnodes::RELOPT_OTHER_MEMBER_REL
+    ));
+    let top_parent_relids = relids_copy(mcx, &run.root.rel(child_rel).top_parent_relids);
+    let child_relids = relids_copy(mcx, &run.root.rel(child_rel).relids);
+    let child_relid = run.root.rel(child_rel).relid as usize;
+    let ec_indexes = relids_copy(mcx, &run.root.rel(parent_rel).eclass_indexes);
+    for i in relids_members(&ec_indexes) {
+        let cur_ec = EcId(i as u32);
+        // A volatile EC has only one EM; child copies would be dangerous.
+        if run.root.ec(cur_ec).ec_has_volatile {
+            continue;
+        }
+        debug_assert!(relids_is_subset(&top_parent_relids, &run.root.ec(cur_ec).ec_relids));
+        let n_members = run.root.ec(cur_ec).ec_members.len();
+        for m in 0..n_members {
+            let cur_em = run.root.ec(cur_ec).ec_members[m];
+            let (is_const, is_child, em_relids, em_jd, em_type) = {
+                let em = run.root.em(cur_em);
+                (
+                    em.em_is_const,
+                    em.em_is_child,
+                    relids_copy(mcx, &em.em_relids),
+                    em.em_jdomain,
+                    em.em_datatype,
+                )
+            };
+            if is_const {
+                continue;
+            }
+            debug_assert!(!is_child);
+            // Members with nonempty varnullingrels don't translate to a
+            // simple Var and are useless for child planning (C comment).
+            if relids_is_subset(&em_relids, &top_parent_relids) && !relids_is_empty(&em_relids) {
+                let expr = *run.root.expr_node(run.root.em(cur_em).em_expr);
+                let child_expr = if run.root.rel(parent_rel).reloptkind == RELOPT_BASEREL {
+                    crate::inherit::adjust_appendrel_attrs(run, expr, appinfo)?
+                } else {
+                    let top = run.root.rel(child_rel).top_parent.expect("child has top parent");
+                    crate::inherit::adjust_appendrel_attrs_multilevel(run, expr, child_rel, top)?
+                };
+                // Not pull_varnos(child_expr): a substituted constant must
+                // not mark the child member const.
+                let new_relids = relids_union(
+                    mcx,
+                    &crate::relnode::relids_difference(mcx, &em_relids, &top_parent_relids),
+                    &child_relids,
+                );
+                add_child_eq_member(
+                    run,
+                    cur_ec,
+                    Some(cur_ec),
+                    child_expr,
+                    new_relids,
+                    em_jd,
+                    cur_em,
+                    em_type,
+                    child_relid,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// add_child_join_rel_equivalences (equivclass.c). Members for a child joinrel
+// are stored under its first component relid only; iterator callers pass all
+// component relids so the member is still found exactly once.
+pub fn add_child_join_rel_equivalences<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    appinfos: &[types_pathnodes::AppendRelInfo<'mcx>],
+    parent_joinrel: RelId,
+    child_joinrel: RelId,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(matches!(
+        run.root.rel(parent_joinrel).reloptkind,
+        types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
+    ));
+    let top_parent_relids = relids_copy(mcx, &run.root.rel(child_joinrel).top_parent_relids);
+    let child_relids = relids_copy(mcx, &run.root.rel(child_joinrel).relids);
+    let first_component = relids_members(&child_relids)
+        .find(|&r| run.root.simple_rel_array.get(r as usize).copied().flatten().is_some())
+        .expect("child joinrel has a baserel component") as usize;
+    let matching_ecs = get_eclass_indexes_for_relids(run, &top_parent_relids);
+    for i in relids_members(&matching_ecs) {
+        let cur_ec = EcId(i as u32);
+        if run.root.ec(cur_ec).ec_has_volatile {
+            continue;
+        }
+        debug_assert!(relids_overlap(&top_parent_relids, &run.root.ec(cur_ec).ec_relids));
+        let n_members = run.root.ec(cur_ec).ec_members.len();
+        for m in 0..n_members {
+            let cur_em = run.root.ec(cur_ec).ec_members[m];
+            let (is_const, is_child, em_relids, em_jd, em_type) = {
+                let em = run.root.em(cur_em);
+                (
+                    em.em_is_const,
+                    em.em_is_child,
+                    relids_copy(mcx, &em.em_relids),
+                    em.em_jdomain,
+                    em.em_datatype,
+                )
+            };
+            if is_const {
+                continue;
+            }
+            debug_assert!(!is_child);
+            // Single-baserel members were handled by add_child_rel_equivalences.
+            if relids_num_members(&em_relids) <= 1 {
+                continue;
+            }
+            if relids_overlap(&em_relids, &top_parent_relids) {
+                let expr = *run.root.expr_node(run.root.em(cur_em).em_expr);
+                let child_expr = if run.root.rel(parent_joinrel).reloptkind
+                    == types_pathnodes::RELOPT_JOINREL
+                {
+                    crate::inherit::adjust_appendrel_attrs_multi(run, expr, appinfos)?
+                } else {
+                    let top =
+                        run.root.rel(child_joinrel).top_parent.expect("child has top parent");
+                    crate::inherit::adjust_appendrel_attrs_multilevel(run, expr, child_joinrel, top)?
+                };
+                let new_relids = relids_union(
+                    mcx,
+                    &crate::relnode::relids_difference(mcx, &em_relids, &top_parent_relids),
+                    &child_relids,
+                );
+                add_child_eq_member(
+                    run,
+                    cur_ec,
+                    None,
+                    child_expr,
+                    new_relids,
+                    em_jd,
+                    cur_em,
+                    em_type,
+                    first_component,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 // jdomain is always the top domain: sort/group expressions are top-level.
 pub(crate) fn get_eclass_for_sort_expr<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -343,7 +560,6 @@ pub(crate) fn get_eclass_for_sort_expr<'mcx>(
                 continue;
             }
         }
-        assert_no_child_members(run, id);
         let n_members = run.root.ec(id).ec_members.len();
         for m in 0..n_members {
             let em_id = run.root.ec(id).ec_members[m];
@@ -636,13 +852,22 @@ pub fn generate_join_implied_equalities<'mcx>(
 ) -> PgResult<PgVec<'mcx, RinfoId>> {
     let mcx = run.mcx;
     let mut result: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    assert!(
-        relids_is_empty(&run.root.rel(inner_rel).top_parent_relids),
-        "generate_join_implied_equalities (equivclass.c): child inner rel; appendrel EC lane"
-    );
     let inner_relids = relids_copy(mcx, &run.root.rel(inner_rel).relids);
-    let nominal_inner_relids = relids_copy(mcx, &inner_relids);
-    let nominal_join_relids = relids_copy(mcx, join_relids);
+    // ECs are marked with parent relids, so a child inner rel matches through
+    // its topmost parent (C's nominal relids).
+    let is_child = !relids_is_empty(&run.root.rel(inner_rel).top_parent_relids);
+    let (nominal_inner_relids, nominal_join_relids) = if is_child {
+        let ninner = relids_copy(mcx, &run.root.rel(inner_rel).top_parent_relids);
+        let mut njoin = relids_union(mcx, outer_relids, &ninner);
+        if let Some(s) = sjinfo {
+            if s.ojrelid != 0 {
+                njoin = relids_add_member(mcx, &njoin, s.ojrelid);
+            }
+        }
+        (ninner, njoin)
+    } else {
+        (relids_copy(mcx, &inner_relids), relids_copy(mcx, join_relids))
+    };
 
     let matching_ecs = if sjinfo.is_some_and(|s| s.ojrelid != 0) {
         get_eclass_indexes_for_relids(run, &nominal_join_relids)
@@ -694,13 +919,15 @@ pub fn generate_join_implied_equalities_for_ecs<'mcx>(
 ) -> PgResult<PgVec<'mcx, RinfoId>> {
     let mcx = run.mcx;
     let mut result: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    assert!(
-        relids_is_empty(&run.root.rel(inner_rel).top_parent_relids),
-        "generate_join_implied_equalities_for_ecs (equivclass.c): child inner rel"
-    );
     let inner_relids = relids_copy(mcx, &run.root.rel(inner_rel).relids);
-    let nominal_inner_relids = relids_copy(mcx, &inner_relids);
-    let nominal_join_relids = relids_copy(mcx, join_relids);
+    let is_child = !relids_is_empty(&run.root.rel(inner_rel).top_parent_relids);
+    let (nominal_inner_relids, nominal_join_relids) = if is_child {
+        let ninner = relids_copy(mcx, &run.root.rel(inner_rel).top_parent_relids);
+        let njoin = relids_union(mcx, outer_relids, &ninner);
+        (ninner, njoin)
+    } else {
+        (relids_copy(mcx, &inner_relids), relids_copy(mcx, join_relids))
+    };
 
     for &ec in eclasses {
         if run.root.ec(ec).ec_has_const {
@@ -760,9 +987,11 @@ fn generate_join_implied_equalities_normal<'mcx>(
     let mut inner_members: PgVec<'mcx, EmId> = PgVec::new_in(mcx);
     let mut new_members: PgVec<'mcx, EmId> = PgVec::new_in(mcx);
 
-    assert_no_child_members(run, ec);
-    for m in 0..run.root.ec(ec).ec_members.len() {
-        let cur_em = run.root.ec(ec).ec_members[m];
+    // Child members need no explicit check: a child EM subset of join_relids
+    // is exactly one belonging to a child rel of this join (C comment).
+    let candidates = ec_members_for_relids(run, ec, join_relids);
+    for m in 0..candidates.len() {
+        let cur_em = candidates[m];
         let em_relids = relids_copy(mcx, &run.root.em(cur_em).em_relids);
         if !relids_is_subset(&em_relids, join_relids) {
             continue;
@@ -925,10 +1154,15 @@ pub(crate) fn create_join_clause<'mcx>(
     if let Some(rinfo) = ec_search_clause_for_ems(run, ec, leftem, rightem, parent_ec) {
         return Ok(rinfo);
     }
-    assert!(
-        !run.root.em(leftem).em_is_child && !run.root.em(rightem).em_is_child,
-        "create_join_clause (equivclass.c): child EM; appendrel EC lane"
-    );
+    // Child EMs: build the parent-to-parent clause first so the child clause
+    // can duplicate its rinfo_serial.
+    let parent_rinfo = if run.root.em(leftem).em_is_child || run.root.em(rightem).em_is_child {
+        let leftp = run.root.em(leftem).em_parent.unwrap_or(leftem);
+        let rightp = run.root.em(rightem).em_parent.unwrap_or(rightem);
+        Some(create_join_clause(run, ec, opno, leftp, rightp, parent_ec)?)
+    } else {
+        None
+    };
     let (collation, min_security) = {
         let e = run.root.ec(ec);
         (e.ec_collation, e.ec_min_security)
@@ -943,8 +1177,25 @@ pub(crate) fn create_join_clause<'mcx>(
     let rinfo = crate::initsplan::build_implied_join_equality(
         run, opno, collation, left_expr, right_expr, qualscope, min_security,
     )?;
-    {
+    // A pseudoconstant-translated child EM (UNION ALL const output) may leave
+    // its relids out of clause_relids; force them in so
+    // join_clause_is_movable_into evaluates the clause at the right place.
+    if run.root.em(leftem).em_is_child {
+        let add = relids_copy(mcx, &run.root.em(leftem).em_relids);
         let r = run.root.rinfo_mut(rinfo);
+        r.clause_relids = relids_union(mcx, &r.clause_relids.clone(), &add);
+    }
+    if run.root.em(rightem).em_is_child {
+        let add = relids_copy(mcx, &run.root.em(rightem).em_relids);
+        let r = run.root.rinfo_mut(rinfo);
+        r.clause_relids = relids_union(mcx, &r.clause_relids.clone(), &add);
+    }
+    {
+        let serial = parent_rinfo.map(|pr| run.root.rinfo(pr).rinfo_serial);
+        let r = run.root.rinfo_mut(rinfo);
+        if let Some(serial) = serial {
+            r.rinfo_serial = serial;
+        }
         r.parent_ec = parent_ec;
         r.left_ec = Some(ec);
         r.right_ec = Some(ec);
@@ -1436,28 +1687,41 @@ where
     let mcx = run.mcx;
     let mut result: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
     debug_assert!(run.root.ec_merging_done);
-    assert_eq!(
-        run.root.rel(rel).reloptkind,
-        RELOPT_BASEREL,
-        "generate_implied_equalities_for_column (equivclass.c): child rel; appendrel EC lane"
-    );
+    let is_child_rel =
+        run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL;
+    // find_childrel_parents (relnode.c): all ancestor relids, to skip useless
+    // joins from a child to its own parents.
+    let parent_relids = if is_child_rel {
+        let mut acc: Relids<'mcx> = None;
+        let mut cur = rel;
+        while let Some(p) = run.root.rel(cur).parent {
+            acc = relids_union(mcx, &acc, &run.root.rel(p).relids);
+            if run.root.rel(p).reloptkind == RELOPT_BASEREL {
+                break;
+            }
+            cur = p;
+        }
+        acc
+    } else {
+        None
+    };
 
     let eclass_indexes = relids_copy(mcx, &run.root.rel(rel).eclass_indexes);
     for i in relids_members(&eclass_indexes) {
         let cur_ec = EcId(i as u32);
-        debug_assert!(relids_is_subset(
-            &run.root.rel(rel).relids,
-            &run.root.ec(cur_ec).ec_relids
-        ));
+        debug_assert!(
+            is_child_rel
+                || relids_is_subset(&run.root.rel(rel).relids, &run.root.ec(cur_ec).ec_relids)
+        );
         if run.root.ec(cur_ec).ec_has_const || run.root.ec(cur_ec).ec_members.len() <= 1 {
             continue;
         }
-        assert_no_child_members(run, cur_ec);
 
         let rel_relids = relids_copy(mcx, &run.root.rel(rel).relids);
         let mut cur_em: Option<EmId> = None;
-        for m in 0..run.root.ec(cur_ec).ec_members.len() {
-            let em_id = run.root.ec(cur_ec).ec_members[m];
+        let candidates = ec_members_for_relids(run, cur_ec, &rel_relids);
+        for m in 0..candidates.len() {
+            let em_id = candidates[m];
             if relids_equal(&run.root.em(em_id).em_relids, &rel_relids)
                 && callback(run, rel, cur_ec, em_id)
             {
@@ -1467,11 +1731,18 @@ where
         }
         let Some(cur_em) = cur_em else { continue };
 
+        // Only parent members can be join targets; children are never marked
+        // useful for other rels.
         for m in 0..run.root.ec(cur_ec).ec_members.len() {
             let other_em = run.root.ec(cur_ec).ec_members[m];
             debug_assert!(!run.root.em(other_em).em_is_child);
             if other_em == cur_em
                 || relids_overlap(&run.root.em(other_em).em_relids, &rel_relids)
+            {
+                continue;
+            }
+            if is_child_rel
+                && relids_overlap(&parent_relids, &run.root.em(other_em).em_relids)
             {
                 continue;
             }
@@ -1540,8 +1811,12 @@ pub fn eclass_useful_for_merging(run: &PlannerRun<'_>, eclass: EcId, rel: RelId)
             return false;
         }
     }
-    debug_assert!(relids_is_empty(&run.root.rel(rel).top_parent_relids));
-    let relids = &run.root.rel(rel).relids;
+    let rel_info = run.root.rel(rel);
+    let relids = if relids_is_empty(&rel_info.top_parent_relids) {
+        &rel_info.relids
+    } else {
+        &rel_info.top_parent_relids
+    };
     if relids_is_subset(&run.root.ec(eclass).ec_relids, relids) {
         return false;
     }
