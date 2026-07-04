@@ -1229,15 +1229,11 @@ impl<'a> Estate<'a> {
         Ok(RC_OK)
     }
 
-    // exec_assign_c_string: NULL C string assigns SQL NULL.
+    // exec_assign_c_string: a NULL C string assigns an empty string.
     fn exec_assign_c_string(&mut self, target: Dno, s: Option<&str>) -> PgResult<()> {
-        match s {
-            Some(s) => {
-                let v = varlena::cstring_to_text(self.eval_ctx.mcx(), s.as_bytes())?;
-                self.exec_assign_value(target, fmgr::varlena_result(v), false, TEXTOID, -1)
-            }
-            None => self.exec_assign_value(target, Datum::null(), true, TEXTOID, -1),
-        }
+        let s = s.unwrap_or("");
+        let v = varlena::cstring_to_text(self.eval_ctx.mcx(), s.as_bytes())?;
+        self.exec_assign_value(target, fmgr::varlena_result(v), false, TEXTOID, -1)
     }
 
     // exec_stmt_case (pl_exec.c:2556).
