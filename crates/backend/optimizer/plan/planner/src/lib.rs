@@ -144,6 +144,7 @@ pub fn init_seams() {
         crate::selfuncs::estimate_multivariate_bucketsize,
     );
     planner_seams::add_function_cost::set(crate::plancat::add_function_cost);
+    indexam_seams::index_can_return::set(crate::plancat::index_can_return);
     planner_seams::get_function_rows::set(crate::plancat::get_function_rows);
     planner_seams::get_rel_data_width::set(crate::plancat::get_rel_data_width);
     planner_seams::match_index_to_operand::set(crate::indxpath::match_index_to_operand);

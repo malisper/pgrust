@@ -182,6 +182,7 @@ pub fn index_bulk_delete<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
+        IndexAmKind::Hash => panic!("unported: hashbulkdelete (hash vacuum lane)"),
         IndexAmKind::Gin => gin::ginbulkdelete(),
         IndexAmKind::Gist => {
             gist::gistbulkdelete(info.index)?;
@@ -221,6 +222,15 @@ pub fn index_vacuum_cleanup<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
+        // hashvacuumcleanup: C returns NULL when stats is NULL (the ANALYZE
+        // call); the stats-bearing path is the hash vacuum lane.
+        IndexAmKind::Hash => {
+            if istat.is_none() {
+                Ok(None)
+            } else {
+                panic!("unported: hashvacuumcleanup with stats (hash vacuum lane)")
+            }
+        }
         // ginvacuumcleanup's analyze_only arm is a C no-op; the rest is the
         // loud vacuum lane. brinvacuumcleanup: same analyze_only early return.
         IndexAmKind::Gin => {

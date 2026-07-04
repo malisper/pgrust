@@ -976,6 +976,7 @@ mod acct_pool {
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
             is_bump: false,
+            kind: "AllocSet",
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),
         }

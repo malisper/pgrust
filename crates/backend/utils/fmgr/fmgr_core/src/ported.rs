@@ -61,6 +61,10 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_windowfuncs::WINDOWFUNCS_BUILTINS,
     ::commands_async::builtins::ASYNC_BUILTINS,
     ::cryptohashfuncs::CRYPTOHASH_BUILTINS,
+    ::adt_ascii::ASCII_BUILTINS,
+    ::adt_amutils::AMUTILS_BUILTINS,
+    ::adt_mcxtfuncs::MCXTFUNCS_BUILTINS,
+    ::waitfuncs::WAITFUNCS_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
     ::trigfuncs::TRIGFUNCS_BUILTINS,
 ];

@@ -271,6 +271,7 @@ mod tests {
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
             is_bump: true,
+            kind: "Bump",
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),
         }

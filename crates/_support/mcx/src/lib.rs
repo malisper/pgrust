@@ -121,6 +121,7 @@ pub(crate) struct Acct {
     pub(crate) arena_footprint: Cell<usize>,
     pub(crate) arena_nblocks: Cell<usize>,
     pub(crate) is_bump: bool,
+    pub(crate) kind: &'static str,
     pub(crate) parent: Option<AcctRc>,
     pub(crate) children: RefCell<alloc::vec::Vec<AcctWeak>>,
 }
@@ -452,6 +453,39 @@ impl Drop for AcctWeak {
     }
 }
 
+/// Weak handle to a root (parentless) context's accounting node. Not Send:
+/// the counters are Cells; a handle must stay on its creating thread.
+pub struct RootWeak(AcctWeak);
+
+impl RootWeak {
+    pub fn is_live(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+
+    pub fn tree_stats(&self) -> Option<TreeStats> {
+        self.0.upgrade().map(|rc| tree_stats_node(&rc))
+    }
+}
+
+// Observer for root-context creation (mcxt.c's TopMemoryContext linkage has no
+// ambient equivalent here). Installed once at boot; runs on the creating thread.
+static ROOT_OBSERVER: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+pub fn set_root_observer(f: fn(RootWeak)) {
+    ROOT_OBSERVER.store(f as *mut (), core::sync::atomic::Ordering::Release);
+}
+
+#[inline]
+fn notify_root_observer(acct: &AcctRc) {
+    let p = ROOT_OBSERVER.load(core::sync::atomic::Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: only set_root_observer stores here, always from fn(RootWeak).
+        let f: fn(RootWeak) = unsafe { core::mem::transmute(p) };
+        f(RootWeak(acct.downgrade()));
+    }
+}
+
 pub struct MemoryContext {
     acct: AcctRc,
     backend: Backend,
@@ -553,23 +587,23 @@ impl MemoryContext {
         backend: Backend,
         parent: Option<AcctRc>,
     ) -> Self {
-        let (is_bump, init_footprint, init_nblocks) = match &backend {
-            Backend::Aset(_) => (false, 0usize, 0usize),
-            Backend::Malloc => (false, 0usize, 0usize),
+        let (is_bump, kind, init_footprint, init_nblocks) = match &backend {
+            Backend::Aset(_) => (false, "AllocSet", 0usize, 0usize),
+            Backend::Malloc => (false, "Malloc", 0usize, 0usize),
             Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
                 // SAFETY: exclusive during construction.
                 let a = unsafe { &*a.get() };
-                (true, a.footprint(), a.nblocks())
+                (true, "Bump", a.footprint(), a.nblocks())
             }
             Backend::Generation(a) => {
                 // SAFETY: exclusive during construction.
                 let a = unsafe { &*a.get() };
-                (true, a.footprint(), a.nblocks())
+                (true, "Generation", a.footprint(), a.nblocks())
             }
             Backend::Slab(a) => {
                 // SAFETY: exclusive during construction.
                 let a = unsafe { &*a.get() };
-                (true, a.footprint(), a.nblocks())
+                (true, "Slab", a.footprint(), a.nblocks())
             }
         };
         let limited_path = parent.as_ref().is_some_and(|p| {
@@ -585,6 +619,7 @@ impl MemoryContext {
             arena_footprint: Cell::new(init_footprint),
             arena_nblocks: Cell::new(init_nblocks),
             is_bump,
+            kind,
             parent,
             children: RefCell::new(child_vec_take()),
         });
@@ -594,6 +629,8 @@ impl MemoryContext {
                 children.retain(|w| w.strong_count() > 0);
             }
             children.push(acct.downgrade());
+        } else {
+            notify_root_observer(&acct);
         }
         MemoryContext {
             acct,
@@ -777,38 +814,7 @@ impl MemoryContext {
     }
 
     pub fn stats_tree(&self) -> TreeStats {
-        fn node(acct: &Acct) -> TreeStats {
-            let mut children = alloc::vec::Vec::new();
-            acct.children.borrow_mut().retain(|w| match w.upgrade() {
-                Some(c) => {
-                    children.push(node(&c));
-                    true
-                }
-                None => false,
-            });
-            let used = acct.self_used.get();
-            let peak = acct.self_peak.get();
-            let mut subtree_used = used;
-            let mut subtree_peak = peak;
-            for child in &children {
-                subtree_used = subtree_used.saturating_add(child.subtree_used);
-                subtree_peak = subtree_peak.saturating_add(child.subtree_peak);
-            }
-            TreeStats {
-                name: acct.name.get(),
-                ident: acct.ident.borrow().clone(),
-                used,
-                peak,
-                subtree_used,
-                subtree_peak,
-                limit: acct.limit.get(),
-                is_bump: acct.is_bump,
-                arena_footprint: acct.arena_footprint.get(),
-                nblocks: acct.arena_nblocks.get(),
-                children,
-            }
-        }
-        node(&self.acct)
+        tree_stats_node(&self.acct)
     }
 
     #[cold]
@@ -915,6 +921,7 @@ pub struct ContextStats {
 pub struct TreeStats {
     pub name: &'static str,
     pub ident: Option<alloc::string::String>,
+    pub kind: &'static str,
     pub used: usize,
     pub peak: usize,
     pub subtree_used: usize,
@@ -924,6 +931,39 @@ pub struct TreeStats {
     pub arena_footprint: usize,
     pub nblocks: usize,
     pub children: alloc::vec::Vec<TreeStats>,
+}
+
+fn tree_stats_node(acct: &Acct) -> TreeStats {
+    let mut children = alloc::vec::Vec::new();
+    acct.children.borrow_mut().retain(|w| match w.upgrade() {
+        Some(c) => {
+            children.push(tree_stats_node(&c));
+            true
+        }
+        None => false,
+    });
+    let used = acct.self_used.get();
+    let peak = acct.self_peak.get();
+    let mut subtree_used = used;
+    let mut subtree_peak = peak;
+    for child in &children {
+        subtree_used = subtree_used.saturating_add(child.subtree_used);
+        subtree_peak = subtree_peak.saturating_add(child.subtree_peak);
+    }
+    TreeStats {
+        name: acct.name.get(),
+        ident: acct.ident.borrow().clone(),
+        kind: acct.kind,
+        used,
+        peak,
+        subtree_used,
+        subtree_peak,
+        limit: acct.limit.get(),
+        is_bump: acct.is_bump,
+        arena_footprint: acct.arena_footprint.get(),
+        nblocks: acct.arena_nblocks.get(),
+        children,
+    }
 }
 
 /// Copyable allocator handle tying every allocation to the context lifetime.

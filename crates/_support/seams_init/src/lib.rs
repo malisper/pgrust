@@ -161,6 +161,7 @@ pub fn init_all() {
     utility::init_seams();
     backend_status::init_seams();
     waitevent::init_seams();
+    mcxt_stats::init_seams();
     pgstat::init_seams();
     adt_acl::init_seams();
     adt_timestamp::init_seams();
