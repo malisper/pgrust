@@ -1110,6 +1110,6 @@ fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
 // Exempt: released in exec_end_hash_join/exec_end_hash — table (BufFile fds)
 // is destroyed and taken there, hash_expr via release_frames, inner_desc taken.
 mcx::forget_safe_struct!(
-    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth;
+    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware;
         table, hash_expr, inner_desc },
 );

@@ -1579,7 +1579,16 @@ fn hash_inner_and_outer<'mcx>(
         && crate::relnode::relids_is_empty(&run.root.rel(joinrel).lateral_relids)
     {
         let cheapest_partial_outer = run.root.rel(outerrel).partial_pathlist[0];
-        if !run.root.rel(innerrel).partial_pathlist.is_empty()
+        // DIVERGENCE: the parallel_hash=true arm (shared table from a partial
+        // inner) is generation-blocked until create_hashjoin_plan copies
+        // parallel_aware/rows_total onto the Hash node (plan-side lane hunk,
+        // saved in notes/optpath-joinpath-lane.md); without that copy the
+        // executor guard is bypassed and each worker builds a private table
+        // from a partial inner (wrong results). C picks Parallel Hash Join
+        // here; we fall back to the next-best path until the hunk lands.
+        const PARALLEL_HASH_PLAN_HUNK_LANDED: bool = false;
+        if PARALLEL_HASH_PLAN_HUNK_LANDED
+            && !run.root.rel(innerrel).partial_pathlist.is_empty()
             && save_jointype != JOIN_UNIQUE_INNER
             && gucs::enable_parallel_hash()
         {
