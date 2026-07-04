@@ -386,11 +386,14 @@ pub(crate) fn _SPI_execute_plan(
                     let mut qc = QueryCompletion::default();
                     cmdtag::InitializeQueryCompletion(&mut qc);
                     let mcx = current_exec_mcx();
+                    // C passes readOnlyTree=true and copyObjects the tree in
+                    // ProcessUtility; a oneshot tree dies with this call, so
+                    // the copy is skipped (saved plans keep the loud arm).
                     utility_seams::process_utility::call(
                         mcx,
                         stmt,
                         query_string,
-                        true,
+                        !plan.oneshot,
                         context,
                         options.params,
                         QueryEnvHandle::NULL,
