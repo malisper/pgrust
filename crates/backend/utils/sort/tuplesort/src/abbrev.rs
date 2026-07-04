@@ -9,6 +9,7 @@ enum ConverterState {
     VarStr(varlena::abbrev::VarStrAbbrevState),
     Uuid(::adt_uuid::abbrev::UuidAbbrevState),
     Network(::adt_network::abbrev::NetworkAbbrevState),
+    Numeric(::adt_numeric::sortsupport::NumericAbbrevState),
 }
 
 pub struct AbbrevState {
@@ -29,13 +30,16 @@ impl AbbrevState {
             AbbrevKind::Network => {
                 ConverterState::Network(::adt_network::abbrev::NetworkAbbrevState::new())
             }
+            AbbrevKind::Numeric => {
+                ConverterState::Numeric(::adt_numeric::sortsupport::NumericAbbrevState::new())
+            }
         };
         AbbrevState { full_comparator: arm.full_comparator, conv }
     }
 
     /// # Safety
     /// `original` is a live non-null datum of the arm's type: an untoasted
-    /// varlena (VarStrC/BpcharC/Network) or a 16-byte uuid (Uuid).
+    /// varlena (VarStrC/BpcharC/Network/Numeric) or a 16-byte uuid (Uuid).
     #[inline]
     pub unsafe fn convert(&mut self, original: Datum) -> Datum {
         let word = match &mut self.conv {
@@ -46,6 +50,7 @@ impl AbbrevState {
             ConverterState::Network(s) => s.convert(::adt_network::InetRef::from_payload(
                 varlena_payload(original),
             )),
+            ConverterState::Numeric(s) => s.convert(varlena_payload(original)),
         };
         Datum::from_u64(word)
     }
@@ -55,6 +60,7 @@ impl AbbrevState {
             ConverterState::VarStr(s) => s.abort(memtupcount),
             ConverterState::Uuid(s) => s.abort(memtupcount),
             ConverterState::Network(s) => s.abort(memtupcount),
+            ConverterState::Numeric(s) => s.abort(memtupcount),
         }
     }
 }
