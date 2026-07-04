@@ -23,6 +23,7 @@ lmgr = { path = "../../storage/lmgr/lmgr" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 miscinit = { path = "../../utils/init/miscinit" }
+elog = { path = "../../utils/error/elog" }
 mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
