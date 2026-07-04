@@ -26,8 +26,15 @@ use types_nodes::parsenodes::{
 };
 use types_nodes::primnodes::{
     CaseExpr, CaseWhen, CoalesceExpr, CollateClause, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    JsonBehavior, JsonBehaviorType, JsonEncoding, JsonExprOp, JsonFormat, JsonFormatType,
+    JsonIsPredicate, JsonReturning, JsonValueExpr, JsonValueType, JsonWrapper,
     OverridingKind, RowExpr,
     SQLValueFunction, SQLValueFunctionOp,
+};
+use types_nodes::rawnodes::{
+    JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
+    JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg, JsonObjectConstructor,
+    JsonOutput, JsonParseExpr, JsonQuotes, JsonScalarExpr, JsonSerializeExpr,
 };
 
 use types_nodes::rawnodes::CreateDomainStmt;
@@ -71,7 +78,7 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{KeyAction, KeyActions, SelectLimit, YYSTYPE};
+use crate::yystype::{JsonBehaviors, KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
 const CAS_NOT_DEFERRABLE: i32 = 0x01;
@@ -6575,6 +6582,427 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // --- sqljson-lane arms (append-only) ---
+            2187 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonObjectConstructor {
+                        exprs: view.v(3).list(),
+                        output: view.v(6).node(),
+                        absent_on_null: view.v(4).boolean(),
+                        unique: view.v(5).boolean(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2188 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonObjectConstructor {
+                        exprs: NodeList::nil(),
+                        output: view.v(3).node(),
+                        absent_on_null: false,
+                        unique: false,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2189 | 2191 => {
+                let (exprs, absent, output) = if rule == 2189 {
+                    (view.v(3).list(), view.v(4).boolean(), view.v(5).node())
+                } else {
+                    (NodeList::nil(), true, view.v(3).node())
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonArrayConstructor {
+                        exprs,
+                        output,
+                        absent_on_null: absent,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2190 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonArrayQueryConstructor {
+                        query: view.v(3).node(),
+                        output: view.v(5).node(),
+                        format: json_format_ref(view.v(4).node()),
+                        absent_on_null: true,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2192 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonParseExpr {
+                        expr: view.v(3).node(),
+                        output: None,
+                        unique_keys: view.v(4).boolean(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2193 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonScalarExpr {
+                        expr: view.v(3).node(),
+                        output: None,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2194 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonSerializeExpr {
+                        expr: view.v(3).node(),
+                        output: view.v(4).node(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2196 => {
+                let behaviors = view.v(10).json_behaviors();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonFuncExpr {
+                        op: JsonExprOp::JSON_QUERY_OP,
+                        column_name: None,
+                        context_item: view.v(3).node(),
+                        pathspec: view.v(5).node(),
+                        passing: view.v(6).list(),
+                        output: view.v(7).node(),
+                        on_empty: behaviors.on_empty,
+                        on_error: behaviors.on_error,
+                        wrapper: json_wrapper(view.v(8).ival()),
+                        quotes: json_quotes(view.v(9).ival()),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2197 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonFuncExpr {
+                        op: JsonExprOp::JSON_EXISTS_OP,
+                        column_name: None,
+                        context_item: view.v(3).node(),
+                        pathspec: view.v(5).node(),
+                        passing: view.v(6).list(),
+                        output: None,
+                        on_empty: None,
+                        on_error: view.v(7).node(),
+                        wrapper: JsonWrapper::JSW_UNSPEC,
+                        quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2198 => {
+                let behaviors = view.v(8).json_behaviors();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonFuncExpr {
+                        op: JsonExprOp::JSON_VALUE_OP,
+                        column_name: None,
+                        context_item: view.v(3).node(),
+                        pathspec: view.v(5).node(),
+                        passing: view.v(6).list(),
+                        output: view.v(7).node(),
+                        on_empty: behaviors.on_empty,
+                        on_error: behaviors.on_error,
+                        wrapper: JsonWrapper::JSW_UNSPEC,
+                        quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // a_expr IS [NOT] json_predicate_type_constraint unique_opt
+            2087 | 2088 => {
+                let not = rule == 2088;
+                let (ty, uniq) = if not {
+                    (view.v(4).ival(), view.v(5).boolean())
+                } else {
+                    (view.v(3).ival(), view.v(4).boolean())
+                };
+                let format = Node::mk_mut(mcx, JsonFormat::default())?.seal_ref();
+                let pred = Node::mk(
+                    mcx,
+                    JsonIsPredicate {
+                        expr: view.v(1).node(),
+                        format: Some(format),
+                        item_type: json_value_type(ty),
+                        unique_keys: uniq,
+                        location: view.l(1),
+                    },
+                )?;
+                let out = if not {
+                    Node::mk(
+                        mcx,
+                        BoolExpr {
+                            boolop: BoolExprType::NOT_EXPR,
+                            args: NodeList::make1(mcx, pred)?,
+                            location: view.l(1),
+                        },
+                    )?
+                } else {
+                    pred
+                };
+                *yyval = YYSTYPE::Node(Some(out));
+            }
+            // func_expr: json_aggregate_func filter_clause over_clause
+            2134 => {
+                let agg = view.v(1).node().expect("json_aggregate_func");
+                let filter = view.v(2).node();
+                let over = view.v(3).node();
+                let ctor = if let Some(oa) = agg.as_json_object_agg() {
+                    oa.constructor
+                } else {
+                    agg.as_json_array_agg().expect("JsonArrayAgg").constructor
+                }
+                .expect("JsonAggConstructor");
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    ctor.with_mut::<JsonAggConstructor, _>(|c| {
+                        c.agg_filter = filter;
+                        c.over = over;
+                    })
+                    .expect("JsonAggConstructor");
+                }
+                *yyval = YYSTYPE::Node(Some(agg));
+            }
+            // json_arguments
+            2354 => {
+                let n = view.v(1).node().expect("json_argument");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            2355 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("json_argument"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            2356 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonArgument {
+                        val: view.v(1).node(),
+                        name: Some(view.v(3).str_val()),
+                    },
+                )?));
+            }
+            // json_wrapper_behavior
+            2357 | 2358 => *yyval = YYSTYPE::Ival(JsonWrapper::JSW_NONE as i32),
+            2359 | 2360 | 2362 | 2364 => {
+                *yyval = YYSTYPE::Ival(JsonWrapper::JSW_UNCONDITIONAL as i32)
+            }
+            2361 | 2363 => *yyval = YYSTYPE::Ival(JsonWrapper::JSW_CONDITIONAL as i32),
+            2365 => *yyval = YYSTYPE::Ival(JsonWrapper::JSW_UNSPEC as i32),
+            // json_behavior: DEFAULT a_expr | json_behavior_type
+            2366 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonBehavior {
+                        btype: JsonBehaviorType::JSON_BEHAVIOR_DEFAULT,
+                        expr: view.v(2).node(),
+                        coerce: false,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2367 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonBehavior {
+                        btype: json_behavior_type(view.v(1).ival()),
+                        expr: None,
+                        coerce: false,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // json_behavior_type
+            2368 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_ERROR as i32),
+            2369 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_NULL as i32),
+            2370 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_TRUE as i32),
+            2371 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_FALSE as i32),
+            2372 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_UNKNOWN as i32),
+            2373 | 2375 => {
+                *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY as i32)
+            }
+            2374 => *yyval = YYSTYPE::Ival(JsonBehaviorType::JSON_BEHAVIOR_EMPTY_OBJECT as i32),
+            // json_behavior_clause_opt
+            2376..=2379 => {
+                let (on_empty, on_error) = match rule {
+                    2376 => (view.v(1).node(), None),
+                    2377 => (None, view.v(1).node()),
+                    2378 => (view.v(1).node(), view.v(4).node()),
+                    _ => (None, None),
+                };
+                *yyval = YYSTYPE::JsonBehaviorsV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    JsonBehaviors { on_empty, on_error },
+                )?));
+            }
+            // json_value_expr: a_expr json_format_clause_opt
+            2382 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonValueExpr {
+                        raw_expr: view.v(1).node(),
+                        formatted_expr: None,
+                        format: json_format_ref(view.v(2).node()),
+                    },
+                )?));
+            }
+            // json_format_clause: FORMAT_LA JSON [ENCODING name]
+            2383 => {
+                let name = view.v(4).str_val();
+                let encoding = if name.eq_ignore_ascii_case("utf8") {
+                    JsonEncoding::JS_ENC_UTF8
+                } else if name.eq_ignore_ascii_case("utf16") {
+                    JsonEncoding::JS_ENC_UTF16
+                } else if name.eq_ignore_ascii_case("utf32") {
+                    JsonEncoding::JS_ENC_UTF32
+                } else {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            format!("unrecognized JSON encoding: {name}"),
+                            view.l(4),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+                    ));
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonFormat {
+                        format_type: JsonFormatType::JS_FORMAT_JSON,
+                        encoding,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2384 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonFormat {
+                        format_type: JsonFormatType::JS_FORMAT_JSON,
+                        encoding: JsonEncoding::JS_ENC_DEFAULT,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2386 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, JsonFormat::default())?));
+            }
+            // json_quotes_clause_opt
+            2387 | 2388 => *yyval = YYSTYPE::Ival(JsonQuotes::JS_QUOTES_KEEP as i32),
+            2389 | 2390 => *yyval = YYSTYPE::Ival(JsonQuotes::JS_QUOTES_OMIT as i32),
+            2391 => *yyval = YYSTYPE::Ival(JsonQuotes::JS_QUOTES_UNSPEC as i32),
+            // json_returning_clause_opt: RETURNING Typename json_format_clause_opt
+            2392 => {
+                // C makeNode zeroing: typmod 0 here (transform assigns both).
+                let returning = Node::mk_mut(
+                    mcx,
+                    JsonReturning {
+                        format: json_format_ref(view.v(3).node()),
+                        typid: 0,
+                        typmod: 0,
+                    },
+                )?
+                .seal_ref();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonOutput { typeName: view.v(2).node(), returning: Some(returning) },
+                )?));
+            }
+            // json_predicate_type_constraint
+            2394 | 2395 => *yyval = YYSTYPE::Ival(JsonValueType::JS_TYPE_ANY as i32),
+            2396 => *yyval = YYSTYPE::Ival(JsonValueType::JS_TYPE_ARRAY as i32),
+            2397 => *yyval = YYSTYPE::Ival(JsonValueType::JS_TYPE_OBJECT as i32),
+            2398 => *yyval = YYSTYPE::Ival(JsonValueType::JS_TYPE_SCALAR as i32),
+            // json_key_uniqueness_constraint_opt
+            2399 | 2400 => *yyval = YYSTYPE::Boolean(true),
+            2401 | 2402 | 2403 => *yyval = YYSTYPE::Boolean(false),
+            // json_name_and_value_list
+            2404 => {
+                let n = view.v(1).node().expect("json_name_and_value");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            2405 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("json_name_and_value"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // json_name_and_value: c_expr VALUE_P jve | a_expr ':' jve
+            2406 | 2407 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonKeyValue { key: view.v(1).node(), value: view.v(3).node() },
+                )?));
+            }
+            // json_object_constructor_null_clause_opt
+            2408 | 2410 => *yyval = YYSTYPE::Boolean(false),
+            2409 => *yyval = YYSTYPE::Boolean(true),
+            // json_array_constructor_null_clause_opt
+            2411 => *yyval = YYSTYPE::Boolean(false),
+            2412 | 2413 => *yyval = YYSTYPE::Boolean(true),
+            // json_value_expr_list
+            2414 => {
+                let n = view.v(1).node().expect("json_value_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            2415 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("json_value_expr"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // json_aggregate_func: JSON_OBJECTAGG | JSON_ARRAYAGG
+            2416 => {
+                let ctor = Node::mk(
+                    mcx,
+                    JsonAggConstructor {
+                        output: view.v(6).node(),
+                        agg_filter: None,
+                        agg_order: NodeList::nil(),
+                        over: None,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonObjectAgg {
+                        constructor: Some(ctor),
+                        arg: view.v(3).node(),
+                        absent_on_null: view.v(4).boolean(),
+                        unique: view.v(5).boolean(),
+                    },
+                )?));
+            }
+            2417 => {
+                let ctor = Node::mk(
+                    mcx,
+                    JsonAggConstructor {
+                        output: view.v(6).node(),
+                        agg_filter: None,
+                        agg_order: view.v(4).list(),
+                        over: None,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    JsonArrayAgg {
+                        constructor: Some(ctor),
+                        arg: view.v(3).node(),
+                        absent_on_null: view.v(5).boolean(),
+                    },
+                )?));
+            }
             // alter_table_cmd ENABLE/DISABLE RULE
             _ => unimplemented_rule(rule),
         }
@@ -7244,6 +7672,50 @@ fn lock_wait_policy(v: i32) -> LockWaitPolicy {
         1 => LockWaitPolicy::LockWaitSkip,
         2 => LockWaitPolicy::LockWaitError,
         _ => LockWaitPolicy::LockWaitBlock,
+    }
+}
+
+fn json_format_ref<'mcx>(n: Option<Node<'mcx>>) -> Option<&'mcx JsonFormat> {
+    n.map(|n| n.as_json_format().expect("JsonFormat"))
+}
+
+fn json_wrapper(v: i32) -> JsonWrapper {
+    match v {
+        1 => JsonWrapper::JSW_NONE,
+        2 => JsonWrapper::JSW_CONDITIONAL,
+        3 => JsonWrapper::JSW_UNCONDITIONAL,
+        _ => JsonWrapper::JSW_UNSPEC,
+    }
+}
+
+fn json_quotes(v: i32) -> JsonQuotes {
+    match v {
+        1 => JsonQuotes::JS_QUOTES_KEEP,
+        2 => JsonQuotes::JS_QUOTES_OMIT,
+        _ => JsonQuotes::JS_QUOTES_UNSPEC,
+    }
+}
+
+fn json_behavior_type(v: i32) -> JsonBehaviorType {
+    match v {
+        1 => JsonBehaviorType::JSON_BEHAVIOR_ERROR,
+        2 => JsonBehaviorType::JSON_BEHAVIOR_EMPTY,
+        3 => JsonBehaviorType::JSON_BEHAVIOR_TRUE,
+        4 => JsonBehaviorType::JSON_BEHAVIOR_FALSE,
+        5 => JsonBehaviorType::JSON_BEHAVIOR_UNKNOWN,
+        6 => JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY,
+        7 => JsonBehaviorType::JSON_BEHAVIOR_EMPTY_OBJECT,
+        8 => JsonBehaviorType::JSON_BEHAVIOR_DEFAULT,
+        _ => JsonBehaviorType::JSON_BEHAVIOR_NULL,
+    }
+}
+
+fn json_value_type(v: i32) -> JsonValueType {
+    match v {
+        1 => JsonValueType::JS_TYPE_OBJECT,
+        2 => JsonValueType::JS_TYPE_ARRAY,
+        3 => JsonValueType::JS_TYPE_SCALAR,
+        _ => JsonValueType::JS_TYPE_ANY,
     }
 }
 

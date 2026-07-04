@@ -610,6 +610,12 @@ fn run_program<'mcx>(
                 let (value, isnull) = eval_row_expr(frames, *elems, *nelems, *frame, *desc)?;
                 write_out(*out, value, isnull);
             }
+            Step::JsonConstructor { jcstate, frame, out } => {
+                eval_json_constructor_step(frames, *jcstate, *frame, *out)?;
+            }
+            Step::IsJson { exprtype, item_type, unique_keys, frame, out } => {
+                eval_is_json_step(frames, *exprtype, *item_type, *unique_keys, *frame, *out)?;
+            }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
@@ -1491,6 +1497,232 @@ fn eval_row_expr(
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok((d, false))
+}
+
+// Out of line: json steps are cold relative to the dispatch loop; keeping the
+// arm a bare call protects the loop's register allocation (graviton.md flat
+// interpreter rule; M3 A/B measured the fat-arm form at +0.3-1.8% instr on
+// interpreter-bound lanes).
+#[inline(never)]
+fn eval_json_constructor_step(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    jcstate: core::ptr::NonNull<crate::steps::JsonConstructorState>,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    // SAFETY: plan-mcx state, exclusive during this step.
+    let jc = unsafe { jcstate.as_ref() };
+    let (value, isnull) = eval_json_constructor(frames, jc, frame)?;
+    write_out(out, value, isnull);
+    Ok(())
+}
+
+#[inline(never)]
+fn eval_is_json_step(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    exprtype: ::types_core::Oid,
+    item_type: ::types_nodes::primnodes::JsonValueType,
+    unique_keys: bool,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    let nd = read_out(out);
+    if nd.isnull {
+        // C writes false into resvalue but leaves resnull set: NULL result.
+        write_out(out, Datum::from_bool(false), true);
+        return Ok(());
+    }
+    let res = eval_is_json(frames, nd.value, exprtype, item_type, unique_keys, frame)?;
+    write_out(out, Datum::from_bool(res), false);
+    Ok(())
+}
+
+// C ExecEvalJsonConstructor (execExprInterp.c:4657); results in the armed
+// per-eval result context.
+fn eval_json_constructor(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    jc: &crate::steps::JsonConstructorState,
+    frame: u32,
+) -> PgResult<(Datum, bool)> {
+    use ::types_nodes::JsonConstructorType as JC;
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let n = jc.nargs as usize;
+    // SAFETY: n compile-allocated slots, written by the arg steps just run;
+    // values/nulls are same-size split scratch (exclusive during this step).
+    unsafe {
+        let src = core::slice::from_raw_parts(jc.slots.as_ptr(), n);
+        for (i, nd) in src.iter().enumerate() {
+            jc.values.as_ptr().add(i).write(nd.value);
+            jc.nulls.as_ptr().add(i).write(nd.isnull);
+        }
+    }
+    // SAFETY: just initialized above / at compile.
+    let (values, nulls, types) = unsafe {
+        (
+            core::slice::from_raw_parts(jc.values.as_ptr(), n),
+            core::slice::from_raw_parts(jc.nulls.as_ptr(), n),
+            core::slice::from_raw_parts(jc.types.as_ptr(), n),
+        )
+    };
+
+    match jc.ctor_type {
+        JC::JSCTOR_JSON_ARRAY => {
+            let d = if jc.is_jsonb {
+                image_datum(::adt_jsonb::tojsonb::jsonb_build_array_worker(
+                    mcx,
+                    values,
+                    nulls,
+                    types,
+                    jc.absent_on_null,
+                )?)
+            } else {
+                varlena_datum(::adt_json::tojson::json_build_array_worker(
+                    mcx,
+                    values,
+                    nulls,
+                    types,
+                    jc.absent_on_null,
+                )?)
+            };
+            Ok((d, false))
+        }
+        JC::JSCTOR_JSON_OBJECT => {
+            let d = if jc.is_jsonb {
+                image_datum(::adt_jsonb::tojsonb::jsonb_build_object_worker(
+                    mcx,
+                    values,
+                    nulls,
+                    types,
+                    jc.absent_on_null,
+                    jc.unique,
+                )?)
+            } else {
+                varlena_datum(::adt_json::tojson::json_build_object_worker(
+                    mcx,
+                    values,
+                    nulls,
+                    types,
+                    jc.absent_on_null,
+                    jc.unique,
+                )?)
+            };
+            Ok((d, false))
+        }
+        JC::JSCTOR_JSON_SCALAR => {
+            if nulls[0] {
+                return Ok((Datum::null(), true));
+            }
+            if jc.is_jsonb {
+                // SAFETY: compile-resolved carrier, exclusive during this step.
+                let cat = unsafe { &mut *jc.scalar_jsonb.expect("scalar_jsonb").as_ptr() };
+                Ok((image_datum(::adt_jsonb::tojsonb::datum_to_jsonb_cat(mcx, values[0], cat)?), false))
+            } else {
+                // SAFETY: compile-resolved carrier, exclusive during this step.
+                let cat = unsafe { &mut *jc.scalar_json.expect("scalar_json").as_ptr() };
+                Ok((varlena_datum(::adt_json::tojson::datum_to_json_cat(mcx, values[0], cat)?), false))
+            }
+        }
+        JC::JSCTOR_JSON_PARSE => {
+            // Reached only with unique_keys (the non-unique leg compiles to
+            // the bare argument).
+            if nulls[0] {
+                return Ok((Datum::null(), true));
+            }
+            // SAFETY: values[0] is a live text datum from the arg step.
+            let text = unsafe { ::types_fmgr::datum_varlena_packed(values[0], mcx)? };
+            let js = text.data();
+            if jc.is_jsonb {
+                let image = ::adt_jsonb::io::jsonb_from_cstring(mcx, js, true, None)?
+                    .expect("hard errsave without escontext returns Err");
+                Ok((image_datum(image), false))
+            } else {
+                ::adt_json::funcs::json_validate(js, true, true)?;
+                Ok((values[0], false))
+            }
+        }
+        JC::JSCTOR_JSON_OBJECTAGG | JC::JSCTOR_JSON_ARRAYAGG | JC::JSCTOR_JSON_SERIALIZE => {
+            panic!("invalid JsonConstructorExpr type {:?} in EEOP_JSON_CONSTRUCTOR", jc.ctor_type)
+        }
+    }
+}
+
+// C ExecEvalJsonIsPredicate (execExprInterp.c:4735).
+fn eval_is_json(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    js: Datum,
+    exprtype: ::types_core::Oid,
+    item_type: ::types_nodes::primnodes::JsonValueType,
+    unique_keys: bool,
+    frame: u32,
+) -> PgResult<bool> {
+    use ::adt_json::jsonapi::JsonToken;
+    use ::types_core::catalog::{JSONBOID, JSONOID, TEXTOID};
+    use ::types_nodes::primnodes::JsonValueType as JT;
+
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+
+    if exprtype == TEXTOID || exprtype == JSONOID {
+        // SAFETY: js is a live text/json varlena from the arg step.
+        let text = unsafe { ::types_fmgr::datum_varlena_packed(js, mcx)? };
+        let json = text.data();
+        let mut res = if item_type == JT::JS_TYPE_ANY {
+            true
+        } else {
+            match ::adt_jsonb::builtins::json_get_first_token(json)? {
+                Some(JsonToken::ObjectStart) => item_type == JT::JS_TYPE_OBJECT,
+                Some(JsonToken::ArrayStart) => item_type == JT::JS_TYPE_ARRAY,
+                Some(
+                    JsonToken::String
+                    | JsonToken::Number
+                    | JsonToken::True
+                    | JsonToken::False
+                    | JsonToken::Null,
+                ) => item_type == JT::JS_TYPE_SCALAR,
+                _ => false,
+            }
+        };
+        // Full parse only for uniqueness check or json-text validation.
+        if res && (unique_keys || exprtype == TEXTOID) {
+            res = ::adt_json::funcs::json_validate(json, unique_keys, false)?;
+        }
+        Ok(res)
+    } else if exprtype == JSONBOID {
+        if item_type == JT::JS_TYPE_ANY {
+            Ok(true)
+        } else {
+            // SAFETY: js is a live jsonb varlena from the arg step.
+            let payload = unsafe { ::adt_jsonb::builtins::jsonb_payload_from_datum(mcx, js)? };
+            let c = payload.as_bytes();
+            Ok(match item_type {
+                JT::JS_TYPE_OBJECT => ::adt_jsonb::container::container_is_object(c),
+                JT::JS_TYPE_ARRAY => {
+                    ::adt_jsonb::container::container_is_array(c)
+                        && !::adt_jsonb::container::container_is_scalar(c)
+                }
+                JT::JS_TYPE_SCALAR => {
+                    ::adt_jsonb::container::container_is_array(c)
+                        && ::adt_jsonb::container::container_is_scalar(c)
+                }
+                JT::JS_TYPE_ANY => true,
+            })
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+fn image_datum(image: ::mcx::PgVec<'_, u8>) -> Datum {
+    let d = Datum::from_usize(image.as_ptr() as usize);
+    core::mem::forget(image);
+    d
+}
+
+fn varlena_datum(v: ::datum::Varlena<'_>) -> Datum {
+    image_datum(v.into_image())
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in

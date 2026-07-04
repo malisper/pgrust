@@ -413,7 +413,7 @@ pub fn jsonb_build_object_worker<'mcx>(
         return Err(odd_argument_list());
     }
     assert!(
-        !absent_on_null,
+        !(absent_on_null && unique_keys),
         "jsonb_build_object_worker: skip_nulls uniqueify lane unported"
     );
     let mut ps = JsonbPush::new(mcx)?;
@@ -422,6 +422,10 @@ pub fn jsonb_build_object_worker<'mcx>(
     while i < args.len() {
         if nulls[i] {
             return Err(null_key(i + 1));
+        }
+        if absent_on_null && nulls[i + 1] {
+            i += 2;
+            continue;
         }
         add_jsonb(mcx, &mut ps, args[i], false, types[i], true)?;
         add_jsonb(mcx, &mut ps, args[i + 1], nulls[i + 1], types[i + 1], false)?;
@@ -448,6 +452,39 @@ pub fn jsonb_build_array_worker<'mcx>(
         add_jsonb(mcx, &mut ps, args[i], nulls[i], types[i], false)?;
     }
     ps.push_token(WjbToken::EndArray)?;
+    convert_to_jsonb(mcx, &ps.finish())
+}
+
+/// C: to_jsonb_is_immutable (jsonb.c).
+pub fn to_jsonb_is_immutable(typoid: Oid) -> PgResult<bool> {
+    let cat = json_categorize_type(typoid)?;
+    Ok(match cat.category {
+        JsonTypeCategory::Null
+        | JsonTypeCategory::Bool
+        | JsonTypeCategory::Json
+        | JsonTypeCategory::Jsonb => true,
+        JsonTypeCategory::Date
+        | JsonTypeCategory::Timestamp
+        | JsonTypeCategory::Timestamptz
+        | JsonTypeCategory::Array
+        | JsonTypeCategory::Composite => false,
+        // 'i' = PROVOLATILE_IMMUTABLE.
+        _ => {
+            let oid = cat.outfunc.as_ref().map_or(InvalidOid, |f| f.fn_oid);
+            lsyscache::func_volatile(oid)? == b'i' as i8
+        }
+    })
+}
+
+/// datum_to_jsonb over a compile-resolved category carrier
+/// (execExprInterp.c ExecEvalJsonConstructor JSCTOR_JSON_SCALAR).
+pub fn datum_to_jsonb_cat<'mcx>(
+    mcx: Mcx<'mcx>,
+    val: Datum,
+    cat: &mut ValCategory,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut ps = JsonbPush::new(mcx)?;
+    datum_to_jsonb_internal(mcx, &mut ps, val, false, cat, false)?;
     convert_to_jsonb(mcx, &ps.finish())
 }
 

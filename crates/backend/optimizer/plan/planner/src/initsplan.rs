@@ -182,6 +182,43 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                pull_var_nodes(e, out);
+            }
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for a in &c.args {
+                pull_var_nodes(a, out);
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                pull_var_nodes(e, out);
+            }
+        }
+        NodeTag::T_JsonIsPredicate => {
+            if let Some(e) = node.as_json_is_predicate().unwrap().expr {
+                pull_var_nodes(e, out);
+            }
+        }
+        NodeTag::T_JsonBehavior => {
+            if let Some(e) = node.as_json_behavior().unwrap().expr {
+                pull_var_nodes(e, out);
+            }
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                pull_var_nodes(e, out);
+            }
+            for v in &j.passing_values {
+                pull_var_nodes(v, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M2 expression lane"),
     }
 }

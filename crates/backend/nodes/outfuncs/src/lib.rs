@@ -114,6 +114,88 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 d.typeId, d.typeMod, d.collation
             );
         }
+        NodeTag::T_JsonFormat => {
+            out_json_format(out, node.as_json_format().expect("JsonFormat"))
+        }
+        NodeTag::T_JsonReturning => {
+            out_json_returning(out, node.as_json_returning().expect("JsonReturning"))
+        }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().expect("JsonValueExpr");
+            w!(out, "{{JSONVALUEEXPR :raw_expr ");
+            out_opt_node(out, j.raw_expr)?;
+            w!(out, " :formatted_expr ");
+            out_opt_node(out, j.formatted_expr)?;
+            w!(out, " :format ");
+            out_opt_json_format(out, j.format);
+            w!(out, "}}");
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().expect("JsonConstructorExpr");
+            w!(out, "{{JSONCONSTRUCTOREXPR :type {} :args ", c.r#type as u32);
+            out_list(out, &c.args)?;
+            w!(out, " :func ");
+            out_opt_node(out, c.func)?;
+            w!(out, " :coercion ");
+            out_opt_node(out, c.coercion)?;
+            w!(out, " :returning ");
+            out_opt_json_returning(out, c.returning);
+            w!(out, " :absent_on_null ");
+            out_bool(out, c.absent_on_null);
+            w!(out, " :unique ");
+            out_bool(out, c.unique);
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().expect("JsonIsPredicate");
+            w!(out, "{{JSONISPREDICATE :expr ");
+            out_opt_node(out, p.expr)?;
+            w!(out, " :format ");
+            out_opt_json_format(out, p.format);
+            w!(out, " :item_type {} :unique_keys ", p.item_type as u32);
+            out_bool(out, p.unique_keys);
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_JsonBehavior => {
+            let b = node.as_json_behavior().expect("JsonBehavior");
+            w!(out, "{{JSONBEHAVIOR :btype {} :expr ", b.btype as u32);
+            out_opt_node(out, b.expr)?;
+            w!(out, " :coerce ");
+            out_bool(out, b.coerce);
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().expect("JsonExpr");
+            w!(out, "{{JSONEXPR :op {} :column_name ", j.op as u32);
+            out_str(out, j.column_name);
+            w!(out, " :formatted_expr ");
+            out_opt_node(out, j.formatted_expr)?;
+            w!(out, " :format ");
+            out_opt_json_format(out, j.format);
+            w!(out, " :path_spec ");
+            out_opt_node(out, j.path_spec)?;
+            w!(out, " :returning ");
+            out_opt_json_returning(out, j.returning);
+            w!(out, " :passing_names ");
+            out_list(out, &j.passing_names)?;
+            w!(out, " :passing_values ");
+            out_list(out, &j.passing_values)?;
+            w!(out, " :on_empty ");
+            out_opt_node(out, j.on_empty)?;
+            w!(out, " :on_error ");
+            out_opt_node(out, j.on_error)?;
+            w!(out, " :use_io_coercion ");
+            out_bool(out, j.use_io_coercion);
+            w!(out, " :use_json_coercion ");
+            out_bool(out, j.use_json_coercion);
+            w!(
+                out,
+                " :wrapper {} :omit_quotes ",
+                j.wrapper as u32
+            );
+            out_bool(out, j.omit_quotes);
+            w!(out, " :collation {} :location -1}}", j.collation);
+        }
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
@@ -447,6 +529,34 @@ fn out_string_node(out: &mut PgString<'_>, s: &str) {
         out_token(out, s);
     }
     w!(out, "\"");
+}
+
+fn out_json_format(out: &mut PgString<'_>, f: &types_nodes::JsonFormat) {
+    w!(
+        out,
+        "{{JSONFORMAT :format_type {} :encoding {} :location -1}}",
+        f.format_type as u32, f.encoding as u32
+    );
+}
+
+fn out_opt_json_format(out: &mut PgString<'_>, f: Option<&types_nodes::JsonFormat>) {
+    match f {
+        None => w!(out, "<>"),
+        Some(f) => out_json_format(out, f),
+    }
+}
+
+fn out_json_returning(out: &mut PgString<'_>, r: &types_nodes::JsonReturning<'_>) {
+    w!(out, "{{JSONRETURNING :format ");
+    out_opt_json_format(out, r.format);
+    w!(out, " :typid {} :typmod {}}}", r.typid, r.typmod);
+}
+
+fn out_opt_json_returning(out: &mut PgString<'_>, r: Option<&types_nodes::JsonReturning<'_>>) {
+    match r {
+        None => w!(out, "<>"),
+        Some(r) => out_json_returning(out, r),
+    }
 }
 
 fn out_opt_node(out: &mut PgString<'_>, n: Option<Node<'_>>) -> PgResult<()> {
