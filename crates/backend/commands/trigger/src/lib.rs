@@ -10,9 +10,11 @@ pub use catalog::{CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerA
 pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById};
 pub use exec::{ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache};
 pub use queue::{
-    AfterTriggerBeginQuery, AfterTriggerBeginSubXact, AfterTriggerBeginXact, AfterTriggerEndQuery,
-    AfterTriggerEndSubXact, AfterTriggerEndXact, AfterTriggerFireDeferred,
-    AfterTriggerPendingOnRel, ExecARDeleteTriggers, ExecARInsertTriggers, ExecARUpdateTriggers,
+    before_stmt_triggers_fired, AfterTriggerBeginQuery, AfterTriggerBeginSubXact,
+    AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
+    AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
+    ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
+    ExecASUpdateTriggers,
 };
 pub use state::AfterTriggerSetState;
 

@@ -153,7 +153,24 @@ pub fn CreateTriggerFiringOn<'mcx>(
                 ));
             }
         }
-        b'p' | b'v' | b'f' => unported("triggers on partitioned/view/foreign relations"),
+        b'v' => {
+            if stmt.timing != TRIGGER_TYPE_INSTEAD && stmt.row {
+                return Err(Box::new(
+                    (*err(format!("\"{relname}\" is a view"), ERRCODE_WRONG_OBJECT_TYPE))
+                        .with_detail(
+                            "Views cannot have row-level BEFORE or AFTER triggers."
+                                .to_string(),
+                        ),
+                ));
+            }
+            if stmt.events & TRIGGER_TYPE_TRUNCATE != 0 {
+                return Err(Box::new(
+                    (*err(format!("\"{relname}\" is a view"), ERRCODE_WRONG_OBJECT_TYPE))
+                        .with_detail("Views cannot have TRUNCATE triggers.".to_string()),
+                ));
+            }
+        }
+        b'p' | b'f' => unported("triggers on partitioned/foreign relations"),
         other => {
             return Err(Box::new(
                 (*err(

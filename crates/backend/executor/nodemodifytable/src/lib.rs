@@ -47,6 +47,8 @@ pub struct ModifyTableState<'mcx> {
     pub operation: CmdType,
     pub canSetTag: bool,
     pub mt_done: bool,
+    fireBSTriggers: bool,
+    result_relkind: u8,
     pub result_rti: u32,
     ri_newTupleSlot: Option<ExecSlotId>,
     ri_oldTupleSlot: Option<ExecSlotId>,
@@ -172,43 +174,31 @@ pub fn exec_init_modify_table<'mcx>(
     debug_assert!(estate.es_unpruned_relids.is_member(rti as i32));
 
     estate.exec_init_result_relation(rti)?;
-    let trigdesc = {
+    let (trigdesc, result_relkind) = {
         let rel = estate.es_relations[(rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        check_valid_result_rel(rel, node.operation);
-        if rel.rd_hastriggers {
+        let td = if rel.rd_hastriggers {
             let td = relcache::RelationGetTriggerDesc(rel.rd_id)?;
             if let Some(td) = &td {
-                let unported = td.trig_insert_instead_row
-                    || td.trig_update_instead_row
-                    || td.trig_delete_instead_row
-                    || td.trig_insert_before_statement
-                    || td.trig_insert_after_statement
-                    || td.trig_update_before_statement
-                    || td.trig_update_after_statement
-                    || td.trig_delete_before_statement
-                    || td.trig_delete_after_statement
-                    || td
-                        .triggers
-                        .iter()
-                        .any(|t| t.tgoldtable.is_some() || t.tgnewtable.is_some());
-                if unported {
+                if td.triggers.iter().any(|t| t.tgoldtable.is_some() || t.tgnewtable.is_some())
+                {
                     panic!(
-                        "ExecInitModifyTable (nodeModifyTable.c): INSTEAD OF/\
-                         statement triggers/transition tables unported"
+                        "ExecInitModifyTable (nodeModifyTable.c): transition tables \
+                         unported"
                     );
                 }
             }
             td
         } else {
             None
-        }
+        };
+        check_valid_result_rel(rel, node.operation, td.as_deref())?;
+        (td, rel.rd_rel.relkind)
     };
 
-    // The UPDATE/DELETE row identity: the plain-relation leg carries a junk
-    // ctid attribute in the subplan targetlist (wholerow legs are the
-    // FDW/view lanes, loud at CheckValidResultRel).
+    // The UPDATE/DELETE row identity: plain relations carry a junk ctid in
+    // the subplan targetlist; views (INSTEAD OF lane) a junk wholerow.
     let mut rowid_attno: i16 = 0;
     if matches!(
         node.operation,
@@ -220,8 +210,13 @@ pub fn exec_init_modify_table<'mcx>(
             .expect("ModifyTable has a subplan")
             .as_plan()
             .expect("plan node");
-        rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "ctid");
-        assert!(rowid_attno > 0, "could not find junk ctid column");
+        if result_relkind == types_rel::RELKIND_VIEW {
+            rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "wholerow");
+            assert!(rowid_attno > 0, "could not find junk wholerow column");
+        } else {
+            rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "ctid");
+            assert!(rowid_attno > 0, "could not find junk ctid column");
+        }
     }
 
     // The RETURNING projection: scan vars read the returned tuple (result
@@ -488,14 +483,13 @@ pub fn exec_init_modify_table<'mcx>(
         merge = Some(MergeState { matched_actions, not_matched_actions });
     }
 
-    // fireBSTriggers/ExecSetupTransitionCaptureState: the trimmed relcache
-    // entry carries no trigger descriptor, so statement triggers are
-    // undetectable until pg_trigger lands (none exist without CREATE TRIGGER).
     Ok(ModifyTableState {
         plan: node,
         operation: node.operation,
         canSetTag: node.canSetTag,
         mt_done: false,
+        fireBSTriggers: true,
+        result_relkind,
         result_rti: rti,
         ri_newTupleSlot: merge_new_slot,
         ri_oldTupleSlot: merge_old_slot,
@@ -537,14 +531,30 @@ fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_nam
 }
 
 // CheckValidResultRel (execMain.c), plain-table arm.
-fn check_valid_result_rel(rel: &Relation<'_>, operation: CmdType) {
+fn check_valid_result_rel(
+    rel: &Relation<'_>,
+    operation: CmdType,
+    trigdesc: Option<&types_trigger::TriggerDesc<'static>>,
+) -> PgResult<()> {
     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         if operation != CmdType::CMD_INSERT {
             panic!(
                 "ExecInitModifyTable: {operation:?} on a partitioned table                  (inherited result relations) not ported"
             );
         }
-        return;
+        return Ok(());
+    }
+    if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
+        let has_instead = match operation {
+            CmdType::CMD_INSERT => trigdesc.is_some_and(|td| td.trig_insert_instead_row),
+            CmdType::CMD_UPDATE => trigdesc.is_some_and(|td| td.trig_update_instead_row),
+            CmdType::CMD_DELETE => trigdesc.is_some_and(|td| td.trig_delete_instead_row),
+            other => panic!("CheckValidResultRel (execMain.c): {other:?} on a view not ported"),
+        };
+        if !has_instead {
+            return Err(error_view_not_updatable(rel, operation));
+        }
+        return Ok(());
     }
     if rel.rd_rel.relkind != RELKIND_RELATION {
         panic!(
@@ -559,6 +569,37 @@ fn check_valid_result_rel(rel: &Relation<'_>, operation: CmdType) {
             "ExecPartitionCheck (execPartition.c): direct {operation:?} into a              partition not ported (route via the parent)"
         );
     }
+    Ok(())
+}
+
+// error_view_not_updatable (rewriteHandler.c), executor-check leg (no
+// errdetail, per C's CheckValidResultRel call).
+#[cold]
+#[inline(never)]
+fn error_view_not_updatable(rel: &Relation<'_>, operation: CmdType) -> Box<PgError> {
+    let name = rel.name();
+    let (msg, hint) = match operation {
+        CmdType::CMD_INSERT => (
+            format!("cannot insert into view \"{name}\""),
+            "To enable inserting into the view, provide an INSTEAD OF INSERT trigger or \
+             an unconditional ON INSERT DO INSTEAD rule.",
+        ),
+        CmdType::CMD_UPDATE => (
+            format!("cannot update view \"{name}\""),
+            "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an \
+             unconditional ON UPDATE DO INSTEAD rule.",
+        ),
+        _ => (
+            format!("cannot delete from view \"{name}\""),
+            "To enable deleting from the view, provide an INSTEAD OF DELETE trigger or \
+             an unconditional ON DELETE DO INSTEAD rule.",
+        ),
+    };
+    Box::new(
+        PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(hint.to_string()),
+    )
 }
 
 /// `ExecModifyTable` (nodeModifyTable.c), INSERT/UPDATE/DELETE loop.
@@ -572,6 +613,10 @@ pub fn exec_modify_table<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     if mt.mt_done {
         return Ok(None);
+    }
+    if mt.fireBSTriggers {
+        fire_bs_triggers(mt, estate)?;
+        mt.fireBSTriggers = false;
     }
 
     loop {
@@ -595,6 +640,38 @@ pub fn exec_modify_table<'mcx>(
                     }
                 }
             }
+            CmdType::CMD_UPDATE if mt.result_relkind == types_rel::RELKIND_VIEW => {
+                let old_tup = fetch_wholerow_tuple(mt, estate, plan_slot)?;
+                if !mt.ri_projectNewInfoValid {
+                    exec_init_update_projection(mt, estate)?;
+                }
+                let old_slot = mt.ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
+                {
+                    let mcx = estate.es_query_cxt;
+                    exectuples::exec_force_store_heap_tuple(
+                        old_tup,
+                        &mut estate.es_tupleTable[old_slot.0 as usize],
+                        mcx,
+                    )?;
+                }
+                let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
+                let modified = ir_row_triggers(
+                    mt,
+                    estate,
+                    types_trigger::TRIGGER_TYPE_UPDATE,
+                    types_trigger::TRIGGER_EVENT_UPDATE,
+                    Some(old_slot),
+                    Some(slot),
+                )?;
+                if modified {
+                    if mt.canSetTag {
+                        estate.es_processed += 1;
+                    }
+                    if mt.project_returning.is_some() {
+                        return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                    }
+                }
+            }
             CmdType::CMD_UPDATE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
                 if !mt.ri_projectNewInfoValid {
@@ -605,6 +682,36 @@ pub fn exec_modify_table<'mcx>(
                 let modified = exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)?;
                 if modified && mt.project_returning.is_some() {
                     return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                }
+            }
+            CmdType::CMD_DELETE if mt.result_relkind == types_rel::RELKIND_VIEW => {
+                let old_tup = fetch_wholerow_tuple(mt, estate, plan_slot)?;
+                let old_slot = ensure_trig_old_slot(mt, estate);
+                {
+                    let mcx = estate.es_query_cxt;
+                    exectuples::exec_force_store_heap_tuple(
+                        old_tup,
+                        &mut estate.es_tupleTable[old_slot.0 as usize],
+                        mcx,
+                    )?;
+                }
+                let deleted = ir_row_triggers(
+                    mt,
+                    estate,
+                    types_trigger::TRIGGER_TYPE_DELETE,
+                    types_trigger::TRIGGER_EVENT_DELETE,
+                    Some(old_slot),
+                    None,
+                )?;
+                if deleted {
+                    if mt.canSetTag {
+                        estate.es_processed += 1;
+                    }
+                    if mt.project_returning.is_some() {
+                        return Ok(Some(exec_process_returning(
+                            mt, estate, old_slot, plan_slot,
+                        )?));
+                    }
                 }
             }
             CmdType::CMD_DELETE => {
@@ -626,8 +733,151 @@ pub fn exec_modify_table<'mcx>(
     }
 
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
+    fire_as_triggers(mt, estate)?;
     mt.mt_done = true;
     Ok(None)
+}
+
+// fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
+// DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
+// first); MERGE fires per present subcommand.
+fn fire_bs_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    use types_trigger::*;
+    if mt.trigdesc.is_none() {
+        return Ok(());
+    }
+    let (ins, upd, del) = stmt_trigger_ops(mt, true);
+    if ins {
+        exec_bs_triggers(mt, estate, TRIGGER_TYPE_INSERT, TRIGGER_EVENT_INSERT)?;
+    }
+    if upd {
+        exec_bs_triggers(mt, estate, TRIGGER_TYPE_UPDATE, TRIGGER_EVENT_UPDATE)?;
+    }
+    if del {
+        exec_bs_triggers(mt, estate, TRIGGER_TYPE_DELETE, TRIGGER_EVENT_DELETE)?;
+    }
+    Ok(())
+}
+
+fn fire_as_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let Some(td) = mt.trigdesc.clone() else {
+        return Ok(());
+    };
+    let (ins, upd, del) = stmt_trigger_ops(mt, false);
+    let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    if del {
+        ::trigger::ExecASDeleteTriggers(rel, &td)?;
+    }
+    if upd {
+        ::trigger::ExecASUpdateTriggers(rel, &td)?;
+    }
+    if ins {
+        ::trigger::ExecASInsertTriggers(rel, &td)?;
+    }
+    Ok(())
+}
+
+// (insert, update, delete) statement-trigger ops for this node. BS order is
+// op-major (INSERT then conflict-UPDATE); AS inverts (C fireASTriggers), which
+// the caller's DELETE/UPDATE/INSERT sequencing preserves for MERGE too.
+fn stmt_trigger_ops(mt: &ModifyTableState<'_>, _before: bool) -> (bool, bool, bool) {
+    match mt.operation {
+        CmdType::CMD_INSERT => (
+            true,
+            mt.plan.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32,
+            false,
+        ),
+        CmdType::CMD_UPDATE => (false, true, false),
+        CmdType::CMD_DELETE => (false, false, true),
+        CmdType::CMD_MERGE => {
+            let mut ops = (false, false, false);
+            if let Some(m) = &mt.merge {
+                for a in m.matched_actions.iter().chain(m.not_matched_actions.iter()) {
+                    match a.command_type {
+                        CmdType::CMD_INSERT => ops.0 = true,
+                        CmdType::CMD_UPDATE => ops.1 = true,
+                        CmdType::CMD_DELETE => ops.2 = true,
+                        _ => {}
+                    }
+                }
+            }
+            ops
+        }
+        _ => (false, false, false),
+    }
+}
+
+// ExecBS{Insert,Update,Delete}Triggers (trigger.c).
+fn exec_bs_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tgtype_event: i16,
+    event_op: u32,
+) -> PgResult<()> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_LEVEL_MASK,
+        TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK,
+    };
+    let trigdesc = mt.trigdesc.as_ref().expect("caller checked trigdesc").clone();
+    let has_before = match event_op {
+        types_trigger::TRIGGER_EVENT_INSERT => trigdesc.trig_insert_before_statement,
+        types_trigger::TRIGGER_EVENT_UPDATE => trigdesc.trig_update_before_statement,
+        _ => trigdesc.trig_delete_before_statement,
+    };
+    if !has_before {
+        return Ok(());
+    }
+    let relid = {
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        rel.rd_id
+    };
+    if ::trigger::before_stmt_triggers_fired(relid, event_op) {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let tg_event = event_op | TRIGGER_EVENT_BEFORE;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
+            != TRIGGER_TYPE_STATEMENT | TRIGGER_TYPE_BEFORE | tgtype_event
+        {
+            continue;
+        }
+        if !::trigger::TriggerEnabled(trigger) {
+            continue;
+        }
+        if trigger.tgnattr > 0 || trigger.tgqual.is_some() {
+            panic!(
+                "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
+                 unported on the BEFORE STATEMENT path"
+            );
+        }
+        let ret = {
+            let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
+            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let mut tdata =
+                types_trigger_call::TriggerData::new(tg_event, rel, None, None, trigger);
+            ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?
+        };
+        if ret.is_some() {
+            return Err(Box::new(
+                PgError::error("BEFORE STATEMENT trigger cannot return a value".to_string())
+                    .with_sqlstate(types_error::ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // The ctid-junk fetch of ExecModifyTable's row-identity block; the datum is a
@@ -1869,9 +2119,36 @@ fn br_row_triggers<'mcx>(
     old_slot: Option<ExecSlotId>,
     new_slot: Option<ExecSlotId>,
 ) -> PgResult<bool> {
+    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, false)
+}
+
+// ExecIR{Insert,Update,Delete}Triggers (trigger.c): same protocol as BEFORE
+// ROW with INSTEAD timing; the view row is never stored.
+fn ir_row_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tgtype_event: i16,
+    event_op: u32,
+    old_slot: Option<ExecSlotId>,
+    new_slot: Option<ExecSlotId>,
+) -> PgResult<bool> {
+    row_triggers_common(mt, estate, tgtype_event, event_op, old_slot, new_slot, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_triggers_common<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tgtype_event: i16,
+    event_op: u32,
+    old_slot: Option<ExecSlotId>,
+    new_slot: Option<ExecSlotId>,
+    instead: bool,
+) -> PgResult<bool> {
     use types_trigger::{
-        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_ROW, TRIGGER_TYPE_BEFORE,
-        TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK,
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSTEAD, TRIGGER_EVENT_ROW,
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW,
+        TRIGGER_TYPE_TIMING_MASK,
     };
     let mcx = estate.es_query_cxt;
     let raw_old = match old_slot {
@@ -1883,11 +2160,16 @@ fn br_row_triggers<'mcx>(
         None => None,
     };
     let trigdesc = mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone();
-    let tg_event = event_op | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
+    let (type_timing, event_timing) = if instead {
+        (TRIGGER_TYPE_INSTEAD, TRIGGER_EVENT_INSTEAD)
+    } else {
+        (TRIGGER_TYPE_BEFORE, TRIGGER_EVENT_BEFORE)
+    };
+    let tg_event = event_op | TRIGGER_EVENT_ROW | event_timing;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
-            != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | tgtype_event
+            != TRIGGER_TYPE_ROW | type_timing | tgtype_event
         {
             continue;
         }
@@ -1973,11 +2255,10 @@ fn br_row_triggers<'mcx>(
 
 // GetTupleForTrigger (trigger.c): lock + fetch the target row into the
 // trigger old slot. Ok(None) = row gone, skip the operation.
-fn get_tuple_for_trigger<'mcx>(
+fn ensure_trig_old_slot<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
-) -> PgResult<Option<ExecSlotId>> {
+) -> ExecSlotId {
     if mt.trig_old_slot.is_none() {
         let mcx = estate.es_query_cxt;
         let (kind, desc) = {
@@ -1991,7 +2272,42 @@ fn get_tuple_for_trigger<'mcx>(
         estate.es_tupleTable.push(slot);
         mt.trig_old_slot = Some(id);
     }
-    let slot_id = mt.trig_old_slot.expect("just initialized");
+    mt.trig_old_slot.expect("just initialized")
+}
+
+// The wholerow-junk row identity of views (nodeModifyTable.c:4409-4470):
+// rebuild the OLD view row; t_self invalid, t_tableOid invalid (historical
+// view-trigger behavior).
+fn fetch_wholerow_tuple<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<types_tuple::HeapTupleData<'mcx>> {
+    debug_assert!(mt.ri_RowIdAttNo > 0);
+    let slot = &mut estate.es_tupleTable[plan_slot.0 as usize];
+    let mut isnull = false;
+    let datum = exectuples::slot_getattr(slot, mt.ri_RowIdAttNo as i32, &mut isnull);
+    assert!(!isnull, "wholerow is NULL");
+    let hdr = datum.as_usize() as *const u8;
+    // SAFETY: a composite datum is an in-memory HeapTupleHeader image
+    // (RowExpr output, never toasted); live in the plan slot for this row.
+    let t_len = unsafe {
+        (*(hdr as *const types_tuple::htup::HeapTupleHeaderData)).datum_length()
+    };
+    let mut tid = ItemPointerData::default();
+    ItemPointerSetInvalid(&mut tid);
+    // SAFETY: image bounds established above.
+    Ok(unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(hdr, t_len, tid, types_core::InvalidOid)
+    })
+}
+
+fn get_tuple_for_trigger<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<Option<ExecSlotId>> {
+    let slot_id = ensure_trig_old_slot(mt, estate);
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
     let lock_result = {
@@ -2118,6 +2434,23 @@ fn exec_insert<'mcx>(
     let output_cid = estate.es_output_cid;
     let onconflict = mt.plan.onConflictAction;
     let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
+
+    if mt.result_relkind == types_rel::RELKIND_VIEW {
+        if !ir_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_TYPE_INSERT,
+            types_trigger::TRIGGER_EVENT_INSERT,
+            None,
+            Some(slot_id),
+        )? {
+            return Ok(None);
+        }
+        if mt.canSetTag {
+            estate.es_processed += 1;
+        }
+        return Ok(Some(slot_id));
+    }
 
     if mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row) {
         if !br_row_triggers(
