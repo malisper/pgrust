@@ -19,7 +19,8 @@ use types_nodes::parsenodes::{
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
-    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MergeAction,
+    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
+    JoinExpr, MergeAction,
     MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr,
     OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType, ScalarArrayOpExpr,
     SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var, VarReturningType, WindowFunc,
@@ -414,6 +415,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONBEHAVIOR" => self.read_json_behavior(),
             b"JSONEXPR" => self.read_json_expr(),
             b"NAMEDARGEXPR" => self.read_named_arg_expr(),
+            b"FIELDSELECT" => self.read_field_select(),
+            b"FIELDSTORE" => self.read_field_store(),
             b"MERGEACTION" => self.read_merge_action(),
             b"XMLEXPR" => self.read_xml_expr(),
             b"TABLEFUNC" => self.read_table_func(),
@@ -686,6 +689,27 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         n.argnumber = self.read_i32("argnumber");
         n.location = self.read_location("location");
         Ok(n.seal())
+    }
+
+    fn read_field_select(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut f = Node::build::<FieldSelect>(mcx)?;
+        f.arg = self.read_node("arg")?.expect("FieldSelect has an arg");
+        f.fieldnum = self.read_i32("fieldnum") as i16;
+        f.resulttype = self.read_u32("resulttype");
+        f.resulttypmod = self.read_i32("resulttypmod");
+        f.resultcollid = self.read_u32("resultcollid");
+        Ok(f.seal())
+    }
+
+    fn read_field_store(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut f = Node::build::<FieldStore>(mcx)?;
+        f.arg = self.read_node("arg")?.expect("FieldStore has an arg");
+        f.newvals = self.read_node_list("newvals")?;
+        f.fieldnums = self.read_int_list("fieldnums")?;
+        f.resulttype = self.read_u32("resulttype");
+        Ok(f.seal())
     }
 
     fn read_merge_action(&mut self) -> PgResult<Node<'mcx>> {

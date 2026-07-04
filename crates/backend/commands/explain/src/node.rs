@@ -603,10 +603,15 @@ pub fn ExplainNode<'mcx>(
         | NodeTag::T_WorkTableScan
         | NodeTag::T_TableFuncScan => {
             if node.node_tag() == NodeTag::T_TableFuncScan && es.verbose {
-                node_gap(
-                    "show_table_func_scan_info",
-                    "VERBOSE Table Function Call deparse (ruleutils get_tablefunc unported)",
-                );
+                let tablefunc = node
+                    .as_table_func_scan()
+                    .unwrap()
+                    .tablefunc
+                    .expect("TableFuncScan has a tablefunc");
+                let mcx = es.str.allocator();
+                let mut buf = PgString::new_in(mcx);
+                deparse_expr(es, node, ancestors, tablefunc, true, false, &mut buf)?;
+                crate::format::ExplainPropertyText("Table Function Call", buf.as_str(), es);
             }
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {

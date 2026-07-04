@@ -11,6 +11,8 @@ catcache = { path = "../../cache/catcache" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../format_type" }
+funcapi = { path = "../../fmgr/funcapi" }
+xml = { package = "adt_xml", path = "../xml" }
 indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 typcache_seams = { path = "../../cache/typcache_seams" }

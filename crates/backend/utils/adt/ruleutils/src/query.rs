@@ -49,6 +49,7 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub rtable_columns: Vec<DeparseColumns>,
     pub unique_using: bool,
     pub using_names: Vec<String>,
+    pub ctes: Vec<&'mcx types_nodes::parsenodes::CommonTableExpr<'mcx>>,
     pub subplans: Option<&'mcx NodeList<'mcx>>,
     // Indexed by child relid (0 unused), as C's palloc0'd array.
     pub appendrels: Option<Vec<Option<&'mcx types_nodes::plannodes::AppendRelInfo<'mcx>>>>,
@@ -63,6 +64,7 @@ impl<'mcx> DeparseNamespace<'mcx> {
             rtable_columns: Vec::new(),
             unique_using: false,
             using_names: Vec::new(),
+            ctes: Vec::new(),
             subplans: None,
             appendrels: None,
             plan: core::cell::RefCell::new(crate::plan::DpnsPlan::default()),
@@ -164,6 +166,11 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         .map(|n| n.as_range_tbl_entry().expect("rtable entry"))
         .collect();
     let mut dpns = DeparseNamespace::empty(rtable);
+    dpns.ctes = query
+        .cteList
+        .iter()
+        .map(|n| n.as_common_table_expr().expect("cteList entry"))
+        .collect();
     set_rtable_names(mcx, &mut dpns, parents, None)?;
     for _ in 0..dpns.rtable.len() {
         dpns.rtable_columns.push(DeparseColumns::default());
@@ -1343,8 +1350,6 @@ fn get_merge_query_def<'mcx>(
     get_returning_clause(query, ctx)
 }
 
-// processIndirection (ruleutils.c): FieldStore stripping stays loud (no
-// FieldSelect/FieldStore node vocabulary yet).
 pub(crate) fn process_indirection<'mcx>(
     node: Node<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
@@ -1353,7 +1358,28 @@ pub(crate) fn process_indirection<'mcx>(
     let mut cdomain: Option<Node<'mcx>> = None;
     loop {
         match node.node_tag() {
-            NodeTag::T_FieldStore => gap("processIndirection", "FieldStore deparse"),
+            NodeTag::T_FieldStore => {
+                let fstore = node.as_field_store().unwrap();
+                let typrelid = lsyscache::get_typ_typrelid(fstore.resulttype)?;
+                if typrelid == types_core::InvalidOid {
+                    panic!(
+                        "argument type {} of FieldStore is not a tuple type",
+                        fstore.resulttype
+                    );
+                }
+                // Stored rules carry exactly one target field.
+                debug_assert!(fstore.fieldnums.len() == 1);
+                let fieldname = lsyscache::get_attname(
+                    ctx.mcx,
+                    typrelid,
+                    fstore.fieldnums.nth(0) as i16,
+                    false,
+                )?
+                .expect("get_attname missing_ok=false");
+                ctx.buf.push('.');
+                ctx.buf.push_str(&quote_identifier(fieldname.as_str()));
+                node = fstore.newvals.nth(0);
+            }
             NodeTag::T_SubscriptingRef => {
                 let sbsref = node.as_subscripting_ref().unwrap();
                 let Some(refassgnexpr) = sbsref.refassgnexpr else {
@@ -2030,6 +2056,13 @@ fn get_from_clause_item<'mcx>(
                     if rte.funcordinality {
                         ctx.buf.push_str(" WITH ORDINALITY");
                     }
+                }
+                RTEKind::RTE_TABLEFUNC => {
+                    let tf = rte
+                        .tablefunc
+                        .and_then(|n| n.as_table_func())
+                        .expect("RTE_TABLEFUNC holds a TableFunc");
+                    crate::deparse::get_tablefunc(tf, ctx, true)?;
                 }
                 RTEKind::RTE_VALUES => {
                     ctx.buf.push('(');

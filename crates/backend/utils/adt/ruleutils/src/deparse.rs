@@ -200,6 +200,23 @@ pub(crate) fn walk_varnos(node: Node<'_>, f: &mut impl FnMut(i32, u32)) {
                 walk_varnos(a, f);
             }
         }
+        NodeTag::T_FieldSelect => walk_varnos(node.as_field_select().unwrap().arg, f),
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            walk_varnos(fs.arg, f);
+            for v in fs.newvals.iter() {
+                walk_varnos(v, f);
+            }
+        }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter() {
+                walk_varnos(a, f);
+            }
+            for a in x.args.iter() {
+                walk_varnos(a, f);
+            }
+        }
         other => gap("pull_varnos", &format!("{other:?} walk arm")),
     }
 }
@@ -421,6 +438,50 @@ pub(crate) fn get_rule_expr<'mcx>(
                 print_subscripts(sbsref, ctx)?;
             }
             Ok(())
+        }
+        NodeTag::T_FieldSelect => {
+            let fselect = node.as_field_select().unwrap();
+            let arg = fselect.arg;
+            // C: a Var argument MUST be parenthesized — name-count correctness,
+            // not simplicity.
+            let need_parens =
+                !matches!(arg.node_tag(), NodeTag::T_SubscriptingRef | NodeTag::T_FieldSelect);
+            if need_parens {
+                ctx.buf.push('(');
+            }
+            get_rule_expr(arg, ctx, true)?;
+            if need_parens {
+                ctx.buf.push(')');
+            }
+            let fieldname = get_name_for_var_field(arg, fselect.fieldnum as i32, 0, ctx)?;
+            ctx.buf.push('.');
+            ctx.buf.push_str(&quote_identifier(&fieldname));
+            Ok(())
+        }
+        NodeTag::T_FieldStore => {
+            // No SQL spelling exists; EXPLAIN-only, per C: print the source
+            // args, ROW()-wrapped when the planner collapsed several stores.
+            let fstore = node.as_field_store().unwrap();
+            let need_parens = fstore.newvals.len() != 1;
+            if need_parens {
+                ctx.buf.push_str("ROW(");
+            }
+            let mut first = true;
+            for v in fstore.newvals.iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(v, ctx, showimplicit)?;
+            }
+            if need_parens {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_XmlExpr => get_xml_expr(node, ctx),
+        NodeTag::T_TableFunc => {
+            get_tablefunc(node.as_table_func().unwrap(), ctx, showimplicit)
         }
         NodeTag::T_SubPlan => {
             let subplan = node.as_sub_plan().unwrap();
@@ -893,9 +954,14 @@ fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_MergeSupportFunc
-        | NodeTag::T_FuncExpr => true,
+        | NodeTag::T_FuncExpr
+        | NodeTag::T_JsonConstructorExpr
+        | NodeTag::T_JsonExpr => true,
 
         NodeTag::T_CaseExpr => true,
+
+        NodeTag::T_FieldSelect => parent.node_tag() != NodeTag::T_FieldSelect,
+        NodeTag::T_FieldStore => parent.node_tag() != NodeTag::T_FieldStore,
 
         NodeTag::T_RelabelType => {
             is_simple_node(node.as_relabel_type().unwrap().arg, Some(node), pretty_flags)
@@ -1467,6 +1533,7 @@ const F_BTRIM_OIDS: [Oid; 3] = [884, 885, 2015];
 const F_LTRIM_OIDS: [Oid; 3] = [875, 881, 6195];
 const F_RTRIM_OIDS: [Oid; 3] = [876, 882, 6196];
 const F_SYSTEM_USER: Oid = 6311;
+const F_XMLEXISTS: Oid = 2614;
 
 fn text_const_str(arg: Node<'_>) -> String {
     let c = arg.as_const().expect("SQL-syntax option arg is a Const");
@@ -1613,6 +1680,15 @@ fn get_func_sql_syntax<'mcx>(
         }
         F_SYSTEM_USER => {
             ctx.buf.push_str("SYSTEM_USER");
+            Ok(true)
+        }
+        F_XMLEXISTS => {
+            // Extra parens: the args are c_exprs.
+            ctx.buf.push_str("XMLEXISTS((");
+            get_rule_expr(expr.args.nth(0), ctx, false)?;
+            ctx.buf.push_str(") PASSING (");
+            get_rule_expr(expr.args.nth(1), ctx, false)?;
+            ctx.buf.push_str("))");
             Ok(true)
         }
         _ => Ok(false),
@@ -2068,4 +2144,507 @@ fn get_null_test<'mcx>(
         ctx.buf.push(')');
     }
     Ok(())
+}
+
+fn xml_name_to_sql(name: &str) -> PgResult<String> {
+    let mapped = xml::map_xml_name_to_sql_identifier(name.as_bytes())?;
+    Ok(String::from_utf8(mapped).expect("XML name is valid UTF-8"))
+}
+
+fn get_xml_expr<'mcx>(node: Node<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    use types_nodes::primnodes::XmlExprOp::*;
+    use types_nodes::primnodes::XmlOptionType;
+    let x = node.as_xml_expr().unwrap();
+    let mut needcomma = false;
+    match x.op {
+        IS_XMLCONCAT => ctx.buf.push_str("XMLCONCAT("),
+        IS_XMLELEMENT => ctx.buf.push_str("XMLELEMENT("),
+        IS_XMLFOREST => ctx.buf.push_str("XMLFOREST("),
+        IS_XMLPARSE => ctx.buf.push_str("XMLPARSE("),
+        IS_XMLPI => ctx.buf.push_str("XMLPI("),
+        IS_XMLROOT => ctx.buf.push_str("XMLROOT("),
+        IS_XMLSERIALIZE => ctx.buf.push_str("XMLSERIALIZE("),
+        IS_DOCUMENT => {}
+    }
+    if matches!(x.op, IS_XMLPARSE | IS_XMLSERIALIZE) {
+        ctx.buf.push_str(if x.xmloption == XmlOptionType::XMLOPTION_DOCUMENT {
+            "DOCUMENT "
+        } else {
+            "CONTENT "
+        });
+    }
+    if let Some(name) = x.name {
+        ctx.buf.push_str("NAME ");
+        ctx.buf.push_str(&quote_identifier(&xml_name_to_sql(name)?));
+        needcomma = true;
+    }
+    if !x.named_args.is_nil() {
+        if x.op != IS_XMLFOREST {
+            if needcomma {
+                ctx.buf.push_str(", ");
+            }
+            ctx.buf.push_str("XMLATTRIBUTES(");
+            needcomma = false;
+        }
+        for (e, narg) in x.named_args.iter().zip(x.arg_names.iter()) {
+            if needcomma {
+                ctx.buf.push_str(", ");
+            }
+            get_rule_expr(e, ctx, true)?;
+            ctx.buf.push_str(" AS ");
+            let argname = narg.as_string().expect("arg_names cell").sval;
+            ctx.buf.push_str(&quote_identifier(&xml_name_to_sql(argname)?));
+            needcomma = true;
+        }
+        if x.op != IS_XMLFOREST {
+            ctx.buf.push(')');
+        }
+    }
+    if !x.args.is_nil() {
+        if needcomma {
+            ctx.buf.push_str(", ");
+        }
+        match x.op {
+            IS_XMLCONCAT | IS_XMLELEMENT | IS_XMLFOREST | IS_XMLPI | IS_XMLSERIALIZE => {
+                let mut first = true;
+                for a in x.args.iter() {
+                    if !first {
+                        ctx.buf.push_str(", ");
+                    }
+                    first = false;
+                    get_rule_expr(a, ctx, true)?;
+                }
+            }
+            IS_XMLPARSE => {
+                debug_assert!(x.args.len() == 2);
+                get_rule_expr(x.args.nth(0), ctx, true)?;
+                let con = x.args.nth(1).as_const().expect("XMLPARSE whitespace Const");
+                debug_assert!(!con.constisnull);
+                ctx.buf.push_str(if con.constvalue.as_bool() {
+                    " PRESERVE WHITESPACE"
+                } else {
+                    " STRIP WHITESPACE"
+                });
+            }
+            IS_XMLROOT => {
+                debug_assert!(x.args.len() == 3);
+                get_rule_expr(x.args.nth(0), ctx, true)?;
+                ctx.buf.push_str(", VERSION ");
+                let ver = x.args.nth(1);
+                match ver.as_const() {
+                    Some(c) if c.constisnull => ctx.buf.push_str("NO VALUE"),
+                    _ => get_rule_expr(ver, ctx, false)?,
+                }
+                let con = x.args.nth(2).as_const().expect("XMLROOT standalone Const");
+                if !con.constisnull {
+                    // XmlStandaloneType (xml.h): YES / NO / NO_VALUE / OMITTED.
+                    match con.constvalue.as_i32() {
+                        0 => ctx.buf.push_str(", STANDALONE YES"),
+                        1 => ctx.buf.push_str(", STANDALONE NO"),
+                        2 => ctx.buf.push_str(", STANDALONE NO VALUE"),
+                        _ => {}
+                    }
+                }
+            }
+            IS_DOCUMENT => {
+                // C passes the args List to get_rule_expr_paren; a List is
+                // never "simple", so parens appear exactly under PRETTY_PAREN.
+                if ctx.pretty_paren() {
+                    ctx.buf.push('(');
+                }
+                let mut first = true;
+                for a in x.args.iter() {
+                    if !first {
+                        ctx.buf.push_str(", ");
+                    }
+                    first = false;
+                    get_rule_expr(a, ctx, false)?;
+                }
+                if ctx.pretty_paren() {
+                    ctx.buf.push(')');
+                }
+            }
+        }
+    }
+    if x.op == IS_XMLSERIALIZE {
+        ctx.buf.push_str(" AS ");
+        ctx.buf.push_str(&format_type_with_typemod(x.r#type, x.typmod)?);
+        ctx.buf.push_str(if x.indent { " INDENT" } else { " NO INDENT" });
+    }
+    if x.op == IS_DOCUMENT {
+        ctx.buf.push_str(" IS DOCUMENT");
+    } else {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+pub(crate) fn get_tablefunc<'mcx>(
+    tf: &'mcx types_nodes::primnodes::TableFunc<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    match tf.functype {
+        types_nodes::TableFuncType::TFT_XMLTABLE => get_xmltable(tf, ctx, showimplicit),
+        types_nodes::TableFuncType::TFT_JSON_TABLE => {
+            gap("get_tablefunc", "JSON_TABLE deparse (JsonTablePathScan vocabulary)")
+        }
+    }
+}
+
+fn get_xmltable<'mcx>(
+    tf: &'mcx types_nodes::primnodes::TableFunc<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    ctx.buf.push_str("XMLTABLE(");
+    if !tf.ns_uris.is_nil() {
+        ctx.buf.push_str("XMLNAMESPACES (");
+        let mut first = true;
+        for (expr, ns_node) in tf.ns_uris.iter().zip(tf.ns_names.iter()) {
+            if !first {
+                ctx.buf.push_str(", ");
+            }
+            first = false;
+            match ns_node {
+                Some(n) => {
+                    get_rule_expr(expr, ctx, showimplicit)?;
+                    ctx.buf.push_str(" AS ");
+                    ctx.buf
+                        .push_str(&quote_identifier(n.as_string().expect("ns_names cell").sval));
+                }
+                None => {
+                    ctx.buf.push_str("DEFAULT ");
+                    get_rule_expr(expr, ctx, showimplicit)?;
+                }
+            }
+        }
+        ctx.buf.push_str("), ");
+    }
+    ctx.buf.push('(');
+    get_rule_expr(tf.rowexpr.expect("XMLTABLE has a rowexpr"), ctx, showimplicit)?;
+    ctx.buf.push_str(") PASSING (");
+    get_rule_expr(tf.docexpr.expect("XMLTABLE has a docexpr"), ctx, showimplicit)?;
+    ctx.buf.push(')');
+    if !tf.colexprs.is_nil() {
+        ctx.buf.push_str(" COLUMNS ");
+        for (colnum, (((colname, typid), typmod), (colexpr, coldefexpr))) in tf
+            .colnames
+            .iter()
+            .zip(tf.coltypes.iter())
+            .zip(tf.coltypmods.iter())
+            .zip(tf.colexprs.iter().zip(tf.coldefexprs.iter()))
+            .enumerate()
+        {
+            let ordinality = tf.ordinalitycol == colnum as i32;
+            let notnull = tf.notnulls.is_member(colnum as i32);
+            if colnum > 0 {
+                ctx.buf.push_str(", ");
+            }
+            ctx.buf
+                .push_str(&quote_identifier(colname.as_string().expect("colnames cell").sval));
+            ctx.buf.push(' ');
+            if ordinality {
+                ctx.buf.push_str("FOR ORDINALITY");
+                continue;
+            }
+            ctx.buf.push_str(&format_type_with_typemod(typid, typmod)?);
+            if let Some(defexpr) = coldefexpr {
+                ctx.buf.push_str(" DEFAULT (");
+                get_rule_expr(defexpr, ctx, showimplicit)?;
+                ctx.buf.push(')');
+            }
+            if let Some(colexpr) = colexpr {
+                ctx.buf.push_str(" PATH (");
+                get_rule_expr(colexpr, ctx, showimplicit)?;
+                ctx.buf.push(')');
+            }
+            if notnull {
+                ctx.buf.push_str(" NOT NULL");
+            }
+        }
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn tupdesc_field_name<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>, fieldno: i32) -> PgResult<String> {
+    // C funcapi builds a RowExpr(RECORD) tupdesc from colnames; the name is
+    // all we need here (drill-through from subquery/CTE output expressions).
+    if let Some(r) = expr.as_row_expr() {
+        if r.row_typeid == types_core::catalog::RECORDOID
+            && fieldno > 0
+            && fieldno <= r.colnames.len() as i32
+        {
+            return Ok(r
+                .colnames
+                .nth(fieldno as usize - 1)
+                .as_string()
+                .expect("RowExpr colname")
+                .sval
+                .to_owned());
+        }
+    }
+    let tupdesc = funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
+        .expect("composite expression has a tupdesc");
+    debug_assert!(fieldno >= 1 && fieldno <= tupdesc.natts as i32);
+    Ok(String::from_utf8_lossy(tupdesc.attr(fieldno as usize - 1).attname.name_str())
+        .into_owned())
+}
+
+fn get_rte_attribute_name_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    attnum: i32,
+) -> PgResult<String> {
+    if attnum == 0 {
+        return Ok("*".to_string());
+    }
+    if let Some(alias) = rte.alias {
+        if attnum > 0 && attnum <= alias.colnames.len() as i32 {
+            return Ok(alias
+                .colnames
+                .nth(attnum as usize - 1)
+                .as_string()
+                .expect("alias colname")
+                .sval
+                .to_owned());
+        }
+    }
+    if rte.rtekind == RTEKind::RTE_RELATION {
+        return Ok(lsyscache::get_attname(mcx, rte.relid, attnum as i16, false)?
+            .expect("get_attname missing_ok=false")
+            .as_str()
+            .to_owned());
+    }
+    let eref = rte.eref.expect("RTE has eref");
+    if attnum > 0 && attnum <= eref.colnames.len() as i32 {
+        return Ok(eref
+            .colnames
+            .nth(attnum as usize - 1)
+            .as_string()
+            .expect("eref colname")
+            .sval
+            .to_owned());
+    }
+    panic!(
+        "invalid attnum {attnum} for rangetable entry {}",
+        eref.aliasname.unwrap_or("")
+    );
+}
+
+pub(crate) fn get_name_for_var_field<'mcx>(
+    node: Node<'mcx>,
+    fieldno: i32,
+    levelsup: u32,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<String> {
+    if let Some(r) = node.as_row_expr() {
+        if fieldno > 0 && fieldno <= r.colnames.len() as i32 {
+            return Ok(r
+                .colnames
+                .nth(fieldno as usize - 1)
+                .as_string()
+                .expect("RowExpr colname")
+                .sval
+                .to_owned());
+        }
+    }
+    if let Some(param) = node.as_param() {
+        if let Some((expr, dpns, idx)) = crate::plan::find_param_referent(param, ctx) {
+            let save = crate::plan::push_ancestor_plan(&dpns, idx);
+            let result = get_name_for_var_field(expr, fieldno, 0, ctx);
+            crate::plan::pop_ancestor_plan(&dpns, save);
+            return result;
+        }
+    }
+    let var = match node.as_var() {
+        Some(v) if v.vartype == types_core::catalog::RECORDOID => v,
+        _ => return tupdesc_field_name(ctx.mcx, node, fieldno),
+    };
+
+    let netlevelsup = (var.varlevelsup + levelsup) as usize;
+    if netlevelsup >= ctx.namespaces.len() {
+        panic!("bogus varlevelsup: {} offset {levelsup}", var.varlevelsup);
+    }
+    let dpns = Rc::clone(&ctx.namespaces[netlevelsup]);
+    let plan_active = dpns.plan.borrow().plan.is_some();
+    let (varno, varattno) = if var.varnosyn > 0 && !plan_active {
+        (var.varnosyn as i32, var.varattnosyn)
+    } else {
+        (var.varno, var.varattno)
+    };
+
+    let (rte, attnum) = if varno >= 1 && varno as usize <= dpns.rtable.len() {
+        (dpns.rtable[varno as usize - 1], varattno)
+    } else {
+        let ps = dpns.plan.borrow();
+        if varno == types_nodes::primnodes::OUTER_VAR && ps.outer_tlist.is_some() {
+            let tle = crate::plan::get_tle_by_resno(ps.outer_tlist.unwrap(), varattno)
+                .unwrap_or_else(|| panic!("bogus varattno for OUTER_VAR var: {varattno}"));
+            debug_assert!(netlevelsup == 0);
+            let outer = ps.outer_plan.unwrap();
+            drop(ps);
+            let save = crate::plan::push_child_plan(&dpns, outer);
+            let result = get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
+            crate::plan::pop_child_plan(&dpns, save);
+            return result;
+        }
+        if varno == types_nodes::primnodes::INNER_VAR && ps.inner_tlist.is_some() {
+            let tle = crate::plan::get_tle_by_resno(ps.inner_tlist.unwrap(), varattno)
+                .unwrap_or_else(|| panic!("bogus varattno for INNER_VAR var: {varattno}"));
+            debug_assert!(netlevelsup == 0);
+            let inner = ps.inner_plan.unwrap();
+            drop(ps);
+            let save = crate::plan::push_child_plan(&dpns, inner);
+            let result = get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
+            crate::plan::pop_child_plan(&dpns, save);
+            return result;
+        }
+        if varno == types_nodes::primnodes::INDEX_VAR && ps.index_tlist.is_some() {
+            let tle = crate::plan::get_tle_by_resno(ps.index_tlist.unwrap(), varattno)
+                .unwrap_or_else(|| panic!("bogus varattno for INDEX_VAR var: {varattno}"));
+            debug_assert!(netlevelsup == 0);
+            drop(ps);
+            return get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
+        }
+        panic!("bogus varno: {varno}");
+    };
+
+    if attnum == 0 {
+        return get_rte_attribute_name_string(ctx.mcx, rte, fieldno);
+    }
+
+    let mut expr: Node<'mcx> = node;
+    match rte.rtekind {
+        RTEKind::RTE_SUBQUERY => {
+            if let Some(subquery) = rte.subquery {
+                let ste = subquery
+                    .targetList
+                    .iter()
+                    .map(|n| n.as_target_entry().expect("targetlist holds TargetEntries"))
+                    .find(|tle| tle.resno == attnum);
+                let ste = match ste {
+                    Some(s) if !s.resjunk => s,
+                    _ => panic!(
+                        "subquery {} does not have attribute {attnum}",
+                        rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+                    ),
+                };
+                expr = ste.expr;
+                if expr.node_tag() == NodeTag::T_Var {
+                    let parents: Vec<Rc<DeparseNamespace<'mcx>>> =
+                        ctx.namespaces[netlevelsup..].to_vec();
+                    let mydpns =
+                        Rc::new(query::set_deparse_for_query(ctx.mcx, subquery, &parents)?);
+                    let save_ns = std::mem::replace(
+                        &mut ctx.namespaces,
+                        std::iter::once(mydpns).chain(parents).collect(),
+                    );
+                    let result = get_name_for_var_field(expr, fieldno, 0, ctx);
+                    ctx.namespaces = save_ns;
+                    return result;
+                }
+            } else {
+                // Plan tree: drill into the SubqueryScan child tlist; a
+                // proven-empty subquery leaves a childless Result — print fN.
+                let ps = dpns.plan.borrow();
+                if ps.inner_plan.is_none() {
+                    return Ok(format!("f{fieldno}"));
+                }
+                let tle = crate::plan::get_tle_by_resno(
+                    ps.inner_tlist.expect("inner_plan implies inner_tlist"),
+                    attnum,
+                )
+                .unwrap_or_else(|| panic!("bogus varattno for subquery var: {attnum}"));
+                debug_assert!(netlevelsup == 0);
+                let inner = ps.inner_plan.unwrap();
+                drop(ps);
+                let save = crate::plan::push_child_plan(&dpns, inner);
+                let result = get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
+                crate::plan::pop_child_plan(&dpns, save);
+                return result;
+            }
+        }
+        RTEKind::RTE_JOIN => {
+            if rte.joinaliasvars.is_nil() {
+                panic!("cannot decompile join alias var in plan tree");
+            }
+            debug_assert!(attnum > 0 && attnum as usize <= rte.joinaliasvars.len());
+            expr = rte.joinaliasvars.nth(attnum as usize - 1);
+            if expr.node_tag() == NodeTag::T_Var {
+                return get_name_for_var_field(expr, fieldno, var.varlevelsup + levelsup, ctx);
+            }
+        }
+        RTEKind::RTE_CTE => {
+            let ctelevelsup = rte.ctelevelsup as usize + netlevelsup;
+            let cte = if ctelevelsup < ctx.namespaces.len() {
+                ctx.namespaces[ctelevelsup]
+                    .ctes
+                    .iter()
+                    .copied()
+                    .find(|c| c.ctename == rte.ctename)
+            } else {
+                None
+            };
+            if let Some(cte) = cte {
+                let ctequery = cte
+                    .ctequery
+                    .and_then(|n| n.as_query())
+                    .expect("transformed CTE holds a Query");
+                let tl = if ctequery.commandType == types_nodes::nodes_enums::CmdType::CMD_SELECT
+                {
+                    &ctequery.targetList
+                } else {
+                    &ctequery.returningList
+                };
+                let ste = tl
+                    .iter()
+                    .map(|n| n.as_target_entry().expect("targetlist holds TargetEntries"))
+                    .find(|tle| tle.resno == attnum);
+                let ste = match ste {
+                    Some(s) if !s.resjunk => s,
+                    _ => panic!(
+                        "CTE {} does not have attribute {attnum}",
+                        rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+                    ),
+                };
+                expr = ste.expr;
+                if expr.node_tag() == NodeTag::T_Var {
+                    let parents: Vec<Rc<DeparseNamespace<'mcx>>> =
+                        ctx.namespaces[ctelevelsup..].to_vec();
+                    let mydpns =
+                        Rc::new(query::set_deparse_for_query(ctx.mcx, ctequery, &parents)?);
+                    let save_ns = std::mem::replace(
+                        &mut ctx.namespaces,
+                        std::iter::once(mydpns).chain(parents).collect(),
+                    );
+                    let result = get_name_for_var_field(expr, fieldno, 0, ctx);
+                    ctx.namespaces = save_ns;
+                    return result;
+                }
+            } else {
+                // Plan tree: CteScan/WorkTableScan expose the emitting plan as
+                // inner_plan; a proven-empty CTE leaves a Result — print fN.
+                let ps = dpns.plan.borrow();
+                if ps.inner_plan.is_none() {
+                    return Ok(format!("f{fieldno}"));
+                }
+                let tle = crate::plan::get_tle_by_resno(
+                    ps.inner_tlist.expect("inner_plan implies inner_tlist"),
+                    attnum,
+                )
+                .unwrap_or_else(|| panic!("bogus varattno for subquery var: {attnum}"));
+                debug_assert!(netlevelsup == 0);
+                let inner = ps.inner_plan.unwrap();
+                drop(ps);
+                let save = crate::plan::push_child_plan(&dpns, inner);
+                let result = get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
+                crate::plan::pop_child_plan(&dpns, save);
+                return result;
+            }
+        }
+        _ => {}
+    }
+    tupdesc_field_name(ctx.mcx, expr, fieldno)
 }

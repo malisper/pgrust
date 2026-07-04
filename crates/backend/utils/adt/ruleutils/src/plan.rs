@@ -190,7 +190,7 @@ pub(crate) fn pop_ancestor_plan<'mcx>(dpns: &DeparseNamespace<'mcx>, save: DpnsP
     *dpns.plan.borrow_mut() = save;
 }
 
-fn get_tle_by_resno<'mcx>(
+pub(crate) fn get_tle_by_resno<'mcx>(
     tlist: &NodeList<'mcx>,
     resno: i16,
 ) -> Option<&'mcx types_nodes::primnodes::TargetEntry<'mcx>> {

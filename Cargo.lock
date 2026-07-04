@@ -10545,6 +10545,7 @@ dependencies = [
 name = "ruleutils"
 version = "0.1.0"
 dependencies = [
+ "adt_xml",
  "cache_syscache",
  "catalog_namespace",
  "catcache",
@@ -10552,6 +10553,7 @@ dependencies = [
  "detoast",
  "fmgr_seams",
  "format_type",
+ "funcapi",
  "genam",
  "genam_seams",
  "guc",
