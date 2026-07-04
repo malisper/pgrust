@@ -714,7 +714,7 @@ fn rescan_rebuilds_from_fresh_bitmap() {
         assert!(exec_bitmap_heap_scan(&mut c.bhs, &mut c.estate).unwrap().is_some());
         exec_rescan_bitmap_heap_scan(&mut c.bhs, &mut c.estate).unwrap();
         assert!(!c.bhs.initialized);
-        nodebitmapindexscan::exec_rescan_bitmap_index_scan(&mut c.biss).unwrap();
+        nodebitmapindexscan::exec_rescan_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
         bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
         assert_eq!(drain(&mut c.bhs, &mut c.estate), vec![20, 30]);
