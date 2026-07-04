@@ -81,6 +81,7 @@ fn varsize_any(p: *const u8) -> usize {
     unsafe {
         let b0 = *p;
         if b0 & 0x01 != 0 {
+            assert!(b0 != 0x01, "array varlena is an external toast pointer — detoast lane");
             (b0 as usize >> 1) & 0x7F
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
@@ -329,6 +330,16 @@ mod tests {
         };
         assert_eq!(read(out[0]), b"abc");
         assert_eq!(read(out[1]), b"hello");
+    }
+
+    #[test]
+    #[should_panic(expected = "external toast pointer")]
+    fn construct_array_rejects_external_input() {
+        let ctx = MemoryContext::new_bump("arr-ext");
+        let mut ext = vec![0x01u8, 18];
+        ext.extend_from_slice(&[0u8; 16]);
+        let vals = [Datum::from_usize(ext.as_ptr() as usize)];
+        let _ = construct_array_image(ctx.mcx(), &vals, 25, -1, false, b'i');
     }
 
     #[test]

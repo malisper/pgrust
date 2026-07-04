@@ -61,10 +61,9 @@ const ANY_CHAR_SEL: f64 = 0.9;
 const FULL_WILDCARD_SEL: f64 = 5.0;
 const PARTIAL_WILDCARD_SEL: f64 = 2.0;
 
+// Pattern consts can be short-form (bound-param datumCopy preserves headers).
 fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
-    // SAFETY: caller passes a non-null by-ref text/bytea datum living in the
-    // planner arena.
-    unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8).data() }
+    selfuncs::varlena_datum_payload(d)
 }
 
 fn text_const<'mcx>(mcx: Mcx<'mcx>, s: &[u8], typ: Oid) -> PgResult<PrefixConst> {

@@ -440,8 +440,9 @@ fn get_actual_variable_endpoint<'mcx>(
 }
 
 // datumCopy (datum.c): the probed value points into the AM's page buffer and
-// must outlive the scan; toast pointers cannot appear in an index key image.
-fn endpoint_datum_copy<'mcx>(
+// must outlive the scan; index_form_tuple packs, so the -1 arm is C's
+// VARSIZE_ANY (short 1B headers and inline-compressed images included).
+pub(crate) fn endpoint_datum_copy<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     value: Datum,
     typbyval: bool,
@@ -454,8 +455,25 @@ fn endpoint_datum_copy<'mcx>(
     assert!(!p.is_null());
     let size = match typlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum.
-            unsafe { datum::VarlenaRef::from_ptr(p).varsize() }
+            // SAFETY: non-null by-ref varlena datum, readable for its
+            // header-declared (VARSIZE_ANY) size.
+            unsafe {
+                let b0 = *p;
+                if b0 == 0x01 {
+                    2 + match *p.add(1) {
+                        18 => 16,
+                        1 => 8,
+                        2 | 3 => panic!(
+                            "endpoint_datum_copy: expanded-object flatten (EOH_flatten_into) unported"
+                        ),
+                        tag => panic!("endpoint_datum_copy: unknown vartag {tag}"),
+                    }
+                } else if b0 & 0x01 != 0 {
+                    (b0 as usize >> 1) & 0x7F
+                } else {
+                    datum::VarlenaRef::from_ptr(p).varsize()
+                }
+            }
         }
         -2 => {
             let mut n = 0usize;
@@ -800,10 +818,7 @@ fn convert_string_datum<'mcx>(
             let b = [value.as_u8()];
             mcx::slice_in(mcx, &b).ok()?.leak()
         }
-        BPCHAROID | VARCHAROID | TEXTOID => {
-            // SAFETY: by-ref text datum living in the planner arena.
-            unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8).data() }
-        }
+        BPCHAROID | VARCHAROID | TEXTOID => varlena_datum_payload(value),
         NAMEOID => {
             let p = value.as_usize() as *const u8;
             let mut n = 0usize;
@@ -947,14 +962,9 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
         FLOAT8OID => Some(value.as_f64()),
         OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
         | REGTYPEOID => Some(value.as_u32() as f64),
-        NUMERICOID => {
-            // SAFETY: by-ref numeric datum; stats-array elements and consts
-            // carry 4-byte headers (construct_array canonicalizes short forms).
-            let v = unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8) };
-            Some(adt_numeric::numeric_float8_no_overflow(adt_numeric::Num::from_payload(
-                v.data(),
-            )))
-        }
+        NUMERICOID => Some(adt_numeric::numeric_float8_no_overflow(adt_numeric::Num::from_payload(
+            varlena_datum_payload(value),
+        ))),
         _ => None,
     }
 }
@@ -3306,31 +3316,49 @@ struct PrefixConst {
     constvalue: Datum,
 }
 
-fn text_datum_payload<'a>(value: Datum) -> &'a [u8] {
+// VARDATA_ANY/VARSIZE_ANY_EXHDR: planner consts and stats values carry 1B or
+// 4B-U images (bound-param datumCopy preserves short forms; the asserts keep
+// toast forms loud).
+pub(crate) fn varlena_datum_payload<'a>(value: Datum) -> &'a [u8] {
     let p = value.as_usize() as *const u8;
     debug_assert!(!p.is_null());
-    // SAFETY: by-ref varlena datum; planner consts and detoasted stats carry
-    // in-line 1B/4B images only (the asserts keep toast forms loud).
+    // SAFETY: by-ref inline varlena datum, readable for its header size.
     unsafe {
         let b0 = *p;
         if b0 & 0x01 == 0x01 {
-            assert!(b0 != 0x01, "text_datum_payload: external toast datum");
+            assert!(b0 != 0x01, "varlena_datum_payload: external toast datum");
             let total = ((b0 >> 1) & 0x7F) as usize;
             core::slice::from_raw_parts(p.add(1), total - 1)
         } else {
-            assert!(b0 & 0x03 == 0, "text_datum_payload: compressed datum");
+            assert!(b0 & 0x03 == 0, "varlena_datum_payload: compressed datum");
             datum::VarlenaRef::from_ptr(p).data()
         }
     }
 }
 
-fn varlena_image<'a>(value: Datum) -> &'a [u8] {
+// PG_DETOAST_DATUM's short-header arm: layout-sensitive readers (array/range
+// deserializers) need 4B offsets, so a short const expands into `mcx`.
+pub(crate) fn varlena_image_any<'a>(mcx: mcx::Mcx<'a>, value: Datum) -> PgResult<&'a [u8]> {
     let p = value.as_usize() as *const u8;
     debug_assert!(!p.is_null());
-    // SAFETY: as text_datum_payload; array consts are 4B uncompressed images.
+    // SAFETY: by-ref inline varlena datum, readable for its header size.
     unsafe {
-        assert!(*p & 0x03 == 0, "varlena_image: non-4B varlena");
-        datum::VarlenaRef::from_ptr(p).as_bytes()
+        let b0 = *p;
+        if b0 & 0x01 == 0x01 {
+            assert!(b0 != 0x01, "varlena_image_any: external toast datum");
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            let payload = core::slice::from_raw_parts(p.add(1), total - 1);
+            let mut img = mcx::vec_with_capacity_in(mcx, total - 1 + datum::varlena::VARHDRSZ)?;
+            mcx::vec_append_bytes(
+                &mut img,
+                &datum::varlena::set_varsize_4b(total - 1 + datum::varlena::VARHDRSZ),
+            )?;
+            mcx::vec_append_bytes(&mut img, payload)?;
+            Ok(img.leak())
+        } else {
+            assert!(b0 & 0x03 == 0, "varlena_image_any: compressed datum");
+            Ok(datum::VarlenaRef::from_ptr(p).as_bytes())
+        }
     }
 }
 
@@ -3432,18 +3460,7 @@ pub fn scalararraysel<'mcx>(
         if c.constisnull {
             return Ok(0.0);
         }
-        let p = c.constvalue.as_usize() as *const u8;
-        // SAFETY: non-null array datum; planner consts carry inline 4-byte
-        // headers.
-        let b0 = unsafe { *p };
-        assert!(b0 != 0x01 && b0 & 0x03 == 0, "scalararraysel: toasted/packed array const");
-        // SAFETY: 4-byte varlena header verified; image is VARSIZE bytes.
-        let img = unsafe {
-            core::slice::from_raw_parts(
-                p,
-                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
-            )
-        };
+        let img = varlena_image_any(run.mcx, c.constvalue)?;
         let elemtype = arrayfuncs::arr_elemtype(img);
         let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
         let (values, nulls) = arrayfuncs::deconstruct_array(
@@ -3598,21 +3615,14 @@ pub fn estimate_array_length(node: Node<'_>) -> f64 {
         if c.constisnull {
             return 0.0;
         }
-        let p = c.constvalue.as_usize() as *const u8;
-        // SAFETY: non-null inline-header array datum (as scalararraysel).
-        let b0 = unsafe { *p };
-        assert!(b0 != 0x01 && b0 & 0x03 == 0, "estimate_array_length: toasted array const");
-        // SAFETY: 4-byte varlena header verified.
-        let img = unsafe {
-            core::slice::from_raw_parts(
-                p,
-                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
-            )
-        };
-        let ndim = arrayfuncs::arr_ndim(img);
+        // Header-relative reads work for 1B and 4B images alike (bound-param
+        // array consts can be short-form).
+        let body = varlena_datum_payload(c.constvalue);
+        let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+        let ndim = rd(0);
         let mut n = 1f64;
         for i in 0..ndim as usize {
-            n *= arrayfuncs::arr_dim(img, i) as f64;
+            n *= rd(12 + 4 * i) as f64;
         }
         if ndim == 0 {
             n = 0.0;
