@@ -142,7 +142,7 @@ fn clear_then_reuse_and_rescan() {
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 99);
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
-    ts.rescan();
+    ts.rescan().unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 99);
 }
@@ -221,21 +221,10 @@ fn backward_at_start_is_none_and_rescan_resets() {
 
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
-    ts.rescan();
+    ts.rescan().unwrap();
     assert!(!ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 7);
-}
-
-#[test]
-#[should_panic(expected = "work_mem")]
-fn spill_to_tape_is_loud() {
-    let mcx = leaked_mcx();
-    let desc = int4_desc(mcx, 1);
-    let mut ts = Tuplestore::begin_heap(false, true, 1);
-    for v in 0..INITIAL_MEMTUPSIZE as i32 {
-        put_i32(&mut ts, &desc, v);
-    }
 }
 
 #[test]
@@ -260,7 +249,7 @@ fn follower_read_pointer_replays_leader_fill() {
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
 
     // Follower replays the whole store independently.
-    ts.select_read_pointer(follower);
+    ts.select_read_pointer(follower).unwrap();
     for v in [10, 20, 30] {
         assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
         assert_eq!(read_i32(&mut slot), v);
@@ -268,11 +257,11 @@ fn follower_read_pointer_replays_leader_fill() {
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert!(ts.ateof());
 
-    ts.rescan();
+    ts.rescan().unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 10);
 
-    ts.select_read_pointer(0);
+    ts.select_read_pointer(0).unwrap();
     assert!(ts.ateof());
 }
 
@@ -286,15 +275,15 @@ fn inactive_eof_pointer_advances_to_next_write() {
     put_i32(&mut ts, &desc, 1);
     let mut slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
-    ts.select_read_pointer(follower);
+    ts.select_read_pointer(follower).unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
 
     // Follower hits EOF, becomes inactive, then a write lands: C spec says an
     // INACTIVE eof pointer un-eofs onto the new tuple.
-    ts.select_read_pointer(0);
+    ts.select_read_pointer(0).unwrap();
     put_i32(&mut ts, &desc, 2);
-    ts.select_read_pointer(follower);
+    ts.select_read_pointer(follower).unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 2);
 }
@@ -311,7 +300,7 @@ fn new_pointer_copies_pointer_zero_position() {
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
-    ts.select_read_pointer(p);
+    ts.select_read_pointer(p).unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 2);
 }
@@ -403,22 +392,22 @@ fn skiptuples_and_advance_window_navigation() {
     }
     let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
 
-    ts.select_read_pointer(rp);
-    assert!(ts.skiptuples(4, true));
+    ts.select_read_pointer(rp).unwrap();
+    assert!(ts.skiptuples(4, true).unwrap());
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 4);
 
     // seekpos == pos refetch shape: advance forward, then read backward.
-    assert!(ts.advance(true));
+    assert!(ts.advance(true).unwrap());
     assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 4);
 
-    assert!(ts.skiptuples(3, false));
+    assert!(ts.skiptuples(3, false).unwrap());
     assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 0);
 
     // Forward skip past EOF fails and leaves the pointer at EOF.
-    assert!(!ts.skiptuples(50, true));
+    assert!(!ts.skiptuples(50, true).unwrap());
     assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     // Backward from EOF: last tuple.
     assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
@@ -445,4 +434,231 @@ fn get_stats_tracks_chunk_space_maximum_across_clear() {
     // maxSpace survives clear (C tuplestore_updatemax in tuplestore_clear).
     assert_eq!(ts.get_stats().max_space, s1.max_space);
     ts.end();
+}
+
+mod spill {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Once;
+
+    use super::*;
+
+    static SETUP: Once = Once::new();
+    static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
+    static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn enter_datadir(tag: &str) -> (std::sync::MutexGuard<'static, ()>, String) {
+        let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = format!(
+            "{}/pgrust-tstorespill-{}-{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            tag
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(format!("{dir}/base/pgsql_tmp")).unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        (guard, dir)
+    }
+
+    fn setup() {
+        SETUP.call_once(|| {
+            guc_tables::init_seams();
+            elog::init_seams();
+            fd::init_seams();
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+            aio_seams::pgaio_closing_fd::set(|_| {});
+            aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            pgstat_seams::pgstat_report_tempfile::set(|_| {});
+            ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
+            ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+            resowner::init_seams();
+            guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
+                get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
+                set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
+            });
+        });
+        fd::InitFileAccess();
+        let _ = fd::InitTemporaryFileAccess();
+        if resowner_seams::current_resource_owner::call().is_null() {
+            let owner =
+                resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "spill-test")
+                    .unwrap();
+            resowner_seams::set_current_resource_owner::call(owner);
+        }
+    }
+
+    fn temp_files(dir: &str) -> usize {
+        std::fs::read_dir(format!("{dir}/base/pgsql_tmp"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    const N: i32 = 200_000; // ~200k 16B tuples >> 64KB work_mem
+
+    #[test]
+    fn spill_forward_roundtrip_and_stats() {
+        setup();
+        let (_cwd, dir) = enter_datadir("fwd");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(false, false, 64);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory(), "200k tuples must spill at 64KB");
+        assert!(temp_files(&dir) > 0);
+
+        for v in 0..N {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+        assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert!(ts.ateof());
+
+        let stats = ts.get_stats();
+        assert!(matches!(
+            stats.space_type,
+            types_core::instrument::TuplesortSpaceType::Disk
+        ));
+        assert!(stats.max_space > 0);
+
+        // Writes resume after reads (READFILE -> WRITEFILE switch); the
+        // active pointer stays at EOF (C API spec), so replay via rescan.
+        put_i32(&mut ts, &desc, N);
+        assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        ts.rescan().unwrap();
+        assert!(ts.skiptuples(i64::from(N), true).unwrap());
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), N);
+
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+        assert_eq!(temp_files(&dir), 0, "temp file must be removed at end");
+    }
+
+    #[test]
+    fn spill_backward_and_rescan() {
+        setup();
+        let (_cwd, dir) = enter_datadir("back");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(true, false, 64);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory());
+
+        // Forward to EOF.
+        let mut n = 0;
+        while ts.gettupleslot(true, false, &mut slot, mcx).unwrap() {
+            n += 1;
+        }
+        assert_eq!(n, N);
+
+        // Backward walk: last tuple first, down to (not incl.) the first.
+        let mut v = N - 1;
+        while ts.gettupleslot(false, false, &mut slot, mcx).unwrap() {
+            assert_eq!(read_i32(&mut slot), v);
+            v -= 1;
+        }
+        assert_eq!(v, -1);
+
+        ts.rescan().unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 0);
+
+        // skiptuples across the file arms.
+        assert!(ts.skiptuples(1000, true).unwrap());
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1001);
+        assert!(ts.skiptuples(2, false).unwrap());
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1000);
+
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+        assert_eq!(temp_files(&dir), 0);
+    }
+
+    #[test]
+    fn spill_two_read_pointers_and_copy() {
+        setup();
+        let (_cwd, _dir) = enter_datadir("ptrs");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(true, false, 64);
+        let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory());
+
+        // Pointer 0 reads ahead 10 tuples.
+        for v in 0..10 {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+        // Follower still at the start.
+        ts.select_read_pointer(follower).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 0);
+
+        // copy_read_pointer: follower jumps to pointer 0's position.
+        ts.copy_read_pointer(0, follower).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 10);
+
+        // Back to pointer 0; it is unaffected.
+        ts.select_read_pointer(0).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 10);
+
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+    }
+
+    #[test]
+    fn spill_clear_returns_to_memory() {
+        setup();
+        let (_cwd, dir) = enter_datadir("clear");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(false, false, 64);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory());
+        ts.clear();
+        assert!(ts.in_memory());
+        assert_eq!(temp_files(&dir), 0, "clear must drop the temp file");
+        assert_eq!(ts.tuple_count(), 0);
+
+        put_i32(&mut ts, &desc, 7);
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 7);
+
+        // usedDisk sticks across clear (C contract).
+        let stats = ts.get_stats();
+        assert!(matches!(
+            stats.space_type,
+            types_core::instrument::TuplesortSpaceType::Disk
+        ));
+
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+    }
 }

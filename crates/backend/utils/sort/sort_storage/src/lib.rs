@@ -1,5 +1,6 @@
-// logtape.c, serial arm. Parallel (SharedFileSet worker/leader import) and
-// sharedtuplestore.c are unreached in serial sorts (loud by absence).
+// logtape.c, serial arm; block trailer = trailing (prev, next) i64 pair,
+// next < 0 on the last block encodes -nbytes. Parallel (SharedFileSet
+// import) and sharedtuplestore.c are unreached in serial sorts.
 #![allow(non_snake_case)]
 
 use ::mcx::{Mcx, PgVec};
@@ -22,9 +23,6 @@ const TAPE_WRITE_PREALLOC_MAX: usize = 128;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TapeIdx(u32);
 
-// Trailer = final 16 bytes of each block: (prev: i64, next: i64), native
-// endian (the temp file is private to this backend). next < 0 on the last
-// block encodes -nbytes.
 #[inline]
 fn trailer_prev(buf: &[u8]) -> i64 {
     i64::from_ne_bytes(
@@ -216,7 +214,6 @@ impl<'m> LogicalTapeSet<'m> {
         self.core.pfile.close()
     }
 
-    /// `LogicalTapeSetBlocks`; serial sets never have hole blocks.
     pub fn blocks(&self) -> i64 {
         self.core.n_blocks_written
     }
@@ -225,7 +222,6 @@ impl<'m> LogicalTapeSet<'m> {
         self.core.forget_free_space = true;
     }
 
-    /// `LogicalTapeCreate` (serial: the leader check never applies).
     pub fn create_tape(&mut self) -> TapeIdx {
         let mcx = self.core.mcx;
         let slot = self.tapes.len();
@@ -260,7 +256,6 @@ impl<'m> LogicalTapeSet<'m> {
         (&mut self.core, lt)
     }
 
-    /// `LogicalTapeWrite`.
     pub fn write(&mut self, tape: TapeIdx, mut data: &[u8]) -> PgResult<()> {
         let (core, lt) = self.parts(tape);
         debug_assert!(lt.writing);
@@ -307,7 +302,6 @@ impl<'m> LogicalTapeSet<'m> {
         Ok(())
     }
 
-    /// `LogicalTapeRewindForRead`.
     pub fn rewind_for_read(&mut self, tape: TapeIdx, buffer_size: usize) -> PgResult<()> {
         let (core, lt) = self.parts(tape);
         let buffer_size = if lt.frozen {
@@ -327,7 +321,6 @@ impl<'m> LogicalTapeSet<'m> {
             debug_assert!(lt.frozen);
         }
 
-        // Buffer is lazily reallocated at the new size on first read.
         lt.buffer.clear();
         lt.buffer.shrink_to_fit();
         lt.buffer_size = buffer_size;
@@ -339,7 +332,6 @@ impl<'m> LogicalTapeSet<'m> {
         Ok(())
     }
 
-    /// `LogicalTapeRead`; short return = EOF.
     pub fn read(&mut self, tape: TapeIdx, dst: &mut [u8]) -> PgResult<usize> {
         let (core, lt) = self.parts(tape);
         debug_assert!(!lt.writing);
@@ -364,7 +356,6 @@ impl<'m> LogicalTapeSet<'m> {
         Ok(nread)
     }
 
-    /// `LogicalTapeFreeze`, serial arm (`share = NULL`).
     pub fn freeze(&mut self, tape: TapeIdx) -> PgResult<()> {
         let (core, lt) = self.parts(tape);
         debug_assert!(lt.writing);
@@ -376,7 +367,6 @@ impl<'m> LogicalTapeSet<'m> {
         lt.writing = false;
         lt.frozen = true;
 
-        // Seek/backspace assume a single-block read buffer.
         if lt.buffer_size != BLCKSZ || lt.buffer.len() != BLCKSZ {
             lt.buffer.clear();
             lt.buffer.resize(BLCKSZ, 0);
@@ -467,7 +457,6 @@ impl<'m> LogicalTapeSet<'m> {
         Ok(())
     }
 
-    /// `LogicalTapeTell`.
     pub fn tell(&mut self, tape: TapeIdx) -> PgResult<(i64, i32)> {
         let (core, lt) = self.parts(tape);
         if lt.buffer.is_empty() {
@@ -478,7 +467,6 @@ impl<'m> LogicalTapeSet<'m> {
     }
 }
 
-/// `ltsGetBlock`.
 fn get_block(core: &mut TapeSetCore<'_>, lt: &mut LogicalTape<'_>) -> i64 {
     if core.enable_prealloc {
         get_prealloc_block(core, lt)

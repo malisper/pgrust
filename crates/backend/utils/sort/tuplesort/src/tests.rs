@@ -1647,3 +1647,233 @@ fn radix_direct_small_covers_unsafe_paths() {
     assert_eq!(drain_text_datums(&mut ts), text_oracle(dups, false));
     ts.end();
 }
+
+mod spill {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Once;
+
+    use super::*;
+    use ::types_slot::TupleSlotKind;
+
+    static SETUP: Once = Once::new();
+    static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
+    static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn enter_datadir(tag: &str) -> (std::sync::MutexGuard<'static, ()>, String) {
+        let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = format!(
+            "{}/pgrust-tsortspill-{}-{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            tag
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(format!("{dir}/base/pgsql_tmp")).unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        (guard, dir)
+    }
+
+    fn setup() {
+        SETUP.call_once(|| {
+            guc_tables::init_seams();
+            elog::init_seams();
+            fd::init_seams();
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+            aio_seams::pgaio_closing_fd::set(|_| {});
+            aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            pgstat_seams::pgstat_report_tempfile::set(|_| {});
+            ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
+            ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+            resowner::init_seams();
+            guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
+                get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
+                set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
+            });
+        });
+        fd::InitFileAccess();
+        let _ = fd::InitTemporaryFileAccess();
+        if resowner_seams::current_resource_owner::call().is_null() {
+            let owner =
+                resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "spill-test")
+                    .unwrap();
+            resowner_seams::set_current_resource_owner::call(owner);
+        }
+    }
+
+    fn temp_files(dir: &str) -> usize {
+        std::fs::read_dir(format!("{dir}/base/pgsql_tmp"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    fn spill_datums(n: u64, sortopt: i32) -> (Tuplesort, Vec<i32>) {
+        let mut ts = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 64, sortopt);
+        let mut seed = 42u64;
+        let mut oracle: Vec<i32> = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let v = lcg(&mut seed) as i32;
+            oracle.push(v);
+            ts.putdatum(Datum::from_i32(v), false).unwrap();
+        }
+        oracle.sort_unstable();
+        (ts, oracle)
+    }
+
+    #[test]
+    fn datum_spill_final_merge() {
+        setup();
+        let (_cwd, dir) = enter_datadir("finalmerge");
+        let (mut ts, oracle) = spill_datums(30_000, TUPLESORT_NONE);
+        ts.performsort().unwrap();
+        let mut got = Vec::with_capacity(oracle.len());
+        while let Some(nd) = ts.getdatum(true).unwrap() {
+            assert!(!nd.isnull);
+            got.push(nd.value.as_i32());
+        }
+        assert_eq!(got, oracle);
+        let stats = ts.get_stats();
+        assert!(matches!(
+            stats.sortMethod,
+            ::types_core::instrument::TuplesortMethod::ExternalMerge
+        ));
+        assert!(matches!(
+            stats.spaceType,
+            ::types_core::instrument::TuplesortSpaceType::Disk
+        ));
+        assert!(temp_files(&dir) > 0, "temp file expected during merge");
+        ts.end();
+        assert_eq!(temp_files(&dir), 0, "temp files must be removed at end");
+    }
+
+    #[test]
+    fn datum_spill_randomaccess_backward_rescan_markpos() {
+        setup();
+        let (_cwd, dir) = enter_datadir("ontape");
+        let (mut ts, oracle) = spill_datums(20_000, TUPLESORT_RANDOMACCESS);
+        ts.performsort().unwrap();
+
+        // Forward walk.
+        let mut got = Vec::with_capacity(oracle.len());
+        while let Some(nd) = ts.getdatum(true).unwrap() {
+            got.push(nd.value.as_i32());
+        }
+        assert_eq!(got, oracle);
+        let stats = ts.get_stats();
+        assert!(matches!(
+            stats.sortMethod,
+            ::types_core::instrument::TuplesortMethod::ExternalSort
+        ));
+
+        // Backward walk from EOF returns the whole thing reversed.
+        let mut back = Vec::with_capacity(oracle.len());
+        while let Some(nd) = ts.getdatum(false).unwrap() {
+            back.push(nd.value.as_i32());
+        }
+        back.reverse();
+        assert_eq!(back, oracle);
+
+        // Rescan replays from the start.
+        ts.rescan().unwrap();
+        let first = ts.getdatum(true).unwrap().unwrap();
+        assert_eq!(first.value.as_i32(), oracle[0]);
+
+        // markpos/restorepos replay the same tuple.
+        ts.markpos().unwrap();
+        let second = ts.getdatum(true).unwrap().unwrap();
+        assert_eq!(second.value.as_i32(), oracle[1]);
+        ts.restorepos().unwrap();
+        let second_again = ts.getdatum(true).unwrap().unwrap();
+        assert_eq!(second_again.value.as_i32(), oracle[1]);
+
+        // skiptuples over the tape arm.
+        assert!(ts.skiptuples(100, true).unwrap());
+        let after_skip = ts.getdatum(true).unwrap().unwrap();
+        assert_eq!(after_skip.value.as_i32(), oracle[102]);
+
+        ts.end();
+        assert_eq!(temp_files(&dir), 0);
+    }
+
+    #[test]
+    fn heap_spill_two_keys_matches_oracle() {
+        setup();
+        let (_cwd, dir) = enter_datadir("heapspill");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 2);
+        let mut in_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        let mut out_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let keys = [int32_key(1, false, false), int32_key(2, false, false)];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc.clone(), &keys, 64, TUPLESORT_NONE);
+
+        let mut seed = 7u64;
+        let mut rows: Vec<(Option<i32>, Option<i32>)> = (0..40_000)
+            .map(|_| {
+                let a = lcg(&mut seed) % 1000;
+                let b = lcg(&mut seed);
+                (Some(a as i32), if b % 17 == 0 { None } else { Some((b % 100) as i32) })
+            })
+            .collect();
+        for (a, b) in &rows {
+            store_row(&mut in_slot, mcx, &[*a, *b]);
+            ts.puttupleslot(&mut in_slot, mcx).unwrap();
+        }
+        ts.performsort().unwrap();
+
+        rows.sort_by(|x, y| {
+            let k1 = x.0.cmp(&y.0);
+            k1.then_with(|| match (x.1, y.1) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Greater,
+                (_, None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => a.cmp(&b),
+            })
+        });
+
+        let mut got = Vec::new();
+        while ts.gettupleslot(true, false, &mut out_slot, mcx).unwrap() {
+            let mut n1 = false;
+            let mut n2 = false;
+            let v1 = exectuples::slot_getattr(&mut out_slot, 1, &mut n1);
+            let v2 = exectuples::slot_getattr(&mut out_slot, 2, &mut n2);
+            got.push((
+                if n1 { None } else { Some(v1.as_i32()) },
+                if n2 { None } else { Some(v2.as_i32()) },
+            ));
+        }
+        assert_eq!(got.len(), rows.len());
+        assert_eq!(got, rows);
+        exectuples::exec_clear_tuple(&mut out_slot, mcx);
+        ts.end();
+        assert_eq!(temp_files(&dir), 0);
+    }
+
+    #[test]
+    fn spill_then_reset_reuses_state() {
+        setup();
+        let (_cwd, dir) = enter_datadir("reset");
+        let (mut ts, oracle) = spill_datums(15_000, TUPLESORT_NONE);
+        ts.performsort().unwrap();
+        let first = ts.getdatum(true).unwrap().unwrap();
+        assert_eq!(first.value.as_i32(), oracle[0]);
+
+        ts.reset();
+        assert_eq!(temp_files(&dir), 0, "reset must drop the tape files");
+
+        // Second, in-memory batch works after a spilled one.
+        for v in [5, 1, 3] {
+            ts.putdatum(Datum::from_i32(v), false).unwrap();
+        }
+        ts.performsort().unwrap();
+        let vals: Vec<i32> = std::iter::from_fn(|| {
+            ts.getdatum(true).unwrap().map(|nd| nd.value.as_i32())
+        })
+        .collect();
+        assert_eq!(vals, vec![1, 3, 5]);
+        ts.end();
+    }
+}
