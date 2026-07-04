@@ -15,6 +15,7 @@ smgr_seams = { path = "../../smgr/smgr_seams" }
 freespace_seams = { path = "../freespace_seams" }
 
 [dev-dependencies]
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 mcx = { path = "../../../../_support/mcx" }

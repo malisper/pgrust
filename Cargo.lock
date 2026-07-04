@@ -3656,6 +3656,7 @@ dependencies = [
  "predicate_seams",
  "smgr_seams",
  "transam_xlog",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
