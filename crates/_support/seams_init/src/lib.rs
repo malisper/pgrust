@@ -166,6 +166,7 @@ pub fn init_all() {
     pquery::init_seams();
     explain::init_seams();
     commands_createas::init_seams();
+    copy_cmd::init_seams();
     commands_matview::init_seams();
     execreplication::init_seams();
     prepare::init_seams();

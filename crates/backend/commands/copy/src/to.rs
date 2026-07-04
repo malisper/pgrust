@@ -1,7 +1,9 @@
-// copyto.c, text/CSV/binary formats to file or frontend. The callback
-// destination is loud in lib.rs before this module is reached.
+// copyto.c, text/CSV/binary formats to file or frontend, from a relation scan
+// or a query executor run (DestCopyOut). The callback destination
+// (data_dest_cb) has no producer here.
 
 use core::ffi::CStr;
+use std::rc::Rc;
 
 use datum::Datum;
 use elog::ereport;
@@ -9,12 +11,19 @@ use mcx::{Mcx, MemoryContext, PgVec};
 use stringinfo::StringInfo;
 use types_core::primitive::InvalidOid;
 use types_dest::CommandDest;
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_NAME, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+};
 use types_fmgr::{function_call1_coll_in, send_function_call, FmgrInfo, PackedVarlena};
-use types_nodes::NodeList;
+use types_nodes::nodes_enums::CmdType;
+use types_nodes::rawnodes::{CreateTableAsStmt, RawStmt};
+use types_nodes::{NodeList, QuerySource};
+use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle, CURSOR_OPT_PARALLEL_OK};
 use types_rel::Relation;
 use types_scan::ForwardScanDirection;
 use types_slot::SlotData;
+use types_tuple::TupleDescData;
 
 use crate::{
     force_flags, unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
@@ -39,32 +48,52 @@ pub struct CopyToState<'mcx, 's> {
     need_transcoding: bool,
     bytes_processed: u64,
     rowcx: MemoryContext,
+    query_desc: Option<QueryDescHandle>,
+    tupdesc: Option<Rc<TupleDescData<'static>>>,
 }
 
 fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("copyto.c", 0, funcname)
 }
 
-/// `BeginCopyTo` (copyto.c), relation-to-file/frontend arms.
+/// `BeginCopyTo` (copyto.c), relation and query source arms.
 pub fn BeginCopyTo<'mcx, 's>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'mcx>,
+    rel: Option<&Relation<'mcx>>,
+    raw_query: Option<&RawStmt<'mcx>>,
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
     source_text: Option<&str>,
 ) -> PgResult<CopyToState<'mcx, 's>> {
-    if rel.rd_rel.relkind != RELKIND_RELATION
-        && !(rel.rd_rel.relkind == b'm' && rel.rd_rel.relispopulated)
-    {
-        return Err(cannot_copy_from_relkind(rel));
+    if let Some(rel) = rel {
+        if rel.rd_rel.relkind != RELKIND_RELATION
+            && !(rel.rd_rel.relkind == b'm' && rel.rd_rel.relispopulated)
+        {
+            return Err(cannot_copy_from_relkind(rel));
+        }
     }
 
     let opts = ProcessCopyOptions(false, options, source_text)?;
-    let attnumlist = CopyGetAttnums(mcx, &rel.rd_att, rel, attnamelist)?;
+
+    let (query_desc, tupdesc) = match raw_query {
+        None => (None, None),
+        Some(raw_query) => {
+            debug_assert!(rel.is_none());
+            let query_string = source_text.expect("COPY (query) carries its source text");
+            let (qd, td) = begin_copy_query(mcx, raw_query, query_string)?;
+            (Some(qd), Some(td))
+        }
+    };
+    let tup_desc: &TupleDescData<'_> = match rel {
+        Some(rel) => &rel.rd_att,
+        None => tupdesc.as_deref().expect("ExecutorStart computed a result tupDesc"),
+    };
+
+    let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
     let force_quote_flags = force_flags(
         mcx,
-        &rel.rd_att,
+        tup_desc,
         rel,
         &attnumlist,
         opts.force_quote,
@@ -138,16 +167,110 @@ pub fn BeginCopyTo<'mcx, 's>(
         need_transcoding,
         bytes_processed: 0,
         rowcx: MemoryContext::new_bump("COPY TO"),
+        query_desc,
+        tupdesc,
     })
 }
 
-/// `DoCopyTo` (copyto.c): scan the relation, emit every visible row.
+// BeginCopyTo (copyto.c), the raw_query arm: analyze/rewrite, plan, snapshot
+// push, DestCopyOut QueryDesc, ExecutorStart.
+fn begin_copy_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    raw_query: &RawStmt<'mcx>,
+    query_string: &str,
+) -> PgResult<(QueryDescHandle, Rc<TupleDescData<'static>>)> {
+    let rewritten = postgres::simple_query::pg_analyze_and_rewrite_fixedparams(
+        mcx,
+        raw_query,
+        query_string,
+        &[],
+        QueryEnvHandle::NULL,
+    )?;
+
+    if rewritten.is_empty() {
+        return Err(feature_not_supported(
+            "DO INSTEAD NOTHING rules are not supported for COPY",
+        ));
+    }
+    if rewritten.len() > 1 {
+        for q in rewritten.iter() {
+            if q.querySource == QuerySource::QSRC_QUAL_INSTEAD_RULE {
+                return Err(feature_not_supported(
+                    "conditional DO INSTEAD rules are not supported for COPY",
+                ));
+            }
+            if q.querySource == QuerySource::QSRC_NON_INSTEAD_RULE {
+                return Err(feature_not_supported(
+                    "DO ALSO rules are not supported for COPY",
+                ));
+            }
+        }
+        return Err(feature_not_supported(
+            "multi-statement DO INSTEAD rules are not supported for COPY",
+        ));
+    }
+
+    let query = rewritten.into_iter().next().expect("checked non-empty");
+
+    if let Some(u) = query.utilityStmt {
+        if u.as_variant::<CreateTableAsStmt>().is_some() {
+            return Err(feature_not_supported("COPY (SELECT INTO) is not supported"));
+        }
+        return Err(feature_not_supported("COPY query must not be a utility command"));
+    }
+    if query.commandType != CmdType::CMD_SELECT && query.returningList.is_nil() {
+        return Err(feature_not_supported("COPY query must have a RETURNING clause"));
+    }
+
+    let plan = postgres::simple_query::pg_plan_query(
+        mcx,
+        query,
+        query_string,
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )?
+    .expect("planner handles non-utility commands");
+    // Arena-pin the plan: create_query_desc's retention contract holds it
+    // until free_query_desc, past this frame.
+    let plan = mcx::leak_in(mcx::alloc_in(mcx, plan)?);
+
+    snapmgr::PushCopiedSnapshot(&snapmgr::GetActiveSnapshot())?;
+    snapmgr::UpdateActiveSnapshotCommandId()?;
+
+    let qd = execmain_seams::create_query_desc::call(
+        plan,
+        query_string,
+        Some(snapmgr::GetActiveSnapshot()),
+        None,
+        CommandDest::CopyOut,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )?;
+    execmain_seams::executor_start::call(qd, 0)?;
+    let tupdesc = execmain_seams::query_desc_result_tupdesc::call(qd)
+        .expect("ExecutorStart computed a result tupDesc");
+    Ok((qd, tupdesc))
+}
+
+#[cold]
+#[inline(never)]
+fn feature_not_supported(msg: &str) -> Box<PgError> {
+    Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+}
+
+/// `DoCopyTo` (copyto.c): scan the relation or run the query plan, emit every
+/// visible row.
 pub fn DoCopyTo<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &mut CopyToState<'mcx, '_>,
-    rel: &Relation<'mcx>,
+    rel: Option<&Relation<'mcx>>,
 ) -> PgResult<u64> {
-    let tup_desc = &rel.rd_att;
+    let query_tupdesc = cstate.tupdesc.clone();
+    let tup_desc: &TupleDescData<'_> = match rel {
+        Some(rel) => &rel.rd_att,
+        None => query_tupdesc.as_deref().expect("query COPY carries the executor tupDesc"),
+    };
 
     // FmgrInfo carries droppy fn_extra, so PgVec::new_in (printtup precedent);
     // resolve-once, never per row (rule 4).
@@ -204,18 +327,44 @@ pub fn DoCopyTo<'mcx>(
         end_of_row(cstate)?;
     }
 
-    let snapshot = Some(snapmgr::GetActiveSnapshot());
-    let mut scandesc = tableam::table_beginscan(mcx, rel, snapshot, 0, PgVec::new_in(mcx))?;
-    let mut slot = tableam::table_slot_create(mcx, rel)?;
+    let processed: u64 = match rel {
+        Some(rel) => {
+            let snapshot = Some(snapmgr::GetActiveSnapshot());
+            let mut scandesc =
+                tableam::table_beginscan(mcx, rel, snapshot, 0, PgVec::new_in(mcx))?;
+            let mut slot = tableam::table_slot_create(mcx, rel)?;
 
-    let mut processed: u64 = 0;
-    while tableam::table_scan_getnextslot(mcx, &mut scandesc, ForwardScanDirection, &mut slot)? {
-        exectuples::slot_getallattrs(&mut slot);
-        CopyOneRowTo(cstate, &mut slot, &mut out_functions)?;
-        processed += 1;
-    }
+            let mut processed: u64 = 0;
+            while tableam::table_scan_getnextslot(
+                mcx,
+                &mut scandesc,
+                ForwardScanDirection,
+                &mut slot,
+            )? {
+                exectuples::slot_getallattrs(&mut slot);
+                CopyOneRowTo(cstate, &mut slot, &mut out_functions)?;
+                processed += 1;
+            }
 
-    tableam::table_endscan(scandesc)?;
+            tableam::table_endscan(scandesc)?;
+            processed
+        }
+        None => {
+            let qd = cstate.query_desc.expect("query COPY has a QueryDesc");
+            let mut frame = QueryFrame { cstate, out_functions: &mut out_functions };
+            let mut dest = tcop_dest::DestReceiver::CopyOut(copy_seams::CopyDestState::new(
+                (&mut frame as *mut QueryFrame<'_, '_, '_>).cast(),
+            ));
+            execmain_seams::executor_run::call(
+                qd,
+                types_scan::sdir::ScanDirection::ForwardScanDirection,
+                0,
+                &mut dest,
+            )?;
+            let tcop_dest::DestReceiver::CopyOut(st) = &dest else { unreachable!() };
+            st.processed
+        }
+    };
     if cstate.opts.binary {
         // CopyToBinaryEnd: -1 tuple-count trailer, then flush.
         cstate.fe_msgbuf.append_bytes(&(-1i16).to_be_bytes())?;
@@ -230,6 +379,25 @@ pub fn DoCopyTo<'mcx>(
         }
     }
     Ok(processed)
+}
+
+struct QueryFrame<'f, 'mcx, 's> {
+    cstate: &'f mut CopyToState<'mcx, 's>,
+    out_functions: &'f mut [FmgrInfo],
+}
+
+// copy_dest_receive (copyto.c); installed on copy_seams::copy_dest_receive.
+pub(crate) fn copy_dest_receive<'mcx>(
+    state: &mut copy_seams::CopyDestState,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // SAFETY: `frame` points at DoCopyTo's QueryFrame, live for the whole
+    // executor_run window; lifetimes re-derived under that retention contract.
+    let frame = unsafe { &mut *(state.frame as *mut QueryFrame<'_, 'mcx, '_>) };
+    exectuples::slot_getallattrs(slot);
+    CopyOneRowTo(frame.cstate, slot, frame.out_functions)?;
+    state.processed += 1;
+    Ok(true)
 }
 
 // SendCopyBegin (copyto.c): CopyOutResponse.
@@ -423,6 +591,12 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
 
 /// `EndCopyTo` + `EndCopy` (copyto.c).
 pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
+    if let Some(qd) = cstate.query_desc.take() {
+        execmain_seams::executor_finish::call(qd)?;
+        execmain_seams::executor_end::call(qd)?;
+        execmain_seams::free_query_desc::call(qd);
+        snapmgr::PopActiveSnapshot()?;
+    }
     if let CopyDest::File { fd, filename } = cstate.dest {
         flush_to_file(&mut cstate)?;
         if fd::FreeFile(fd)? != 0 {

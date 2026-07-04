@@ -3757,10 +3757,12 @@ dependencies = [
  "aclchk_seams",
  "aio_seams",
  "clauses",
+ "copy_seams",
  "datum",
  "elog",
  "execexpr",
  "execindexing",
+ "execmain_seams",
  "execpartition",
  "exectuples",
  "fd",
@@ -3782,6 +3784,7 @@ dependencies = [
  "parser_small1",
  "planner",
  "portalmem",
+ "postgres",
  "postgres_seams",
  "pqcomm",
  "pqformat",
@@ -3793,11 +3796,13 @@ dependencies = [
  "table",
  "tableam",
  "tableam_vocab",
+ "tcop_dest",
  "types_core",
  "types_dest",
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_scan",
  "types_slot",
@@ -3807,6 +3812,15 @@ dependencies = [
  "wchar",
  "xact",
  "xact_seams",
+]
+
+[[package]]
+name = "copy_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_slot",
 ]
 
 [[package]]
@@ -12545,6 +12559,7 @@ dependencies = [
  "commit_ts",
  "condition_variable",
  "conffiles",
+ "copy_cmd",
  "costsize",
  "crypt",
  "dbcommands",
@@ -14286,6 +14301,7 @@ name = "tcop_dest"
 version = "0.1.0"
 dependencies = [
  "cmdtag",
+ "copy_seams",
  "createas_seams",
  "explain_dr",
  "matview_seams",

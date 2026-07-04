@@ -96,13 +96,13 @@ pub fn BeginCopyFrom<'mcx, 's>(
         unported("convert_selectively (file_fdw-only option)");
     }
     let tup_desc = &rel.rd_att;
-    let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
+    let attnumlist = CopyGetAttnums(mcx, tup_desc, Some(rel), attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
 
     let force_notnull_flags = force_flags(
         mcx,
         tup_desc,
-        rel,
+        Some(rel),
         &attnumlist,
         opts.force_notnull,
         opts.force_notnull_all,
@@ -111,7 +111,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let force_null_flags = force_flags(
         mcx,
         tup_desc,
-        rel,
+        Some(rel),
         &attnumlist,
         opts.force_null,
         opts.force_null_all,
