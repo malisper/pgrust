@@ -16,3 +16,8 @@ executils = { path = "../executils" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

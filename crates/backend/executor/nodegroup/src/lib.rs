@@ -14,6 +14,9 @@ use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 pub struct GroupState<'mcx> {
     pub plan: &'mcx Group<'mcx>,
     pub ps_ExprContext: EcxtId,
