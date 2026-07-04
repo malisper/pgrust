@@ -26,7 +26,8 @@ const FUNC_MAX_ARGS: usize = 100;
 pub fn init_seams() {
     clauses_seams::make_fn_arguments_nullstate::set(|mcx, args, actual, declared| {
         let pstate = parser_small1::make_parsestate(mcx, None);
-        make_fn_arguments(mcx, &pstate, *args, actual, declared)
+        let args = args.clone_in(mcx)?;
+        make_fn_arguments(mcx, &pstate, args, actual, declared)
     });
 }
 
