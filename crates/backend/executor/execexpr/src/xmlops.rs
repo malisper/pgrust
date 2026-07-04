@@ -153,7 +153,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
             }
             let data = varlena_payload(args[0].value, &st.resmcx)?;
             let preserve = args[1].value.as_bool();
-            let out = adt_xml::xmlparse(data, x.xmloption, preserve)?;
+            let out = adt_xml::xmlparse(data, xml_opt(x.xmloption), preserve)?;
             Ok((xml_datum(mcx, &out)?, false))
         }
         XmlExprOp::IS_XMLPI => {
@@ -206,7 +206,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                 return Ok((Datum::null(), true));
             }
             let data = varlena_payload(args[0].value, &st.resmcx)?;
-            let out = adt_xml::xmltotext_with_options(data, x.xmloption, x.indent)?;
+            let out = adt_xml::xmltotext_with_options(data, xml_opt(x.xmloption), x.indent)?;
             Ok((xml_datum(mcx, &out)?, false))
         }
         XmlExprOp::IS_DOCUMENT => {
@@ -387,4 +387,11 @@ fn ts_out_of_range() -> Box<PgError> {
         PgError::error("timestamp out of range".to_string())
             .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
     )
+}
+
+fn xml_opt(v: types_nodes::XmlOptionType) -> adt_xml::XmlOptionType {
+    match v {
+        types_nodes::XmlOptionType::XMLOPTION_DOCUMENT => adt_xml::XmlOptionType::XMLOPTION_DOCUMENT,
+        types_nodes::XmlOptionType::XMLOPTION_CONTENT => adt_xml::XmlOptionType::XMLOPTION_CONTENT,
+    }
 }
