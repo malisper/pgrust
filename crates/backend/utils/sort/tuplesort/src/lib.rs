@@ -1299,13 +1299,36 @@ fn datum_put_slow<'m>(
     let datum1 = if is_null { Datum::null() } else { val };
     // Bounded: the window is permanently empty (watermark 0) and len is
     // already flushed at `bound`, so every put lands here — skip the flush +
-    // puttuple_common re-dispatch (C's shape: one call to the bounded arm).
+    // puttuple_common re-dispatch and run the discard leg inline (C's shape:
+    // one comparetup behind the put call). Caller is putdatum_batch: variant
+    // is by-value Datum (asserted there), abbrev disarmed by set_bound, so
+    // datum1 decides alone and there is no tuple image to free.
     if st.status == TupSortStatus::Bounded {
-        st.puttuple_bounded(SortTuple {
-            tuple: core::ptr::null_mut(),
+        // SAFETY: TSS_BOUNDED holds exactly `bound` >= 1 tuples; Datum
+        // variant carries a sort key (begin_datum asserts).
+        let (heap_top, key0) = unsafe {
+            (*st.memtuples.get_unchecked(0), st.sort_keys.get_unchecked(0))
+        };
+        debug_assert!(st.abbrev.is_none());
+        debug_assert!(matches!(st.variant, SortVariant::Datum { byref_typlen: 0 }));
+        let compare = ssup::apply_sort_comparator_as_in(
+            key0.comparator,
+            st.mcx,
             datum1,
-            isnull1: is_null,
-        })?;
+            is_null,
+            heap_top.datum1,
+            heap_top.isnull1,
+            key0,
+        );
+        if compare <= 0 {
+            cfi()?;
+        } else {
+            st.puttuple_bounded_replace(SortTuple {
+                tuple: core::ptr::null_mut(),
+                datum1,
+                isnull1: is_null,
+            })?;
+        }
     } else {
         datum_put_flush(st, next);
         st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
