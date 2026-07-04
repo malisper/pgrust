@@ -383,9 +383,8 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
                 }
                 let owa = item_owa(item);
                 let funcOid = parse_func::LookupFuncWithArgs(
-                    &owa.objname,
-                    &owa.objargs,
-                    owa.args_unspecified,
+                    types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+                    owa,
                     false,
                 )?;
                 let mut member = OpFamilyMember {
@@ -643,9 +642,8 @@ fn AlterOpFamilyAdd<'mcx>(
                 }
                 let owa = item_owa(item);
                 let funcOid = parse_func::LookupFuncWithArgs(
-                    &owa.objname,
-                    &owa.objargs,
-                    owa.args_unspecified,
+                    types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+                    owa,
                     false,
                 )?;
                 let mut member = OpFamilyMember {
