@@ -1280,10 +1280,21 @@ fn seq_agg_fusible<'mcx>(
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> bool {
+    if !::nodeagg::agg_batch_drainable(agg) {
+        return false;
+    }
+    seq_batch_fusible(ss, estate)
+}
+
+// Scan-side half of the fused-drive gate: uninstrumented bare SeqScan,
+// forward, no EPQ, variant Plain or allocation-free kernel qual.
+fn seq_batch_fusible<'mcx>(
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
     use ::execexpr::{Kernel, SlotSrc};
     if estate.es_epq_active
         || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !::nodeagg::agg_batch_drainable(agg)
     {
         return false;
     }
@@ -1341,6 +1352,37 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     fn has_qual(&self) -> bool {
         self.ss.ss.qual.is_some()
     }
+}
+
+impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
+    #[inline]
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
+    }
+
+    #[inline]
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeseqscan::seq_scan_batch_fetch(self.ss, estate, i)
+    }
+
+    #[inline]
+    fn slot(&self) -> ExecSlotId {
+        self.outer_slot
+    }
+}
+
+// Deform prefix the fused hash-build drive reads from the scan slot: the
+// build-side hash keys + the kernel qual (the minimal-tuple copy reads the
+// buffer tuple image, not the deformed prefix).
+fn hash_build_soa_prefix<'mcx>(
+    hs: &::nodehash::HashState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<i32> {
+    let mut p = hs.build_prefix()?;
+    if let Some(q) = ss.ss.qual.as_deref() {
+        p = p.max(q.max_fetch(::execexpr::SlotSrc::Scan)?);
+    }
+    Some(p)
 }
 
 struct IndexScanBatchSource<'a, 'mcx> {
@@ -2252,6 +2294,31 @@ impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
 impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
         exec_proc_node(self, estate)
+    }
+
+    // Fused hash-build page-batch drive: Instrumented children never match,
+    // so EXPLAIN ANALYZE keeps the per-tuple drive and its counters.
+    fn multi_exec(
+        &mut self,
+        hs: &mut ::nodehash::HashState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if let PlanStateNode::SeqScan(ss) = self {
+            if seq_batch_fusible(ss, estate)
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+            {
+                ::nodeseqscan::seq_scan_batch_soa_prepare(
+                    ss,
+                    estate,
+                    hash_build_soa_prefix(hs, ss).unwrap_or(0),
+                    false,
+                );
+                let outer_slot = ss.ss.ss_ScanTupleSlot;
+                let src = SeqScanBatchSource { ss, outer_slot };
+                return ::nodehash::multi_exec_hash_batched(hs, src, estate);
+            }
+        }
+        ::nodehash::multi_exec_hash(hs, self, estate)
     }
 }
 
