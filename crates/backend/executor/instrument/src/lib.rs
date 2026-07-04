@@ -1,5 +1,5 @@
-// instrument.c; parallel-query save/accum arms land with execParallel, WAL
-// accumulation is loud until xloginsert's pgWalUsage counters exist.
+// instrument.c; WAL accumulation is loud until xloginsert's pgWalUsage
+// counters exist (the parallel accum path carries WalUsage::default()).
 
 use types_core::instrument::{
     instr_time, BufferUsage, Instrumentation, WalUsage, INSTRUMENT_BUFFERS, INSTRUMENT_TIMER,
@@ -22,9 +22,11 @@ pub fn instr_time_current() -> instr_time {
 // pgBufferUsage (instrument.c): shared_blks_* tick in bufmgr::counters and
 // temp_blks_* in fd::buffile; local buffers plus the track_io_timing
 // blk_*_time clocks have no ported writers (nor an installed GUC backing),
-// so their running totals are truly zero.
+// so their running totals are truly zero. WORKER_CONTRIB is
+// InstrAccumParallelQuery's add — the live counters cannot be bumped, so the
+// accumulated worker usage rides as an overlay.
 pub fn pg_buffer_usage() -> BufferUsage {
-    BufferUsage {
+    let mut u = BufferUsage {
         shared_blks_hit: bufmgr::counters::shared_blks_hit() as i64,
         shared_blks_read: bufmgr::counters::shared_blks_read() as i64,
         shared_blks_dirtied: bufmgr::counters::shared_blks_dirtied() as i64,
@@ -32,7 +34,55 @@ pub fn pg_buffer_usage() -> BufferUsage {
         temp_blks_read: fd::buffile::temp_blks_read(),
         temp_blks_written: fd::buffile::temp_blks_written(),
         ..BufferUsage::default()
-    }
+    };
+    WORKER_CONTRIB.with(|c| buffer_usage_add(&mut u, &c.get()));
+    u
+}
+
+const ZERO_USAGE: BufferUsage = BufferUsage {
+    shared_blks_hit: 0,
+    shared_blks_read: 0,
+    shared_blks_dirtied: 0,
+    shared_blks_written: 0,
+    local_blks_hit: 0,
+    local_blks_read: 0,
+    local_blks_dirtied: 0,
+    local_blks_written: 0,
+    temp_blks_read: 0,
+    temp_blks_written: 0,
+    shared_blk_read_time: instr_time { ticks: 0 },
+    shared_blk_write_time: instr_time { ticks: 0 },
+    local_blk_read_time: instr_time { ticks: 0 },
+    local_blk_write_time: instr_time { ticks: 0 },
+    temp_blk_read_time: instr_time { ticks: 0 },
+    temp_blk_write_time: instr_time { ticks: 0 },
+};
+
+std::thread_local! {
+    static WORKER_CONTRIB: std::cell::Cell<BufferUsage> =
+        const { std::cell::Cell::new(ZERO_USAGE) };
+}
+
+/// `InstrStartParallelQuery` (worker side): snapshot the running totals.
+pub fn instr_start_parallel_query() -> BufferUsage {
+    pg_buffer_usage()
+}
+
+/// `InstrEndParallelQuery` (worker side): this run's usage.
+pub fn instr_end_parallel_query(save: &BufferUsage) -> BufferUsage {
+    let mut out = BufferUsage::default();
+    buffer_usage_accum_diff(&mut out, &pg_buffer_usage(), save);
+    out
+}
+
+/// `InstrAccumParallelQuery` (leader side): fold one worker's usage into the
+/// leader's totals.
+pub fn instr_accum_parallel_query(bufusage: &BufferUsage) {
+    WORKER_CONTRIB.with(|c| {
+        let mut cur = c.get();
+        buffer_usage_add(&mut cur, bufusage);
+        c.set(cur);
+    });
 }
 
 /// `InstrInit`.

@@ -251,6 +251,59 @@ impl Default for Append<'_> {
     }
 }
 
+#[repr(C)]
+pub struct Gather<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub num_workers: i32,
+    pub rescan_param: i32,
+    pub single_copy: bool,
+    pub invisible: bool,
+    pub initParam: Bitmapset<'mcx>,
+}
+
+impl Default for Gather<'_> {
+    fn default() -> Self {
+        Gather {
+            plan: Plan::default(),
+            num_workers: 0,
+            rescan_param: -1,
+            single_copy: false,
+            invisible: false,
+            initParam: Bitmapset::empty(),
+        }
+    }
+}
+
+/// Per-key arrays as in [`Sort`].
+#[repr(C)]
+pub struct GatherMerge<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub num_workers: i32,
+    pub rescan_param: i32,
+    pub numCols: i32,
+    pub sortColIdx: &'mcx [i16],
+    pub sortOperators: &'mcx [Oid],
+    pub collations: &'mcx [Oid],
+    pub nullsFirst: &'mcx [bool],
+    pub initParam: Bitmapset<'mcx>,
+}
+
+impl Default for GatherMerge<'_> {
+    fn default() -> Self {
+        GatherMerge {
+            plan: Plan::default(),
+            num_workers: 0,
+            rescan_param: -1,
+            numCols: 0,
+            sortColIdx: &[],
+            sortOperators: &[],
+            collations: &[],
+            nullsFirst: &[],
+            initParam: Bitmapset::empty(),
+        }
+    }
+}
+
 /// Per-key arrays as in [`Sort`].
 #[repr(C)]
 pub struct MergeAppend<'mcx> {
@@ -883,6 +936,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Append<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for MergeAppend<'mcx> {
     const TAG: NodeTag = NodeTag::T_MergeAppend;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Gather<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Gather;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for GatherMerge<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GatherMerge;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for PartitionPruneInfo<'mcx> {
     const TAG: NodeTag = NodeTag::T_PartitionPruneInfo;
 }
@@ -997,6 +1056,10 @@ unsafe impl<'mcx> PlanVariant<'mcx> for BitmapHeapScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Append<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for MergeAppend<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Gather<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for GatherMerge<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for SubqueryScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -1092,6 +1155,10 @@ const _: () = {
     assert!(offset_of!(NodeRep<Append>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(MergeAppend, plan) == 0);
     assert!(offset_of!(NodeRep<MergeAppend>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Gather, plan) == 0);
+    assert!(offset_of!(NodeRep<Gather>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(GatherMerge, plan) == 0);
+    assert!(offset_of!(NodeRep<GatherMerge>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(SubqueryScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<SubqueryScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -1173,6 +1240,8 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_BitmapHeapScan
             | NodeTag::T_Append
             | NodeTag::T_MergeAppend
+            | NodeTag::T_Gather
+            | NodeTag::T_GatherMerge
             | NodeTag::T_SubqueryScan
             | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
@@ -1333,6 +1402,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_merge_append(self) -> Option<&'mcx MergeAppend<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_gather(self) -> Option<&'mcx Gather<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_gather_merge(self) -> Option<&'mcx GatherMerge<'mcx>> {
         self.as_variant()
     }
 

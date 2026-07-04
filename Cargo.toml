@@ -566,6 +566,7 @@ members = [
     "crates/backend/postmaster/pmchild_seams",
     "crates/backend/postmaster/pmchild",
     "crates/backend/postmaster/bgworker",
+    "crates/backend/postmaster/bgworker_seams",
     "crates/backend/storage/ipc/ipci_seams",
     "crates/backend/storage/ipc/ipci",
     "crates/backend/postmaster/postmaster",

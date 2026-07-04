@@ -31,6 +31,7 @@ pub enum DestReceiver<'mcx> {
     TransientRel(matview_seams::TransientRelState<'mcx>), // CreateTransientRelDestReceiver (matview.c)
     SqlFunction(sql_functions_seams::SqlFunctionDestState<'mcx>), // CreateSQLFunctionDestReceiver (functions.c)
     ExplainSerialize(explain_dr::SerializeDestReceiver<'mcx>), // CreateExplainSerializeDestReceiver (explain_dr.c)
+    TupleQueue(tqueue::DrTqueue),          // CreateTupleQueueDestReceiver (tqueue.c)
 }
 
 impl<'mcx> DestReceiver<'mcx> {
@@ -50,6 +51,7 @@ impl<'mcx> DestReceiver<'mcx> {
                 sql_functions_seams::sqlfunction_receive::call(state, slot)
             }
             DestReceiver::ExplainSerialize(dr) => dr.receive_slot(slot),
+            DestReceiver::TupleQueue(dr) => dr.receive_slot(slot),
             other => other.unported("receiveSlot"),
         }
     }
@@ -68,6 +70,10 @@ impl<'mcx> DestReceiver<'mcx> {
             }
             DestReceiver::SqlFunction(_) => Ok(()),
             DestReceiver::ExplainSerialize(dr) => dr.startup(operation, typeinfo),
+            DestReceiver::TupleQueue(dr) => {
+                dr.startup(operation, typeinfo);
+                Ok(())
+            }
             other => other.unported("rStartup"),
         }
     }
@@ -93,6 +99,10 @@ impl<'mcx> DestReceiver<'mcx> {
                 dr.shutdown();
                 Ok(())
             }
+            DestReceiver::TupleQueue(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
         }
     }
 
@@ -111,6 +121,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::TransientRel(_) => CommandDest::TransientRel,
             DestReceiver::SqlFunction(_) => CommandDest::SqlFunction,
             DestReceiver::ExplainSerialize(_) => CommandDest::ExplainSerialize,
+            DestReceiver::TupleQueue(_) => CommandDest::TupleQueue,
         }
     }
 
@@ -165,14 +176,15 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
         // Constructors owned by unported units or built directly by their
         // owner (DestSqlFunction by sql_functions — junkfilter params;
         // DestExplainSerialize by explain — C's case here passes es=NULL,
-        // which any real use would deref-crash on, so it stays loud).
+        // which any real use would deref-crash on, so it stays loud;
+        // DestTupleQueue by tqueue_create_DR — it needs the queue handle).
         CommandDest::IntoRel
         | CommandDest::CopyOut
         | CommandDest::SqlFunction
         | CommandDest::TransientRel
         | CommandDest::TupleQueue
         | CommandDest::ExplainSerialize => {
-            panic!("CreateDestReceiver({dest:?}): owning unit not ported yet")
+            panic!("CreateDestReceiver({dest:?}): owning unit constructs this receiver")
         }
     }
 }

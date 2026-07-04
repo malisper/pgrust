@@ -9,6 +9,10 @@ name = "tqueue"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../../../_support/mcx" }
+exectuples = { path = "../exectuples" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 elog = { path = "../../utils/error/elog" }
 shm_mq = { path = "../../storage/ipc/shm_mq" }
 types_error = { path = "../../../_support/types/types_error" }

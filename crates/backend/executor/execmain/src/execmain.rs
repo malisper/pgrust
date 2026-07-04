@@ -485,12 +485,16 @@ pub(crate) fn init_plan<'mcx>(
     let mut tup_type = planstate.exec_get_result_type(plan)?;
 
     if operation == CmdType::CMD_SELECT {
-        let junk_filter_needed = plan.targetlist.iter().any(|tle_node| {
-            tle_node
-                .as_target_entry()
-                .expect("targetlist entry is a TargetEntry")
-                .resjunk
-        });
+        // A parallel worker's junk columns must reach the leader: C clears
+        // resjunk on a plan copy in ExecSerializePlan; the shared plan tree
+        // is immutable here, so the filter is suppressed instead.
+        let junk_filter_needed = !parallel::IsParallelWorker()
+            && plan.targetlist.iter().any(|tle_node| {
+                tle_node
+                    .as_target_entry()
+                    .expect("targetlist entry is a TargetEntry")
+                    .resjunk
+            });
         if junk_filter_needed {
             let slot = data
                 .estate
@@ -568,7 +572,7 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
     if use_parallel_mode {
-        panic!("ExecutePlan (execMain.c): EnterParallelMode lane not ported (execParallel.c)");
+        xact::EnterParallelMode();
     }
 
     let mut current_tuple_count: u64 = 0;
@@ -607,7 +611,10 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     }
 
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
-        exec_shutdown_node(planstate, estate);
+        exec_shutdown_node(planstate, estate)?;
+    }
+    if use_parallel_mode {
+        xact::ExitParallelMode();
     }
     Ok(())
 }

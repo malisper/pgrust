@@ -434,6 +434,9 @@ pub struct EStateData<'mcx> {
     pub es_hash_instrumentation: PgVec<'mcx, (i32, HashInstrumentation)>,
     /// (plan_node_id, nsearches); C's IndexScanInstrumentation, hoisted.
     pub es_index_instrumentation: PgVec<'mcx, (i32, u64)>,
+    /// One entry per parallel worker (C PlanState.worker_instrument + the
+    /// per-node shared_info arrays, hoisted; execParallel retrieve fills it).
+    pub es_worker_instrument: PgVec<'mcx, WorkerInstr<'mcx>>,
     // Node-owned resettable contexts (C's node-local AllocSets): droppy, so
     // they live in the estate owner; nodes hold AuxCxtId (docs/no-drop.md).
     es_aux_contexts: PgVec<'mcx, MemoryContext>,
@@ -463,6 +466,17 @@ pub struct EStateData<'mcx> {
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
     pub es_epq_active: bool,
+}
+
+/// One worker's instrumentation snapshot: `instrument` is indexed by
+/// plan_node_id; the side tables are (plan_node_id, data) pairs.
+pub struct WorkerInstr<'mcx> {
+    pub instrument: PgVec<'mcx, Instrumentation>,
+    pub sort: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
+    pub incsort: PgVec<'mcx, (i32, IncrementalSortInfo)>,
+    pub agg: PgVec<'mcx, (i32, AggregateInstrumentation)>,
+    pub hash: PgVec<'mcx, (i32, HashInstrumentation)>,
+    pub index: PgVec<'mcx, (i32, u64)>,
 }
 
 pub struct EpqSubs<'mcx> {
@@ -520,6 +534,7 @@ impl<'mcx> EStateData<'mcx> {
             es_incsort_instrumentation: PgVec::new_in(mcx),
             es_hash_instrumentation: PgVec::new_in(mcx),
             es_index_instrumentation: PgVec::new_in(mcx),
+            es_worker_instrument: PgVec::new_in(mcx),
             es_aux_contexts: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
@@ -948,9 +963,13 @@ mcx::forget_safe_struct!(
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
-        es_hash_instrumentation, es_index_instrumentation, es_subplan_hook, es_subplan_init_hook,
+        es_hash_instrumentation, es_index_instrumentation, es_worker_instrument,
+        es_subplan_hook, es_subplan_init_hook,
         es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
     },
+);
+mcx::forget_safe_struct!(
+    WorkerInstr<'_> { instrument, sort, incsort, agg, hash, index },
 );
 
 #[cold]
