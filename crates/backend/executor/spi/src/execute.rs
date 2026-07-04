@@ -114,7 +114,20 @@ pub fn SPI_execute_plan(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, read_only, tcount, None, None, true)
+    execute_plan_common(ptr, values, nulls, read_only, false, tcount, None, None, true)
+}
+
+// SPI_execute_plan_extended's allow_nonatomic leg (spi.c); params ride the
+// values/nulls arrays like SPI_execute_plan.
+pub fn SPI_execute_plan_extended(
+    ptr: SpiPlanPtr,
+    values: &[Datum],
+    nulls: &[bool],
+    read_only: bool,
+    allow_nonatomic: bool,
+    tcount: i64,
+) -> PgResult<i32> {
+    execute_plan_common(ptr, values, nulls, read_only, allow_nonatomic, tcount, None, None, true)
 }
 
 pub fn SPI_execp(ptr: SpiPlanPtr, values: &[Datum], nulls: &[bool], tcount: i64) -> PgResult<i32> {
@@ -136,6 +149,7 @@ pub fn SPI_execute_snapshot(
         values,
         nulls,
         read_only,
+        false,
         tcount,
         snapshot,
         crosscheck_snapshot,
@@ -149,6 +163,7 @@ fn execute_plan_common(
     values: &[Datum],
     nulls: &[bool],
     read_only: bool,
+    allow_nonatomic: bool,
     tcount: i64,
     snapshot: Option<Snapshot>,
     crosscheck_snapshot: Option<Snapshot>,
@@ -172,6 +187,7 @@ fn execute_plan_common(
     let options = SpiExecuteOptions {
         params,
         read_only,
+        allow_nonatomic,
         tcount: tcount as u64,
         ..Default::default()
     };

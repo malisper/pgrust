@@ -22,7 +22,7 @@ mod tuptable;
 pub use access::{SPI_fnumber, SPI_getbinval, SPI_getvalue, SPI_gettypeid};
 pub use execute::{
     SPI_exec, SPI_execp, SPI_execute, SPI_execute_extended, SPI_execute_plan,
-    SPI_execute_snapshot, SpiExecuteOptions,
+    SPI_execute_plan_extended, SPI_execute_snapshot, SpiExecuteOptions,
 };
 pub use cursor::{
     SPI_cursor_close, SPI_cursor_close_portal, SPI_cursor_fetch, SPI_cursor_open,

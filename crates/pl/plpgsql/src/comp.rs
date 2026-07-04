@@ -2,7 +2,7 @@
 // Unported louds (named at their sites): %ROWTYPE, cword %TYPE beyond
 // var/2-3-part type names, record %TYPE, composite- and domain-typed
 // variables, trigger compile, polymorphic argument resolution,
-// OUT/INOUT/TABLE arg modes.
+// VARIADIC/TABLE arg modes.
 use types_core::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -32,6 +32,7 @@ pub struct CompState {
     pub nstatements: u32,
     pub resolve_option: i32,
     pub print_strict_params: bool,
+    pub out_param_varno: Dno,
     datums_last: usize,
 }
 
@@ -46,6 +47,7 @@ impl CompState {
             nstatements: 0,
             resolve_option: PLPGSQL_RESOLVE_ERROR,
             print_strict_params: false,
+            out_param_varno: -1,
             datums_last: 0,
         }
     }

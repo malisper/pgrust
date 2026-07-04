@@ -1,6 +1,6 @@
 // pl_gram.y as recursive descent (keyword-led statements; the bison
 // grammar's pushback tricks map 1:1). Named louds: CASE, FOREACH,
-// FOR ... IN EXECUTE, OPEN/FETCH/MOVE/CLOSE, CALL/DO, COMMIT/ROLLBACK,
+// FOR ... IN EXECUTE, OPEN/FETCH/MOVE/CLOSE, DO, COMMIT/ROLLBACK,
 // RETURN NEXT/QUERY, cursor declarations, %ROWTYPE, qualified %TYPE,
 // #option dump.
 use parser_seams::RawParseMode;
@@ -1012,8 +1012,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_FETCH => Ok(Some(self.parse_fetch(lloc)?)),
             K_MOVE => Ok(Some(self.parse_move(lloc)?)),
             K_CLOSE => Ok(Some(self.parse_close(lloc)?)),
-            K_CALL | K_DO => panic!(
-                "stmt_call (pl_gram.y): CALL/DO unported — unit backend-pl-plpgsql-gram"
+            K_CALL => {
+                let lineno = self.lineno(lloc);
+                self.push_back(&t)?;
+                let expr = self.read_sql_construct(
+                    ';' as i32,
+                    0,
+                    0,
+                    ";",
+                    RawParseMode::RAW_PARSE_DEFAULT,
+                    false,
+                    true,
+                    None,
+                    None,
+                )?;
+                Ok(Some(PlStmt::Call { lineno, expr, is_call: true }))
+            }
+            K_DO => panic!(
+                "stmt_call (pl_gram.y): DO unported — unit backend-pl-plpgsql-gram"
             ),
             K_COMMIT | K_ROLLBACK => panic!(
                 "stmt_commit/rollback (pl_gram.y): transaction control in PL \
@@ -1995,14 +2011,16 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let t = self.yylex()?;
             if t.0 != (';' as i32) {
                 if self.fn_prokind == PROKIND_PROCEDURE {
-                    return Err(self.gram_err(
+                    return Err(self.gram_err_pos(
                         ERRCODE_SYNTAX_ERROR,
                         "RETURN cannot have a parameter in a procedure".to_string(),
+                        t.2,
                     ));
                 }
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     types_error::ERRCODE_DATATYPE_MISMATCH,
                     "RETURN cannot have a parameter in function returning void".to_string(),
+                    t.2,
                 ));
             }
             return Ok(PlStmt::Return { lineno, expr: None, retvarno: -1 });
