@@ -127,9 +127,22 @@ pub fn mul_size(s1: usize, s2: usize) -> PgResult<usize> {
 }
 
 pub fn ShmemLockAcquire() {
-    while SHMEM_LOCK.swap(true, Ordering::Acquire) {
-        std::hint::spin_loop();
+    if SHMEM_LOCK.swap(true, Ordering::Acquire) {
+        shmem_lock_contended();
     }
+}
+
+#[cold]
+#[inline(never)]
+fn shmem_lock_contended() {
+    let mut delay = s_lock_seams::SpinDelayStatus::new(file!(), line!() as i32, "ShmemLock");
+    loop {
+        if !SHMEM_LOCK.load(Ordering::Relaxed) && !SHMEM_LOCK.swap(true, Ordering::Acquire) {
+            break;
+        }
+        s_lock_seams::perform_spin_delay::call(&mut delay);
+    }
+    s_lock_seams::finish_spin_delay::call(&delay);
 }
 
 pub fn ShmemLockRelease() {

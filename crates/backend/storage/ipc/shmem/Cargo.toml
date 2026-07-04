@@ -9,6 +9,7 @@ name = "shmem"
 path = "src/lib.rs"
 
 [dependencies]
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 types_error = { path = "../../../../_support/types/types_error" }
 elog = { path = "../../../utils/error/elog" }
 shmem_seams = { path = "../shmem_seams" }

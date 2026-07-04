@@ -9750,6 +9750,7 @@ name = "shmem"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "s_lock_seams",
  "shmem_seams",
  "types_error",
 ]
@@ -10876,6 +10877,7 @@ dependencies = [
  "procarray_seams",
  "relcache_seams",
  "relmapper",
+ "s_lock_seams",
  "shmem",
  "snapbuild_seams",
  "standby_seams",
