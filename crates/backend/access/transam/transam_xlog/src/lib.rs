@@ -16,6 +16,7 @@ pub mod ctl;
 pub mod guc_vars;
 pub mod insert;
 pub mod redo;
+pub(crate) mod removal;
 pub mod startup;
 pub mod write;
 
