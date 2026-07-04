@@ -17,6 +17,8 @@ libc = "0.2"
 
 [dev-dependencies]
 aio_seams = { path = "../../storage/aio/aio_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
 pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 xact_seams = { path = "../../access/transam/xact_seams" }

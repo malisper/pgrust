@@ -1516,6 +1516,8 @@ dependencies = [
  "elog",
  "fd",
  "guc_tables",
+ "init_small_seams",
+ "ipc_seams",
  "libc",
  "pgstat_seams",
  "types_error",
