@@ -7,7 +7,7 @@ use core::cell::Cell;
 use types_core::instrument::WalUsage;
 use types_core::{BackendType, InvalidOid, TimestampTz};
 
-use crate::io::{IOContext, IOObject, IOOp, PgStat_BktypeIO, PgStat_PendingIO, PENDING_IO_ZERO};
+use crate::io::{PgStat_BktypeIO, PENDING_IO_ZERO};
 use crate::pending::{PgStat_HashKey, PGSTAT_KIND_BACKEND};
 use crate::wal::PgStat_WalCounters;
 
@@ -34,10 +34,6 @@ pub const PGSTAT_BACKEND_FLUSH_WAL: u32 = 1 << 1;
 pub const PGSTAT_BACKEND_FLUSH_ALL: u32 = PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL;
 
 thread_local! {
-    // Same UnsafeCell shape as io.rs's pending matrix (per-buffer-hit path).
-    static PENDING_BACKEND_IO: core::cell::UnsafeCell<PgStat_PendingIO> =
-        const { core::cell::UnsafeCell::new(PENDING_IO_ZERO) };
-    static BACKEND_HAS_IOSTATS: Cell<bool> = const { Cell::new(false) };
     static PREV_BACKEND_WAL_USAGE: Cell<WalUsage> = const { Cell::new(WalUsage {
         wal_records: 0,
         wal_fpi: 0,
@@ -59,13 +55,6 @@ fn current_wal_usage() -> Option<WalUsage> {
         .then(transam_xlog_seams::wal_usage::call)
 }
 
-#[inline(always)]
-fn with_pending_backend_io<R>(f: impl FnOnce(&mut PgStat_PendingIO) -> R) -> R {
-    // SAFETY: thread-local; callers' closures are leaves (no re-entry, no
-    // escaping reference).
-    PENDING_BACKEND_IO.with(|s| f(unsafe { &mut *s.get() }))
-}
-
 pub fn pgstat_tracks_backend_bktype(bktype: BackendType) -> bool {
     use BackendType as B;
     !matches!(
@@ -82,40 +71,6 @@ pub fn pgstat_tracks_backend_bktype(bktype: BackendType) -> bool {
     )
 }
 
-pub(crate) fn pgstat_count_backend_io_op(
-    io_object: IOObject,
-    io_context: IOContext,
-    io_op: IOOp,
-    cnt: u32,
-    bytes: u64,
-) {
-    if !pgstat_tracks_backend_bktype(miscinit::GetMyBackendType()) {
-        return;
-    }
-    let (o, c, p) = (io_object as usize, io_context as usize, io_op as usize);
-    with_pending_backend_io(|pending| {
-        pending.counts[o][c][p] += cnt as i64;
-        pending.bytes[o][c][p] += bytes;
-    });
-    BACKEND_HAS_IOSTATS.with(|f| f.set(true));
-}
-
-pub(crate) fn pgstat_count_backend_io_op_time(
-    io_object: IOObject,
-    io_context: IOContext,
-    io_op: IOOp,
-    elapsed_ns: i64,
-) {
-    if !pgstat_tracks_backend_bktype(miscinit::GetMyBackendType()) {
-        return;
-    }
-    let (o, c, p) = (io_object as usize, io_context as usize, io_op as usize);
-    with_pending_backend_io(|pending| {
-        pending.pending_times_ns[o][c][p] += elapsed_ns;
-    });
-    BACKEND_HAS_IOSTATS.with(|f| f.set(true));
-}
-
 fn backend_wal_have_pending() -> bool {
     match current_wal_usage() {
         Some(usage) => {
@@ -130,7 +85,7 @@ pub fn pgstat_flush_backend(nowait: bool, flags: u32) -> bool {
     if !pgstat_tracks_backend_bktype(miscinit::GetMyBackendType()) {
         return false;
     }
-    let has_io = BACKEND_HAS_IOSTATS.with(|f| f.get());
+    let has_io = crate::io::with_pending_block(|blk| blk.backend_has_iostats);
     let has_wal = backend_wal_have_pending();
     if !has_io && !has_wal {
         return false;
@@ -138,7 +93,8 @@ pub fn pgstat_flush_backend(nowait: bool, flags: u32) -> bool {
     let key = backend_key(init_small::globals::MyProcNumber());
     crate::shmem::update_backend_entry(key, |entry| {
         if flags & PGSTAT_BACKEND_FLUSH_IO != 0 && has_io {
-            with_pending_backend_io(|pending| {
+            crate::io::with_pending_block(|blk| {
+                let pending = &mut blk.backend;
                 for o in 0..crate::io::IOOBJECT_NUM_TYPES {
                     for c in 0..crate::io::IOCONTEXT_NUM_TYPES {
                         for p in 0..crate::io::IOOP_NUM_TYPES {
@@ -150,8 +106,8 @@ pub fn pgstat_flush_backend(nowait: bool, flags: u32) -> bool {
                     }
                 }
                 *pending = PENDING_IO_ZERO;
+                blk.backend_has_iostats = false;
             });
-            BACKEND_HAS_IOSTATS.with(|f| f.set(false));
         }
         if flags & PGSTAT_BACKEND_FLUSH_WAL != 0 && has_wal {
             let usage = current_wal_usage().expect("has_wal implies installed");
@@ -179,8 +135,10 @@ pub fn pgstat_create_backend(proc_number: i32) {
     crate::shmem::update_backend_entry(key, |entry| {
         *entry = PgStat_Backend::default();
     });
-    with_pending_backend_io(|pending| *pending = PENDING_IO_ZERO);
-    BACKEND_HAS_IOSTATS.with(|f| f.set(false));
+    crate::io::with_pending_block(|blk| {
+        blk.backend = PENDING_IO_ZERO;
+        blk.backend_has_iostats = false;
+    });
     if let Some(usage) = current_wal_usage() {
         PREV_BACKEND_WAL_USAGE.with(|c| c.set(usage));
     }
