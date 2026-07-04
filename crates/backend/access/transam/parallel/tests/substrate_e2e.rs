@@ -142,6 +142,8 @@ fn stub_seams() {
     multixact_seams::at_eoxact_multixact::set(|| {});
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     relcache_seams::at_eoxact_relation_cache::set(|_| Ok(()));
+    relcache_seams::relation_cache_invalidate::set(|_| Ok(()));
+    catcache_seams::reset_catalog_caches_ext::set(|_| Ok(()));
     typcache_seams::at_eoxact_type_cache::set(|| {});
     logical_seams::reset_logical_streaming_state::set(|| {});
     snapbuild_seams::snap_build_reset_exported_snapshot_state::set(|| {});
