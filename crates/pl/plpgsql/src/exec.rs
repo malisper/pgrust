@@ -2395,6 +2395,18 @@ impl<'a> Estate<'a> {
                 }
                 PlDatum::Rec(r) => {
                     let rectypeid = r.rectypeid;
+                    if !self.func.fn_retistuple && !self.func.fn_retset {
+                        // C keeps retval a composite Datum (ExpandedRecordGetDatum);
+                        // scalar-returning functions IO-cast it at exit, so the
+                        // ret_rec path must not leave retval unset (null deref in
+                        // record_out).
+                        let (d, isnull) = self.rec_as_composite_datum(retvarno)?;
+                        self.ret_rec = None;
+                        self.retval = d;
+                        self.retisnull = isnull;
+                        self.rettype = rectypeid;
+                        return Ok(());
+                    }
                     match &self.datums[retvarno as usize] {
                         DatumVal::Rec(Some(rv)) if !rv.empty => {
                             self.ret_rec = Some(rv.clone());
