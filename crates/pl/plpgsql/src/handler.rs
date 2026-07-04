@@ -1013,7 +1013,7 @@ fn coerce_function_result_tuple(
         None => {
             let retval = estate.retval;
             let (desc, src, values, nulls) = estate.deconstruct_composite(retval)?;
-            crate::exec::RecValue { desc, values, nulls, src_desc: Some(src) }
+            crate::exec::RecValue { desc, values, nulls, src_desc: Some(src), empty: false }
         }
     };
 
@@ -1327,50 +1327,47 @@ fn plpgsql_exec_trigger(
     let natts = desc.types.len();
     let src_desc =
         Rc::new(tupdesc::CreateTupleDescCopy(estate.datum_mcx(), &tupdesc)?);
+    // C makes empty expanded records for BOTH variables (pl_exec.c:966-984):
+    // unsupplied tuples read as NULL, whole-record use is SQL NULL.
     let empty_rv = crate::exec::RecValue {
         desc: desc.clone(),
         values: vec![Datum::null(); natts],
         nulls: vec![true; natts],
         src_desc: Some(src_desc),
+        empty: true,
     };
-    // Absent tuples leave the rec valueless (C's NULL erh): field reads are
-    // 55000, whole-record references are SQL NULL.
-    let mut new_rv: Option<crate::exec::RecValue> = None;
-    let mut old_rv: Option<crate::exec::RecValue> = None;
+    let mut new_rv = empty_rv.clone();
+    let mut old_rv = empty_rv;
 
     let ev = trigdata.tg_event;
     if !TRIGGER_FIRED_FOR_ROW(ev) {
-        // Statement triggers: both NEW and OLD stay valueless.
+        // Per-statement triggers don't use OLD/NEW variables.
     } else if TRIGGER_FIRED_BY_INSERT(ev) {
-        let mut rv = empty_rv.clone();
-        bind_trigger_tuple(&estate, &mut rv, trigdata.tg_trigtuple, &tupdesc)?;
-        new_rv = Some(rv);
+        bind_trigger_tuple(&estate, &mut new_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        new_rv.empty = false;
     } else if TRIGGER_FIRED_BY_UPDATE(ev) {
-        let mut nrv = empty_rv.clone();
-        let mut orv = empty_rv.clone();
-        bind_trigger_tuple(&estate, &mut nrv, trigdata.tg_newtuple, &tupdesc)?;
-        bind_trigger_tuple(&estate, &mut orv, trigdata.tg_trigtuple, &tupdesc)?;
+        bind_trigger_tuple(&estate, &mut new_rv, trigdata.tg_newtuple, &tupdesc)?;
+        bind_trigger_tuple(&estate, &mut old_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        new_rv.empty = false;
+        old_rv.empty = false;
         // BEFORE UPDATE: stored generated columns are not computed yet, so
         // NEW carries them as NULL (pl_exec.c:1005-1023).
         if ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_BEFORE {
             for (i, g) in generated.iter().enumerate() {
                 if *g {
-                    nrv.values[i] = Datum::null();
-                    nrv.nulls[i] = true;
+                    new_rv.values[i] = Datum::null();
+                    new_rv.nulls[i] = true;
                 }
             }
         }
-        new_rv = Some(nrv);
-        old_rv = Some(orv);
     } else if TRIGGER_FIRED_BY_DELETE(ev) {
-        let mut rv = empty_rv.clone();
-        bind_trigger_tuple(&estate, &mut rv, trigdata.tg_trigtuple, &tupdesc)?;
-        old_rv = Some(rv);
+        bind_trigger_tuple(&estate, &mut old_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        old_rv.empty = false;
     } else {
         panic!("unrecognized trigger action: not INSERT, DELETE, or UPDATE");
     }
-    estate.datums[func.new_varno as usize] = crate::exec::DatumVal::Rec(new_rv);
-    estate.datums[func.old_varno as usize] = crate::exec::DatumVal::Rec(old_rv);
+    estate.datums[func.new_varno as usize] = crate::exec::DatumVal::Rec(Some(new_rv));
+    estate.datums[func.old_varno as usize] = crate::exec::DatumVal::Rec(Some(old_rv));
 
     if trigdata.tg_trigger.tgoldtable.is_some() || trigdata.tg_trigger.tgnewtable.is_some() {
         panic!(
@@ -1413,7 +1410,7 @@ fn plpgsql_exec_trigger(
                 Ok(x) => x,
                 Err(e) => return Err(attach_exec_context(e, &estate)),
             };
-            crate::exec::RecValue { desc: d, values, nulls, src_desc: Some(s) }
+            crate::exec::RecValue { desc: d, values, nulls, src_desc: Some(s), empty: false }
         }
     };
     // build_attrmap_by_position + execute_attr_map_tuple: map the returned

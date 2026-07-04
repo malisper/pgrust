@@ -298,23 +298,47 @@ fn compute_return_type<'mcx>(
     Ok((rettype, returnType.setof))
 }
 
-// interpret_function_parameter_list (functioncmds.c), IN/DEFAULT-mode slice.
+// interpret_function_parameter_list (functioncmds.c); VARIADIC stays loud.
+struct ParamListInfoOut<'mcx> {
+    in_types: mcx::PgVec<'mcx, Oid>,
+    all_types: Option<mcx::PgVec<'mcx, Oid>>,
+    modes: Option<mcx::PgVec<'mcx, i8>>,
+    names: mcx::PgVec<'mcx, &'mcx str>,
+    have_names: bool,
+    /// RECORDOID / single-OUT type when RETURNS is omitted; InvalidOid if no OUTs.
+    required_result_type: Oid,
+}
+
 fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
-) -> PgResult<(mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, &'mcx str>, bool)> {
+) -> PgResult<ParamListInfoOut<'mcx>> {
+    const RECORDOID: Oid = 2249;
     let n = stmt.parameters.len();
     let mut in_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut all_types: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut modes: mcx::PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut names: mcx::PgVec<'mcx, &'mcx str> = mcx::vec_with_capacity_in(mcx, n)?;
     let mut have_names = false;
+    let mut have_modes = false;
+    let mut out_count = 0usize;
+    let mut required_result_type = InvalidOid;
 
     for p in stmt.parameters.iter() {
         let fp: &FunctionParameter<'mcx> = p
             .as_function_parameter()
             .expect("func_args_with_defaults holds FunctionParameters");
-        match fp.mode {
-            FunctionParameterMode::FUNC_PARAM_IN | FunctionParameterMode::FUNC_PARAM_DEFAULT => {}
-            _ => unported("OUT/INOUT/VARIADIC/TABLE parameter modes"),
+        let mode = match fp.mode {
+            FunctionParameterMode::FUNC_PARAM_IN | FunctionParameterMode::FUNC_PARAM_DEFAULT => {
+                b'i' as i8
+            }
+            FunctionParameterMode::FUNC_PARAM_OUT => b'o' as i8,
+            FunctionParameterMode::FUNC_PARAM_INOUT => b'b' as i8,
+            FunctionParameterMode::FUNC_PARAM_TABLE => b't' as i8,
+            _ => unported("VARIADIC parameter mode"),
+        };
+        if mode != b'i' as i8 {
+            have_modes = true;
         }
         if fp.defexpr.is_some() {
             unported("parameter DEFAULT expressions");
@@ -328,7 +352,16 @@ fn interpret_function_parameter_list<'mcx>(
                 ERRCODE_INVALID_FUNCTION_DEFINITION,
             ));
         }
-        in_types.push(toid);
+        if matches!(mode as u8, b'i' | b'b') {
+            in_types.push(toid);
+        }
+        if matches!(mode as u8, b'o' | b'b' | b't') {
+            out_count += 1;
+            required_result_type =
+                if out_count > 1 { RECORDOID } else { toid };
+        }
+        all_types.push(toid);
+        modes.push(mode);
 
         let name = fp.name.unwrap_or("");
         if !name.is_empty() {
@@ -342,7 +375,19 @@ fn interpret_function_parameter_list<'mcx>(
         }
         names.push(name);
     }
-    Ok((in_types, names, have_names))
+    let (all_types, modes) = if have_modes {
+        (Some(all_types), Some(modes))
+    } else {
+        (None, None)
+    };
+    Ok(ParamListInfoOut {
+        in_types,
+        all_types,
+        modes,
+        names,
+        have_names,
+        required_result_type,
+    })
 }
 
 struct AsClause<'a> {
@@ -539,12 +584,17 @@ pub fn CreateFunction<'mcx>(
         ));
     }
 
-    let (in_types, param_names, have_names) = interpret_function_parameter_list(mcx, stmt)?;
+    let params = interpret_function_parameter_list(mcx, stmt)?;
+    let (in_types, param_names, have_names) =
+        (params.in_types, params.names, params.have_names);
 
     let (prorettype, returnsSet) = match stmt.returnType {
         Some(rt) => {
             let tn = rt.as_variant::<TypeName>().expect("returnType is a TypeName");
             compute_return_type(mcx, tn, languageOid)?
+        }
+        None if OidIsValid(params.required_result_type) => {
+            (params.required_result_type, false)
         }
         None => {
             return Err(err(
@@ -601,6 +651,8 @@ pub fn CreateFunction<'mcx>(
             volatility: attrs.volatility,
             parallel: attrs.parallel,
             parameterTypes: &in_types,
+            allParameterTypes: params.all_types.as_deref(),
+            parameterModes: params.modes.as_deref(),
             parameterNames: if have_names { Some(&param_names) } else { None },
             procost,
             prorows,

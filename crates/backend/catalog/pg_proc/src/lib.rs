@@ -107,6 +107,10 @@ pub struct ProcedureCreateArgs<'a> {
     pub volatility: i8,
     pub parallel: i8,
     pub parameterTypes: &'a [Oid],
+    /// All parameters (IN and OUT) when any non-IN mode exists.
+    pub allParameterTypes: Option<&'a [Oid]>,
+    /// One mode char per allParameterTypes entry.
+    pub parameterModes: Option<&'a [i8]>,
     // One entry per parameter, "" for unnamed; None when no parameter is named.
     pub parameterNames: Option<&'a [&'a str]>,
     pub procost: f32,
@@ -281,8 +285,44 @@ pub fn ProcedureCreate<'mcx>(
         Anum_pg_proc_proargtypes,
         Datum::from_usize(argtypes_image.as_ptr() as usize),
     );
-    nulls[Anum_pg_proc_proallargtypes - 1] = true;
-    nulls[Anum_pg_proc_proargmodes - 1] = true;
+    let allargtypes_image = match a.allParameterTypes {
+        Some(all) => {
+            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, all.len())?;
+            for &t in all {
+                elems.push(Datum::from_oid(t));
+            }
+            const OIDOID: Oid = 26;
+            Some(datum::array_build::construct_array_image(mcx, &elems, OIDOID, 4, true, b'i')?)
+        }
+        None => None,
+    };
+    match &allargtypes_image {
+        Some(img) => set(
+            &mut values,
+            Anum_pg_proc_proallargtypes,
+            Datum::from_usize(img.as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_proallargtypes - 1] = true,
+    }
+    let argmodes_image = match a.parameterModes {
+        Some(modes) => {
+            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, modes.len())?;
+            for &m in modes {
+                elems.push(Datum::from_i8(m));
+            }
+            const CHAROID: Oid = 18;
+            Some(datum::array_build::construct_array_image(mcx, &elems, CHAROID, 1, true, b'c')?)
+        }
+        None => None,
+    };
+    match &argmodes_image {
+        Some(img) => set(
+            &mut values,
+            Anum_pg_proc_proargmodes,
+            Datum::from_usize(img.as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_proargmodes - 1] = true,
+    }
     let argnames_image = match a.parameterNames {
         Some(names) => {
             // std Vec: scratch holding droppy Varlena handles (PgVec's
