@@ -564,6 +564,9 @@ fn copy_from_partitioned_body<'mcx>(
 
     let mut qualexpr = init_where_qual(mcx, cstate)?;
     let mut router = execpartition::PartitionTupleRouting::new(mcx, rel)?;
+    // C GetPerTupleExprContext: expression partition keys evaluate here,
+    // reset per row.
+    let mut route_eval_cx = MemoryContext::new_bump("CopyRouteEvalPerTuple");
     let mut rootslot = tableam::table_slot_create(mcx, rel)?;
     let mut buffers: Vec<PartBuffer<'mcx>> = Vec::new();
     let mut leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>> = Vec::new();
@@ -603,7 +606,8 @@ fn copy_from_partitioned_body<'mcx>(
             }
         }
 
-        let leaf = router.find_partition(&mut rootslot)?;
+        route_eval_cx.reset();
+        let leaf = router.find_partition(&mut rootslot, route_eval_cx.mcx())?;
         if leaf_checks.len() <= leaf {
             leaf_checks.resize_with(leaf + 1, || None);
             leaf_indexes.resize_with(leaf + 1, || None);
