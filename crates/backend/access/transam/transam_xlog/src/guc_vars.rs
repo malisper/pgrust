@@ -39,7 +39,7 @@ xlog_guc! {
     WAL_INIT_ZERO, wal_init_zero, bool, true;
     WAL_RECYCLE, wal_recycle, bool, true;
     LOG_CHECKPOINTS, log_checkpoints, bool, true;
-    WAL_SYNC_METHOD, wal_sync_method, i32, crate::WAL_SYNC_METHOD_OPEN_DSYNC;
+    WAL_SYNC_METHOD, wal_sync_method, i32, crate::DEFAULT_WAL_SYNC_METHOD;
     WAL_LEVEL, wal_level, i32, crate::WAL_LEVEL_REPLICA;
     COMMIT_DELAY, CommitDelay, i32, 0;
     COMMIT_SIBLINGS, CommitSiblings, i32, 5;
