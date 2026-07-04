@@ -16,6 +16,7 @@ datum = { path = "../../../../_support/types/datum" }
 cache_syscache = { path = "../../cache/cache_syscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 aclchk = { path = "../../../catalog/aclchk" }
+adt_acl = { path = "../../adt/acl" }
 guc_tables = { path = "../guc_tables" }
 miscinit = { path = "../../init/miscinit" }
 elog = { path = "../../error/elog" }
