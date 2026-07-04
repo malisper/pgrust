@@ -1598,6 +1598,19 @@ fn lookup_pg_conversion_oid_by_name_nsp(conname: &str, connamespace: Oid) -> PgR
     )
 }
 
+const ANUM_PG_STATISTIC_EXT_OID: i32 = 1;
+
+fn lookup_pg_statistic_ext_oid_by_name_nsp(stxname: &str, stxnamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        crate::cacheinfo::STATEXTNAMENSP,
+        ANUM_PG_STATISTIC_EXT_OID,
+        SysCacheKey::Str(stxname),
+        SysCacheKey::Value(Datum::from_oid(stxnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn lookup_pg_ts_dict_oid_by_name_nsp(dictname: &str, dictnamespace: Oid) -> PgResult<Oid> {
     GetSysCacheOid(
         TSDICTNAMENSP,
@@ -2587,6 +2600,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_ts_config_row::set(lookup_pg_ts_config_row);
     syscache_seams::lookup_pg_ts_dict_oid_by_name_nsp::set(lookup_pg_ts_dict_oid_by_name_nsp);
     syscache_seams::lookup_pg_conversion_oid_by_name_nsp::set(lookup_pg_conversion_oid_by_name_nsp);
+    syscache_seams::lookup_pg_statistic_ext_oid_by_name_nsp::set(lookup_pg_statistic_ext_oid_by_name_nsp);
     syscache_seams::lookup_pg_ts_dict_row::set(lookup_pg_ts_dict_row);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);

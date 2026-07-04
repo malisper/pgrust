@@ -12564,6 +12564,7 @@ dependencies = [
  "catalog_heap",
  "catalog_indexing",
  "catalog_namespace",
+ "commands_comment",
  "datum",
  "elog",
  "fmgr_seams",

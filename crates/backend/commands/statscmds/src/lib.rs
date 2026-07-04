@@ -7,7 +7,7 @@ use types_core::fmgr::{F_BOOLEQ, F_OIDEQ};
 use types_core::primitive::RegProcedure;
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, NOTICE};
-use types_nodes::rawnodes::{CreateStatsStmt, StatsElem};
+use types_nodes::rawnodes::{AlterStatsStmt, CreateStatsStmt, StatsElem};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::HeapTupleData;
 
@@ -517,10 +517,107 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'mcx>) -> P
     pg_depend::recordDependencyOn(mcx, &myself, &parent, pg_depend::DependencyType::Normal)?;
     pg_depend::recordDependencyOnOwner(mcx, StatisticExtRelationId, statoid, stxowner)?;
 
-    if stmt.stxcomment.is_some() {
-        unported("CreateStatistics: comment on statistics object");
+    if let Some(comment) = stmt.stxcomment {
+        commands_comment::CreateComments(mcx, statoid, StatisticExtRelationId, 0, Some(comment))?;
     }
 
+    Ok(())
+}
+
+const MAX_STATISTICS_TARGET: i64 = 10000;
+
+// AlterStatistics (statscmds.c:638). DIVERGENCE: the old tuple comes from a
+// systable scan on the oid index instead of SearchSysCache1(STATEXTOID); the
+// update is identical.
+pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgResult<()> {
+    let mut newtarget: i64 = 0;
+    let mut newtarget_default = true;
+    if let Some(t) = stmt.stxstattarget {
+        let ival = i64::from(t.as_integer().expect("stxstattarget is an Integer").ival);
+        // -1 was used in previous versions for the default setting
+        if ival != -1 {
+            newtarget = ival;
+            newtarget_default = false;
+        }
+    }
+    if !newtarget_default {
+        if newtarget < 0 {
+            return Err(err(
+                types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("statistics target {newtarget} is too low"),
+            ));
+        } else if newtarget > MAX_STATISTICS_TARGET {
+            newtarget = MAX_STATISTICS_TARGET;
+            ereport(types_error::WARNING)
+                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("lowering statistics target to {newtarget}"))
+                .finish(loc("AlterStatistics"))?;
+        }
+    }
+
+    let parts: PgVec<'_, &str> = {
+        let mut v = PgVec::new_in(mcx);
+        for n in stmt.defnames.iter() {
+            v.push(n.as_string().expect("name String").sval);
+        }
+        v
+    };
+    let stxoid = get_statistics_object_oid(&parts, stmt.missing_ok)?;
+
+    if stxoid == InvalidOid {
+        debug_assert!(stmt.missing_ok);
+        let (schemaname, statname) = catalog_namespace::DeconstructQualifiedName(&parts)?;
+        let msg = match schemaname {
+            Some(s) => {
+                format!("statistics object \"{s}.{statname}\" does not exist, skipping")
+            }
+            None => format!("statistics object \"{statname}\" does not exist, skipping"),
+        };
+        ereport(NOTICE).errmsg(msg).finish(loc("AlterStatistics"))?;
+        return Ok(());
+    }
+
+    let rel = table::table_open(mcx, StatisticExtRelationId, RowExclusiveLock)?;
+
+    let keys = [eq_key(Anum_oid, F_OIDEQ, Datum::from_oid(stxoid))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, StatisticExtOidIndexId, true, None, &keys)?;
+    let Some(oldtup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(err(
+            types_error::ERRCODE_INTERNAL_ERROR,
+            format!("cache lookup failed for extended statistics object {stxoid}"),
+        ));
+    };
+
+    if !aclchk::object_ownercheck(
+        StatisticExtRelationId,
+        stxoid,
+        miscinit_seams::get_user_id::call(),
+    )? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_STATISTIC_EXT,
+            &parts.join("."),
+        )?;
+    }
+
+    let mut repl_val = [Datum::null(); Natts_pg_statistic_ext];
+    let mut repl_null = [false; Natts_pg_statistic_ext];
+    let mut repl_repl = [false; Natts_pg_statistic_ext];
+    repl_repl[Anum_stxstattarget - 1] = true;
+    if !newtarget_default {
+        repl_val[Anum_stxstattarget - 1] = Datum::from_i16(newtarget as i16);
+    } else {
+        repl_null[Anum_stxstattarget - 1] = true;
+    }
+
+    let desc = rel.descr();
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, oldtup, desc, &repl_val, &repl_null, &repl_repl)?;
+    let otid = oldtup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    rel.close(RowExclusiveLock)?;
     Ok(())
 }
 

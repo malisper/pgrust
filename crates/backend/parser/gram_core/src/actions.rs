@@ -1812,6 +1812,17 @@ impl<'mcx> Parser<'mcx> {
                 n.expr = view.v(i).node();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterStatsStmt: ALTER STATISTICS [IF_P EXISTS] any_name SET
+            // STATISTICS set_statistics_value
+            618 | 619 => {
+                let (names, target) =
+                    if rule == 618 { (view.v(3), view.v(6)) } else { (view.v(5), view.v(8)) };
+                let mut n = Node::build::<types_nodes::rawnodes::AlterStatsStmt>(mcx)?;
+                n.defnames = names.list();
+                n.stxstattarget = target.node();
+                n.missing_ok = rule == 619;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // OnCommitOption
             602 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DROP as i32),
             603 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DELETE_ROWS as i32),
