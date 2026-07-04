@@ -1899,6 +1899,81 @@ fn statext_data_blob<'mcx>(
     Ok(img)
 }
 
+fn statext_exprs_src<'mcx>(mcx: Mcx<'mcx>, statoid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(statoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = text_attr(mcx, &t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXEXPRS)?;
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(out)
+}
+
+fn statext_expressions_load<'mcx>(
+    mcx: Mcx<'mcx>,
+    statoid: Oid,
+    inh: bool,
+    idx: i32,
+) -> PgResult<syscache_seams::PgStatisticBundle<'mcx>> {
+    let img = statext_data_blob(mcx, statoid, inh, ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR)?
+        .unwrap_or_else(|| {
+            panic!(
+                "requested statistics kind \"e\" is not yet built for statistics object {statoid}"
+            )
+        });
+    let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'd')?;
+    let d = elems[idx as usize];
+    let p = d.as_usize() as *const u8;
+    // SAFETY: composite datum inside the detoasted stxdexpr image; its
+    // varlena word (HeapTupleHeaderGetDatumLength) declares the image size.
+    let tup = unsafe {
+        let t_len = u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2;
+        types_tuple::HeapTupleData::from_raw_parts(
+            p,
+            t_len,
+            types_tuple::ItemPointerData::invalid(),
+            InvalidOid,
+        )
+    };
+    let mut slots = PgVec::new_in(mcx);
+    for i in 0..STATISTIC_NUM_SLOTS {
+        let kind = getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STAKIND1 + i).as_i16();
+        if kind == 0 {
+            continue;
+        }
+        let numbers_image =
+            varlena_image(mcx, &tup, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + i)?
+                .unwrap_or(PgVec::new_in(mcx));
+        let numbers = decode_pg_statistic_numbers(mcx, &numbers_image)?;
+        let (values_image, valuetype) =
+            match varlena_image(mcx, &tup, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + i)? {
+                Some(vimg) => {
+                    let elemtype = datum::array_build::array_image_elemtype(&vimg);
+                    (vimg, elemtype)
+                }
+                None => (PgVec::new_in(mcx), InvalidOid),
+            };
+        let values = decode_pg_statistic_values(mcx, valuetype, &values_image)?;
+        slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+            kind,
+            getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid(),
+            getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid(),
+            valuetype,
+            values,
+            numbers,
+            values_image,
+        ));
+    }
+    Ok(syscache_seams::PgStatisticBundle {
+        stanullfrac: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STANULLFRAC).as_f32(),
+        stawidth: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STAWIDTH).as_i32(),
+        stadistinct: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STADISTINCT).as_f32(),
+        slots,
+    })
+}
+
 fn text_attr<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: &HeapTupleData<'_>,
@@ -2470,6 +2545,8 @@ pub(crate) fn install() {
     syscache_seams::statext_form::set(statext_form);
     syscache_seams::statext_data_kinds::set(statext_data_kinds);
     syscache_seams::statext_data_blob::set(statext_data_blob);
+    syscache_seams::statext_exprs_src::set(statext_exprs_src);
+    syscache_seams::statext_expressions_load::set(statext_expressions_load);
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);

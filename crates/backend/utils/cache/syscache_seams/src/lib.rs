@@ -1000,6 +1000,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SysCacheGetAttr(STATEXTOID, stxexprs) as nodeToString text; None = NULL.
+    pub fn statext_exprs_src<'mcx>(
+        mcx: Mcx<'mcx>,
+        statoid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    // statext_expressions_load (extended_stats.c): stxdexpr pg_statistic[]
+    // element `idx` decoded to a bundle. Slots decode eagerly — the lazy
+    // refetch key targets pg_statistic rows, which these are not.
+    pub fn statext_expressions_load<'mcx>(
+        mcx: Mcx<'mcx>,
+        statoid: Oid,
+        inh: bool,
+        idx: i32,
+    ) -> PgResult<PgStatisticBundle<'mcx>>
+);
+
+seam_core::seam!(
     pub fn pg_namespace_nspname(nspid: Oid) -> PgResult<Option<NameData>>
 );
 
