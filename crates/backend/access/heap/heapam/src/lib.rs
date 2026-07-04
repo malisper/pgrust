@@ -986,10 +986,8 @@ pub fn heap_batch_deform_soa<'mcx>(
     // SAFETY: as heap_batch_store_slot — pinned page, offsets from
     // page_collect_tuples under the per-page bound.
     let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
-    // Reverse row order = ascending tuple addresses (pages fill from pd_upper
-    // down), so the first toucher of each line streams forward; every SoA
-    // write is positional, so batch output is order-free. Manual while: the
-    // .rev() form cost ~3 instr/row on this loop's codegen.
+    // Descending i = ascending tuple addresses (pages fill from pd_upper down;
+    // scanqual -8.3% wall); SoA writes are positional, so output is order-free.
     let mut i = n;
     while i != 0 {
         i -= 1;
