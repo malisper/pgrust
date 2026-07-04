@@ -100,6 +100,8 @@ pub fn init_all() {
     relpath::init_seams();
     rewrite_handler::init_seams();
     rewrite_define::init_seams();
+    opclasscmds::init_seams();
+    catalog_objectaddress::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();

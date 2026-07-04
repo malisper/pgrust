@@ -1467,8 +1467,10 @@ dependencies = [
  "catalog_index",
  "catalog_indexing",
  "catalog_namespace",
+ "catalog_objectaddress",
  "datum",
  "dependency_seams",
+ "elog_seams",
  "extension",
  "fmgr_seams",
  "format_type",
@@ -1482,6 +1484,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_largeobject",
+ "pg_namespace",
  "pg_shdepend",
  "pg_type",
  "policy_seams",
@@ -1668,6 +1671,45 @@ dependencies = [
  "varlena",
  "wchar",
  "xact",
+]
+
+[[package]]
+name = "catalog_objectaddress"
+version = "0.0.0"
+dependencies = [
+ "adt_regproc",
+ "cache_syscache",
+ "catalog",
+ "catalog_namespace",
+ "datum",
+ "dbcommands_seams",
+ "extension",
+ "fmgr_seams",
+ "format_type",
+ "genam",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "objectaddress_seams",
+ "opclasscmds_seams",
+ "parse_func",
+ "parse_oper",
+ "pg_attrdef",
+ "pg_depend",
+ "rel_vocab",
+ "relation",
+ "rewrite_define_seams",
+ "sinval",
+ "syscache_seams",
+ "table",
+ "trigger",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2312,6 +2354,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_dropcmds"
+version = "0.0.0"
+dependencies = [
+ "catalog_dependency",
+ "catalog_namespace",
+ "catalog_objectaddress",
+ "elog_seams",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "rel_vocab",
+ "superuser",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "xact",
+]
+
+[[package]]
 name = "commands_matview"
 version = "0.1.0"
 dependencies = [
@@ -2940,25 +3004,6 @@ dependencies = [
  "types_nodes",
  "types_storage",
  "xact",
-]
-
-[[package]]
-name = "dropcmds"
-version = "0.1.0"
-dependencies = [
- "catalog_dependency",
- "catalog_namespace",
- "elog_seams",
- "mcx",
- "pg_depend",
- "rel_vocab",
- "relcache",
- "rewrite_define",
- "table",
- "types_core",
- "types_error",
- "types_nodes",
- "types_rel",
 ]
 
 [[package]]
@@ -6290,6 +6335,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectaddress_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6314,6 +6369,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "opclasscmds_seams",
  "parse_func",
  "parse_oper",
  "parse_utilcmd",
@@ -6329,6 +6385,16 @@ dependencies = [
  "types_rel",
  "types_relscan",
  "types_tuple",
+]
+
+[[package]]
+name = "opclasscmds_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -7140,6 +7206,8 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "fmgr_seams",
+ "genam",
  "heaptuple",
  "mcx",
  "pg_depend",
@@ -7148,6 +7216,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
@@ -7260,15 +7329,13 @@ dependencies = [
  "datum",
  "dbcommands_seams",
  "fmgr_seams",
- "format_type",
  "genam",
  "heaptuple",
  "init_small",
  "lmgr",
- "lsyscache",
  "mcx",
  "miscinit_seams",
- "namespace_seams",
+ "objectaddress_seams",
  "syscache_seams",
  "table",
  "types_core",
@@ -7307,6 +7374,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "pg_depend",
+ "pg_enum",
  "syscache_seams",
  "table",
  "types_core",
@@ -9409,6 +9477,7 @@ dependencies = [
  "catalog_dependency",
  "catalog_index",
  "catalog_namespace",
+ "catalog_objectaddress",
  "catalog_storage",
  "catcache",
  "checkpointer",
@@ -11524,6 +11593,7 @@ dependencies = [
  "commands_cluster",
  "commands_comment",
  "commands_createas",
+ "commands_dropcmds",
  "commands_matview",
  "commands_policy",
  "commands_vacuum",
@@ -11531,7 +11601,6 @@ dependencies = [
  "copy_cmd",
  "dbcommands",
  "discard",
- "dropcmds",
  "elog",
  "elog_seams",
  "explain",

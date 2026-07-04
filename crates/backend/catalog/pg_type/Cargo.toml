@@ -23,6 +23,7 @@ init_small = { path = "../../utils/init/init_small" }
 table = { path = "../../access/table/table" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
+pg_enum = { path = "../pg_enum" }
 pg_depend = { path = "../pg_depend" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }

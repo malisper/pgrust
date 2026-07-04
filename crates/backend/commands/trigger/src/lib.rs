@@ -7,7 +7,7 @@ mod queue;
 mod state;
 
 pub use catalog::{CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs};
-pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById, RemoveTriggers};
+pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById};
 pub use exec::{ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache};
 pub use queue::{
     AfterTriggerBeginQuery, AfterTriggerBeginSubXact, AfterTriggerBeginXact, AfterTriggerEndQuery,

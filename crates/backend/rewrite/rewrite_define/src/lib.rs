@@ -29,6 +29,7 @@ pub const ViewSelectRuleName: &str = "_RETURN";
 
 pub fn init_seams() {
     rewrite_define_seams::remove_rewrite_rule_by_id::set(RemoveRewriteRuleById);
+    rewrite_define_seams::get_rewrite_oid::set(get_rewrite_oid);
 }
 
 const RULE_FIRES_ON_ORIGIN: u8 = b'O';

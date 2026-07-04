@@ -175,6 +175,14 @@ pub struct PgConstraintShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgConstraintDescShape {
+    pub conname: NameData,
+    pub connamespace: Oid,
+    pub conrelid: Oid,
+    pub contypid: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgOpclassShape {
     pub opcmethod: Oid,
     pub opcfamily: Oid,
@@ -454,6 +462,15 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn lookup_pg_constraint_shape(conoid: Oid) -> PgResult<Option<PgConstraintShape>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_constraint_desc_shape(conoid: Oid) -> PgResult<Option<PgConstraintDescShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TYPEOID) -> (typname, typnamespace).
+    pub fn pg_type_name_namespace(typid: Oid) -> PgResult<Option<(NameData, Oid)>>
 );
 
 seam_core::seam!(
