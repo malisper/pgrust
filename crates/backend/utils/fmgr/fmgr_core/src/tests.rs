@@ -469,23 +469,25 @@ fn thin_tables_sorted_and_refereed() {
         }
         for e in *t {
             let b = fmgr_isbuiltin(e.foid).expect("thin row without builtin row");
-            assert_eq!(b.nargs, 2, "thin rows are 2-arg in this rung ({})", e.foid);
+            assert_eq!(b.nargs, e.nargs, "thin arity mismatch ({})", e.foid);
             assert_eq!(b.func as usize, e.func as usize, "thin referee mismatch ({})", e.foid);
         }
     }
     let f = fmgr_info(177).unwrap();
-    assert!(fmgr_thin_builtin(&f).is_some());
+    assert!(fmgr_thin_builtin(&f, 2).is_some());
+    assert!(fmgr_thin_builtin(&f, 1).is_none(), "arity mismatch must not get a thin twin");
     let mut g = fmgr_info(177).unwrap();
     g.fn_addr = int4pl_body;
-    assert!(fmgr_thin_builtin(&g).is_none(), "diverging fn_addr must not get a thin twin");
-    assert!(fmgr_thin_builtin(&fmgr_info(65).unwrap()).is_some());
+    assert!(fmgr_thin_builtin(&g, 2).is_none(), "diverging fn_addr must not get a thin twin");
+    assert!(fmgr_thin_builtin(&fmgr_info(65).unwrap(), 2).is_some());
+    assert!(fmgr_thin_builtin(&fmgr_info(1219).unwrap(), 1).is_some(), "int8inc thin row");
 }
 
 #[test]
 fn thin_twin_matches_wrapper() {
     for (oid, a, b) in [(177u32, 40i32, 2i32), (65, 7, 7), (66, -3, 4), (154, 40, 8)] {
         let mut f = fmgr_info(oid).unwrap();
-        let thin = fmgr_thin_builtin(&f).unwrap();
+        let thin = fmgr_thin_builtin(&f, 2).unwrap();
         let mut fcinfo = LocalFcinfo::<2>::fresh(0);
         fcinfo.set_arg(0, Datum::from_i32(a));
         fcinfo.set_arg(1, Datum::from_i32(b));
@@ -497,7 +499,7 @@ fn thin_twin_matches_wrapper() {
     }
     // Error surface: int4pl overflow through both ABIs.
     let mut f = fmgr_info(177).unwrap();
-    let thin = fmgr_thin_builtin(&f).unwrap();
+    let thin = fmgr_thin_builtin(&f, 2).unwrap();
     let mut fcinfo = LocalFcinfo::<2>::fresh(0);
     fcinfo.set_arg(0, Datum::from_i32(i32::MAX));
     fcinfo.set_arg(1, Datum::from_i32(1));

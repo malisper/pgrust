@@ -332,6 +332,21 @@ fn eval_kernel<'mcx>(
             }
             Ok(NullableDatum::null())
         }
+        Kernel::AggTransByValThin { call, pergroup, strict } => {
+            // SAFETY: as AggTransByVal; thin callee never sets isnull.
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !strict || !(*pg).trans_value_is_null {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    (*pg).trans_value = invoke_thin(&call)?;
+                    (*pg).trans_value_is_null = false;
+                }
+            }
+            Ok(NullableDatum::null())
+        }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
             // SAFETY: the frame's fcinfo image and mcx-boxed FmgrInfo are
@@ -1272,6 +1287,15 @@ fn run_program<'mcx>(
                 assign_to_result(rslot, *resultnum1, nd1.value, nd1.isnull);
                 assign_to_result(rslot, *resultnum2, nd2.value, nd2.isnull);
             }
+            Step::FuncExprStrict1Thin { call, out } => {
+                // SAFETY: arg 0 of the call's live fcinfo image.
+                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+                if a0.isnull {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    write_out(*out, invoke_thin(call)?, false);
+                }
+            }
             Step::FuncExprStrict2Thin { call, out } => {
                 let r = strict2_thin_eval(call)?;
                 write_out(*out, r.value, r.isnull);
@@ -1286,7 +1310,7 @@ fn run_program<'mcx>(
                 if nd.isnull || other.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    write_out(*out, invoke2_thin(call)?, false);
+                    write_out(*out, invoke_thin(call)?, false);
                 }
             }
             Step::FuncFuncStrict2Thin { call1, argno, call2, out } => {
@@ -1299,7 +1323,7 @@ fn run_program<'mcx>(
                 if r1.isnull || other.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    write_out(*out, invoke2_thin(call2)?, false);
+                    write_out(*out, invoke_thin(call2)?, false);
                 }
             }
             Step::FuncStrict2QualThin { call, jumpdone, out } => {
@@ -1324,7 +1348,7 @@ fn run_program<'mcx>(
                 } else if nd.isnull || other.isnull {
                     write_out(*out, Datum::from_bool(false), false);
                 } else {
-                    write_out(*out, invoke2_thin(call)?, false);
+                    write_out(*out, invoke_thin(call)?, false);
                 }
             }
             Step::NotDistinctQualThin { call, jumpdone, out } => {
@@ -1340,7 +1364,7 @@ fn run_program<'mcx>(
                 } else if a0.isnull || a1.isnull {
                     Datum::from_bool(false)
                 } else {
-                    invoke2_thin(call)?
+                    invoke_thin(call)?
                 };
                 if !v.as_bool() {
                     write_out(*out, Datum::from_bool(false), false);
@@ -1349,6 +1373,20 @@ fn run_program<'mcx>(
                     continue;
                 }
                 write_out(*out, v, false);
+            }
+            Step::AggTransStrictByValIndirectThin { call, base, transno } => {
+                // SAFETY: as AggTransByValIndirect; thin callee never sets isnull.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        (*pg).trans_value = invoke_thin(call)?;
+                        (*pg).trans_value_is_null = false;
+                    }
+                }
             }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -1747,13 +1785,13 @@ fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
 // Thin-ABI call: no flinfo arg, no arity check, no isnull round trip — the
 // registered callee never writes fcinfo.isnull (fmgr_thin_builtin contract).
 #[inline(always)]
-fn invoke2_thin(call: &crate::steps::Call2Thin) -> PgResult<Datum> {
+fn invoke_thin(call: &crate::steps::CallThin) -> PgResult<Datum> {
     // SAFETY: live 2-arg fcinfo image; thin contract holds at registration.
     unsafe { (call.f)(call.fcinfo.cast()) }
 }
 
 #[inline(always)]
-fn strict2_thin_eval(call: &crate::steps::Call2Thin) -> PgResult<NullableDatum> {
+fn strict2_thin_eval(call: &crate::steps::CallThin) -> PgResult<NullableDatum> {
     // SAFETY: args 0/1 of the call's live fcinfo image.
     let (a0, a1) = unsafe {
         (
@@ -1764,7 +1802,7 @@ fn strict2_thin_eval(call: &crate::steps::Call2Thin) -> PgResult<NullableDatum> 
     if a0.isnull || a1.isnull {
         return Ok(NullableDatum::null());
     }
-    Ok(NullableDatum { value: invoke2_thin(call)?, isnull: false })
+    Ok(NullableDatum { value: invoke_thin(call)?, isnull: false })
 }
 
 #[inline(always)]

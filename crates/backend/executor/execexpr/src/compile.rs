@@ -2485,18 +2485,32 @@ fn arg_index_of(call: &FuncCall, out: OutRef) -> Option<u8> {
 }
 
 // Thin-ABI carrier when the resolved fn has a referee'd thin twin.
-fn thin2(call: &FuncCall) -> Option<crate::steps::Call2Thin> {
-    debug_assert!(call.nargs == 2);
+fn thin_call(call: &FuncCall) -> Option<crate::steps::CallThin> {
     // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
     let fl = unsafe { call.flinfo.as_ref() };
-    let f = fmgr_core::fmgr_thin_builtin(fl)?;
-    Some(crate::steps::Call2Thin { fcinfo: call.fcinfo, f })
+    let f = fmgr_core::fmgr_thin_builtin(fl, call.nargs as i16)?;
+    Some(crate::steps::CallThin { fcinfo: call.fcinfo, f })
+}
+
+fn thin2(call: &FuncCall) -> Option<crate::steps::CallThin> {
+    debug_assert!(call.nargs == 2);
+    thin_call(call)
 }
 
 fn thin_single(step: &Step) -> Option<Step> {
     match step {
+        Step::FuncExprStrict1 { call, out } => {
+            Some(Step::FuncExprStrict1Thin { call: thin_call(call)?, out: *out })
+        }
         Step::FuncExprStrict2 { call, out } => {
-            Some(Step::FuncExprStrict2Thin { call: thin2(call)?, out: *out })
+            Some(Step::FuncExprStrict2Thin { call: thin_call(call)?, out: *out })
+        }
+        Step::AggTransStrictByValIndirect { call, base, transno } => {
+            Some(Step::AggTransStrictByValIndirectThin {
+                call: thin_call(call)?,
+                base: *base,
+                transno: *transno,
+            })
         }
         _ => None,
     }
@@ -2757,12 +2771,22 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
             Step::AggPlainTransByVal { call, pergroup }
                 if matches!(steps[1], Step::DoneNoReturn) =>
             {
-                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: false }
+                match thin_call(call) {
+                    Some(c) => {
+                        Kernel::AggTransByValThin { call: c, pergroup: *pergroup, strict: false }
+                    }
+                    None => Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: false },
+                }
             }
             Step::AggPlainTransStrictByVal { call, pergroup }
                 if matches!(steps[1], Step::DoneNoReturn) =>
             {
-                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true }
+                match thin_call(call) {
+                    Some(c) => {
+                        Kernel::AggTransByValThin { call: c, pergroup: *pergroup, strict: true }
+                    }
+                    None => Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true },
+                }
             }
             _ => match (var_src(&steps[0]), assign_var_src(&steps[0])) {
                 (Some((src, attnum, out)), _) if state.is_result(out) => {
