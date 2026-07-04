@@ -958,9 +958,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         // named args/defaults in its argument list before recursing.
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
-            let shape = syscache_seams::lookup_pg_proc_shape::call(wf.winfnoid)?
-                .ok_or_else(|| func_lookup_failed(wf.winfnoid))?;
-            match expand_function_arguments(cx.mcx, &wf.args, wf.wintype, wf.winfnoid, &shape)? {
+            match expand_function_arguments_opt(cx.mcx, &wf.args, false, wf.wintype, wf.winfnoid)? {
                 None => expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx)),
                 Some(args) => {
                     let expanded = Node::mk(

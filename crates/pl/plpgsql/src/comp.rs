@@ -2,7 +2,7 @@
 // Unported louds (named at their sites): %ROWTYPE, cword %TYPE beyond
 // var/2-3-part type names, record %TYPE, composite- and domain-typed
 // variables, trigger compile, polymorphic argument resolution,
-// VARIADIC/TABLE arg modes.
+// VARIADIC arg mode.
 use types_core::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT, ERROR,

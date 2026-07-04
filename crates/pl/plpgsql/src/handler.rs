@@ -627,33 +627,6 @@ fn attach_compile_context(
     e
 }
 
-// add_dummy_return (pl_comp.c): let control fall off the end when the
-// function has OUT params, returns VOID, or returns a set.
-fn add_dummy_return(comp: &mut CompState, action: &mut PlBlock) {
-    if action.exceptions.is_some() || action.label.is_some() {
-        let inner = std::mem::replace(
-            action,
-            PlBlock {
-                lineno: 0,
-                label: None,
-                body: Vec::new(),
-                initvarnos: Vec::new(),
-                exceptions: None,
-            },
-        );
-        comp.nstatements += 1;
-        action.body.push(PlStmt::Block(inner));
-    }
-    if !matches!(action.body.last(), Some(PlStmt::Return { .. })) {
-        comp.nstatements += 1;
-        action.body.push(PlStmt::Return {
-            lineno: 0,
-            expr: None,
-            retvarno: comp.out_param_varno,
-        });
-    }
-}
-
 // add_parameter_name (pl_comp.c).
 fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()> {
     if comp.ns_lookup(comp.ns_top, true, name, None, None).is_some() {
@@ -707,7 +680,7 @@ fn plpgsql_call_handler(
 
     // SAFETY: fcinfo.context, when set, is ExecuteCallStmt's live CallContext
     // armed for this call, with no `&mut` formed during it.
-    let nonatomic = ctx_tag == Some(types_fmgr::T_CALL_CONTEXT)
+    let nonatomic = ctx_tag == Some(fmgr::T_CALL_CONTEXT)
         && unsafe { fcinfo.call_context() }.is_some_and(|cc| !cc.atomic);
 
     let rc = spi::SPI_connect_ext(if nonatomic { spi::SPI_OPT_NONATOMIC } else { 0 })?;
