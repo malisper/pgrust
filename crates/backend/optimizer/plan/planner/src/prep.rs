@@ -107,6 +107,19 @@ pub fn preprocess_rowmarks<'mcx>(
         match parse.commandType {
             CmdType::CMD_SELECT | CmdType::CMD_INSERT => return Ok(()),
             CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
+                // INSTEAD OF view targets: source data comes from the expanded
+                // view; same no-marks EPQ divergence as the MERGE arm below
+                // (IR triggers never lock or EPQ the view rows).
+                let target_rte = parse
+                    .rtable
+                    .nth(parse.resultRelation as usize - 1)
+                    .as_range_tbl_entry()
+                    .expect("rtable cell");
+                if target_rte.rtekind == RTEKind::RTE_RELATION
+                    && target_rte.relkind == types_rel::RELKIND_VIEW
+                {
+                    return Ok(());
+                }
                 let f = parse.jointree.expect("jointree is a FromExpr");
                 for child in &f.fromlist {
                     let rtr = child.as_range_tbl_ref().unwrap_or_else(|| {
