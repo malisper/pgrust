@@ -1222,26 +1222,26 @@ fn finalize_grouping_exprs<'mcx>(
         NodeTag::T_JsonValueExpr => {
             let j = node.as_json_value_expr().unwrap();
             for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
-                finalize_grouping_exprs(mcx, pstate, qry, hnvg, e)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, e)?;
             }
             Ok(())
         }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
             for arg in &c.args {
-                finalize_grouping_exprs(mcx, pstate, qry, hnvg, arg)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, arg)?;
             }
             for e in [c.func, c.coercion].into_iter().flatten() {
-                finalize_grouping_exprs(mcx, pstate, qry, hnvg, e)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, e)?;
             }
             Ok(())
         }
         NodeTag::T_JsonIsPredicate => match node.as_json_is_predicate().unwrap().expr {
-            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, e),
+            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, e),
             None => Ok(()),
         },
         NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
-            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, e),
+            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, e),
             None => Ok(()),
         },
         NodeTag::T_JsonExpr => {
@@ -1250,10 +1250,10 @@ fn finalize_grouping_exprs<'mcx>(
                 .into_iter()
                 .flatten()
             {
-                finalize_grouping_exprs(mcx, pstate, qry, hnvg, e)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, e)?;
             }
             for v in &j.passing_values {
-                finalize_grouping_exprs(mcx, pstate, qry, hnvg, v)?;
+                finalize_grouping_exprs(mcx, pstate, qry, hnvg, sublevels_up, v)?;
             }
             Ok(())
         }
