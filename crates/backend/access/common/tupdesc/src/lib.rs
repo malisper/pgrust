@@ -646,3 +646,23 @@ pub fn build_attrmap_by_name<'mcx>(
     }
     Ok(attmap)
 }
+
+// convert_tuples_by_name (tupconvert.c): None when the by-name map is the
+// identity (check_attrmap_match), so callers skip conversion entirely.
+pub fn convert_tuples_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+) -> PgResult<Option<PgVec<'mcx, i16>>> {
+    let attmap = build_attrmap_by_name(mcx, indesc, outdesc)?;
+    if indesc.natts == outdesc.natts {
+        let identity = attmap.iter().enumerate().all(|(i, &m)| {
+            m == (i + 1) as i16
+                || (m == 0 && indesc.attr(i).attisdropped && outdesc.attr(i).attisdropped)
+        });
+        if identity {
+            return Ok(None);
+        }
+    }
+    Ok(Some(attmap))
+}

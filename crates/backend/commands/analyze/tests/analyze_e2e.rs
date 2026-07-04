@@ -589,6 +589,14 @@ fn install_relation_seams() {
         );
         Ok(Relation::open(make_relation(mcx, relid), None))
     });
+    relcache_seams::relation_id_get_relation::set(|relid| {
+        assert!(
+            relid == T_OID || relid == STAT_OID || relid == STATEXT_OID,
+            "unknown relation oid {relid}"
+        );
+        let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("test-relcache")));
+        Ok(Some(Rc::new(make_relation(cx.mcx(), relid))))
+    });
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
     relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
 }
@@ -913,7 +921,7 @@ fn run_analyze() {
     let cx = MemoryContext::new("analyze");
     let mcx = cx.mcx();
     xact::StartTransactionCommand().unwrap();
-    commands_analyze::analyze_rel(mcx, T_OID, &NodeList::nil(), &VacuumParams { options: 0x02 }, false)
+    commands_analyze::analyze_rel(mcx, T_OID, None, &NodeList::nil(), &VacuumParams { options: 0x02 }, false)
         .unwrap();
     xact::CommitTransactionCommand().unwrap();
 }

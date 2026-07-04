@@ -10,7 +10,9 @@ use types_core::{AttrNumber, BlockNumber, ForkNumber, InvalidOid, Oid};
 use types_core::fmgr::{F_BOOLEQ, F_INT2EQ, F_OIDEQ};
 use types_error::{PgError, PgResult};
 use types_nodes::parsenodes::{VacuumRelation, VacuumStmt};
-use types_rel::{Relation, RELKIND_MATVIEW, RELKIND_RELATION};
+use types_rel::{
+    Relation, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_slot::SlotData;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
@@ -43,6 +45,7 @@ const WIDTH_THRESHOLD: usize = 1024;
 
 const SHARE_UPDATE_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 4;
 const ROW_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 3;
+const ACCESS_SHARE_LOCK: types_rel::LOCKMODE = 1;
 const NO_LOCK: types_rel::LOCKMODE = 0;
 
 pub struct VacuumParams {
@@ -91,7 +94,11 @@ pub(crate) struct VacAttrStats<'mcx> {
     statypalign: [u8; STATISTIC_NUM_SLOTS],
 }
 
-pub fn ExecVacuum(mcx: Mcx<'_>, stmt: &VacuumStmt<'_>, is_top_level: bool) -> PgResult<()> {
+pub fn ExecVacuum<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &'mcx VacuumStmt<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
     if stmt.is_vacuumcmd {
         panic!("ExecVacuum (vacuum.c): VACUUM lane (commands_vacuum unit)");
     }
@@ -117,6 +124,7 @@ pub fn ExecVacuum(mcx: Mcx<'_>, stmt: &VacuumStmt<'_>, is_top_level: bool) -> Pg
 fn analyze_rel_seam<'a, 'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
+    relname: Option<&'a str>,
     va_cols: &'a types_nodes::NodeList<'mcx>,
     options: u32,
     in_outer_xact: bool,
@@ -124,15 +132,16 @@ fn analyze_rel_seam<'a, 'mcx>(
     analyze_rel(
         mcx,
         relid,
+        relname,
         va_cols,
         &VacuumParams { options: options as i32 },
         in_outer_xact,
     )
 }
 
-fn vacuum(
-    mcx: Mcx<'_>,
-    rels: &types_nodes::NodeList<'_>,
+fn vacuum<'mcx>(
+    mcx: Mcx<'mcx>,
+    rels: &'mcx types_nodes::NodeList<'mcx>,
     params: &VacuumParams,
     is_top_level: bool,
 ) -> PgResult<()> {
@@ -145,44 +154,52 @@ fn vacuum(
             .into());
     }
     let in_outer_xact = xact::IsInTransactionBlock(is_top_level);
-    if rels.iter().count() > 1 && !in_outer_xact {
-        panic!("vacuum (vacuum.c): use_own_xacts multi-relation ANALYZE lane");
+
+    let mut vacrels: mcx::PgVec<'mcx, commands_vacuum::ExpandedVacRel<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    for reln in rels.iter() {
+        let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
+        commands_vacuum::expand_vacuum_rel(mcx, vrel, params.options as u32, &mut vacrels)?;
     }
+
+    let use_own_xacts = !in_outer_xact && vacrels.len() > 1;
+    if use_own_xacts {
+        if snapmgr::ActiveSnapshotSet() {
+            snapmgr::PopActiveSnapshot()?;
+        }
+        xact::CommitTransactionCommand()?;
+    }
+
     commands_vacuum::set_in_vacuum(true);
     // catch_unwind = C's PG_FINALLY (panics become ERRORs at tcop and the
     // session survives, so in_vacuum must reset on every exit path).
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        vacuum_all_rels(mcx, rels, params, in_outer_xact)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
+        for vrel in vacrels.iter() {
+            if use_own_xacts {
+                xact::StartTransactionCommand()?;
+                let snapshot = snapmgr::GetTransactionSnapshot()?;
+                snapmgr::PushActiveSnapshot(&snapshot)?;
+            }
+            analyze_rel(mcx, vrel.oid, vrel.relname, vrel.va_cols, params, in_outer_xact)?;
+            if use_own_xacts {
+                snapmgr::PopActiveSnapshot()?;
+                xact::CommandCounterIncrement()?;
+                xact::CommitTransactionCommand()?;
+            } else {
+                // Separating CCIs keep "ANALYZE t, t" self-consistent (C).
+                xact::CommandCounterIncrement()?;
+            }
+        }
+        Ok(())
     }));
     commands_vacuum::set_in_vacuum(false);
     match result {
-        Ok(r) => r,
+        Ok(r) => r?,
         Err(p) => std::panic::resume_unwind(p),
     }
-}
-
-fn vacuum_all_rels(
-    mcx: Mcx<'_>,
-    rels: &types_nodes::NodeList<'_>,
-    params: &VacuumParams,
-    in_outer_xact: bool,
-) -> PgResult<()> {
-    for reln in rels.iter() {
-        let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
-        let rv = vrel.relation.expect("ANALYZE relation name");
-        let rv = rv.as_range_var().expect("RangeVar");
-        let rv = rel_vocab::RangeVar {
-            catalogname: rv.catalogname,
-            schemaname: rv.schemaname,
-            relname: rv.relname.expect("relname"),
-            inh: rv.inh,
-            relpersistence: rv.relpersistence as u8,
-            location: rv.location,
-        };
-        let rel = table::table_openrv(mcx, &rv, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
-        let relid = rel.rd_id;
-        table::table_close(rel, NO_LOCK)?;
-        analyze_rel(mcx, relid, &vrel.va_cols, params, in_outer_xact)?;
+    if use_own_xacts {
+        // Matches the CommitTransaction waiting in PostgresMain.
+        xact::StartTransactionCommand()?;
     }
     Ok(())
 }
@@ -190,31 +207,57 @@ fn vacuum_all_rels(
 pub fn analyze_rel(
     mcx: Mcx<'_>,
     relid: Oid,
+    relname: Option<&str>,
     va_cols: &types_nodes::NodeList<'_>,
     params: &VacuumParams,
     in_outer_xact: bool,
 ) -> PgResult<()> {
-    // vacuum_open_relation's try-lock/skip and vacuum_is_permitted_for_relation
-    // owner checks are the commands_vacuum unit's; here the open is plain and
-    // permission is the caller's.
-    let onerel = table::table_open(mcx, relid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    let Some(onerel) = commands_vacuum::vacuum_open_relation(
+        mcx,
+        relid,
+        relname,
+        (params.options & !VACOPT_VACUUM) as u32,
+        SHARE_UPDATE_EXCLUSIVE_LOCK,
+    )?
+    else {
+        return Ok(());
+    };
     if onerel.rd_id == STATISTIC_RELATION_ID {
-        table::table_close(onerel, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
         return Ok(());
     }
     let relkind = onerel.rd_rel.relkind;
-    if !(relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW) {
-        panic!("analyze_rel (analyze.c): relkind {relkind}; foreign/partitioned ANALYZE lane");
+    let relpages = match relkind {
+        RELKIND_RELATION | RELKIND_MATVIEW => bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+            &onerel,
+            ForkNumber::MAIN_FORKNUM,
+        )?,
+        RELKIND_PARTITIONED_TABLE => 0,
+        RELKIND_FOREIGN_TABLE => {
+            panic!("analyze_rel (analyze.c): foreign-table ANALYZE (FDW AnalyzeForeignTable lane)")
+        }
+        _ => {
+            if params.options & VACOPT_VACUUM == 0 {
+                elog::ereport(types_error::WARNING)
+                    .errmsg(format!(
+                        "skipping \"{}\" --- cannot analyze non-tables or special system tables",
+                        onerel.name()
+                    ))
+                    .finish(types_error::ErrorLocation::new("analyze.c", 0, "analyze_rel"))?;
+            }
+            onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+            return Ok(());
+        }
+    };
+
+    if relkind != RELKIND_PARTITIONED_TABLE {
+        do_analyze_rel(mcx, &onerel, va_cols, params, relpages, false, in_outer_xact)?;
     }
     if onerel.rd_rel.relhassubclass {
-        panic!("analyze_rel (analyze.c): inheritance-tree ANALYZE lane");
+        do_analyze_rel(mcx, &onerel, va_cols, params, relpages, true, in_outer_xact)?;
     }
-    let relpages =
-        bufmgr_seams::relation_get_number_of_blocks_in_fork::call(&onerel, ForkNumber::MAIN_FORKNUM)?;
 
-    do_analyze_rel(mcx, &onerel, va_cols, params, relpages, in_outer_xact)?;
-
-    table::table_close(onerel, NO_LOCK)?;
+    onerel.close(NO_LOCK)?;
     Ok(())
 }
 
@@ -224,13 +267,25 @@ fn do_analyze_rel<'mcx>(
     va_cols: &types_nodes::NodeList<'_>,
     params: &VacuumParams,
     relpages: BlockNumber,
+    inh: bool,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
-    let irel = commands_vacuum::vac_open_indexes(mcx, onerel, ROW_EXCLUSIVE_LOCK)?;
-    let hasindex = !irel.is_empty();
+    // Partitioned: hasindex only (nothing to open); inh recursion: leave the
+    // parent's indexes alone entirely (C).
+    let is_partitioned = onerel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
+    let irel = if is_partitioned || inh {
+        PgVec::new_in(mcx)
+    } else {
+        commands_vacuum::vac_open_indexes(mcx, onerel, ROW_EXCLUSIVE_LOCK)?
+    };
+    let hasindex = if is_partitioned {
+        !relcache_seams::relation_get_index_list::call(mcx, onerel.rd_id)?.is_empty()
+    } else {
+        !irel.is_empty()
+    };
 
     let tupdesc = onerel.descr();
     let mut vacattrstats: PgVec<'_, VacAttrStats<'_>> = PgVec::new_in(anl_mcx);
@@ -322,14 +377,25 @@ fn do_analyze_rel<'mcx>(
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
     let mut rows: PgVec<'_, HeapTupleData<'_>> = PgVec::new_in(anl_mcx);
-    let numrows = acquire_sample_rows(
-        anl_mcx,
-        onerel,
-        &mut rows,
-        targrows,
-        &mut totalrows,
-        &mut totaldeadrows,
-    )?;
+    let numrows = if inh {
+        acquire_inherited_sample_rows(
+            anl_mcx,
+            onerel,
+            &mut rows,
+            targrows,
+            &mut totalrows,
+            &mut totaldeadrows,
+        )?
+    } else {
+        acquire_sample_rows(
+            anl_mcx,
+            onerel,
+            &mut rows,
+            targrows,
+            &mut totalrows,
+            &mut totaldeadrows,
+        )?
+    };
 
     if numrows > 0 {
         // Bump: armed cmp frames detoast packed by-ref args here per comparison,
@@ -369,7 +435,7 @@ fn do_analyze_rel<'mcx>(
                 &mut col_cx,
             )?;
         }
-        update_attstats(onerel.rd_id, false, &vacattrstats)?;
+        update_attstats(onerel.rd_id, inh, &vacattrstats)?;
         for (ind, thisdata) in irel.iter().zip(indexdata.iter()) {
             update_attstats(ind.rd_id, false, &thisdata.vacattrstats)?;
         }
@@ -377,38 +443,53 @@ fn do_analyze_rel<'mcx>(
         statistics::BuildRelationExtStatistics(
             anl_mcx,
             onerel,
-            false,
+            inh,
             totalrows,
             &rows[..numrows as usize],
             &colstats,
         )?;
     }
 
-    let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
-    xact::CommandCounterIncrement()?;
-    vacuum_seams::vac_update_relstats::call(
-        onerel,
-        relpages,
-        totalrows,
-        relallvisible,
-        relallfrozen,
-        hasindex,
-        in_outer_xact,
-    )?;
-
-    for (ind, thisdata) in irel.iter().zip(indexdata.iter()) {
-        let ind_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-            ind,
-            ForkNumber::MAIN_FORKNUM,
-        )?;
-        let totalindexrows = (thisdata.tuple_fract * totalrows).ceil();
+    if !inh {
+        let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
+        xact::CommandCounterIncrement()?;
         vacuum_seams::vac_update_relstats::call(
-            ind,
-            ind_pages,
-            totalindexrows,
+            onerel,
+            relpages,
+            totalrows,
+            relallvisible,
+            relallfrozen,
+            hasindex,
+            in_outer_xact,
+        )?;
+
+        for (ind, thisdata) in irel.iter().zip(indexdata.iter()) {
+            let ind_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                ind,
+                ForkNumber::MAIN_FORKNUM,
+            )?;
+            let totalindexrows = (thisdata.tuple_fract * totalrows).ceil();
+            vacuum_seams::vac_update_relstats::call(
+                ind,
+                ind_pages,
+                totalindexrows,
+                0,
+                0,
+                false,
+                in_outer_xact,
+            )?;
+        }
+    } else if is_partitioned {
+        // Storage-less shell: relpages stays C's -1 sentinel; only reltuples
+        // and relhasindex carry information.
+        xact::CommandCounterIncrement()?;
+        vacuum_seams::vac_update_relstats::call(
+            onerel,
+            BlockNumber::MAX,
+            totalrows,
             0,
             0,
-            false,
+            hasindex,
             in_outer_xact,
         )?;
     }
@@ -698,6 +779,9 @@ fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     Ok(true)
 }
 
+/// Appends up to `targrows` sampled rows; the inherited caller reuses one
+/// vec across children, so replacement/sort indexes are relative to the
+/// vec length at entry (C's rows + numrows subarray).
 fn acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
@@ -707,6 +791,7 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
+    let base = rows.len();
     let mut numrows: i32 = 0;
     let mut samplerows = 0.0f64;
     let mut liverows = 0.0f64;
@@ -758,7 +843,7 @@ fn acquire_sample_rows<'mcx>(
                     debug_assert!(k < targrows as usize);
                     // C heap_freetuple's the replaced copy; here it stays in
                     // the Analyze arena until context teardown.
-                    rows[k] = copy_slot_tuple(mcx, &slot)?;
+                    rows[base + k] = copy_slot_tuple(mcx, &slot)?;
                 }
                 rowstoskip -= 1.0;
             }
@@ -769,7 +854,7 @@ fn acquire_sample_rows<'mcx>(
     tableam::table_endscan(scan)?;
 
     if numrows == targrows {
-        rows.sort_unstable_by_key(|t| {
+        rows[base..].sort_unstable_by_key(|t| {
             (
                 types_tuple::ItemPointerGetBlockNumberNoCheck(&t.t_self),
                 types_tuple::ItemPointerGetOffsetNumberNoCheck(&t.t_self),
@@ -785,6 +870,115 @@ fn acquire_sample_rows<'mcx>(
         *totaldeadrows = 0.0;
     }
 
+    Ok(numrows)
+}
+
+/// acquire_inherited_sample_rows (analyze.c): the sampled union across all
+/// live children, block-proportional, child rows converted to the parent
+/// rowtype where the descriptors diverge.
+fn acquire_inherited_sample_rows<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
+    targrows: i32,
+    totalrows: &mut f64,
+    totaldeadrows: &mut f64,
+) -> PgResult<i32> {
+    *totalrows = 0.0;
+    *totaldeadrows = 0.0;
+
+    let table_oids =
+        pg_inherits::find_all_inheritors(mcx, onerel.rd_id, ACCESS_SHARE_LOCK)?;
+    if table_oids.len() < 2 {
+        // A child existed when relhassubclass was set but is gone; clear the
+        // flag so the inh pass stops firing (safe under our SUE lock).
+        xact::CommandCounterIncrement()?;
+        tablecmds_seams::set_relation_has_subclass::call(mcx, onerel.rd_id, false)?;
+        return Ok(0);
+    }
+
+    let mut children: PgVec<'_, (Relation<'mcx>, f64)> =
+        PgVec::with_capacity_in(table_oids.len(), mcx);
+    let mut totalblocks = 0.0f64;
+    for &child_oid in table_oids.iter() {
+        let childrel = table::table_open(mcx, child_oid, NO_LOCK)?;
+        match childrel.rd_rel.relkind {
+            RELKIND_RELATION | RELKIND_MATVIEW => {
+                let relpages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                    &childrel,
+                    ForkNumber::MAIN_FORKNUM,
+                )?;
+                totalblocks += relpages as f64;
+                children.push((childrel, relpages as f64));
+            }
+            RELKIND_FOREIGN_TABLE => panic!(
+                "acquire_inherited_sample_rows (analyze.c): foreign-table child (FDW lane)"
+            ),
+            _ => {
+                debug_assert!(childrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
+                let lmode = if child_oid == onerel.rd_id { NO_LOCK } else { ACCESS_SHARE_LOCK };
+                table::table_close(childrel, lmode)?;
+            }
+        }
+    }
+
+    if children.is_empty() {
+        return Ok(0);
+    }
+
+    let mut numrows: i32 = 0;
+    for (childrel, childblocks) in children {
+        if childblocks > 0.0 {
+            let mut childtargrows =
+                (targrows as f64 * childblocks / totalblocks).round() as i32;
+            childtargrows = childtargrows.min(targrows - numrows);
+            if childtargrows > 0 {
+                let base = rows.len();
+                let mut trows = 0.0f64;
+                let mut tdrows = 0.0f64;
+                let childrows = acquire_sample_rows(
+                    mcx,
+                    &childrel,
+                    rows,
+                    childtargrows,
+                    &mut trows,
+                    &mut tdrows,
+                )?;
+
+                if childrows > 0 && !tupdesc::equalRowTypes(childrel.descr(), onerel.descr()) {
+                    if let Some(map) =
+                        tupdesc::convert_tuples_by_name(mcx, childrel.descr(), onerel.descr())?
+                    {
+                        for row in rows[base..].iter_mut() {
+                            let newtup = heaptuple::execute_attr_map_tuple(
+                                mcx,
+                                row,
+                                childrel.descr(),
+                                onerel.descr(),
+                                &map,
+                            )?;
+                            let (ptr, len, tid, oid) = (
+                                newtup.image().as_ptr(),
+                                newtup.as_tuple().t_len,
+                                newtup.as_tuple().t_self,
+                                newtup.as_tuple().t_tableOid,
+                            );
+                            core::mem::forget(newtup);
+                            // SAFETY: the converted image lives in `mcx`
+                            // (Analyze arena) until context teardown.
+                            *row = unsafe {
+                                HeapTupleData::from_raw_parts(ptr, len, tid, oid)
+                            };
+                        }
+                    }
+                }
+                numrows += childrows;
+                *totalrows += trows;
+                *totaldeadrows += tdrows;
+            }
+        }
+        table::table_close(childrel, NO_LOCK)?;
+    }
     Ok(numrows)
 }
 
