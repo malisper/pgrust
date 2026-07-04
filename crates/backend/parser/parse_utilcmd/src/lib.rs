@@ -37,6 +37,15 @@ fn type_does_not_exist(name: &str) -> Box<PgError> {
     )
 }
 
+#[cold]
+#[inline(never)]
+fn type_is_only_a_shell(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("type \"{name}\" is only a shell"))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
 // typenameTypeIdAndMod (parse_type.c); pstate feeds errposition around the
 // typmodin call (C's setup_parser_errposition_callback).
 pub fn typenameTypeIdAndMod<'mcx>(
@@ -101,7 +110,7 @@ fn typename_type_id_and_mod<'mcx>(
     };
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
-        _ => unported("shell types (typisdefined = false)"),
+        _ => return Err(type_is_only_a_shell(typname)),
     }
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(t)
