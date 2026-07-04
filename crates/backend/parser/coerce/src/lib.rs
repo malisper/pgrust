@@ -249,7 +249,7 @@ pub fn coerce_type<'mcx>(
         // C: no RelabelType here.
         return Ok(node);
     }
-    if pg_inherits::typeInheritsFrom(inputTypeId, targetTypeId)?
+    if pg_inherits_seams::type_inherits_from::call(inputTypeId, targetTypeId)?
         || type_is_of_typed_table(inputTypeId, targetTypeId)?
     {
         // C: ConvertRowtypeExpr works only between plain composite types; a
@@ -568,7 +568,7 @@ pub fn can_coerce_type(
         if targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)? {
             continue;
         }
-        if pg_inherits::typeInheritsFrom(inputTypeId, targetTypeId)?
+        if pg_inherits_seams::type_inherits_from::call(inputTypeId, targetTypeId)?
             || type_is_of_typed_table(inputTypeId, targetTypeId)?
         {
             continue;

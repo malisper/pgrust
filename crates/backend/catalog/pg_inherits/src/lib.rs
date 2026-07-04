@@ -12,6 +12,10 @@ use types_error::{PgError, PgResult, ERROR};
 use types_rel::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
+pub fn init_seams() {
+    pg_inherits_seams::type_inherits_from::set(typeInheritsFrom);
+}
+
 pub const InheritsRelationId: Oid = 2611;
 pub const InheritsRelidSeqnoIndexId: Oid = 2680;
 pub const InheritsParentIndexId: Oid = 2187;
