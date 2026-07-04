@@ -889,6 +889,30 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             *name = Some("row");
             2
         }
+        NodeTag::T_XmlExpr => {
+            use types_nodes::XmlExprOp::*;
+            let n = match node.as_xml_expr().unwrap().op {
+                IS_XMLCONCAT => Some("xmlconcat"),
+                IS_XMLELEMENT => Some("xmlelement"),
+                IS_XMLFOREST => Some("xmlforest"),
+                IS_XMLPARSE => Some("xmlparse"),
+                IS_XMLPI => Some("xmlpi"),
+                IS_XMLROOT => Some("xmlroot"),
+                IS_XMLSERIALIZE => Some("xmlserialize"),
+                IS_DOCUMENT => None,
+            };
+            match n {
+                Some(v) => {
+                    *name = Some(v);
+                    1
+                }
+                None => 0,
+            }
+        }
+        NodeTag::T_XmlSerialize => {
+            *name = Some("xmlserialize");
+            1
+        }
         NodeTag::T_SQLValueFunction => {
             use types_nodes::SQLValueFunctionOp::*;
             *name = Some(match node.as_sql_value_function().unwrap().op {
