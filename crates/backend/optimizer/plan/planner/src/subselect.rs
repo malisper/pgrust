@@ -1416,7 +1416,7 @@ fn hash_ok_operator(expr: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool>
 
 // materialize_finished_plan (createplan.c) + cost_material (costsize.c):
 // Material shield so repeated rescans of an uncorrelated subplan are cheap.
-fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+pub(crate) fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
     let sub = subplan.as_plan().expect("plan node");
     assert!(
         sub.initPlan.is_nil(),
