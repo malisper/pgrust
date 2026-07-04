@@ -16,9 +16,12 @@ types_array = { path = "../../../../_support/types/array" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 guc_tables = { path = "../../misc/guc_tables" }
 
 [dev-dependencies]
 fmgr_core = { path = "../../fmgr/fmgr_core" }
+mcx = { path = "../../../../_support/mcx" }

@@ -269,9 +269,11 @@ name = "adt_float"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "detoast_seams",
  "fmgr_core",
  "guc_tables",
  "hashfn",
+ "mcx",
  "pqformat",
  "ryu",
  "stringinfo",
@@ -279,6 +281,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]

@@ -1,10 +1,7 @@
 //! fmgr-shaped wrappers (`fc_<cname>`) and the `FLOAT_BUILTINS` registry table
 //! for fmgr-core. Not registrable yet (frame conventions pending, the int.c
-//! precedent): btfloat{4,8}sortsupport (3132/3133, SortSupport node), and the
-//! aggregate transition/final rows (208, 222, 276, 1830-1832, 2512-2513,
-//! 2806-2817, 3342 — float8[] transvalue allocation belongs to the agg frame);
-//! their value cores live in the crate. recv/send (2424-2427) ride the
-//! binary-wire fmgr frame (types_fmgr::wire).
+//! precedent): btfloat{4,8}sortsupport (3132/3133, SortSupport node).
+//! recv/send (2424-2427) ride the binary-wire fmgr frame (types_fmgr::wire).
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -13,7 +10,8 @@ use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 
 // C float{4,8}recv/send bodies: pq_getmsgfloat{4,8} (advances the buffer
@@ -336,6 +334,130 @@ pub fn fc_hashfloat8extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(&float8_hash_image(key), seed)))
 }
 
+// float8[] transvalue frame: in an agg/window context (C's
+// AggCheckCallContext leg) the transfn overwrites the caller-owned array's
+// data words in place; outside one a fresh construct_array_builtin image goes
+// to the result mcx. Packed/toasted arrays (possible only outside an agg
+// frame) flatten first, as C's PG_GETARG_ARRAYTYPE_P.
+fn float8_transvalues<const N: usize>(
+    fcinfo: &Fcinfo,
+    i: usize,
+    caller: &str,
+) -> PgResult<[f64; N]> {
+    // SAFETY: strict fn — arg i is a non-null live varlena.
+    let raw = unsafe { fcinfo.arg_varlena_raw(i) };
+    // SAFETY: raw covers the header byte.
+    if unsafe { ::types_tuple::varatt::varatt_is_4b_u(raw.as_ptr()) } {
+        return crate::aggregates::check_float8_array::<N>(raw, caller);
+    }
+    let flat = ::detoast_seams::detoast_attr::call(fcinfo.result_mcx(), raw)?;
+    crate::aggregates::check_float8_array::<N>(&flat, caller)
+}
+
+fn float8_trans_result<const N: usize>(
+    fcinfo: &mut Fcinfo,
+    caller: &str,
+    kernel: impl FnOnce([f64; N]) -> PgResult<[f64; N]>,
+) -> PgResult<Datum> {
+    const { assert!(N <= 6) }
+    // SAFETY: strict fn — arg 0 is a non-null live varlena; fcinfo.context,
+    // if set, is the live agg frame for this call.
+    let p = unsafe { fcinfo.arg_ptr(0) };
+    if unsafe { fcinfo.agg_context() }.is_some()
+        && unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) }
+    {
+        // SAFETY: 4B-uncompressed varlena of varsize_any bytes; shape
+        // verified by check_float8_array before any write.
+        let image =
+            unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+        let out = kernel(crate::aggregates::check_float8_array::<N>(image, caller)?)?;
+        // SAFETY: the agg frame owns this transarray as a mutable palloc'd
+        // image; no other reference to it is live during the call.
+        unsafe {
+            let data = (p as *mut u8).add(crate::aggregates::FLOAT8_ARRAY_HDRSZ);
+            for (k, v) in out.iter().enumerate() {
+                data.add(8 * k).cast::<[u8; 8]>().write(v.to_ne_bytes());
+            }
+        }
+        return Ok(fcinfo.arg(0));
+    }
+    let out = kernel(float8_transvalues::<N>(fcinfo, 0, caller)?)?;
+    let mut img = [0u8; crate::aggregates::float8_transarray_size(6)];
+    let size = crate::aggregates::write_float8_transarray(&out, &mut img);
+    byref_result(fcinfo.result_mcx(), &img[..size])
+}
+
+pub fn fc_float8_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let newval = fcinfo.arg_f64(1);
+    float8_trans_result::<3>(fcinfo, "float8_accum", |t| {
+        crate::aggregates::float8_accum(t, newval)
+    })
+}
+
+pub fn fc_float4_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let newval = fcinfo.arg_f32(1);
+    float8_trans_result::<3>(fcinfo, "float4_accum", |t| {
+        crate::aggregates::float4_accum(t, newval)
+    })
+}
+
+pub fn fc_float8_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t2 = float8_transvalues::<3>(fcinfo, 1, "float8_combine")?;
+    float8_trans_result::<3>(fcinfo, "float8_combine", |t1| {
+        crate::aggregates::float8_combine(t1, t2)
+    })
+}
+
+// float8_regr_accum args: (state, Y, X).
+pub fn fc_float8_regr_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let y = fcinfo.arg_f64(1);
+    let x = fcinfo.arg_f64(2);
+    float8_trans_result::<6>(fcinfo, "float8_regr_accum", |t| {
+        crate::aggregates::float8_regr_accum(t, y, x)
+    })
+}
+
+pub fn fc_float8_regr_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let t2 = float8_transvalues::<6>(fcinfo, 1, "float8_regr_combine")?;
+    float8_trans_result::<6>(fcinfo, "float8_regr_combine", |t1| {
+        crate::aggregates::float8_regr_combine(t1, t2)
+    })
+}
+
+macro_rules! fc_float_final {
+    ($($fc:ident: $core:ident, $n:literal, $name:literal;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let t = float8_transvalues::<$n>(fcinfo, 0, $name)?;
+            match crate::aggregates::$core(t) {
+                Some(v) => Ok(Datum::from_f64(v)),
+                None => Ok(fcinfo.return_null()),
+            }
+        }
+    )*};
+}
+
+fc_float_final! {
+    fc_float8_avg: float8_avg, 3, "float8_avg";
+    fc_float8_var_pop: float8_var_pop, 3, "float8_var_pop";
+    fc_float8_var_samp: float8_var_samp, 3, "float8_var_samp";
+    fc_float8_stddev_pop: float8_stddev_pop, 3, "float8_stddev_pop";
+    fc_float8_stddev_samp: float8_stddev_samp, 3, "float8_stddev_samp";
+    fc_float8_regr_sxx: float8_regr_sxx, 6, "float8_regr_sxx";
+    fc_float8_regr_syy: float8_regr_syy, 6, "float8_regr_syy";
+    fc_float8_regr_sxy: float8_regr_sxy, 6, "float8_regr_sxy";
+    fc_float8_regr_avgx: float8_regr_avgx, 6, "float8_regr_avgx";
+    fc_float8_regr_avgy: float8_regr_avgy, 6, "float8_regr_avgy";
+    fc_float8_regr_r2: float8_regr_r2, 6, "float8_regr_r2";
+    fc_float8_regr_slope: float8_regr_slope, 6, "float8_regr_slope";
+    fc_float8_regr_intercept: float8_regr_intercept, 6, "float8_regr_intercept";
+    fc_float8_covar_pop: float8_covar_pop, 6, "float8_covar_pop";
+    fc_float8_covar_samp: float8_covar_samp, 6, "float8_covar_samp";
+    fc_float8_corr: float8_corr, 6, "float8_corr";
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -479,6 +601,27 @@ pub const FLOAT_BUILTINS: &[FmgrBuiltin] = &[
     b(2738, "dcotd", 1, fc_dcotd),
     b(4139, "in_range_float8_float8", 5, fc_in_range_float8_float8),
     b(4140, "in_range_float4_float8", 5, fc_in_range_float4_float8),
+    b(208, "float4_accum", 2, fc_float4_accum),
+    b(222, "float8_accum", 2, fc_float8_accum),
+    b(276, "float8_combine", 2, fc_float8_combine),
+    b(1830, "float8_avg", 1, fc_float8_avg),
+    b(1831, "float8_var_samp", 1, fc_float8_var_samp),
+    b(1832, "float8_stddev_samp", 1, fc_float8_stddev_samp),
+    b(2512, "float8_var_pop", 1, fc_float8_var_pop),
+    b(2513, "float8_stddev_pop", 1, fc_float8_stddev_pop),
+    b(2806, "float8_regr_accum", 3, fc_float8_regr_accum),
+    b(2807, "float8_regr_sxx", 1, fc_float8_regr_sxx),
+    b(2808, "float8_regr_syy", 1, fc_float8_regr_syy),
+    b(2809, "float8_regr_sxy", 1, fc_float8_regr_sxy),
+    b(2810, "float8_regr_avgx", 1, fc_float8_regr_avgx),
+    b(2811, "float8_regr_avgy", 1, fc_float8_regr_avgy),
+    b(2812, "float8_regr_r2", 1, fc_float8_regr_r2),
+    b(2813, "float8_regr_slope", 1, fc_float8_regr_slope),
+    b(2814, "float8_regr_intercept", 1, fc_float8_regr_intercept),
+    b(2815, "float8_covar_pop", 1, fc_float8_covar_pop),
+    b(2816, "float8_covar_samp", 1, fc_float8_covar_samp),
+    b(2817, "float8_corr", 1, fc_float8_corr),
+    b(3342, "float8_regr_combine", 2, fc_float8_regr_combine),
     b(6219, "derf", 1, fc_derf),
     b(6220, "derfc", 1, fc_derfc),
     b(6383, "dgamma", 1, fc_dgamma),
