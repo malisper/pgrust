@@ -432,7 +432,7 @@ pub fn findNotNullConstraintAttnum<'mcx>(
 }
 
 // extractNotNullColumn (pg_constraint.c): sole conkey element.
-fn extract_notnull_column<'mcx>(
+pub fn extract_notnull_column<'mcx>(
     mcx: Mcx<'mcx>,
     tup: &types_tuple::HeapTupleData<'mcx>,
     desc: &types_tuple::TupleDescData<'mcx>,
@@ -1057,10 +1057,6 @@ pub fn ConstraintSetParentConstraint<'mcx>(
     parent_constr_id: Oid,
     child_table_id: Oid,
 ) -> PgResult<()> {
-    assert!(
-        parent_constr_id != InvalidOid,
-        "unported: pg_constraint ConstraintSetParentConstraint detach direction"
-    );
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(child_constr_id))];
     let mut scan =
@@ -1074,15 +1070,11 @@ pub fn ConstraintSetParentConstraint<'mcx>(
         types_tuple::heap_getattr(tup, Anum_pg_constraint_conparentid as i32, desc, &mut isnull)
     }
     .as_oid();
-    if conparentid != InvalidOid {
-        panic!("constraint {child_constr_id} already has a parent constraint");
-    }
     // SAFETY: coninhcount is a fixed NOT NULL pg_constraint column.
     let prior_inhcount = unsafe {
         types_tuple::heap_getattr(tup, Anum_pg_constraint_coninhcount as i32, desc, &mut isnull)
     }
     .as_i16();
-    assert!(prior_inhcount == 0, "attach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
     let natts = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -1094,19 +1086,47 @@ pub fn ConstraintSetParentConstraint<'mcx>(
         values[anum as usize - 1] = v;
         replace[anum as usize - 1] = true;
     };
-    set(Anum_pg_constraint_conislocal, Datum::from_bool(false));
-    set(Anum_pg_constraint_coninhcount, Datum::from_i16(1));
-    set(Anum_pg_constraint_conparentid, Datum::from_oid(parent_constr_id));
+    if parent_constr_id != InvalidOid {
+        if conparentid != InvalidOid {
+            panic!("constraint {child_constr_id} already has a parent constraint");
+        }
+        assert!(prior_inhcount == 0, "attach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
+        set(Anum_pg_constraint_conislocal, Datum::from_bool(false));
+        set(Anum_pg_constraint_coninhcount, Datum::from_i16(1));
+        set(Anum_pg_constraint_conparentid, Datum::from_oid(parent_constr_id));
+    } else {
+        assert!(prior_inhcount == 1, "detach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
+        set(Anum_pg_constraint_conislocal, Datum::from_bool(true));
+        set(Anum_pg_constraint_coninhcount, Datum::from_i16(prior_inhcount - 1));
+        set(Anum_pg_constraint_conparentid, Datum::from_oid(InvalidOid));
+    }
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
     let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
 
     let depender = ObjectAddress::set(CONSTRAINT_RELATION_ID, child_constr_id);
-    let parent = ObjectAddress::set(CONSTRAINT_RELATION_ID, parent_constr_id);
-    pg_depend::recordDependencyOn(mcx, &depender, &parent, pg_depend::DependencyType::PartitionPri)?;
-    let tbl = ObjectAddress::set(types_core::RELATION_RELATION_ID, child_table_id);
-    pg_depend::recordDependencyOn(mcx, &depender, &tbl, pg_depend::DependencyType::PartitionSec)?;
+    if parent_constr_id != InvalidOid {
+        let parent = ObjectAddress::set(CONSTRAINT_RELATION_ID, parent_constr_id);
+        pg_depend::recordDependencyOn(mcx, &depender, &parent, pg_depend::DependencyType::PartitionPri)?;
+        let tbl = ObjectAddress::set(types_core::RELATION_RELATION_ID, child_table_id);
+        pg_depend::recordDependencyOn(mcx, &depender, &tbl, pg_depend::DependencyType::PartitionSec)?;
+    } else {
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            CONSTRAINT_RELATION_ID,
+            child_constr_id,
+            CONSTRAINT_RELATION_ID,
+            pg_depend::DependencyType::PartitionPri,
+        )?;
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            CONSTRAINT_RELATION_ID,
+            child_constr_id,
+            types_core::RELATION_RELATION_ID,
+            pg_depend::DependencyType::PartitionSec,
+        )?;
+    }
 
     con_rel.close(RowExclusiveLock)
 }

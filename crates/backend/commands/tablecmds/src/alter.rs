@@ -210,7 +210,7 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
             }
         }
         _ => {
-            if relkind != RELKIND_RELATION {
+            if relkind != RELKIND_RELATION && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
                 unported("RangeVarCallbackForAlterRelation: non-plain-table relkind");
             }
         }
@@ -239,8 +239,8 @@ struct NewConstraint<'mcx> {
     qual: Node<'mcx>,
 }
 
-struct AlteredTableInfo<'mcx> {
-    relid: Oid,
+pub(crate) struct AlteredTableInfo<'mcx> {
+    pub(crate) relid: Oid,
     relkind: u8,
     old_desc: std::rc::Rc<TupleDescData<'mcx>>,
     subcmds: [NodeList<'mcx>; AT_NUM_PASSES],
@@ -250,6 +250,27 @@ struct AlteredTableInfo<'mcx> {
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
     fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
+    pub(crate) partition_constraint: Option<Node<'mcx>>,
+    pub(crate) validate_default: bool,
+}
+
+impl<'mcx> AlteredTableInfo<'mcx> {
+    pub(crate) fn new(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> Self {
+        AlteredTableInfo {
+            relid: rel.rd_id,
+            relkind: rel.rd_rel.relkind,
+            old_desc: rel.rd_att.clone(),
+            subcmds: core::array::from_fn(|_| NodeList::nil()),
+            rewrite: 0,
+            has_newvals: false,
+            verify_new_notnull: false,
+            newvals: PgVec::new_in(mcx),
+            constraints: PgVec::new_in(mcx),
+            fk_checks: PgVec::new_in(mcx),
+            partition_constraint: None,
+            validate_default: false,
+        }
+    }
 }
 
 pub fn AlterTable<'mcx>(
@@ -275,26 +296,22 @@ fn ATController<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
-    let mut tab = AlteredTableInfo {
-        relid: rel.rd_id,
-        relkind: rel.rd_rel.relkind,
-        old_desc: rel.rd_att.clone(),
-        subcmds: core::array::from_fn(|_| NodeList::nil()),
-        rewrite: 0,
-        has_newvals: false,
-        verify_new_notnull: false,
-        newvals: PgVec::new_in(mcx),
-        constraints: PgVec::new_in(mcx),
-        fk_checks: PgVec::new_in(mcx),
-    };
+    let mut tab = AlteredTableInfo::new(mcx, &rel);
 
     for cnode in cmds.iter() {
         ATPrepCmd(mcx, &mut tab, &rel, cnode, recurse, query_string)?;
     }
     rel.close(NoLock)?;
 
-    ATRewriteCatalogs(mcx, &mut tab, lockmode, query_string)?;
-    ATRewriteTables(mcx, &mut tab, lockmode)
+    // C's wqueue: ATTACH PARTITION queues validation-only entries for other
+    // relations; only the main tab carries subcmds.
+    let mut wqueue: PgVec<'mcx, AlteredTableInfo<'mcx>> = PgVec::new_in(mcx);
+    ATRewriteCatalogs(mcx, &mut tab, &mut wqueue, lockmode, query_string)?;
+    ATRewriteTables(mcx, &mut tab, lockmode)?;
+    for extra in wqueue.iter_mut() {
+        ATRewriteTables(mcx, extra, lockmode)?;
+    }
+    Ok(())
 }
 
 // ATPrepCmd: the statement arena is single-use, so the subcommand is
@@ -315,10 +332,22 @@ fn ATPrepCmd<'mcx>(
         cmd.subtype,
         AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions
     );
+    let partitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
     if rel.rd_rel.relkind != RELKIND_RELATION
+        && !partitioned
         && !(relopt_cmd && rel.rd_rel.relkind == types_rel::RELKIND_INDEX)
     {
         unported("ATSimplePermissions: non-plain-table relkind");
+    }
+    if partitioned
+        && !matches!(
+            cmd.subtype,
+            AlterTableType::AT_AttachPartition
+                | AlterTableType::AT_DetachPartition
+                | AlterTableType::AT_DetachPartitionFinalize
+        )
+    {
+        unported(&format!("ALTER TABLE on partitioned table: {:?}", cmd.subtype));
     }
     let set_recurse = || {
         if recurse {
@@ -383,6 +412,21 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_MISC
         }
         AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => AT_PASS_MISC,
+        AlterTableType::AT_AttachPartition => {
+            if !partitioned {
+                return Err(at_wrong_relkind("ATTACH PARTITION", rel.name()));
+            }
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_DetachPartition => {
+            if !partitioned {
+                return Err(at_wrong_relkind("DETACH PARTITION", rel.name()));
+            }
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_DetachPartitionFinalize => {
+            unported("ATExecDetachPartitionFinalize (DETACH CONCURRENTLY lane)")
+        }
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -392,6 +436,7 @@ fn ATPrepCmd<'mcx>(
 fn ATRewriteCatalogs<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
@@ -523,6 +568,25 @@ fn ATRewriteCatalogs<'mcx>(
                     let defs = cmd.def.and_then(|d| d.as_list()).unwrap_or(&empty);
                     crate::setrelopts::ATExecSetRelOptions(mcx, &rel, defs, cmd.subtype, lockmode)?;
                 }
+                AlterTableType::AT_AttachPartition => {
+                    let pcmd = cmd
+                        .def
+                        .expect("AT_AttachPartition PartitionCmd")
+                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                        .expect("PartitionCmd");
+                    if rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+                        unported("ATExecAttachPartitionIdx (ALTER TABLE form)");
+                    }
+                    crate::attach::ATExecAttachPartition(mcx, wqueue, &rel, pcmd)?;
+                }
+                AlterTableType::AT_DetachPartition => {
+                    let pcmd = cmd
+                        .def
+                        .expect("AT_DetachPartition PartitionCmd")
+                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                        .expect("PartitionCmd");
+                    crate::attach::ATExecDetachPartition(mcx, &rel, pcmd)?;
+                }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             // C threads each ATExec* return address; only the subcmd count is
@@ -538,8 +602,13 @@ fn ATRewriteCatalogs<'mcx>(
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
     // or none is needed; opened with the statement lockmode (the AEL open in
-    // NewRelationCreateToastTable blocked SUE-level VALIDATE behind writers).
-    if tab.relkind == RELKIND_RELATION || tab.relkind == types_rel::RELKIND_MATVIEW {
+    // NewRelationCreateToastTable blocked SUE-level VALIDATE behind writers);
+    // partitioned parents and ATTACH source tabs skip per tablecmds.c:5364-5368.
+    if ((tab.relkind == RELKIND_RELATION
+        || tab.relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+        && tab.partition_constraint.is_none())
+        || tab.relkind == types_rel::RELKIND_MATVIEW
+    {
         catalog_toasting::AlterTableCreateToastTable(mcx, tab.relid, None, lockmode)?;
     }
     Ok(())
@@ -574,7 +643,10 @@ fn ATRewriteTables<'mcx>(
             multixact::ReadNextMultiXactId()?,
             persistence,
         )?;
-    } else if !tab.constraints.is_empty() || tab.verify_new_notnull {
+    } else if !tab.constraints.is_empty()
+        || tab.verify_new_notnull
+        || tab.partition_constraint.is_some()
+    {
         ATRewriteTable(mcx, tab, InvalidOid)?;
     }
     let _ = tab.has_newvals;
@@ -624,6 +696,18 @@ fn ATRewriteTable<'mcx>(
             .expect("transform expr");
         newval_states.push((nv.attnum, state));
     }
+
+    let mut partqualstate = match tab.partition_constraint {
+        Some(q) => {
+            needscan = true;
+            let planned = clauses::eval_const_expressions(mcx, q)?;
+            Some(
+                execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+                    .expect("partition constraint expr"),
+            )
+        }
+        None => None,
+    };
 
     let mut notnull_attrs: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     if newrel.is_some() || tab.verify_new_notnull {
@@ -757,6 +841,31 @@ fn ATRewriteTable<'mcx>(
                             ),
                         )
                         .with_sqlstate(ERRCODE_CHECK_VIOLATION),
+                    ));
+                }
+            }
+
+            if let Some(state) = partqualstate.as_mut() {
+                let mut slots = execexpr::EvalSlots {
+                    scan: Some(insertslot),
+                    inner: None,
+                    outer: None,
+                };
+                let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                if !r.isnull && !r.value.as_bool() {
+                    let msg = if tab.validate_default {
+                        format!(
+                            "updated partition constraint for default partition \"{relname}\" \
+                             would be violated by some row"
+                        )
+                    } else {
+                        format!(
+                            "partition constraint of relation \"{relname}\" is violated by \
+                             some row"
+                        )
+                    };
+                    return Err(Box::new(
+                        PgError::new(ERROR, msg).with_sqlstate(ERRCODE_CHECK_VIOLATION),
                     ));
                 }
             }
@@ -2349,6 +2458,16 @@ fn undefined_column(col_name: &str, relname: &str) -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
+fn at_wrong_relkind(action: &str, relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("ALTER action {action} cannot be performed on relation \"{relname}\""),
+        )
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+    )
+}
+
 fn cannot_alter_system_column(col_name: &str) -> Box<PgError> {
     Box::new(
         PgError::new(ERROR, format!("cannot alter system column \"{col_name}\""))

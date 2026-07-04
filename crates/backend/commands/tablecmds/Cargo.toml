@@ -92,3 +92,7 @@ partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+planner = { path = "../../optimizer/plan/planner" }
+execindexing = { path = "../../executor/execindexing" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+varlena = { path = "../../utils/adt/varlena" }

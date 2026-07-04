@@ -4856,6 +4856,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_rel",
 ]
 
 [[package]]
@@ -10868,7 +10869,9 @@ dependencies = [
  "elog_seams",
  "event_trigger",
  "execexpr",
+ "execindexing",
  "exectuples",
+ "fmgr_core",
  "fmgr_seams",
  "format_type",
  "genam",
@@ -10901,6 +10904,7 @@ dependencies = [
  "pg_inherits",
  "pg_type",
  "pgstat",
+ "planner",
  "predicate_seams",
  "procarray",
  "readfuncs",
@@ -10931,6 +10935,7 @@ dependencies = [
  "types_slot",
  "types_trigger",
  "types_tuple",
+ "varlena",
  "vars",
  "xact",
 ]

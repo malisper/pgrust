@@ -32,3 +32,13 @@ seam_core::seam!(
         quiet: bool,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    // IndexSetParentIndex (indexcmds.c); seam because indexcmds depends on
+    // tablecmds.
+    pub fn index_set_parent_index<'a, 'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        partition_idx: &'a types_rel::Relation<'mcx>,
+        parent_oid: Oid,
+    ) -> PgResult<()>
+);

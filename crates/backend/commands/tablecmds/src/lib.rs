@@ -2,6 +2,7 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
+mod attach;
 mod setrelopts;
 mod inheritance;
 mod partition;
