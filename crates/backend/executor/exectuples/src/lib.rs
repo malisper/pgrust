@@ -12,7 +12,7 @@ mod deform;
 mod slots;
 
 pub use batch::{
-    soa_deform_tuple, soa_deform_tuple_qual_col, soa_store_prefix, SoaBatch, SoaDeformPlan,
+    soa_classify_row, soa_deform_columns, soa_store_prefix, SoaBatch, SoaDeformPlan,
     SOA_BM_WORDS, SOA_MAX_ROWS,
 };
 pub use deform::{

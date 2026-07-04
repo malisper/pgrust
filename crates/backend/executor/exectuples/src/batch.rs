@@ -55,6 +55,9 @@ pub struct SoaBatch<'mcx> {
     end_off: PgVec<'mcx, u32>,
     slow: PgVec<'mcx, bool>,
     fallback: [u64; SOA_BM_WORDS],
+    // Kind 0 rows deform column-major from tps.
+    tps: PgVec<'mcx, *const u8>,
+    kinds: PgVec<'mcx, u8>,
 }
 
 impl<'mcx> SoaBatch<'mcx> {
@@ -68,6 +71,8 @@ impl<'mcx> SoaBatch<'mcx> {
             end_off: ::mcx::vec_from_elem_in(mcx, 0u32, SOA_MAX_ROWS),
             slow: ::mcx::vec_from_elem_in(mcx, false, SOA_MAX_ROWS),
             fallback: [0; SOA_BM_WORDS],
+            tps: ::mcx::vec_from_elem_in(mcx, core::ptr::null(), SOA_MAX_ROWS),
+            kinds: ::mcx::vec_from_elem_in(mcx, 0u8, SOA_MAX_ROWS),
         }
     }
 
@@ -111,9 +116,10 @@ impl<'mcx> SoaBatch<'mcx> {
     }
 }
 
-/// Tuples narrower than the prefix fall back to the per-row lazy path.
+/// Fixed-lane rows park their data pointer; hasnulls rows deform here
+/// (offsets shift past nulls); narrow tuples fall back to the lazy path.
 #[inline(always)]
-pub fn soa_deform_tuple(
+pub fn soa_classify_row(
     soa: &mut SoaBatch<'_>,
     plan: &SoaDeformPlan<'_>,
     atts: &[CompactAttribute],
@@ -121,94 +127,74 @@ pub fn soa_deform_tuple(
     tuple: &HeapTupleData<'_>,
 ) {
     let ncols = plan.ncols as usize;
-    debug_assert!(soa.ncols as usize == ncols && (i as usize) < SOA_MAX_ROWS);
-    debug_assert!(ncols <= atts.len() && (i as usize) < soa.end_off.len());
-    if (tuple.t_data().natts() as usize) < ncols {
-        soa.fallback[(i / 64) as usize] |= 1u64 << (i % 64);
-        return;
-    }
-    if tuple.has_nulls() {
-        return soa_deform_tuple_nulls(soa, atts, i as usize, ncols, tuple);
-    }
-    let tp = tuple.getstruct();
     let idx = i as usize;
-    // SAFETY: natts >= ncols and hasnulls false put every prefix column at
-    // its fixed aligned offset; SoA arrays are sized ncols * SOA_MAX_ROWS.
+    debug_assert!(soa.ncols as usize == ncols && idx < SOA_MAX_ROWS && ncols <= atts.len());
+    // SAFETY: idx < SOA_MAX_ROWS; arrays sized SOA_MAX_ROWS.
     unsafe {
-        for c in 0..ncols {
-            let att = atts.get_unchecked(c);
-            let off = *plan.offs.get_unchecked(c) as usize;
-            *soa.values.get_unchecked_mut(c * SOA_MAX_ROWS + idx) =
-                fetch_att(tp.add(off), att.attbyval, att.attlen as i32);
-            *soa.isnull.get_unchecked_mut(c * SOA_MAX_ROWS + idx) = false;
+        if (tuple.t_data().natts() as usize) < ncols {
+            soa.fallback[idx / 64] |= 1u64 << (idx % 64);
+            *soa.kinds.get_unchecked_mut(idx) = 2;
+            return;
         }
+        if tuple.has_nulls() {
+            *soa.kinds.get_unchecked_mut(idx) = 1;
+            return soa_deform_tuple_nulls(soa, atts, idx, ncols, tuple);
+        }
+        *soa.kinds.get_unchecked_mut(idx) = 0;
+        *soa.tps.get_unchecked_mut(idx) = tuple.getstruct();
         *soa.end_off.get_unchecked_mut(idx) = plan.end_off;
         *soa.slow.get_unchecked_mut(idx) = false;
     }
 }
 
-/// Late-materialization deform: only column `col` of the plan's prefix (the
-/// qual column) is written; survivors deform lazily from the stored tuple.
-#[inline(always)]
-pub fn soa_deform_tuple_qual_col(
+/// Column-major deform of kind-0 rows: offset/width are loop constants,
+/// each inner loop a monomorphic load/store pair per row.
+pub fn soa_deform_columns(
     soa: &mut SoaBatch<'_>,
     plan: &SoaDeformPlan<'_>,
     atts: &[CompactAttribute],
-    i: u32,
-    tuple: &HeapTupleData<'_>,
-    col: u16,
+    qual_col_only: Option<u16>,
 ) {
+    let n = soa.nrows as usize;
     let ncols = plan.ncols as usize;
-    let col = col as usize;
-    debug_assert!(col < ncols && soa.ncols as usize == ncols && (i as usize) < SOA_MAX_ROWS);
-    if (tuple.t_data().natts() as usize) < ncols {
-        soa.fallback[(i / 64) as usize] |= 1u64 << (i % 64);
-        return;
-    }
-    if tuple.has_nulls() {
-        return soa_deform_qual_col_nulls(soa, atts, i as usize, col, tuple);
-    }
-    let tp = tuple.getstruct();
-    let idx = i as usize;
-    // SAFETY: as soa_deform_tuple's fixed lane, single column.
-    unsafe {
-        let att = atts.get_unchecked(col);
-        let off = *plan.offs.get_unchecked(col) as usize;
-        *soa.values.get_unchecked_mut(col * SOA_MAX_ROWS + idx) =
-            fetch_att(tp.add(off), att.attbyval, att.attlen as i32);
-        *soa.isnull.get_unchecked_mut(col * SOA_MAX_ROWS + idx) = false;
-    }
-}
-
-#[inline(never)]
-fn soa_deform_qual_col_nulls(
-    soa: &mut SoaBatch<'_>,
-    atts: &[CompactAttribute],
-    idx: usize,
-    col: usize,
-    tuple: &HeapTupleData<'_>,
-) {
-    let tp = tuple.getstruct();
-    // SAFETY: as soa_deform_tuple_nulls; the walk stops at the qual column.
-    let bp = unsafe { tuple.header_ptr().add(SizeofHeapTupleHeader) };
-    let mut off = 0usize;
-    for c in 0..=col {
+    let (first, last) = match qual_col_only {
+        Some(c) => (c as usize, c as usize + 1),
+        None => (0, ncols),
+    };
+    for c in first..last {
+        let att = &atts[c];
+        let off = plan.offs[c] as usize;
+        // SAFETY: kind-0 rows are null-free with natts >= ncols, so tp + off
+        // is inside the tuple data area for every prefix column.
         unsafe {
-            if att_isnull(c, bp) {
-                if c == col {
-                    soa.values[c * SOA_MAX_ROWS + idx] = Datum::null();
-                    soa.isnull[c * SOA_MAX_ROWS + idx] = true;
+            let values = &mut soa.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+            let isnull = &mut soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+            let tps = &soa.tps[..n];
+            let kinds = &soa.kinds[..n];
+            macro_rules! col_loop {
+                (|$p:ident| $load:expr) => {
+                    for i in 0..n {
+                        if *kinds.get_unchecked(i) == 0 {
+                            let $p: *const u8 = *tps.get_unchecked(i);
+                            *values.get_unchecked_mut(i) = $load;
+                            *isnull.get_unchecked_mut(i) = false;
+                        }
+                    }
+                };
+            }
+            match (att.attbyval, att.attlen) {
+                (true, 4) => {
+                    col_loop!(|p| Datum::from_i32(p.add(off).cast::<i32>().read_unaligned()))
                 }
-                continue;
+                (true, 8) => {
+                    col_loop!(|p| Datum::from_i64(p.add(off).cast::<i64>().read_unaligned()))
+                }
+                (true, 2) => {
+                    col_loop!(|p| Datum::from_i16(p.add(off).cast::<i16>().read_unaligned()))
+                }
+                (true, _) => col_loop!(|p| Datum::from_char(p.add(off).cast::<i8>().read())),
+                (false, _) => col_loop!(|p| Datum::from_usize(p.add(off) as usize)),
             }
-            let att = &atts[c];
-            off = att_nominal_alignby(off, att.attalignby);
-            if c == col {
-                soa.values[c * SOA_MAX_ROWS + idx] =
-                    fetch_att(tp.add(off), att.attbyval, att.attlen as i32);
-                soa.isnull[c * SOA_MAX_ROWS + idx] = false;
-            }
-            off += att.attlen as usize;
         }
     }
 }
@@ -282,5 +268,5 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
 
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds },
 );
