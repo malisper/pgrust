@@ -1019,9 +1019,7 @@ pub fn slot_is_current_xact_tuple(
     }
 }
 
-/// `execute_attr_map_slot` (tupconvert.c): remap `in_slot` into `out_slot`
-/// via `attmap[out-1] = in attno` (0 = force NULL). `out_slot` must already
-/// carry its own descriptor (`tts_values`/`tts_isnull` sized to it).
+// execute_attr_map_slot (tupconvert.c): attmap[out-1] = in attno, 0 = NULL.
 pub fn execute_attr_map_slot<'mcx>(
     attmap: &[i16],
     in_slot: &mut SlotData<'mcx>,
