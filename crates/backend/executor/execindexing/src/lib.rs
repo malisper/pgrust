@@ -721,7 +721,8 @@ pub fn IndexCheckExclusion<'mcx>(
         ::types_slot::TupleSlotKind::BufferHeapTuple,
         Some(heap_relation.rd_att.clone()),
     );
-    let snapshot = snapmgr::GetLatestSnapshot()?;
+    let snapshot = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
+        .expect("registered snapshot");
     let flags = ::tableam_vocab::SO_TYPE_SEQSCAN
         | ::tableam_vocab::SO_ALLOW_STRAT
         | ::tableam_vocab::SO_ALLOW_SYNC
@@ -768,6 +769,7 @@ pub fn IndexCheckExclusion<'mcx>(
         )?;
     }
     heapam::heap_endscan(scan)?;
+    snapmgr::UnregisterSnapshot(Some(&snapshot));
     Ok(())
 }
 

@@ -464,14 +464,10 @@ pub fn BuildIndexValueDescription<'mcx>(
         }
     }
 
-    let tupdesc = indexRelation.descr();
     let mut buf = String::from("(");
-    // C divergence: pg_get_indexdef_columns unported; attnames lack quoting/expr deparse.
-    for i in 0..indnkeyatts {
-        if i > 0 {
-            buf.push_str(", ");
-        }
-        buf.push_str(core::str::from_utf8(tupdesc.attr(i).attname.name_str()).expect("non-UTF-8 attname"));
+    match genam_seams::pg_get_indexdef_columns_keys_only::call(mcx, indexRelation.rd_id)? {
+        Some(cols) => buf.push_str(&cols),
+        None => return Ok(None),
     }
     buf.push_str(")=(");
     for i in 0..indnkeyatts {

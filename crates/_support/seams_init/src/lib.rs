@@ -1,6 +1,7 @@
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
     detoast::init_seams();
+    ruleutils::init_seams();
     heaptoast::init_seams();
     printtup::init_seams();
     relation::init_seams();
