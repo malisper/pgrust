@@ -109,6 +109,7 @@ spi_seams = { path = "../../executor/spi_seams" }
 subtrans = { path = "../../access/transam/subtrans" }
 syncrep_seams = { path = "../../replication/syncrep_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 tablecmds_seams = { path = "../../commands/tablecmds_seams" }
