@@ -311,7 +311,7 @@ fn coerce_record_to_complex<'mcx>(
             if node.as_var().is_some_and(|v| v.varattno == types_core::InvalidAttrNumber) {
                 unported("coerce_record_to_complex (parse_coerce.c): whole-row Var source");
             }
-            return Err(record_cast_error(targetTypeId, Option::None, location));
+            return Err(record_cast_error(pstate, targetTypeId, Option::None, location));
         }
     };
     let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, targetTypeId, -1)?;
@@ -329,6 +329,7 @@ fn coerce_record_to_complex<'mcx>(
         }
         if argix >= args.len() {
             return Err(record_cast_error(
+                pstate,
                 targetTypeId,
                 Some("Input has too few columns.".to_string()),
                 location,
@@ -348,7 +349,7 @@ fn coerce_record_to_complex<'mcx>(
             -1,
         )?
         .ok_or_else(|| {
-            record_cast_column_error(exprtype, attr.atttypid, targetTypeId, ucolno, location)
+            record_cast_column_error(pstate, exprtype, attr.atttypid, targetTypeId, ucolno, location)
         })?;
         newargs.lappend(mcx, cexpr)?;
         ucolno += 1;
@@ -356,6 +357,7 @@ fn coerce_record_to_complex<'mcx>(
     }
     if argix < args.len() {
         return Err(record_cast_error(
+            pstate,
             targetTypeId,
             Some("Input has too many columns.".to_string()),
             location,
@@ -375,6 +377,7 @@ fn coerce_record_to_complex<'mcx>(
 
 #[cold]
 fn record_cast_error(
+    pstate: &ParseState<'_, '_>,
     target: Oid,
     detail: Option<std::string::String>,
     location: ParseLoc,
@@ -385,12 +388,16 @@ fn record_cast_error(
     if let Some(d) = detail {
         e = e.with_detail(d);
     }
-    let _ = location;
-    Box::new(e)
+    Box::new(e.with_cursor_position(parser_errposition(
+        pstate,
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
 }
 
 #[cold]
 fn record_cast_column_error(
+    pstate: &ParseState<'_, '_>,
     from: Oid,
     to: Oid,
     target: Oid,
@@ -400,11 +407,15 @@ fn record_cast_column_error(
     let fname = format_type::format_type_be(from).unwrap_or_default();
     let toname = format_type::format_type_be(to).unwrap_or_default();
     let tyname = format_type::format_type_be(target).unwrap_or_default();
-    let _ = location;
     Box::new(
         types_error::PgError::error(format!("cannot cast type record to {tyname}"))
             .with_detail(format!("Cannot cast type {fname} to {toname} in column {ucolno}."))
-            .with_sqlstate(types_error::ERRCODE_CANNOT_COERCE),
+            .with_sqlstate(types_error::ERRCODE_CANNOT_COERCE)
+            .with_cursor_position(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            )),
     )
 }
 

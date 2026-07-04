@@ -366,6 +366,8 @@ pub fn adjust_appendrel_attrs<'mcx>(
 struct AppinfoMap<'mcx> {
     parent_relid: u32,
     child_relid: u32,
+    parent_reltype: types_core::Oid,
+    child_reltype: types_core::Oid,
     // None = dropped parent column.
     translated: PgVec<'mcx, Option<Node<'mcx>>>,
 }
@@ -392,6 +394,8 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
         maps.push(AppinfoMap {
             parent_relid: appinfo.parent_relid,
             child_relid: appinfo.child_relid,
+            parent_reltype: appinfo.parent_reltype,
+            child_reltype: appinfo.child_reltype,
             translated,
         });
     }
@@ -461,10 +465,32 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                         Ok(Some(crate::prepjointree::copy_expr(mcx, t, 0)?))
                     }
                 } else if v.varattno == 0 {
-                    panic!(
-                        "adjust_appendrel_attrs (appendinfo.c): whole-row Var \
-                         (ConvertRowtypeExpr) unported"
-                    );
+                    if !types_core::OidIsValid(map.child_reltype) {
+                        panic!(
+                            "adjust_appendrel_attrs (appendinfo.c): whole-row Var over a \
+                             typeless child (RowExpr arm) unported"
+                        );
+                    }
+                    debug_assert_eq!(v.vartype, map.parent_reltype);
+                    let mut newvar = copy_var(mcx, v)?;
+                    newvar.varno = map.child_relid as i32;
+                    newvar.varnosyn = 0;
+                    newvar.varattnosyn = 0;
+                    if map.parent_reltype != map.child_reltype {
+                        newvar.vartype = map.child_reltype;
+                        let arg = Node::mk(mcx, newvar)?;
+                        return Ok(Some(Node::mk(
+                            mcx,
+                            types_nodes::ConvertRowtypeExpr {
+                                arg,
+                                resulttype: map.parent_reltype,
+                                convertformat:
+                                    types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                                location: -1,
+                            },
+                        )?));
+                    }
+                    Ok(Some(Node::mk(mcx, newvar)?))
                 } else {
                     let mut newvar = copy_var(mcx, v)?;
                     newvar.varno = map.child_relid as i32;

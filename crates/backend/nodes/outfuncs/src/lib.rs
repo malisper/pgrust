@@ -88,6 +88,19 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_int_list(out, &f.fieldnums);
             w!(out, " :resulttype {}}}", f.resulttype);
         }
+        NodeTag::T_CaseTestExpr => {
+            let c = node.as_case_test_expr().expect("CaseTestExpr");
+            w!(
+                out,
+                "{{CASETESTEXPR :typeId {} :typeMod {} :collation {}}}",
+                c.typeId, c.typeMod, c.collation
+            );
+        }
+        NodeTag::T_RangeTblFunction => out_range_tbl_function(
+            out,
+            node.as_variant::<types_nodes::parsenodes::RangeTblFunction>()
+                .expect("RangeTblFunction"),
+        )?,
         NodeTag::T_TableFunc => {
             out_table_func(out, node.as_variant::<TableFunc>().expect("TableFunc"))?
         }
@@ -878,6 +891,26 @@ fn out_query(out: &mut PgString<'_>, q: &Query<'_>) -> PgResult<()> {
     Ok(())
 }
 
+fn out_range_tbl_function(
+    out: &mut PgString<'_>,
+    f: &types_nodes::parsenodes::RangeTblFunction<'_>,
+) -> PgResult<()> {
+    w!(out, "{{RANGETBLFUNCTION :funcexpr ");
+    out_opt_node(out, f.funcexpr)?;
+    w!(out, " :funccolcount {} :funccolnames ", f.funccolcount);
+    out_list(out, &f.funccolnames)?;
+    w!(out, " :funccoltypes ");
+    out_oid_list(out, &f.funccoltypes);
+    w!(out, " :funccoltypmods ");
+    out_int_list(out, &f.funccoltypmods);
+    w!(out, " :funccolcollations ");
+    out_oid_list(out, &f.funccolcollations);
+    w!(out, " :funcparams ");
+    out_bitmapset(out, &f.funcparams);
+    w!(out, "}}");
+    Ok(())
+}
+
 fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResult<()> {
     w!(out, "{{RANGETBLENTRY :alias ");
     out_opt_alias(out, r.alias)?;
@@ -928,6 +961,12 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_int_list(out, &r.joinrightcols);
             w!(out, " :join_using_alias ");
             out_opt_alias(out, r.join_using_alias)?;
+        }
+        RTEKind::RTE_FUNCTION => {
+            w!(out, " :functions ");
+            out_list(out, &r.functions)?;
+            w!(out, " :funcordinality ");
+            out_bool(out, r.funcordinality);
         }
         RTEKind::RTE_TABLEFUNC => {
             w!(out, " :tablefunc ");

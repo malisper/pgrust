@@ -113,6 +113,9 @@ fn typename_type_id_and_mod<'mcx>(
                 || t == b'c' as i8
                 || t == b'd' as i8 => {}
         Some(t) if t == b'c' as i8 && allow_composite => {}
+        // C typenameTypeIdAndMod has no typtype gate; pseudo-types (record,
+        // record[]) are legal cast targets. The column lane keeps its loud.
+        Some(t) if t == b'p' as i8 && allow_composite => {}
         Some(t) => unported(match t as u8 {
             b'p' => "pseudo-type columns",
             _ => "unknown typtype",
