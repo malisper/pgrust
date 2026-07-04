@@ -339,12 +339,14 @@ name = "adt_jsonb"
 version = "0.1.0"
 dependencies = [
  "adt_json",
+ "adt_jsonpath",
  "adt_numeric",
  "arrayfuncs",
  "datum",
  "detoast_seams",
  "fmgr_seams",
  "funcapi",
+ "gin_vocab",
  "hashfn",
  "heaptuple",
  "lsyscache",
@@ -864,6 +866,10 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "allpaths"
+version = "0.1.0"
 
 [[package]]
 name = "amapi"
@@ -2095,6 +2101,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_amcmds"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "commands_analyze"
 version = "0.0.0"
 dependencies = [
@@ -2517,11 +2533,18 @@ dependencies = [
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "fmgr_seams",
+ "genam",
  "mcx",
  "relpath",
+ "table",
  "tablespace_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2667,9 +2690,11 @@ name = "commands_view"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "elog",
  "lsyscache",
  "mcx",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "rewrite_define",
  "tablecmds",
@@ -3125,6 +3150,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "equivclass"
+version = "0.1.0"
+
+[[package]]
 name = "error_small_seams"
 version = "0.0.0"
 dependencies = [
@@ -3322,13 +3351,18 @@ dependencies = [
  "nodemergejoin",
  "nodemodifytable",
  "nodenestloop",
+ "noderecursiveunion",
  "nodeseqscan",
  "nodesetop",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodevaluesscan",
  "nodewindowagg",
+ "nodeworktablescan",
  "pgstat_seams",
+ "portalmem",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -4814,6 +4848,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "indxpath"
+version = "0.1.0"
+
+[[package]]
 name = "init_small"
 version = "0.0.0"
 dependencies = [
@@ -5306,10 +5344,12 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "readfuncs",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_pathnodes",
  "types_tuple",
 ]
@@ -6270,6 +6310,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "noderecursiveunion"
+version = "0.1.0"
+dependencies = [
+ "execgrouping",
+ "executils",
+ "init_small",
+ "mcx",
+ "postgres_seams",
+ "tuplestore",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
@@ -6378,6 +6434,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodetidrangescan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodetidscan"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "detoast",
+ "execexpr",
+ "execmain_seams",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodeunique"
 version = "0.1.0"
 dependencies = [
@@ -6445,6 +6540,21 @@ dependencies = [
  "types_nodes",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "nodeworktablescan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
 ]
 
 [[package]]
@@ -6776,6 +6886,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nodes_core",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
@@ -7087,6 +7198,7 @@ dependencies = [
  "catalog_indexing",
  "datum",
  "fmgr_seams",
+ "format_type",
  "genam",
  "heaptuple",
  "mcx",
@@ -7662,6 +7774,7 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "aclchk",
+ "aclchk_seams",
  "adt_acl",
  "adt_int8",
  "adt_multirangetypes",
@@ -7702,6 +7815,7 @@ dependencies = [
  "nodehash",
  "nodememoize",
  "nodes_core",
+ "outfuncs",
  "parse_agg",
  "parse_relation",
  "parser_analyze",
@@ -7720,6 +7834,7 @@ dependencies = [
  "relcache",
  "relcache_build_seams",
  "relcache_seams",
+ "rewrite_manip",
  "spgist",
  "statistics",
  "syscache_seams",
@@ -7763,6 +7878,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "arrayfuncs",
  "cache_syscache",
  "catalog_namespace",
  "coerce",
@@ -7773,6 +7889,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "guc_tables",
+ "heaptuple",
  "lsyscache",
  "mcx",
  "nodes_core",
@@ -7782,6 +7899,7 @@ dependencies = [
  "pg_proc",
  "plancache",
  "rel_vocab",
+ "resowner",
  "rustc-hash",
  "scan_fgram",
  "snapmgr",
@@ -7794,7 +7912,10 @@ dependencies = [
  "types_nodes",
  "types_portal",
  "types_rel",
+ "types_trigger",
+ "types_trigger_call",
  "types_tuple",
+ "varlena",
  "wchar",
  "xact",
 ]
@@ -9099,6 +9220,7 @@ dependencies = [
  "predicate_seams",
  "resowner_portal_seams",
  "resowner_seams",
+ "snapmgr_seams",
  "types_error",
  "types_resowner",
  "types_snapshot",
@@ -9741,6 +9863,8 @@ dependencies = [
  "nodenestloop",
  "nodeseqscan",
  "nodesort",
+ "nodetidrangescan",
+ "nodetidscan",
  "nodeunique",
  "nodewindowagg",
  "opclasscmds",
@@ -10818,10 +10942,13 @@ dependencies = [
  "catalog_toasting",
  "clauses",
  "coerce",
+ "commands_amcmds",
  "commands_cluster",
+ "commands_tablespace",
  "datum",
  "elog_seams",
  "execexpr",
+ "execindexing",
  "exectuples",
  "fmgr_seams",
  "format_type",
@@ -10875,6 +11002,7 @@ dependencies = [
  "tablecmds_seams",
  "trigger",
  "tupdesc",
+ "typcache",
  "types_array",
  "types_core",
  "types_error",
@@ -11441,13 +11569,21 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "adt_acl",
+ "catalog_dependency",
+ "catalog_indexing",
  "catalog_namespace",
+ "clauses",
  "coerce",
  "datum",
  "elog",
+ "elog_seams",
+ "execexpr",
+ "exectuples",
  "fmgr_seams",
  "format_type",
  "genam",
+ "heaptuple",
+ "inval",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -11458,17 +11594,26 @@ dependencies = [
  "parse_utilcmd",
  "parser_small1",
  "pg_constraint",
+ "pg_depend",
  "pg_enum",
+ "pg_shdepend",
  "pg_type",
+ "readfuncs",
+ "relation_seams",
+ "ruleutils",
+ "snapmgr",
  "superuser",
  "syscache_seams",
  "table",
+ "tableam",
+ "tablecmds",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
  "vars",
  "xact",
 ]

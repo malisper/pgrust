@@ -101,7 +101,11 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SeqScan) => true,
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
+        t if t == tag16(NodeTag::T_TidScan) => true,
+        t if t == tag16(NodeTag::T_TidRangeScan) => true,
+        t if t == tag16(NodeTag::T_BitmapHeapScan) => true,
         t if t == tag16(NodeTag::T_CteScan) => true,
+        t if t == tag16(NodeTag::T_WorkTableScan) => true,
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
@@ -685,6 +689,26 @@ fn base_path<'mcx>(
     }
 }
 
+// calc_non_nestloop_required_outer (pathnode.c); child-join reparameterize
+// arm is dead (no top_parent_relids yet).
+pub fn calc_non_nestloop_required_outer<'mcx>(
+    run: &PlannerRun<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    outer_path: PathId,
+    inner_path: PathId,
+) -> Relids<'mcx> {
+    use types_pathnodes::relids::{relids_copy, relids_is_empty, relids_overlap, relids_union};
+    let outer_paramrels = relids_copy(mcx, path_req_outer(run.root.path(outer_path).base()));
+    let inner_paramrels = relids_copy(mcx, path_req_outer(run.root.path(inner_path).base()));
+    let outer_parent = run.root.path(outer_path).base().parent;
+    let inner_parent = run.root.path(inner_path).base().parent;
+    debug_assert!(relids_is_empty(&run.root.rel(outer_parent).top_parent_relids));
+    debug_assert!(relids_is_empty(&run.root.rel(inner_parent).top_parent_relids));
+    debug_assert!(!relids_overlap(&outer_paramrels, &run.root.rel(inner_parent).relids));
+    debug_assert!(!relids_overlap(&inner_paramrels, &run.root.rel(outer_parent).relids));
+    relids_union(mcx, &outer_paramrels, &inner_paramrels)
+}
+
 // join_clause_is_movable_into (restrictinfo.c).
 pub fn join_clause_is_movable_into(
     run: &PlannerRun<'_>,
@@ -736,12 +760,19 @@ pub fn get_baserel_parampathinfo<'mcx>(
     let rel_relids = relids_copy(mcx, &run.root.rel(rel_id).relids);
     for &rid in joininfo.iter() {
         if join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids) {
-            // generate_join_implied_equalities divergence: eclass-lite keeps
-            // join equalities in joininfo, but C's EC leg emits them at a
-            // parameterized scan as outer_em = inner_em; commute so the
-            // scanned rel sits on the right (EXPLAIN parity).
-            pclauses.push(commute_ec_clause_for_scan(run, rid, &rel_relids)?);
+            pclauses.push(rid);
         }
+    }
+    let eqclauses = planner_seams::generate_join_implied_equalities::call(
+        run,
+        &joinrelids,
+        required_outer,
+        rel_id,
+        None,
+    )?;
+    for &rid in eqclauses.iter() {
+        debug_assert!(join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids));
+        pclauses.push(rid);
     }
     let mut pserials: types_pathnodes::Relids<'mcx> = None;
     for &rid in pclauses.iter() {
@@ -758,73 +789,137 @@ pub fn get_baserel_parampathinfo<'mcx>(
     Ok(Some(mcx::box_new_in(mcx, ppi)))
 }
 
-// The EC-orientation shim for get_baserel_parampathinfo (see call site).
-fn commute_ec_clause_for_scan<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    rid: types_pathnodes::RinfoId,
-    rel_relids: &types_pathnodes::Relids<'mcx>,
-) -> PgResult<types_pathnodes::RinfoId> {
-    use types_pathnodes::relids::{relids_is_empty, relids_is_subset};
-    let mcx = run.mcx;
-    let (clause_id, ok, left_in_rel) = {
-        let ri = run.root.rinfo(rid);
-        (
-            ri.clause,
-            ri.can_join
-                && ri.is_pushed_down
-                && !ri.pseudoconstant
-                && !ri.mergeopfamilies.is_empty(),
-            !relids_is_empty(&ri.left_relids) && relids_is_subset(&ri.left_relids, rel_relids),
-        )
-    };
-    if !ok || !left_in_rel {
-        return Ok(rid);
-    }
-    let clause = *run.root.expr_node(clause_id);
-    let Some(op) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
-        return Ok(rid);
-    };
-    let comm = lsyscache::get_commutator(op.opno)?;
-    if comm == 0 {
-        return Ok(rid);
-    }
-    let mut args = types_nodes::NodeList::nil();
-    args.lappend(mcx, op.args.nth(1))?;
-    args.lappend(mcx, op.args.nth(0))?;
-    let commuted = types_nodes::Node::mk(
-        mcx,
-        types_nodes::primnodes::OpExpr {
-            opno: comm,
-            opfuncid: lsyscache::get_opcode(comm)?,
-            opresulttype: op.opresulttype,
-            opretset: op.opretset,
-            opcollid: op.opcollid,
-            inputcollid: op.inputcollid,
-            args,
-            location: op.location,
-        },
-    )?;
-    planner_seams::make_restrictinfo::call(
-        run, commuted, true, false, false, false, 0, None, None, None,
-    )
-}
-
-// get_joinrel_parampathinfo (relnode.c): only the unparameterized-join arm is
-// live (parameterized join paths need the movable-clause split).
+// get_joinrel_parampathinfo (relnode.c). The path holds a copy of the cached
+// PPI, matching get_baserel_parampathinfo above.
+#[allow(clippy::too_many_arguments)]
 pub fn get_joinrel_parampathinfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    _rel_id: RelId,
+    joinrel: RelId,
+    outer_path: PathId,
+    inner_path: PathId,
+    sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
     required_outer: &types_pathnodes::Relids<'mcx>,
     restrict_clauses: &mut PgVec<'mcx, types_pathnodes::RinfoId>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>>> {
-    let _ = restrict_clauses;
-    if types_pathnodes::relids::relids_is_empty(required_outer) {
+    use types_pathnodes::relids::{
+        relids_copy, relids_equal, relids_is_empty, relids_is_subset, relids_overlap,
+        relids_union,
+    };
+    let mcx = run.mcx;
+    debug_assert!(relids_is_subset(&run.root.rel(joinrel).lateral_relids, required_outer));
+    if relids_is_empty(required_outer) {
         return Ok(None);
     }
-    panic!(
-        "get_joinrel_parampathinfo (relnode.c): parameterized join path; \
-         multi-level lateral/param lane unported"
-    );
+    debug_assert!(!relids_overlap(&run.root.rel(joinrel).relids, required_outer));
+
+    let joinrel_relids = relids_copy(mcx, &run.root.rel(joinrel).relids);
+    let join_and_req = relids_union(mcx, &joinrel_relids, required_outer);
+    let outer_parent = run.root.path(outer_path).base().parent;
+    let inner_parent = run.root.path(inner_path).base().parent;
+    let outer_parent_relids = relids_copy(mcx, &run.root.rel(outer_parent).relids);
+    let inner_parent_relids = relids_copy(mcx, &run.root.rel(inner_parent).relids);
+    // An unparameterized input accepts no parameterized clauses (empty set
+    // fails every is-subset test in join_clause_is_movable_into).
+    let outer_and_req = if run.root.path(outer_path).base().param_info.is_some() {
+        relids_union(
+            mcx,
+            &outer_parent_relids,
+            path_req_outer(run.root.path(outer_path).base()),
+        )
+    } else {
+        None
+    };
+    let inner_and_req = if run.root.path(inner_path).base().param_info.is_some() {
+        relids_union(
+            mcx,
+            &inner_parent_relids,
+            path_req_outer(run.root.path(inner_path).base()),
+        )
+    } else {
+        None
+    };
+
+    let joininfo = types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel(joinrel).joininfo);
+    let mut pclauses: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(mcx);
+    for &rid in joininfo.iter() {
+        if join_clause_is_movable_into(run, rid, &joinrel_relids, &join_and_req)
+            && !join_clause_is_movable_into(run, rid, &outer_parent_relids, &outer_and_req)
+            && !join_clause_is_movable_into(run, rid, &inner_parent_relids, &inner_and_req)
+        {
+            pclauses.push(rid);
+        }
+    }
+
+    let eclauses = planner_seams::generate_join_implied_equalities::call(
+        run,
+        &join_and_req,
+        required_outer,
+        joinrel,
+        None,
+    )?;
+    let mut dropped_ecs: PgVec<'mcx, types_pathnodes::EcId> = PgVec::new_in(mcx);
+    for &rid in eclauses.iter() {
+        debug_assert!(join_clause_is_movable_into(run, rid, &joinrel_relids, &join_and_req));
+        if join_clause_is_movable_into(run, rid, &outer_parent_relids, &outer_and_req) {
+            continue;
+        }
+        if join_clause_is_movable_into(run, rid, &inner_parent_relids, &inner_and_req) {
+            let ri = run.root.rinfo(rid);
+            debug_assert!(ri.left_ec == ri.right_ec);
+            dropped_ecs.push(ri.left_ec.expect("EC-derived clause carries its EC"));
+            continue;
+        }
+        pclauses.push(rid);
+    }
+
+    if !dropped_ecs.is_empty() {
+        let real_outer_and_req = relids_union(mcx, &outer_parent_relids, required_outer);
+        let eclauses = planner_seams::generate_join_implied_equalities_for_ecs::call(
+            run,
+            &dropped_ecs,
+            &real_outer_and_req,
+            required_outer,
+            outer_parent,
+        )?;
+        for &rid in eclauses.iter() {
+            debug_assert!(join_clause_is_movable_into(
+                run,
+                rid,
+                &outer_parent_relids,
+                &real_outer_and_req
+            ));
+            if !join_clause_is_movable_into(run, rid, &outer_parent_relids, &outer_and_req) {
+                pclauses.push(rid);
+            }
+        }
+    }
+
+    pclauses.extend(restrict_clauses.iter().copied());
+    core::mem::swap(restrict_clauses, &mut pclauses);
+
+    for i in 0..run.root.rel(joinrel).ppilist.len() {
+        if relids_equal(&run.root.rel(joinrel).ppilist[i].ppi_req_outer, required_outer) {
+            let ppi = run.root.rel(joinrel).ppilist[i].clone();
+            return Ok(Some(mcx::box_new_in(mcx, ppi)));
+        }
+    }
+
+    let rows = costsize::get_parameterized_joinrel_size(
+        run,
+        joinrel,
+        outer_path,
+        inner_path,
+        sjinfo,
+        restrict_clauses,
+    )?;
+    let ppi = types_pathnodes::ParamPathInfo {
+        ppi_req_outer: relids_copy(mcx, required_outer),
+        ppi_rows: rows,
+        ppi_clauses: PgVec::new_in(mcx),
+        ppi_serials: None,
+    };
+    run.root.rel_mut(joinrel).ppilist.push(ppi.clone());
+    Ok(Some(mcx::box_new_in(mcx, ppi)))
 }
 
 // create_seqscan_path (pathnode.c); required_outer is empty on this lane.
@@ -901,6 +996,56 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
+// create_worktablescan_path (pathnode.c); required_outer empty on this lane.
+pub fn create_worktablescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_WorkTableScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    costsize::cost_ctescan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_recursiveunion_path (pathnode.c); distinct_list empty and num_groups
+// zero for UNION ALL.
+#[allow(clippy::too_many_arguments)]
+pub fn create_recursiveunion_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    leftpath: PathId,
+    rightpath: PathId,
+    target_id: PtId,
+    distinct_list: PgVec<'mcx, types_pathnodes::NodeId>,
+    wt_param: i32,
+    num_groups: f64,
+) -> PathId {
+    let (l_safe, l_workers) = {
+        let l = run.root.path(leftpath).base();
+        (l.parallel_safe, l.parallel_workers)
+    };
+    let r_safe = run.root.path(rightpath).base().parallel_safe;
+    let mut path =
+        base_path(run, NodeTag::T_RecursiveUnionPath, NodeTag::T_RecursiveUnion, rel_id);
+    path.pathtarget_id = Some(target_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel && l_safe && r_safe;
+    path.parallel_workers = l_workers;
+    let id = run.root.alloc_path(PathNode::RecursiveUnionPath(
+        types_pathnodes::RecursiveUnionPath {
+            path,
+            leftpath: Some(leftpath),
+            rightpath: Some(rightpath),
+            distinctList: distinct_list,
+            wtParam: wt_param,
+            numGroups: num_groups,
+        },
+    ));
+    costsize::cost_recursive_union(run, id, leftpath, rightpath);
+    id
+}
 
 // create_tidscan_path (pathnode.c); required_outer is empty on this lane.
 pub fn create_tidscan_path<'mcx>(
@@ -919,20 +1064,44 @@ pub fn create_tidscan_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_and_path (pathnode.c); required_outer empty on this lane
-// (children are unparameterized, asserted).
+// create_tidrangescan_path (pathnode.c); required_outer is empty on this lane.
+pub fn create_tidrangescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    tidrangequals: PgVec<'mcx, RinfoId>,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_TidRangePath, NodeTag::T_TidRangeScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &tidrangequals);
+    let id = run.root.alloc_path(PathNode::TidRangePath(types_pathnodes::TidRangePath {
+        path,
+        tidrangequals,
+    }));
+    costsize::cost_tidrangescan(run, id, rel_id, &quals)?;
+    Ok(id)
+}
+
+// create_bitmap_and_path (pathnode.c): required_outer is the union of the
+// children's requirements.
 pub fn create_bitmap_and_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapquals: PgVec<'mcx, PathId>,
 ) -> PgResult<PathId> {
+    let mcx = run.mcx;
+    use types_pathnodes::relids::relids_union;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
     for &q in bitmapquals.iter() {
-        assert!(
-            run.root.path(q).base().param_info.is_none(),
-            "create_bitmap_and_path (pathnode.c): parameterized subpath; M2 join lane"
+        required_outer = relids_union(
+            mcx,
+            &required_outer,
+            path_req_outer(run.root.path(q).base()),
         );
     }
+    let param_info = get_baserel_parampathinfo(run, rel_id, &required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapAndPath, NodeTag::T_BitmapAnd, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapAndPath { path, bitmapquals, bitmapselectivity: 0.0 };
@@ -941,19 +1110,26 @@ pub fn create_bitmap_and_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_or_path (pathnode.c); required_outer empty on this lane.
+// create_bitmap_or_path (pathnode.c): required_outer is the union of the
+// children's requirements.
 pub fn create_bitmap_or_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapquals: PgVec<'mcx, PathId>,
 ) -> PgResult<PathId> {
+    let mcx = run.mcx;
+    use types_pathnodes::relids::relids_union;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
     for &q in bitmapquals.iter() {
-        assert!(
-            run.root.path(q).base().param_info.is_none(),
-            "create_bitmap_or_path (pathnode.c): parameterized subpath; M2 join lane"
+        required_outer = relids_union(
+            mcx,
+            &required_outer,
+            path_req_outer(run.root.path(q).base()),
         );
     }
+    let param_info = get_baserel_parampathinfo(run, rel_id, &required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapOrPath, NodeTag::T_BitmapOr, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapOrPath { path, bitmapquals, bitmapselectivity: 0.0 };
@@ -962,14 +1138,17 @@ pub fn create_bitmap_or_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.
+// create_bitmap_heap_path (pathnode.c); parallel loud upstream.
 pub fn create_bitmap_heap_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapqual: PathId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapHeapPath, NodeTag::T_BitmapHeapScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapHeapPath { path, bitmapqual: Some(bitmapqual) };
@@ -979,6 +1158,7 @@ pub fn create_bitmap_heap_path<'mcx>(
 }
 
 // create_index_path (pathnode.c); indexorderbys/partial paths loud upstream.
+#[allow(clippy::too_many_arguments)]
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     index: &'mcx IndexOptInfo<'mcx>,
@@ -986,11 +1166,14 @@ pub fn create_index_path<'mcx>(
     pathkeys: PgVec<'mcx, PathKey>,
     indexscandir: ScanDirection,
     indexonly: bool,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
 ) -> PgResult<PathId> {
     let rel_id = index.rel.expect("IndexOptInfo rel set");
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let pathtype = if indexonly { NodeTag::T_IndexOnlyScan } else { NodeTag::T_IndexScan };
     let mut path = base_path(run, NodeTag::T_IndexPath, pathtype, rel_id);
+    path.param_info = param_info;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.pathkeys = pathkeys;
     let mcx = run.mcx;
@@ -1641,9 +1824,7 @@ pub fn create_windowagg_path<'mcx>(
     Ok(id)
 }
 
-// create_unique_path (pathnode.c). The make_pathkeys_for_sortclauses
-// redundancy probe reduces under eclass-lite to dropping duplicate exprs
-// (no EC ever carries a const). C's semi_can_hash write-back on oversized
+// create_unique_path (pathnode.c). C's semi_can_hash write-back on oversized
 // hash entries is skipped: recomputation reaches the same verdict.
 pub fn create_unique_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -2349,6 +2530,7 @@ pub fn create_nestloop_path<'mcx>(
     jointype: u32,
     workspace: &JoinCostWorkspace,
     inner_unique: bool,
+    sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
     outer_path: PathId,
     inner_path: PathId,
     pathkeys: &[PathKey],
@@ -2383,11 +2565,15 @@ pub fn create_nestloop_path<'mcx>(
         restrict_vec = jclauses;
     }
 
-    let mut restrict_vec_for_ppi =
-        types_pathnodes::relids::pgvec_clone_shallow(mcx, &restrict_vec);
-    let param_info =
-        get_joinrel_parampathinfo(run, joinrel, required_outer, &mut restrict_vec_for_ppi)?;
-    debug_assert!(param_info.is_none() || restrict_vec_for_ppi.len() == restrict_vec.len());
+    let param_info = get_joinrel_parampathinfo(
+        run,
+        joinrel,
+        outer_path,
+        inner_path,
+        sjinfo,
+        required_outer,
+        &mut restrict_vec,
+    )?;
 
     let outer = run.root.path(outer_path).base();
     let inner = run.root.path(inner_path).base();
@@ -2436,21 +2622,34 @@ pub fn create_hashjoin_path<'mcx>(
     jointype: u32,
     workspace: &JoinCostWorkspace,
     inner_unique: bool,
+    sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
     outer_path: PathId,
     inner_path: PathId,
     restrict_clauses: &[RinfoId],
+    required_outer: &Relids<'mcx>,
     hashclauses: &[RinfoId],
     semifactors: Option<SemiAntiJoinFactors>,
 ) -> PgResult<PathId> {
     let mcx = run.mcx;
+
+    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+    joinrestrictinfo.extend(restrict_clauses.iter().copied());
+    let param_info = get_joinrel_parampathinfo(
+        run,
+        joinrel,
+        outer_path,
+        inner_path,
+        sjinfo,
+        required_outer,
+        &mut joinrestrictinfo,
+    )?;
+
     let outer = run.root.path(outer_path).base();
     let inner = run.root.path(inner_path).base();
     let parallel_safe =
         run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
     let parallel_workers = outer.parallel_workers;
 
-    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    joinrestrictinfo.extend(restrict_clauses.iter().copied());
     let mut path_hashclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
     path_hashclauses.extend(hashclauses.iter().copied());
 
@@ -2459,7 +2658,7 @@ pub fn create_hashjoin_path<'mcx>(
         pathtype: tag16(NodeTag::T_HashJoin),
         parent: joinrel,
         pathtarget_id: run.root.rel(joinrel).pathtarget_id,
-        param_info: None,
+        param_info,
         parallel_aware: false,
         parallel_safe,
         parallel_workers,
@@ -2487,7 +2686,7 @@ pub fn create_hashjoin_path<'mcx>(
 }
 
 
-// create_mergejoin_path (pathnode.c); required_outer is always NULL.
+// create_mergejoin_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_mergejoin_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -2495,31 +2694,44 @@ pub fn create_mergejoin_path<'mcx>(
     jointype: u32,
     workspace: &JoinCostWorkspace,
     inner_unique: bool,
+    sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
     outer_path: PathId,
     inner_path: PathId,
     restrict_clauses: &[RinfoId],
     pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &Relids<'mcx>,
     mergeclauses: PgVec<'mcx, RinfoId>,
     outersortkeys: PgVec<'mcx, PathKey>,
     innersortkeys: PgVec<'mcx, PathKey>,
     outer_presorted_keys: usize,
 ) -> PgResult<PathId> {
     let mcx = run.mcx;
+
+    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+    joinrestrictinfo.extend(restrict_clauses.iter().copied());
+    let param_info = get_joinrel_parampathinfo(
+        run,
+        joinrel,
+        outer_path,
+        inner_path,
+        sjinfo,
+        required_outer,
+        &mut joinrestrictinfo,
+    )?;
+
     let outer = run.root.path(outer_path).base();
     let inner = run.root.path(inner_path).base();
     let parallel_safe =
         run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
     let parallel_workers = outer.parallel_workers;
 
-    let mut joinrestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
-    joinrestrictinfo.extend(restrict_clauses.iter().copied());
 
     let path = Path {
         type_: tag16(NodeTag::T_MergePath),
         pathtype: tag16(NodeTag::T_MergeJoin),
         parent: joinrel,
         pathtarget_id: run.root.rel(joinrel).pathtarget_id,
-        param_info: None,
+        param_info,
         parallel_aware: false,
         parallel_safe,
         parallel_workers,

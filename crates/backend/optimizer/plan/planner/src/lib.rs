@@ -9,9 +9,11 @@ pub mod cluster;
 pub mod extended_stats;
 pub mod costsize;
 pub mod createplan;
+pub mod equivclass;
 pub mod grouping;
 pub mod groupingsets;
 pub mod indxpath;
+mod tidpath;
 mod inherit;
 pub mod initsplan;
 pub mod joinpath;
@@ -142,6 +144,12 @@ pub fn init_seams() {
     planner_seams::get_function_rows::set(crate::plancat::get_function_rows);
     planner_seams::get_rel_data_width::set(crate::plancat::get_rel_data_width);
     planner_seams::match_index_to_operand::set(crate::indxpath::match_index_to_operand);
+    planner_seams::generate_join_implied_equalities::set(
+        crate::equivclass::generate_join_implied_equalities,
+    );
+    planner_seams::generate_join_implied_equalities_for_ecs::set(
+        crate::equivclass::generate_join_implied_equalities_for_ecs,
+    );
     use guc_tables::GucVarAccessors;
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
@@ -233,7 +241,7 @@ pub fn standard_planner<'mcx>(
         0.0
     };
 
-    subquery_planner(&mut run, parse, tuple_fraction, None)?;
+    subquery_planner(&mut run, parse, false, tuple_fraction, None)?;
 
     let final_rel = fetch_final_rel(&mut run);
     let best_path = get_cheapest_fractional_path(&run, final_rel, tuple_fraction);
@@ -253,9 +261,10 @@ pub fn standard_planner<'mcx>(
         debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
         for i in 0..run.glob.subplans.len() {
             let subplan = run.glob.subplans.nth(i);
-            crate::subselect::ss_finalize_plan(&run, subplan, &run.subroots[i].root.outer_params)?;
+            let subroot = &run.subroots[i].root;
+            crate::subselect::ss_finalize_plan(&run, subroot, subplan, &subroot.outer_params)?;
         }
-        crate::subselect::ss_finalize_plan(&run, top_plan, &run.root.outer_params)?;
+        crate::subselect::ss_finalize_plan(&run, &run.root, top_plan, &run.root.outer_params)?;
     }
 
     debug_assert!(run.glob.finalrtable.is_nil());

@@ -26,11 +26,13 @@ const AT_PASS_ADD_COL: usize = 2;
 const AT_PASS_SET_EXPRESSION: usize = 3;
 const AT_PASS_ADD_CONSTR: usize = 6;
 const AT_PASS_COL_ATTRS: usize = 7;
+const AT_PASS_ADD_INDEXCONSTR: usize = 8;
 const AT_PASS_ADD_INDEX: usize = 9;
 const AT_PASS_ADD_OTHERCONSTR: usize = 10;
 const AT_PASS_MISC: usize = 11;
 const AT_REWRITE_DEFAULT_VAL: i32 = 1 << 1;
 const AT_REWRITE_COLUMN_REWRITE: i32 = 1 << 2;
+const AT_REWRITE_ACCESS_METHOD: i32 = 1 << 3;
 
 pub(crate) const Anum_pg_attribute_attname: usize = 2;
 const Anum_pg_attribute_atttypid: usize = 3;
@@ -108,6 +110,12 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_EnableAlwaysRule
             | AlterTableType::AT_EnableReplicaRule
             | AlterTableType::AT_DisableRule => AccessExclusiveLock,
+            AlterTableType::AT_ReplicaIdentity
+            | AlterTableType::AT_AddOf
+            | AlterTableType::AT_DropOf
+            | AlterTableType::AT_SetTableSpace
+            | AlterTableType::AT_SetAccessMethod
+            | AlterTableType::AT_GenericOptions => AccessExclusiveLock,
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
         if cmd_lockmode > lockmode {
@@ -218,6 +226,9 @@ struct AlteredTableInfo<'mcx> {
     old_desc: std::rc::Rc<TupleDescData<'mcx>>,
     subcmds: [NodeList<'mcx>; AT_NUM_PASSES],
     rewrite: i32,
+    new_tablespace: Oid,
+    chg_access_method: bool,
+    new_access_method: Oid,
     has_newvals: bool,
     verify_new_notnull: bool,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
@@ -253,6 +264,9 @@ fn ATController<'mcx>(
         old_desc: rel.rd_att.clone(),
         subcmds: core::array::from_fn(|_| NodeList::nil()),
         rewrite: 0,
+        new_tablespace: InvalidOid,
+        chg_access_method: false,
+        new_access_method: InvalidOid,
         has_newvals: false,
         verify_new_notnull: false,
         newvals: PgVec::new_in(mcx),
@@ -347,6 +361,43 @@ fn ATPrepCmd<'mcx>(
             set_recurse();
             AT_PASS_MISC
         }
+        // These commands never recurse; no command-specific prep.
+        AlterTableType::AT_ReplicaIdentity
+        | AlterTableType::AT_AddOf
+        | AlterTableType::AT_DropOf => AT_PASS_MISC,
+        AlterTableType::AT_AddIndexConstraint => AT_PASS_ADD_INDEXCONSTR,
+        AlterTableType::AT_SetTableSpace => {
+            ATPrepSetTableSpace(mcx, tab, cmd.name.expect("SET TABLESPACE name"))?;
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_SetAccessMethod => {
+            if tab.chg_access_method {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot have multiple SET ACCESS METHOD subcommands".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            ATPrepSetAccessMethod(tab, rel, cmd.name)?;
+            AT_PASS_MISC
+        }
+        AlterTableType::AT_GenericOptions => {
+            // ATSimplePermissions(ATT_FOREIGN_TABLE): foreign tables cannot
+            // exist yet, so only the relkind error is reachable.
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "ALTER action OPTIONS cannot be performed on relation \"{}\"",
+                        rel.name()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_detail("This operation is not supported for tables.".to_string()),
+            ));
+        }
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -397,18 +448,47 @@ fn ATRewriteCatalogs<'mcx>(
                     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
                     match constr.contype {
                         ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
-                            let istmt =
-                                parse_utilcmd::transformIndexConstraintForAlter(mcx, defnode)?;
-                            parse_clause::transformIndexStmt(
-                                mcx,
-                                tab.relid,
-                                istmt,
-                                query_string,
-                            )?;
+                            let (istmt, nnconstraints) =
+                                parse_utilcmd::transformIndexConstraintForAlter(
+                                    mcx, &rel, defnode, query_string,
+                                )?;
+                            let is_existing = istmt
+                                .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                                .expect("IndexStmt")
+                                .indexOid
+                                != InvalidOid;
+                            if !is_existing {
+                                parse_clause::transformIndexStmt(
+                                    mcx,
+                                    tab.relid,
+                                    istmt,
+                                    query_string,
+                                )?;
+                            }
+                            // C's transformAlterTableStmt: PK USING INDEX
+                            // not-null constraints run in COL_ATTRS, before
+                            // the ADD_INDEXCONSTR pass checks them.
+                            for nn in nnconstraints.iter() {
+                                let mut nncmd = Node::build::<AlterTableCmd>(mcx)?;
+                                nncmd.subtype = AlterTableType::AT_AddConstraint;
+                                nncmd.recurse = true;
+                                nncmd.def = Some(nn);
+                                tab.subcmds[AT_PASS_COL_ATTRS]
+                                    .lappend(mcx, nncmd.seal())?;
+                            }
                             let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
-                            newcmd.subtype = AlterTableType::AT_AddIndex;
+                            newcmd.subtype = if is_existing {
+                                AlterTableType::AT_AddIndexConstraint
+                            } else {
+                                AlterTableType::AT_AddIndex
+                            };
                             newcmd.def = Some(istmt);
-                            tab.subcmds[AT_PASS_ADD_INDEX].lappend(mcx, newcmd.seal())?;
+                            let target_pass = if is_existing {
+                                AT_PASS_ADD_INDEXCONSTR
+                            } else {
+                                AT_PASS_ADD_INDEX
+                            };
+                            tab.subcmds[target_pass].lappend(mcx, newcmd.seal())?;
                         }
                         ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
                             tab.subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
@@ -484,6 +564,36 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_SetStorage => {
                     ATExecSetStorage(mcx, &rel, cmd)?;
                 }
+                AlterTableType::AT_AddIndexConstraint => {
+                    let stmt = cmd
+                        .def
+                        .expect("AT_AddIndexConstraint IndexStmt")
+                        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                        .expect("IndexStmt");
+                    ATExecAddIndexConstraint(mcx, &rel, stmt)?;
+                }
+                AlterTableType::AT_ReplicaIdentity => {
+                    let stmt = cmd
+                        .def
+                        .expect("AT_ReplicaIdentity ReplicaIdentityStmt")
+                        .as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>()
+                        .expect("ReplicaIdentityStmt");
+                    ATExecReplicaIdentity(mcx, &rel, stmt)?;
+                }
+                AlterTableType::AT_AddOf => {
+                    let tn = cmd
+                        .def
+                        .expect("AT_AddOf TypeName")
+                        .as_variant::<TypeName>()
+                        .expect("TypeName");
+                    ATExecAddOf(mcx, &rel, tn)?;
+                }
+                AlterTableType::AT_DropOf => {
+                    ATExecDropOf(mcx, &rel)?;
+                }
+                // Phase-2 arms only fire for partitioned relkinds (no
+                // storage), which are unreachable here; phase 3 does the work.
+                AlterTableType::AT_SetTableSpace | AlterTableType::AT_SetAccessMethod => {}
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             rel.close(NoLock)?;
@@ -505,8 +615,14 @@ fn ATRewriteTables<'mcx>(
     // find_composite_type_dependencies: composite-type columns are unported,
     // so no dependent rowtype uses can exist.
     if tab.rewrite > 0 {
+        if tab.rewrite & AT_REWRITE_ACCESS_METHOD != 0 {
+            unported("ATRewriteTable rewrite (SET ACCESS METHOD; only heap exists)");
+        }
         if tab.rewrite & !(AT_REWRITE_COLUMN_REWRITE | AT_REWRITE_DEFAULT_VAL) != 0 {
-            unported("ATRewriteTable rewrite flags (persistence/access-method)");
+            unported("ATRewriteTable rewrite flags (persistence)");
+        }
+        if tab.new_tablespace != InvalidOid {
+            unported("ATRewriteTable rewrite combined with SET TABLESPACE");
         }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
         let persistence = old_heap.rd_rel.relpersistence;
@@ -526,8 +642,13 @@ fn ATRewriteTables<'mcx>(
             multixact::ReadNextMultiXactId()?,
             persistence,
         )?;
-    } else if !tab.constraints.is_empty() || tab.verify_new_notnull {
-        ATRewriteTable(mcx, tab, InvalidOid)?;
+    } else {
+        if !tab.constraints.is_empty() || tab.verify_new_notnull {
+            ATRewriteTable(mcx, tab, InvalidOid)?;
+        }
+        if tab.new_tablespace != InvalidOid {
+            ATExecSetTableSpace(mcx, tab.relid, tab.new_tablespace, lockmode)?;
+        }
     }
     let _ = tab.has_newvals;
 
@@ -852,7 +973,8 @@ fn ATExecAddColumn<'mcx>(
     let mut has_missing = false;
     let rel3 = table::table_open(mcx, myrelid, NoLock)?;
     if rel3.rd_att.attr(newattnum as usize - 1).atthasdef {
-        let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?
+            .expect("atthasdef column has a default");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         tab.has_newvals = true;
         if !clauses::contain_volatile_functions(defval)? {
@@ -1207,7 +1329,8 @@ fn ATExecSetExpression<'mcx>(
 
     if rewrite {
         let rel2 = table::table_open(mcx, rel.rd_id, NoLock)?;
-        let defval = rewrite_handler::build_column_default(mcx, &rel2, attnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, &rel2, attnum as usize)?
+            .expect("generated column has a generation expression");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         rel2.close(NoLock)?;
         tab.newvals.push(NewColumnValue { attnum, expr: defval, is_generated: true });
@@ -1704,8 +1827,64 @@ fn ATExecAddNotNullConstraint<'mcx>(
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
     }
-    if pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?.is_some() {
-        unported("ATAddCheckNNConstraint: merge with an existing not-null constraint");
+    // AdjustNotNullInheritance (pg_constraint.c:742), is_local slice: an
+    // existing constraint absorbs the new one after compatibility checks.
+    if let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? {
+        if constr.is_no_inherit != con.connoinherit {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{relname}\"",
+                        con.name_str()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint(
+                    "You might need to make the existing constraint inheritable using \
+                     ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                        .to_string(),
+                ),
+            ));
+        }
+        if !constr.skip_validation && !con.convalidated {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "incompatible NOT VALID constraint \"{}\" on relation \"{relname}\"",
+                        con.name_str()
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint(
+                    "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT."
+                        .to_string(),
+                ),
+            ));
+        }
+        if let Some(new_conname) = constr.conname {
+            if new_conname != con.name_str() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot create not-null constraint \"{new_conname}\" on column \
+                             \"{col_name}\" of table \"{relname}\""
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .with_detail(format!(
+                        "A not-null constraint named \"{}\" already exists for this column.",
+                        con.name_str()
+                    )),
+                ));
+            }
+        }
+        if !con.conislocal {
+            unported("AdjustNotNullInheritance conislocal flip (inheritance lane)");
+        }
+        return Ok(());
     }
     if constr.is_no_inherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
         unported("ATAddCheckNNConstraint inheritance recursion");
@@ -2220,7 +2399,8 @@ fn ATExecAlterColumnType<'mcx>(
 
     // Re-coerce any stored default before the column type flips.
     let defaultexpr = if att.atthasdef {
-        let defval = rewrite_handler::build_column_default(mcx, rel, attnum as usize)?;
+        let defval = rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
+            .expect("atthasdef column has a default");
         let defval = nodes_core::strip_implicit_coercions(defval);
         let mut pstate = parser_small1::make_parsestate(mcx, None);
         let coerced = coerce::coerce_to_target_type(
@@ -2585,4 +2765,683 @@ fn ATExecForceNoForceRowSecurity<'mcx>(
     force_rls: bool,
 ) -> PgResult<()> {
     set_pg_class_bool(mcx, rel, Anum_pg_class_relforcerowsecurity, force_rls)
+}
+
+const Anum_pg_class_reloftype: usize = 5;
+const Anum_pg_class_relreplident: usize = 27;
+const TableSpaceRelationId: Oid = 1213;
+const GLOBALTABLESPACE_OID: Oid = 1664;
+
+fn pg_class_read_attr(mcx: Mcx<'_>, relid: Oid, attnum: usize) -> PgResult<Datum> {
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
+    let key = oid_scankey(1, relid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_class columns under pg_class's descriptor.
+    let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, pg_class.descr(), &mut isnull) };
+    debug_assert!(!isnull);
+    genam::systable_endscan(mcx, scan)?;
+    pg_class.close(types_rel::AccessShareLock)?;
+    Ok(d)
+}
+
+fn set_pg_class_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: usize,
+    value: Datum,
+) -> PgResult<()> {
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_scankey(1, relid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
+    let reltup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let natts = pg_class.descr().natts as usize;
+    let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    repl_values.resize(natts, Datum::null());
+    repl_isnull.resize(natts, false);
+    repl.resize(natts, false);
+    repl_values[attnum - 1] = value;
+    repl[attnum - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(
+        mcx,
+        reltup,
+        pg_class.descr(),
+        &repl_values,
+        &repl_isnull,
+        &repl,
+    )?;
+    let otid = reltup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    pg_class.close(RowExclusiveLock)
+}
+
+// relation_mark_replica_identity (tablecmds.c:18402).
+fn relation_mark_replica_identity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    ri_type: u8,
+    index_oid: Oid,
+) -> PgResult<()> {
+    let current = pg_class_read_attr(mcx, rel.rd_id, Anum_pg_class_relreplident)?.as_i8() as u8;
+    if current != ri_type {
+        set_pg_class_datum(
+            mcx,
+            rel.rd_id,
+            Anum_pg_class_relreplident,
+            Datum::from_i8(ri_type as i8),
+        )?;
+    }
+
+    let pg_index = table::table_open(mcx, types_core::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let desc = pg_index.descr();
+    for &this_index in relcache::RelationGetIndexList(mcx, rel.rd_id)?.iter() {
+        let key = [oid_scankey(1, this_index)];
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {this_index}"));
+        let mut isnull = false;
+        // SAFETY: indisreplident is a fixed NOT NULL pg_index column.
+        let isreplident = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_index_indisreplident as i32, desc, &mut isnull)
+        }
+        .as_bool();
+        let want = this_index == index_oid;
+        if isreplident != want {
+            let natts = desc.natts as usize;
+            let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            values.resize(natts, Datum::null());
+            nulls.resize(natts, false);
+            replace.resize(natts, false);
+            values[Anum_pg_index_indisreplident - 1] = Datum::from_bool(want);
+            replace[Anum_pg_index_indisreplident - 1] = true;
+            let mut newtup =
+                heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+            let otid = tup.t_self;
+            genam::systable_endscan(mcx, scan)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &otid, &mut newtup)?;
+            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+        } else {
+            genam::systable_endscan(mcx, scan)?;
+        }
+    }
+    pg_index.close(RowExclusiveLock)
+}
+
+// ATExecReplicaIdentity (tablecmds.c:18490).
+fn ATExecReplicaIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &types_nodes::parsenodes::ReplicaIdentityStmt<'_>,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::{
+        REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_INDEX,
+        REPLICA_IDENTITY_NOTHING,
+    };
+    match stmt.identity_type {
+        REPLICA_IDENTITY_DEFAULT | REPLICA_IDENTITY_FULL | REPLICA_IDENTITY_NOTHING => {
+            return relation_mark_replica_identity(mcx, rel, stmt.identity_type, InvalidOid);
+        }
+        REPLICA_IDENTITY_INDEX => {}
+        other => panic!("unexpected identity type {other}"),
+    }
+
+    let index_name = stmt.name.expect("REPLICA IDENTITY USING INDEX name");
+    let index_oid = lsyscache::get_relname_relid(index_name, rel.rd_rel.relnamespace)?;
+    if index_oid == InvalidOid {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "index \"{index_name}\" for table \"{}\" does not exist",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    let index_rel = indexam::index_open(mcx, index_oid, types_rel::ShareLock)?;
+    let index_relname = index_rel.name().to_string();
+    let wrong_type = |msg: String| -> Box<PgError> {
+        Box::new(PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    };
+    let not_supported = |msg: String| -> Box<PgError> {
+        Box::new(PgError::new(ERROR, msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+    };
+    let Some(index_form) = index_rel.rd_index.as_ref() else {
+        return Err(wrong_type(format!(
+            "\"{index_relname}\" is not an index for table \"{}\"",
+            rel.name()
+        )));
+    };
+    if index_form.indrelid != rel.rd_id {
+        return Err(wrong_type(format!(
+            "\"{index_relname}\" is not an index for table \"{}\"",
+            rel.name()
+        )));
+    }
+    // rd_indam->amcanunique: btree is the only ported AM whose handler sets
+    // it (matches stock pg_am; CREATE ACCESS METHOD is unported).
+    let amcanunique = index_rel.rd_rel.relam == types_core::BTREE_AM_OID;
+    if (!amcanunique || !index_form.indisunique)
+        && !(index_form.indisunique && index_form.indisexclusion)
+    {
+        return Err(wrong_type(format!(
+            "cannot use non-unique index \"{index_relname}\" as replica identity"
+        )));
+    }
+    if !index_form.indimmediate {
+        return Err(not_supported(format!(
+            "cannot use non-immediate index \"{index_relname}\" as replica identity"
+        )));
+    }
+    if index_form.indexprs_src.is_some() {
+        return Err(not_supported(format!(
+            "cannot use expression index \"{index_relname}\" as replica identity"
+        )));
+    }
+    if index_form.has_indpred {
+        return Err(not_supported(format!(
+            "cannot use partial index \"{index_relname}\" as replica identity"
+        )));
+    }
+    for key in 0..index_form.indnkeyatts as usize {
+        let attno = index_form.indkey[key];
+        if attno <= 0 {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "index \"{index_relname}\" cannot be used as replica identity \
+                         because column {attno} is a system column"
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_REFERENCE),
+            ));
+        }
+        let attr = rel.rd_att.attr(attno as usize - 1);
+        if !attr.attnotnull {
+            let attname =
+                core::str::from_utf8(attr.attname.name_str()).expect("attname UTF-8");
+            return Err(wrong_type(format!(
+                "index \"{index_relname}\" cannot be used as replica identity \
+                 because column \"{attname}\" is nullable"
+            )));
+        }
+    }
+    relation_mark_replica_identity(mcx, rel, stmt.identity_type, index_oid)?;
+    index_rel.close(NoLock)
+}
+
+// check_of_type (tablecmds.c:7143).
+fn check_of_type(mcx: Mcx<'_>, typeid: Oid) -> PgResult<()> {
+    const TYPTYPE_COMPOSITE: u8 = b'c';
+    if lsyscache::get_typtype(typeid)? as u8 == TYPTYPE_COMPOSITE {
+        let typrelid = lsyscache::get_typ_typrelid(typeid)?;
+        debug_assert!(typrelid != InvalidOid);
+        let type_relation =
+            relation_seams::relation_open::call(mcx, typrelid, types_rel::AccessShareLock)?;
+        let type_ok = type_relation.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE;
+        // Keep the AccessShareLock on the parent rel until xact commit.
+        type_relation.close(NoLock)?;
+        if !type_ok {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "type {} is the row type of another table",
+                        format_type::format_type_be(typeid)?
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_detail(
+                    "A typed table must use a stand-alone composite type created with \
+                     CREATE TYPE."
+                        .to_string(),
+                ),
+            ));
+        }
+        Ok(())
+    } else {
+        Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "type {} is not a composite type",
+                    format_type::format_type_be(typeid)?
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ))
+    }
+}
+
+// ATExecAddOf (tablecmds.c:18216).
+fn ATExecAddOf<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    of_typename: &TypeName<'_>,
+) -> PgResult<()> {
+    let relid = rel.rd_id;
+    let (typeid, _typmod) =
+        parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, None, of_typename)?;
+    check_of_type(mcx, typeid)?;
+
+    if pg_inherits::has_superclass(mcx, relid)? {
+        return Err(Box::new(
+            PgError::new(ERROR, "typed tables cannot inherit".to_string())
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+
+    let type_tupdesc = typcache::lookup_rowtype_tupdesc_copy(mcx, typeid, -1)?;
+    let table_tupdesc = &rel.rd_att;
+    let table_natts = table_tupdesc.natts as usize;
+    let mismatch = |msg: String| -> Box<PgError> {
+        Box::new(PgError::new(ERROR, msg).with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
+    };
+    let mut table_attno: usize = 0;
+    for type_attno in 0..type_tupdesc.natts as usize {
+        let type_attr = type_tupdesc.attr(type_attno);
+        if type_attr.attisdropped {
+            continue;
+        }
+        let type_attname =
+            core::str::from_utf8(type_attr.attname.name_str()).expect("attname UTF-8");
+        let table_attr = loop {
+            if table_attno >= table_natts {
+                return Err(mismatch(format!("table is missing column \"{type_attname}\"")));
+            }
+            let attr = table_tupdesc.attr(table_attno);
+            table_attno += 1;
+            if !attr.attisdropped {
+                break attr;
+            }
+        };
+        let table_attname =
+            core::str::from_utf8(table_attr.attname.name_str()).expect("attname UTF-8");
+        if table_attname != type_attname {
+            return Err(mismatch(format!(
+                "table has column \"{table_attname}\" where type requires \"{type_attname}\""
+            )));
+        }
+        if table_attr.atttypid != type_attr.atttypid
+            || table_attr.atttypmod != type_attr.atttypmod
+            || table_attr.attcollation != type_attr.attcollation
+        {
+            return Err(mismatch(format!(
+                "table \"{}\" has different type for column \"{type_attname}\"",
+                rel.name()
+            )));
+        }
+    }
+    while table_attno < table_natts {
+        let table_attr = table_tupdesc.attr(table_attno);
+        table_attno += 1;
+        if !table_attr.attisdropped {
+            let attname =
+                core::str::from_utf8(table_attr.attname.name_str()).expect("attname UTF-8");
+            return Err(mismatch(format!("table has extra column \"{attname}\"")));
+        }
+    }
+
+    let cur_reloftype = pg_class_read_attr(mcx, relid, Anum_pg_class_reloftype)?.as_oid();
+    if cur_reloftype != InvalidOid {
+        drop_parent_dependency_on_class(
+            mcx,
+            relid,
+            TYPE_RELATION_ID,
+            cur_reloftype,
+            pg_depend::DependencyType::Normal,
+        )?;
+    }
+
+    let tableobj = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, relid);
+    let typeobj = pg_depend::ObjectAddress::set(TYPE_RELATION_ID, typeid);
+    pg_depend::recordDependencyOn(mcx, &tableobj, &typeobj, pg_depend::DependencyType::Normal)?;
+
+    set_pg_class_datum(mcx, relid, Anum_pg_class_reloftype, Datum::from_oid(typeid))
+}
+
+// ATExecDropOf (tablecmds.c:18358).
+fn ATExecDropOf<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
+    let relid = rel.rd_id;
+    let reloftype = pg_class_read_attr(mcx, relid, Anum_pg_class_reloftype)?.as_oid();
+    if reloftype == InvalidOid {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("\"{}\" is not a typed table", rel.name()))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+    drop_parent_dependency_on_class(
+        mcx,
+        relid,
+        TYPE_RELATION_ID,
+        reloftype,
+        pg_depend::DependencyType::Normal,
+    )?;
+    set_pg_class_datum(mcx, relid, Anum_pg_class_reloftype, Datum::from_oid(InvalidOid))
+}
+
+// ATExecAddIndexConstraint (tablecmds.c:9704).
+fn ATExecAddIndexConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &types_nodes::rawnodes::IndexStmt<'mcx>,
+) -> PgResult<()> {
+    let index_oid = stmt.indexOid;
+    debug_assert!(index_oid != InvalidOid);
+    debug_assert!(stmt.isconstraint);
+
+    let index_rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
+    let index_name = index_rel.name().to_string();
+    let index_info = execindexing::BuildIndexInfo(mcx, &index_rel)?;
+    if !index_info.ii_Unique {
+        panic!("index \"{index_name}\" is not unique");
+    }
+
+    let constraint_name = match stmt.idxname {
+        Some(cn) if cn != index_name => {
+            elog_seams::ereport_msg::call(
+                NOTICE,
+                format!(
+                    "ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index \
+                     \"{index_name}\" to \"{cn}\""
+                ),
+                None,
+            )?;
+            crate::rename::RenameRelationInternal(mcx, index_oid, cn, true)?;
+            cn.to_string()
+        }
+        Some(cn) => cn.to_string(),
+        None => index_name.clone(),
+    };
+
+    if stmt.primary {
+        catalog_index::index_check_primary_key(mcx, rel, &index_info, true)?;
+    }
+    let constraint_type = if stmt.primary {
+        pg_constraint::CONSTRAINT_PRIMARY
+    } else {
+        pg_constraint::CONSTRAINT_UNIQUE
+    };
+    let mut flags: u16 = catalog_index::INDEX_CONSTR_CREATE_UPDATE_INDEX
+        | catalog_index::INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS;
+    if stmt.initdeferred {
+        flags |= catalog_index::INDEX_CONSTR_CREATE_INIT_DEFERRED;
+    }
+    if stmt.deferrable {
+        flags |= catalog_index::INDEX_CONSTR_CREATE_DEFERRABLE;
+    }
+    if stmt.primary {
+        flags |= catalog_index::INDEX_CONSTR_CREATE_MARK_AS_PRIMARY;
+    }
+    catalog_index::index_constraint_create(
+        mcx,
+        rel,
+        index_oid,
+        InvalidOid,
+        &index_info,
+        &constraint_name,
+        constraint_type,
+        flags,
+        init_small::globals::allowSystemTableMods(),
+    )?;
+    index_rel.close(NoLock)
+}
+
+// ATPrepSetTableSpace (tablecmds.c:16615).
+fn ATPrepSetTableSpace<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    tablespacename: &str,
+) -> PgResult<()> {
+    let tablespace_id = commands_tablespace::get_tablespace_oid(mcx, tablespacename, false)?;
+    if tablespace_id != InvalidOid
+        && tablespace_id != init_small::globals::MyDatabaseTableSpace()
+    {
+        let aclresult = aclchk::object_aclcheck(
+            TableSpaceRelationId,
+            tablespace_id,
+            miscinit::GetUserId(),
+            adt_acl::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk::aclcheck_error(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE,
+                tablespacename,
+            )?;
+        }
+    }
+    if tab.new_tablespace != InvalidOid {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot have multiple SET TABLESPACE subcommands".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+        ));
+    }
+    tab.new_tablespace = tablespace_id;
+    Ok(())
+}
+
+// CheckRelationTableSpaceMove (tablecmds.c:3682); false = silent no-op.
+fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace_id: Oid) -> PgResult<bool> {
+    let old_tablespace_id = rel.rd_rel.reltablespace;
+    if new_tablespace_id == old_tablespace_id
+        || (new_tablespace_id == init_small::globals::MyDatabaseTableSpace()
+            && old_tablespace_id == InvalidOid)
+    {
+        return Ok(false);
+    }
+    // RelationIsMapped: mapped relations carry relfilenode 0.
+    if rel.rd_rel.relfilenode == InvalidOid {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("cannot move system relation \"{}\"", rel.name()),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    if new_tablespace_id == GLOBALTABLESPACE_OID {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "only shared relations can be placed in pg_global tablespace".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    // RELATION_IS_OTHER_TEMP: temp relations unported.
+    Ok(true)
+}
+
+// ATExecSetTableSpace (tablecmds.c:16853): validation surface; the physical
+// move (new relfilenumber + fork copy) rides the tablespace storage lane.
+fn ATExecSetTableSpace<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_oid: Oid,
+    new_tablespace: Oid,
+    _lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, table_oid, NoLock)?;
+    if !CheckRelationTableSpaceMove(&rel, new_tablespace)? {
+        return rel.close(NoLock);
+    }
+    unported("ATExecSetTableSpace: physical relation move (tablespace storage lane)");
+}
+
+// ATPrepSetAccessMethod (tablecmds.c:16491).
+fn ATPrepSetAccessMethod<'mcx>(
+    tab: &mut AlteredTableInfo<'mcx>,
+    rel: &Relation<'mcx>,
+    amname: Option<&str>,
+) -> PgResult<()> {
+    let amoid = match amname {
+        Some(name) => commands_amcmds::get_table_am_oid(name, false)?,
+        // Partitioned DEFAULT arm unreachable (relkind gate).
+        None => commands_amcmds::get_table_am_oid(&tableam::default_table_access_method(), false)?,
+    };
+    if rel.rd_rel.relam == amoid {
+        return Ok(());
+    }
+    tab.rewrite |= AT_REWRITE_ACCESS_METHOD;
+    tab.new_access_method = amoid;
+    tab.chg_access_method = true;
+    Ok(())
+}
+
+// drop_parent_dependency (tablecmds.c:16351) generalized to refclassid;
+// inherit-recurse lane's RemoveInheritance leg delegates here when it lands.
+fn drop_parent_dependency_on_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    target_refclassid: Oid,
+    refobjid: Oid,
+    deptype: pg_depend::DependencyType,
+) -> PgResult<()> {
+    let dep_rel =
+        table::table_open(mcx, pg_depend::DependRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [
+        oid_scankey(1, RELATION_RELATION_ID),
+        oid_scankey(2, relid),
+        int4_key(3, 0),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &dep_rel,
+        pg_depend::DependDependerIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = dep_rel.descr();
+    let mut tids: PgVec<'mcx, types_tuple::ItemPointerData> = PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
+        let refclassid =
+            unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
+        // SAFETY: as above.
+        let dep_refobjid =
+            unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
+        // SAFETY: as above.
+        let refobjsubid =
+            unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
+        // SAFETY: as above.
+        let dtype =
+            unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
+        if refclassid == target_refclassid
+            && dep_refobjid == refobjid
+            && refobjsubid == 0
+            && dtype == deptype.as_char()
+        {
+            tids.push(tup.t_self);
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    for tid in tids.iter() {
+        catalog_indexing::CatalogTupleDelete(&dep_rel, tid)?;
+    }
+    dep_rel.close(types_rel::RowExclusiveLock)
+}
+// find_composite_type_dependencies (tablecmds.c): origTypeName form only —
+// the origRelation error arms belong to ALTER TABLE OF/composite lanes.
+pub fn find_composite_type_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    orig_type_name: &str,
+) -> PgResult<()> {
+    let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, types_rel::AccessShareLock)?;
+    const Anum_pg_depend_classid: usize = 1;
+    const Anum_pg_depend_objid: usize = 2;
+    const Anum_pg_depend_objsubid: usize = 3;
+    const Anum_pg_depend_refclassid: usize = 4;
+    const Anum_pg_depend_refobjid: usize = 5;
+    let keys = [
+        oid_scankey(Anum_pg_depend_refclassid, TYPE_RELATION_ID),
+        oid_scankey(Anum_pg_depend_refobjid, type_oid),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &dep_rel,
+        pg_depend::DependReferenceIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = dep_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let get = |anum: usize| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_depend columns under its descriptor.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        let classid = get(Anum_pg_depend_classid).as_oid();
+        let objid = get(Anum_pg_depend_objid).as_oid();
+        let objsubid = get(Anum_pg_depend_objsubid).as_i32();
+        if classid == TYPE_RELATION_ID {
+            find_composite_type_dependencies(mcx, objid, orig_type_name)?;
+            continue;
+        }
+        if classid != RELATION_RELATION_ID {
+            continue;
+        }
+        let rel = relation_seams::relation_open::call(mcx, objid, types_rel::AccessShareLock)?;
+        let natts = rel.rd_att.natts as i32;
+        let mut attname: Option<String> = None;
+        if objsubid > 0 && objsubid <= natts {
+            let att = rel.rd_att.attr(objsubid as usize - 1);
+            attname =
+                Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").into());
+        } else {
+            for attno in 1..=natts {
+                let att = rel.rd_att.attr(attno as usize - 1);
+                if att.atttypid == type_oid && !att.attisdropped {
+                    attname = Some(
+                        core::str::from_utf8(att.attname.name_str())
+                            .expect("attname UTF-8")
+                            .into(),
+                    );
+                    break;
+                }
+            }
+            if attname.is_none() {
+                rel.close(types_rel::AccessShareLock)?;
+                continue;
+            }
+        }
+        if types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind)
+            || matches!(rel.rd_rel.relkind, b'p' | b'I')
+        {
+            let relname = rel.name().to_string();
+            let colname = attname.expect("column resolved above");
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot alter type \"{orig_type_name}\" because column \
+                         \"{relname}.{colname}\" uses it"
+                    ),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        rel.close(types_rel::AccessShareLock)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    dep_rel.close(types_rel::AccessShareLock)
 }
