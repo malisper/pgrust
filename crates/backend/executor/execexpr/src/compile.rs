@@ -2436,6 +2436,43 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
+    if dump_programs_enabled() {
+        dump_program(state);
+    }
+}
+
+// PGRUST_DUMP_EXPR_PROGRAMS: measurement-only step-sequence dump (fusion-lane
+// histogram rig); one relaxed load + branch per ready when off.
+fn dump_programs_enabled() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static FLAG: AtomicU8 = AtomicU8::new(0);
+    match FLAG.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var_os("PGRUST_DUMP_EXPR_PROGRAMS").is_some();
+            FLAG.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dump_program(state: &ExprState<'_>) {
+    fn tag(dbg: &str) -> &str {
+        dbg.split([' ', '(']).next().unwrap_or(dbg)
+    }
+    let mut line = std::string::String::new();
+    for s in state.steps.as_slice() {
+        if !line.is_empty() {
+            line.push(',');
+        }
+        let d = std::format!("{s:?}");
+        line.push_str(tag(&d));
+    }
+    let k = std::format!("{:?}", state.kernel);
+    std::eprintln!("EXPRDUMP kernel={} steps={}", tag(&k), line);
 }
 
 fn var_src(step: &Step) -> Option<(SlotSrc, u16, OutRef)> {
