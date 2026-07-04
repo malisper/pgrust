@@ -36,54 +36,218 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
     Ok(())
 }
 
-// remove_useless_results_recurse, all-RangeTblRef top FromExpr slice: C
-// deletes each RESULT child while more than one child remains (joining to a
-// one-row table changes nothing). remove_result_refs is a no-op here —
-// PlaceHolderVar creation is loud, so no PHV can reference the dropped rel.
+// remove_useless_result_rtes + remove_useless_results_recurse
+// (prepjointree.c:3596). remove_result_refs and the find_dependent_phvs
+// checks are vacuous here: PlaceHolderVar creation is loud, so lastPHId is
+// always 0 and no PHV can reference a dropped rel.
 pub fn remove_useless_result_rtes<'mcx>(
     run: &PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
-    if !f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
-        panic!(
-            "remove_useless_results_recurse (prepjointree.c): non-trivial jointree; \
-             M2 join lane"
-        );
+    let mut dropped_outer_joins = types_nodes::bitmapset::Bitmapset::empty();
+    let mut quals = f.quals;
+    let mut children: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for child in &f.fromlist {
+        children.push(remove_useless_results_recurse(
+            run,
+            parse,
+            child,
+            Some(&mut quals),
+            &mut dropped_outer_joins,
+        )?);
     }
-    let is_result = |n: types_nodes::Node<'mcx>| {
-        let rti = n.as_range_tbl_ref().expect("RangeTblRef").rtindex;
-        parse
-            .rtable
-            .nth(rti as usize - 1)
-            .as_range_tbl_entry()
-            .expect("rtable cell")
-            .rtekind
-            == RTEKind::RTE_RESULT
-    };
-    let total = f.fromlist.len();
-    let mut dropped = 0usize;
+    let mut remaining = children.len();
     let mut fromlist = NodeList::nil();
-    for n in &f.fromlist {
-        if total - dropped > 1 && is_result(n) {
-            dropped += 1;
+    for child in children.iter() {
+        if remaining > 1 && get_result_relid(parse, *child) != 0 {
+            remaining -= 1;
             continue;
         }
-        fromlist.lappend(mcx, n)?;
+        fromlist.lappend(mcx, *child)?;
     }
-    if dropped == 0 {
-        return Ok(());
+    parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals })?);
+
+    if !dropped_outer_joins.is_empty() {
+        crate::prepjointree::remove_nulling_relids(parse, &dropped_outer_joins, None)?;
     }
-    // C also drops any PlanRowMark on a RESULT RTE; the rowmark store is
-    // id-indexed here, so removal would dangle ids — loud until a lane needs it.
-    assert!(
-        run.root.rowMarks.is_empty(),
-        "remove_useless_result_rtes (prepjointree.c): PlanRowMark drop on RESULT; \
-         M2 rowmark lane"
-    );
-    parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
+    // C drops any PlanRowMark on a RESULT RTE (removed or surviving); the
+    // rowmark store is id-indexed here, so removal would dangle ids — loud
+    // until a lane needs it.
+    for &id in run.root.rowMarks.iter() {
+        let rc = run.rowmark(id);
+        let rte = parse
+            .rtable
+            .nth(rc.rti as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        assert!(
+            rte.rtekind != RTEKind::RTE_RESULT,
+            "remove_useless_result_rtes (prepjointree.c): PlanRowMark drop on RESULT; \
+             M2 rowmark lane"
+        );
+    }
     Ok(())
+}
+
+fn get_result_relid<'mcx>(parse: &Query<'mcx>, jtnode: Node<'mcx>) -> i32 {
+    let Some(rtr) = jtnode.as_range_tbl_ref() else { return 0 };
+    let rte = parse
+        .rtable
+        .nth(rtr.rtindex as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable cell");
+    if rte.rtekind == RTEKind::RTE_RESULT { rtr.rtindex } else { 0 }
+}
+
+// Pushed-up quals are implicit-AND T_List nodes; child quals go in front.
+fn merge_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    child: Option<Node<'mcx>>,
+    parent: &mut Option<Node<'mcx>>,
+) -> PgResult<()> {
+    let Some(c) = child else { return Ok(()) };
+    let mut merged = c
+        .as_list()
+        .expect("preprocessed quals are a list")
+        .clone_in(mcx)?;
+    if let Some(p) = *parent {
+        for q in p.as_list().expect("preprocessed quals are a list") {
+            merged.lappend(mcx, q)?;
+        }
+    }
+    *parent = Some(Node::mk_list(mcx, merged)?);
+    Ok(())
+}
+
+fn remove_useless_results_recurse<'mcx>(
+    run: &PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    jtnode: Node<'mcx>,
+    mut parent_quals: Option<&mut Option<Node<'mcx>>>,
+    dropped_outer_joins: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::jointype::JoinType;
+    let mcx = run.mcx;
+    match jtnode.node_tag() {
+        NodeTag::T_RangeTblRef => Ok(jtnode),
+        NodeTag::T_FromExpr => {
+            let f = jtnode.as_from_expr().expect("FromExpr");
+            let mut quals = f.quals;
+            let mut children: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+            for child in &f.fromlist {
+                children.push(remove_useless_results_recurse(
+                    run,
+                    parse,
+                    child,
+                    Some(&mut quals),
+                    dropped_outer_joins,
+                )?);
+            }
+            let mut remaining = children.len();
+            let mut fromlist = NodeList::nil();
+            for child in children.iter() {
+                if remaining > 1 && get_result_relid(parse, *child) != 0 {
+                    remaining -= 1;
+                    continue;
+                }
+                fromlist.lappend(mcx, *child)?;
+            }
+            if fromlist.len() == 1 && (quals.is_none() || parent_quals.is_some()) {
+                if let Some(p) = parent_quals {
+                    merge_quals(mcx, quals, p)?;
+                }
+                return Ok(fromlist.nth(0));
+            }
+            Node::mk(mcx, FromExpr { fromlist, quals })
+        }
+        NodeTag::T_JoinExpr => {
+            let j = jtnode.as_join_expr().expect("JoinExpr");
+            let mut quals = j.quals;
+            let larg = remove_useless_results_recurse(
+                run,
+                parse,
+                j.larg,
+                match j.jointype {
+                    JoinType::JOIN_INNER => Some(&mut quals),
+                    JoinType::JOIN_LEFT => parent_quals.as_deref_mut(),
+                    _ => None,
+                },
+                dropped_outer_joins,
+            )?;
+            let rarg = remove_useless_results_recurse(
+                run,
+                parse,
+                j.rarg,
+                match j.jointype {
+                    JoinType::JOIN_INNER | JoinType::JOIN_LEFT => Some(&mut quals),
+                    _ => None,
+                },
+                dropped_outer_joins,
+            )?;
+
+            match j.jointype {
+                JoinType::JOIN_INNER => {
+                    let lres = get_result_relid(parse, larg);
+                    let rres = get_result_relid(parse, rarg);
+                    if lres != 0 || rres != 0 {
+                        let keep = if lres != 0 { rarg } else { larg };
+                        if quals.is_some() && parent_quals.is_none() {
+                            return Node::mk(
+                                mcx,
+                                FromExpr { fromlist: NodeList::make1(mcx, keep)?, quals },
+                            );
+                        }
+                        if let Some(p) = parent_quals {
+                            merge_quals(mcx, quals, p)?;
+                        }
+                        return Ok(keep);
+                    }
+                }
+                JoinType::JOIN_LEFT => {
+                    if get_result_relid(parse, rarg) != 0 {
+                        dropped_outer_joins.add_member(mcx, j.rtindex)?;
+                        return Ok(larg);
+                    }
+                }
+                JoinType::JOIN_SEMI => {
+                    if get_result_relid(parse, rarg) != 0 {
+                        debug_assert_eq!(j.rtindex, 0);
+                        if quals.is_some() && parent_quals.is_none() {
+                            return Node::mk(
+                                mcx,
+                                FromExpr { fromlist: NodeList::make1(mcx, larg)?, quals },
+                            );
+                        }
+                        if let Some(p) = parent_quals {
+                            merge_quals(mcx, quals, p)?;
+                        }
+                        return Ok(larg);
+                    }
+                }
+                JoinType::JOIN_FULL | JoinType::JOIN_ANTI => {}
+                other => panic!(
+                    "remove_useless_results_recurse (prepjointree.c): join type {other:?}"
+                ),
+            }
+            Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg,
+                    rarg,
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals,
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
+            )
+        }
+        other => panic!("remove_useless_results_recurse (prepjointree.c): {other:?}"),
+    }
 }
 
 // preprocess_rowmarks (planner.c); UPDATE/DELETE non-target marks stay loud.

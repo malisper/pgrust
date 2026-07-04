@@ -77,6 +77,30 @@ SET enable_sort = off;
 EXPLAIN SELECT b, count(*) FROM ec_big GROUP BY b ORDER BY b;
 RESET enable_sort;
 
+-- outer-join strength reduction (reduce_outer_joins): strict upper quals
+-- turn LEFT/RIGHT/FULL into INNER/LEFT/RIGHT; IS NULL forcing turns LEFT
+-- into ANTI
+EXPLAIN SELECT count(*) FROM ec_small s LEFT JOIN ec_dup d ON s.x = d.k WHERE d.v < 100;
+EXPLAIN SELECT count(*) FROM ec_small s LEFT JOIN ec_dup d ON s.x = d.k WHERE d.v IS NOT NULL;
+EXPLAIN SELECT count(*) FROM ec_small s RIGHT JOIN ec_dup d ON s.x = d.k WHERE s.y = 3;
+EXPLAIN SELECT count(*) FROM ec_small s LEFT JOIN ec_dup d ON s.x = d.k WHERE d.k IS NULL;
+EXPLAIN SELECT count(*) FROM ec_small s FULL JOIN ec_dup d ON s.x = d.k WHERE s.y = 3 AND d.v < 100;
+EXPLAIN SELECT count(*) FROM ec_small s FULL JOIN ec_dup d ON s.x = d.k WHERE s.y = 3;
+EXPLAIN SELECT count(*) FROM ec_small s FULL JOIN ec_dup d ON s.x = d.k WHERE d.v < 100;
+EXPLAIN SELECT count(*) FROM ec_small s1 LEFT JOIN (ec_small s2 LEFT JOIN ec_dup d ON s2.x = d.k) ON s1.x = s2.x WHERE d.v IS NOT NULL;
+EXPLAIN SELECT count(*) FROM ec_small s FULL JOIN ec_dup d ON s.x = d.k;
+
+-- RTE_RESULT removal (remove_useless_results_recurse): pulled-up empty-FROM
+-- subqueries joined via explicit JOIN syntax
+EXPLAIN SELECT count(*) FROM ec_small s, (SELECT 1 AS one) r;
+EXPLAIN SELECT count(*) FROM ec_small s JOIN (SELECT 1 AS one) r ON s.y = r.one;
+EXPLAIN SELECT count(*) FROM ec_small s JOIN (SELECT 2 AS two) r ON true;
+EXPLAIN SELECT count(*) FROM ec_small s LEFT JOIN (SELECT 1 AS one) r ON true;
+EXPLAIN SELECT count(*) FROM ec_small s LEFT JOIN (SELECT 1 AS one) r ON s.y = r.one;
+EXPLAIN SELECT s.x, r.one FROM ec_small s JOIN (SELECT 1 AS one) r ON s.y = r.one WHERE s.x < 20;
+EXPLAIN SELECT count(*) FROM (SELECT 1 AS one) r1 JOIN (SELECT 2 AS two) r2 ON r1.one < r2.two;
+EXPLAIN SELECT count(*) FROM ec_small s JOIN (ec_dup d JOIN (SELECT 3 AS three) r ON d.k = r.three) ON s.x = d.k;
+
 -- subqueries / values / cte / setops / append
 EXPLAIN SELECT * FROM (SELECT b, count(*) AS n FROM ec_big GROUP BY b) sub;
 -- (single-use CTE: C inlines it since PG12; pgrust's inline decision is the
