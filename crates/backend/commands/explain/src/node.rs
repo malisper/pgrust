@@ -108,6 +108,9 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_SeqScan => {
             rels_used.add_member(mcx, node.as_seq_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_SampleScan => {
+            rels_used.add_member(mcx, node.as_sample_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_IndexScan => {
             rels_used.add_member(mcx, node.as_index_scan().unwrap().scan.scanrelid as i32)?;
         }
@@ -437,6 +440,7 @@ pub fn ExplainNode<'mcx>(
             other => node_gap("ExplainNode", &format!("SetOp strategy {other} unrecognized")),
         },
         NodeTag::T_SeqScan => "Seq Scan",
+        NodeTag::T_SampleScan => "Sample Scan",
         NodeTag::T_TidScan => "Tid Scan",
         NodeTag::T_TidRangeScan => "Tid Range Scan",
         NodeTag::T_IndexScan => "Index Scan",
@@ -561,6 +565,9 @@ pub fn ExplainNode<'mcx>(
 
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
+    }
+    if let Some(ss) = node.as_sample_scan() {
+        ExplainScanTarget(ss.scan.scanrelid, es)?;
     }
     if let Some(ts) = node.as_tid_scan() {
         ExplainScanTarget(ts.scan.scanrelid, es)?;
@@ -713,6 +720,13 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
+        NodeTag::T_SampleScan => {
+            show_tablesample(node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+        }
         NodeTag::T_SeqScan
         | NodeTag::T_CteScan
         | NodeTag::T_NamedTuplestoreScan
@@ -2062,6 +2076,62 @@ fn show_upper_qual<'mcx>(
 ) -> PgResult<()> {
     let useprefix = es.rtable_size > 1 || es.verbose;
     show_qual(qual, qlabel, node, ancestors, useprefix, es)
+}
+
+// show_tablesample (explain.c).
+fn show_tablesample<'mcx>(
+    node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    let ss = node.as_sample_scan().expect("SampleScan plan node");
+    let tsc = ss
+        .tablesample
+        .expect("SampleScan has a tablesample clause")
+        .as_table_sample_clause()
+        .expect("tablesample is a TableSampleClause");
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1;
+
+    let method_name = lsyscache::get_func_name(mcx, tsc.tsmhandler)?
+        .expect("TSM handler has a pg_proc row");
+    let mut params: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    for arg in tsc.args.iter() {
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, node, ancestors, arg, useprefix, false, &mut buf)?;
+        params.push(buf);
+    }
+    let repeatable = match tsc.repeatable {
+        Some(r) => {
+            let mut buf = PgString::new_in(mcx);
+            deparse_expr(es, node, ancestors, r, useprefix, false, &mut buf)?;
+            Some(buf)
+        }
+        None => None,
+    };
+
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        crate::format::ExplainIndentText(es);
+        append!(es, "Sampling: {} (", method_name.as_str());
+        for (i, p) in params.iter().enumerate() {
+            if i > 0 {
+                append!(es, ", ");
+            }
+            append!(es, "{}", p.as_str());
+        }
+        append!(es, ")");
+        if let Some(r) = repeatable {
+            append!(es, " REPEATABLE ({})", r.as_str());
+        }
+        append!(es, "\n");
+    } else {
+        ExplainPropertyText("Sampling Method", method_name.as_str(), es);
+        ExplainPropertyList("Sampling Parameters", &params, es);
+        if let Some(r) = repeatable {
+            ExplainPropertyText("Repeatable Seed", r.as_str(), es);
+        }
+    }
+    Ok(())
 }
 
 fn show_qual<'mcx>(

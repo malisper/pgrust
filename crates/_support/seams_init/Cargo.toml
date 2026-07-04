@@ -73,6 +73,8 @@ execjunk = { path = "../../backend/executor/execjunk" }
 execmain = { path = "../../backend/executor/execmain" }
 execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
+nodesamplescan = { path = "../../backend/executor/nodesamplescan" }
+tablesample = { path = "../../backend/access/tablesample/tablesample" }
 nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
 nodetidscan = { path = "../../backend/executor/nodetidscan" }
 nodetidrangescan = { path = "../../backend/executor/nodetidrangescan" }

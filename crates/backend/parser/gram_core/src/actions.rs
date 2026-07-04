@@ -47,7 +47,7 @@ use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::primnodes::{CoercionContext, XmlExpr, XmlExprOp, XmlOptionType};
-use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol};
+use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol, RangeTableSample};
 use types_nodes::rawnodes::{
     AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
     AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
@@ -8753,6 +8753,33 @@ impl<'mcx> Parser<'mcx> {
             // opt_if_not_exists: IF_P NOT EXISTS | /*EMPTY*/
             888 => *yyval = YYSTYPE::Boolean(true),
             889 => *yyval = YYSTYPE::Boolean(false),
+            // table_ref: relation_expr opt_alias_clause tablesample_clause
+            1833 => {
+                let rv = view.v(1).node().expect("relation_expr");
+                let alias = view.v(2).alias();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    rv.with_mut::<RangeVar, _>(|r| r.alias = alias)
+                        .expect("relation_expr is RangeVar");
+                }
+                let rts = view.v(3).node().expect("tablesample_clause");
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    rts.with_mut::<RangeTableSample, _>(|n| n.relation = Some(rv))
+                        .expect("tablesample_clause is RangeTableSample");
+                }
+                *yyval = YYSTYPE::Node(Some(rts));
+            }
+            // tablesample_clause: TABLESAMPLE func_name '(' expr_list ')'
+            //   opt_repeatable_clause
+            1881 => {
+                let mut n = Node::build::<RangeTableSample>(mcx)?;
+                n.method = view.v(2).list();
+                n.args = view.v(4).list();
+                n.repeatable = view.v(6).node();
+                n.location = view.l(2);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1876 => {
                 let n = view.v(1).node().expect("relation_expr");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);

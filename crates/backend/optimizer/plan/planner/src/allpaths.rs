@@ -103,8 +103,11 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
                 "set_rel_size relkind {}",
                 rte.relkind
             );
-            debug_assert!(rte.tablesample.is_none());
-            set_plain_rel_size(run, rel)?;
+            if rte.tablesample.is_some() {
+                set_tablesample_rel_size(run, rel, rti)?;
+            } else {
+                set_plain_rel_size(run, rel)?;
+            }
         }
         RTEKind::RTE_FUNCTION => {
             crate::costsize::set_function_size_estimates(run, rel)?;
@@ -414,7 +417,13 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
         set_append_rel_pathlist(run, rel, rti)?;
     } else {
         match rte.rtekind {
-            RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
+            RTEKind::RTE_RELATION => {
+                if rte.tablesample.is_some() {
+                    set_tablesample_rel_pathlist(run, rel)?;
+                } else {
+                    set_plain_rel_pathlist(run, rel)?;
+                }
+            }
             RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
             RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
             RTEKind::RTE_TABLEFUNC => set_tablefunc_pathlist(run, rel)?,
@@ -1015,6 +1024,40 @@ fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     Ok(())
 }
 
+// set_tablesample_rel_size (allpaths.c): the TSM's size estimate overwrites
+// the whole-rel pages/tuples (SampleScan is the only path considered).
+fn set_tablesample_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    crate::indxpath::check_index_predicates(run, rel)?;
+    let tsc = run
+        .rte(rti)
+        .tablesample
+        .expect("sampled rel has a tablesample clause")
+        .as_table_sample_clause()
+        .expect("tablesample is a TableSampleClause");
+    let tsm = ::tablesample::Tsm::get(tsc.tsmhandler);
+    let (pages, tuples) = {
+        let r = run.root.rel(rel);
+        tsm.sample_scan_get_sample_size(run.mcx, &tsc.args, r.pages, r.tuples)?
+    };
+    {
+        let r = run.root.rel_mut(rel);
+        r.pages = pages;
+        r.tuples = tuples;
+    }
+    crate::costsize::set_baserel_size_estimates(run, rel)?;
+    Ok(())
+}
+
+// set_tablesample_rel_pathlist (allpaths.c). C wraps the path in Material
+// when the TSM lacks repeatable_across_scans and a join/subquery could rescan
+// it; both in-core TSMs are repeatable, so the wrap is unreachable here.
+fn set_tablesample_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_samplescan_path(run, rel, &required_outer)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+
 // set_rel_consider_parallel (allpaths.c).
 fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     debug_assert!(!run.root.rel(rel).consider_parallel);
@@ -1025,7 +1068,18 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             if lsyscache::get_rel_persistence(rte.relid)? != b'p' as i8 {
                 return Ok(());
             }
-            debug_assert!(rte.tablesample.is_none());
+            if let Some(ts) = rte.tablesample {
+                let tsc = ts.as_table_sample_clause().expect("TableSampleClause");
+                const PROPARALLEL_SAFE: i8 = b's' as i8;
+                if lsyscache::func_parallel(tsc.tsmhandler)? != PROPARALLEL_SAFE {
+                    return Ok(());
+                }
+                for arg in tsc.args.iter() {
+                    if !crate::is_parallel_safe_opt(run, Some(arg))? {
+                        return Ok(());
+                    }
+                }
+            }
         }
         RTEKind::RTE_SUBQUERY => {
             // LIMIT/OFFSET in a subquery gives nondeterministic row order

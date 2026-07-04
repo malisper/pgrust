@@ -1,0 +1,22 @@
+[package]
+name = "nodesamplescan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
+tableam = { path = "../../access/table/tableam" }
+tablesample = { path = "../../access/tablesample/tablesample" }
+adt_float = { path = "../../utils/adt/float" }
+pg_prng = { path = "../../../common/pg_prng" }
+execscan = { path = "../execscan" }
+execexpr = { path = "../execexpr" }
+executils = { path = "../executils" }
+exectuples = { path = "../exectuples" }

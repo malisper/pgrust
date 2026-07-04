@@ -99,6 +99,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
     match pathtype {
         t if t == tag16(NodeTag::T_Result) => true,
         t if t == tag16(NodeTag::T_SeqScan) => true,
+        t if t == tag16(NodeTag::T_SampleScan) => true,
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
         t if t == tag16(NodeTag::T_TidScan) => true,
@@ -1220,6 +1221,22 @@ pub fn create_gather_merge_path<'mcx>(
     }));
     costsize::cost_gather_merge(run, id, rel_id, input_disabled, input_startup, input_total, rows);
     id
+}
+
+// create_samplescan_path (pathnode.c); result is always unordered.
+pub fn create_samplescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_SampleScan, rel_id);
+    path.param_info = param_info;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    costsize::cost_samplescan(run, id, rel_id)?;
+    Ok(id)
 }
 
 // create_functionscan_path (pathnode.c).

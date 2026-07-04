@@ -176,6 +176,7 @@ fn search_plan_tree<'a, 'mcx>(
     match node {
         PlanStateNode::Instrumented(w) => search_plan_tree(&w.inner, table_oid),
         PlanStateNode::SeqScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
+        PlanStateNode::SampleScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
         PlanStateNode::IndexScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
         PlanStateNode::TidScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
         PlanStateNode::TidRangeScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),

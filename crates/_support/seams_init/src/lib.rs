@@ -63,6 +63,8 @@ pub fn init_all() {
     execmain::init_seams();
     execscan::init_seams();
     nodeseqscan::init_seams();
+    nodesamplescan::init_seams();
+    tablesample::init_seams();
     nodeindexscan::init_seams();
     nodetidscan::init_seams();
     nodetidrangescan::init_seams();

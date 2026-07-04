@@ -18,7 +18,7 @@ use types_error::{
     ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::nodes_enums::LimitOption;
-use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, SortGroupClause, WindowClause};
+use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, RTEKind, RangeTblEntry, SortGroupClause, WindowClause};
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::{
     SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_OFFSET,
@@ -820,12 +820,259 @@ fn transformFromClauseItem<'mcx>(
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
             Ok((rtr, nsitem))
         }
+        NodeTag::T_RangeTableSample => {
+            let rts = n.as_range_table_sample().unwrap();
+            let relation = rts.relation.expect("grammar sets relation");
+            let (rel, nsitem) = transformFromClauseItem(mcx, pstate, relation)?;
+            let rte = nsitem.p_rte;
+            // Only plain relations and matviews can be sampled.
+            if rte.rtekind != RTEKind::RTE_RELATION
+                || !(rte.relkind == types_rel::RELKIND_RELATION
+                    || rte.relkind == types_rel::RELKIND_MATVIEW
+                    || rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+            {
+                return Err(tablesample_wrong_relkind(pstate, expr_location(relation)));
+            }
+            let tsc = transformRangeTableSample(mcx, pstate, rts)?;
+            let rte_node = pstate
+                .p_rtable
+                .nth((nsitem.p_rtindex - 1) as usize);
+            // SAFETY: the rtable entry is exclusively owned by this parse
+            // (nsitem.p_rte aliases it read-only; C mutates in place).
+            unsafe {
+                rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(tsc))
+            }
+            .expect("rtable cell is a RangeTblEntry");
+            Ok((rel, nsitem))
+        }
         other => panic!(
             "transformFromClauseItem (parse_clause.c): arm for {other:?} \
-             (tablesample) unported — \
-             unit backend-parser-clause"
+             unported — unit backend-parser-clause"
         ),
     }
+}
+
+// transformRangeTableSample (parse_clause.c); the caller has already
+// transformed rts.relation.
+fn transformRangeTableSample<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    rts: &types_nodes::rawnodes::RangeTableSample<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    const TSM_HANDLEROID: Oid = 3310;
+
+    let mut parts: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
+    for p in rts.method.iter() {
+        parts.push(p.as_string().expect("func_name parts are String nodes").sval);
+    }
+    let handler_oid =
+        parse_func_seams::LookupFuncName::call(&parts, 1, &[types_core::catalog::INTERNALOID], true)?;
+    if handler_oid == InvalidOid {
+        return Err(tablesample_no_method(pstate, &parts, rts.location));
+    }
+    if lsyscache::get_func_rettype(handler_oid)? != TSM_HANDLEROID {
+        return Err(tablesample_wrong_rettype(pstate, &parts, rts.location));
+    }
+
+    let tsm = tablesample::Tsm::get(handler_oid);
+    let param_types = tsm.parameter_types();
+
+    if rts.args.len() != param_types.len() {
+        return Err(tablesample_wrong_arg_count(
+            pstate,
+            &parts,
+            param_types.len(),
+            rts.args.len(),
+            rts.location,
+        ));
+    }
+
+    // Transform + coerce the arguments and assign collations now:
+    // assign_query_collations never looks inside RTEs (as C).
+    let mut fargs = NodeList::nil();
+    for (raw, &argtype) in rts.args.iter().zip(param_types) {
+        let arg = parse_expr::transformExpr(mcx, pstate, raw, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+        let arg = coerce::coerce_to_specific_type(
+            mcx,
+            pstate,
+            arg,
+            parse_expr::expr_type(arg),
+            expr_location(arg),
+            argtype,
+            "TABLESAMPLE",
+        )?;
+        parse_collate::assign_expr_collations(mcx, pstate, arg)?;
+        fargs.lappend(mcx, arg)?;
+    }
+
+    let repeatable = match rts.repeatable {
+        Some(raw) => {
+            if !tsm.repeatable_across_queries() {
+                return Err(tablesample_no_repeatable(pstate, &parts, rts.location));
+            }
+            let arg =
+                parse_expr::transformExpr(mcx, pstate, raw, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+            let arg = coerce::coerce_to_specific_type(
+                mcx,
+                pstate,
+                arg,
+                parse_expr::expr_type(arg),
+                expr_location(arg),
+                types_core::catalog::FLOAT8OID,
+                "REPEATABLE",
+            )?;
+            parse_collate::assign_expr_collations(mcx, pstate, arg)?;
+            Some(arg)
+        }
+        None => None,
+    };
+
+    Node::mk(
+        mcx,
+        types_nodes::TableSampleClause { tsmhandler: handler_oid, args: fargs, repeatable },
+    )
+}
+
+// NameListToString (namespace.c): dotted, unquoted.
+fn name_list_to_string(parts: &[&str]) -> std::string::String {
+    parts.join(".")
+}
+
+#[cold]
+#[inline(never)]
+fn tablesample_wrong_relkind(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "TABLESAMPLE clause can only be applied to tables and materialized views"
+                    .to_string(),
+            )
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformFromClauseItem",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn tablesample_no_method(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!(
+                "tablesample method {} does not exist",
+                name_list_to_string(parts)
+            ))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformRangeTableSample",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn tablesample_wrong_rettype(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "function {} must return type {}",
+                name_list_to_string(parts),
+                "tsm_handler"
+            ))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformRangeTableSample",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn tablesample_wrong_arg_count(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    want: usize,
+    got: usize,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    // errmsg_plural on `want`; both in-core methods take one argument.
+    let msg = if want == 1 {
+        format!(
+            "tablesample method {} requires {} argument, not {}",
+            name_list_to_string(parts),
+            want,
+            got
+        )
+    } else {
+        format!(
+            "tablesample method {} requires {} arguments, not {}",
+            name_list_to_string(parts),
+            want,
+            got
+        )
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_INVALID_TABLESAMPLE_ARGUMENT)
+            .errmsg(msg)
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformRangeTableSample",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn tablesample_no_repeatable(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "tablesample method {} does not support REPEATABLE",
+                name_list_to_string(parts)
+            ))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformRangeTableSample",
+            )),
+    )
 }
 
 // XMLTABLE only; JSON_TABLE arrives as T_JsonTable, not here.

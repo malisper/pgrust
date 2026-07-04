@@ -554,6 +554,67 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
 }
 
+// cost_samplescan (costsize.c). TABLESAMPLE parameter expressions are
+// evaluated once per scan, so their cost is ignored (as C).
+pub fn cost_samplescan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> types_error::PgResult<()> {
+    let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (
+            baserel.relid,
+            baserel.rtekind,
+            baserel.reltablespace,
+            baserel.pages,
+            baserel.tuples,
+            baserel.rows,
+        )
+    };
+    debug_assert!(relid > 0 && rtekind == RTE_RELATION);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_samplescan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    let tsc = run
+        .rte(relid as usize)
+        .tablesample
+        .expect("sampled rel has a tablesample clause")
+        .as_table_sample_clause()
+        .expect("tablesample is a TableSampleClause");
+    let tsm = ::tablesample::Tsm::get(tsc.tsmhandler);
+
+    let rows = base_rows;
+    let mut startup_cost = 0.0;
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    // NextSampleBlock implies random access, else sequential (as C).
+    let spc_page_cost = if tsm.has_next_sample_block() {
+        spc_random_page_cost
+    } else {
+        spc_seq_page_cost
+    };
+    let mut run_cost = spc_page_cost * pages as f64;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)
+        .expect("unparameterized path has no param clauses");
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    run_cost += cpu_per_tuple * tuples;
+
+    // tlist eval costs are paid per output row, not per scanned tuple.
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
 // cost_functionscan (costsize.c): function eval is all startup cost (the
 // executor materializes into a tuplestore before returning rows).
 pub fn cost_functionscan(

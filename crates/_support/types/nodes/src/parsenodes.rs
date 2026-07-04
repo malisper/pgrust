@@ -177,6 +177,14 @@ pub struct RangeTblEntry<'mcx> {
     pub securityQuals: NodeList<'mcx>,
 }
 
+/// args are coerced to the method's parameter types; repeatable to float8.
+#[derive(Default)]
+pub struct TableSampleClause<'mcx> {
+    pub tsmhandler: Oid,
+    pub args: NodeList<'mcx>,
+    pub repeatable: Option<Node<'mcx>>,
+}
+
 pub struct RangeTblFunction<'mcx> {
     pub funcexpr: Option<Node<'mcx>>,
     pub funccolcount: i32,
@@ -1724,6 +1732,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_tbl_entry(self) -> Option<&'mcx RangeTblEntry<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_table_sample_clause(self) -> Option<&'mcx TableSampleClause<'mcx>> {
         self.as_variant()
     }
 

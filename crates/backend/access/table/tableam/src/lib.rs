@@ -640,19 +640,19 @@ mod heap {
 
     pub(super) fn scan_sample_next_block<'mcx>(
         _mcx: Mcx<'mcx>,
-        _scan: &mut HeapScanDescData<'mcx>,
-        _scanstate: &mut dyn SampleScanDriver,
+        scan: &mut HeapScanDescData<'mcx>,
+        scanstate: &mut dyn SampleScanDriver,
     ) -> PgResult<bool> {
-        unported("backend-access-heap-heapam (sample scan lane)")
+        heapam::sample::heap_scan_sample_next_block(scan, scanstate)
     }
 
     pub(super) fn scan_sample_next_tuple<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _scan: &mut HeapScanDescData<'mcx>,
-        _scanstate: &mut dyn SampleScanDriver,
-        _slot: &mut SlotData<'mcx>,
+        mcx: Mcx<'mcx>,
+        scan: &mut HeapScanDescData<'mcx>,
+        scanstate: &mut dyn SampleScanDriver,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool> {
-        unported("backend-access-heap-heapam (sample scan lane)")
+        heapam::sample::heap_scan_sample_next_tuple(mcx, scan, scanstate, slot)
     }
 }
 

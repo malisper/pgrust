@@ -184,6 +184,60 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("SeqScan node");
             }
         }
+        NodeTag::T_SampleScan => {
+            let s = plan.as_sample_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let tsc = s
+                .tablesample
+                .expect("SampleScan has a tablesample clause")
+                .as_table_sample_clause()
+                .expect("tablesample is a TableSampleClause");
+            let take_mutator = rtoffset != 0
+                || run.glob.has_alternative_subplans
+                || !run.root.minmax_aggs.is_empty();
+            let args = fix_scan_list(run, &tsc.args, rtoffset, 1.0)?;
+            let repeatable = match tsc.repeatable {
+                Some(r) if take_mutator => Some(fix_scan_expr_mutator(run, r, rtoffset, 1.0)?),
+                Some(r) => {
+                    fix_scan_expr_walker(run, r)?;
+                    None
+                }
+                None => None,
+            };
+            let new_tsc = if args.is_some() || repeatable.is_some() {
+                let t = types_nodes::TableSampleClause {
+                    tsmhandler: tsc.tsmhandler,
+                    args: match args {
+                        Some(a) => a,
+                        None => tsc.args.clone_in(run.mcx)?,
+                    },
+                    repeatable: repeatable.or(tsc.repeatable),
+                };
+                Some(Node::mk(run.mcx, t)?)
+            } else {
+                None
+            };
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || new_tsc.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::SampleScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(t) = new_tsc {
+                            p.tablesample = Some(t);
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                    })
+                }
+                .expect("SampleScan node");
+            }
+        }
         NodeTag::T_TidScan => {
             let s = plan.as_tid_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);

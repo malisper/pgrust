@@ -37,6 +37,7 @@ pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
     ProjectSet(PgBox<'mcx, ProjectSetState<'mcx>>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
+    SampleScan(PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
     TableFuncScan(PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>),
@@ -318,6 +319,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::ProjectSet(ps) => ps.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
+            PlanStateNode::SampleScan(ss) => Some(ss.ss.ps_ExprContext),
             PlanStateNode::TidScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::TidRangeScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
@@ -381,6 +383,7 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .clone()
                 .expect("ProjectSetState without a result type")),
             PlanStateNode::SeqScan(_)
+            | PlanStateNode::SampleScan(_)
             | PlanStateNode::FunctionScan(_)
             | PlanStateNode::TableFuncScan(_)
             | PlanStateNode::ValuesScan(_)
@@ -469,6 +472,16 @@ pub fn exec_init_node<'mcx>(
                 estate,
                 eflags,
             )?)
+        }
+        NodeTag::T_SampleScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodesamplescan::exec_init_sample_scan(
+                mcx,
+                node.as_sample_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::SampleScan(::mcx::alloc_in(mcx, state)?)
         }
         NodeTag::T_FunctionScan => {
             let mcx = estate.es_query_cxt;
@@ -1208,7 +1221,6 @@ pub fn exec_init_node<'mcx>(
             )?)
         }
         tag => unported_nodes!(tag, {
-            T_SampleScan => "nodeSamplescan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
             T_ForeignScan => "nodeForeignscan.c",
@@ -1263,6 +1275,7 @@ fn scan_state_of<'a, 'mcx>(
 ) -> Option<&'a mut ::execscan::ScanState<'mcx>> {
     match node {
         PlanStateNode::SeqScan(ss) => Some(&mut ss.ss),
+        PlanStateNode::SampleScan(ss) => Some(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
         PlanStateNode::TableFuncScan(ts) => Some(&mut ts.ss),
@@ -1291,6 +1304,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Result(rs) => result_arm(rs, estate),
         PlanStateNode::ProjectSet(ps) => project_set_arm(ps, estate),
         PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
+        PlanStateNode::SampleScan(ss) => sample_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
         PlanStateNode::TableFuncScan(ts) => table_func_scan_arm(ts, estate),
@@ -1370,6 +1384,14 @@ fn seq_scan_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     ::nodeseqscan::exec_seq_scan(ss, estate)
+}
+
+#[inline(never)]
+fn sample_scan_arm<'mcx>(
+    ss: &mut PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodesamplescan::exec_sample_scan(ss, estate)
 }
 
 #[inline(never)]
@@ -2648,6 +2670,7 @@ fn exec_end_node_inner<'mcx>(
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
         PlanStateNode::ProjectSet(ps) => exec_end_project_set(ps, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_end_seq_scan(ss),
+        PlanStateNode::SampleScan(ss) => ::nodesamplescan::exec_end_sample_scan(ss),
         PlanStateNode::FunctionScan(fs) => {
             ::nodefunctionscan::exec_end_function_scan(fs);
             Ok(())
