@@ -75,8 +75,10 @@ fn materialize_mode_srf_feeds_the_scan_store() {
     let desc = int4_desc(mcx, 2);
     let mut setexpr = setexpr_for(mcx, true);
 
+    let mut arg_mcx = MemoryContext::new("t-args");
     let mut store =
-        exec_make_table_function_result(&mut setexpr, &desc, false, &mut estate, ecxt).unwrap();
+        exec_make_table_function_result(&mut setexpr, &desc, false, &mut estate, ecxt, &mut arg_mcx)
+            .unwrap();
     assert_eq!(store.tuple_count(), 2);
 
     let mut slot =
@@ -102,8 +104,15 @@ fn materialize_mode_from_non_srf_violates_protocol() {
     let desc = int4_desc(mcx, 2);
     let mut setexpr = setexpr_for(mcx, false);
 
-    let err = match exec_make_table_function_result(&mut setexpr, &desc, false, &mut estate, ecxt)
-    {
+    let mut arg_mcx = MemoryContext::new("t-args");
+    let err = match exec_make_table_function_result(
+        &mut setexpr,
+        &desc,
+        false,
+        &mut estate,
+        ecxt,
+        &mut arg_mcx,
+    ) {
         Err(e) => e,
         Ok(_) => panic!("non-SRF materialize return must violate the protocol"),
     };
