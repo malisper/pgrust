@@ -1314,6 +1314,7 @@ fn json_format_type(v: u32) -> types_nodes::primnodes::JsonFormatType {
         _ => JS_FORMAT_DEFAULT,
     }
 }
+}
 
 fn json_encoding(v: u32) -> types_nodes::primnodes::JsonEncoding {
     use types_nodes::primnodes::JsonEncoding::*;
