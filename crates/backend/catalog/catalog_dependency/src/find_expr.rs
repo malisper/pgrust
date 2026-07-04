@@ -502,6 +502,18 @@ fn walker<'w, 'mcx: 'w>(
             Some(e) => walker(e, context),
             None => Ok(()),
         },
+        NodeTag::T_CoerceViaIO => {
+            let io = node.as_coerce_via_io().unwrap();
+            // No exposed function; depend on the type (and collation).
+            context.add(TYPE_RELATION_ID, io.resulttype, 0);
+            if io.resultcollid != InvalidOid && io.resultcollid != DEFAULT_COLLATION_OID {
+                context.add(CollationRelationId, io.resultcollid, 0);
+            }
+            match io.arg {
+                Some(e) => walker(e, context),
+                None => Ok(()),
+            }
+        }
         NodeTag::T_JsonExpr => {
             let j = node.as_json_expr().unwrap();
             for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]

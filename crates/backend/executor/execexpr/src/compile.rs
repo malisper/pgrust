@@ -1741,7 +1741,23 @@ pub(crate) fn init_expr_rec<'mcx>(
                 },
             )
         }
-        NodeTag::T_JsonExpr => init_json_expr(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_JsonExpr => {
+            let je = node.as_json_expr().unwrap();
+            // JSON_TABLE docexpr: tfuncFetchRows only wants formatted_expr.
+            if je.op == ::types_nodes::primnodes::JsonExprOp::JSON_TABLE_OP {
+                init_expr_rec(
+                    je.formatted_expr.expect("JsonExpr.formatted_expr"),
+                    state,
+                    mcx,
+                    out,
+                    agg,
+                    params,
+                    sub,
+                )
+            } else {
+                init_json_expr(node, state, mcx, out, agg, params, sub)
+            }
+        }
         NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
             Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
