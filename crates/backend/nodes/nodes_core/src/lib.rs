@@ -1232,11 +1232,6 @@ where
             let raw = mutate_opt(j.raw_expr, m)?;
             let formatted = mutate_opt(j.formatted_expr, m)?;
             if raw.is_none() && formatted.is_none() {
-        NodeTag::T_RowCompareExpr => {
-            let rc = node.as_row_compare_expr().unwrap();
-            let largs = mutate_list(mcx, &rc.largs, m)?;
-            let rargs = mutate_list(mcx, &rc.rargs, m)?;
-            if largs.is_none() && rargs.is_none() {
                 return Ok(None);
             }
             Ok(Some(Node::mk(
@@ -1343,6 +1338,18 @@ where
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+                },
+            )?))
+        }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let largs = mutate_list(mcx, &rc.largs, m)?;
+            let rargs = mutate_list(mcx, &rc.rargs, m)?;
+            if largs.is_none() && rargs.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
                 types_nodes::RowCompareExpr {
                     cmptype: rc.cmptype,
                     opnos: rc.opnos.clone_in(mcx)?,

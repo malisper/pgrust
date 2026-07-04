@@ -1640,6 +1640,9 @@ fn fix_upper_expr<'mcx>(
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+                },
+            )
+        }
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
             let mut largs = NodeList::nil();
@@ -2337,6 +2340,9 @@ fn fix_scan_expr_mutator<'mcx>(
                     omit_quotes: j.omit_quotes,
                     collation: j.collation,
                     location: j.location,
+                },
+            )
+        }
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
             let mut largs = NodeList::nil();
@@ -2599,6 +2605,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             for v in &j.passing_values {
                 fix_scan_expr_walker(run, v)?;
+            }
+            Ok(())
+        }
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
             for arg in rc.largs.iter().chain(rc.rargs.iter()) {

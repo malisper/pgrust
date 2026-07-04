@@ -1050,22 +1050,6 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_JsonBehavior => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }
-        NodeTag::T_FieldSelect => {
-            let f = node.as_field_select().unwrap();
-            let arg = ece_mutator(f.arg, cx)?.unwrap_or(f.arg);
-            if let Some(v) = arg.as_var() {
-                if v.varattno == 0 && v.varlevelsup == 0 {
-                    panic!(
-                        "eval_const_expressions_mutator (clauses.c): FieldSelect over a \
-                         whole-row Var fold; search-cycle lane carries the pass-through only"
-                    );
-                }
-            }
-            if arg.node_tag() == NodeTag::T_RowExpr || arg.node_tag() == NodeTag::T_Const {
-                panic!(
-                    "eval_const_expressions_mutator (clauses.c): FieldSelect over \
-                     RowExpr/Const fold; search-cycle lane carries the pass-through only"
-                );
         // C's generic arm: mutate both sides; the op/family lists never change.
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
