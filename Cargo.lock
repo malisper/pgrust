@@ -573,6 +573,7 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "funcapi_srf",
  "hashfn",
  "hyperloglog",
  "init_small",
@@ -583,6 +584,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_tuple",
 ]
 
