@@ -1345,8 +1345,10 @@ pub fn expand_function_arguments<'mcx>(
     result_type: Oid,
     funcid: Oid,
 ) -> PgResult<NodeList<'mcx>> {
-    Ok(expand_function_arguments_opt(mcx, args, include_out_arguments, result_type, funcid)?
-        .unwrap_or(*args))
+    match expand_function_arguments_opt(mcx, args, include_out_arguments, result_type, funcid)? {
+        Some(l) => Ok(l),
+        None => args.clone_in(mcx),
+    }
 }
 
 // None = unchanged (C returns the input list untouched in that case).
@@ -1465,7 +1467,7 @@ fn fetch_function_defaults<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<NodeLi
     let Some(list) = node.as_list() else {
         panic!("proargdefaults of {funcid} is not a List");
     };
-    Ok(*list)
+    list.clone_in(mcx)
 }
 
 fn recheck_cast_function_args<'mcx>(
