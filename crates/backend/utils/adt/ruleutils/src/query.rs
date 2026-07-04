@@ -1904,7 +1904,7 @@ fn get_rte_alias(
 
 const F_UNNEST_ANYARRAY: types_core::Oid = 2331;
 
-fn looks_like_function(node: Node<'_>) -> bool {
+pub(crate) fn looks_like_function(node: Node<'_>) -> bool {
     match node.node_tag() {
         NodeTag::T_FuncExpr => matches!(
             node.as_func_expr().unwrap().funcformat,

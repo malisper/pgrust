@@ -127,11 +127,61 @@ pub fn fc_pg_get_expr_ext(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     expr(flinfo, fcinfo, get_pretty_flags(pretty))
 }
 
-pub fn fc_pg_get_statisticsobjdef_columns(
-    _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+pub fn fc_pg_get_partkeydef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_partkeydef");
+    let res = crate::pg_get_partkeydef_worker(
+        ctx.mcx(),
+        fcinfo.arg_oid(0),
+        PRETTYFLAG_INDENT,
+        false,
+        true,
+    )?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_partkeydef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_function_arg_default(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    crate::gap("pg_get_statisticsobjdef_columns", "extended-statistics deparse")
+    let funcid = fcinfo.arg_oid(0);
+    let nth_arg = fcinfo.arg_i32(1);
+    let ctx = MemoryContext::new("pg_get_function_arg_default");
+    let res = crate::pg_get_function_arg_default_worker(ctx.mcx(), funcid, nth_arg)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_function_arg_default", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+fn statisticsobjdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    columns_only: bool,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_statisticsobjdef");
+    let res =
+        crate::pg_get_statisticsobj_worker(ctx.mcx(), fcinfo.arg_oid(0), columns_only, true)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_statisticsobjdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_statisticsobjdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    statisticsobjdef(flinfo, fcinfo, false)
+}
+
+pub fn fc_pg_get_statisticsobjdef_columns(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    statisticsobjdef(flinfo, fcinfo, true)
 }
 
 fn viewdef(
@@ -294,5 +344,8 @@ pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
     b(2508, "pg_get_constraintdef_ext", 2, fc_pg_get_constraintdef_ext),
     b(2509, "pg_get_expr_ext", 3, fc_pg_get_expr_ext),
     b(3159, "pg_get_viewdef_wrap", 2, fc_pg_get_viewdef_wrap),
+    b(3352, "pg_get_partkeydef", 1, fc_pg_get_partkeydef),
+    b(3415, "pg_get_statisticsobjdef", 1, fc_pg_get_statisticsobjdef),
+    b(3808, "pg_get_function_arg_default", 2, fc_pg_get_function_arg_default),
     b(6174, "pg_get_statisticsobjdef_columns", 1, fc_pg_get_statisticsobjdef_columns),
 ];

@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+pub mod builtins;
+pub use builtins::MBUTILS_BUILTINS;
+
 // C mbutils.c returns the *source pointer* when no conversion is performed;
 // pointer identity does not cross a safe-Rust boundary, so that outcome is
 // `Ok(None)` ("the caller's bytes stand") and a performed conversion is
