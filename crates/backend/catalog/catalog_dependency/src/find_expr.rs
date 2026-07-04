@@ -509,10 +509,7 @@ fn walker<'w, 'mcx: 'w>(
             if io.resultcollid != InvalidOid && io.resultcollid != DEFAULT_COLLATION_OID {
                 context.add(CollationRelationId, io.resultcollid, 0);
             }
-            match io.arg {
-                Some(e) => walker(e, context),
-                None => Ok(()),
-            }
+            walker(io.arg, context)
         }
         NodeTag::T_JsonExpr => {
             let j = node.as_json_expr().unwrap();
