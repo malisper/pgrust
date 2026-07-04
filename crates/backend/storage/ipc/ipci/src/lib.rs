@@ -70,6 +70,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
         pmsignal::PMSignalShmemSize(pmchild_seams::max_live_postmaster_children::call())?,
     )?;
     size = shmem::add_size(size, procsignal::ProcSignalShmemSize()?)?;
+    size = shmem::add_size(size, syncscan::SyncScanShmemSize())?;
     size = shmem::add_size(size, commands_async::AsyncShmemSize())?;
     size = shmem::add_size(size, checkpointer::CheckpointerShmemSize(g::NBuffers()))?;
 
@@ -133,6 +134,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
     procsignal::ProcSignalShmemInit();
     checkpointer::CheckpointerShmemInit(g::NBuffers());
+    syncscan::SyncScanShmemInit();
     commands_async::AsyncShmemInit()?;
 
     Ok(())
@@ -172,6 +174,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     pmsignal::PMSignalShmemResetAfterCrash();
     procsignal::ProcSignalShmemResetAfterCrash();
     checkpointer::CheckpointerShmemResetAfterCrash();
+    syncscan::SyncScanShmemResetAfterCrash();
     commands_async::AsyncShmemResetAfterCrash()?;
 
     dsm_core::dsm::dsm_postmaster_startup_after_crash()
