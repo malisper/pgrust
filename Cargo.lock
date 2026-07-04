@@ -2095,6 +2095,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_amcmds"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "commands_analyze"
 version = "0.0.0"
 dependencies = [
@@ -2517,11 +2527,18 @@ dependencies = [
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "fmgr_seams",
+ "genam",
  "mcx",
  "relpath",
+ "table",
  "tablespace_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -10818,10 +10835,13 @@ dependencies = [
  "catalog_toasting",
  "clauses",
  "coerce",
+ "commands_amcmds",
  "commands_cluster",
+ "commands_tablespace",
  "datum",
  "elog_seams",
  "execexpr",
+ "execindexing",
  "exectuples",
  "fmgr_seams",
  "format_type",
@@ -10875,6 +10895,7 @@ dependencies = [
  "tablecmds_seams",
  "trigger",
  "tupdesc",
+ "typcache",
  "types_array",
  "types_core",
  "types_error",

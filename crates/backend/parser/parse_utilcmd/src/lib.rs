@@ -940,7 +940,13 @@ fn transform_index_constraints<'mcx>(
             ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
         ));
         if constraint.indexname.is_some() {
-            unported("transformIndexConstraint: USING INDEX (ExistingIndex)");
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot use an existing index in CREATE TABLE".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
         }
         if constraint.deferrable || constraint.initdeferred {
             unported("transformIndexConstraint: DEFERRABLE constraint indexes");
@@ -1079,15 +1085,16 @@ fn transform_index_constraints<'mcx>(
 // INCLUDE / WITHOUT OVERLAPS are loud, as in the CREATE lane.
 pub fn transformIndexConstraintForAlter<'mcx>(
     mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'_>,
     cnode: Node<'mcx>,
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<(Node<'mcx>, NodeList<'mcx>)> {
     let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
     debug_assert!(matches!(
         constraint.contype,
         ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
     ));
     if constraint.indexname.is_some() {
-        unported("transformIndexConstraint: USING INDEX (ExistingIndex)");
+        return transform_existing_index_constraint(mcx, rel, cnode);
     }
     if constraint.deferrable || constraint.initdeferred {
         unported("transformIndexConstraint: DEFERRABLE constraint indexes");
@@ -1126,7 +1133,244 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         index_params.lappend(mcx, iparam.seal())?;
     }
     index.indexParams = index_params;
-    Ok(index.seal())
+    Ok((index.seal(), NodeList::nil()))
+}
+
+// transformIndexConstraint's USING INDEX arm (parse_utilcmd.c:2397-2574);
+// returns the IndexStmt (indexOid set) + the PK not-null Constraint nodes C
+// puts in cxt->nnconstraints.
+fn transform_existing_index_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'_>,
+    cnode: Node<'mcx>,
+) -> PgResult<(Node<'mcx>, NodeList<'mcx>)> {
+    let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
+    let index_name = constraint.indexname.expect("Constraint.indexname");
+    debug_assert!(constraint.keys.is_nil());
+
+    let mut index = Node::build::<IndexStmt>(mcx)?;
+    index.unique = true;
+    index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
+    index.nulls_not_distinct = constraint.nulls_not_distinct;
+    index.isconstraint = true;
+    index.deferrable = constraint.deferrable;
+    index.initdeferred = constraint.initdeferred;
+    index.idxname = constraint.conname;
+    index.accessMethod = Some("btree");
+    index.tableSpace = constraint.indexspace;
+
+    let index_oid = lsyscache::get_relname_relid(index_name, rel.rd_rel.relnamespace)?;
+    if index_oid == InvalidOid {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("index \"{index_name}\" does not exist"))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    let index_rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
+    let existing_err = |msg: String| -> Box<PgError> {
+        Box::new(
+            PgError::new(ERROR, msg)
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        )
+    };
+    let wrong_type = |msg: String, detail: bool| -> Box<PgError> {
+        let mut e = PgError::new(ERROR, msg)
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        if detail {
+            e = e.with_detail(
+                "Cannot create a primary key or unique constraint using such an index."
+                    .to_string(),
+            );
+        }
+        Box::new(e)
+    };
+    if pg_depend::get_index_constraint(mcx, index_oid)? != InvalidOid {
+        return Err(existing_err(format!(
+            "index \"{index_name}\" is already associated with a constraint"
+        )));
+    }
+    let index_form = index_rel.rd_index.as_ref().expect("rd_index");
+    if index_form.indrelid != rel.rd_id {
+        return Err(existing_err(format!(
+            "index \"{index_name}\" does not belong to table \"{}\"",
+            rel.name()
+        )));
+    }
+    if !index_form.indisvalid {
+        return Err(existing_err(format!("index \"{index_name}\" is not valid")));
+    }
+    if !index_form.indisunique {
+        return Err(wrong_type(format!("\"{index_name}\" is not a unique index"), true));
+    }
+    if index_form.indexprs_src.is_some() {
+        return Err(wrong_type(format!("index \"{index_name}\" contains expressions"), true));
+    }
+    if index_form.has_indpred {
+        return Err(wrong_type(format!("\"{index_name}\" is a partial index"), true));
+    }
+    if !index_form.indimmediate && !constraint.deferrable {
+        let mut e = PgError::new(ERROR, format!("\"{index_name}\" is a deferrable index"))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        e = e.with_detail(
+            "Cannot create a non-deferrable constraint using a deferrable index.".to_string(),
+        );
+        return Err(Box::new(e));
+    }
+    if index_rel.rd_rel.relam != types_core::BTREE_AM_OID {
+        return Err(wrong_type(format!("index \"{index_name}\" is not a btree"), false));
+    }
+
+    let (indcollation, indclass, indoption) = pg_index_vectors(mcx, index_oid)?;
+    let mut nnconstraints = NodeList::nil();
+    let mut keys = NodeList::nil();
+    let mut including = NodeList::nil();
+    for i in 0..index_form.indnatts as usize {
+        let attnum = index_form.indkey[i];
+        if attnum <= 0 {
+            // Expression columns were rejected above; system columns can't be
+            // indexed here (index creation on them is an earlier error).
+            unported("transformIndexConstraint: USING INDEX over a system column");
+        }
+        let attform = rel.rd_att.attr(attnum as usize - 1);
+        let attname = {
+            let mut s = PgString::new_in(mcx);
+            s.try_push_str(
+                core::str::from_utf8(attform.attname.name_str()).expect("attname UTF-8"),
+            )?;
+            leak_str(s)
+        };
+        if i < index_form.indnkeyatts as usize {
+            let attoptions_set = index_attoptions_set(mcx, index_oid, (i + 1) as i16)?;
+            let defopclass = indexcmds_seams::get_default_opclass::call(
+                attform.atttypid,
+                index_rel.rd_rel.relam,
+            )?;
+            if indclass[i] != defopclass
+                || attform.attcollation != indcollation[i]
+                || attoptions_set
+                || indoption[i] != 0
+            {
+                return Err(wrong_type(
+                    format!(
+                        "index \"{index_name}\" column number {} does not have default sorting behavior",
+                        i + 1
+                    ),
+                    true,
+                ));
+            }
+            keys.lappend(mcx, Node::mk_string(mcx, attname)?)?;
+            if constraint.contype == ConstrType::CONSTR_PRIMARY {
+                nnconstraints.lappend(mcx, make_not_null_constraint(mcx, attname)?)?;
+            }
+        } else {
+            including.lappend(mcx, Node::mk_string(mcx, attname)?)?;
+        }
+    }
+    // SAFETY: parse tree is statement-owned; no derived refs live.
+    unsafe {
+        cnode
+            .with_mut::<Constraint, _>(|c| {
+                c.keys = keys;
+                c.including = including;
+            })
+            .expect("Constraint");
+    }
+    index_rel.close(types_rel::NoLock)?;
+    index.indexOid = index_oid;
+    Ok((index.seal(), nnconstraints))
+}
+
+const IndexRelidIndexId: Oid = 2679;
+const AttributeRelidNumIndexId: Oid = 2659;
+const Anum_pg_index_indcollation: usize = 17;
+const Anum_pg_index_indclass: usize = 18;
+const Anum_pg_index_indoption: usize = 19;
+const Anum_pg_attribute_attoptions: usize = 23;
+
+fn catalog_oid_key(attno: usize, oid: Oid) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno as i16;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = datum::Datum::from_oid(oid);
+    key
+}
+
+fn pg_index_vectors<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexoid: Oid,
+) -> PgResult<(mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, i16>)> {
+    let pg_index =
+        table::table_open(mcx, types_core::INDEX_RELATION_ID, types_rel::AccessShareLock)?;
+    let key = catalog_oid_key(1, indexoid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+    let desc = pg_index.descr();
+    let mut vector_image = |attnum: usize| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_index vector columns under its descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+        assert!(!isnull, "unexpected null pg_index attnum {attnum}");
+        let p = d.as_usize() as *const u8;
+        // SAFETY: NOT NULL varlena, live through the scan.
+        unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) }
+    };
+    let coll_elems =
+        datum::array_build::deconstruct_array_image(mcx, vector_image(Anum_pg_index_indcollation), 4, true, b'i')?;
+    let class_elems =
+        datum::array_build::deconstruct_array_image(mcx, vector_image(Anum_pg_index_indclass), 4, true, b'i')?;
+    let opt_elems =
+        datum::array_build::deconstruct_array_image(mcx, vector_image(Anum_pg_index_indoption), 2, true, b's')?;
+    let mut indcollation: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, coll_elems.len())?;
+    indcollation.extend(coll_elems.iter().map(|d| d.as_oid()));
+    let mut indclass: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, class_elems.len())?;
+    indclass.extend(class_elems.iter().map(|d| d.as_oid()));
+    let mut indoption: mcx::PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, opt_elems.len())?;
+    indoption.extend(opt_elems.iter().map(|d| d.as_i16()));
+    genam::systable_endscan(mcx, scan)?;
+    pg_index.close(types_rel::AccessShareLock)?;
+    Ok((indcollation, indclass, indoption))
+}
+
+// get_attoptions(relid, attnum) != (Datum) 0 — only the null test is needed.
+fn index_attoptions_set(mcx: Mcx<'_>, relid: Oid, attnum: i16) -> PgResult<bool> {
+    let pg_attribute =
+        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
+    let key1 = catalog_oid_key(1, relid);
+    let mut key2 = types_scan::scankey::ScanKeyData::empty();
+    key2.sk_attno = 5;
+    key2.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key2.sk_collation = 0;
+    key2.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT2EQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_INT2EQ) failed: {e:?}"));
+    key2.sk_argument = datum::Datum::from_i16(attnum);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &pg_attribute,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &[key1, key2],
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {relid}"));
+    let mut isnull = false;
+    // SAFETY: attoptions under pg_attribute's descriptor; null checked.
+    let _ = unsafe {
+        types_tuple::heap_getattr(
+            tup,
+            Anum_pg_attribute_attoptions as i32,
+            pg_attribute.descr(),
+            &mut isnull,
+        )
+    };
+    genam::systable_endscan(mcx, scan)?;
+    pg_attribute.close(types_rel::AccessShareLock)?;
+    Ok(!isnull)
 }
 
 fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
