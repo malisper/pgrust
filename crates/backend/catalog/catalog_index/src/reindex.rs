@@ -208,8 +208,8 @@ pub fn reindex_index<'mcx>(
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    let set_tablespace =
-        params.tablespace_oid != InvalidOid && CheckRelationTableSpaceMove(&iRel, params.tablespace_oid);
+    let set_tablespace = params.tablespace_oid != InvalidOid
+        && CheckRelationTableSpaceMove(&iRel, params.tablespace_oid)?;
 
     catalog_heap::CheckTableNotInUse(&iRel, "REINDEX INDEX")?;
 
@@ -231,11 +231,14 @@ pub fn reindex_index<'mcx>(
     let mut indexInfo = execindexing::BuildIndexInfo(mcx, &iRel)?;
     let mut skipped_constraint = false;
     if skip_constraint_checks {
-        // exclusion constraints are loud inside BuildIndexInfo
-        if indexInfo.ii_Unique {
+        if indexInfo.ii_Unique || indexInfo.ii_HasExclusion {
             skipped_constraint = true;
         }
         indexInfo.ii_Unique = false;
+        indexInfo.ii_HasExclusion = false;
+        indexInfo.ii_ExclusionOps = [InvalidOid; types_core::INDEX_MAX_KEYS as usize];
+        indexInfo.ii_ExclusionProcs = [InvalidOid; types_core::INDEX_MAX_KEYS as usize];
+        indexInfo.ii_ExclusionStrats = [0; types_core::INDEX_MAX_KEYS as usize];
     }
 
     types_rel::reindex::set_reindex_processing(
@@ -269,13 +272,28 @@ pub fn reindex_index<'mcx>(
     heapRelation.close(NoLock)
 }
 
+const GLOBALTABLESPACE_OID: Oid = 1664;
+
 // CheckRelationTableSpaceMove (tablecmds.c), index arm: storage exists and is
 // unmapped by reindex_index's earlier checks.
-fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace: Oid) -> bool {
+fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace: Oid) -> PgResult<bool> {
     let old_tablespace = rel.rd_rel.reltablespace;
-    !(new_tablespace == old_tablespace
+    if new_tablespace == old_tablespace
         || (new_tablespace == init_small::globals::MyDatabaseTableSpace()
-            && old_tablespace == InvalidOid))
+            && old_tablespace == InvalidOid)
+    {
+        return Ok(false);
+    }
+    if new_tablespace == GLOBALTABLESPACE_OID {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "only shared relations can be placed in pg_global tablespace".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    Ok(true)
 }
 
 // SetRelationTableSpace (tablecmds.c:3750), storage-bearing arm (no

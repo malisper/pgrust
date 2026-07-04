@@ -13,7 +13,7 @@ use ::types_snapshot::HTSV_Result::*;
 use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerData};
 use ::types_tuple::HeapTupleData;
-use tableam_vocab::{SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN};
+use tableam_vocab::{SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN};
 
 use crate::{index_predicate_passes, unported, FormIndexDatum, IndexInfo};
 
@@ -30,7 +30,7 @@ where
 {
     let concurrent = index_info.ii_Concurrent;
     let is_system_catalog = catalog::IsSystemRelation(heap_relation);
-    let checking_uniqueness = index_info.ii_Unique;
+    let checking_uniqueness = index_info.ii_Unique || index_info.ii_HasExclusion;
 
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,
@@ -54,7 +54,7 @@ where
         x
     };
 
-    let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT;
+    let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_PAGEMODE;
     if allow_sync {
         flags |= SO_ALLOW_SYNC;
     }

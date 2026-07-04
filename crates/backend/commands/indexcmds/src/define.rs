@@ -665,6 +665,11 @@ pub fn DefineIndex<'mcx>(
 
     let mut flags = (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
         | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 });
+    if stmt.if_not_exists {
+        // Routes to index_create's loud if-not-exists gate (C skips with a
+        // NOTICE on duplicate; that skip-and-return tail is unported).
+        flags |= catalog_index::INDEX_CREATE_IF_NOT_EXISTS;
+    }
     if skip_build || concurrent {
         flags |= catalog_index::INDEX_CREATE_SKIP_BUILD;
     }

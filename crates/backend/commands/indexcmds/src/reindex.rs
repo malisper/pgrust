@@ -433,8 +433,9 @@ fn oid_key_at(attno: usize, oid: Oid) -> types_scan::scankey::ScanKeyData {
     key
 }
 
-// ReindexPartitions (indexcmds.c:3348); the error-context callback is elided
-// (error context stack is not ported).
+// ReindexPartitions (indexcmds.c:3348); C's error-context callback covers only
+// PreventInTransactionBlock (pushed then popped around it), so the CONTEXT
+// line is attached to that error alone.
 fn ReindexPartitions<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
@@ -446,7 +447,24 @@ fn ReindexPartitions<'mcx>(
     xact::PreventInTransactionBlock(
         is_top_level,
         if relkind == RELKIND_PARTITIONED_TABLE { "REINDEX TABLE" } else { "REINDEX INDEX" },
-    )?;
+    )
+    .map_err(|mut e| -> Box<types_error::PgError> {
+        let ns = lsyscache::get_namespace_name(mcx, lsyscache::get_rel_namespace(relid).unwrap_or(InvalidOid))
+            .ok()
+            .flatten()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        let name = lsyscache::get_rel_name(mcx, relid)
+            .ok()
+            .flatten()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        e.add_context_line(format!(
+            "while reindexing partitioned {} \"{ns}.{name}\"",
+            if relkind == RELKIND_PARTITIONED_TABLE { "table" } else { "index" }
+        ));
+        e
+    })?;
 
     let inhoids = pg_inherits::find_all_inheritors(mcx, relid, ShareLock)?;
     let mut partitions: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
@@ -494,10 +512,13 @@ fn ReindexMultipleInternal<'mcx>(
                 adt_acl::ACL_CREATE,
             )?;
             if aclresult != aclchk::ACLCHECK_OK {
+                let name = commands_tablespace::get_tablespace_name(mcx, params.tablespace_oid)?;
                 aclchk_seams::aclcheck_error::call(
                     aclresult,
                     types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE as i32,
-                    "",
+                    name.as_ref()
+                        .map(|n| std::str::from_utf8(n.name_str()).unwrap_or(""))
+                        .unwrap_or(""),
                 )?;
             }
         }
@@ -679,8 +700,13 @@ fn ReindexRelationConcurrently<'mcx>(
     }
 
     if params.tablespace_oid == GLOBALTABLESPACE_OID {
+        let name = commands_tablespace::get_tablespace_name(mcx, params.tablespace_oid)?;
+        let name = name
+            .as_ref()
+            .map(|n| std::str::from_utf8(n.name_str()).unwrap_or(""))
+            .unwrap_or("");
         return Err(err(
-            "cannot move non-shared relation to a global tablespace".to_string(),
+            format!("cannot move non-shared relation to tablespace \"{name}\""),
             ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
