@@ -424,7 +424,12 @@ CREATE TABLE ec_pe2_p1 PARTITION OF ec_pe2 FOR VALUES FROM (0, 0) TO (10, 10);
 CREATE TABLE ec_pe2_p2 PARTITION OF ec_pe2 FOR VALUES FROM (10, 10) TO (20, 20);
 INSERT INTO ec_pe2 SELECT i % 20, i % 20 FROM generate_series(0, 399) i;
 ANALYZE ec_pe2_p1; ANALYZE ec_pe2_p2;
+-- mergejoin off: the C-chosen MergeJoin sorts on abs(b), which needs
+-- prepare_sort_from_pathkeys' resjunk sort-column injection (M2 lane);
+-- the hash shape still pins partition-wise join over expression keys.
+SET enable_mergejoin = off;
 EXPLAIN SELECT * FROM ec_pe t1 JOIN ec_pe2 t2 ON t1.a = t2.a AND abs(t1.b) = abs(t2.b);
+RESET enable_mergejoin;
 RESET enable_partitionwise_join;
 DROP TABLE ec_pe2;
 DROP TABLE ec_poc;
