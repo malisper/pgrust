@@ -53,6 +53,11 @@ struct SharedInstrumentation {
     workers: Mutex<Vec<Option<WorkerInstrReport>>>,
 }
 
+// C's per-node shm_toc entries, typed and keyed by plan_node_id.
+pub(crate) enum ParallelNodeShared {
+    SeqScan(Arc<::tableam::ParallelTableScanDescShared>),
+}
+
 pub(crate) struct ParallelExecShared {
     pstmt: SendConst<PlannedStmt<'static>>,
     query_text: String,
@@ -63,6 +68,8 @@ pub(crate) struct ParallelExecShared {
     tuples_needed: i64,
     eflags: i32,
     queues: Mutex<Vec<Arc<shm_mq::ShmMq>>>,
+    // Written once by the leader's InitializeDSM walk, before workers launch.
+    nodes: Mutex<Vec<(i32, ParallelNodeShared)>>,
     instrumentation: Option<SharedInstrumentation>,
     usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
 }
@@ -79,10 +86,11 @@ pub struct ParallelExecutorInfo {
 fn walk_parallel_aware(node: Option<Node<'_>>) {
     let Some(node) = node else { return };
     let plan = plan_of_node(node);
-    if plan.parallel_aware {
+    if plan.parallel_aware && node.node_tag() != ::types_nodes::NodeTag::T_SeqScan {
         panic!(
             "ExecParallelInitializeDSM (execParallel.c): parallel-aware {:?} — \
-             per-node DSM/worker arms land with the parallel scan lanes",
+             per-node DSM/worker arms land with the parallel index/bitmap/append \
+             scan lanes",
             node.node_tag()
         );
     }
@@ -93,6 +101,93 @@ fn walk_parallel_aware(node: Option<Node<'_>>) {
             walk_parallel_aware(Some(sub));
         }
     }
+}
+
+// planstate_tree_walker for the ExecParallel* walks (execParallel.c);
+// non-SeqScan parallel-aware nodes are rejected loud by walk_parallel_aware.
+// Divergence: initPlan/subPlan planstates are not walked — subplans are
+// parallel_safe, never parallel_aware, so those arms are no-ops in C too.
+fn for_each_parallel_seqscan<'mcx>(
+    ps: &mut crate::procnode::PlanStateNode<'mcx>,
+    f: &mut dyn FnMut(&mut ::nodeseqscan::SeqScanState<'mcx>) -> PgResult<()>,
+) -> PgResult<()> {
+    use crate::procnode::PlanStateNode as N;
+    match ps {
+        N::Instrumented(w) => for_each_parallel_seqscan(&mut w.inner, f)?,
+        N::SeqScan(ss) => {
+            if ss.parallel_aware() {
+                f(ss)?;
+            }
+        }
+        N::Result(rs) => {
+            if let Some(outer) = rs.outer.as_deref_mut() {
+                for_each_parallel_seqscan(outer, f)?;
+            }
+        }
+        N::ProjectSet(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Agg(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Sort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::IncrementalSort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Material(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Memoize(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Unique(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Limit(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::LockRows(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::WindowAgg(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::Gather(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::GatherMerge(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
+        N::BitmapHeapScan(x) => for_each_parallel_seqscan(&mut x.bitmapqual, f)?,
+        N::ModifyTable(x) => for_each_parallel_seqscan(&mut x.subplan, f)?,
+        N::SubqueryScan(x) => for_each_parallel_seqscan(&mut x.subplan, f)?,
+        N::NestLoop(x) => {
+            for_each_parallel_seqscan(&mut x.outer, f)?;
+            for_each_parallel_seqscan(&mut x.inner, f)?;
+        }
+        N::MergeJoin(x) => {
+            for_each_parallel_seqscan(&mut x.outer, f)?;
+            for_each_parallel_seqscan(&mut x.inner, f)?;
+        }
+        N::HashJoin(x) => {
+            let x = &mut **x;
+            for_each_parallel_seqscan(&mut x.outer, f)?;
+            for_each_parallel_seqscan(&mut x.hash.child, f)?;
+        }
+        N::SetOp(x) => {
+            for_each_parallel_seqscan(&mut x.outer, f)?;
+            for_each_parallel_seqscan(&mut x.inner, f)?;
+        }
+        N::RecursiveUnion(x) => {
+            for_each_parallel_seqscan(&mut x.outer, f)?;
+            for_each_parallel_seqscan(&mut x.inner, f)?;
+        }
+        N::Append(x) => {
+            for sub in x.substates.iter_mut() {
+                for_each_parallel_seqscan(sub, f)?;
+            }
+        }
+        N::MergeAppend(x) => {
+            for sub in x.substates.iter_mut() {
+                for_each_parallel_seqscan(sub, f)?;
+            }
+        }
+        N::BitmapAnd(x) | N::BitmapOr(x) => {
+            for sub in x.substates.iter_mut() {
+                for_each_parallel_seqscan(sub, f)?;
+            }
+        }
+        N::FunctionScan(_)
+        | N::ValuesScan(_)
+        | N::TableFuncScan(_)
+        | N::CteScan(_)
+        | N::IndexScan(_)
+        | N::TidScan(_)
+        | N::TidRangeScan(_)
+        | N::IndexOnlyScan(_)
+        | N::BitmapIndexScan(_)
+        | N::WorkTableScan(_)
+        | N::NamedTuplestoreScan(_) => {}
+    }
+    Ok(())
 }
 
 fn plan_of_node<'mcx>(node: Node<'mcx>) -> &'mcx ::types_nodes::plannodes::Plan<'mcx> {
@@ -198,9 +293,11 @@ fn setup_tuple_queues(
     handles
 }
 
-/// `ExecInitParallelPlan` (execParallel.c).
+/// `ExecInitParallelPlan` (execParallel.c). `planstate` is the leader's tree
+/// for `child_plan` (C receives the PlanState and reads plan through it).
 pub fn exec_init_parallel_plan<'mcx>(
     child_plan: Node<'mcx>,
+    planstate: &mut crate::procnode::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     send_params: &Bitmapset<'mcx>,
     nworkers: i32,
@@ -217,6 +314,16 @@ pub fn exec_init_parallel_plan<'mcx>(
 
     debug_assert!(estate.es_snapshot.is_some());
 
+    // ExecParallelEstimate + ExecParallelInitializeDSM: before workers launch
+    // and before the leader executes (its parallel scan descs install here).
+    let mut nodes = Vec::new();
+    for_each_parallel_seqscan(planstate, &mut |ss| {
+        ::nodeseqscan::exec_seq_scan_estimate(ss);
+        let pscan = ::nodeseqscan::exec_seq_scan_initialize_dsm(ss, estate)?;
+        nodes.push((ss.plan_node_id(), ParallelNodeShared::SeqScan(pscan)));
+        Ok(())
+    })?;
+
     let instrumented = estate.es_instrument != 0;
     let shared = Arc::new(ParallelExecShared {
         // SAFETY: the pstmt lives in the leader's executor arena; workers are
@@ -232,6 +339,7 @@ pub fn exec_init_parallel_plan<'mcx>(
         tuples_needed,
         eflags: estate.es_top_eflags,
         queues: Mutex::new(Vec::new()),
+        nodes: Mutex::new(nodes),
         instrumentation: instrumented.then(|| SharedInstrumentation {
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
@@ -266,6 +374,7 @@ pub fn exec_parallel_create_readers(pei: &mut ParallelExecutorInfo) {
 
 /// `ExecParallelReinitialize` (execParallel.c).
 pub fn exec_parallel_reinitialize<'mcx>(
+    planstate: &mut crate::procnode::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     pei: &mut ParallelExecutorInfo,
     send_params: &Bitmapset<'mcx>,
@@ -283,7 +392,11 @@ pub fn exec_parallel_reinitialize<'mcx>(
             *w = None;
         }
     }
-    Ok(())
+    // ExecParallelReInitializeDSM walk.
+    for_each_parallel_seqscan(planstate, &mut |ss| {
+        ::nodeseqscan::exec_seq_scan_reinitialize_dsm(ss);
+        Ok(())
+    })
 }
 
 /// `ExecParallelFinish` (execParallel.c).
@@ -411,17 +524,38 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 
         querydesc::with_qd(qd, |q| {
             let x = q.exec.as_mut().expect("worker ExecutorStart left no exec");
-            x.with_mut(|d| {
+            x.with_mut(|d| -> PgResult<()> {
                 let pe = exec.param_exec.lock().unwrap_or_else(|e| e.into_inner());
                 for (paramid, value, isnull) in pe.iter() {
                     d.estate.es_param_exec_vals[*paramid as usize] =
                         ParamExecData { value: *value, isnull: *isnull, exec_plan: false };
                 }
+                drop(pe);
+                // ExecParallelInitializeWorker, then the tuple bound (C order).
+                let estate = &mut d.estate;
                 if let Some(ps) = d.planstate.as_mut() {
+                    for_each_parallel_seqscan(ps, &mut |ss| {
+                        let nodes = exec.nodes.lock().unwrap_or_else(|e| e.into_inner());
+                        let entry = nodes
+                            .iter()
+                            .find(|(id, _)| *id == ss.plan_node_id())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "ExecParallelInitializeWorker (execParallel.c): no shared \
+                                     entry for plan node {}",
+                                    ss.plan_node_id()
+                                )
+                            });
+                        let ParallelNodeShared::SeqScan(pscan) = &entry.1;
+                        let pscan = Arc::clone(pscan);
+                        drop(nodes);
+                        ::nodeseqscan::exec_seq_scan_initialize_worker(ss, estate, pscan)
+                    })?;
                     crate::procnode::exec_set_tuple_bound(exec.tuples_needed, ps);
                 }
-            });
-        });
+                Ok(())
+            })
+        })?;
 
         let save = ::instrument::instr_start_parallel_query();
 

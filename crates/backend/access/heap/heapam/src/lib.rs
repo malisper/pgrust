@@ -79,6 +79,9 @@ pub struct HeapScanDescData<'mcx> {
     // One-probe pgstat accumulators (indexam precedent); pgstat_relation flushes.
     pub rs_pgstat_numscans: u64,
     pub rs_pgstat_getnext: u64,
+    // The registered handle behind SO_TEMP_SNAPSHOT: rs_snapshot's lifetime is
+    // 'mcx-erased, so the 'static Rc UnregisterSnapshot needs is kept here.
+    pub rs_temp_snapshot: Option<std::rc::Rc<SnapshotData<'static>>>,
 }
 
 impl<'mcx> HeapScanDescData<'mcx> {
@@ -1139,6 +1142,7 @@ pub fn heap_beginscan<'mcx>(
         rs_vistuples: [0; MaxHeapTuplesPerPage],
         rs_pgstat_numscans: 0,
         rs_pgstat_getnext: 0,
+        rs_temp_snapshot: None,
     };
 
     initscan(&mut scan, None, false)?;
@@ -1197,7 +1201,11 @@ pub fn heap_endscan(mut scan: HeapScanDescData<'_>) -> PgResult<()> {
     }
 
     if (scan.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
-        unported("backend-utils-time-snapmgr (UnregisterSnapshot)");
+        let snap = scan
+            .rs_temp_snapshot
+            .take()
+            .expect("SO_TEMP_SNAPSHOT scan carries its registered snapshot");
+        snapmgr_seams::unregister_snapshot::call(snap);
     }
 
     // rs_rd alias drop = RelationDecrementReferenceCount; rs_key drops.

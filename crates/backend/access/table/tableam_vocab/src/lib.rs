@@ -139,6 +139,21 @@ pub struct ParallelBlockTableScanDescData {
     pub phs_nallocated: AtomicU64,
 }
 
+impl Default for ParallelBlockTableScanDescData {
+    fn default() -> Self {
+        ParallelBlockTableScanDescData {
+            phs_locator: RelFileLocator::default(),
+            phs_syncscan: false,
+            phs_snapshot_any: false,
+            phs_snapshot_off: 0,
+            phs_nblocks: 0,
+            phs_mutex: Spinlock::new(),
+            phs_startblock: AtomicU32::new(InvalidBlockNumber),
+            phs_nallocated: AtomicU64::new(0),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ParallelBlockTableScanWorkerData {
     pub phsw_nallocated: u64,

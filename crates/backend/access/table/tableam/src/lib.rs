@@ -1035,6 +1035,15 @@ pub fn table_scan_getnextslot_tidrange<'mcx>(
 
 // --- Parallel table scan (tableam.c) ---
 
+// C's ParallelTableScanDescData shm block: the typed snapshot field replaces
+// the phs_snapshot_off byte image (docs/parallel-query-design.md); stable
+// address — worker scans hold NonNull into `pscan`.
+#[derive(Default)]
+pub struct ParallelTableScanDescShared {
+    pub pscan: ParallelBlockTableScanDescData,
+    pub snapshot: Option<::snapmgr::SerializedSnapshot>,
+}
+
 pub fn table_parallelscan_estimate(
     rel: &Relation<'_>,
     snapshot: &Snapshot<'_>,
@@ -1042,10 +1051,9 @@ pub fn table_parallelscan_estimate(
     let mut sz: usize = 0;
 
     match snapshot {
-        Some(s) if IsMVCCSnapshot(s) => {
-            unported("backend-utils-time-snapmgr (EstimateSnapshotSpace)")
-        }
-        _ => debug_assert!(snapshot.is_none()), // Assert(snapshot == SnapshotAny)
+        // EstimateSnapshotSpace adds nothing: the snapshot crosses typed.
+        Some(s) => debug_assert!(IsMVCCSnapshot(s)),
+        None => {} // Assert(snapshot == SnapshotAny)
     }
 
     let am_sz = match am(rel) {
@@ -1058,22 +1066,23 @@ pub fn table_parallelscan_estimate(
 
 pub fn table_parallelscan_initialize(
     rel: &Relation<'_>,
-    pscan: &mut ParallelBlockTableScanDescData,
-    _snapshot_buf: &mut [u8],
-    snapshot: &Snapshot<'_>,
+    target: &mut ParallelTableScanDescShared,
+    snapshot: &Snapshot<'static>,
 ) -> PgResult<()> {
     let snapshot_off = match am(rel) {
-        TableAm::Heap => heap::parallelscan_initialize(rel, pscan)?,
+        TableAm::Heap => heap::parallelscan_initialize(rel, &mut target.pscan)?,
     };
-    pscan.phs_snapshot_off = snapshot_off;
+    target.pscan.phs_snapshot_off = snapshot_off;
 
     match snapshot {
         Some(s) if IsMVCCSnapshot(s) => {
-            unported("backend-utils-time-snapmgr (SerializeSnapshot)")
+            target.snapshot = Some(::snapmgr::SerializeSnapshot(s));
+            target.pscan.phs_snapshot_any = false;
         }
         _ => {
             debug_assert!(snapshot.is_none());
-            pscan.phs_snapshot_any = true;
+            target.snapshot = None;
+            target.pscan.phs_snapshot_any = true;
         }
     }
 
@@ -1090,12 +1099,46 @@ pub fn table_parallelscan_reinitialize(
 }
 
 pub fn table_beginscan_parallel<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _relation: &Relation<'mcx>,
-    _pscan: NonNull<ParallelBlockTableScanDescData>,
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    parallel_scan: &ParallelTableScanDescShared,
 ) -> PgResult<TableScanDesc<'mcx>> {
-    // Restore+Register serialized snapshot, scan_begin(.., pscan, SEQSCAN|STRAT|SYNC|PAGEMODE[|TEMP_SNAPSHOT]).
-    unported("backend-utils-time-snapmgr (RestoreSnapshot/RegisterSnapshot)")
+    debug_assert!(relation.rd_locator.get() == parallel_scan.pscan.phs_locator);
+
+    let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+    let mut registered = None;
+    let snapshot: Snapshot<'mcx> = if !parallel_scan.pscan.phs_snapshot_any {
+        let serialized = parallel_scan
+            .snapshot
+            .as_ref()
+            .expect("MVCC parallel scan carries its serialized snapshot");
+        let snap = ::snapmgr::RestoreSnapshot(serialized);
+        let snap = ::snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered a snapshot");
+        flags |= SO_TEMP_SNAPSHOT;
+        registered = Some(snap.clone());
+        Some(snap)
+    } else {
+        None
+    };
+
+    // heapam rs_parallel contract: the shared descriptor outlives the scan.
+    let pscan_ptr = NonNull::from(&parallel_scan.pscan);
+    match am(relation) {
+        TableAm::Heap => {
+            let mut scan = heap::scan_begin(
+                mcx,
+                relation,
+                snapshot,
+                0,
+                PgVec::new_in(mcx),
+                Some(pscan_ptr),
+                flags,
+            )?;
+            let TableScanDesc::Heap(h) = &mut scan;
+            h.rs_temp_snapshot = registered;
+            Ok(scan)
+        }
+    }
 }
 
 // --- Index scan related functions (tableam.h / tableam.c) ---
@@ -1813,5 +1856,5 @@ fn relation_nblocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
 }
 
 fn nbuffers() -> PgResult<i32> {
-    unported("NBuffers GUC wiring (backend-storage-buffer-bufmgr)")
+    Ok(init_small::globals::NBuffers())
 }

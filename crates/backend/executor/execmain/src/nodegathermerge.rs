@@ -184,13 +184,14 @@ pub fn exec_gather_merge<'mcx>(
                 None => {
                     node.pei = Some(exec_init_parallel_plan(
                         gm.plan.lefttree.expect("GatherMerge without an outer plan"),
+                        outer,
                         estate,
                         &gm.initParam,
                         gm.num_workers,
                         node.tuples_needed,
                     )?)
                 }
-                Some(pei) => exec_parallel_reinitialize(estate, pei, &gm.initParam)?,
+                Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gm.initParam)?,
             }
             let pei = node.pei.as_mut().expect("just initialized");
             parallel::LaunchParallelWorkers(pei.pcxt)?;
