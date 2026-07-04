@@ -159,6 +159,7 @@ portalcmds = { path = "../../backend/commands/portalcmds" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
+mcxt_stats = { path = "../../backend/utils/mmgr/mcxt_stats" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
 adt_geo = { path = "../../backend/utils/adt/geo" }
 spgist_text = { path = "../../backend/access/spgist/spgist_text" }

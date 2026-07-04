@@ -756,6 +756,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SysCacheGetAttrNotNull(INDEXRELID tuple, indoption).values[index];
+    // None mirrors !HeapTupleIsValid. PRECONDITION: index < indoption->dim1.
+    pub fn pg_index_indoption_element(index_oid: Oid, index: i32) -> PgResult<Option<i16>>
+);
+
+seam_core::seam!(
+    // pg_am.amtype by AMOID; None mirrors !HeapTupleIsValid.
+    pub fn pg_am_amtype(amoid: Oid) -> PgResult<Option<i8>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_publication_oid(pubname: &str) -> PgResult<Oid>
 );
 

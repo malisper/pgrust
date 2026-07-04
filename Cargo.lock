@@ -99,6 +99,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_amutils"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "indexam_seams",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
+name = "adt_ascii"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "adt_bool"
 version = "0.1.0"
 dependencies = [
@@ -495,6 +524,26 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "adt_mcxtfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "elog",
+ "funcapi",
+ "lmgr_proc",
+ "mbutils",
+ "mcx",
+ "mcxt_stats",
+ "procarray",
+ "procsignal",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varlena",
 ]
 
 [[package]]
@@ -4451,6 +4500,8 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "fmgr_core"
 version = "0.1.0"
 dependencies = [
+ "adt_amutils",
+ "adt_ascii",
  "adt_bool",
  "adt_cash",
  "adt_char",
@@ -4469,6 +4520,7 @@ dependencies = [
  "adt_like",
  "adt_mac",
  "adt_mac8",
+ "adt_mcxtfuncs",
  "adt_multirangetypes",
  "adt_network",
  "adt_numeric",
@@ -4521,6 +4573,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "varlena",
+ "waitfuncs",
  "wparser_def",
  "xid8funcs",
 ]
@@ -6463,6 +6516,17 @@ name = "mcxt_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "mcxt_stats"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "init_small",
+ "mcx",
+ "mcxt_seams",
  "types_error",
 ]
 
@@ -9366,6 +9430,7 @@ dependencies = [
  "gist",
  "guc_tables",
  "indexam",
+ "indexam_seams",
  "indexcmds_seams",
  "indxpath",
  "init_small",
@@ -11624,6 +11689,7 @@ dependencies = [
  "logicalfuncs",
  "lsyscache",
  "mbutils",
+ "mcxt_stats",
  "miscinit",
  "multixact",
  "nodeagg",
@@ -14597,6 +14663,18 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "waitfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "procarray",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "waitevent",
 ]
 
 [[package]]

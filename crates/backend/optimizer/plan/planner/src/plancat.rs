@@ -583,6 +583,20 @@ fn btcanreturn() -> bool {
     true
 }
 
+// index_can_return (indexam.c) for the closed AM set; amutils' generic
+// Returnable fallback rides the indexam_seams slot installed here.
+pub fn index_can_return(mcx: mcx::Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool> {
+    let rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
+    let res = match rel.rd_rel.relam {
+        BTREE_AM_OID => btcanreturn(),
+        types_core::GIST_AM_OID => gist::gistcanreturn(&rel, attno),
+        types_core::SPGIST_AM_OID => spgist::spgcanreturn(&rel, attno)?,
+        _ => false,
+    };
+    indexam::index_close(rel, types_rel::AccessShareLock)?;
+    Ok(res)
+}
+
 // ChangeVarNodes (rewriteManip.c), rt_index 1 arm over freshly parsed index
 // expression trees (exclusively owned, so in-place mutation is safe).
 pub(crate) fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {

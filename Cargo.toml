@@ -47,6 +47,7 @@ members = [
     "crates/backend/storage/ipc/procsignal_seams",
     "crates/backend/utils/misc/guc_file_seams",
     "crates/backend/utils/mmgr/mcxt_seams",
+    "crates/backend/utils/mmgr/mcxt_stats",
     "crates/backend/postmaster/interrupt",
     "crates/backend/utils/error/elog",
     "crates/_support/types/hash",
@@ -664,6 +665,10 @@ members = [
     "crates/common/saslprep",
     "crates/backend/libpq/auth_scram",
     "crates/backend/utils/adt/cryptohashfuncs",
+    "crates/backend/utils/adt/adt_ascii",
+    "crates/backend/utils/adt/adt_amutils",
+    "crates/backend/utils/adt/mcxtfuncs",
+    "crates/backend/utils/adt/waitfuncs",
     "crates/backend/utils/adt/pseudorandomfuncs",
 ]
 

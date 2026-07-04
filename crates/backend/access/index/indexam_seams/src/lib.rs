@@ -12,6 +12,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // index_can_return (indexam.c): amcanreturn dispatch; opens the index
+    // with AccessShareLock as C's amutils fallback does.
+    pub fn index_can_return(mcx: Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn try_index_open<'mcx>(
         mcx: Mcx<'mcx>,
         relation_id: Oid,

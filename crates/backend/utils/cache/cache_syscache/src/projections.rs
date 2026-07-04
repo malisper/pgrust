@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheGetAttr, SysCacheKey,
 };
-use crate::cacheinfo::{COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, OPFAMILYAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{AMOID, COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, OPFAMILYAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -276,6 +276,41 @@ fn pg_index_indclass_element(index_oid: Oid, index: i32) -> PgResult<Option<Oid>
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(elem))
+}
+
+fn pg_index_indoption_element(index_oid: Oid, index: i32) -> PgResult<Option<i16>> {
+    const ANUM_PG_INDEX_INDOPTION: i32 = 19;
+    let Some(tuple) =
+        SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(index_oid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let d = getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDOPTION);
+    // SAFETY: not-null plain-storage int2vector column of the held tuple
+    // (24-byte header, values in place); the seam's precondition bounds
+    // `index` under dim1.
+    let elem = unsafe {
+        let p = d.as_usize() as *const u8;
+        let dim1 = *(p.add(16) as *const i32);
+        debug_assert!(index >= 0 && index < dim1);
+        *(p.add(24) as *const i16).add(index as usize)
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(elem))
+}
+
+fn pg_am_amtype_lookup(amoid: Oid) -> PgResult<Option<i8>> {
+    const ANUM_PG_AM_AMTYPE: i32 = 4;
+    let Some(tuple) = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let amtype = getattr(&t, AMOID, ANUM_PG_AM_AMTYPE).as_i8();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(amtype))
 }
 
 fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid> {
@@ -2608,6 +2643,8 @@ pub(crate) fn install() {
     syscache_seams::pg_class_reloftype::set(pg_class_reloftype);
     syscache_seams::lookup_pg_index_ls_shape::set(lookup_pg_index_ls_shape);
     syscache_seams::pg_index_indclass_element::set(pg_index_indclass_element);
+    syscache_seams::pg_index_indoption_element::set(pg_index_indoption_element);
+    syscache_seams::pg_am_amtype::set(pg_am_amtype_lookup);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);

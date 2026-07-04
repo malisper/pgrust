@@ -74,6 +74,7 @@ partbounds = { path = "../../../partitioning/partbounds" }
 partprune = { path = "../../../partitioning/partprune" }
 tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
 brin = { path = "../../../access/brin/brin" }
 spgist = { path = "../../../access/spgist/spgist" }
 gist = { path = "../../../access/gist/gist" }
