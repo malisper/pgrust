@@ -58,6 +58,7 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "adt_regproc",
  "cache_syscache",
  "catalog_namespace",
  "catcache",
@@ -686,6 +687,7 @@ dependencies = [
  "miscinit_seams",
  "namespace_seams",
  "pqformat",
+ "regproc_seams",
  "rel_vocab",
  "syscache_seams",
  "types_core",
@@ -3948,18 +3950,16 @@ name = "genfile"
 version = "0.1.0"
 dependencies = [
  "acl_seams",
+ "adt_datetime",
  "datum",
  "elog",
- "fd",
  "funcapi",
  "guc_tables",
  "heaptuple",
  "init_small",
- "libc",
- "mcx",
+ "mbutils",
  "miscinit",
  "pg_path",
- "tupdesc",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -4189,10 +4189,12 @@ dependencies = [
  "adt_acl",
  "adt_datetime",
  "adt_timestamp",
+ "arrayfuncs",
  "datum",
  "elog",
  "exectuples_output",
  "format_type",
+ "funcapi",
  "guc",
  "guc_tables",
  "mbutils",
@@ -4212,6 +4214,7 @@ dependencies = [
  "types_core",
  "types_dest",
  "types_error",
+ "types_fmgr",
  "types_guc",
  "types_nodes",
  "types_tuple",
@@ -6834,6 +6837,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "readfuncs",
+ "regproc_seams",
  "rel_vocab",
  "relation",
  "relcache",
@@ -8849,6 +8853,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "regproc_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "regress_lib"
 version = "0.1.0"
 dependencies = [
@@ -9730,6 +9744,7 @@ dependencies = [
  "parse_clause",
  "parse_collate",
  "parse_expr",
+ "parse_utilcmd",
  "parser_analyze",
  "parser_driver",
  "partitionfuncs",

@@ -414,6 +414,7 @@ members = [
     "crates/backend/utils/adt/uuid",
     "crates/backend/utils/adt/network",
     "crates/backend/utils/adt/regproc",
+    "crates/backend/utils/adt/regproc_seams",
     "crates/backend/utils/adt/rowtypes",
     "crates/backend/utils/adt/varbit",
     "crates/backend/utils/adt/like",

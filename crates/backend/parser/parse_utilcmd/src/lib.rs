@@ -1570,6 +1570,10 @@ fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+pub fn init_seams() {
+    regproc_seams::parse_type_string::set(parseTypeString);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
