@@ -1,6 +1,6 @@
 // RemoveRelations + RangeVarCallbackForDropRelation (tablecmds.c) over the
-// relation removeTypes; DROP INDEX CONCURRENTLY and the partition-locking
-// callback arms are loud.
+// relation removeTypes; the partitioned-index children pre-lock
+// (find_all_inheritors) is not taken.
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_TABLE, ERROR, NOTICE};
@@ -8,12 +8,6 @@ use types_nodes::parsenodes::{DropStmt, ObjectType};
 use rel_vocab::RangeVar;
 use types_nodes::NodeList;
 use types_rel::{AccessExclusiveLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
-
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: tablecmds {what}")
-}
 
 fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
     let parts: Vec<&'mcx str> = names
@@ -174,8 +168,27 @@ fn DropErrorMsgWrongType(relname: &str, wrongkind: u8, rightkind: u8) -> Box<PgE
 }
 
 pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<()> {
+    let mut flags = 0;
+    let mut lockmode = AccessExclusiveLock;
     if drop.concurrent {
-        unported("RemoveRelations: DROP INDEX CONCURRENTLY");
+        lockmode = types_rel::ShareUpdateExclusiveLock;
+        debug_assert!(matches!(drop.removeType, ObjectType::OBJECT_INDEX));
+        if drop.objects.len() != 1 {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "DROP INDEX CONCURRENTLY does not support dropping multiple objects"
+                        .to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if matches!(drop.behavior, types_nodes::parsenodes::DropBehavior::DROP_CASCADE) {
+            return Err(Box::new(
+                PgError::new(ERROR, "DROP INDEX CONCURRENTLY does not support CASCADE".to_string())
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
     }
     let expected_relkind = match drop.removeType {
         ObjectType::OBJECT_TABLE => RELKIND_RELATION,
@@ -195,12 +208,28 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
 
         inval::local::AcceptInvalidationMessages()?;
 
+        let heap_lockmode = if drop.concurrent {
+            types_rel::ShareUpdateExclusiveLock
+        } else {
+            AccessExclusiveLock
+        };
+        let actual_relkind = core::cell::Cell::new(0u8);
+        let actual_relpersistence = core::cell::Cell::new(0u8);
         let mut callback = |rv: &RangeVar<'_>, relOid: Oid, oldRelOid: Oid| {
-            RangeVarCallbackForDropRelation(mcx, rv, relOid, oldRelOid, expected_relkind)
+            RangeVarCallbackForDropRelation(
+                mcx,
+                rv,
+                relOid,
+                oldRelOid,
+                expected_relkind,
+                heap_lockmode,
+                &actual_relkind,
+                &actual_relpersistence,
+            )
         };
         let relOid = catalog_namespace::RangeVarGetRelidExtended(
             &rel,
-            AccessExclusiveLock,
+            lockmode,
             catalog_namespace::RVR_MISSING_OK,
             Some(&mut callback),
         )?;
@@ -210,21 +239,50 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
             continue;
         }
 
+        if drop.concurrent
+            && actual_relpersistence.get() != types_core::RELPERSISTENCE_TEMP
+        {
+            debug_assert!(
+                drop.objects.len() == 1
+                    && matches!(drop.removeType, ObjectType::OBJECT_INDEX)
+            );
+            flags |= catalog_dependency::PERFORM_DELETION_CONCURRENTLY;
+        }
+
+        if flags & catalog_dependency::PERFORM_DELETION_CONCURRENTLY != 0
+            && actual_relkind.get() == types_rel::RELKIND_PARTITIONED_INDEX
+        {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot drop partitioned index \"{}\" concurrently",
+                        rel.relname
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+
         objects.add_exact_object_address(pg_depend::ObjectAddress::set(
             RELATION_RELATION_ID,
             relOid,
         ));
     }
 
-    catalog_dependency::performMultipleDeletions(mcx, &objects, drop.behavior, 0)
+    catalog_dependency::performMultipleDeletions(mcx, &objects, drop.behavior, flags)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn RangeVarCallbackForDropRelation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &RangeVar<'_>,
     relOid: Oid,
     _oldRelOid: Oid,
     expected_relkind: u8,
+    heap_lockmode: types_storage::lock::LOCKMODE,
+    actual_relkind: &core::cell::Cell<u8>,
+    actual_relpersistence: &core::cell::Cell<u8>,
 ) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
@@ -260,10 +318,13 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         d
     };
     let relnamespace = get(3).as_oid();
+    let relpersistence = get(17).as_i8() as u8;
     let relkind = get(18).as_i8() as u8;
     let relispartition = get(28).as_bool();
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
+    actual_relkind.set(relkind);
+    actual_relpersistence.set(relpersistence);
 
     let actual_expected = if relkind == RELKIND_PARTITIONED_TABLE {
         RELKIND_RELATION
@@ -313,7 +374,7 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         // until end of transaction.
         let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
         if heap_oid != InvalidOid {
-            lmgr::LockRelationOid(heap_oid, AccessExclusiveLock)?;
+            lmgr::LockRelationOid(heap_oid, heap_lockmode)?;
         }
     }
 

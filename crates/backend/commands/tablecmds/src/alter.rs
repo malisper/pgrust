@@ -1656,6 +1656,7 @@ fn ATExecAddColumn<'mcx>(
         core::slice::from_ref(&attribute),
         myrelid,
         None,
+        None,
     )?;
     attrdesc.close(RowExclusiveLock)?;
 

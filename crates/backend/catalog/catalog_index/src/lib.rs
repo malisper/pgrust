@@ -9,7 +9,7 @@ use execindexing::IndexInfo;
 use mcx::Mcx;
 use types_core::{
     AttrNumber, ForkNumber, InvalidOid, Oid, ATTRIBUTE_RELATION_ID, DEFAULT_COLLATION_OID,
-    INDEX_RELATION_ID, NAMEDATALEN, RELATION_RELATION_ID,
+    INDEX_RELATION_ID, RELATION_RELATION_ID,
 };
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_rel::{
@@ -37,10 +37,8 @@ pub const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
 pub const GIN_AM_OID: Oid = 2742;
-const TEXTOID: Oid = 25;
 pub const GIST_AM_OID: Oid = 783;
 const INT4OID: Oid = 23;
-const BOXOID: Oid = 603;
 const OpclassOidIndexId: Oid = 2687;
 const IndexRelidIndexId: Oid = 2679;
 const Anum_pg_opclass_opcintype: usize = 7;
@@ -185,10 +183,8 @@ fn ConstructTupleDescriptor<'mcx>(
     let mut indexpr_item = indexInfo.ii_Expressions.iter();
     for i in 0..numatts {
         let atnum = indexInfo.ii_IndexAttrNumbers[i];
+        // namestrcpy truncates at NAMEDATALEN-1 bytes, as C.
         let colname = indexColNames[i];
-        if colname.len() >= NAMEDATALEN as usize {
-            unported("ConstructTupleDescriptor: overlength index column name");
-        }
         if atnum != 0 {
             if atnum < 0 || atnum as i32 > natts {
                 panic!("invalid column number {atnum}");
@@ -244,47 +240,23 @@ fn ConstructTupleDescriptor<'mcx>(
             const ANYELEMENTOID: Oid = 2283;
             const ANYARRAYOID: Oid = 2277;
             if keyType == ANYELEMENTOID && opcintype == ANYARRAYOID {
-                unported("ConstructTupleDescriptor: ANYARRAY opclass keytype");
+                let atttypid = indexTupDesc.attr(i).atttypid;
+                keyType = lsyscache::get_base_element_type(atttypid)?;
+                if keyType == InvalidOid {
+                    panic!("could not get element type of array type {atttypid}");
+                }
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            // C reads the pg_type row for keyType; closed-set arms: INT4
-            // (hash amkeytype), text (jsonb_ops opckeytype), BOX (gist
-            // point_ops opckeytype).
+            let shape = syscache_seams::lookup_pg_type_shape::call(keyType)?
+                .unwrap_or_else(|| panic!("cache lookup failed for type {keyType}"));
             let to = indexTupDesc.attr_mut(i);
-            match keyType {
-                INT4OID => {
-                    to.attlen = 4;
-                    to.attbyval = true;
-                    to.attalign = b'i' as i8;
-                    to.attstorage = b'p' as i8;
-                }
-                TEXTOID => {
-                    to.attlen = -1;
-                    to.attbyval = false;
-                    to.attalign = b'i' as i8;
-                    to.attstorage = b'x' as i8;
-                }
-                BOXOID => {
-                    to.attlen = 32;
-                    to.attbyval = false;
-                    to.attalign = b'd' as i8;
-                    to.attstorage = b'p' as i8;
-                }
-                // anyrange (gist multirange_ops opckeytype)
-                3831 => {
-                    to.attlen = -1;
-                    to.attbyval = false;
-                    to.attalign = b'd' as i8;
-                    to.attstorage = b'x' as i8;
-                }
-                other => unported(&format!(
-                    "ConstructTupleDescriptor: opclass keytype override to {other}"
-                )),
-            }
             to.atttypid = keyType;
             to.atttypmod = -1;
-
+            to.attlen = shape.typlen;
+            to.attbyval = shape.typbyval;
+            to.attalign = shape.typalign;
+            to.attstorage = shape.typstorage;
             to.attcompression = 0;
         }
         tupdesc::populate_compact_attribute(&mut indexTupDesc, i);
@@ -437,6 +409,8 @@ pub struct IndexCreateExtra<'a> {
     pub parent_index_relid: Oid,
     pub parent_constraint_id: Oid,
     pub reloptions: Option<&'a [u8]>,
+    pub opclass_options: Option<&'a [Datum]>,
+    pub stattargets: Option<&'a [datum::NullableDatum]>,
     // C relFileNumber: valid means adopt this existing storage (TryReuseIndex).
     pub old_number: types_core::RelFileNumber,
 }
@@ -466,9 +440,6 @@ pub fn index_create<'mcx>(
     let skip_build = extra.flags & INDEX_CREATE_SKIP_BUILD != 0;
     let parentIndexRelid = extra.parent_index_relid;
 
-    if extra.flags & INDEX_CREATE_IF_NOT_EXISTS != 0 {
-        unported("index_create: if-not-exists flag");
-    }
     if concurrent && catalog::IsCatalogRelation(heapRelation) {
         return Err(err(
             "concurrent index creation on system catalog tables is not supported".into(),
@@ -545,6 +516,15 @@ pub fn index_create<'mcx>(
     }
 
     if lsyscache::get_relname_relid(indexRelationName, namespaceId)? != InvalidOid {
+        if extra.flags & INDEX_CREATE_IF_NOT_EXISTS != 0 {
+            elog_seams::ereport_msg::call(
+                types_error::NOTICE,
+                format!("relation \"{indexRelationName}\" already exists, skipping"),
+                None,
+            )?;
+            pg_class.close(RowExclusiveLock)?;
+            return Ok((InvalidOid, InvalidOid));
+        }
         return Err(err(
             format!("relation \"{indexRelationName}\" already exists"),
             ERRCODE_DUPLICATE_TABLE,
@@ -624,15 +604,34 @@ pub fn index_create<'mcx>(
     )?;
     pg_class.close(RowExclusiveLock)?;
 
-    // AppendAttributeTuples (attopts/stattargets NULL).
+    // AppendAttributeTuples.
     {
+        let natts = indexTupDesc.natts as usize;
+        let mut attrs_extra: mcx::PgVec<'_, catalog_heap::FormExtraData_pg_attribute> =
+            mcx::PgVec::new_in(mcx);
+        if let Some(attopts) = extra.opclass_options {
+            for i in 0..natts {
+                attrs_extra.push(catalog_heap::FormExtraData_pg_attribute {
+                    attoptions: if attopts[i].as_usize() != 0 {
+                        datum::NullableDatum::value(attopts[i])
+                    } else {
+                        datum::NullableDatum::null()
+                    },
+                    attstattarget: match extra.stattargets {
+                        Some(st) => st[i],
+                        None => datum::NullableDatum::null(),
+                    },
+                });
+            }
+        }
         let pg_attribute = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
         let mut indstate = catalog_indexing::CatalogOpenIndexes(mcx, &pg_attribute)?;
         catalog_heap::create::InsertPgAttributeTuples(
             mcx,
             &pg_attribute,
-            &indexTupDesc.attrs[..indexTupDesc.natts as usize],
+            &indexTupDesc.attrs[..natts],
             indexRelationId,
+            if attrs_extra.is_empty() { None } else { Some(&attrs_extra[..]) },
             Some(&mut indstate),
         )?;
         catalog_indexing::CatalogCloseIndexes(indstate)?;
@@ -994,7 +993,21 @@ pub fn index_build<'mcx>(
     };
 
     if indexRelation.rd_rel.relpersistence == types_core::RELPERSISTENCE_UNLOGGED {
-        unported("index_build: unlogged-index INIT_FORKNUM ambuildempty");
+        let key = types_storage::RelFileLocatorBackend {
+            locator: indexRelation.rd_locator.get(),
+            backend: indexRelation.rd_backend,
+        };
+        smgr::smgropen(key.locator, key.backend)?;
+        if !smgr::smgrexists(key, ForkNumber::INIT_FORKNUM)? {
+            smgr::smgrcreate(key, ForkNumber::INIT_FORKNUM, false)?;
+            catalog_storage::log_smgrcreate(&key.locator, ForkNumber::INIT_FORKNUM)?;
+            match indexRelation.rd_rel.relam {
+                HASH_AM_OID => hashsort::hashbuildempty(indexRelation)?,
+                GIST_AM_OID => gistbuild::gistbuildempty(indexRelation)?,
+                types_core::BRIN_AM_OID => brin_build::brinbuildempty(indexRelation),
+                other => unported(&format!("index_build: ambuildempty for AM {other}")),
+            }
+        }
     }
 
     if indexInfo.ii_BrokenHotChain && !isreindex && !indexInfo.ii_Concurrent {
