@@ -1,4 +1,4 @@
-//! view.c CREATE VIEW lane. CREATE OR REPLACE is a loud panic.
+//! view.c CREATE VIEW lane, including CREATE OR REPLACE.
 
 #![allow(non_snake_case)]
 
@@ -8,7 +8,7 @@ use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{DefElem, DefElemAction, Query};
+use types_nodes::parsenodes::{AlterTableCmd, AlterTableType, DefElem, DefElemAction, Query};
 use types_nodes::primnodes::RangeVar;
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName, ViewCheckOption, ViewStmt};
 use types_nodes::{Node, RawStmt};
@@ -193,7 +193,22 @@ fn DefineVirtualRelation<'mcx>(
     }
 
     if stmt.replace {
-        panic!("DefineVirtualRelation (view.c): CREATE OR REPLACE VIEW lane unported");
+        // RangeVarGetAndCheckCreationNamespace resolve + existing-oid probe;
+        // CREATE ACL check and concurrent-drop retry ride with the aclchk lane.
+        let creation_rv = rel_vocab::RangeVar {
+            catalogname: view.catalogname,
+            schemaname: view.schemaname,
+            relname: view.relname.expect("RangeVar.relname"),
+            inh: view.inh,
+            relpersistence: view.relpersistence,
+            location: view.location,
+        };
+        let namespace_id = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
+        let view_oid = lsyscache::get_relname_relid(creation_rv.relname, namespace_id)?;
+        if view_oid != InvalidOid {
+            lmgr::LockRelationOid(view_oid, types_rel::AccessExclusiveLock)?;
+            return ReplaceViewQuery(mcx, view_oid, attrList, options, viewParse);
+        }
     }
 
     let mut createStmt = Node::build::<CreateStmt>(mcx)?;
@@ -210,6 +225,126 @@ fn DefineVirtualRelation<'mcx>(
     xact::CommandCounterIncrement()?;
     StoreViewQuery(mcx, view_oid, viewParse, stmt.replace)?;
     Ok(view_oid)
+}
+
+// DefineVirtualRelation (view.c), OR REPLACE arm over an existing view.
+fn ReplaceViewQuery<'mcx>(
+    mcx: Mcx<'mcx>,
+    view_oid: Oid,
+    attrList: NodeList<'mcx>,
+    options: NodeList<'mcx>,
+    viewParse: &mut Query<'mcx>,
+) -> PgResult<Oid> {
+    let rel = relation_seams::relation_open::call(mcx, view_oid, types_rel::NoLock)?;
+
+    if rel.rd_rel.relkind != RELKIND_VIEW {
+        return Err(Box::new(
+            PgError::error(format!("\"{}\" is not a view", rel.name()))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+    catalog_heap::CheckTableNotInUse(&rel, "CREATE OR REPLACE VIEW")?;
+
+    let descriptor = tablecmds::BuildDescForRelation(mcx, &attrList)?;
+    checkViewColumns(mcx, &descriptor, &rel.rd_att)?;
+
+    let old_natts = rel.rd_att.natts;
+    if attrList.len() as i32 > old_natts {
+        let mut atcmds = NodeList::nil();
+        for (i, c) in attrList.iter().enumerate() {
+            if (i as i32) < old_natts {
+                continue;
+            }
+            let mut atcmd = Node::build::<AlterTableCmd>(mcx)?;
+            atcmd.subtype = AlterTableType::AT_AddColumnToView;
+            atcmd.def = Some(c);
+            atcmds.lappend(mcx, atcmd.seal())?;
+        }
+        tablecmds::AlterTableInternal(mcx, view_oid, &atcmds, true)?;
+        xact::CommandCounterIncrement()?;
+    }
+
+    StoreViewQuery(mcx, view_oid, viewParse, true)?;
+    xact::CommandCounterIncrement()?;
+
+    let mut atcmd = Node::build::<AlterTableCmd>(mcx)?;
+    atcmd.subtype = AlterTableType::AT_ReplaceRelOptions;
+    atcmd.def = if options.is_nil() {
+        None
+    } else {
+        Some(Node::mk_list(mcx, options)?)
+    };
+    let atcmds = NodeList::make1(mcx, atcmd.seal())?;
+    tablecmds::AlterTableInternal(mcx, view_oid, &atcmds, true)?;
+
+    let address = pg_depend::ObjectAddress::set(types_core::RELATION_RELATION_ID, view_oid);
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &address, true)?;
+
+    rel.close(types_rel::NoLock)?;
+    Ok(view_oid)
+}
+
+// checkViewColumns (view.c): the old column list must be an initial prefix of
+// the new one, with names/types/collations unchanged.
+fn checkViewColumns(
+    mcx: Mcx<'_>,
+    newdesc: &types_tuple::TupleDescData<'_>,
+    olddesc: &types_tuple::TupleDescData<'_>,
+) -> PgResult<()> {
+    let invalid = |msg: String| -> Box<PgError> {
+        Box::new(
+            PgError::error(msg).with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        )
+    };
+    if newdesc.natts < olddesc.natts {
+        return Err(invalid("cannot drop columns from view".to_string()));
+    }
+    for i in 0..olddesc.natts as usize {
+        let newattr = newdesc.attr(i);
+        let oldattr = olddesc.attr(i);
+
+        if newattr.attisdropped != oldattr.attisdropped {
+            return Err(invalid("cannot drop columns from view".to_string()));
+        }
+
+        let newname = core::str::from_utf8(newattr.attname.name_str())
+            .expect("attribute name is UTF-8");
+        let oldname = core::str::from_utf8(oldattr.attname.name_str())
+            .expect("attribute name is UTF-8");
+        if newname != oldname {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot change name of view column \"{oldname}\" to \"{newname}\""
+                ))
+                .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION)
+                .with_hint(
+                    "Use ALTER VIEW ... RENAME COLUMN ... to change name of view column instead.",
+                ),
+            ));
+        }
+
+        if newattr.atttypid != oldattr.atttypid || newattr.atttypmod != oldattr.atttypmod {
+            return Err(invalid(format!(
+                "cannot change data type of view column \"{oldname}\" from {} to {}",
+                format_type::format_type_with_typemod(oldattr.atttypid, oldattr.atttypmod)?,
+                format_type::format_type_with_typemod(newattr.atttypid, newattr.atttypmod)?,
+            )));
+        }
+
+        if newattr.attcollation != oldattr.attcollation {
+            let collname = |oid: Oid| -> PgResult<String> {
+                Ok(lsyscache::get_collation_name(mcx, oid)?
+                    .map(|n| n.to_string())
+                    .unwrap_or_default())
+            };
+            return Err(invalid(format!(
+                "cannot change collation of view column \"{oldname}\" from \"{}\" to \"{}\"",
+                collname(oldattr.attcollation)?,
+                collname(newattr.attcollation)?,
+            )));
+        }
+    }
+    Ok(())
 }
 
 // StoreViewQuery -> DefineViewRules (view.c): the ON SELECT _RETURN rule.

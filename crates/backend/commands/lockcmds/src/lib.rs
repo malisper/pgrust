@@ -1,12 +1,14 @@
 #![allow(non_snake_case)]
-// lockcmds.c, plain-table lane: views (LockViewRecurse) and inheritance
-// children (find_all_inheritors) are loud.
+// lockcmds.c: inheritance children (find_all_inheritors) are loud.
 use mcx::Mcx;
 use types_core::{
     InvalidOid, Oid, RELPERSISTENCE_TEMP, XACT_FLAGS_ACCESSEDTEMPNAMESPACE,
 };
-use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
-use types_nodes::parsenodes::{LockStmt, ObjectType};
+use types_error::{
+    PgError, PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+};
+use types_nodes::parsenodes::{LockStmt, ObjectType, Query};
+use types_nodes::Node;
 use types_rel::{NoLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
 use types_storage::{AccessShareLock, RowExclusiveLock, LOCKMODE};
 
@@ -38,7 +40,8 @@ pub fn LockTableCommand<'mcx>(mcx: Mcx<'mcx>, lockstmt: &LockStmt<'mcx>) -> PgRe
             catalog_namespace::RangeVarGetRelidExtended(&rv, mode, flags, Some(&mut callback))?;
 
         if lsyscache::get_rel_relkind(reloid)? as u8 == RELKIND_VIEW {
-            unported("LockViewRecurse (view lane)");
+            let mut ancestor_views: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+            LockViewRecurse(mcx, reloid, mode, lockstmt.nowait, &mut ancestor_views)?;
         } else if recurse {
             LockTableRecurse(mcx, reloid)?;
         }
@@ -85,6 +88,105 @@ fn RangeVarCallbackForLockTable(
         aclchk_seams::aclcheck_error::call(aclresult, objtype as i32, rv.relname)?;
     }
     Ok(())
+}
+
+struct LockViewRecurseCtx<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
+    lockmode: LOCKMODE,
+    nowait: bool,
+    check_as_user: Oid,
+    ancestor_views: &'a mut mcx::PgVec<'mcx, Oid>,
+}
+
+impl<'a, 'mcx> LockViewRecurseCtx<'a, 'mcx> {
+    fn query(&mut self, query: &Query<'mcx>) -> PgResult<bool> {
+        for rnode in query.rtable.iter() {
+            let rte = rnode.as_range_tbl_entry().expect("rtable entry");
+            let relid = rte.relid;
+            let relkind = rte.relkind;
+            if relkind != RELKIND_RELATION
+                && relkind != RELKIND_PARTITIONED_TABLE
+                && relkind != RELKIND_VIEW
+            {
+                continue;
+            }
+            if self.ancestor_views.iter().any(|&v| v == relid) {
+                continue;
+            }
+            let relname = lsyscache::get_rel_name(self.mcx, relid)?
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let aclresult = LockTableAclCheck(relid, self.lockmode, self.check_as_user)?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                let objtype = if relkind == RELKIND_VIEW {
+                    ObjectType::OBJECT_VIEW
+                } else {
+                    ObjectType::OBJECT_TABLE
+                };
+                aclchk_seams::aclcheck_error::call(aclresult, objtype as i32, &relname)?;
+            }
+            if !self.nowait {
+                lmgr::LockRelationOid(relid, self.lockmode)?;
+            } else if !lmgr::ConditionalLockRelationOid(relid, self.lockmode)? {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!("could not obtain lock on relation \"{relname}\""),
+                    )
+                    .with_sqlstate(ERRCODE_LOCK_NOT_AVAILABLE),
+                ));
+            }
+            if relkind == RELKIND_VIEW {
+                LockViewRecurse(self.mcx, relid, self.lockmode, self.nowait, self.ancestor_views)?;
+            } else if rte.inh {
+                LockTableRecurse(self.mcx, relid)?;
+            }
+        }
+        nodes_core::query_tree_walker(query, self, nodes_core::QTW_IGNORE_JOINALIASES)
+    }
+}
+
+impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for LockViewRecurseCtx<'a, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(q) = node.as_query() {
+            return self.query(q);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.query(q)
+    }
+}
+
+pub fn LockViewRecurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    reloid: Oid,
+    lockmode: LOCKMODE,
+    nowait: bool,
+    ancestor_views: &mut mcx::PgVec<'mcx, Oid>,
+) -> PgResult<()> {
+    let view = table::table_open(mcx, reloid, NoLock)?;
+    let viewquery = rewrite_handler::get_view_query(mcx, &view)?;
+
+    let check_as_user = if view
+        .rd_options
+        .as_ref()
+        .and_then(|o| o.view())
+        .is_some_and(|v| v.security_invoker)
+    {
+        miscinit::GetUserId()
+    } else {
+        view.rd_rel.relowner
+    };
+    ancestor_views.push(reloid);
+    {
+        let mut ctx = LockViewRecurseCtx { mcx, lockmode, nowait, check_as_user, ancestor_views };
+        ctx.query(viewquery)?;
+    }
+    ancestor_views.pop();
+
+    view.close(NoLock)
 }
 
 // find_all_inheritors is unported: with no children the C loop is a no-op, so

@@ -158,6 +158,8 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_SetAccessMethod
             | AlterTableType::AT_ChangeOwner
             | AlterTableType::AT_GenericOptions => AccessExclusiveLock,
+            AlterTableType::AT_AddColumnToView
+            | AlterTableType::AT_ReplaceRelOptions => AccessExclusiveLock,
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         };
         if cmd_lockmode > lockmode {
@@ -378,6 +380,19 @@ pub fn AlterTable<'mcx>(
     catalog_heap::CheckTableNotInUse(&rel, "ALTER TABLE")?;
     let recurse = stmt.relation.expect("AlterTableStmt.relation").inh;
     ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string)
+}
+
+// AlterTableInternal (tablecmds.c); EventTriggerAlterTableRelid is a no-op
+// repo-wide.
+pub fn AlterTableInternal<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    cmds: &NodeList<'mcx>,
+    recurse: bool,
+) -> PgResult<()> {
+    let lockmode = AlterTableGetLockLevel(cmds);
+    let rel = relation_seams::relation_open::call(mcx, relid, lockmode)?;
+    ATController(mcx, rel, cmds, recurse, lockmode, "")
 }
 
 fn ATController<'mcx>(
@@ -755,7 +770,11 @@ fn ATPrepCmd<'mcx>(
         AlterTableType::AT_SetCompression
         | AlterTableType::AT_SetOptions
         | AlterTableType::AT_ResetOptions => AT_PASS_MISC,
-        AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => AT_PASS_MISC,
+        AlterTableType::AT_SetRelOptions
+        | AlterTableType::AT_ResetRelOptions
+        | AlterTableType::AT_ReplaceRelOptions => AT_PASS_MISC,
+        // ATPrepAddColumn recursion is a no-op for views (no children).
+        AlterTableType::AT_AddColumnToView => AT_PASS_ADD_COL,
         AlterTableType::AT_AttachPartition
         | AlterTableType::AT_DetachPartition
         | AlterTableType::AT_DetachPartitionFinalize => AT_PASS_MISC,
@@ -841,7 +860,7 @@ fn ATRewriteCatalogs<'mcx>(
             let mut rel = relation_seams::relation_open::call(mcx, wqueue[tabidx].relid, NoLock)?;
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
-                AlterTableType::AT_AddColumn => {
+                AlterTableType::AT_AddColumn | AlterTableType::AT_AddColumnToView => {
                     ATExecAddColumn(mcx, &mut wqueue[tabidx], &rel, cnode, query_string)?;
                 }
                 AlterTableType::AT_DropColumn => {
@@ -1086,7 +1105,9 @@ fn ATRewriteCatalogs<'mcx>(
                 AlterTableType::AT_ResetOptions => {
                     ATExecSetOptions(mcx, &rel, cmd, true)?;
                 }
-                AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
+                AlterTableType::AT_SetRelOptions
+                | AlterTableType::AT_ResetRelOptions
+                | AlterTableType::AT_ReplaceRelOptions => {
                     let empty = types_nodes::NodeList::nil();
                     let defs = cmd.def.and_then(|d| d.as_list()).unwrap_or(&empty);
                     crate::setrelopts::ATExecSetRelOptions(mcx, &rel, defs, cmd.subtype, lockmode)?;
@@ -1603,7 +1624,9 @@ fn ATExecAddColumn<'mcx>(
         return Ok(());
     }
 
-    parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
+    if cmd.subtype != AlterTableType::AT_AddColumnToView {
+        parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
+    }
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
 
     let pgclass = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;

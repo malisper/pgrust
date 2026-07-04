@@ -5501,6 +5501,12 @@ impl<'mcx> Parser<'mcx> {
             }
             // drop_option: FORCE.
             1525 => *yyval = def_elem(mcx, "force", None, view.l(1))?,
+            // AlterCollationStmt: ALTER COLLATION any_name REFRESH VERSION_P.
+            1526 => {
+                let mut n = Node::build::<types_nodes::parsenodes::AlterCollationStmt>(mcx)?;
+                n.collname = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1589 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
                 n.query = view.v(5).node();

@@ -406,6 +406,11 @@ pub struct AlterOwnerStmt<'mcx> {
     pub newowner: Option<&'mcx RoleSpec<'mcx>>,
 }
 
+#[derive(Default)]
+pub struct AlterCollationStmt<'mcx> {
+    pub collname: NodeList<'mcx>,
+}
+
 // C: subtype T/N/O/C/X/V selects the ALTER DOMAIN arm; def is the default
 // expression or new Constraint.
 #[derive(Default)]
@@ -1479,6 +1484,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterFunctionStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOwnerStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOwnerStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterCollationStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterCollationStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterDomainStmt;

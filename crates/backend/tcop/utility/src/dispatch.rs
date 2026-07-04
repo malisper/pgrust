@@ -1110,6 +1110,23 @@ fn slow_switch<'mcx>(
             Ok(None)
         }
 
+        T_AlterCollationStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterCollationStmt>()
+                .expect("AlterCollationStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterCollationStmt<'_>,
+                    &types_nodes::parsenodes::AlterCollationStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = AlterCollation; no address surface yet.
+            collect_gap("ALTER COLLATION");
+            collationcmds::AlterCollation(mcx, stmt)?;
+            Ok(None)
+        }
+
         T_AlterStatsStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::rawnodes::AlterStatsStmt>()
@@ -1732,7 +1749,8 @@ fn slow_switch<'mcx>(
                 | types_nodes::parsenodes::ObjectType::OBJECT_STATISTIC_EXT
                 | types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
-                | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION => {
+                | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA => {
                     // C: address = ExecAlterOwnerStmt; no address collected yet.
                     collect_gap("ALTER OWNER");
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
@@ -1933,6 +1951,13 @@ fn exec_rename_stmt_inner<'mcx>(
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
             commands_tablespace::RenameTableSpace(
+                mcx,
+                stmt.subname.expect("RenameStmt.subname"),
+                stmt.newname.expect("RenameStmt.newname"),
+            )?;
+        }
+        types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA => {
+            schemacmds::RenameSchema(
                 mcx,
                 stmt.subname.expect("RenameStmt.subname"),
                 stmt.newname.expect("RenameStmt.newname"),

@@ -44,3 +44,4 @@ pg_shdepend = { path = "../../catalog/pg_shdepend" }
 pg_proc = { path = "../../catalog/pg_proc" }
 collationcmds = { path = "../collationcmds" }
 opclasscmds = { path = "../opclasscmds" }
+schemacmds = { path = "../schemacmds" }

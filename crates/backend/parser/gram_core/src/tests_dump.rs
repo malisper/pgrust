@@ -1344,6 +1344,10 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterCollationStmt>() {
+        out.push_str("{ALTERCOLLATIONSTMT");
+        list_field(out, "collname", &a.collname);
+        out.push('}');
     } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
         out.push_str("{ALTERDOMAINSTMT :subtype ");
         out.push(a.subtype as char);

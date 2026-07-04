@@ -614,6 +614,19 @@ pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> 
                 .sval;
             subscriptioncmds::AlterSubscriptionOwner(mcx, name, newowner)
         }
+        ObjectType::OBJECT_SCHEMA => {
+            let name = stmt
+                .object
+                .and_then(|o| o.as_string())
+                .expect("ALTER SCHEMA OWNER object is a String")
+                .sval;
+            let nsp_oid = schemacmds::AlterSchemaOwner(mcx, name, newowner)?;
+            Ok(ObjectAddress {
+                classId: NAMESPACE_RELATION_ID,
+                objectId: nsp_oid,
+                objectSubId: 0,
+            })
+        }
         ObjectType::OBJECT_DATABASE => {
             let name = stmt
                 .object

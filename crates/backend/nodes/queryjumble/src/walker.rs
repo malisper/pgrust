@@ -1385,6 +1385,10 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_u8(e.identity_type);
             js.f_str(e.name);
         }
+        NodeTag::T_AlterCollationStmt => {
+            let e = cast!(q::AlterCollationStmt);
+            list(js, &e.collname)?;
+        }
         NodeTag::T_AlterDomainStmt => {
             let e = cast!(q::AlterDomainStmt);
             js.f_u8(e.subtype);
