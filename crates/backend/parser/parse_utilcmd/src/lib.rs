@@ -849,9 +849,6 @@ pub fn transformCreateStmt<'mcx>(
         stmt_node.as_variant::<CreateStmt>().expect("transformCreateStmt on non-CreateStmt")
     };
 
-    if stmt.if_not_exists {
-        unported("IF NOT EXISTS");
-    }
     if stmt.partbound.is_some() && !stmt.tableElts.is_nil() {
         unported("PARTITION OF with a column/constraint list");
     }
@@ -862,6 +859,27 @@ pub fn transformCreateStmt<'mcx>(
 
     let relation = stmt.relation.expect("CreateStmt.relation");
     let relname = relation.relname.unwrap_or("");
+    // RangeVarGetAndCheckCreationNamespace existing-relation probe; the
+    // namespace CREATE ACL check and lock-retry loop ride with the aclchk
+    // lane (DefineRelation precedent).
+    if stmt.if_not_exists {
+        let nspid = RangeVarGetCreationNamespace(mcx, relation)?;
+        if lsyscache::get_relname_relid(relname, nspid)? != InvalidOid {
+            // checkMembershipInCurrentExtension only bites inside an
+            // extension script (needs getObjectDescription for its report).
+            if pg_depend::creating_extension() {
+                unported("CREATE TABLE IF NOT EXISTS inside an extension script");
+            }
+            elog_seams::ereport::call(
+                PgError::new(
+                    types_error::NOTICE,
+                    format!("relation \"{relname}\" already exists, skipping"),
+                )
+                .with_sqlstate(types_error::ERRCODE_DUPLICATE_TABLE),
+            )?;
+            return Ok(NodeList::nil());
+        }
+    }
     let mut columns = NodeList::nil();
     let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
     let mut ckconstraints = NodeList::nil();

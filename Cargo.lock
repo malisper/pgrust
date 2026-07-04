@@ -7904,6 +7904,7 @@ dependencies = [
  "commands_comment",
  "datum",
  "elog",
+ "elog_seams",
  "fmgr_core",
  "fmgr_seams",
  "format_type",
