@@ -521,3 +521,22 @@ pub fn exec_rescan_set_op<'mcx>(
         }
     }
 }
+
+/// `ExecReScanSetOp` chgParam-nonnull arm: stored groups are stale — hashed
+/// resets and refills the table; sorted re-reads both inputs.
+pub fn exec_rescan_set_op_chg<'mcx>(node: &mut SetOpState<'mcx>, estate: &mut EStateData<'mcx>) {
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
+    node.setop_done = false;
+    node.num_output = 0;
+    match &mut node.strategy {
+        StrategyState::Hashed(hs) => {
+            hs.hashiter = 0;
+            if hs.table_filled {
+                hs.hashtable.reset();
+                hs.table_filled = false;
+            }
+        }
+        StrategyState::Sorted(st) => st.need_init = true,
+    }
+}
