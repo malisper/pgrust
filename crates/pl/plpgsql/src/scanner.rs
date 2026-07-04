@@ -6,7 +6,9 @@ use mcx::Mcx;
 use scan_fgram::{tokens, CoreVal, CoreYYSTYPE, Scanner, ScannerSettings};
 use types_error::{PgError, PgResult};
 
-pub use tokens::{COLON_EQUALS, FCONST, ICONST, IDENT, Op, PARAM, SCONST, TYPECAST, UIDENT};
+pub use tokens::{
+    COLON_EQUALS, EQUALS_GREATER, FCONST, ICONST, IDENT, Op, PARAM, SCONST, TYPECAST, UIDENT,
+};
 
 pub const T_WORD: i32 = 275;
 pub const T_CWORD: i32 = 276;

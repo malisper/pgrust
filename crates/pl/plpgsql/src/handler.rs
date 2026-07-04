@@ -29,6 +29,7 @@ const ANUM_PG_PROC_PROVOLATILE: i32 = 15;
 const ANUM_PG_PROC_PRONARGS: i32 = 17;
 const ANUM_PG_PROC_PRORETTYPE: i32 = 19;
 const ANUM_PG_PROC_PROARGTYPES: i32 = 20;
+const ANUM_PG_PROC_PROALLARGTYPES: i32 = 21;
 const ANUM_PG_PROC_PROARGMODES: i32 = 22;
 const ANUM_PG_PROC_PROARGNAMES: i32 = 23;
 const ANUM_PG_PROC_PROSRC: i32 = 26;
@@ -161,6 +162,8 @@ struct ProcInfo {
     proname: String,
     prosrc: String,
     argtypes: Vec<Oid>,
+    /// One mode per argtypes entry; empty when proargmodes is null (all IN).
+    argmodes: Vec<i8>,
     argnames: Vec<String>,
     rettype: Oid,
     retset: bool,
@@ -183,23 +186,41 @@ fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
     let (prokind_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROKIND)?;
     let (pronargs, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONARGS)?;
     let nargs = pronargs.as_i16() as usize;
-    let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
-    let argtypes_pg = read_oidvector_attr(mcx, argv)?;
-    let (_, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
-    if !modes_null {
-        panic!("plpgsql_compile: OUT/INOUT/VARIADIC/TABLE parameters unported (function {fn_oid})");
-    }
+    // get_func_arg_info (funcapi.c): proallargtypes supersedes proargtypes
+    // when present; proargmodes rides along.
+    let (allarg_d, allarg_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROALLARGTYPES)?;
+    let (modes_d, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
+    let (argtypes, argmodes): (Vec<Oid>, Vec<i8>) = if !allarg_null {
+        let img = varlena_bytes(mcx, allarg_d)?;
+        const OIDOID: Oid = 26;
+        let _ = OIDOID;
+        let elems = datum::array_build::deconstruct_array_image(mcx, &img, 4, true, b'i')?;
+        let types: Vec<Oid> = elems.iter().map(|d| d.as_oid()).collect();
+        assert!(!modes_null, "proallargtypes without proargmodes (function {fn_oid})");
+        let mimg = varlena_bytes(mcx, modes_d)?;
+        let melems = datum::array_build::deconstruct_array_image(mcx, &mimg, 1, true, b'c')?;
+        let modes: Vec<i8> = melems.iter().map(|d| d.as_i8()).collect();
+        assert_eq!(types.len(), modes.len(), "proargmodes length mismatch (function {fn_oid})");
+        (types, modes)
+    } else {
+        let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
+        let argtypes_pg = read_oidvector_attr(mcx, argv)?;
+        (argtypes_pg.iter().copied().collect(), Vec::new())
+    };
+    let numargs = argtypes.len();
+    let _ = nargs;
     let (prosrc_d, prosrc_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSRC)?;
     assert!(!prosrc_null, "null prosrc for function {fn_oid}");
     let prosrc = varlena_str(mcx, prosrc_d)?;
     let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
     let proname = name_str(mcx, proname_d)?;
     let (argnames_d, argnames_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
-    let argnames = read_argnames_attr(mcx, argnames_d, argnames_null, nargs)?;
+    let argnames = read_argnames_attr(mcx, argnames_d, argnames_null, numargs)?;
     let info = ProcInfo {
         proname: proname.as_str().to_string(),
         prosrc: prosrc.as_str().to_string(),
-        argtypes: argtypes_pg.iter().copied().collect(),
+        argtypes,
+        argmodes,
         argnames: argnames.iter().map(|s| s.as_str().to_string()).collect(),
         rettype: rettype_d.as_oid(),
         retset: proretset.as_bool(),
@@ -325,6 +346,8 @@ fn do_compile(
     comp.ns_push_label(Some(&proc.proname), crate::gram::LABEL_BLOCK);
 
     let mut fn_argvarnos = Vec::with_capacity(proc.argtypes.len());
+    let mut fn_arg_is_input = Vec::with_capacity(proc.argtypes.len());
+    let mut out_param_varno: Dno = -1;
     let mut new_varno: Dno = -1;
     let mut old_varno: Dno = -1;
     let rettypeid;
@@ -412,7 +435,20 @@ fn do_compile(
         )?;
         fn_is_trigger = FnTrigger::EventTrigger { tg_event_varno, tg_tag_varno };
     } else {
+        const PROARGMODE_IN: i8 = b'i' as i8;
+        const PROARGMODE_OUT: i8 = b'o' as i8;
+        const PROARGMODE_INOUT: i8 = b'b' as i8;
+        const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+        const PROARGMODE_TABLE: i8 = b't' as i8;
+        let mut out_arg_variables: Vec<Dno> = Vec::new();
         for (i, &argtypeid) in proc.argtypes.iter().enumerate() {
+            let argmode = proc.argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
+            if argmode == PROARGMODE_VARIADIC {
+                panic!(
+                    "plpgsql_compile: VARIADIC parameters unported (function {fn_oid}, arg {})",
+                    i + 1
+                );
+            }
             let buf = format!("${}", i + 1);
             let argdtype = CompState::build_datatype(argtypeid, -1, fn_collation)?;
             if argdtype.ttype == TypeKind::Pseudo {
@@ -424,21 +460,30 @@ fn do_compile(
                     ),
                 )));
             }
-            if lsyscache::typ::type_is_rowtype(argtypeid)? || argtypeid == RECORDOID {
-                panic!(
-                    "plpgsql_compile: composite/record arguments unported \
-                     (function {fn_oid}, arg {})",
-                    i + 1
-                );
-            }
             let argname = &proc.argnames[i];
             let refname = if !argname.is_empty() { argname.as_str() } else { buf.as_str() };
             let dno = comp.build_variable(refname, 0, argdtype, false)?;
             fn_argvarnos.push(dno);
+            fn_arg_is_input.push(matches!(
+                argmode,
+                PROARGMODE_IN | PROARGMODE_INOUT | PROARGMODE_VARIADIC
+            ));
+            if matches!(argmode, PROARGMODE_OUT | PROARGMODE_INOUT | PROARGMODE_TABLE) {
+                out_arg_variables.push(dno);
+            }
             add_parameter_name(&mut comp, dno, &buf).map_err(|e| hdr_ctx(e))?;
             if !argname.is_empty() {
                 add_parameter_name(&mut comp, dno, argname).map_err(|e| hdr_ctx(e))?;
             }
+        }
+
+        // out_param_varno: one OUT param is itself; several build a row.
+        if out_arg_variables.len() > 1
+            || (out_arg_variables.len() == 1 && proc.prokind == b'p' as i8)
+        {
+            out_param_varno = comp.build_row("(unnamed row)", -1, out_arg_variables);
+        } else if out_arg_variables.len() == 1 {
+            out_param_varno = out_arg_variables[0];
         }
 
         // Return type checks.
@@ -453,13 +498,7 @@ fn do_compile(
                 ),
             )));
         }
-        fn_retistuple = lsyscache::typ::type_is_rowtype(rettypeid)?;
-        if fn_retistuple || rettypeid == RECORDOID {
-            panic!("plpgsql_compile: composite/record return types unported (function {fn_oid})");
-        }
-        if proc.retset {
-            panic!("plpgsql_compile: SETOF return unported (function {fn_oid})");
-        }
+        fn_retistuple = lsyscache::typ::type_is_rowtype(rettypeid)? || rettypeid == RECORDOID;
         fn_retisdomain = rettyptype == b'd' as i8;
         let (l, bv) = lsyscache::typ::get_typlenbyval(rettypeid)?;
         fn_rettyplen = l;
@@ -488,6 +527,7 @@ fn do_compile(
         fn_prokind: proc.prokind,
         fn_input_collation: fn_collation,
         fn_is_trigger: is_dml_trigger,
+        out_param_varno,
         scratch: scan_cx.mcx(),
     };
     let parse_result = parser.parse_function_body();
@@ -496,7 +536,14 @@ fn do_compile(
         attach_compile_context(e, &proc.proname, latest_line, for_validator, &proc.prosrc)
     })?;
 
-    let fn_signature = format_signature(&proc.proname, &proc.argtypes)?;
+    // format_procedure covers input args only (proargtypes).
+    let sig_argtypes: Vec<Oid> = proc
+        .argtypes
+        .iter()
+        .zip(fn_arg_is_input.iter().chain(std::iter::repeat(&true)))
+        .filter_map(|(&t, &is_in)| is_in.then_some(t))
+        .collect();
+    let fn_signature = format_signature(&proc.proname, &sig_argtypes)?;
     Ok(PlFunction {
         fn_signature,
         fn_oid,
@@ -511,12 +558,14 @@ fn do_compile(
         fn_retset: proc.retset,
         fn_readonly: proc.readonly,
         fn_prokind: proc.prokind,
-        fn_is_trigger,
-        fn_nargs: proc.argtypes.len() as i16,
+        fn_nargs: sig_argtypes.len() as i16,
         fn_argvarnos,
+        fn_arg_is_input,
+        fn_is_trigger,
         new_varno,
         old_varno,
         found_varno,
+        out_param_varno,
         datums: std::mem::take(&mut comp.datums),
         ns: std::mem::take(&mut comp.ns),
         action,
@@ -625,7 +674,9 @@ fn plpgsql_call_handler(
                     Datum::null()
                 })
             }
-            (FnTrigger::NotTrigger, None, None) => plpgsql_exec_function(&entry.func, fcinfo, true),
+            (FnTrigger::NotTrigger, None, None) => {
+                plpgsql_exec_function(&entry.func, flinfo.as_deref(), fcinfo, true)
+            }
             _ => panic!(
                 "plpgsql_call_handler: call context does not match the compiled \
                  trigger-ness (function {fn_oid})"
@@ -654,7 +705,7 @@ fn plpgsql_inline_handler(
 
     let func = compile_inline(cb.source_text)?;
     let mut fake = fmgr::LocalFcinfo::<0>::fresh(types_core::InvalidOid);
-    let result = plpgsql_exec_function(&func, &mut fake, cb.atomic);
+    let result = plpgsql_exec_function(&func, None, &mut fake, cb.atomic);
     crate::exec::free_function_plans(&func.expr_ids);
     result?;
 
@@ -687,6 +738,7 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
         fn_prokind: PROKIND_FUNCTION,
         fn_input_collation: types_core::InvalidOid,
         fn_is_trigger: false,
+        out_param_varno: -1,
         scratch: scan_cx.mcx(),
     };
     let parse_result = parser.parse_function_body();
@@ -712,10 +764,12 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
         fn_prokind: PROKIND_FUNCTION,
         fn_nargs: 0,
         fn_argvarnos: Vec::new(),
-        fn_is_trigger: false,
+        fn_arg_is_input: Vec::new(),
+        fn_is_trigger: FnTrigger::NotTrigger,
         new_varno: -1,
         old_varno: -1,
         found_varno,
+        out_param_varno: -1,
         datums: std::mem::take(&mut comp.datums),
         ns: std::mem::take(&mut comp.ns),
         action,
@@ -761,27 +815,51 @@ fn guc_check_function_bodies() -> bool {
     guc_tables::backing::check_function_bodies()
 }
 
-// plpgsql_exec_function (pl_exec.c), scalar non-SETOF arm.
+// plpgsql_exec_function (pl_exec.c).
 fn plpgsql_exec_function(
     func: &PlFunction,
+    flinfo: Option<&FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
     atomic: bool,
 ) -> PgResult<Datum> {
     let mut estate = Estate::new(func, func.fn_readonly, atomic);
+    if let Some(rsi) = fcinfo.rsinfo_mut() {
+        estate.rsi = Some(crate::exec::RsiSnapshot {
+            allowed_modes: rsi.allowedModes,
+            expected_desc: rsi.expectedDesc,
+        });
+    }
     let _frame = crate::exec::FrameGuard::push_pl(&estate);
 
-    // Store call arguments into the argument variables.
+    // Store call arguments into the argument variables; OUT-only args have
+    // no fcinfo slot and stay NULL.
     estate.frame.text.set(Some("while storing call arguments into local variables"));
+    let mut argi = 0usize;
     for (i, &dno) in func.fn_argvarnos.iter().enumerate() {
-        let arg = &fcinfo.args[i];
-        let ty = match &func.datums[dno as usize] {
-            PlDatum::Var(v) => &v.datatype,
-            _ => panic!("plpgsql: argument datum is not a Var"),
+        if !func.fn_arg_is_input.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        let (value, isnull) = {
+            let arg = &fcinfo.args[argi];
+            (arg.value, arg.isnull)
         };
-        // Argument datums live in the caller's context for the call's
-        // duration; no copy (C behaves identically for IN args).
-        let _ = ty;
-        estate.set_var(dno, arg.value, arg.isnull);
+        argi += 1;
+        match &func.datums[dno as usize] {
+            // Argument datums live in the caller's context for the call's
+            // duration; no copy (C behaves identically for IN args).
+            PlDatum::Var(_) => estate.set_var(dno, value, isnull),
+            PlDatum::Rec(_) => {
+                if isnull {
+                    estate.datums[dno as usize] = crate::exec::DatumVal::Rec(None);
+                } else {
+                    match estate.exec_assign_value(dno, value, false, RECORDOID, -1) {
+                        Ok(()) => {}
+                        Err(e) => return Err(attach_exec_context(e, &estate)),
+                    }
+                }
+            }
+            _ => panic!("plpgsql: argument datum is not a Var or Rec"),
+        }
     }
 
     // C sets FOUND=false at function entry (pl_exec.c:623).
@@ -814,19 +892,61 @@ fn plpgsql_exec_function(
         ));
     }
 
-    if estate.ret_rec.is_some() {
-        panic!(
-            "plpgsql_exec_function: coercing a record return value to a scalar \
-             return type unported (function {})",
-            func.fn_signature
-        );
-    }
-    // Cast the return value to the function's return type and copy it out
-    // of SPI/estate memory (it must survive SPI_finish and estate drop).
     estate.frame.text.set(Some("while casting return value to function's return type"));
+
+    if func.fn_retset {
+        // pl_exec.c:651-680: hand the tuplestore to the caller's rsinfo.
+        let Some(store) = estate.take_tuple_store() else {
+            // Empty set: signal materialize mode with an empty store (the
+            // executor's setResult-NULL leg also yields zero rows).
+            let Some(rsi) = fcinfo.rsinfo_mut() else {
+                return Err(crate::exec::exec_err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "set-valued function called in context that cannot accept a set"
+                        .to_string(),
+                ));
+            };
+            rsi.returnMode = fmgr::SetFunctionReturnMode::Materialize;
+            fcinfo.isnull = true;
+            return Ok(Datum::null());
+        };
+        let rsi = fcinfo.rsinfo_mut().expect("tuple store implies rsinfo");
+        rsi.returnMode = fmgr::SetFunctionReturnMode::Materialize;
+        rsi.setResult = Some(Box::new(store));
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+
+    if func.fn_retistuple && !estate.retisnull {
+        let out = coerce_function_result_tuple(&mut estate, func, flinfo, fcinfo);
+        return match out {
+            Ok(d) => {
+                fcinfo.isnull = false;
+                Ok(d)
+            }
+            Err(e) => Err(attach_exec_context(e, &estate)),
+        };
+    }
+
+    // Scalar case: cast the return value to the function's return type and
+    // copy it out of SPI/estate memory (it must survive SPI_finish and
+    // estate drop).
     let mut isnull = estate.retisnull;
     let mut retval = estate.retval;
-    if !isnull || func.fn_rettype != VOIDOID {
+    if isnull && func.fn_retisdomain {
+        // NULL into a domain return type still checks constraints.
+        retval = match estate.exec_cast_value(
+            retval,
+            &mut isnull,
+            estate.rettype,
+            -1,
+            func.fn_rettype,
+            -1,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Err(attach_exec_context(e, &estate)),
+        };
+    } else if !isnull {
         let rt = if OidIsValid(estate.rettype) { estate.rettype } else { func.fn_rettype };
         retval = match estate.exec_cast_value(retval, &mut isnull, rt, -1, func.fn_rettype, -1) {
             Ok(v) => v,
@@ -855,8 +975,9 @@ fn plpgsql_exec_event_trigger(
     };
     let mut estate = Estate::new(func, func.fn_readonly, true);
 
+    let _frame = crate::exec::FrameGuard::push_pl(&estate);
     // Divergence from C: tg_event/tg_tag are eager, not PROMISE-lazy.
-    estate.err_text = Some("during initialization of execution state");
+    estate.frame.text.set(Some("during initialization of execution state"));
     if let Err(e) = estate.assign_text_var(tg_event_varno, trigdata.event) {
         return Err(attach_exec_context(e, &estate));
     }
@@ -864,7 +985,7 @@ fn plpgsql_exec_event_trigger(
     if let Err(e) = estate.assign_text_var(tg_tag_varno, tagname) {
         return Err(attach_exec_context(e, &estate));
     }
-    estate.err_text = None;
+    estate.frame.text.set(None);
 
     let rc = match estate.exec_toplevel_block(&func.action) {
         Ok(rc) => rc,
@@ -874,6 +995,85 @@ fn plpgsql_exec_event_trigger(
     // end is success; this port accepts RC_OK directly (void-fn precedent).
     debug_assert!(rc == RC_RETURN || rc == RC_OK);
     Ok(())
+}
+
+// coerce_function_result_tuple (pl_exec.c:824) + the get_call_result_type
+// dispatch of plpgsql_exec_function's retistuple arm.
+fn coerce_function_result_tuple(
+    estate: &mut Estate<'_>,
+    func: &PlFunction,
+    flinfo: Option<&FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    use funcapi::TypeFuncClass;
+
+    // Source row: a returned record variable, or a composite Datum.
+    let rv: crate::exec::RecValue = match estate.ret_rec.take() {
+        Some(rv) => rv,
+        None => {
+            let retval = estate.retval;
+            let (desc, src, values, nulls) = estate.deconstruct_composite(retval)?;
+            crate::exec::RecValue { desc, values, nulls, src_desc: Some(src) }
+        }
+    };
+
+    let cx = mcx::MemoryContext::new("plpgsql result-type resolution");
+    let resolved = match flinfo {
+        Some(fl) => funcapi::get_call_result_type(cx.mcx(), fl, None)?,
+        None => funcapi::ResolvedResultType {
+            class: if func.fn_rettype == RECORDOID {
+                TypeFuncClass::Record
+            } else {
+                TypeFuncClass::Composite
+            },
+            result_type_id: func.fn_rettype,
+            result_tuple_desc: None,
+        },
+    };
+
+    let out_mcx = fcinfo.result_mcx();
+    match resolved.class {
+        TypeFuncClass::Composite | TypeFuncClass::CompositeDomain => {
+            if resolved.class == TypeFuncClass::CompositeDomain {
+                panic!(
+                    "plpgsql coerce_function_result_tuple: domain-over-composite \
+                     return (domain_check) unported — unit backend-pl-plpgsql-exec"
+                );
+            }
+            let expected = resolved
+                .result_tuple_desc
+                .as_ref()
+                .expect("composite result carries a tupdesc");
+            let dst = crate::exec::RecDesc::from_tupdesc(expected);
+            let (values, nulls) = crate::exec::convert_values_by_position(
+                &rv.desc,
+                &rv.values,
+                &rv.nulls,
+                &dst,
+                "returned record type does not match expected record type",
+            )?;
+            let mut td = tupdesc::CreateTupleDescCopy(out_mcx, expected)?;
+            td.tdtypeid = resolved.result_type_id;
+            td.tdtypmod = -1;
+            let tup = heaptuple::heap_form_tuple(out_mcx, &td, &values, &nulls)?;
+            let img = tup.header_ptr();
+            core::mem::forget(tup);
+            Ok(Datum::from_usize(img as usize))
+        }
+        _ => {
+            // Generic RECORD caller: pass the row back with a blessed typmod.
+            let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
+            let mut td = tupdesc::CreateTupleDescCopy(out_mcx, &src)?;
+            td.tdtypeid = RECORDOID;
+            if td.tdtypmod < 0 {
+                typcache::assign_record_type_typmod(&mut td)?;
+            }
+            let tup = heaptuple::heap_form_tuple(out_mcx, &td, &rv.values, &rv.nulls)?;
+            let img = tup.header_ptr();
+            core::mem::forget(tup);
+            Ok(Datum::from_usize(img as usize))
+        }
+    }
 }
 
 use crate::exec::attach_frame_context_at_exit as attach_exec_context;
@@ -1125,38 +1325,52 @@ fn plpgsql_exec_trigger(
     let tupdesc = rel.rd_att.clone();
     let (desc, generated) = recdesc_from_tupdesc(&tupdesc);
     let natts = desc.types.len();
-    let mut new_rv = crate::exec::RecValue {
+    let src_desc =
+        Rc::new(tupdesc::CreateTupleDescCopy(estate.datum_mcx(), &tupdesc)?);
+    let empty_rv = crate::exec::RecValue {
         desc: desc.clone(),
         values: vec![Datum::null(); natts],
         nulls: vec![true; natts],
+        src_desc: Some(src_desc),
     };
-    let mut old_rv = new_rv.clone();
+    // Absent tuples leave the rec valueless (C's NULL erh): field reads are
+    // 55000, whole-record references are SQL NULL.
+    let mut new_rv: Option<crate::exec::RecValue> = None;
+    let mut old_rv: Option<crate::exec::RecValue> = None;
 
     let ev = trigdata.tg_event;
     if !TRIGGER_FIRED_FOR_ROW(ev) {
-        // Statement triggers leave NEW/OLD field reads as NULL.
+        // Statement triggers: both NEW and OLD stay valueless.
     } else if TRIGGER_FIRED_BY_INSERT(ev) {
-        bind_trigger_tuple(&estate, &mut new_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        let mut rv = empty_rv.clone();
+        bind_trigger_tuple(&estate, &mut rv, trigdata.tg_trigtuple, &tupdesc)?;
+        new_rv = Some(rv);
     } else if TRIGGER_FIRED_BY_UPDATE(ev) {
-        bind_trigger_tuple(&estate, &mut new_rv, trigdata.tg_newtuple, &tupdesc)?;
-        bind_trigger_tuple(&estate, &mut old_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        let mut nrv = empty_rv.clone();
+        let mut orv = empty_rv.clone();
+        bind_trigger_tuple(&estate, &mut nrv, trigdata.tg_newtuple, &tupdesc)?;
+        bind_trigger_tuple(&estate, &mut orv, trigdata.tg_trigtuple, &tupdesc)?;
         // BEFORE UPDATE: stored generated columns are not computed yet, so
         // NEW carries them as NULL (pl_exec.c:1005-1023).
         if ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_BEFORE {
             for (i, g) in generated.iter().enumerate() {
                 if *g {
-                    new_rv.values[i] = Datum::null();
-                    new_rv.nulls[i] = true;
+                    nrv.values[i] = Datum::null();
+                    nrv.nulls[i] = true;
                 }
             }
         }
+        new_rv = Some(nrv);
+        old_rv = Some(orv);
     } else if TRIGGER_FIRED_BY_DELETE(ev) {
-        bind_trigger_tuple(&estate, &mut old_rv, trigdata.tg_trigtuple, &tupdesc)?;
+        let mut rv = empty_rv.clone();
+        bind_trigger_tuple(&estate, &mut rv, trigdata.tg_trigtuple, &tupdesc)?;
+        old_rv = Some(rv);
     } else {
         panic!("unrecognized trigger action: not INSERT, DELETE, or UPDATE");
     }
-    estate.datums[func.new_varno as usize] = crate::exec::DatumVal::Rec(Some(new_rv));
-    estate.datums[func.old_varno as usize] = crate::exec::DatumVal::Rec(Some(old_rv));
+    estate.datums[func.new_varno as usize] = crate::exec::DatumVal::Rec(new_rv);
+    estate.datums[func.old_varno as usize] = crate::exec::DatumVal::Rec(old_rv);
 
     if trigdata.tg_trigger.tgoldtable.is_some() || trigdata.tg_trigger.tgnewtable.is_some() {
         panic!(
@@ -1190,11 +1404,17 @@ fn plpgsql_exec_trigger(
     if estate.retisnull || !TRIGGER_FIRED_FOR_ROW(ev) {
         return Ok(Datum::null());
     }
-    let Some(rv) = estate.ret_rec.take() else {
-        panic!(
-            "plpgsql_exec_trigger (pl_exec.c): non-record composite RETURN \
-             (deconstruct_composite_datum lane) unported — unit backend-pl-plpgsql-exec"
-        );
+    let rv = match estate.ret_rec.take() {
+        Some(rv) => rv,
+        None => {
+            // Composite Datum returned by expression: deconstruct it.
+            let retval = estate.retval;
+            let (d, s, values, nulls) = match estate.deconstruct_composite(retval) {
+                Ok(x) => x,
+                Err(e) => return Err(attach_exec_context(e, &estate)),
+            };
+            crate::exec::RecValue { desc: d, values, nulls, src_desc: Some(s) }
+        }
     };
     // build_attrmap_by_position + execute_attr_map_tuple: map the returned
     // row onto the relation rowtype (typmod-aware position walk).

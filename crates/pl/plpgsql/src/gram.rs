@@ -16,6 +16,9 @@ const INT4OID: Oid = 23;
 const VOIDOID: Oid = 2278;
 const REFCURSOROID: Oid = 1790;
 const PROKIND_PROCEDURE: i8 = b'p' as i8;
+const CURSOR_OPT_SCROLL: i32 = 0x0002;
+const CURSOR_OPT_NO_SCROLL: i32 = 0x0004;
+const CURSOR_OPT_FAST_PLAN: i32 = 0x0100;
 
 pub const LABEL_BLOCK: i32 = 0;
 pub const LABEL_LOOP: i32 = 1;
@@ -39,6 +42,7 @@ pub struct Parser<'a, 'mcx> {
     pub fn_prokind: i8,
     pub fn_input_collation: Oid,
     pub fn_is_trigger: bool,
+    pub out_param_varno: Dno,
     pub scratch: mcx::Mcx<'mcx>,
 }
 
@@ -311,10 +315,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 if Self::tok_is_keyword(&t3, K_TYPE, "type") {
                     result = Some(self.comp.parse_wordtype(&name)?);
                 } else if Self::tok_is_keyword(&t3, K_ROWTYPE, "rowtype") {
-                    panic!(
-                        "plpgsql_parse_wordrowtype (pl_comp.c): %ROWTYPE unported — \
-                         unit backend-pl-plpgsql-comp"
-                    );
+                    result = Some(self.comp.parse_wordrowtype(&name)?);
                 } else {
                     self.push_back(&t3)?;
                     self.push_back(&t2)?;
@@ -330,10 +331,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 if Self::tok_is_keyword(&t3, K_TYPE, "type") {
                     result = Some(self.comp.parse_cwordtype(&idents)?);
                 } else if Self::tok_is_keyword(&t3, K_ROWTYPE, "rowtype") {
-                    panic!(
-                        "plpgsql_parse_cwordrowtype (pl_comp.c): %ROWTYPE unported — \
-                         unit backend-pl-plpgsql-comp"
-                    );
+                    result = Some(self.comp.parse_cwordrowtype(&idents)?);
                 } else {
                     self.push_back(&t3)?;
                     self.push_back(&t2)?;
@@ -745,10 +743,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             || Self::tok_is_keyword(&t, K_SCROLL, "scroll")
             || Self::tok_is_keyword(&t, K_NO, "no")
         {
-            panic!(
-                "decl_cursor (pl_gram.y): bound cursor declarations unported — \
-                 unit backend-pl-plpgsql-gram"
-            );
+            return self.parse_decl_cursor(&name, lineno, t);
         }
         let isconst = if Self::tok_is_keyword(&t, K_CONSTANT, "constant") {
             true
@@ -808,6 +803,84 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 e.target_param = dno;
                 v.default_val = Some(e);
             }
+        }
+        Ok(())
+    }
+
+    // decl_statement cursor arm (pl_gram.y:553-577) + opt_scrollable +
+    // decl_cursor_args + decl_cursor_query.
+    fn parse_decl_cursor(&mut self, name: &str, lineno: i32, t: Tok) -> PgResult<()> {
+        let mut cursor_options = CURSOR_OPT_FAST_PLAN;
+        let mut t = t;
+        if Self::tok_is_keyword(&t, K_NO, "no") {
+            self.expect(K_SCROLL, "syntax error")?;
+            cursor_options |= CURSOR_OPT_NO_SCROLL;
+            t = self.yylex()?;
+        } else if Self::tok_is_keyword(&t, K_SCROLL, "scroll") {
+            cursor_options |= CURSOR_OPT_SCROLL;
+            t = self.yylex()?;
+        }
+        if !Self::tok_is_keyword(&t, K_CURSOR, "cursor") {
+            return Err(self.yyerror("syntax error", t.2));
+        }
+
+        self.comp.ns_push_label(Some(name), LABEL_BLOCK);
+        let t = self.yylex()?;
+        let argrow: Dno = if t.0 == ('(' as i32) {
+            let arg_loc = t.2;
+            self.comp.identifier_lookup = IdentifierLookup::Declare;
+            let mut varnos = Vec::new();
+            loop {
+                let (argname, arg_name_loc) = self.decl_varname()?;
+                let arg_lineno = self.lineno(arg_name_loc);
+                let datatype = self.read_datatype(None)?;
+                let dno = self.comp.build_variable(&argname, arg_lineno, datatype, true)?;
+                varnos.push(dno);
+                let sep = self.yylex()?;
+                if sep.0 == (',' as i32) {
+                    continue;
+                }
+                if sep.0 == (')' as i32) {
+                    break;
+                }
+                return Err(self.yyerror("syntax error", sep.2));
+            }
+            self.comp.identifier_lookup = IdentifierLookup::Normal;
+            let row_lineno = self.lineno(arg_loc);
+            self.comp.build_row("(unnamed row)", row_lineno, varnos)
+        } else {
+            self.push_back(&t)?;
+            -1
+        };
+
+        // decl_is_for.
+        let t = self.yylex()?;
+        if t.0 != K_FOR && !Self::tok_is_keyword(&t, K_IS, "is") {
+            return Err(self.yyerror("syntax error", t.2));
+        }
+        let query = self.read_sql_construct(
+            ';' as i32,
+            0,
+            0,
+            ";",
+            RawParseMode::RAW_PARSE_DEFAULT,
+            false,
+            true,
+            None,
+            None,
+        )?;
+        self.comp.ns_pop();
+
+        let dno = self.comp.build_variable(
+            name,
+            lineno,
+            CompState::build_datatype(REFCURSOROID, -1, types_core::InvalidOid)?,
+            true,
+        )?;
+        if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
+            v.cursor_explicit_expr = Some(query);
+            v.cursor_explicit_argrow = argrow;
+            v.cursor_options = cursor_options;
         }
         Ok(())
     }
@@ -935,10 +1008,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_GET => Ok(Some(self.parse_getdiag(lloc)?)),
             K_PERFORM => Ok(Some(self.parse_perform(t, lloc)?)),
             K_EXECUTE => Ok(Some(self.parse_dynexecute(lloc)?)),
-            K_OPEN | K_FETCH | K_MOVE | K_CLOSE => panic!(
-                "cursor statements (pl_gram.y): OPEN/FETCH/MOVE/CLOSE unported — \
-                 unit backend-pl-plpgsql-gram"
-            ),
+            K_OPEN => Ok(Some(self.parse_open(lloc)?)),
+            K_FETCH => Ok(Some(self.parse_fetch(lloc)?)),
+            K_MOVE => Ok(Some(self.parse_move(lloc)?)),
+            K_CLOSE => Ok(Some(self.parse_close(lloc)?)),
             K_CALL | K_DO => panic!(
                 "stmt_call (pl_gram.y): CALL/DO unported — unit backend-pl-plpgsql-gram"
             ),
@@ -982,6 +1055,392 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             }
             _ => Err(self.yyerror("syntax error", lloc)),
         }
+    }
+
+    // cursor_variable (pl_gram.y:2282): must be a refcursor-typed Var.
+    fn cursor_variable(&mut self) -> PgResult<Dno> {
+        let t = self.yylex()?;
+        if t.0 == T_DATUM {
+            let w = t.1.wdatum.as_ref().expect("T_DATUM");
+            if let PlDatum::Var(v) = &self.comp.datums[w.dno as usize] {
+                if v.datatype.typoid == REFCURSOROID {
+                    return Ok(w.dno);
+                }
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    format!("variable \"{}\" must be of type cursor or refcursor", v.refname),
+                    t.2,
+                ));
+            }
+            let name = self.comp.datums[t.1.wdatum.as_ref().unwrap().dno as usize]
+                .refname()
+                .to_string();
+            return Err(self.gram_err_pos(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                format!("variable \"{name}\" must be of type cursor or refcursor"),
+                t.2,
+            ));
+        }
+        Err(self.current_token_is_not_variable(&t))
+    }
+
+    // stmt_open (pl_gram.y:2100).
+    fn parse_open(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let lineno = self.lineno(lloc);
+        let curvar = self.cursor_variable()?;
+        let mut cursor_options = CURSOR_OPT_FAST_PLAN;
+        let mut argquery = None;
+        let mut query = None;
+        let mut dynquery = None;
+        let mut params = Vec::new();
+
+        let explicit = matches!(
+            &self.comp.datums[curvar as usize],
+            PlDatum::Var(v) if v.cursor_explicit_expr.is_some()
+        );
+        if !explicit {
+            let mut t = self.yylex()?;
+            if Self::tok_is_keyword(&t, K_NO, "no") {
+                let t2 = self.yylex()?;
+                if Self::tok_is_keyword(&t2, K_SCROLL, "scroll") {
+                    cursor_options |= CURSOR_OPT_NO_SCROLL;
+                    t = self.yylex()?;
+                } else {
+                    self.push_back(&t2)?;
+                }
+            } else if Self::tok_is_keyword(&t, K_SCROLL, "scroll") {
+                cursor_options |= CURSOR_OPT_SCROLL;
+                t = self.yylex()?;
+            }
+            if t.0 != K_FOR {
+                return Err(self.yyerror("syntax error, expected \"FOR\"", t.2));
+            }
+            let t = self.yylex()?;
+            if t.0 == K_EXECUTE {
+                let mut endtoken = 0i32;
+                dynquery =
+                    Some(self.read_sql_expression2(K_USING, ';' as i32, "USING or ;", &mut endtoken)?);
+                if endtoken == K_USING {
+                    loop {
+                        let mut term = 0i32;
+                        let expr =
+                            self.read_sql_expression2(',' as i32, ';' as i32, ", or ;", &mut term)?;
+                        params.push(expr);
+                        if term != (',' as i32) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                self.push_back(&t)?;
+                query = Some(self.read_sql_construct(
+                    ';' as i32,
+                    0,
+                    0,
+                    ";",
+                    RawParseMode::RAW_PARSE_DEFAULT,
+                    false,
+                    true,
+                    None,
+                    None,
+                )?);
+            }
+        } else {
+            argquery = self.read_cursor_args(curvar, ';' as i32)?;
+        }
+
+        Ok(PlStmt::Open {
+            lineno,
+            curvar,
+            cursor_options,
+            argquery,
+            query,
+            dynquery,
+            params,
+        })
+    }
+
+    // read_fetch_direction (pl_gram.y:3197); returns
+    // (direction, how_many, expr, returns_multiple_rows).
+    fn read_fetch_direction(&mut self) -> PgResult<(i32, i64, Option<PlExpr>, bool)> {
+        let mut direction = FETCH_FORWARD;
+        let mut how_many: i64 = 1;
+        let mut expr: Option<PlExpr> = None;
+        let mut multi = false;
+        let mut check_from = true;
+
+        let t = self.yylex()?;
+        if t.0 == 0 {
+            return Err(self.yyerror("unexpected end of function definition", t.2));
+        }
+        if Self::tok_is_keyword(&t, K_NEXT, "next") {
+        } else if Self::tok_is_keyword(&t, K_PRIOR, "prior") {
+            direction = FETCH_BACKWARD;
+        } else if Self::tok_is_keyword(&t, K_FIRST, "first") {
+            direction = FETCH_ABSOLUTE;
+        } else if Self::tok_is_keyword(&t, K_LAST, "last") {
+            direction = FETCH_ABSOLUTE;
+            how_many = -1;
+        } else if Self::tok_is_keyword(&t, K_ABSOLUTE, "absolute") {
+            direction = FETCH_ABSOLUTE;
+            let mut term = 0i32;
+            expr = Some(self.read_sql_expression2(K_FROM, K_IN, "FROM or IN", &mut term)?);
+            check_from = false;
+        } else if Self::tok_is_keyword(&t, K_RELATIVE, "relative") {
+            direction = FETCH_RELATIVE;
+            let mut term = 0i32;
+            expr = Some(self.read_sql_expression2(K_FROM, K_IN, "FROM or IN", &mut term)?);
+            check_from = false;
+        } else if Self::tok_is_keyword(&t, K_ALL, "all") {
+            how_many = FETCH_ALL;
+            multi = true;
+        } else if Self::tok_is_keyword(&t, K_FORWARD, "forward") {
+            self.complete_direction(&mut how_many, &mut expr, &mut multi, &mut check_from)?;
+        } else if Self::tok_is_keyword(&t, K_BACKWARD, "backward") {
+            direction = FETCH_BACKWARD;
+            self.complete_direction(&mut how_many, &mut expr, &mut multi, &mut check_from)?;
+        } else if t.0 == K_FROM || t.0 == K_IN {
+            check_from = false;
+        } else if t.0 == T_DATUM {
+            self.push_back(&t)?;
+            check_from = false;
+        } else {
+            self.push_back(&t)?;
+            let mut term = 0i32;
+            expr = Some(self.read_sql_expression2(K_FROM, K_IN, "FROM or IN", &mut term)?);
+            multi = true;
+            check_from = false;
+        }
+
+        if check_from {
+            let t = self.yylex()?;
+            if t.0 != K_FROM && t.0 != K_IN {
+                return Err(self.yyerror("expected FROM or IN", t.2));
+            }
+        }
+        Ok((direction, how_many, expr, multi))
+    }
+
+    // complete_direction (pl_gram.y:3324).
+    fn complete_direction(
+        &mut self,
+        how_many: &mut i64,
+        expr: &mut Option<PlExpr>,
+        multi: &mut bool,
+        check_from: &mut bool,
+    ) -> PgResult<()> {
+        let t = self.yylex()?;
+        if t.0 == 0 {
+            return Err(self.yyerror("unexpected end of function definition", t.2));
+        }
+        if t.0 == K_FROM || t.0 == K_IN {
+            *check_from = false;
+            return Ok(());
+        }
+        if t.0 == K_ALL {
+            *how_many = FETCH_ALL;
+            *multi = true;
+            *check_from = true;
+            return Ok(());
+        }
+        self.push_back(&t)?;
+        let mut term = 0i32;
+        *expr = Some(self.read_sql_expression2(K_FROM, K_IN, "FROM or IN", &mut term)?);
+        *multi = true;
+        *check_from = false;
+        Ok(())
+    }
+
+    // stmt_fetch (pl_gram.y:2178).
+    fn parse_fetch(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let (direction, how_many, expr, multi) = self.read_fetch_direction()?;
+        let curvar = self.cursor_variable()?;
+        self.expect(K_INTO, "syntax error")?;
+        let (target, _strict) = self.read_into_target(false)?;
+        let t = self.yylex()?;
+        if t.0 != (';' as i32) {
+            return Err(self.yyerror("syntax error", t.2));
+        }
+        if multi {
+            return Err(self.gram_err_pos(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "FETCH statement cannot return multiple rows".to_string(),
+                lloc,
+            ));
+        }
+        Ok(PlStmt::Fetch {
+            lineno: self.lineno(lloc),
+            target,
+            curvar,
+            direction,
+            how_many,
+            expr,
+            is_move: false,
+            returns_multiple_rows: false,
+        })
+    }
+
+    // stmt_move (pl_gram.y:2208).
+    fn parse_move(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let (direction, how_many, expr, multi) = self.read_fetch_direction()?;
+        let curvar = self.cursor_variable()?;
+        self.expect(';' as i32, "syntax error")?;
+        Ok(PlStmt::Fetch {
+            lineno: self.lineno(lloc),
+            target: -1,
+            curvar,
+            direction,
+            how_many,
+            expr,
+            is_move: true,
+            returns_multiple_rows: multi,
+        })
+    }
+
+    // stmt_close (pl_gram.y:2226).
+    fn parse_close(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        let curvar = self.cursor_variable()?;
+        self.expect(';' as i32, "syntax error")?;
+        Ok(PlStmt::Close { lineno: self.lineno(lloc), curvar })
+    }
+
+    // read_cursor_args (pl_gram.y:3908): positional/named args re-serialized
+    // as one SELECT-list expression in declared order.
+    fn read_cursor_args(&mut self, curvar: Dno, until: i32) -> PgResult<Option<PlExpr>> {
+        let (argrow, curname) = match &self.comp.datums[curvar as usize] {
+            PlDatum::Var(v) => (v.cursor_explicit_argrow, v.refname.clone()),
+            _ => unreachable!("cursor_variable checked"),
+        };
+        let t = self.yylex()?;
+        if argrow < 0 {
+            if t.0 == ('(' as i32) {
+                return Err(self.gram_err_pos(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!("cursor \"{curname}\" has no arguments"),
+                    t.2,
+                ));
+            }
+            if t.0 != until {
+                return Err(self.yyerror("syntax error", t.2));
+            }
+            return Ok(None);
+        }
+        if t.0 != ('(' as i32) {
+            return Err(self.gram_err_pos(
+                ERRCODE_SYNTAX_ERROR,
+                format!("cursor \"{curname}\" has arguments"),
+                t.2,
+            ));
+        }
+
+        let fieldnames = match &self.comp.datums[argrow as usize] {
+            PlDatum::Row(r) => r.fieldnames.clone(),
+            _ => unreachable!("cursor argrow is a Row"),
+        };
+        let nfields = fieldnames.len();
+        let mut argv: Vec<Option<String>> = vec![None; nfields];
+        let mut any_named = false;
+
+        for argc in 0..nfields {
+            // Named notation: IDENT := expr / IDENT => expr.
+            let mut argpos = argc;
+            let t1 = self.yylex()?;
+            let arglocation = t1.2;
+            let named_candidate = t1.0 == T_WORD || t1.0 == T_DATUM || Self::token_is_unreserved_keyword(&t1);
+            let argname: Option<String> = if named_candidate {
+                let t2 = self.yylex()?;
+                let is_named = t2.0 == COLON_EQUALS || t2.0 == EQUALS_GREATER;
+                if is_named {
+                    let name = if t1.0 == T_WORD {
+                        t1.1.word.as_ref().expect("T_WORD").ident.clone()
+                    } else if t1.0 == T_DATUM {
+                        let w = t1.1.wdatum.as_ref().expect("T_DATUM");
+                        if !w.ident.is_empty() { w.ident.clone() } else { w.idents.join(".") }
+                    } else {
+                        Self::unreserved_keyword_name(&t1).unwrap_or("").to_string()
+                    };
+                    Some(name)
+                } else {
+                    self.push_back(&t2)?;
+                    self.push_back(&t1)?;
+                    None
+                }
+            } else {
+                self.push_back(&t1)?;
+                None
+            };
+            if let Some(name) = argname {
+                match fieldnames.iter().position(|f| *f == name) {
+                    Some(p) => argpos = p,
+                    None => {
+                        return Err(self.gram_err_pos(
+                            ERRCODE_SYNTAX_ERROR,
+                            format!(
+                                "cursor \"{curname}\" has no argument named \"{name}\""
+                            ),
+                            arglocation,
+                        ));
+                    }
+                }
+                any_named = true;
+            }
+            if argv[argpos].is_some() {
+                return Err(self.gram_err_pos(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!(
+                        "value for parameter \"{}\" of cursor \"{curname}\" specified more than once",
+                        fieldnames[argpos]
+                    ),
+                    arglocation,
+                ));
+            }
+            let mut endtoken = 0i32;
+            let item = self.read_sql_construct(
+                ',' as i32,
+                ')' as i32,
+                0,
+                ",\" or \")",
+                RawParseMode::RAW_PARSE_PLPGSQL_EXPR,
+                true,
+                true,
+                None,
+                Some(&mut endtoken),
+            )?;
+            argv[argpos] = Some(item.query);
+            if endtoken == (')' as i32) && argc != nfields - 1 {
+                return Err(self.gram_err_pos(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!("not enough arguments for cursor \"{curname}\""),
+                    arglocation,
+                ));
+            }
+            if endtoken == (',' as i32) && argc == nfields - 1 {
+                return Err(self.gram_err_pos(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!("too many arguments for cursor \"{curname}\""),
+                    arglocation,
+                ));
+            }
+        }
+
+        let mut ds = String::new();
+        for (i, a) in argv.iter().enumerate() {
+            ds.push_str(a.as_ref().expect("all filled"));
+            if any_named {
+                ds.push_str(" AS ");
+                ds.push_str(&format_type::quote_identifier(&fieldnames[i]));
+            }
+            if i < nfields - 1 {
+                ds.push_str(", ");
+            }
+        }
+        let expr = self.make_expr(ds, RawParseMode::RAW_PARSE_PLPGSQL_EXPR, self.comp.ns_top);
+
+        let t = self.yylex()?;
+        if t.0 != until {
+            return Err(self.yyerror("syntax error", t.2));
+        }
+        Ok(Some(expr))
     }
 
     fn parse_assign(&mut self, t: Tok) -> PgResult<PlStmt> {
@@ -1150,6 +1609,29 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         }
     }
 
+    fn query_for_target(
+        &mut self,
+        name: &str,
+        var_lineno: i32,
+        var_loc: i32,
+        scalar: Option<Dno>,
+        rowrec: Option<Dno>,
+    ) -> PgResult<Dno> {
+        if let Some(r) = rowrec {
+            self.check_assignable(r, var_loc)?;
+            return Ok(r);
+        }
+        if let Some(s) = scalar {
+            return self.make_scalar_list1(name, s, var_lineno, var_loc);
+        }
+        Err(self.gram_err_pos(
+            types_error::ERRCODE_DATATYPE_MISMATCH,
+            "loop variable of loop over rows must be a record variable or list of scalar variables"
+                .to_string(),
+            var_loc,
+        ))
+    }
+
     fn parse_for(&mut self, label: Option<String>, for_loc: i32) -> PgResult<PlStmt> {
         self.comp.ns_push_label(label.as_deref(), LABEL_LOOP);
         let (name, var_lineno, scalar, rowrec, var_loc) = self.parse_for_variable()?;
@@ -1158,20 +1640,54 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let t = self.yylex()?;
         let tokloc = t.2;
         if t.0 == K_EXECUTE {
-            panic!(
-                "stmt_dynfors (pl_gram.y): FOR ... IN EXECUTE unported — \
-                 unit backend-pl-plpgsql-gram"
-            );
+            let mut term = 0i32;
+            let dynquery = self.read_sql_expression2(K_LOOP, K_USING, "LOOP", &mut term)?;
+            let mut params = Vec::new();
+            if term == K_USING {
+                loop {
+                    let mut t2 = 0i32;
+                    let expr =
+                        self.read_sql_expression2(',' as i32, K_LOOP, ", or LOOP", &mut t2)?;
+                    params.push(expr);
+                    if t2 != (',' as i32) {
+                        break;
+                    }
+                }
+            }
+            let var = self.query_for_target(&name, var_lineno, var_loc, scalar, rowrec)?;
+            let (body, end_label, end_loc) = self.parse_loop_body()?;
+            self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
+            self.comp.ns_pop();
+            return Ok(PlStmt::DynForS {
+                lineno: self.lineno(for_loc),
+                label,
+                var,
+                query: dynquery,
+                params,
+                body,
+            });
         }
         if t.0 == T_DATUM {
-            let w = t.1.wdatum.as_ref().expect("T_DATUM");
-            if let PlDatum::Var(v) = &self.comp.datums[w.dno as usize] {
-                if v.datatype.typoid == REFCURSOROID {
-                    panic!(
-                        "stmt_forc (pl_gram.y): FOR over a bound cursor unported — \
-                         unit backend-pl-plpgsql-gram"
-                    );
-                }
+            let w = t.1.wdatum.clone().expect("T_DATUM");
+            let is_cursor = matches!(
+                &self.comp.datums[w.dno as usize],
+                PlDatum::Var(v) if v.datatype.typoid == REFCURSOROID
+            );
+            if is_cursor {
+                let curvar = w.dno;
+                let var = self.comp.build_rec(&name, var_lineno, true);
+                let argquery = self.read_cursor_args(curvar, K_LOOP)?;
+                let (body, end_label, end_loc) = self.parse_loop_body()?;
+                self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
+                self.comp.ns_pop();
+                return Ok(PlStmt::ForC {
+                    lineno: self.lineno(for_loc),
+                    label,
+                    var,
+                    curvar,
+                    argquery,
+                    body,
+                });
             }
         }
         let mut reverse = false;
@@ -1240,19 +1756,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 ));
             }
             self.check_sql_expr(&expr1.query, expr1.parse_mode, expr1loc)?;
-            let var = if let Some(r) = rowrec {
-                self.check_assignable(r, var_loc)?;
-                r
-            } else if let Some(s) = scalar {
-                self.make_scalar_list1(&name, s, var_lineno, var_loc)?
-            } else {
-                return Err(self.gram_err_pos(
-                    types_error::ERRCODE_DATATYPE_MISMATCH,
-                    "loop variable of loop over rows must be a record variable or list of scalar variables"
-                        .to_string(),
-                    var_loc,
-                ));
-            };
+            let var = self.query_for_target(&name, var_lineno, var_loc, scalar, rowrec)?;
             let (body, end_label, end_loc) = self.parse_loop_body()?;
             self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
             self.comp.ns_pop();
@@ -1464,11 +1968,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         if t.0 == 0 {
             return Err(self.yyerror("unexpected end of function definition", t.2));
         }
-        if Self::tok_is_keyword(&t, K_NEXT, "next") || Self::tok_is_keyword(&t, K_QUERY, "query") {
-            panic!(
-                "make_return_next/query_stmt (pl_gram.y): RETURN NEXT/QUERY unported — \
-                 unit backend-pl-plpgsql-gram"
-            );
+        if Self::tok_is_keyword(&t, K_NEXT, "next") {
+            return self.make_return_next_stmt(lloc);
+        }
+        if Self::tok_is_keyword(&t, K_QUERY, "query") {
+            return self.make_return_query_stmt(lloc);
         }
         self.push_back(&t)?;
 
@@ -1481,6 +1985,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
                         .errmsg("RETURN cannot have a parameter in function returning set")
                         .errhint("Use RETURN NEXT or RETURN QUERY.")
+                        .errposition(self.sc.errposition(t.2))
                         .into_error(),
                 ));
             }
@@ -1502,6 +2007,17 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             }
             return Ok(PlStmt::Return { lineno, expr: None, retvarno: -1 });
         }
+        if self.out_param_varno >= 0 {
+            let t = self.yylex()?;
+            if t.0 != (';' as i32) {
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    "RETURN cannot have a parameter in function with OUT parameters".to_string(),
+                    t.2,
+                ));
+            }
+            return Ok(PlStmt::Return { lineno, expr: None, retvarno: self.out_param_varno });
+        }
 
         let t = self.yylex()?;
         // pl_gram.y:3408-3412: fast path only for VAR/PROMISE/ROW/REC datums;
@@ -1520,6 +2036,87 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         self.push_back(&t)?;
         let expr = self.read_sql_expression(';' as i32, ";")?;
         Ok(PlStmt::Return { lineno, expr: Some(expr), retvarno: -1 })
+    }
+
+    // make_return_next_stmt (pl_gram.y:3437).
+    fn make_return_next_stmt(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        if !self.fn_retset {
+            return Err(self.gram_err_pos(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                "cannot use RETURN NEXT in a non-SETOF function".to_string(),
+                lloc,
+            ));
+        }
+        let lineno = self.lineno(lloc);
+        if self.out_param_varno >= 0 {
+            let t = self.yylex()?;
+            if t.0 != (';' as i32) {
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    "RETURN NEXT cannot have a parameter in function with OUT parameters"
+                        .to_string(),
+                    t.2,
+                ));
+            }
+            return Ok(PlStmt::ReturnNext { lineno, expr: None, retvarno: self.out_param_varno });
+        }
+        let t = self.yylex()?;
+        if t.0 == T_DATUM && self.peek()? == (';' as i32) {
+            let retvarno = t.1.wdatum.as_ref().expect("T_DATUM").dno;
+            if matches!(
+                self.comp.datums[retvarno as usize],
+                PlDatum::Var(_) | PlDatum::Row(_) | PlDatum::Rec(_)
+            ) {
+                let semi = self.yylex()?;
+                debug_assert_eq!(semi.0, ';' as i32);
+                return Ok(PlStmt::ReturnNext { lineno, expr: None, retvarno });
+            }
+        }
+        self.push_back(&t)?;
+        let expr = self.read_sql_expression(';' as i32, ";")?;
+        Ok(PlStmt::ReturnNext { lineno, expr: Some(expr), retvarno: -1 })
+    }
+
+    // make_return_query_stmt (pl_gram.y:3501).
+    fn make_return_query_stmt(&mut self, lloc: i32) -> PgResult<PlStmt> {
+        if !self.fn_retset {
+            return Err(self.gram_err_pos(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                "cannot use RETURN QUERY in a non-SETOF function".to_string(),
+                lloc,
+            ));
+        }
+        let lineno = self.lineno(lloc);
+        let t = self.yylex()?;
+        if t.0 != K_EXECUTE {
+            self.push_back(&t)?;
+            let query = self.read_sql_construct(
+                ';' as i32,
+                0,
+                0,
+                ";",
+                RawParseMode::RAW_PARSE_DEFAULT,
+                false,
+                true,
+                None,
+                None,
+            )?;
+            return Ok(PlStmt::ReturnQuery { lineno, query: Some(query), dynquery: None, params: Vec::new() });
+        }
+        let mut term = 0i32;
+        let dynquery = self.read_sql_expression2(';' as i32, K_USING, "; or USING", &mut term)?;
+        let mut params = Vec::new();
+        if term == K_USING {
+            loop {
+                let mut t2 = 0i32;
+                let expr = self.read_sql_expression2(',' as i32, ';' as i32, ", or ;", &mut t2)?;
+                params.push(expr);
+                if t2 != (',' as i32) {
+                    break;
+                }
+            }
+        }
+        Ok(PlStmt::ReturnQuery { lineno, query: None, dynquery: Some(dynquery), params })
     }
 
     fn recognize_err_condition(&self, condname: &str, allow_sqlstate: bool) -> PgResult<()> {

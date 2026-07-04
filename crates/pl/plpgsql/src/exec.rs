@@ -46,7 +46,7 @@ const RECORDOID: Oid = 2249;
 const VOIDOID: Oid = 2278;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
-const CURSOR_OPT_PARALLEL_OK: i32 = 0x0100;
+const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 
 pub(crate) struct Ctx(*mut MemoryContext);
 
@@ -82,11 +82,39 @@ pub struct RecDesc {
     pub dropped: Vec<bool>,
 }
 
+impl RecDesc {
+    pub fn from_tupdesc(td: &types_tuple::TupleDescData<'_>) -> RecDesc {
+        let natts = td.attrs.len();
+        let mut d = RecDesc {
+            names: Vec::with_capacity(natts),
+            types: Vec::with_capacity(natts),
+            typmods: Vec::with_capacity(natts),
+            typlens: Vec::with_capacity(natts),
+            typbyvals: Vec::with_capacity(natts),
+            dropped: Vec::with_capacity(natts),
+        };
+        for a in td.attrs.iter() {
+            d.names
+                .push(String::from_utf8_lossy(a.attname.name_str()).to_ascii_lowercase());
+            d.types.push(a.atttypid);
+            d.typmods.push(a.atttypmod);
+            d.typlens.push(a.attlen);
+            d.typbyvals.push(a.attbyval);
+            d.dropped.push(a.attisdropped);
+        }
+        d
+    }
+}
+
+// A deconstructed expanded record (values always deconstructed; src_desc
+// keeps the physical tupdesc so the record can re-materialize as a
+// composite Datum, dropped columns included).
 #[derive(Clone)]
 pub struct RecValue {
     pub desc: RecDesc,
     pub values: Vec<Datum>,
     pub nulls: Vec<bool>,
+    pub src_desc: Option<std::rc::Rc<types_tuple::TupleDescData<'static>>>,
 }
 
 pub enum DatumVal {
@@ -138,6 +166,12 @@ struct CastEntry {
     inval_gen: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct RsiSnapshot {
+    pub allowed_modes: u32,
+    pub expected_desc: Option<core::ptr::NonNull<core::ffi::c_void>>,
+}
+
 pub struct Estate<'a> {
     pub func: &'a PlFunction,
     pub datums: Vec<DatumVal>,
@@ -146,6 +180,9 @@ pub struct Estate<'a> {
     pub rettype: Oid,
     /// RETURN of a record variable (trigger tuple return protocol).
     pub ret_rec: Option<RecValue>,
+    pub rsi: Option<RsiSnapshot>,
+    pub tuple_store: Option<tuplestore::Tuplestore>,
+    tuple_store_desc: Option<types_tuple::TupleDescData<'static>>,
     pub cur_error: Option<Box<PgError>>,
     pub eval_processed: u64,
     eval_tuptable: Option<TuptabHandle>,
@@ -302,6 +339,9 @@ impl<'a> Estate<'a> {
             retisnull: true,
             rettype: types_core::InvalidOid,
             ret_rec: None,
+            rsi: None,
+            tuple_store: None,
+            tuple_store_desc: None,
             cur_error: None,
             eval_processed: 0,
             eval_tuptable: None,
@@ -409,7 +449,9 @@ impl<'a> Estate<'a> {
             }
             None => {}
         }
-        let (hooks_names, params_by_dno, recs) = self.build_hook_tables(expr)?;
+        let (hooks_names, params_by_dno, recs, valueless) = self
+            .build_hook_tables(expr)
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         let used = core::cell::RefCell::new(Vec::new());
         let name_entries: Vec<parser_small1::PlpgsqlNameEntry> = hooks_names
             .iter()
@@ -422,11 +464,13 @@ impl<'a> Estate<'a> {
             })
             .collect();
         let rec_names: Vec<&str> = recs.iter().map(|s| s.as_str()).collect();
+        let valueless_names: Vec<&str> = valueless.iter().map(|s| s.as_str()).collect();
         let hooks = parser_small1::PlpgsqlHookState {
             names: &name_entries,
             params_by_dno: &params_by_dno,
             arg_dnos: &self.func.fn_argvarnos,
             recs: &rec_names,
+            valueless_recs: &valueless_names,
             resolve_option: match self.func.resolve_option {
                 crate::comp::PLPGSQL_RESOLVE_VARIABLE => {
                     parser_small1::PlpgsqlResolveOption::Variable
@@ -458,16 +502,19 @@ impl<'a> Estate<'a> {
     // level; rec fields resolve against the rec's CURRENT tupdesc).
     #[allow(clippy::type_complexity)]
     fn build_hook_tables(
-        &self,
+        &mut self,
         expr: &PlExpr,
     ) -> PgResult<(
         Vec<(String, Dno, Oid, i32, Oid)>,
         Vec<Option<(Oid, i32, Oid)>>,
         Vec<String>,
+        Vec<String>,
     )> {
         let func = self.func;
         let mut names: Vec<(String, Dno, Oid, i32, Oid)> = Vec::new();
         let mut recs: Vec<String> = Vec::new();
+        let mut valueless: Vec<String> = Vec::new();
+        let mut pending_valueless: Vec<String> = Vec::new();
         let have = |names: &Vec<(String, Dno, Oid, i32, Oid)>, k: &str| {
             names.iter().any(|(n, ..)| n == k)
         };
@@ -480,6 +527,7 @@ impl<'a> Estate<'a> {
                     Some((t.typoid, t.atttypmod, t.collation))
                 }
                 PlDatum::RecField(f) => self.recfield_type(f)?,
+                PlDatum::Rec(r) => Some((self.rec_param_type(r.dno), -1, types_core::InvalidOid)),
                 _ => None,
             });
         }
@@ -504,12 +552,10 @@ impl<'a> Estate<'a> {
                 NsType::Rec => {
                     let recname = item.name.to_ascii_lowercase();
                     let recno = item.itemno;
-                    // Whole-record references are unported: an InvalidOid
-                    // marker entry panics loud in resolve_column_ref.
                     let marker = (
                         recname.clone(),
                         recno,
-                        types_core::InvalidOid,
+                        self.rec_param_type(recno),
                         -1,
                         types_core::InvalidOid,
                     );
@@ -537,6 +583,14 @@ impl<'a> Estate<'a> {
                     if !recs.contains(&recname) {
                         recs.push(recname.clone());
                     }
+                    if matches!(&self.datums[recno as usize], DatumVal::Rec(None))
+                        && self.rec_meta(recno).rectypeid == RECORDOID
+                    {
+                        if !valueless.contains(&recname) {
+                            valueless.push(recname.clone());
+                        }
+                        pending_valueless.push(recname.clone());
+                    }
                     pending_recs.push(recname);
                 }
                 NsType::Row => {}
@@ -555,19 +609,104 @@ impl<'a> Estate<'a> {
                                 recs.push(lr);
                             }
                         }
+                        for r in pending_valueless.drain(..) {
+                            let lr = format!("{label}.{r}");
+                            if !valueless.contains(&lr) {
+                                valueless.push(lr);
+                            }
+                        }
                     } else {
                         pending.clear();
                         pending_recs.clear();
+                        pending_valueless.clear();
                     }
                 }
             }
             cur = item.prev;
         }
-        Ok((names, params_by_dno, recs))
+        Ok((names, params_by_dno, recs, valueless))
     }
 
-    // exec_get_datum_type-ish for RECFIELD: type from the rec's live value.
-    fn recfield_type(&self, f: &PlRecField) -> PgResult<Option<(Oid, i32, Oid)>> {
+    // exec_get_datum_type_info REC arm: the declared rectypeid, typmod -1.
+    fn rec_param_type(&self, recno: Dno) -> Oid {
+        self.rec_meta(recno).rectypeid
+    }
+
+    // exec_eval_datum REC arm: materialize the record as a composite Datum in
+    // the eval scratch (valueless/empty record is a plain NULL).
+    fn rec_as_composite_datum(&mut self, recno: Dno) -> PgResult<(Datum, bool)> {
+        let rectypeid = self.rec_meta(recno).rectypeid;
+        let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
+            return Ok((Datum::null(), true));
+        };
+        let src = rv
+            .src_desc
+            .clone()
+            .expect("RecValue carries its source tupdesc");
+        let values = rv.values.clone();
+        let nulls = rv.nulls.clone();
+        let mcx = self.eval_ctx.mcx();
+        let mut td = tupdesc::CreateTupleDescCopy(mcx, &src)?;
+        if rectypeid != RECORDOID {
+            td.tdtypeid = rectypeid;
+            td.tdtypmod = -1;
+        } else {
+            td.tdtypeid = RECORDOID;
+            if td.tdtypmod < 0 {
+                typcache::assign_record_type_typmod(&mut td)?;
+            }
+        }
+        let tup = heaptuple::heap_form_tuple(mcx, &td, &values, &nulls)?;
+        let img = tup.header_ptr();
+        core::mem::forget(tup);
+        Ok((Datum::from_usize(img as usize), false))
+    }
+
+    fn rec_meta(&self, recno: Dno) -> &PlRec {
+        match &self.func.datums[recno as usize] {
+            PlDatum::Rec(r) => r,
+            _ => panic!("plpgsql: datum {recno} is not a Rec"),
+        }
+    }
+
+    // instantiate_empty_record_variable (pl_exec.c:7810).
+    pub(crate) fn instantiate_empty_rec(&mut self, recno: Dno) -> PgResult<()> {
+        let rec = self.rec_meta(recno);
+        if rec.rectypeid == RECORDOID {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(format!("record \"{}\" is not assigned yet", rec.refname))
+                    .errdetail(
+                        "The tuple structure of a not-yet-assigned record is indeterminate.",
+                    )
+                    .into_error(),
+            ));
+        }
+        let rectypeid = rec.rectypeid;
+        let td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), rectypeid, -1)?;
+        let desc = RecDesc::from_tupdesc(&td);
+        let n = desc.types.len();
+        self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
+            desc,
+            values: vec![Datum::null(); n],
+            nulls: vec![true; n],
+            src_desc: Some(std::rc::Rc::new(td)),
+        }));
+        Ok(())
+    }
+
+    // exec_get_datum_type-ish for RECFIELD: type from the rec's live value;
+    // a valueless named-composite rec is instantiated first (C
+    // exec_get_datum_type_info). Valueless RECORD recs stay None — the 55000
+    // fires only if the SQL expression actually references a field
+    // (resolve_column_ref's valueless_recs arm).
+    fn recfield_type(&mut self, f: &PlRecField) -> PgResult<Option<(Oid, i32, Oid)>> {
+        if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None))
+            && self.rec_meta(f.recparentno).rectypeid != RECORDOID
+        {
+            self.instantiate_empty_rec(f.recparentno)?;
+        }
         if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
             let want = f.fieldname.to_ascii_lowercase();
             for (i, n) in rv.desc.names.iter().enumerate() {
@@ -600,10 +739,17 @@ impl<'a> Estate<'a> {
         Ok((values, nulls))
     }
 
-    fn datum_as_param(&self, dno: Dno) -> PgResult<(Datum, bool)> {
-        match &self.func.datums[dno as usize] {
+    fn datum_as_param(&mut self, dno: Dno) -> PgResult<(Datum, bool)> {
+        let func = self.func;
+        match &func.datums[dno as usize] {
             PlDatum::Var(_) => Ok(self.get_var(dno)),
+            PlDatum::Rec(_) => self.rec_as_composite_datum(dno),
             PlDatum::RecField(f) => {
+                if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None))
+                    && self.rec_meta(f.recparentno).rectypeid != RECORDOID
+                {
+                    self.instantiate_empty_rec(f.recparentno)?;
+                }
                 if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
                     let want = f.fieldname.to_ascii_lowercase();
                     for (i, n) in rv.desc.names.iter().enumerate() {
@@ -1179,6 +1325,31 @@ impl<'a> Estate<'a> {
             PlStmt::ForEachA { label, varno, slice, expr, body, .. } => {
                 self.exec_stmt_foreach_a(label.as_deref(), *varno, *slice, expr, body)
             }
+            PlStmt::ReturnNext { expr, retvarno, .. } => {
+                self.exec_stmt_return_next(expr.as_ref(), *retvarno)
+            }
+            PlStmt::ReturnQuery { query, dynquery, params, .. } => {
+                self.exec_stmt_return_query(query.as_ref(), dynquery.as_ref(), params)
+            }
+            PlStmt::Open { curvar, cursor_options, argquery, query, dynquery, params, .. } => self
+                .exec_stmt_open(
+                    *curvar,
+                    *cursor_options,
+                    argquery.as_ref(),
+                    query.as_ref(),
+                    dynquery.as_ref(),
+                    params,
+                ),
+            PlStmt::Fetch { target, curvar, direction, how_many, expr, is_move, .. } => {
+                self.exec_stmt_fetch(*target, *curvar, *direction, *how_many, expr.as_ref(), *is_move)
+            }
+            PlStmt::Close { curvar, .. } => self.exec_stmt_close(*curvar),
+            PlStmt::ForC { label, var, curvar, argquery, body, .. } => {
+                self.exec_stmt_forc(label.as_deref(), *var, *curvar, argquery.as_ref(), body)
+            }
+            PlStmt::DynForS { label, var, query, params, body, .. } => {
+                self.exec_stmt_dynfors(label.as_deref(), *var, query, params, body)
+            }
         }
     }
 
@@ -1722,10 +1893,65 @@ impl<'a> Estate<'a> {
                 }
                 Ok(())
             }
-            PlDatum::Rec(_) | PlDatum::Row(_) => panic!(
-                "exec_assign_value (pl_exec.c): whole record/row assignment targets \
-                 unported — unit backend-pl-plpgsql-exec"
-            ),
+            PlDatum::Rec(r) => {
+                let recname = r.refname.clone();
+                if isnull {
+                    // C exec_move_row(rec, NULL, NULL): a null-valued but
+                    // assigned record of the rec's own type.
+                    if self.rec_meta(target).rectypeid != RECORDOID {
+                        self.instantiate_empty_rec(target)?;
+                    } else if let DatumVal::Rec(Some(rv)) = &mut self.datums[target as usize] {
+                        for i in 0..rv.values.len() {
+                            rv.values[i] = Datum::null();
+                            rv.nulls[i] = true;
+                        }
+                    }
+                    return Ok(());
+                }
+                if valtype != RECORDOID && !lsyscache::typ::type_is_rowtype(valtype)? {
+                    return Err(exec_err(
+                        types_error::ERRCODE_DATATYPE_MISMATCH,
+                        format!(
+                            "cannot assign non-composite value to a record variable"
+                        ),
+                    ));
+                }
+                let _ = recname;
+                let (desc, src, values, nulls) = self.deconstruct_composite(value)?;
+                self.move_rec_from_values(target, &desc, src, &values, &nulls)
+            }
+            PlDatum::Row(r) => {
+                let varnos = r.varnos.clone();
+                if isnull {
+                    for dno in varnos {
+                        self.exec_assign_value(dno, Datum::null(), true, UNKNOWNOID, -1)?;
+                    }
+                    return Ok(());
+                }
+                if valtype != RECORDOID && !lsyscache::typ::type_is_rowtype(valtype)? {
+                    return Err(exec_err(
+                        types_error::ERRCODE_DATATYPE_MISMATCH,
+                        "cannot assign non-composite value to a row variable".to_string(),
+                    ));
+                }
+                let (desc, _src, values, nulls) = self.deconstruct_composite(value)?;
+                let natts = desc.types.len();
+                let mut anum = 0usize;
+                for dno in varnos {
+                    while anum < natts && desc.dropped[anum] {
+                        anum += 1;
+                    }
+                    let (v, vn, vt, vm) = if anum < natts {
+                        let r = (values[anum], nulls[anum], desc.types[anum], desc.typmods[anum]);
+                        anum += 1;
+                        r
+                    } else {
+                        (Datum::null(), true, UNKNOWNOID, -1)
+                    };
+                    self.exec_assign_value(dno, v, vn, vt, vm)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1912,42 +2138,26 @@ impl<'a> Estate<'a> {
         Ok(rc)
     }
 
-    fn rec_desc_of(tuptab: TuptabHandle) -> RecDesc {
-        spi::tuptable_with(tuptab, |t| {
-            let natts = t.tupdesc.attrs.len();
-            let mut d = RecDesc {
-                names: Vec::with_capacity(natts),
-                types: Vec::with_capacity(natts),
-                typmods: Vec::with_capacity(natts),
-                typlens: Vec::with_capacity(natts),
-                typbyvals: Vec::with_capacity(natts),
-                dropped: Vec::with_capacity(natts),
-            };
-            for a in t.tupdesc.attrs.iter() {
-                d.names
-                    .push(String::from_utf8_lossy(a.attname.name_str()).to_ascii_lowercase());
-                d.types.push(a.atttypid);
-                d.typmods.push(a.atttypmod);
-                d.typlens.push(a.attlen);
-                d.typbyvals.push(a.attbyval);
-                d.dropped.push(a.attisdropped);
-            }
-            d
-        })
+    fn rec_desc_of(&self, tuptab: TuptabHandle) -> PgResult<(RecDesc, std::rc::Rc<types_tuple::TupleDescData<'static>>)> {
+        let td = spi::tuptable_with(tuptab, |t| {
+            tupdesc::CreateTupleDescCopy(self.datum_ctx.mcx(), &t.tupdesc)
+        })?;
+        Ok((RecDesc::from_tupdesc(&td), std::rc::Rc::new(td)))
     }
 
     // exec_move_row with a NULL source tuple.
     fn move_row_null(&mut self, var: Dno, tuptab: TuptabHandle) -> PgResult<()> {
         match &self.func.datums[var as usize] {
             PlDatum::Rec(_) => {
-                let desc = Self::rec_desc_of(tuptab);
+                let (desc, src_desc) = self.rec_desc_of(tuptab)?;
                 let n = desc.types.len();
-                self.datums[var as usize] = DatumVal::Rec(Some(RecValue {
-                    desc,
-                    values: vec![Datum::null(); n],
-                    nulls: vec![true; n],
-                }));
-                Ok(())
+                self.move_rec_from_values(
+                    var,
+                    &desc,
+                    src_desc,
+                    &vec![Datum::null(); n],
+                    &vec![true; n],
+                )
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -1964,7 +2174,7 @@ impl<'a> Estate<'a> {
     fn move_row_from_tuptable(&mut self, var: Dno, tuptab: TuptabHandle, i: usize) -> PgResult<()> {
         match &self.func.datums[var as usize] {
             PlDatum::Rec(_) => {
-                let desc = Self::rec_desc_of(tuptab);
+                let (desc, src_desc) = self.rec_desc_of(tuptab)?;
                 let natts = desc.types.len();
                 let mut values = vec![Datum::null(); natts];
                 let mut nulls = vec![true; natts];
@@ -1976,24 +2186,11 @@ impl<'a> Estate<'a> {
                         nulls[f] = isnull;
                     }
                 });
-                // Copy by-ref fields into the invocation context (the tuple
-                // table is freed per fetch batch).
-                for f in 0..natts {
-                    if !desc.dropped[f] {
-                        values[f] = self.copy_to_datum_ctx(
-                            values[f],
-                            nulls[f],
-                            desc.typlens[f],
-                            desc.typbyvals[f],
-                        )?;
-                    }
-                }
-                self.datums[var as usize] = DatumVal::Rec(Some(RecValue { desc, values, nulls }));
-                Ok(())
+                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
-                let desc = Self::rec_desc_of(tuptab);
+                let (desc, _src) = self.rec_desc_of(tuptab)?;
                 let natts = desc.types.len();
                 let mut anum = 0usize;
                 for dno in varnos {
@@ -2018,9 +2215,162 @@ impl<'a> Estate<'a> {
         }
     }
 
+    // exec_move_row_from_fields REC-target arm: a RECORD rec adopts the
+    // source shape; a named-composite rec coerces field-by-field onto its
+    // declared tupdesc (source read positionally, dropped columns skipped on
+    // both sides, missing sources become NULL).
+    fn move_rec_from_values(
+        &mut self,
+        recno: Dno,
+        srcdesc: &RecDesc,
+        src_tupdesc: std::rc::Rc<types_tuple::TupleDescData<'static>>,
+        values: &[Datum],
+        nulls: &[bool],
+    ) -> PgResult<()> {
+        let rectypeid = self.rec_meta(recno).rectypeid;
+        if rectypeid == RECORDOID {
+            let natts = srcdesc.types.len();
+            let mut out_values = values.to_vec();
+            for f in 0..natts {
+                if !srcdesc.dropped[f] {
+                    out_values[f] = self.copy_to_datum_ctx(
+                        out_values[f],
+                        nulls[f],
+                        srcdesc.typlens[f],
+                        srcdesc.typbyvals[f],
+                    )?;
+                }
+            }
+            self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
+                desc: srcdesc.clone(),
+                values: out_values,
+                nulls: nulls.to_vec(),
+                src_desc: Some(src_tupdesc),
+            }));
+            return Ok(());
+        }
+
+        let var_td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), rectypeid, -1)?;
+        let dst = RecDesc::from_tupdesc(&var_td);
+        let vtd_natts = dst.types.len();
+        let td_natts = srcdesc.types.len();
+        let mut newvalues = vec![Datum::null(); vtd_natts];
+        let mut newnulls = vec![true; vtd_natts];
+        let mut anum = 0usize;
+        for fnum in 0..vtd_natts {
+            if dst.dropped[fnum] {
+                continue;
+            }
+            while anum < td_natts && srcdesc.dropped[anum] {
+                anum += 1;
+            }
+            let (value, mut isnull, valtype, valtypmod) = if anum < td_natts {
+                let r = (values[anum], nulls[anum], srcdesc.types[anum], srcdesc.typmods[anum]);
+                anum += 1;
+                r
+            } else {
+                (Datum::null(), true, UNKNOWNOID, -1)
+            };
+            let v = self.exec_cast_value(
+                value,
+                &mut isnull,
+                valtype,
+                valtypmod,
+                dst.types[fnum],
+                dst.typmods[fnum],
+            )?;
+            newvalues[fnum] =
+                self.copy_to_datum_ctx(v, isnull, dst.typlens[fnum], dst.typbyvals[fnum])?;
+            newnulls[fnum] = isnull;
+        }
+        self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
+            desc: dst,
+            values: newvalues,
+            nulls: newnulls,
+            src_desc: Some(std::rc::Rc::new(var_td)),
+        }));
+        Ok(())
+    }
+
+    // make_tuple_from_row (pl_exec.c:7491) shaped as a RecValue.
+    fn row_as_rec_value(&mut self, rowno: Dno) -> PgResult<RecValue> {
+        let (varnos, fieldnames) = match &self.func.datums[rowno as usize] {
+            PlDatum::Row(r) => (r.varnos.clone(), r.fieldnames.clone()),
+            _ => panic!("plpgsql: datum {rowno} is not a Row"),
+        };
+        let n = varnos.len();
+        let mcx = self.datum_ctx.mcx();
+        let mut td = tupdesc::CreateTemplateTupleDesc(mcx, n as i32)?;
+        let mut values = Vec::with_capacity(n);
+        let mut nulls = Vec::with_capacity(n);
+        for (i, &dno) in varnos.iter().enumerate() {
+            let (typoid, typmod) = match &self.func.datums[dno as usize] {
+                PlDatum::Var(_) => {
+                    let t = self.var_type(dno);
+                    (t.typoid, t.atttypmod)
+                }
+                PlDatum::Rec(r) => (r.rectypeid, -1),
+                _ => panic!("plpgsql row member {dno} is not a Var or Rec"),
+            };
+            tupdesc::TupleDescInitEntry(
+                &mut td,
+                (i + 1) as i16,
+                Some(&fieldnames[i]),
+                typoid,
+                typmod,
+                0,
+            )?;
+            let (v, isnull) = self.datum_as_param(dno)?;
+            values.push(v);
+            nulls.push(isnull);
+        }
+        td.tdtypeid = RECORDOID;
+        td.tdtypmod = -1;
+        let desc = RecDesc::from_tupdesc(&td);
+        for i in 0..n {
+            values[i] =
+                self.copy_to_datum_ctx(values[i], nulls[i], desc.typlens[i], desc.typbyvals[i])?;
+        }
+        Ok(RecValue {
+            desc,
+            values,
+            nulls,
+            src_desc: Some(std::rc::Rc::new(td)),
+        })
+    }
+
+    // deconstruct_composite_datum (pl_exec.c:7546) — plain composite Datum.
+    pub(crate) fn deconstruct_composite(
+        &mut self,
+        value: Datum,
+    ) -> PgResult<(RecDesc, std::rc::Rc<types_tuple::TupleDescData<'static>>, Vec<Datum>, Vec<bool>)> {
+        // SAFETY: non-null composite datum — a live HeapTupleHeader image.
+        let td_hdr = unsafe { &*(value.as_usize() as *const types_tuple::HeapTupleHeaderData) };
+        let tup_type = td_hdr.type_id();
+        let tup_typmod = td_hdr.typmod();
+        let t_len = td_hdr.datum_length();
+        let tupdesc =
+            typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), tup_type, tup_typmod)?;
+        let desc = RecDesc::from_tupdesc(&tupdesc);
+        let natts = desc.types.len();
+        let mut values = vec![Datum::null(); natts];
+        let mut nulls = vec![true; natts];
+        // SAFETY: header address + declared datum length form the image.
+        let htd = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                value.as_usize() as *const u8,
+                t_len,
+                types_tuple::ItemPointerData::invalid(),
+                types_core::InvalidOid,
+            )
+        };
+        types_tuple::heap_deform_tuple(&htd, &tupdesc, &mut values, &mut nulls);
+        Ok((desc, std::rc::Rc::new(tupdesc), values, nulls))
+    }
+
     fn exec_stmt_return(&mut self, expr: Option<&PlExpr>, retvarno: Dno) -> PgResult<()> {
         if self.func.fn_retset {
-            panic!("plpgsql exec_stmt_return: SETOF return unported");
+            return Ok(());
         }
         if retvarno >= 0 {
             match &self.func.datums[retvarno as usize] {
@@ -2037,22 +2387,30 @@ impl<'a> Estate<'a> {
                         ));
                     }
                 }
-                PlDatum::Rec(_) => match &self.datums[retvarno as usize] {
-                    DatumVal::Rec(Some(rv)) => {
-                        self.ret_rec = Some(rv.clone());
-                        self.retisnull = false;
-                        self.rettype = RECORDOID;
+                PlDatum::Rec(r) => {
+                    let rectypeid = r.rectypeid;
+                    match &self.datums[retvarno as usize] {
+                        DatumVal::Rec(Some(rv)) => {
+                            self.ret_rec = Some(rv.clone());
+                            self.retisnull = false;
+                            self.rettype =
+                                if rectypeid != RECORDOID { rectypeid } else { RECORDOID };
+                        }
+                        _ => {
+                            self.ret_rec = None;
+                            self.retisnull = true;
+                            self.rettype = rectypeid;
+                        }
                     }
-                    _ => {
-                        self.ret_rec = None;
-                        self.retisnull = true;
-                        self.rettype = types_core::InvalidOid;
-                    }
-                },
-                PlDatum::Row(_) => panic!(
-                    "exec_stmt_return (pl_exec.c): returning row variables \
-                     unported — unit backend-pl-plpgsql-exec"
-                ),
+                }
+                PlDatum::Row(row) => {
+                    // exec_eval_datum ROW arm: rows materialize through their
+                    // member variables (multiple OUT parameters).
+                    let rv = self.row_as_rec_value(row.dno)?;
+                    self.ret_rec = Some(rv);
+                    self.retisnull = false;
+                    self.rettype = RECORDOID;
+                }
                 _ => panic!("plpgsql: bad retvarno"),
             }
             return Ok(());
@@ -2426,28 +2784,13 @@ impl<'a> Estate<'a> {
         Ok(RC_OK)
     }
 
-    // exec_stmt_dynexecute: one-shot SPI execution of a computed query string
-    // with USING params; INTO [STRICT] mirrors execsql's destination rules.
-    fn exec_stmt_dynexecute(
+    // exec_eval_using_params: unknown-typed params become text; by-ref
+    // values are copied so they survive per-param cleanup.
+    #[allow(clippy::type_complexity)]
+    fn exec_eval_using_params(
         &mut self,
-        query: &PlExpr,
-        into: bool,
-        strict: bool,
-        target: Dno,
         params: &[PlExpr],
-    ) -> PgResult<i32> {
-        let (qv, isnull, restype, _m) = self.exec_eval_expr(query)?;
-        if isnull {
-            return Err(exec_err(
-                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                "query string argument of EXECUTE is null".to_string(),
-            ));
-        }
-        let querystr = self.convert_value_to_string(qv, restype)?;
-        self.exec_eval_cleanup();
-
-        // exec_eval_using_params: unknown-typed params become text; by-ref
-        // values are copied so they survive per-param cleanup.
+    ) -> PgResult<(Vec<Oid>, Vec<Datum>, Vec<bool>)> {
         let n = params.len();
         let mut ptypes = Vec::with_capacity(n);
         let mut pvalues = Vec::with_capacity(n);
@@ -2474,6 +2817,30 @@ impl<'a> Estate<'a> {
             pnulls.push(isnull);
             self.exec_eval_cleanup();
         }
+        Ok((ptypes, pvalues, pnulls))
+    }
+
+    // exec_stmt_dynexecute: one-shot SPI execution of a computed query string
+    // with USING params; INTO [STRICT] mirrors execsql's destination rules.
+    fn exec_stmt_dynexecute(
+        &mut self,
+        query: &PlExpr,
+        into: bool,
+        strict: bool,
+        target: Dno,
+        params: &[PlExpr],
+    ) -> PgResult<i32> {
+        let (qv, isnull, restype, _m) = self.exec_eval_expr(query)?;
+        if isnull {
+            return Err(exec_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                "query string argument of EXECUTE is null".to_string(),
+            ));
+        }
+        let querystr = self.convert_value_to_string(qv, restype)?;
+        self.exec_eval_cleanup();
+
+        let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
 
         let _frame =
             FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
@@ -2563,6 +2930,669 @@ impl<'a> Estate<'a> {
         }
 
         Ok(RC_OK)
+    }
+
+    // exec_eval_integer (pl_exec.c): cast to int4.
+    fn exec_eval_integer(&mut self, expr: &PlExpr) -> PgResult<(i32, bool)> {
+        const INT4OID: Oid = 23;
+        let (v, mut isnull, t, m) = self.exec_eval_expr(expr)?;
+        let v = self.exec_cast_value(v, &mut isnull, t, m, INT4OID, -1)?;
+        Ok((v.as_i32(), isnull))
+    }
+
+    // exec_init_tuple_store (pl_exec.c:3669).
+    fn init_tuple_store(&mut self) -> PgResult<()> {
+        let Some(rsi) = self.rsi else {
+            return Err(exec_err(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "set-valued function called in context that cannot accept a set".to_string(),
+            ));
+        };
+        if rsi.allowed_modes & fmgr::SFRM_Materialize == 0 || rsi.expected_desc.is_none() {
+            return Err(exec_err(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "materialize mode required, but it is not allowed in this context".to_string(),
+            ));
+        }
+        // SAFETY: expectedDesc contract — armed by the executor with the scan
+        // tupdesc, live for the duration of this call.
+        let expected = unsafe {
+            rsi.expected_desc
+                .expect("checked above")
+                .cast::<types_tuple::TupleDescData<'_>>()
+                .as_ref()
+        };
+        let td = tupdesc::CreateTupleDescCopy(self.datum_ctx.mcx(), expected)?;
+        let random = rsi.allowed_modes & fmgr::SFRM_Materialize_Random != 0;
+        self.tuple_store = Some(tuplestore::Tuplestore::begin_heap(
+            random,
+            false,
+            init_small::globals::work_mem(),
+        ));
+        self.tuple_store_desc = Some(td);
+        Ok(())
+    }
+
+    pub fn take_tuple_store(&mut self) -> Option<tuplestore::Tuplestore> {
+        self.tuple_store.take()
+    }
+
+    // exec_stmt_return_next (pl_exec.c:3326).
+    fn exec_stmt_return_next(&mut self, expr: Option<&PlExpr>, retvarno: Dno) -> PgResult<i32> {
+        if !self.func.fn_retset {
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                "cannot use RETURN NEXT in a non-SETOF function".to_string(),
+            ));
+        }
+        if self.tuple_store.is_none() {
+            self.init_tuple_store()?;
+        }
+        let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
+        let natts = dst.types.len();
+
+        if retvarno >= 0 {
+            match &self.func.datums[retvarno as usize] {
+                PlDatum::Var(v) => {
+                    let (typoid, typmod, typlen) =
+                        (v.datatype.typoid, v.datatype.atttypmod, v.datatype.typlen);
+                    let _ = typlen;
+                    if natts != 1 {
+                        return Err(exec_err(
+                            types_error::ERRCODE_DATATYPE_MISMATCH,
+                            "wrong result type supplied in RETURN NEXT".to_string(),
+                        ));
+                    }
+                    let (value, mut isnull) = self.get_var(retvarno);
+                    let v = self.exec_cast_value(
+                        value,
+                        &mut isnull,
+                        typoid,
+                        typmod,
+                        dst.types[0],
+                        dst.typmods[0],
+                    )?;
+                    self.put_tuple_store_values(&[v], &[isnull])?;
+                }
+                PlDatum::Rec(_) => {
+                    if matches!(&self.datums[retvarno as usize], DatumVal::Rec(None)) {
+                        self.instantiate_empty_rec(retvarno)?;
+                    }
+                    let (srcdesc, values, nulls) = match &self.datums[retvarno as usize] {
+                        DatumVal::Rec(Some(rv)) => {
+                            (rv.desc.clone(), rv.values.clone(), rv.nulls.clone())
+                        }
+                        _ => unreachable!("instantiated above"),
+                    };
+                    let (v, n) = convert_values_by_position(
+                        &srcdesc,
+                        &values,
+                        &nulls,
+                        &dst,
+                        "wrong record type supplied in RETURN NEXT",
+                    )?;
+                    self.put_tuple_store_values(&v, &n)?;
+                }
+                PlDatum::Row(row) => {
+                    let rv = self.row_as_rec_value(row.dno)?;
+                    let (v, n) = convert_values_by_position(
+                        &rv.desc,
+                        &rv.values,
+                        &rv.nulls,
+                        &dst,
+                        "wrong record type supplied in RETURN NEXT",
+                    )?;
+                    self.put_tuple_store_values(&v, &n)?;
+                }
+                _ => panic!("plpgsql: bad retvarno in RETURN NEXT"),
+            }
+        } else if let Some(expr) = expr {
+            let (value, mut isnull, rettype, rettypmod) = self.exec_eval_expr(expr)?;
+            if self.func.fn_retistuple {
+                if !isnull {
+                    if !lsyscache::typ::type_is_rowtype(rettype)? {
+                        return Err(exec_err(
+                            types_error::ERRCODE_DATATYPE_MISMATCH,
+                            "cannot return non-composite value from function returning composite type"
+                                .to_string(),
+                        ));
+                    }
+                    let (srcdesc, _src, values, nulls) = self.deconstruct_composite(value)?;
+                    let (v, n) = convert_values_by_position(
+                        &srcdesc,
+                        &values,
+                        &nulls,
+                        &dst,
+                        "returned record type does not match expected record type",
+                    )?;
+                    self.put_tuple_store_values(&v, &n)?;
+                } else {
+                    self.put_tuple_store_values(
+                        &vec![Datum::null(); natts],
+                        &vec![true; natts],
+                    )?;
+                }
+            } else {
+                if natts != 1 {
+                    return Err(exec_err(
+                        types_error::ERRCODE_DATATYPE_MISMATCH,
+                        "wrong result type supplied in RETURN NEXT".to_string(),
+                    ));
+                }
+                let v = self.exec_cast_value(
+                    value,
+                    &mut isnull,
+                    rettype,
+                    rettypmod,
+                    dst.types[0],
+                    dst.typmods[0],
+                )?;
+                self.put_tuple_store_values(&[v], &[isnull])?;
+            }
+        } else {
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                "RETURN NEXT must have a parameter".to_string(),
+            ));
+        }
+        self.exec_eval_cleanup();
+        Ok(RC_OK)
+    }
+
+    fn put_tuple_store_values(&mut self, values: &[Datum], nulls: &[bool]) -> PgResult<()> {
+        let td = self.tuple_store_desc.as_ref().expect("tuple store initialized");
+        self.tuple_store
+            .as_mut()
+            .expect("tuple store initialized")
+            .putvalues(td, values, nulls)
+    }
+
+    // exec_stmt_return_query (pl_exec.c:3544): rows stream into the
+    // tuplestore after a per-batch structure check.
+    fn exec_stmt_return_query(
+        &mut self,
+        query: Option<&PlExpr>,
+        dynquery: Option<&PlExpr>,
+        params: &[PlExpr],
+    ) -> PgResult<i32> {
+        if !self.func.fn_retset {
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                "cannot use RETURN QUERY in a non-SETOF function".to_string(),
+            ));
+        }
+        if self.tuple_store.is_none() {
+            self.init_tuple_store()?;
+        }
+        let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
+
+        let rc = if let Some(query) = query {
+            self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
+            self.exec_run_select(query, 0)?
+        } else {
+            let dynquery = dynquery.expect("RETURN QUERY has a query");
+            let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
+            if isnull {
+                return Err(exec_err(
+                    types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                    "query string argument of EXECUTE is null".to_string(),
+                ));
+            }
+            let querystr = self.convert_value_to_string(qv, restype)?;
+            self.exec_eval_cleanup();
+            let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
+            let _frame =
+                FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
+            spi::SPI_execute_extended(&querystr, &ptypes, &pvalues, &pnulls, self.readonly_func)
+                .map_err(|e| {
+                    spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
+                })?
+        };
+
+        // must_return_tuples contract (spi.c:2570).
+        let Some(tuptab) = spi::SPI_tuptable() else {
+            let tag = match rc {
+                spi::SPI_OK_INSERT => "INSERT",
+                spi::SPI_OK_UPDATE => "UPDATE",
+                spi::SPI_OK_DELETE => "DELETE",
+                spi::SPI_OK_MERGE => "MERGE",
+                spi::SPI_OK_SELINTO => "SELECT INTO",
+                spi::SPI_OK_UTILITY => "UTILITY",
+                _ => "SQL",
+            };
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                format!("{tag} query does not return tuples"),
+            ));
+        };
+
+        let (srcdesc, _src) = self.rec_desc_of(tuptab)?;
+        let n = spi::SPI_processed() as usize;
+        let natts = srcdesc.types.len();
+        for i in 0..n {
+            let mut values = vec![Datum::null(); natts];
+            let mut nulls = vec![true; natts];
+            spi::tuptable_with(tuptab, |t| {
+                for f in 0..natts {
+                    let (v, isnull) = spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (f + 1) as i32);
+                    values[f] = v;
+                    nulls[f] = isnull;
+                }
+            });
+            let (v, nn) = convert_values_by_position(
+                &srcdesc,
+                &values,
+                &nulls,
+                &dst,
+                "structure of query does not match function result type",
+            )?;
+            self.put_tuple_store_values(&v, &nn)?;
+        }
+        let _ = spi::SPI_freetuptable(tuptab);
+        self.eval_tuptable = None;
+        self.exec_eval_cleanup();
+
+        self.eval_processed = n as u64;
+        self.exec_set_found(n != 0);
+        Ok(RC_OK)
+    }
+
+    // ------------------------------------------------------------------
+    // Cursors
+    // ------------------------------------------------------------------
+
+    fn cursor_var_name(&mut self, curvar: Dno) -> PgResult<Option<String>> {
+        let (value, isnull) = self.get_var(curvar);
+        if isnull {
+            return Ok(None);
+        }
+        Ok(Some(self.convert_value_to_string(value, TEXTOID)?))
+    }
+
+    fn cursor_var_name_required(&mut self, curvar: Dno) -> PgResult<String> {
+        match self.cursor_var_name(curvar)? {
+            Some(n) => Ok(n),
+            None => {
+                let refname = match &self.func.datums[curvar as usize] {
+                    PlDatum::Var(v) => v.refname.clone(),
+                    _ => String::new(),
+                };
+                Err(exec_err(
+                    types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                    format!("cursor variable \"{refname}\" is null"),
+                ))
+            }
+        }
+    }
+
+    fn find_open_portal(&mut self, curname: &str) -> PgResult<types_portal::Portal<'static>> {
+        match spi::SPI_cursor_find_portal(curname) {
+            Some(p) => Ok(p),
+            None => Err(exec_err(
+                types_error::ERRCODE_UNDEFINED_CURSOR,
+                format!("cursor \"{curname}\" does not exist"),
+            )),
+        }
+    }
+
+    // exec_stmt_open's shared tail for bound cursors and OPEN FOR query:
+    // check name free, run the cursor's plan into a portal, store the portal
+    // name back if the refcursor was null.
+    fn open_cursor_portal(
+        &mut self,
+        curvar: Dno,
+        curname: Option<&str>,
+        query: &PlExpr,
+        cursor_options: i32,
+    ) -> PgResult<()> {
+        self.ensure_plan(query, cursor_options)?;
+        let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
+            let t = t.borrow();
+            let e = t.get(&query.expr_id).expect("plan ensured");
+            (e.plan, e.paramnos.clone(), e.argtypes.clone())
+        });
+        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let cursor = spi::SPI_cursor_open(curname, plan, &values, &nulls, self.readonly_func)
+            .map_err(|e| spi_ctx_err(e, &query.query, query.parse_mode))?;
+        if curname.is_none() {
+            let name = cursor.portal.borrow().name.as_str().to_string();
+            self.assign_text_var(curvar, &name)?;
+        }
+        self.exec_eval_cleanup();
+        Ok(())
+    }
+
+    // exec_stmt_open (pl_exec.c:4657).
+    #[allow(clippy::too_many_arguments)]
+    fn exec_stmt_open(
+        &mut self,
+        curvar: Dno,
+        cursor_options: i32,
+        argquery: Option<&PlExpr>,
+        query: Option<&PlExpr>,
+        dynquery: Option<&PlExpr>,
+        params: &[PlExpr],
+    ) -> PgResult<i32> {
+        let curname = self.cursor_var_name(curvar)?;
+        if let Some(n) = &curname {
+            if spi::SPI_cursor_find(n).is_some() {
+                return Err(exec_err(
+                    types_error::ERRCODE_DUPLICATE_CURSOR,
+                    format!("cursor \"{n}\" already in use"),
+                ));
+            }
+        }
+
+        if let Some(q) = query {
+            self.open_cursor_portal(curvar, curname.as_deref(), q, cursor_options)?;
+            return Ok(RC_OK);
+        }
+        if let Some(dq) = dynquery {
+            let portal =
+                self.exec_dynquery_with_params(dq, params, curname.as_deref(), cursor_options)?;
+            if curname.is_none() {
+                let name = portal.borrow().name.as_str().to_string();
+                self.assign_text_var(curvar, &name)?;
+            }
+            return Ok(RC_OK);
+        }
+
+        // OPEN of a bound cursor: evaluate declared args, then its query.
+        let (cq, argrow, bound_options) = match &self.func.datums[curvar as usize] {
+            PlDatum::Var(v) => (
+                v.cursor_explicit_expr.as_ref().expect("bound cursor"),
+                v.cursor_explicit_argrow,
+                v.cursor_options,
+            ),
+            _ => panic!("plpgsql: OPEN curvar is not a Var"),
+        };
+        if let Some(aq) = argquery {
+            if argrow < 0 {
+                return Err(exec_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    "arguments given for cursor without arguments".to_string(),
+                ));
+            }
+            self.exec_stmt_execsql(aq, true, false, argrow)?;
+        } else if argrow >= 0 {
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                "arguments required for cursor".to_string(),
+            ));
+        }
+        self.open_cursor_portal(curvar, curname.as_deref(), cq, bound_options)?;
+        Ok(RC_OK)
+    }
+
+    // exec_dynquery_with_params (pl_exec.c:8800): dynamic source into a
+    // one-shot cursor portal.
+    fn exec_dynquery_with_params(
+        &mut self,
+        dynquery: &PlExpr,
+        params: &[PlExpr],
+        curname: Option<&str>,
+        cursor_options: i32,
+    ) -> PgResult<types_portal::Portal<'static>> {
+        let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
+        if isnull {
+            return Err(exec_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                "query string argument of EXECUTE is null".to_string(),
+            ));
+        }
+        let querystr = self.convert_value_to_string(qv, restype)?;
+        self.exec_eval_cleanup();
+        let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
+        let cursor = spi::SPI_cursor_open_extended(
+            curname,
+            &querystr,
+            &ptypes,
+            &pvalues,
+            &pnulls,
+            self.readonly_func,
+            cursor_options,
+        )
+        .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
+        Ok(cursor.portal)
+    }
+
+    // exec_stmt_fetch / exec_stmt_move (pl_exec.c:4822).
+    fn exec_stmt_fetch(
+        &mut self,
+        target: Dno,
+        curvar: Dno,
+        direction: i32,
+        how_many: i64,
+        expr: Option<&PlExpr>,
+        is_move: bool,
+    ) -> PgResult<i32> {
+        let curname = self.cursor_var_name_required(curvar)?;
+        let portal = self.find_open_portal(&curname)?;
+
+        let mut how_many = how_many;
+        if let Some(e) = expr {
+            let (v, isnull) = self.exec_eval_integer(e)?;
+            if isnull {
+                return Err(exec_err(
+                    types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                    "relative or absolute cursor position is null".to_string(),
+                ));
+            }
+            how_many = v as i64;
+            self.exec_eval_cleanup();
+        }
+
+        let dir = fetch_direction_of(direction);
+        let n;
+        if !is_move {
+            spi::SPI_scroll_cursor_fetch(&portal, dir, how_many)?;
+            n = spi::SPI_processed();
+            let tuptab = spi::SPI_tuptable().expect("SPI fetch stored tuptable");
+            if n == 0 {
+                self.move_row_null(target, tuptab)?;
+            } else {
+                self.move_row_from_tuptable(target, tuptab, 0)?;
+            }
+            self.exec_eval_cleanup();
+            let _ = spi::SPI_freetuptable(tuptab);
+        } else {
+            spi::SPI_scroll_cursor_move(&portal, dir, how_many)?;
+            n = spi::SPI_processed();
+        }
+
+        self.eval_processed = n;
+        self.exec_set_found(n != 0);
+        Ok(RC_OK)
+    }
+
+    // exec_stmt_close (pl_exec.c:4913).
+    fn exec_stmt_close(&mut self, curvar: Dno) -> PgResult<i32> {
+        let curname = self.cursor_var_name_required(curvar)?;
+        let portal = self.find_open_portal(&curname)?;
+        spi::SPI_cursor_close_portal(&portal)?;
+        Ok(RC_OK)
+    }
+
+    // exec_stmt_forc (pl_exec.c:2868).
+    fn exec_stmt_forc(
+        &mut self,
+        label: Option<&str>,
+        var: Dno,
+        curvar: Dno,
+        argquery: Option<&PlExpr>,
+        body: &'a [PlStmt],
+    ) -> PgResult<i32> {
+        let curname = self.cursor_var_name(curvar)?;
+        if let Some(n) = &curname {
+            if spi::SPI_cursor_find(n).is_some() {
+                return Err(exec_err(
+                    types_error::ERRCODE_DUPLICATE_CURSOR,
+                    format!("cursor \"{n}\" already in use"),
+                ));
+            }
+        }
+
+        let (cq, argrow, bound_options) = match &self.func.datums[curvar as usize] {
+            PlDatum::Var(v) => (
+                v.cursor_explicit_expr.as_ref().expect("bound cursor"),
+                v.cursor_explicit_argrow,
+                v.cursor_options,
+            ),
+            _ => panic!("plpgsql: FOR-cursor curvar is not a Var"),
+        };
+        if let Some(aq) = argquery {
+            if argrow < 0 {
+                return Err(exec_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    "arguments given for cursor without arguments".to_string(),
+                ));
+            }
+            self.exec_stmt_execsql(aq, true, false, argrow)?;
+        } else if argrow >= 0 {
+            return Err(exec_err(
+                types_error::ERRCODE_SYNTAX_ERROR,
+                "arguments required for cursor".to_string(),
+            ));
+        }
+
+        self.ensure_plan(cq, bound_options)?;
+        let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
+            let t = t.borrow();
+            let e = t.get(&cq.expr_id).expect("plan ensured");
+            (e.plan, e.paramnos.clone(), e.argtypes.clone())
+        });
+        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let cursor =
+            spi::SPI_cursor_open(curname.as_deref(), plan, &values, &nulls, self.readonly_func)
+                .map_err(|e| spi_ctx_err(e, &cq.query, cq.parse_mode))?;
+        if curname.is_none() {
+            let name = cursor.portal.borrow().name.as_str().to_string();
+            self.assign_text_var(curvar, &name)?;
+        }
+        self.exec_eval_cleanup();
+
+        // No prefetch: the cursor is user-visible (WHERE CURRENT OF).
+        let result = self.exec_for_query(label, var, &cursor, body, false);
+
+        let close = spi::SPI_cursor_close(cursor);
+        let rc = match result {
+            Ok(rc) => {
+                close?;
+                rc
+            }
+            Err(e) => return Err(e),
+        };
+        if curname.is_none() {
+            self.set_var(curvar, Datum::null(), true);
+        }
+        Ok(rc)
+    }
+
+    // exec_stmt_dynfors (pl_exec.c): FOR-over-EXECUTE.
+    fn exec_stmt_dynfors(
+        &mut self,
+        label: Option<&str>,
+        var: Dno,
+        query: &PlExpr,
+        params: &[PlExpr],
+        body: &'a [PlStmt],
+    ) -> PgResult<i32> {
+        let portal = self.exec_dynquery_with_params(query, params, None, 0)?;
+        let cursor = spi::SpiCursor::from_portal(portal);
+        let result = self.exec_for_query(label, var, &cursor, body, true);
+        let close = spi::SPI_cursor_close(cursor);
+        match result {
+            Ok(rc) => {
+                close?;
+                Ok(rc)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// build_attrmap_by_position semantics applied to values (attmap.c:64-152):
+// typmod-aware positional match over non-dropped columns, missing sources
+// disallowed, with C's two errdetail texts under the caller's errmsg.
+pub(crate) fn convert_values_by_position(
+    src: &RecDesc,
+    values: &[Datum],
+    nulls: &[bool],
+    dst: &RecDesc,
+    msg: &str,
+) -> PgResult<(Vec<Datum>, Vec<bool>)> {
+    #[cold]
+    fn mismatch(msg: &str, detail: String) -> Box<PgError> {
+        Box::new(
+            elog::ereport(ERROR)
+                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(msg.to_string())
+                .errdetail(detail)
+                .into_error(),
+        )
+    }
+    let n = dst.types.len();
+    let mut out_values = vec![Datum::null(); n];
+    let mut out_nulls = vec![true; n];
+    let mut j = 0usize;
+    let mut nincols = 0;
+    let mut noutcols = 0;
+    for i in 0..n {
+        if dst.dropped[i] {
+            continue;
+        }
+        noutcols += 1;
+        while j < src.types.len() {
+            if src.dropped[j] {
+                j += 1;
+                continue;
+            }
+            nincols += 1;
+            if dst.types[i] != src.types[j]
+                || (dst.typmods[i] != src.typmods[j] && dst.typmods[i] >= 0)
+            {
+                return Err(mismatch(
+                    msg,
+                    format!(
+                        "Returned type {} does not match expected type {} in column \"{}\" (position {}).",
+                        format_type::format_type_with_typemod(src.types[j], src.typmods[j])?,
+                        format_type::format_type_with_typemod(dst.types[i], dst.typmods[i])?,
+                        dst.names[i],
+                        noutcols
+                    ),
+                ));
+            }
+            out_values[i] = values[j];
+            out_nulls[i] = nulls[j];
+            j += 1;
+            break;
+        }
+    }
+    let extra = src.types[j..]
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| !src.dropped[j + k])
+        .count();
+    if extra > 0 || nincols != noutcols {
+        return Err(mismatch(
+            msg,
+            format!(
+                "Number of returned columns ({}) does not match expected column count ({}).",
+                nincols + extra,
+                noutcols
+            ),
+        ));
+    }
+    Ok((out_values, out_nulls))
+}
+
+fn fetch_direction_of(direction: i32) -> types_portal::FetchDirection {
+    match direction {
+        FETCH_FORWARD => types_portal::FetchDirection::FETCH_FORWARD,
+        FETCH_BACKWARD => types_portal::FetchDirection::FETCH_BACKWARD,
+        FETCH_ABSOLUTE => types_portal::FetchDirection::FETCH_ABSOLUTE,
+        FETCH_RELATIVE => types_portal::FetchDirection::FETCH_RELATIVE,
+        other => panic!("unrecognized fetch direction: {other}"),
     }
 }
 
