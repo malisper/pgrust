@@ -1179,7 +1179,22 @@ impl<'a> Estate<'a> {
         xact::BeginInternalSubTransaction(None)?;
         self.err_text = None;
 
-        match self.exec_stmts(&block.body) {
+        // Loud panics unwind without a PgResult; the subtransaction must
+        // still die with the unwind or a later ROLLBACK walks a stack with a
+        // leaked SUBINPROGRESS over a block-less top (C's PG_CATCH cannot be
+        // bypassed this way).
+        let body_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.exec_stmts(&block.body)
+        })) {
+            Ok(r) => r,
+            Err(payload) => {
+                let _ = xact::RollbackAndReleaseCurrentSubTransaction();
+                resowner::SetCurrentResourceOwner(save_owner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+
+        match body_result {
             Ok(rc) => {
                 self.err_text = Some("during statement block exit");
                 // The return value must survive subxact exit (C datumTransfer
@@ -1196,8 +1211,11 @@ impl<'a> Estate<'a> {
                 Ok(rc)
             }
             Err(e) => {
-                // Only ERROR is catchable; FATAL/PANIC never longjmp in C.
+                // Only ERROR is catchable; FATAL/PANIC never longjmp in C
+                // (the backend exits) — release the subxact and propagate.
                 if e.level > ERROR {
+                    let _ = xact::RollbackAndReleaseCurrentSubTransaction();
+                    resowner::SetCurrentResourceOwner(save_owner);
                     return Err(e);
                 }
                 // Bake this frame's context with the throw-time stmt/text
