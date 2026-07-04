@@ -110,6 +110,9 @@ thread_local! {
     static PARALLEL_WORKER_NUMBER: Cell<i32> = const { Cell::new(-1) };
     static INITIALIZING_PARALLEL_WORKER: Cell<bool> = const { Cell::new(false) };
     static PCXT_LIST: RefCell<Vec<ParallelContext>> = const { RefCell::new(Vec::new()) };
+    // Every-commit AtEOXact_Parallel must pay C's dlist_is_empty, not a
+    // RefCell borrow (M1 gate).
+    static PCXT_COUNT: Cell<usize> = const { Cell::new(0) };
     static NEXT_PCXT_ID: Cell<u64> = const { Cell::new(1) };
     static MY_WORKER_SHARED: RefCell<Option<Arc<ParallelShared>>> =
         const { RefCell::new(None) };
@@ -213,6 +216,7 @@ pub fn CreateParallelContext(
             shared_key: None,
         })
     });
+    PCXT_COUNT.with(|c| c.set(c.get() + 1));
     Ok(ParallelContextId(id))
 }
 
@@ -590,6 +594,7 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
             .unwrap_or_else(|| panic!("ParallelContext {} not in pcxt_list", id.0));
         list.remove(idx)
     });
+    PCXT_COUNT.with(|c| c.set(c.get() - 1));
 
     for w in pcxt.workers.iter_mut() {
         if w.error_receiver.is_some() {
@@ -613,20 +618,26 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
 }
 
 pub fn ParallelContextActive() -> bool {
-    PCXT_LIST.with(|l| !l.borrow().is_empty())
+    PCXT_COUNT.with(|c| c.get() != 0)
 }
 
 pub fn AtEOXact_Parallel(is_commit: bool) -> PgResult<()> {
-    if is_commit && ParallelContextActive() {
-        let _ = elog::elog(WARNING, "leaked parallel context");
+    if !ParallelContextActive() {
+        return Ok(());
     }
     while let Some(id) = PCXT_LIST.with(|l| l.borrow().first().map(|p| ParallelContextId(p.id))) {
+        if is_commit {
+            let _ = elog::elog(WARNING, "leaked parallel context");
+        }
         DestroyParallelContext(id)?;
     }
     Ok(())
 }
 
 pub fn AtEOSubXact_Parallel(is_commit: bool, my_subid: SubTransactionId) -> PgResult<()> {
+    if !ParallelContextActive() {
+        return Ok(());
+    }
     loop {
         let front = PCXT_LIST.with(|l| {
             l.borrow()
