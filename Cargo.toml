@@ -249,6 +249,8 @@ members = [
     "crates/backend/commands/view",
     "crates/backend/commands/tablespace",
     "crates/backend/utils/fmgr/fmgr_core",
+    "crates/backend/utils/fmgr/dfmgr",
+    "crates/backend/test_regress",
     "crates/backend/access/transam/subtrans_seams",
     "crates/backend/storage/lmgr/lmgr",
     "crates/backend/access/transam/xact",
