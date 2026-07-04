@@ -1673,6 +1673,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
     fn calculate_frame_offsets(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         debug_assert!(self.all_first);
         let fo = self.frameOptions;
+        for state in [self.start_offset_state.as_deref(), self.end_offset_state.as_deref()] {
+            if let Some(state) = state {
+                let deps = state.param_exec_deps();
+                if !deps.is_empty() {
+                    ::executils::exec_eval_param_exec_params(estate, deps)?;
+                }
+            }
+        }
         if fo & FRAMEOPTION_START_OFFSET != 0 {
             let state = self.start_offset_state.as_deref_mut().expect("startOffset ExprState");
             let mut slots = EvalSlots::default();

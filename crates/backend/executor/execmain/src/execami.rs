@@ -487,7 +487,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
         // Changed params force the full SetOp rebuild (C's chgParam-nonnull arm).
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
-            ::nodesetop::exec_rescan_set_op(&mut s.state, estate);
+            ::nodesetop::exec_rescan_set_op_chg(&mut s.state, estate);
             exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("SetOp outer plan"), estate, chg)?;
             exec_re_scan_with_chg(&mut s.inner, base.righttree.expect("SetOp inner plan"), estate, chg)?;
         }
