@@ -31,7 +31,7 @@ const OID_MULTIRANGE_CONTAINS_ELEM_OP: Oid = 2869;
 const OID_MULTIRANGE_CONTAINS_RANGE_OP: Oid = 2870;
 const OID_MULTIRANGE_CONTAINS_MULTIRANGE_OP: Oid = 2871;
 const OID_MULTIRANGE_ELEM_CONTAINED_OP: Oid = 2872;
-const OID_RANGE_MULTIRANGE_CONTAINED_OP: Oid = 2873;
+const OID_RANGE_MULTIRANGE_CONTAINED_OP: Oid = 4540;
 const OID_MULTIRANGE_MULTIRANGE_CONTAINED_OP: Oid = 2874;
 const OID_RANGE_OVERLAPS_LEFT_MULTIRANGE_OP: Oid = 2875;
 const OID_MULTIRANGE_OVERLAPS_LEFT_RANGE_OP: Oid = 2876;
@@ -46,7 +46,7 @@ const OID_RANGE_RIGHT_MULTIRANGE_OP: Oid = 4398;
 const OID_MULTIRANGE_RIGHT_RANGE_OP: Oid = 4399;
 const OID_MULTIRANGE_RIGHT_MULTIRANGE_OP: Oid = 4400;
 const OID_RANGE_CONTAINS_MULTIRANGE_OP: Oid = 4539;
-const OID_MULTIRANGE_RANGE_CONTAINED_OP: Oid = 4540;
+const OID_MULTIRANGE_RANGE_CONTAINED_OP: Oid = 2873;
 
 struct MultirangeSelCtx {
     mltrngtypid: Oid,
@@ -392,7 +392,9 @@ fn calc_hist_selectivity<'mcx>(
                     &const_lower,
                     const_upper,
                     &hist_lower,
-                    length_hist.expect("length histogram fetched"),
+                    // 4540 is outside C's length-hist fetch list; C zero-fills
+                    // lslot there (empty hist reads as frac 1.0).
+                    length_hist.unwrap_or(&[]),
                 )?
             }
         }

@@ -216,6 +216,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     fmgr_core::register_late_builtins(commands_constraint::CONSTRAINT_BUILTINS);
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
+    fmgr_core::register_late_builtins(rangetypes_gist::RANGETYPES_GIST_BUILTINS);
+    fmgr_core::register_late_builtins(rangetypes_spgist::RANGETYPES_SPGIST_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(orderedsetaggs::ORDEREDSETAGGS_BUILTINS);
