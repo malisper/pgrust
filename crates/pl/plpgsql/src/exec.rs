@@ -1,6 +1,7 @@
-// pl_exec.c, phase-1 subset. Statement set: block (no exceptions), assign,
+// pl_exec.c. Statement set: block (incl. EXCEPTION sections), assign,
 // if, loop/while/fori/fors, exit/continue, return, raise, assert, execsql
-// (incl. INTO [STRICT]), perform, getdiag(row_count). Expressions ride SPI
+// (incl. INTO [STRICT]), dynexecute, perform, getdiag(row_count).
+// Expressions ride SPI
 // plans (saved; plancache invalidation is loud per repo discipline) with the
 // simple-expression fast path over execexpr.
 //
