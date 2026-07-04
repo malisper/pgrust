@@ -71,10 +71,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::LockRowsPath(_) => create_lockrows_plan(run, path_id, flags),
-        PathNode::UniquePath(_) => panic!(
-            "create_unique_plan (createplan.c): unique-ified semijoin won the cost \
-             competition; unique-plan lane unported"
-        ),
+        PathNode::UniquePath(_) => create_unique_plan(run, path_id, flags),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
             "create_plan_recurse (createplan.c): pathtype {}; M2 plan lane",
@@ -1532,6 +1529,120 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     Ok(plan.seal())
 }
 
+
+// create_unique_plan (createplan.c), HASH arm; UNIQUE_PATH_SORT is loud.
+fn create_unique_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, umethod, in_operators, uniq_expr_ids, target_id, parallel_safe) =
+        match run.root.path(path_id) {
+            PathNode::UniquePath(up) => (
+                up.subpath.expect("UniquePath has a subpath"),
+                up.umethod,
+                crate::relnode::pgvec_clone_shallow(mcx, &up.in_operators),
+                crate::relnode::pgvec_clone_shallow(mcx, &up.uniq_exprs),
+                up.path.pathtarget_id.unwrap(),
+                up.path.parallel_safe,
+            ),
+            _ => unreachable!(),
+        };
+    let mut subplan = create_plan_recurse(run, subpath_id, flags)?;
+    if umethod == types_pathnodes::UNIQUE_PATH_NOOP {
+        return Ok(subplan);
+    }
+    assert!(
+        umethod == types_pathnodes::UNIQUE_PATH_HASH,
+        "create_unique_plan (createplan.c): UNIQUE_PATH_SORT arm unported"
+    );
+
+    let mut newtlist = build_path_tlist(run, target_id)?;
+    let mut newitems = false;
+    for &uid in uniq_expr_ids.iter() {
+        let uniqexpr = *run.root.expr_node(uid);
+        let found = newtlist
+            .iter()
+            .any(|n| types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, uniqexpr));
+        if !found {
+            let resno = newtlist.len() as i16 + 1;
+            newtlist.lappend(mcx, Node::mk_target_entry(mcx, uniqexpr, resno, None, false)?)?;
+            newitems = true;
+        }
+    }
+    if newitems {
+        // change_plan_targetlist (createplan.c).
+        if !crate::pathnode::is_projection_capable_pathtype(subplan.node_tag() as u16) {
+            let sub = subplan.as_plan().expect("plan node");
+            let mut result = Node::build::<ResultPlan>(mcx)?;
+            result.plan.targetlist = newtlist.clone_in(mcx)?;
+            result.plan.qual = NodeList::nil();
+            result.plan.lefttree = Some(subplan);
+            result.plan.disabled_nodes = sub.disabled_nodes;
+            result.plan.startup_cost = sub.startup_cost;
+            result.plan.total_cost = sub.total_cost;
+            result.plan.plan_rows = sub.plan_rows;
+            result.plan.plan_width = sub.plan_width;
+            result.plan.parallel_aware = false;
+            result.plan.parallel_safe = parallel_safe;
+            subplan = result.seal();
+        } else {
+            // SAFETY: subplan was freshly built by create_plan_recurse; no
+            // reference derived from its tlist is live across this write.
+            unsafe {
+                subplan.with_plan_mut(|p| {
+                    p.targetlist = newtlist;
+                    p.parallel_safe = parallel_safe;
+                })
+            }
+            .expect("plan node");
+        }
+    }
+
+    let subplan_tlist =
+        NodeList::from_slice(mcx, subplan.as_plan().expect("plan node").targetlist.as_slice())?;
+    let mut grp_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut grp_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    for &uid in uniq_expr_ids.iter() {
+        let uniqexpr = *run.root.expr_node(uid);
+        let tle = subplan_tlist
+            .iter()
+            .find(|n| {
+                types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, uniqexpr)
+            })
+            .unwrap_or_else(|| panic!("failed to find unique expression in subplan tlist"))
+            .as_target_entry()
+            .unwrap();
+        grp_col_idx.push(tle.resno);
+        grp_collations.push(expr_collation(tle.expr));
+    }
+    let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    for &in_oper in in_operators.iter() {
+        let (_, eq_oper) = lsyscache::get_compatible_hash_operators(in_oper)?
+            .unwrap_or_else(|| {
+                panic!("could not find compatible hash operator for operator {in_oper}")
+            });
+        grp_operators.push(eq_oper);
+    }
+
+    let num_cols = uniq_expr_ids.len();
+    let rows = run.root.path(path_id).base().rows;
+    let mut plan = Node::build::<Agg>(mcx)?;
+    plan.plan.targetlist = build_path_tlist(run, target_id)?;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.aggstrategy = types_pathnodes::AGG_HASHED;
+    plan.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+    plan.numCols = num_cols as i32;
+    plan.grpColIdx = mcx::vec_borrow_in(mcx, grp_col_idx)?;
+    plan.grpOperators = mcx::vec_borrow_in(mcx, grp_operators)?;
+    plan.grpCollations = mcx::vec_borrow_in(mcx, grp_collations)?;
+    plan.numGroups = clamp_cardinality_to_long(rows);
+    plan.transitionSpace = 0;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
 
 // create_minmaxagg_plan (createplan.c/planagg.c): one InitPlan per agg, then
 // a Param-fed Result.

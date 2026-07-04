@@ -194,7 +194,7 @@ pub fn inv_create<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid) -> PgResult<Oid> {
 
     // LO dependencies are recorded under LargeObjectRelationId (heap classid)
     // for backwards-compatibility reasons.
-    pg_depend::recordDependencyOnOwner(LargeObjectRelationId, lobjId_new, miscinit::GetUserId());
+    pg_depend::recordDependencyOnOwner(mcx, LargeObjectRelationId, lobjId_new, miscinit::GetUserId())?;
 
     // InvokeObjectPostCreateHook: no object_access_hook can be installed.
 

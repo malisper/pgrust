@@ -828,7 +828,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             use ::types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
-                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColType,
+                SubLinkType::EXPR_SUBLINK => sp.firstColType,
+                SubLinkType::ARRAY_SUBLINK => ::lsyscache::get_promoted_array_type(sp.firstColType)
+                    .expect("array type resolved at plan time"),
                 SubLinkType::MULTIEXPR_SUBLINK => {
                     panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
                 }
@@ -1244,24 +1246,19 @@ pub(crate) fn init_expr_rec<'mcx>(
             push_step(state, mcx, step)
         }
         NodeTag::T_SQLValueFunction => {
-            use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
+            use ::types_nodes::primnodes::SQLValueFunctionOp;
             let svf = node.as_sql_value_function().unwrap();
-            // 12-byte TimeTz image, or a 64-byte NameData for the name ops.
-            let size = match svf.op {
-                Op::SVFOP_CURRENT_ROLE
-                | Op::SVFOP_CURRENT_USER
-                | Op::SVFOP_USER
-                | Op::SVFOP_SESSION_USER
-                | Op::SVFOP_CURRENT_CATALOG
-                | Op::SVFOP_CURRENT_SCHEMA => 64,
-                _ => 12,
+            let size = if (svf.op as u32) >= SQLValueFunctionOp::SVFOP_CURRENT_ROLE as u32 {
+                core::mem::size_of::<types_tuple::NameData>()
+            } else {
+                12
             };
-            let layout = core::alloc::Layout::from_size_align(size, 8).expect("svf scratch layout");
-            let timetz = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            let layout = core::alloc::Layout::from_size_align(size, 8).expect("svf layout");
+            let scratch = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
             push_step(
                 state,
                 mcx,
-                Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, timetz, out },
+                Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, scratch, out },
             )
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),

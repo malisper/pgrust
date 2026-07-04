@@ -314,7 +314,10 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree.as_grant_stmt().unwrap();
             aclchk::ExecuteGrantStmt(mcx, stmt)?;
         }
-        T_GrantRoleStmt => handler_gap("GrantRole (user lane)"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree.as_grant_role_stmt().unwrap();
+            user::GrantRole(mcx, stmt)?;
+        }
 
         T_CreatedbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE DATABASE")?;
@@ -459,11 +462,30 @@ fn dispatch_switch<'mcx>(
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
         T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
-        T_CreateRoleStmt => handler_gap("CreateRole (user lane)"),
-        T_AlterRoleStmt => handler_gap("AlterRole (user lane)"),
-        T_AlterRoleSetStmt => handler_gap("AlterRoleSet (user lane)"),
-        T_DropRoleStmt => handler_gap("DropRole (user lane)"),
-        T_ReassignOwnedStmt => handler_gap("ReassignOwnedObjects (user lane)"),
+        T_CreateRoleStmt => {
+            let stmt = parsetree.as_create_role_stmt().unwrap();
+            user::CreateRole(mcx, stmt)?;
+        }
+        T_AlterRoleStmt => {
+            let stmt = parsetree.as_alter_role_stmt().unwrap();
+            user::AlterRole(mcx, stmt)?;
+        }
+        T_AlterRoleSetStmt => {
+            let stmt = parsetree.as_alter_role_set_stmt().unwrap();
+            user::AlterRoleSet(stmt)
+        }
+        T_DropRoleStmt => {
+            let stmt = parsetree.as_drop_role_stmt().unwrap();
+            user::DropRole(mcx, stmt)?;
+        }
+        T_DropOwnedStmt => {
+            let stmt = parsetree.as_drop_owned_stmt().unwrap();
+            user::DropOwnedObjects(mcx, stmt)?;
+        }
+        T_ReassignOwnedStmt => {
+            let stmt = parsetree.as_reassign_owned_stmt().unwrap();
+            user::ReassignOwnedObjects(mcx, stmt)?;
+        }
 
         T_LockStmt => {
             xact::RequireTransactionBlock(is_top_level, "LOCK TABLE")?;
@@ -472,7 +494,8 @@ fn dispatch_switch<'mcx>(
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
-            handler_gap("AfterTriggerSetState (trigger lane)")
+            let stmt = parsetree.as_constraints_set_stmt().unwrap();
+            trigger::AfterTriggerSetState(mcx, stmt)?;
         }
         T_CheckPointStmt => {
             if !acl_seams::has_privs_of_role::call(
@@ -515,6 +538,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_TRIGGER => trigger::RemoveTriggers(mcx, stmt)?,
                 OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
                 OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
                 // Interim RemoveObjects specialization; collapses into
@@ -607,6 +631,17 @@ fn dispatch_switch<'mcx>(
             exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
+        T_CreateTrigStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
+                .expect("CreateTrigStmt");
+            trigger::CreateTrigger(mcx, stmt, source_text)?;
+        }
+
         T_AlterTableStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
@@ -642,6 +677,9 @@ fn dispatch_switch<'mcx>(
                         >(stmt)
                     };
                     commands_policy::rename_policy(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+                    trigger::renametrig(mcx, stmt)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
                     tablecmds::RenameConstraint(mcx, stmt)?;

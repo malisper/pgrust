@@ -76,6 +76,8 @@ nodematerial = { path = "../../backend/executor/nodematerial" }
 nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
+auth_scram = { path = "../../backend/libpq/auth_scram" }
+crypt = { path = "../../backend/libpq/crypt" }
 be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
@@ -181,6 +183,7 @@ guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
 variable = { path = "../../backend/commands/variable" }
+user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
 queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }
