@@ -272,10 +272,8 @@ EXPLAIN SELECT DISTINCT a, generate_series(1, 3) FROM selgrp;
 CREATE TABLE selgrp2(a int4, c int4);
 INSERT INTO selgrp2 SELECT g % 10, g % 4 FROM generate_series(1, 1000) g;
 ANALYZE selgrp2;
--- Cross-rel known-equal GROUP BY probes deferred: C reduces the group clause
--- to one key via merged join ECs (remove_useless_groupby_columns machinery);
--- main's eclass-lite never merges join equalities, so exprs_known_equal has
--- no EC to find. Re-add after the optpath-p1 EC port lands.
+EXPLAIN SELECT selgrp.a, selgrp2.a, count(*) FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp.a, selgrp2.a;
+EXPLAIN SELECT selgrp2.a, selgrp.a, count(*) FROM selgrp JOIN selgrp2 ON selgrp.a = selgrp2.a GROUP BY selgrp2.a, selgrp.a;
 SET enable_tidscan = off;
 EXPLAIN SELECT count(*) FROM selgrp WHERE ctid < '(3,0)';
 EXPLAIN SELECT count(*) FROM selgrp WHERE ctid <= '(3,10)';
