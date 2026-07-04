@@ -92,6 +92,7 @@ types_rel = { path = "../../../_support/types/rel" }
 nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
+tableam = { path = "../../access/table/tableam" }
 [dev-dependencies]
 spi_seams = { path = "../spi_seams" }
 parallel = { path = "../../access/transam/parallel" }
@@ -173,7 +174,6 @@ tstore_receiver = { path = "../tstore_receiver" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
 types_storage = { path = "../../../_support/types/types_storage" }
-tableam = { path = "../../access/table/tableam" }
 relation_seams = { path = "../../access/common/relation_seams" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
