@@ -19,6 +19,8 @@ pg_proc = { path = "../../catalog/pg_proc" }
 pg_type = { path = "../../catalog/pg_type" }
 commands_define = { path = "../commands_define" }
 elog = { path = "../../utils/error/elog" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 aclchk = { path = "../../catalog/aclchk" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

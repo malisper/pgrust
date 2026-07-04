@@ -955,7 +955,14 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::CreateFunctionStmt<'mcx>,
                 >(stmt)
             };
-            let address = functioncmds::CreateFunction(mcx, stmt, source_text)?;
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            let address = functioncmds::CreateFunction(mcx, &pstate, stmt, source_text)?;
+            parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
         }
 

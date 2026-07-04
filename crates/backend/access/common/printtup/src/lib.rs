@@ -13,7 +13,7 @@ use ::pqformat::{
 };
 use ::pquery_seams::TargetEntrySummary;
 use ::stringinfo::StringInfo;
-use ::types_core::{primitive::InvalidOid, Oid, NAMEDATALEN};
+use ::types_core::{primitive::InvalidOid, FirstNormalObjectId, Oid, NAMEDATALEN};
 use ::types_dest::CommandDest;
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::types_fmgr::{
@@ -192,7 +192,13 @@ impl<'mcx> DrPrinttup<'mcx> {
             };
             info.push(entry);
         }
-        if info.iter().any(|e| e.format == 1 || e.typisvarlena) {
+        // User-defined (non-builtin) output fns follow the result-mcx
+        // convention even for fixed-length results; builtin cstring kernels
+        // return FmgrInfo scratch and stay off the context path.
+        if info
+            .iter()
+            .any(|e| e.format == 1 || e.typisvarlena || e.finfo.fn_oid >= FirstNormalObjectId)
+        {
             if self.send_ctx.is_none() {
                 self.send_ctx = Some(MemoryContext::new_bump("PrinttupSend"));
             }
