@@ -11436,29 +11436,6 @@ dependencies = [
 [[package]]
 name = "seclabel"
 version = "0.0.0"
-dependencies = [
- "catalog",
- "catalog_indexing",
- "datum",
- "fmgr_seams",
- "genam",
- "heaptuple",
- "mcx",
- "miscinit",
- "objectaddress_seams",
- "pg_class_seams",
- "pg_depend",
- "relcache_seams",
- "superuser",
- "table",
- "types_core",
- "types_error",
- "types_nodes",
- "types_rel",
- "types_scan",
- "types_tuple",
- "varlena",
-]
 
 [[package]]
 name = "sequence"
