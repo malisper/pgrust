@@ -6,13 +6,15 @@ use types_core::catalog::{
 use types_error::PgResult;
 use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
-    AccessPriv, AlterRoleSetStmt, AlterRoleStmt, AlterTableCmd, AlterTableStmt, AlterTableType,
+    AccessPriv, AlterFunctionStmt, AlterOwnerStmt, AlterRoleSetStmt, AlterRoleStmt,
+    AlterTableCmd, AlterTableStmt, AlterTableType,
     CTEMaterialize, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt, CommonTableExpr,
     CopyStmt, CreateFunctionStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
     DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, DropBehavior,
     DropOwnedStmt, DropRoleStmt, DropStmt, ExecuteStmt, FetchStmt, FunctionParameter,
     FunctionParameterMode, GrantRoleStmt, GrantStmt, GrantTargetType, GroupingSetKind,
-    ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectType, PrepareStmt, ReassignOwnedStmt,
+    ListenStmt, LoadStmt, LockStmt, NotifyStmt, ObjectType, ObjectWithArgs, PrepareStmt,
+    ReassignOwnedStmt,
     ReindexObjectType, ReindexStmt, RenameStmt, ReplicaIdentityStmt, RoleSpec, RoleSpecType,
     RoleStmtType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt,
     UnlistenStmt, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
@@ -5344,6 +5346,174 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
                 *yyval = YYSTYPE::List(list);
             }
+            // func_args_list / function_with_argtypes_list / aggr_args_list /
+            // aggregate_with_argtypes_list: `el | list ',' el`.
+            1134 | 1136 | 1169 | 1172 => {
+                let el = view.v(1).node().expect("list element");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1135 | 1137 | 1170 | 1173 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("list element"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1138 => {
+                let args = view.v(2).list();
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = view.v(1).list();
+                n.objargs = extract_arg_types(mcx, &args)?;
+                n.objfuncargs = args;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1139 | 1140 => {
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = NodeList::make1(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
+                n.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1141 => {
+                let name = view.v(1).str_val();
+                let mut list = view.v(2).list();
+                for e in &list {
+                    if e.as_string().is_none() {
+                        return Err(self.parser_yyerror("syntax error"));
+                    }
+                }
+                list.lcons(mcx, Node::mk_string(mcx, name)?)?;
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = list;
+                n.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1164 => {
+                let p = view.v(1).node().expect("func_arg");
+                let mode = p.as_function_parameter().expect("FunctionParameter").mode;
+                if !matches!(
+                    mode,
+                    FunctionParameterMode::FUNC_PARAM_DEFAULT
+                        | FunctionParameterMode::FUNC_PARAM_IN
+                        | FunctionParameterMode::FUNC_PARAM_VARIADIC
+                ) {
+                    return Err(self.errposition_error_code(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "aggregates cannot have output arguments".into(),
+                        view.l(1),
+                    ));
+                }
+                *yyval = YYSTYPE::Node(Some(p));
+            }
+            // aggr_args carrier: [args sublist, numdirectargs Integer];
+            // ordered-set form 1168 stays loud (makeOrderedSetArgs).
+            1165..=1167 => {
+                let sub = match rule {
+                    1165 => NodeList::nil(),
+                    1166 => view.v(2).list(),
+                    _ => view.v(4).list(),
+                };
+                let ndirect = if rule == 1167 { 0 } else { -1 };
+                let mut list = NodeList::make1(mcx, Node::mk_list(mcx, sub)?)?;
+                list.lappend(mcx, Node::mk_integer(mcx, ndirect)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // aggregate_with_argtypes: objfuncargs = linitial(aggr_args).
+            1171 => {
+                let aggr = view.v(2).list();
+                let sub = aggr.as_slice()[0];
+                // SAFETY: parser-owned carrier; no derived refs live.
+                let params = unsafe { sub.with_mut::<NodeList, _>(core::mem::take) }
+                    .expect("aggr_args sublist");
+                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
+                n.objname = view.v(1).list();
+                n.objargs = extract_arg_types(mcx, &params)?;
+                n.objfuncargs = params;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1217..=1219 => {
+                let mut n = Node::build::<AlterFunctionStmt>(mcx)?;
+                n.objtype = match rule {
+                    1217 => ObjectType::OBJECT_FUNCTION,
+                    1218 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.func = view.v(3).node().and_then(|o| o.as_object_with_args());
+                n.actions = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1220 => {
+                let el = view.v(1).node().expect("common_func_opt_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1221 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("common_func_opt_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // RemoveFuncStmt / RemoveAggrStmt (operator forms 1232-1242 stay
+            // loud with the rest of DROP/ALTER OPERATOR: operator lane).
+            1224 | 1226 | 1228 | 1230 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = match rule {
+                    1224 => ObjectType::OBJECT_FUNCTION,
+                    1226 => ObjectType::OBJECT_PROCEDURE,
+                    1228 => ObjectType::OBJECT_ROUTINE,
+                    _ => ObjectType::OBJECT_AGGREGATE,
+                };
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1225 | 1227 | 1229 | 1231 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = match rule {
+                    1225 => ObjectType::OBJECT_FUNCTION,
+                    1227 => ObjectType::OBJECT_PROCEDURE,
+                    1229 => ObjectType::OBJECT_ROUTINE,
+                    _ => ObjectType::OBJECT_AGGREGATE,
+                };
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CommentStmt objwithargs forms (OPERATOR 978 stays loud).
+            976 | 977 | 982 | 983 => {
+                let mut n = Node::build::<CommentStmt>(mcx)?;
+                n.objtype = match rule {
+                    976 => ObjectType::OBJECT_AGGREGATE,
+                    977 => ObjectType::OBJECT_FUNCTION,
+                    982 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(4).node();
+                let c = view.v(6);
+                n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1274 | 1281 | 1288 | 1290 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = match rule {
+                    1274 => ObjectType::OBJECT_AGGREGATE,
+                    1281 => ObjectType::OBJECT_FUNCTION,
+                    1288 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.newname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOwnerStmt objwithargs forms (OPERATOR 1388 stays loud).
+            1380 | 1385 | 1391 | 1392 => {
+                let mut n = Node::build::<AlterOwnerStmt>(mcx)?;
+                n.objectType = match rule {
+                    1380 => ObjectType::OBJECT_AGGREGATE,
+                    1385 => ObjectType::OBJECT_FUNCTION,
+                    1391 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.newowner = view.v(6).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // GrantStmt / RevokeStmt; privilege_target rides as a GrantStmt
             // carrier holding (targtype, objtype, objects).
             1027 => {
@@ -5428,8 +5598,31 @@ impl<'mcx> Parser<'mcx> {
                 n.cols = NodeList::nil();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // privilege_target FUNCTION/PROCEDURE/ROUTINE forms.
+            1051..=1053 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = match rule {
+                    1051 => ObjectType::OBJECT_FUNCTION,
+                    1052 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.objects = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1064..=1066 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA;
+                n.objtype = match rule {
+                    1064 => ObjectType::OBJECT_FUNCTION,
+                    1065 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.objects = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // privilege_target: [TABLE] qualified_name_list | SEQUENCE ...
-            // (other target forms 1049-1066 stay louds).
+            // (other target forms 1049-1063 stay louds).
             1046 | 1047 | 1048 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
@@ -5859,46 +6052,6 @@ impl<'mcx> Parser<'mcx> {
                 n.number = view.v(2).ival();
                 n.class_args = view.v(4).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            1134 => {
-                let el = view.v(1).node().expect("func_arg");
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
-            }
-            1135 => {
-                let mut list = view.v(1).list();
-                list.lappend(mcx, view.v(3).node().expect("func_arg"))?;
-                *yyval = YYSTYPE::List(list);
-            }
-            // function_with_argtypes: func_name func_args |
-            // type_func_name_keyword | ColId [indirection]
-            1138 => {
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                owa.objname = view.v(1).list();
-                let fargs = view.v(2).list();
-                owa.objargs = extract_arg_types(mcx, &fargs)?;
-                owa.objfuncargs = fargs;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
-            }
-            1139 | 1140 => {
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                let name = Node::mk_string(mcx, view.v(1).str_val())?;
-                owa.objname = NodeList::make1(mcx, name)?;
-                owa.args_unspecified = true;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
-            }
-            1141 => {
-                let name = view.v(1).str_val();
-                let mut list = view.v(2).list();
-                for n in &list {
-                    if n.as_string().is_none() {
-                        return Err(self.parser_yyerror("syntax error"));
-                    }
-                }
-                list.lcons(mcx, Node::mk_string(mcx, name)?)?;
-                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
-                owa.objname = list;
-                owa.args_unspecified = true;
-                *yyval = YYSTYPE::Node(Some(owa.seal()));
             }
             // DropOpClassStmt / DropOpFamilyStmt: DROP OPERATOR CLASS|FAMILY
             // [IF_P EXISTS] any_name USING name opt_drop_behavior
@@ -6647,6 +6800,24 @@ fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
     }
 }
 
+// extractArgTypes (gram.y): input-argument TypeNames only.
+fn extract_arg_types<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    params: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    for p in params {
+        let fp = p.as_function_parameter().expect("FunctionParameter");
+        if !matches!(
+            fp.mode,
+            FunctionParameterMode::FUNC_PARAM_OUT | FunctionParameterMode::FUNC_PARAM_TABLE
+        ) {
+            result.lappend(mcx, fp.argType.expect("func_arg argType"))?;
+        }
+    }
+    Ok(result)
+}
+
 fn param_mode(v: i32) -> FunctionParameterMode {
     match v as u8 {
         b'i' => FunctionParameterMode::FUNC_PARAM_IN,
@@ -6672,26 +6843,6 @@ fn make_a_const<'mcx>(
         panic!("make_a_const: unexpected node type {:?}", v.node_tag())
     };
     Ok(YYSTYPE::Node(Some(Node::mk_a_const(mcx, Some(val), location)?)))
-}
-
-// extractArgTypes (gram.y): pull input-argument TypeNames off a
-// FunctionParameter list.
-fn extract_arg_types<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    parameters: &NodeList<'mcx>,
-) -> PgResult<NodeList<'mcx>> {
-    let mut result = NodeList::nil();
-    for n in parameters {
-        let p = n
-            .as_variant::<types_nodes::parsenodes::FunctionParameter>()
-            .expect("FunctionParameter");
-        if p.mode != FunctionParameterMode::FUNC_PARAM_OUT
-            && p.mode != FunctionParameterMode::FUNC_PARAM_TABLE
-        {
-            result.lappend(mcx, p.argType.expect("func_arg argType"))?;
-        }
-    }
-    Ok(result)
 }
 
 fn alter_table_cmd<'mcx>(

@@ -357,7 +357,9 @@ fn object_names_to_oids<'mcx>(
     objtype: ObjectType,
     objnames: &types_nodes::list::NodeList<'_>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    debug_assert!(matches!(objtype, ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE));
+    if !matches!(objtype, ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE) {
+        panic!("object_names_to_oids (aclchk.c): objtype {objtype:?} unported (function-grant lane)");
+    }
     let mut objects: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
     for cell in objnames.iter() {
         let relvar = cell.as_range_var().expect("RangeVar");

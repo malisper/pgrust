@@ -995,6 +995,62 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "strength", lc.strength as i32);
         int_field(out, "waitPolicy", lc.waitPolicy as i32);
         out.push('}');
+    } else if let Some(o) = n.as_object_with_args() {
+        object_with_args(out, o);
+    } else if let Some(p) = n.as_function_parameter() {
+        out.push_str("{FUNCTIONPARAMETER");
+        string_field(out, "name", p.name);
+        node_field(out, "argType", p.argType);
+        int_field(out, "mode", p.mode as i32);
+        node_field(out, "defexpr", p.defexpr);
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(c) = n.as_comment_stmt() {
+        out.push_str("{COMMENTSTMT");
+        int_field(out, "objtype", c.objtype as i32);
+        node_field(out, "object", c.object);
+        string_field(out, "comment", c.comment);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::RenameStmt>() {
+        out.push_str("{RENAMESTMT");
+        int_field(out, "renameType", r.renameType as i32);
+        int_field(out, "relationType", r.relationType as i32);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", r.object);
+        string_field(out, "subname", r.subname);
+        string_field(out, "newname", r.newname);
+        int_field(out, "behavior", r.behavior as i32);
+        bool_field(out, "missing_ok", r.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_owner_stmt() {
+        out.push_str("{ALTEROWNERSTMT");
+        int_field(out, "objectType", a.objectType as i32);
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", a.object);
+        out.push_str(" :newowner ");
+        match a.newowner {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
+    } else if let Some(a) = n.as_alter_function_stmt() {
+        out.push_str("{ALTERFUNCTIONSTMT");
+        int_field(out, "objtype", a.objtype as i32);
+        out.push_str(" :func ");
+        match a.func {
+            Some(f) => object_with_args(out, f),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "actions", &a.actions);
+        out.push('}');
     } else if let Some(m) = n.as_merge_stmt() {
         out.push_str("{MERGESTMT");
         node_field(out, "relation", m.relation);
@@ -1021,6 +1077,15 @@ fn node(out: &mut String, n: Node<'_>) {
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
+}
+
+fn object_with_args(out: &mut String, o: &types_nodes::parsenodes::ObjectWithArgs<'_>) {
+    out.push_str("{OBJECTWITHARGS");
+    list_field(out, "objname", &o.objname);
+    list_field(out, "objargs", &o.objargs);
+    list_field(out, "objfuncargs", &o.objfuncargs);
+    bool_field(out, "args_unspecified", o.args_unspecified);
+    out.push('}');
 }
 
 fn variable_set_stmt(out: &mut String, v: &types_nodes::parsenodes::VariableSetStmt<'_>) {
