@@ -605,8 +605,7 @@ unsafe fn bt_check_unique<'mcx>(
     debug_assert!(!insertstate.itup_key.anynullkeys);
     debug_assert!(insertstate.itup_key.scantid.is_none());
 
-    // Each iteration processes one heap TID, not one index tuple: posting
-    // list TIDs advance curposti, everything else advances the page offset.
+    // one heap TID per iteration: posting TIDs advance curposti, not offset.
     let mut curitup: ITup = core::ptr::null();
     let mut curitemid_dead = false;
     let mut inposting = false;
@@ -1371,8 +1370,7 @@ unsafe fn bt_split<'mcx>(
     write_opaque(&mut leftpage, &lopaque);
     leftpage.set_lsn(orig_lsn);
 
-    // lastleft/firstright come from an imaginary origpage that already holds
-    // nposting in place of the split posting tuple (C: origpagepostingoff).
+    // lastleft/firstright come from an imaginary origpage already holding nposting.
     let origpagepostingoff: OffsetNumber = if postingoff != 0 {
         debug_assert!(isleaf);
         debug_assert!(ItemPointerCompare(&t_tid(orignewitem), &t_tid(newitem)) < 0);
@@ -1598,10 +1596,8 @@ unsafe fn bt_split<'mcx>(
     }
 
     if relation_needs_wal(rel) {
-        // postingoff stays zero when both the replacement posting list and
-        // newitem land on the right page: recovery then needs no posting
-        // split at all. Otherwise orignewitem is logged instead of newitem
-        // and redo re-runs _bt_swap_posting.
+        // postingoff stays zero when nposting and newitem both go right; else
+        // orignewitem is logged and redo re-runs _bt_swap_posting.
         let xl_postingoff: u16 = if postingoff != 0 && origpagepostingoff < firstrightoff {
             postingoff
         } else {
