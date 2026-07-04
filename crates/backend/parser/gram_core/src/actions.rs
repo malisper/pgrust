@@ -6935,12 +6935,13 @@ impl<'mcx> Parser<'mcx> {
             }
             out.is_enforced = true;
         }
-        // Deferrable TRIGGER/FOREIGN KEY nodes parse (trigger + firing lanes
-        // own them); the deferrable unique family stays loud
-        // (unique_key_recheck unported).
+        // Deferrable TRIGGER/FOREIGN KEY/EXCLUDE nodes parse (trigger, firing
+        // and exclusion lanes own them); deferrable unique/pk stays loud
+        // (unique_key_recheck deferred-unique arm unported).
         if (out.deferrable || out.initdeferred)
             && constr_type != "TRIGGER"
             && constr_type != "FOREIGN KEY"
+            && constr_type != "EXCLUDE"
         {
             panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
         }
