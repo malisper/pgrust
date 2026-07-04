@@ -55,10 +55,11 @@ SELECT count(*) FROM don_u JOIN (SELECT DISTINCT ON (a) a, b FROM don_t ORDER BY
   ON don_u.v = s.a;
 
 -- CTE drill (two same-level references keep C on the materialized plan;
--- sub-level CTE references are the ctelevelsup loud)
+-- sub-level CTE refs are the ctelevelsup loud; independent join keys keep
+-- EC-derived implied equalities out — equivclass lane)
 EXPLAIN WITH g AS (SELECT a, count(*) n FROM don_t GROUP BY a)
-  SELECT * FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.v;
+  SELECT * FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.k;
 WITH g AS (SELECT a, count(*) n FROM don_t GROUP BY a)
-  SELECT count(*) FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.v;
+  SELECT count(*) FROM don_u JOIN g ON don_u.v = g.a JOIN g g2 ON g2.a = don_u.k;
 
 DROP TABLE don_t, don_u;
