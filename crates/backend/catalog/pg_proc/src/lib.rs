@@ -1,7 +1,6 @@
 // pg_proc.c ProcedureCreate insert/replace slice. Loud: argument defaults,
 // transforms, proconfig, prosqlbody, RECORD-tupdesc replace compare,
-// replace of a function with proargmodes+proargnames set, non-superuser
-// owner check.
+// replace of a function with proargmodes+proargnames set.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -489,8 +488,12 @@ pub fn ProcedureCreate<'mcx>(
                 ERRCODE_DUPLICATE_FUNCTION,
             ));
         }
-        if !superuser::superuser()? {
-            unported("ProcedureCreate: object_ownercheck for non-superusers");
+        if !aclchk::object_ownercheck(PROCEDURE_RELATION_ID, old_oid, a.proowner)? {
+            aclchk::aclcheck_error(
+                aclchk::ACLCHECK_NOT_OWNER,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+                a.procedureName,
+            )?;
         }
         if old_prokind != a.prokind {
             let detail = match old_prokind {

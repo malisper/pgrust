@@ -1,8 +1,5 @@
 // dropcmds.c RemoveObjects over the objtypes get_object_address serves
-// (TYPE/DOMAIN/SCHEMA/RULE/TRIGGER/EXTENSION/OPERATOR/OPCLASS/OPFAMILY);
-// ownership
-// checks run the superuser fast path only — non-superuser DROP is a named
-// panic (aclchk object_ownercheck unported).
+// (TYPE/DOMAIN/SCHEMA/RULE/TRIGGER/EXTENSION/OPERATOR/OPCLASS/OPFAMILY).
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
@@ -256,10 +253,22 @@ pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()
             }
         }
 
-        // C: namespace-owner shortcut, else check_object_ownership.
         let namespaceId = catalog_objectaddress::get_object_namespace(&address)?;
-        if !superuser::superuser_arg(miscinit::GetUserId())? {
-            unported("RemoveObjects check_object_ownership for non-superusers");
+        if !OidIsValid(namespaceId)
+            || !aclchk::object_ownercheck(
+                types_core::NAMESPACE_RELATION_ID,
+                namespaceId,
+                miscinit::GetUserId(),
+            )?
+        {
+            catalog_objectaddress::check_object_ownership(
+                mcx,
+                miscinit::GetUserId(),
+                stmt.removeType,
+                address,
+                object,
+                relation.as_ref(),
+            )?;
         }
 
         if OidIsValid(namespaceId) && catalog_namespace::isTempNamespace(namespaceId) {

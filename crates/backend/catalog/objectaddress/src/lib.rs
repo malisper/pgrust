@@ -76,6 +76,7 @@ fn check_object_ownership_marshal<'mcx>(
     objtype: ObjectType,
     address: objectaddress_seams::ObjectAddr,
     object: Node<'mcx>,
+    relation: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
     check_object_ownership(
         mcx,
@@ -83,6 +84,7 @@ fn check_object_ownership_marshal<'mcx>(
         objtype,
         ObjectAddress::sub_set(address.classId, address.objectId, address.objectSubId),
         object,
+        relation,
     )
 }
 
@@ -853,17 +855,69 @@ fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
     Ok(oid)
 }
 
-// check_object_ownership (objectaddress.c): superuser fast path; the role
-// ownership walks are the unported remainder.
+// check_object_ownership (objectaddress.c); objtypes without an arm below
+// are superuser-only until ported.
 pub fn check_object_ownership<'mcx>(
     _mcx: Mcx<'mcx>,
     roleid: Oid,
-    _objtype: ObjectType,
-    _address: ObjectAddress,
-    _object: Node<'mcx>,
+    objtype: ObjectType,
+    address: ObjectAddress,
+    object: Node<'mcx>,
+    relation: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
-    if !superuser::superuser_arg(roleid)? {
-        unported("check_object_ownership for non-superusers");
+    match objtype {
+        ObjectType::OBJECT_INDEX
+        | ObjectType::OBJECT_SEQUENCE
+        | ObjectType::OBJECT_TABLE
+        | ObjectType::OBJECT_VIEW
+        | ObjectType::OBJECT_MATVIEW
+        | ObjectType::OBJECT_FOREIGN_TABLE
+        | ObjectType::OBJECT_COLUMN
+        | ObjectType::OBJECT_RULE
+        | ObjectType::OBJECT_TRIGGER
+        | ObjectType::OBJECT_POLICY
+        | ObjectType::OBJECT_TABCONSTRAINT => {
+            let relation = relation.expect("relation-scoped object carries its relation");
+            if !aclchk::object_ownercheck(RELATION_RELATION_ID, relation.rd_id, roleid)? {
+                aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, relation.name())?;
+            }
+        }
+        ObjectType::OBJECT_AGGREGATE
+        | ObjectType::OBJECT_FUNCTION
+        | ObjectType::OBJECT_PROCEDURE
+        | ObjectType::OBJECT_ROUTINE
+        | ObjectType::OBJECT_OPERATOR => {
+            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
+                let owa = object
+                    .as_variant::<ObjectWithArgs>()
+                    .expect("object is an ObjectWithArgs");
+                aclchk::aclcheck_error(
+                    aclchk::ACLCHECK_NOT_OWNER,
+                    objtype,
+                    &NameListToString(&owa.objname),
+                )?;
+            }
+        }
+        ObjectType::OBJECT_DATABASE
+        | ObjectType::OBJECT_EVENT_TRIGGER
+        | ObjectType::OBJECT_EXTENSION
+        | ObjectType::OBJECT_FDW
+        | ObjectType::OBJECT_FOREIGN_SERVER
+        | ObjectType::OBJECT_LANGUAGE
+        | ObjectType::OBJECT_PUBLICATION
+        | ObjectType::OBJECT_SCHEMA
+        | ObjectType::OBJECT_SUBSCRIPTION
+        | ObjectType::OBJECT_TABLESPACE => {
+            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
+                let name = object.as_string().expect("object is a String node").sval;
+                aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
+            }
+        }
+        _ => {
+            if !superuser::superuser_arg(roleid)? {
+                unported("check_object_ownership for non-superusers");
+            }
+        }
     }
     Ok(())
 }

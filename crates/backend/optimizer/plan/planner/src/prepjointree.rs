@@ -1783,6 +1783,13 @@ pub(crate) fn copy_expr<'mcx>(
                 pn::ConvertRowtypeExpr { arg: copy_expr(mcx, c.arg, levels_delta)?, ..*c },
             )
         }
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().expect("CoerceToDomain");
+            Node::mk(
+                mcx,
+                pn::CoerceToDomain { arg: copy_expr(mcx, c.arg, levels_delta)?, ..*c },
+            )
+        }
         NodeTag::T_NullTest => {
             let nt = node.as_null_test().expect("NullTest");
             Node::mk(

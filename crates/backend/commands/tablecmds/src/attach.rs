@@ -143,8 +143,16 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
         RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => {}
         other => unported(&format!("ATTACH PARTITION of relkind {}", other as char)),
     }
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("ATSimplePermissions object_ownercheck for non-superusers");
+    if !aclchk::object_ownercheck(
+        types_core::RELATION_RELATION_ID,
+        attachrel.rd_id,
+        miscinit::GetUserId(),
+    )? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(attachrel.rd_rel.relkind),
+            attachrel.name(),
+        )?;
     }
 
     if attachrel.rd_rel.relispartition {

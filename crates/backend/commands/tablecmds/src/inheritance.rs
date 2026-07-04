@@ -143,10 +143,16 @@ pub(crate) fn MergeAttributes<'mcx>(
                 "cannot inherit from temporary relation of another session".to_string(),
             ));
         }
-        // object_ownercheck: superuser fastpath (role-ACL walk loud; the
-        // RangeVarCallbackOwnsRelation precedent).
-        if !superuser::superuser_arg(miscinit::GetUserId())? {
-            unported("MergeAttributes object_ownercheck for non-superusers");
+        if !aclchk::object_ownercheck(
+            types_core::RELATION_RELATION_ID,
+            parent,
+            miscinit::GetUserId(),
+        )? {
+            aclchk::aclcheck_error(
+                aclchk::ACLCHECK_NOT_OWNER,
+                crate::get_relkind_objtype(relkind),
+                &relname,
+            )?;
         }
 
         let tupdesc = relation.descr();
@@ -849,9 +855,17 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     let parent_oid =
         catalog_namespace::RangeVarGetRelid(&rv, types_rel::ShareUpdateExclusiveLock, false)?;
     let parent_rel = table::table_open(mcx, parent_oid, NoLock)?;
-    // ATSimplePermissions(parent): superuser fastpath; foreign tables loud.
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("ATExecAddInherit object_ownercheck for non-superusers");
+    // ATSimplePermissions(parent); foreign tables loud.
+    if !aclchk::object_ownercheck(
+        types_core::RELATION_RELATION_ID,
+        parent_oid,
+        miscinit::GetUserId(),
+    )? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(parent_rel.rd_rel.relkind),
+            parent_rel.name(),
+        )?;
     }
     if child_rel.rd_rel.relkind != RELKIND_RELATION {
         unported("ATExecAddInherit: non-plain-table child relkind");

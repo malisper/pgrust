@@ -1617,7 +1617,7 @@ fn transformOnConflictClause<'mcx>(
 // C `BuildOnConflictExcludedTargetlist` (analyze.c): resnos must equal the
 // Var varattnos (including the resjunk whole-row Var at resno 0) — setrefs
 // resolves EXCLUDED references positionally; this is never a real tlist.
-fn BuildOnConflictExcludedTargetlist<'mcx>(
+pub fn BuildOnConflictExcludedTargetlist<'mcx>(
     mcx: Mcx<'mcx>,
     targetrel: &types_rel::Relation<'mcx>,
     excl_rel_index: i32,

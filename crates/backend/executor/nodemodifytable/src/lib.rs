@@ -347,8 +347,9 @@ pub fn exec_init_modify_table<'mcx>(
     if !node.withCheckOptionLists.is_nil() {
         if node.operation == CmdType::CMD_MERGE {
             panic!(
-                "ExecInitModifyTable (nodeModifyTable.c): WCO_RLS_MERGE_* enforcement \
-                 not wired into exec_merge_matched (C ExecMergeMatched checks them)"
+                "ExecInitModifyTable (nodeModifyTable.c): WITH CHECK OPTION enforcement \
+                 under MERGE (C ExecMergeMatched/NotMatched checks WCO_RLS_MERGE_* and \
+                 WCO_VIEW_CHECK) not ported"
             );
         }
         debug_assert_eq!(node.withCheckOptionLists.len(), node.resultRelations.len());
@@ -361,12 +362,6 @@ pub fn exec_init_modify_table<'mcx>(
             .expect("withCheckOptionLists cell is a List");
         for wco_node in wlist {
             let wco = wco_node.as_with_check_option().expect("WCO cell");
-            if wco.kind == WCOKind::WCO_VIEW_CHECK {
-                panic!(
-                    "ExecInitModifyTable (nodeModifyTable.c): WCO_VIEW_CHECK \
-                     (views WITH CHECK OPTION lane)"
-                );
-            }
             let qual = wco
                 .qual
                 .expect("planned WCO has a qual")
@@ -2084,6 +2079,18 @@ fn exec_update<'mcx>(
         )?;
     }
 
+    // Parent-view CHECK OPTIONs are checked after updating (the qual must see
+    // the actual row, post defaults/triggers).
+    if !mt.wco_exprs.is_empty() {
+        let mcx = estate.es_query_cxt;
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+        exec_view_check_options(mcx, &mut mt.wco_exprs, rel, slot)?;
+    }
+
     if mt.canSetTag {
         estate.es_processed += 1;
     }
@@ -2988,6 +2995,18 @@ fn exec_insert<'mcx>(
     let ar_leaf = leaf_idx;
     ar_insert_triggers(mt, estate, slot_id, &recheck_indexes, ar_leaf)?;
 
+    // Parent-view CHECK OPTIONs are checked after inserting (the qual must see
+    // the actual row, post defaults/triggers).
+    if !mt.wco_exprs.is_empty() {
+        let mcx = estate.es_query_cxt;
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+        exec_view_check_options(mcx, &mut mt.wco_exprs, rel, slot)?;
+    }
+
     if mt.canSetTag {
         estate.es_processed += 1;
     }
@@ -3362,7 +3381,7 @@ fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResu
 }
 
 // ExecWithCheckOptions (execMain.c): NULL or false qual = violation for
-// every kind (ExecQual semantics); VIEW_CHECK is loud at init.
+// every kind (ExecQual semantics).
 fn exec_with_check_options<'mcx>(
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     kind: WCOKind,
@@ -3378,6 +3397,44 @@ fn exec_with_check_options<'mcx>(
         }
     }
     Ok(())
+}
+
+// ExecWithCheckOptions (execMain.c), WCO_VIEW_CHECK arm: needs the result
+// relation for the failing-row detail.
+fn exec_view_check_options<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    for w in wcos.iter_mut() {
+        if w.kind != WCOKind::WCO_VIEW_CHECK {
+            continue;
+        }
+        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+        if !execexpr::exec_qual(Some(&mut *w.state), &mut slots)? {
+            return Err(view_wco_violation(mcx, w.relname, rel, slot));
+        }
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn view_wco_violation<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relname: &str,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> Box<PgError> {
+    let mut e = PgError::error(format!(
+        "new row violates check option for view \"{relname}\""
+    ))
+    .with_sqlstate(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION);
+    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+        e = e.with_detail(format!("Failing row contains {desc}."));
+    }
+    Box::new(e)
 }
 
 #[cold]
@@ -3415,7 +3472,7 @@ fn wco_violation(w: &WcoExpr<'_>) -> Box<PgError> {
                 ),
             }
         }
-        WCOKind::WCO_VIEW_CHECK => unreachable!("loud at init"),
+        WCOKind::WCO_VIEW_CHECK => unreachable!("routed via exec_view_check_options"),
     };
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE))
 }

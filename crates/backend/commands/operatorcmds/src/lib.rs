@@ -332,8 +332,12 @@ fn ValidateOperatorReference(
             ),
         ));
     }
-    if !superuser::superuser()? {
-        panic!("unported: object_ownercheck for non-superusers (ALTER OPERATOR)");
+    if !aclchk::object_ownercheck(OPERATOR_RELATION_ID, oid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            ObjectType::OBJECT_OPERATOR,
+            &parts.join("."),
+        )?;
     }
     Ok(oid)
 }
@@ -448,9 +452,13 @@ pub fn AlterOperator<'mcx>(
         }
     }
 
-    // Permission check: must be owner (superuser-only build).
-    if !superuser::superuser()? {
-        panic!("unported: object_ownercheck for non-superusers (ALTER OPERATOR)");
+    // Permission check: must be owner.
+    if !aclchk::object_ownercheck(OPERATOR_RELATION_ID, oprId, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            ObjectType::OBJECT_OPERATOR,
+            core::str::from_utf8(oprForm.oprname.name_str()).expect("non-UTF-8 oprname"),
+        )?;
     }
 
     let restrictionOid = match restrictionName {

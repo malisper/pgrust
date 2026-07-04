@@ -1905,8 +1905,7 @@ fn exec_alter_table_stmt<'mcx>(
     Ok(())
 }
 
-// RangeVarCallbackOwnsRelation (tablecmds.c): object_ownercheck superuser
-// fastpath (role-ACL walk loud, drop.rs precedent) + IsSystemClass guard.
+// RangeVarCallbackOwnsRelation (tablecmds.c).
 fn range_var_callback_owns_relation(
     _mcx: Mcx<'_>,
     rv: &rel_vocab::RangeVar<'_>,
@@ -1916,8 +1915,17 @@ fn range_var_callback_owns_relation(
     if rel_id == types_core::InvalidOid {
         return Ok(());
     }
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        handler_gap("RangeVarCallbackOwnsRelation object_ownercheck for non-superusers");
+    if !aclchk::object_ownercheck(
+        types_core::RELATION_RELATION_ID,
+        rel_id,
+        miscinit::GetUserId(),
+    )? {
+        let relkind = lsyscache::get_rel_relkind(rel_id)? as u8;
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(relkind),
+            rv.relname,
+        )?;
     }
     let relnamespace = lsyscache::get_rel_namespace(rel_id)?;
     let is_system =
@@ -1932,4 +1940,18 @@ fn range_var_callback_owns_relation(
         ));
     }
     Ok(())
+}
+
+// get_relkind_objtype (objectaddress.c)
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType::*;
+    match relkind {
+        types_rel::RELKIND_RELATION | types_rel::RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
+        types_rel::RELKIND_INDEX | types_rel::RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
+        types_rel::RELKIND_SEQUENCE => OBJECT_SEQUENCE,
+        types_rel::RELKIND_VIEW => OBJECT_VIEW,
+        types_rel::RELKIND_MATVIEW => OBJECT_MATVIEW,
+        types_rel::RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
+        _ => OBJECT_TABLE,
+    }
 }

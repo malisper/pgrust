@@ -1105,7 +1105,7 @@ fn not_a_domain(type_oid: Oid) -> PgResult<Box<PgError>> {
 
 #[cold]
 #[inline(never)]
-fn must_be_owner_of_type(type_oid: Oid) -> PgResult<Box<PgError>> {
+pub(crate) fn must_be_owner_of_type(type_oid: Oid) -> PgResult<Box<PgError>> {
     let name = format_type::format_type_be(type_oid)?;
     Ok(Box::new(
         PgError::new(ERROR, format!("must be owner of type {name}"))

@@ -276,10 +276,19 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         return Err(DropErrorMsgWrongType(rel.relname, relkind, expected_relkind));
     }
 
-    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
-    // the unported remainder.
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("RangeVarCallbackForDropRelation: object_ownercheck for non-superusers");
+    // DROP is allowed to either the table owner or the schema owner.
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relOid, miscinit::GetUserId())?
+        && !aclchk::object_ownercheck(
+            types_core::NAMESPACE_RELATION_ID,
+            relnamespace,
+            miscinit::GetUserId(),
+        )?
+    {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(relkind),
+            rel.relname,
+        )?;
     }
 
     // IsSystemClass: catalog oid range or pg_toast namespace.
@@ -316,6 +325,5 @@ fn RangeVarCallbackForDropRelation<'mcx>(
             lmgr::LockRelationOid(part_parent_oid, AccessExclusiveLock)?;
         }
     }
-    let _ = rel;
     Ok(())
 }

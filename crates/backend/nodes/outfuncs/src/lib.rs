@@ -108,6 +108,86 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 c.typeId, c.typeMod, c.collation
             );
         }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().expect("CaseExpr");
+            w!(out, "{{CASEEXPR :casetype {} :casecollid {} :arg ", c.casetype, c.casecollid);
+            out_opt_node(out, c.arg)?;
+            w!(out, " :args ");
+            out_list(out, &c.args)?;
+            w!(out, " :defresult ");
+            out_opt_node(out, c.defresult)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_CaseWhen => {
+            let c = node.as_case_when().expect("CaseWhen");
+            w!(out, "{{CASEWHEN :expr ");
+            out_opt_node(out, c.expr)?;
+            w!(out, " :result ");
+            out_opt_node(out, c.result)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_WindowFunc => {
+            let f = node.as_window_func().expect("WindowFunc");
+            w!(
+                out,
+                "{{WINDOWFUNC :winfnoid {} :wintype {} :wincollid {} :inputcollid {} :args ",
+                f.winfnoid, f.wintype, f.wincollid, f.inputcollid
+            );
+            out_list(out, &f.args)?;
+            w!(out, " :aggfilter ");
+            out_opt_node(out, f.aggfilter)?;
+            w!(out, " :runCondition ");
+            out_list(out, &f.runCondition)?;
+            w!(out, " :winref {} :winstar ", f.winref);
+            out_bool(out, f.winstar);
+            w!(out, " :winagg ");
+            out_bool(out, f.winagg);
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_WindowClause => {
+            let c = node.as_window_clause().expect("WindowClause");
+            w!(out, "{{WINDOWCLAUSE :name ");
+            out_str(out, c.name);
+            w!(out, " :refname ");
+            out_str(out, c.refname);
+            w!(out, " :partitionClause ");
+            out_list(out, &c.partitionClause)?;
+            w!(out, " :orderClause ");
+            out_list(out, &c.orderClause)?;
+            w!(out, " :frameOptions {} :startOffset ", c.frameOptions);
+            out_opt_node(out, c.startOffset)?;
+            w!(out, " :endOffset ");
+            out_opt_node(out, c.endOffset)?;
+            w!(
+                out,
+                " :startInRangeFunc {} :endInRangeFunc {} :inRangeColl {} :inRangeAsc ",
+                c.startInRangeFunc, c.endInRangeFunc, c.inRangeColl
+            );
+            out_bool(out, c.inRangeAsc);
+            w!(out, " :inRangeNullsFirst ");
+            out_bool(out, c.inRangeNullsFirst);
+            w!(out, " :winref {} :copiedOrder ", c.winref);
+            out_bool(out, c.copiedOrder);
+            w!(out, "}}");
+        }
+        NodeTag::T_SetOperationStmt => {
+            let s = node.as_set_operation_stmt().expect("SetOperationStmt");
+            w!(out, "{{SETOPERATIONSTMT :op {} :all ", s.op as u32);
+            out_bool(out, s.all);
+            w!(out, " :larg ");
+            out_opt_node(out, s.larg)?;
+            w!(out, " :rarg ");
+            out_opt_node(out, s.rarg)?;
+            w!(out, " :colTypes ");
+            out_oid_list(out, &s.colTypes);
+            w!(out, " :colTypmods ");
+            out_int_list(out, &s.colTypmods);
+            w!(out, " :colCollations ");
+            out_oid_list(out, &s.colCollations);
+            w!(out, " :groupClauses ");
+            out_list(out, &s.groupClauses)?;
+            w!(out, "}}");
+        }
         NodeTag::T_RangeTblFunction => out_range_tbl_function(
             out,
             node.as_variant::<types_nodes::parsenodes::RangeTblFunction>()

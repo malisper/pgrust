@@ -1238,10 +1238,8 @@ fn checkEnumOwner(type_oid: Oid) -> PgResult<()> {
     if typtype != TYPTYPE_ENUM {
         return Err(not_an_enum(type_oid)?);
     }
-    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
-    // the drop.rs precedent.
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("checkEnumOwner: object_ownercheck for non-superusers");
+    if !aclchk::object_ownercheck(TYPE_RELATION_ID, type_oid, miscinit::GetUserId())? {
+        return Err(alter::must_be_owner_of_type(type_oid)?);
     }
     Ok(())
 }

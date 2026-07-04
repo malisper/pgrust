@@ -2,7 +2,6 @@
 // SET/DROP DEFAULT, SET/DROP NOT NULL, ADD CONSTRAINT CHECK, ALTER TYPE
 // (no-USING; rewrite via the cluster lane). LOUD: other subtypes,
 // inheritance children, partitions, USING, index rebuilds on rewrite.
-// Ownership checks ride the aclchk lane (superuser fast path only).
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID};
@@ -203,8 +202,6 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
     catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, flags, Some(&mut callback))
 }
 
-// RangeVarCallbackForAlterRelation slice: relkind gate + superuser ownership
-// fast path (per-role object_ownercheck rides the aclchk lane).
 fn RangeVarCallbackForAlterRelation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel_vocab::RangeVar<'_>,
@@ -213,9 +210,6 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
 ) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
-    }
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("RangeVarCallbackForAlterRelation: object_ownercheck for non-superusers");
     }
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
     let key = oid_scankey(1, relOid);
@@ -236,6 +230,24 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relOid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(relkind),
+            rel.relname,
+        )?;
+    }
+    let is_system =
+        catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
+    if is_system && !init_small::globals::allowSystemTableMods() {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("permission denied: \"{}\" is a system catalog", rel.relname),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
     match objtype {
         ObjectType::OBJECT_INDEX => {
             if relkind != types_rel::RELKIND_INDEX
@@ -252,17 +264,6 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
                 unported("RangeVarCallbackForAlterRelation: non-plain-table relkind");
             }
         }
-    }
-    let is_system =
-        catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
-    if is_system && !init_small::globals::allowSystemTableMods() {
-        return Err(Box::new(
-            PgError::new(
-                ERROR,
-                format!("permission denied: \"{}\" is a system catalog", rel.relname),
-            )
-            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
-        ));
     }
     Ok(())
 }
