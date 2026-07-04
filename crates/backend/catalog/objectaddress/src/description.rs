@@ -369,6 +369,35 @@ pub fn getObjectDescription(
         PublicationRelRelationId => {
             let Some(tup) = cache_syscache::SearchSysCache1(
                 cache_syscache::cacheinfo::PUBLICATIONREL,
+        types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => {
+            let Some(name) = foreign_object_name(
+                cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID,
+                object.objectId,
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for foreign-data wrapper {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!("foreign-data wrapper {name}")))
+        }
+        types_core::FOREIGN_SERVER_RELATION_ID => {
+            let Some(name) = foreign_object_name(
+                cache_syscache::cacheinfo::FOREIGNSERVEROID,
+                object.objectId,
+            )?
+            else {
+                if !missing_ok {
+                    panic!("cache lookup failed for foreign server {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            Ok(Some(format!("server {name}")))
+        }
+        types_core::USER_MAPPING_RELATION_ID => {
+            let Some(tup) = cache_syscache::SearchSysCache1(
+                cache_syscache::cacheinfo::USERMAPPINGOID,
                 cache_syscache::SysCacheKey::Value(Datum::from_oid(object.objectId)),
             )?
             else {
@@ -379,12 +408,20 @@ pub fn getObjectDescription(
             };
             let prpubid = cache_syscache::SysCacheGetAttrNotNull(
                 cache_syscache::cacheinfo::PUBLICATIONREL,
+                    panic!("cache lookup failed for user mapping {}", object.objectId);
+                }
+                return Ok(None);
+            };
+            let useid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::USERMAPPINGOID,
                 &tup,
                 2,
             )?
             .as_oid();
             let prrelid = cache_syscache::SysCacheGetAttrNotNull(
                 cache_syscache::cacheinfo::PUBLICATIONREL,
+            let serverid = cache_syscache::SysCacheGetAttrNotNull(
+                cache_syscache::cacheinfo::USERMAPPINGOID,
                 &tup,
                 3,
             )?
@@ -402,6 +439,20 @@ pub fn getObjectDescription(
         SubscriptionRelationId => {
             Ok(lsyscache::get_subscription_name(mcx, object.objectId, missing_ok)?
                 .map(|subname| format!("subscription {}", subname.as_str())))
+            let usename = if useid == types_core::InvalidOid {
+                "public".to_string()
+            } else {
+                miscinit::GetUserNameFromId(mcx, useid, false)?
+                    .expect("noerr=false")
+                    .as_str()
+                    .to_string()
+            };
+            let srvname = foreign_object_name(
+                cache_syscache::cacheinfo::FOREIGNSERVEROID,
+                serverid,
+            )?
+            .unwrap_or_else(|| panic!("cache lookup failed for foreign server {serverid}"));
+            Ok(Some(format!("user mapping for {usename} on server {srvname}")))
         }
         other => unported(&format!("getObjectDescription object class {other}")),
     }
@@ -439,6 +490,22 @@ fn getPublicationSchemaInfo(
         return Ok(None);
     };
     Ok(Some((pubname.as_str().to_string(), nspname)))
+// pg_foreign_data_wrapper and pg_foreign_server carry their NAMEDATALEN name
+// column at attnum 2.
+fn foreign_object_name(cache_id: i32, oid: Oid) -> PgResult<Option<String>> {
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cache_id,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(oid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let d = cache_syscache::SysCacheGetAttrNotNull(cache_id, &tup, 2)?;
+    // SAFETY: attnum 2 is the inline NAMEDATALEN name column in both catalogs.
+    let name = unsafe { &*(d.as_usize() as *const NameData) };
+    let s = String::from_utf8_lossy(name.name_str()).into_owned();
+    cache_syscache::ReleaseSysCache(tup);
+    Ok(Some(s))
 }
 
 // pg_opclass and pg_opfamily share the (method, name, namespace) column

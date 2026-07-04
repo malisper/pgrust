@@ -1704,6 +1704,7 @@ dependencies = [
 name = "catalog_dependency"
 version = "0.1.0"
 dependencies = [
+ "cache_syscache",
  "catalog",
  "catalog_heap",
  "catalog_index",
@@ -1712,6 +1713,7 @@ dependencies = [
  "catalog_objectaddress",
  "datum",
  "dependency_seams",
+ "elog",
  "elog_seams",
  "event_trigger_seams",
  "extension",
@@ -1723,6 +1725,7 @@ dependencies = [
  "lmgr",
  "lsyscache",
  "mcx",
+ "miscinit",
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
@@ -2714,15 +2717,19 @@ dependencies = [
 name = "commands_dropcmds"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
+ "adt_acl",
  "catalog_dependency",
  "catalog_namespace",
  "catalog_objectaddress",
  "elog_seams",
+ "foreigncmds",
  "lsyscache",
  "mcx",
  "miscinit",
  "pg_depend",
  "rel_vocab",
+ "relcache",
  "superuser",
  "types_core",
  "types_error",
@@ -4260,6 +4267,7 @@ dependencies = [
  "dict_snowball",
  "extension_seams",
  "fmgr_seams",
+ "foreigncmds_seams",
  "mcx",
  "name",
  "nbt_compare",
@@ -4288,6 +4296,57 @@ dependencies = [
 name = "fmgr_seams"
 version = "0.1.0"
 dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "foreigncmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catcache",
+ "commands_define",
+ "datum",
+ "detoast",
+ "elog",
+ "elog_seams",
+ "fmgr_core",
+ "foreigncmds_seams",
+ "heaptuple",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parser_small1",
+ "pg_depend",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
+name = "foreigncmds_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
@@ -6449,6 +6508,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeforeignscan"
+version = "0.1.0"
+
+[[package]]
 name = "nodefunctionscan"
 version = "0.1.0"
 dependencies = [
@@ -8587,6 +8650,7 @@ dependencies = [
  "exectuples",
  "fmgr_core",
  "fmgr_seams",
+ "foreigncmds_seams",
  "format_type",
  "gin",
  "gist",
@@ -10671,6 +10735,7 @@ dependencies = [
  "extension",
  "fd",
  "fmgr_core",
+ "foreigncmds",
  "format_type",
  "freespace",
  "funcapi",
@@ -13110,6 +13175,7 @@ dependencies = [
  "event_trigger",
  "explain",
  "extension",
+ "foreigncmds",
  "functioncmds",
  "guc_funcs",
  "guc_tables",
