@@ -321,6 +321,48 @@ pub fn getObjectDescription(
                 adt_regproc::format_operator(mcx, object.objectId)?
             )))
         }
+        crate::CollationRelationId => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                crate::CollationRelationId, 3085, 2, 3, "collation",
+                |name| catalog_namespace::get_collation_oid(&[name], true),
+            )
+        }
+        StatisticExtRelationId_descr => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                StatisticExtRelationId_descr, 3380, 3, 4, "statistics object",
+                |name| statscmds::get_statistics_object_oid(&[name], true),
+            )
+        }
+        crate::TSParserRelationId => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                crate::TSParserRelationId, 3607, 2, 3, "text search parser",
+                |name| catalog_namespace::get_ts_parser_oid(&[name], true),
+            )
+        }
+        crate::TSDictionaryRelationId => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                crate::TSDictionaryRelationId, 3605, 2, 3, "text search dictionary",
+                |name| catalog_namespace::get_ts_dict_oid(&[name], true),
+            )
+        }
+        crate::TSTemplateRelationId => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                crate::TSTemplateRelationId, 3767, 2, 3, "text search template",
+                |name| catalog_namespace::get_ts_template_oid(&[name], true),
+            )
+        }
+        crate::TSConfigRelationId => {
+            named_nsp_class_description(
+                mcx, object, missing_ok,
+                crate::TSConfigRelationId, 3712, 2, 3, "text search configuration",
+                |name| catalog_namespace::get_ts_config_oid(&[name], true),
+            )
+        }
         pg_conversion::ConversionRelationId => {
             let row = scan_one_row(
                 mcx,
@@ -704,4 +746,40 @@ fn getRelationIdentity(relid: Oid, missing_ok: bool) -> PgResult<Option<String>>
     let nspname = get_namespace_name(shape.relnamespace)?
         .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", shape.relnamespace));
     Ok(Some(quote_qualified(Some(&nspname), name_str(&relname))))
+}
+
+const StatisticExtRelationId_descr: Oid = 3381;
+
+// Shared "noun qualified-name" description for name+namespace catalogs;
+// schema-qualifies when a bare-name lookup does not resolve to the object
+// (the C *IsVisible probes).
+fn named_nsp_class_description<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    missing_ok: bool,
+    class_id: Oid,
+    oid_index: Oid,
+    name_attnum: i32,
+    nsp_attnum: i32,
+    noun: &str,
+    visible: impl Fn(&str) -> PgResult<Oid>,
+) -> PgResult<Option<String>> {
+    let row = scan_one_row(mcx, class_id, oid_index, object.objectId, |tup, desc| {
+        (
+            name_from_datum(getattr(tup, name_attnum, desc)),
+            getattr(tup, nsp_attnum, desc).as_oid(),
+        )
+    })?;
+    let Some((name, nsp)) = row else {
+        if !missing_ok {
+            panic!("cache lookup failed for {noun} {}", object.objectId);
+        }
+        return Ok(None);
+    };
+    let nspname = if visible(&name)? == object.objectId {
+        None
+    } else {
+        get_namespace_name(nsp)?
+    };
+    Ok(Some(format!("{noun} {}", quote_qualified(nspname.as_deref(), &name))))
 }

@@ -15,7 +15,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, NOTICE,
 };
-use types_nodes::parsenodes::{DefElem, DropStmt, ObjectType, ACL_CREATE};
+use types_nodes::parsenodes::{DefElem, ObjectType, ACL_CREATE};
 use types_nodes::parsenodes::DefineStmt;
 use types_nodes::rawnodes::{AlterTSConfigurationStmt, AlterTSDictionaryStmt};
 use types_nodes::NodeList;
@@ -914,40 +914,3 @@ pub fn AlterTSConfiguration<'mcx>(
     Ok(ObjectAddress::set(TSConfigRelationId, cfgId))
 }
 
-// RemoveObjects (dropcmds.c) narrowed to the TS object classes; per-object
-// performDeletion instead of C's batched performMultipleDeletions (identical
-// unless the dropped objects depend on each other).
-pub fn RemoveTSObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
-    let (noun, classId) = match stmt.removeType {
-        ObjectType::OBJECT_TSDICTIONARY => ("dictionary", TSDictionaryRelationId),
-        ObjectType::OBJECT_TSCONFIGURATION => ("configuration", TSConfigRelationId),
-        other => panic!("RemoveTSObjects: unexpected object type {other:?}"),
-    };
-    for obj in stmt.objects.iter() {
-        let names = obj.as_list().expect("DROP TEXT SEARCH objects hold name Lists");
-        let parts = name_list_parts(mcx, names);
-        let oid = match stmt.removeType {
-            ObjectType::OBJECT_TSDICTIONARY => get_ts_dict_oid(&parts, stmt.missing_ok)?,
-            _ => get_ts_config_oid(&parts, stmt.missing_ok)?,
-        };
-        if oid == InvalidOid {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!(
-                    "text search {noun} \"{}\" does not exist, skipping",
-                    name_list_to_string(names)
-                ),
-                None,
-            )?;
-            continue;
-        }
-        ownercheck_or_loud(&name_list_to_string(names))?;
-        catalog_dependency::performDeletion(
-            mcx,
-            &ObjectAddress::set(classId, oid),
-            stmt.behavior,
-            0,
-        )?;
-    }
-    Ok(())
-}

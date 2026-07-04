@@ -1701,7 +1701,6 @@ fn exec_drop_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>, is_top_level: bool)
         // has no OBJECT_POLICY arm yet (C routes it through RemoveObjects).
         OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
         // DROP TEXT SEARCH objects stay specialized for the same reason.
-        OBJECT_TSDICTIONARY | OBJECT_TSCONFIGURATION => tsearchcmds::RemoveTSObjects(mcx, stmt)?,
         _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
     }
     Ok(())
