@@ -43,7 +43,6 @@ const INT8OID: Oid = 20;
 const TEXTOID: Oid = 25;
 const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
-const VOIDOID: Oid = 2278;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
 const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
@@ -277,7 +276,6 @@ fn spi_ctx_err(
     query: &str,
     mode: parser_seams::RawParseMode,
 ) -> Box<PgError> {
-    use parser_seams::RawParseMode as M;
     if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
         e.cursor_position = None;
         e.internal_position = Some(p);
@@ -1074,7 +1072,7 @@ impl<'a> Estate<'a> {
         // Read before catalog lookups: an inval firing mid-build leaves this
         // entry stamped old, so the next use rebuilds.
         let inval_gen = plancache::PlanCacheInvalCounter();
-        let mut param: Box<[ParamExternData; 1]> = Box::new([ParamExternData {
+        let param: Box<[ParamExternData; 1]> = Box::new([ParamExternData {
             value: Datum::null(),
             isnull: true,
             pflags: 0,
@@ -1901,8 +1899,7 @@ impl<'a> Estate<'a> {
                 }
                 Ok(())
             }
-            PlDatum::Rec(r) => {
-                let recname = r.refname.clone();
+            PlDatum::Rec(_) => {
                 if isnull {
                     // C exec_move_row(rec, NULL, NULL): an empty record of
                     // the rec's own type.
@@ -1920,12 +1917,9 @@ impl<'a> Estate<'a> {
                 if valtype != RECORDOID && !lsyscache::typ::type_is_rowtype(valtype)? {
                     return Err(exec_err(
                         types_error::ERRCODE_DATATYPE_MISMATCH,
-                        format!(
-                            "cannot assign non-composite value to a record variable"
-                        ),
+                        "cannot assign non-composite value to a record variable".to_string(),
                     ));
                 }
-                let _ = recname;
                 let (desc, src, values, nulls) = self.deconstruct_composite(value)?;
                 self.move_rec_from_values(target, &desc, src, &values, &nulls)
             }
@@ -3006,9 +3000,7 @@ impl<'a> Estate<'a> {
         if retvarno >= 0 {
             match &self.func.datums[retvarno as usize] {
                 PlDatum::Var(v) => {
-                    let (typoid, typmod, typlen) =
-                        (v.datatype.typoid, v.datatype.atttypmod, v.datatype.typlen);
-                    let _ = typlen;
+                    let (typoid, typmod) = (v.datatype.typoid, v.datatype.atttypmod);
                     if natts != 1 {
                         return Err(exec_err(
                             types_error::ERRCODE_DATATYPE_MISMATCH,
@@ -3138,7 +3130,7 @@ impl<'a> Estate<'a> {
         }
         let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
 
-        let mut ctx_query = String::new();
+        let ctx_query;
         let rc = if let Some(query) = query {
             ctx_query = query.query.clone();
             self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;

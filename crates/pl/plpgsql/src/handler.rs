@@ -192,8 +192,6 @@ fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
     let (modes_d, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
     let (argtypes, argmodes): (Vec<Oid>, Vec<i8>) = if !allarg_null {
         let img = varlena_bytes(mcx, allarg_d)?;
-        const OIDOID: Oid = 26;
-        let _ = OIDOID;
         let elems = datum::array_build::deconstruct_array_image(mcx, &img, 4, true, b'i')?;
         let types: Vec<Oid> = elems.iter().map(|d| d.as_oid()).collect();
         assert!(!modes_null, "proallargtypes without proargmodes (function {fn_oid})");

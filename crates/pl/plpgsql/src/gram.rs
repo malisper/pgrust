@@ -752,7 +752,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             false
         };
 
-        let mut datatype = self.read_datatype(None)?;
+        let datatype = self.read_datatype(None)?;
 
         // decl_collate.
         let t = self.yylex()?;
