@@ -176,7 +176,8 @@ fn for_each_parallel_seqscan<'mcx>(
                 for_each_parallel_seqscan(sub, f)?;
             }
         }
-        N::FunctionScan(_)
+        N::SampleScan(_)
+        | N::FunctionScan(_)
         | N::ValuesScan(_)
         | N::TableFuncScan(_)
         | N::CteScan(_)
