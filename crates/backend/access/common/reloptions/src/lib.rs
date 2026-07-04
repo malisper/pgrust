@@ -296,6 +296,29 @@ pub fn text_array_image<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgVec<'mcx, 
     Ok(full)
 }
 
+// DatumGetArrayTypeP's short-header expansion: catalog reads hand back
+// 1-byte-header images for small arrays; the array walkers assume 4-byte.
+// Returns None when the image is already 4-byte-headed (or absent).
+fn expand_short_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    use types_tuple::varatt;
+    let Some(img) = options else { return Ok(None) };
+    // SAFETY: img starts at a live varlena header.
+    if img.is_empty() || !unsafe { varatt::varatt_is_1b(img.as_ptr()) } {
+        return Ok(None);
+    }
+    // SAFETY: 1-byte-header varlena checked above.
+    let total = unsafe { varatt::varsize_1b(img.as_ptr()) };
+    let payload = &img[varatt::VARHDRSZ_SHORT..total];
+    let len = varatt::VARHDRSZ + payload.len();
+    let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    mcx::vec_append_bytes(&mut out, &varatt::set_varsize_4b_word(len as u32).to_ne_bytes())?;
+    mcx::vec_append_bytes(&mut out, payload)?;
+    Ok(Some(out))
+}
+
 fn option_text_strs<'mcx>(mcx: Mcx<'mcx>, options: &[u8]) -> PgResult<PgVec<'mcx, &'mcx str>> {
     let elems = datum::array_build::deconstruct_array_image(mcx, options, -1, false, b'i')?;
     let mut out: PgVec<'mcx, &'mcx str> = mcx::vec_with_capacity_in(mcx, elems.len())?;
@@ -326,6 +349,11 @@ pub fn parseRelOptions<'mcx>(
         }
     }
     let Some(options) = options else { return Ok(values) };
+    let expanded = expand_short_image(mcx, Some(options))?;
+    let options = match &expanded {
+        Some(v) => &v[..],
+        None => options,
+    };
     for text_str in option_text_strs(mcx, options)?.iter() {
         let mut found = false;
         for opt in values.iter_mut() {
@@ -463,6 +491,11 @@ pub fn transformRelOptions<'mcx>(
     accept_oids_off: bool,
     is_reset: bool,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let expanded = expand_short_image(mcx, old_options)?;
+    let old_options = match &expanded {
+        Some(v) => Some(&v[..]),
+        None => old_options,
+    };
     if def_list.is_nil() {
         return match old_options {
             Some(old) => {

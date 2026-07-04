@@ -90,6 +90,35 @@ fn transform_replaces_and_resets() {
     assert_eq!(err.message(), "RESET must not include values for parameters");
 }
 
+#[test]
+fn transform_expands_short_header_old_image() {
+    // heap_form_tuple stores small arrays with a 1-byte header; the merge
+    // paths must see them as C's DatumGetArrayTypeP would.
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let list = NodeList::make2(
+        mcx,
+        def(mcx, None, "n_distinct", Some("100")),
+        def(mcx, None, "n_distinct_inherited", Some("5")),
+    )
+    .unwrap();
+    let old = transformRelOptions(mcx, None, &list, None, &[], false, false).unwrap().unwrap();
+    assert!(old.len() - 4 + 1 <= 0x7F, "test image must be short-able");
+    let mut short: Vec<u8> = Vec::new();
+    short.push((((old.len() - 4 + 1) as u8) << 1) | 0x01);
+    short.extend_from_slice(&old[4..]);
+
+    let reset = NodeList::make1(mcx, def(mcx, None, "n_distinct", None)).unwrap();
+    let img = transformRelOptions(mcx, Some(&short), &reset, None, &[], false, true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(texts_of(&img), ["n_distinct_inherited=5"]);
+
+    let opts = attribute_reloptions(mcx, Some(&short), true).unwrap().unwrap();
+    assert_eq!(opts.n_distinct, 100.0);
+    assert_eq!(opts.n_distinct_inherited, 5.0);
+}
+
 fn parse_heap_err(mcx: Mcx<'_>, defs: &NodeList<'_>) -> (String, Option<String>) {
     let res = transformRelOptions(mcx, None, defs, None, HEAP_RELOPT_NAMESPACES, true, false)
         .and_then(|img| heap_reloptions(mcx, RELKIND_RELATION, img.as_deref(), true));
