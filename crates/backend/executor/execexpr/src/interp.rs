@@ -1866,15 +1866,23 @@ fn eval_row_null(
     if r.isnull {
         return Ok(checkisnull);
     }
-    let f = &mut frames[frame as usize];
-    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
-    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
     let p = r.value.as_usize() as *const u8;
     // SAFETY: a live varlena-headed composite image, per the datum contract.
     let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
     // SAFETY: `total` readable bytes at p, per the datum contract.
     let raw = unsafe { core::slice::from_raw_parts(p, total) };
-    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    // C PG_DETOAST_DATUM returns the original pointer for a plain 4B image;
+    // only the toasted leg touches the frame's per-eval mcx.
+    let detoasted;
+    let rec: &[u8] = if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        raw
+    } else {
+        let f = &mut frames[frame as usize];
+        // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+        let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+        detoasted = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        &detoasted
+    };
     // SAFETY: detoasted composite image; header prefix is in bounds.
     let hdr = unsafe { &*(rec.as_ptr() as *const ::types_tuple::HeapTupleHeaderData) };
     let tup_type = hdr.type_id();
