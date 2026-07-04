@@ -341,7 +341,7 @@ fn ATPrepCmd<'mcx>(
 fn ATRewriteCatalogs<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
-    _lockmode: LOCKMODE,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
     for pass in 0..AT_NUM_PASSES {
@@ -464,8 +464,9 @@ fn ATRewriteCatalogs<'mcx>(
         // ATExecAlterColumnType, so the re-add queue is always empty.
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
-    // or none is needed.
-    catalog_toasting::NewRelationCreateToastTable(mcx, tab.relid)
+    // or none is needed; opened with the statement lockmode (the AEL open in
+    // NewRelationCreateToastTable blocked SUE-level VALIDATE behind writers).
+    catalog_toasting::AlterTableCreateToastTable(mcx, tab.relid, lockmode)
 }
 
 fn ATRewriteTables<'mcx>(
