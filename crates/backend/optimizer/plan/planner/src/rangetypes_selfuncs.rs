@@ -57,7 +57,9 @@ impl RangeSelCtx {
     }
 }
 
-// Decoded stats arrays hold the 4-byte-header images range_in/ANALYZE built.
+// Stats lane only: decoded stats arrays hold 4-byte-header images
+// (construct_array canonicalizes and the slot decode detoasts). Consts go
+// through selfuncs::varlena_image_any — bound params can be short-form.
 pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
     // SAFETY: live varlena datum out of a decoded stats array or a Const.
@@ -140,7 +142,7 @@ pub fn rangesel<'mcx>(
         // this away. Fall back on the default estimate (C does too).
     } else if c.consttype == vardata.vartype {
         ctx = Some(RangeSelCtx::for_range_type(vardata.vartype)?);
-        constrange = Some(varlena_image(c.constvalue));
+        constrange = Some(crate::selfuncs::varlena_image_any(mcx, c.constvalue)?);
     }
 
     let selec = match constrange {
