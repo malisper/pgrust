@@ -152,7 +152,7 @@ pub fn CollationCreate<'mcx>(
     let myself = ObjectAddress::set(COLLATION_RELATION_ID, oid);
     let referenced = ObjectAddress::set(NAMESPACE_RELATION_ID, collnamespace);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
-    pg_depend::recordDependencyOnOwner(COLLATION_RELATION_ID, oid, collowner);
+    pg_depend::recordDependencyOnOwner(mcx, COLLATION_RELATION_ID, oid, collowner)?;
 
     rel.close(NoLock)?;
     Ok(oid)
