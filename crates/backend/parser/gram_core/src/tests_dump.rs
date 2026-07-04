@@ -337,6 +337,59 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "collname", &cc.collname);
         int_field(out, "location", cc.location);
         out.push('}');
+    } else if let Some(t) = n.as_variant::<types_nodes::rawnodes::RangeTableFunc>() {
+        out.push_str("{RANGETABLEFUNC");
+        bool_field(out, "lateral", t.lateral);
+        node_field(out, "docexpr", t.docexpr);
+        node_field(out, "rowexpr", t.rowexpr);
+        list_field(out, "namespaces", &t.namespaces);
+        list_field(out, "columns", &t.columns);
+        out.push_str(" :alias ");
+        match t.alias {
+            Some(a) => alias(out, a),
+            None => out.push_str("<>"),
+        }
+        int_field(out, "location", t.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::RangeTableFuncCol>() {
+        out.push_str("{RANGETABLEFUNCCOL");
+        string_field(out, "colname", c.colname);
+        node_field(out, "typeName", c.typeName);
+        bool_field(out, "for_ordinality", c.for_ordinality);
+        bool_field(out, "is_not_null", c.is_not_null);
+        node_field(out, "colexpr", c.colexpr);
+        node_field(out, "coldefexpr", c.coldefexpr);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::XmlSerialize>() {
+        out.push_str("{XMLSERIALIZE");
+        int_field(out, "xmloption", s.xmloption as i32);
+        node_field(out, "expr", s.expr);
+        node_field(out, "typeName", s.typeName);
+        bool_field(out, "indent", s.indent);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(x) = n.as_xml_expr() {
+        out.push_str("{XMLEXPR");
+        int_field(out, "op", x.op as i32);
+        string_field(out, "name", x.name);
+        list_field(out, "named_args", &x.named_args);
+        list_field(out, "arg_names", &x.arg_names);
+        list_field(out, "args", &x.args);
+        int_field(out, "xmloption", x.xmloption as i32);
+        bool_field(out, "indent", x.indent);
+        int_field(out, "type", x.r#type as i32);
+        int_field(out, "typmod", x.typmod);
+        int_field(out, "location", x.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CompositeTypeStmt>() {
+        out.push_str("{COMPOSITETYPESTMT :typevar ");
+        match c.typevar {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "coldeflist", &c.coldeflist);
+        out.push('}');
     } else if let Some(g) = n.as_grant_stmt() {
         out.push_str("{GRANTSTMT");
         bool_field(out, "is_grant", g.is_grant);

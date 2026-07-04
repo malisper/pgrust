@@ -261,6 +261,21 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_RangeTblFunction => {
             walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
         }
+        // C: arg_names and ns_names deemed uninteresting.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            Ok(walk_list(&x.named_args, w)? || walk_list(&x.args, w)?)
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            Ok(walk_list(&tf.ns_uris, w)?
+                || walk_opt(tf.docexpr, w)?
+                || walk_opt(tf.rowexpr, w)?
+                || walk_opt_list(&tf.colexprs, w)?
+                || walk_opt_list(&tf.coldefexprs, w)?
+                || walk_list(&tf.colvalexprs, w)?
+                || walk_list(&tf.passingvalexprs, w)?)
+        }
         other => deferred("expression_tree_walker", other),
     }
 }
@@ -520,6 +535,25 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_MergeAction => {
             let a = node.as_merge_action().unwrap();
             Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
+        }
+        NodeTag::T_RangeTableFunc => {
+            let rtf = node.as_range_table_func().unwrap();
+            Ok(walk_opt(rtf.docexpr, w)?
+                || walk_opt(rtf.rowexpr, w)?
+                || walk_list(&rtf.namespaces, w)?
+                || walk_list(&rtf.columns, w)?
+                || match rtf.alias {
+                    Some(a) => w.visit_alias_ref(a)?,
+                    None => false,
+                })
+        }
+        NodeTag::T_RangeTableFuncCol => {
+            let rtfc = node.as_range_table_func_col().unwrap();
+            Ok(walk_opt(rtfc.colexpr, w)? || walk_opt(rtfc.coldefexpr, w)?)
+        }
+        NodeTag::T_XmlSerialize => {
+            let xs = node.as_xml_serialize().unwrap();
+            Ok(walk_opt(xs.expr, w)? || walk_opt(xs.typeName, w)?)
         }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),

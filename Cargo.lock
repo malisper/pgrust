@@ -830,6 +830,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_xml"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "elog",
+ "guc_tables",
+ "libc",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3800,6 +3820,7 @@ dependencies = [
  "adt_varbit",
  "adt_varchar",
  "adt_windowfuncs",
+ "adt_xml",
  "arrayfuncs",
  "commands_async",
  "conv",
@@ -9826,6 +9847,7 @@ dependencies = [
  "adt_regproc",
  "adt_rowtypes",
  "adt_timestamp",
+ "adt_xml",
  "aio_config",
  "auth",
  "auth_scram",

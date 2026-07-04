@@ -156,6 +156,7 @@ pub fn init_all() {
     adt_float::init_seams();
     pg_locale::init_seams();
     varlena::init_seams();
+    adt_xml::init_seams();
     cache_syscache::init_seams();
     catcache::init_seams();
     inval::init_seams();

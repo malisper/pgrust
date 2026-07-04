@@ -12,14 +12,14 @@ use datum::Datum;
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{
     CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
     Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
-    ScalarArrayOpExpr, SubLink, TargetEntry, Var,
+    ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var, XmlExpr,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
@@ -56,6 +56,12 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         }
         NodeTag::T_NullTest => {
             out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        }
+        NodeTag::T_XmlExpr => {
+            out_xml_expr(out, node.as_variant::<XmlExpr>().expect("XmlExpr"))?
+        }
+        NodeTag::T_TableFunc => {
+            out_table_func(out, node.as_variant::<TableFunc>().expect("TableFunc"))?
         }
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
@@ -474,6 +480,22 @@ fn out_opt_node(out: &mut PgString<'_>, n: Option<Node<'_>>) -> PgResult<()> {
     }
 }
 
+fn out_opt_list(out: &mut PgString<'_>, list: &OptNodeList<'_>) -> PgResult<()> {
+    if list.is_nil() {
+        w!(out, "<>");
+        return Ok(());
+    }
+    w!(out, "(");
+    for (i, item) in list.iter().enumerate() {
+        if i > 0 {
+            w!(out, " ");
+        }
+        out_opt_node(out, item)?;
+    }
+    w!(out, ")");
+    Ok(())
+}
+
 fn out_int_list(out: &mut PgString<'_>, l: &IntList<'_>) {
     if l.is_nil() {
         w!(out, "<>");
@@ -496,6 +518,54 @@ fn out_oid_list(out: &mut PgString<'_>, l: &OidList<'_>) {
         w!(out, " {v}");
     }
     w!(out, ")");
+}
+
+fn out_xml_expr(out: &mut PgString<'_>, x: &XmlExpr<'_>) -> PgResult<()> {
+    w!(out, "{{XMLEXPR :op {} :name ", x.op as u32);
+    out_str(out, x.name);
+    w!(out, " :named_args ");
+    out_list(out, &x.named_args)?;
+    w!(out, " :arg_names ");
+    out_list(out, &x.arg_names)?;
+    w!(out, " :args ");
+    out_list(out, &x.args)?;
+    w!(out, " :xmloption {} :indent ", x.xmloption as u32);
+    out_bool(out, x.indent);
+    w!(out, " :type {} :typmod {} :location -1}}", x.r#type, x.typmod);
+    Ok(())
+}
+
+fn out_table_func(out: &mut PgString<'_>, tf: &TableFunc<'_>) -> PgResult<()> {
+    w!(out, "{{TABLEFUNC :functype {} :ns_uris ", tf.functype as u32);
+    out_list(out, &tf.ns_uris)?;
+    w!(out, " :ns_names ");
+    out_opt_list(out, &tf.ns_names)?;
+    w!(out, " :docexpr ");
+    out_opt_node(out, tf.docexpr)?;
+    w!(out, " :rowexpr ");
+    out_opt_node(out, tf.rowexpr)?;
+    w!(out, " :colnames ");
+    out_list(out, &tf.colnames)?;
+    w!(out, " :coltypes ");
+    out_oid_list(out, &tf.coltypes);
+    w!(out, " :coltypmods ");
+    out_int_list(out, &tf.coltypmods);
+    w!(out, " :colcollations ");
+    out_oid_list(out, &tf.colcollations);
+    w!(out, " :colexprs ");
+    out_opt_list(out, &tf.colexprs)?;
+    w!(out, " :coldefexprs ");
+    out_opt_list(out, &tf.coldefexprs)?;
+    w!(out, " :colvalexprs ");
+    out_list(out, &tf.colvalexprs)?;
+    w!(out, " :passingvalexprs ");
+    out_list(out, &tf.passingvalexprs)?;
+    w!(out, " :notnulls ");
+    out_bitmapset(out, &tf.notnulls);
+    w!(out, " :plan ");
+    out_opt_node(out, tf.plan)?;
+    w!(out, " :ordinalitycol {} :location -1}}", tf.ordinalitycol);
+    Ok(())
 }
 
 fn out_alias(out: &mut PgString<'_>, a: &Alias<'_>) -> PgResult<()> {
@@ -653,6 +723,10 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_int_list(out, &r.joinrightcols);
             w!(out, " :join_using_alias ");
             out_opt_alias(out, r.join_using_alias)?;
+        }
+        RTEKind::RTE_TABLEFUNC => {
+            w!(out, " :tablefunc ");
+            out_opt_node(out, r.tablefunc)?;
         }
         RTEKind::RTE_VALUES => {
             w!(out, " :values_lists ");
