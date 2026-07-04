@@ -252,6 +252,9 @@ fn setup() {
             init_small::init_seams();
         }
         thread_guc_boot();
+        // init_small's GUC accessors write the process globals; the boot
+        // defaults just clobbered ours — re-assert.
+        thread_globals();
 
         lwlock::CreateLWLocks(false).unwrap();
         lmgr_proc::init_seams();
@@ -289,9 +292,9 @@ fn leader_thread_boot() {
         if armed.get() {
             return;
         }
+        thread_guc_boot();
         thread_globals();
         g::SetMyProcPid(NEXT_PID.fetch_add(1, Relaxed));
-        thread_guc_boot();
         fd::InitFileAccess();
         waiteventset::InitializeWaitEventSupport().unwrap();
         miscinit::InitProcessLocalLatch();
@@ -387,6 +390,7 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                     .unwrap();
+                thread_globals();
                 waiteventset::InitializeWaitEventSupport().unwrap();
                 miscinit::InitProcessLocalLatch();
                 latch::InitializeLatchWaitSet().unwrap();
