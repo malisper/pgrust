@@ -423,6 +423,9 @@ pub struct TextPositionState<'a> {
     str1: &'a [u8],
     str2: &'a [u8],
     is_multibyte_char_in_char: bool,
+    nondeterministic: bool,
+    collid: Oid,
+    greedy: bool,
     last_match: Option<usize>,
     last_match_len: usize,
     refpoint: usize,
@@ -439,11 +442,7 @@ pub fn text_position_setup<'a>(
     collid: Oid,
 ) -> PgResult<TextPositionState<'a>> {
     check_collation_set(collid)?;
-    if !collation_is_deterministic(collid)? {
-        panic!(
-            "text_position_setup (varlena.c): nondeterministic-collation search unported (pg_strncoll)"
-        );
-    }
+    let nondeterministic = !collation_is_deterministic(collid)?;
     let (len1, len2) = (t1.len(), t2.len());
     debug_assert!(len2 > 0);
     let is_multibyte_char_in_char = mbutils::pg_database_encoding_max_length() != 1
@@ -453,6 +452,9 @@ pub fn text_position_setup<'a>(
         str1: t1,
         str2: t2,
         is_multibyte_char_in_char,
+        nondeterministic,
+        collid,
+        greedy: true,
         last_match: None,
         last_match_len: 0,
         refpoint: 0,
@@ -461,7 +463,8 @@ pub fn text_position_setup<'a>(
         skiptable: [core::mem::MaybeUninit::uninit(); 256],
     };
 
-    if len1 >= len2 && len2 > 1 {
+    // (Nondeterministic search is substring-by-substring; no B-M-H table.)
+    if len1 >= len2 && len2 > 1 && !nondeterministic {
         let searchlength = len1 - len2;
         let skiptablemask: usize = if searchlength < 16 {
             3
@@ -491,15 +494,27 @@ pub fn text_position_setup<'a>(
     Ok(state)
 }
 
-fn text_position_next_internal(state: &TextPositionState<'_>, start: usize) -> Option<usize> {
+// Returns (match offset, matched-substring length): with a nondeterministic
+// collation the found substring's length may differ from the needle's.
+fn text_position_next_internal(
+    state: &TextPositionState<'_>,
+    start: usize,
+) -> PgResult<Option<(usize, usize)>> {
     let haystack = state.str1;
     let needle = state.str2;
     let needle_len = needle.len();
     debug_assert!(needle_len > 0);
 
+    if state.nondeterministic {
+        return text_position_next_nondeterministic(state, start);
+    }
+
     if needle_len == 1 {
         let nchar = needle[0];
-        return haystack[start..].iter().position(|&b| b == nchar).map(|i| start + i);
+        return Ok(haystack[start..]
+            .iter()
+            .position(|&b| b == nchar)
+            .map(|i| (start + i, needle_len)));
     }
 
     let mask = state.skiptablemask;
@@ -510,7 +525,7 @@ fn text_position_next_internal(state: &TextPositionState<'_>, start: usize) -> O
         let mut p = hptr;
         while haystack[p] == needle[nptr] {
             if nptr == 0 {
-                return Some(p);
+                return Ok(Some((p, needle_len)));
             }
             nptr -= 1;
             p -= 1;
@@ -520,7 +535,49 @@ fn text_position_next_internal(state: &TextPositionState<'_>, start: usize) -> O
         hptr +=
             unsafe { state.skiptable[haystack[hptr] as usize & mask].assume_init() } as usize;
     }
-    None
+    Ok(None)
+}
+
+// text_position_next_internal nondeterministic arm (varlena.c:1478-1537):
+// walk the haystack character-wise; at each position probe every non-empty
+// prefix of the remainder for pg_strncoll-equality with the needle; greedy
+// mode keeps the longest match at that position.
+fn text_position_next_nondeterministic(
+    state: &TextPositionState<'_>,
+    start: usize,
+) -> PgResult<Option<(usize, usize)>> {
+    let haystack = state.str1;
+    let needle = state.str2;
+    let needle_len = needle.len();
+    let eq = |cand: &[u8]| -> PgResult<bool> {
+        Ok(pg_locale_seams::varstr_cmp_locale::call(state.collid, cand, needle)? == 0)
+    };
+    let mut hptr = start;
+    while hptr < haystack.len() {
+        if !state.greedy && haystack.len() - hptr >= needle_len && eq(&haystack[hptr..hptr + needle_len])? {
+            return Ok(Some((hptr, needle_len)));
+        }
+        let mut result: Option<(usize, usize)> = None;
+        let mut test_end = hptr;
+        loop {
+            test_end += mbutils::pg_mblen_range(&haystack[test_end..])? as usize;
+            let test_end_c = test_end.min(haystack.len());
+            if eq(&haystack[hptr..test_end_c])? {
+                result = Some((hptr, test_end_c - hptr));
+                if !state.greedy {
+                    break;
+                }
+            }
+            if test_end_c >= haystack.len() {
+                break;
+            }
+        }
+        if result.is_some() {
+            return Ok(result);
+        }
+        hptr += mbutils::pg_mblen_range(&haystack[hptr..])? as usize;
+    }
+    Ok(None)
 }
 
 pub fn text_position_next(state: &mut TextPositionState<'_>) -> PgResult<bool> {
@@ -534,10 +591,10 @@ pub fn text_position_next(state: &mut TextPositionState<'_>) -> PgResult<bool> {
     };
 
     'retry: loop {
-        let Some(matchptr) = text_position_next_internal(state, start_ptr) else {
+        let Some((matchptr, matchlen)) = text_position_next_internal(state, start_ptr)? else {
             return Ok(false);
         };
-        if state.is_multibyte_char_in_char {
+        if state.is_multibyte_char_in_char && !state.nondeterministic {
             debug_assert!(state.refpoint <= matchptr);
             while state.refpoint < matchptr {
                 state.refpoint += mbutils::pg_mblen_range(&state.str1[state.refpoint..])? as usize;
@@ -549,7 +606,7 @@ pub fn text_position_next(state: &mut TextPositionState<'_>) -> PgResult<bool> {
             }
         }
         state.last_match = Some(matchptr);
-        state.last_match_len = needle_len;
+        state.last_match_len = matchlen;
         return Ok(true);
     }
 }
@@ -584,6 +641,7 @@ pub fn text_position(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
         return Ok(0);
     }
     let mut state = text_position_setup(t1, t2, collid)?;
+    state.greedy = false;
     if !text_position_next(&mut state)? {
         return Ok(0);
     }

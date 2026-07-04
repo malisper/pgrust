@@ -25,3 +25,5 @@ mbutils = { path = "../../utils/mb/mbutils" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 dbcommands = { path = "../dbcommands" }
 explain = { path = "../explain" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }

@@ -60,12 +60,6 @@ fn mb_matchtext_unported(encoding: pg_enc) -> ! {
     panic!("MB_MatchText: non-UTF8 multibyte database encoding {encoding} unported (like_match.c MB arm)")
 }
 
-#[cold]
-#[inline(never)]
-fn nondeterministic_unported() -> ! {
-    panic!("MatchText: nondeterministic-collation substring arm unreachable without ICU (pg_locale_icu.c unported)")
-}
-
 #[inline]
 fn pg_ascii_tolower(c: u8) -> u8 {
     c.to_ascii_lowercase()
@@ -197,7 +191,62 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
             p = &p[1..];
             continue;
         } else if nondet {
-            nondeterministic_unported()
+            // like_match.c nondeterministic arm: match the next wildcard-free
+            // subpattern against expanding text substrings via pg_strncoll
+            // (per SQL standard, substring by substring — a matching
+            // substring may differ in length from the subpattern).
+            let mut p1 = p;
+            let mut found_escape = false;
+            while !p1.is_empty() {
+                if p1[0] == b'\\' {
+                    found_escape = true;
+                    p1 = &p1[1..];
+                    if p1.is_empty() {
+                        return Err(like_pattern_ends_with_escape());
+                    }
+                } else if p1[0] == b'_' || p1[0] == b'%' {
+                    break;
+                }
+                p1 = &p1[1..];
+            }
+            let sublen = p.len() - p1.len();
+            let mut buf: Vec<u8>;
+            let subpat: &[u8] = if found_escape {
+                buf = Vec::with_capacity(sublen);
+                let mut c = &p[..sublen];
+                while !c.is_empty() {
+                    if c[0] != b'\\' {
+                        buf.push(c[0]);
+                    }
+                    c = &c[1..];
+                }
+                &buf
+            } else {
+                &p[..sublen]
+            };
+
+            if p1.is_empty() {
+                return Ok(if locale.pg_strncoll(subpat, t) == 0 {
+                    LIKE_TRUE
+                } else {
+                    LIKE_FALSE
+                });
+            }
+
+            let mut t1 = t;
+            loop {
+                postgres_seams::check_for_interrupts::call()?;
+                if locale.pg_strncoll(subpat, &t[..t.len() - t1.len()]) == 0 {
+                    let matched = match_text::<M>(t1, p1, locale)?;
+                    if matched == LIKE_TRUE {
+                        return Ok(matched);
+                    }
+                }
+                if t1.is_empty() {
+                    return Ok(LIKE_FALSE);
+                }
+                t1 = M::next_char(t1);
+            }
         } else if M::getchar(p[0], locale) != M::getchar(t[0], locale) {
             return Ok(LIKE_FALSE);
         }

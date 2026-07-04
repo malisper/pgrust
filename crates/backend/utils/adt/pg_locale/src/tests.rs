@@ -225,7 +225,10 @@ fn collation_actual_versions_match_c() {
         None
     );
 
-    assert_eq!(get_collation_actual_version(COLLPROVIDER_ICU, "en").unwrap(), None);
+    // ICU: version comes from the system libicu (ucol_getVersion); pinned
+    // catalog-exactness is gated by collate-e2e against the in-pod C twin.
+    let icu_ver = get_collation_actual_version(COLLPROVIDER_ICU, "en").unwrap();
+    assert!(icu_ver.is_some_and(|v| !v.is_empty() && v.contains('.')));
 }
 
 #[test]
@@ -334,6 +337,7 @@ fn live_pg_differential() {
         builtin_locale: None,
         builtin_casemap_full: full,
         lt: libc_locale::LibcLocale::NONE,
+        icu: crate::icu::IcuLocale::NONE,
     };
 
     let run = |f: fn(Mcx<'_>, &mut [u8], &[u8], &PgLocale) -> PgResult<usize>,
