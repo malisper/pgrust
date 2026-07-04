@@ -56,6 +56,8 @@ members = [
     "crates/backend/utils/init/init_small",
     "crates/backend/utils/init/miscinit_seams",
     "crates/backend/utils/adt/rangetypes",
+    "crates/backend/utils/adt/rangetypes_gist",
+    "crates/backend/utils/adt/rangetypes_spgist",
     "crates/backend/utils/adt/multirangetypes",
     "crates/backend/utils/adt/ri_triggers",
     "crates/backend/utils/adt/ri_triggers_seams",

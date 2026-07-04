@@ -150,18 +150,26 @@ pub fn index_getprocid(index: &Relation<'_>, attno_0based: usize, procnum: u16) 
         .unwrap_or(InvalidOid)
 }
 
-// GetIndexInputType: single-key AM; the polymorphic/expression arm is LOUD.
-fn get_index_input_type(index: &Relation<'_>) -> Oid {
+// GetIndexInputType: single-key AM; the expression-column arm is LOUD.
+fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
     let opcintype = index.rd_opcintype[spgKeyColumn];
     const ANYOID_LOW: Oid = 2276; // "any"
     let polymorphic = matches!(
         opcintype,
         2277 | 2283 | 2776 | 3500 | 3831 | 5077 | 5078 | 5079 | 5080 | 4537 | 4538
     ) || opcintype == ANYOID_LOW;
-    if polymorphic {
-        panic!("unported: SP-GiST polymorphic opclass input type {opcintype} (GetIndexInputType expression arm)");
+    if !polymorphic {
+        return Ok(opcintype);
     }
-    opcintype
+    let ind = index.rd_index.as_ref().expect("spgist index without rd_index");
+    let heapcol = ind.indkey.first().copied().unwrap_or(0);
+    if heapcol != 0 {
+        return lsyscache::typ::getBaseType(lsyscache::attribute::get_atttype(
+            ind.indrelid,
+            heapcol,
+        )?);
+    }
+    panic!("unported: SP-GiST polymorphic opclass input type {opcintype} (GetIndexInputType expression arm)");
 }
 
 /// spgGetCache. Reads/installs the rd_amcache_spgist slot on the relcache
@@ -175,7 +183,7 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
 
     debug_assert_eq!(index.indnkeyatts(), 1);
 
-    let atttype = get_index_input_type(index);
+    let atttype = get_index_input_type(index)?;
 
     let config_oid = index_getprocid(index, spgKeyColumn, SPGIST_CONFIG_PROC);
     if config_oid == InvalidOid {

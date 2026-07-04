@@ -271,6 +271,13 @@ fn ConstructTupleDescriptor<'mcx>(
                     to.attalign = b'd' as i8;
                     to.attstorage = b'p' as i8;
                 }
+                // anyrange (gist multirange_ops opckeytype)
+                3831 => {
+                    to.attlen = -1;
+                    to.attbyval = false;
+                    to.attalign = b'd' as i8;
+                    to.attstorage = b'x' as i8;
+                }
                 other => unported(&format!(
                     "ConstructTupleDescriptor: opclass keytype override to {other}"
                 )),

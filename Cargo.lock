@@ -10628,6 +10628,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "rangetypes_gist"
+version = "0.1.0"
+dependencies = [
+ "adt_multirangetypes",
+ "adt_rangetypes",
+ "datum",
+ "detoast_seams",
+ "mcx",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+]
+
+[[package]]
+name = "rangetypes_spgist"
+version = "0.1.0"
+dependencies = [
+ "adt_multirangetypes",
+ "adt_rangetypes",
+ "datum",
+ "mcx",
+ "rangetypes_gist",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_spgist",
+]
+
+[[package]]
 name = "readfuncs"
 version = "0.1.0"
 dependencies = [
@@ -11757,6 +11789,8 @@ dependencies = [
  "pruneheap",
  "ps_status",
  "queryenvironment",
+ "rangetypes_gist",
+ "rangetypes_spgist",
  "regex_core",
  "regress_lib",
  "relation",
