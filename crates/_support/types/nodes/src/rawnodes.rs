@@ -825,6 +825,12 @@ pub struct CreateRangeStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct AlterTypeStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
 pub struct AlterEnumStmt<'mcx> {
     pub typeName: NodeList<'mcx>,
     pub oldVal: Option<&'mcx str>,
@@ -879,6 +885,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateEnumStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateRangeStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateRangeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTypeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTypeStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterEnumStmt;
@@ -1367,6 +1376,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_type_stmt(self) -> Option<&'mcx AlterTypeStmt<'mcx>> {
         self.as_variant()
     }
 

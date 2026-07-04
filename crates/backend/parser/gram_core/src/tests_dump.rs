@@ -1015,6 +1015,11 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "typeName", &c.typeName);
         list_field(out, "params", &c.params);
         out.push('}');
+    } else if let Some(c) = n.as_alter_type_stmt() {
+        out.push_str("{ALTERTYPESTMT");
+        list_field(out, "typeName", &c.typeName);
+        list_field(out, "options", &c.options);
+        out.push('}');
     } else if let Some(c) = n.as_alter_enum_stmt() {
         out.push_str("{ALTERENUMSTMT");
         list_field(out, "typeName", &c.typeName);

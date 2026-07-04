@@ -51,7 +51,8 @@ use types_nodes::primnodes::{CoercionContext, XmlExpr, XmlExprOp, XmlOptionType}
 use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol, RangeTableSample};
 use types_nodes::rawnodes::{
     AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
-    AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
+    AlterEnumStmt, AlterTypeStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt,
+    CreateEnumStmt,
     CreateRangeStmt, CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem,
     IndexStmt,
     IntoClause, OnCommitAction, TriggerTransition,
@@ -8903,6 +8904,13 @@ impl<'mcx> Parser<'mcx> {
             }
             1371 | 1373 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
             1372 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            // AlterTypeStmt: ALTER TYPE_P any_name SET '(' operator_def_list ')'
+            1379 => {
+                let mut n = Node::build::<AlterTypeStmt>(mcx)?;
+                n.typeName = view.v(3).list();
+                n.options = view.v(6).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // DefineStmt: CREATE TYPE_P any_name definition | CREATE TYPE_P
             // any_name (shell)
             851 | 852 => {

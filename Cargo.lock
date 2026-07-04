@@ -15155,6 +15155,7 @@ dependencies = [
  "relation_seams",
  "ruleutils",
  "snapmgr",
+ "stack_depth",
  "superuser",
  "syscache_seams",
  "table",
