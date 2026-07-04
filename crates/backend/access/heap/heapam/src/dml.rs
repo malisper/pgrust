@@ -380,6 +380,7 @@ pub fn heap_multi_insert<'mcx>(
 
     debug_assert!(options & crate::hio::HEAP_INSERT_NO_LOGICAL == 0);
     let xid = xact_seams::get_current_transaction_id::call()?;
+    std::eprintln!("TOASTPROBE mi xid={} rel={}", xid, relation.rd_id);
     let needwal = relation_needs_wal(relation);
     let save_free_space =
         relation.get_target_page_free_space(crate::hio::HEAP_DEFAULT_FILLFACTOR) as usize;
