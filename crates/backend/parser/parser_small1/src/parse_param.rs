@@ -365,12 +365,13 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
         let prefix = fields[..fields.len() - 1].join(".").to_ascii_lowercase();
         if parstate.valueless_recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
+            // C's error comes from exec_get_datum_type_info (no cursor);
+            // the SPI callback then supplies the statement context line.
             return Err(Box::new(
                 ereport(ERROR)
                     .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                     .errmsg(alloc::format!("record \"{recname}\" is not assigned yet"))
                     .errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")
-                    .errposition(parser_errposition(pstate, location, encoding))
                     .into_error()
                     .with_error_location(loc("resolve_column_ref")),
             ));

@@ -115,6 +115,9 @@ pub struct RecValue {
     pub values: Vec<Datum>,
     pub nulls: Vec<bool>,
     pub src_desc: Option<std::rc::Rc<types_tuple::TupleDescData<'static>>>,
+    /// C ExpandedRecordIsEmpty: shape known, no row stored — reads as SQL
+    /// NULL as a whole, fields read NULL, assignment makes it non-empty.
+    pub empty: bool,
 }
 
 pub enum DatumVal {
@@ -639,6 +642,9 @@ impl<'a> Estate<'a> {
         let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
             return Ok((Datum::null(), true));
         };
+        if rv.empty {
+            return Ok((Datum::null(), true));
+        }
         let src = rv
             .src_desc
             .clone()
@@ -692,6 +698,7 @@ impl<'a> Estate<'a> {
             values: vec![Datum::null(); n],
             nulls: vec![true; n],
             src_desc: Some(std::rc::Rc::new(td)),
+            empty: true,
         }));
         Ok(())
     }
@@ -1890,14 +1897,15 @@ impl<'a> Estate<'a> {
                 if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
                     rv.values[i] = stored;
                     rv.nulls[i] = isnull;
+                    rv.empty = false;
                 }
                 Ok(())
             }
             PlDatum::Rec(r) => {
                 let recname = r.refname.clone();
                 if isnull {
-                    // C exec_move_row(rec, NULL, NULL): a null-valued but
-                    // assigned record of the rec's own type.
+                    // C exec_move_row(rec, NULL, NULL): an empty record of
+                    // the rec's own type.
                     if self.rec_meta(target).rectypeid != RECORDOID {
                         self.instantiate_empty_rec(target)?;
                     } else if let DatumVal::Rec(Some(rv)) = &mut self.datums[target as usize] {
@@ -1905,6 +1913,7 @@ impl<'a> Estate<'a> {
                             rv.values[i] = Datum::null();
                             rv.nulls[i] = true;
                         }
+                        rv.empty = true;
                     }
                     return Ok(());
                 }
@@ -2246,6 +2255,7 @@ impl<'a> Estate<'a> {
                 values: out_values,
                 nulls: nulls.to_vec(),
                 src_desc: Some(src_tupdesc),
+                empty: false,
             }));
             return Ok(());
         }
@@ -2288,6 +2298,7 @@ impl<'a> Estate<'a> {
             values: newvalues,
             nulls: newnulls,
             src_desc: Some(std::rc::Rc::new(var_td)),
+            empty: false,
         }));
         Ok(())
     }
@@ -2336,6 +2347,7 @@ impl<'a> Estate<'a> {
             values,
             nulls,
             src_desc: Some(std::rc::Rc::new(td)),
+            empty: false,
         })
     }
 
@@ -2390,7 +2402,7 @@ impl<'a> Estate<'a> {
                 PlDatum::Rec(r) => {
                     let rectypeid = r.rectypeid;
                     match &self.datums[retvarno as usize] {
-                        DatumVal::Rec(Some(rv)) => {
+                        DatumVal::Rec(Some(rv)) if !rv.empty => {
                             self.ret_rec = Some(rv.clone());
                             self.retisnull = false;
                             self.rettype =
