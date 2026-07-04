@@ -10365,6 +10365,7 @@ dependencies = [
  "xlogreader",
  "xlogrecovery",
  "xlogutils",
+ "xmlmap",
 ]
 
 [[package]]
@@ -13106,6 +13107,31 @@ name = "xlogutils_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "xmlmap"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "adt_xml",
+ "catalog_namespace",
+ "datum",
+ "dbcommands",
+ "elog",
+ "execexpr",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "spi",
+ "syscache_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]

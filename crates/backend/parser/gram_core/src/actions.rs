@@ -4593,6 +4593,23 @@ impl<'mcx> Parser<'mcx> {
                 n.name = Some("session_authorization");
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // set_rest_more: XML_P OPTION document_or_content.
+            220 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("xmloption");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String {
+                        sval: if view.v(3).ival() == 1 { "CONTENT" } else { "DOCUMENT" },
+                    })),
+                    view.l(3),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.jumble_args = true;
+                n.location = -1;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // set_rest: TRANSACTION SNAPSHOT Sconst.
             221 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -7105,6 +7122,30 @@ impl<'mcx> Parser<'mcx> {
                 owa.objname = view.v(1).list();
                 owa.objargs = view.v(2).list();
                 *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
+            // DoStmt: DO dostmt_opt_list
+            1243 => {
+                let mut n = Node::build::<parsenodes::DoStmt>(mcx)?;
+                n.args = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1244 => {
+                let el = view.v(1).node().expect("dostmt_opt_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1245 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("dostmt_opt_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // dostmt_opt_item: Sconst | LANGUAGE NonReservedWord_or_Sconst
+            1246 => {
+                let arg = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = def_elem(mcx, "as", Some(arg), view.l(1))?;
+            }
+            1247 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "language", Some(arg), view.l(1))?;
             }
             // AlterOperatorStmt: ALTER OPERATOR operator_with_argtypes SET
             // '(' operator_def_list ')'

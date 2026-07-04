@@ -841,6 +841,9 @@ fn variable_set_stmt_field_order_matches_c() {
     let crate::parsenodes::VariableShowStmt { name: _ } =
         crate::parsenodes::VariableShowStmt::default();
 
+    assert_eq!(c_struct_fields(parse_h, "DoStmt"), ["args"]);
+    let crate::parsenodes::DoStmt { args: _ } = crate::parsenodes::DoStmt::default();
+
     assert_eq!(
         c_struct_fields(parse_h, "DefElem"),
         ["defnamespace", "defname", "arg", "defaction", "location"]

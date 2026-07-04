@@ -344,8 +344,11 @@ pub fn debug_live_counts() -> (usize, usize) {
     (tuptables, plan::debug_live_plans())
 }
 
-pub fn SPI_cursor_find(_name: &str) -> ! {
-    panic!("SPI_cursor_find (spi.c): SPI cursor lane not ported")
+// C SPI_cursor_find (spi.c): GetPortalByName. The found portal is not
+// SPI-owned; SPI_cursor_close on it would free a NULL stmt handle — callers
+// only fetch (cursor_to_xml precedent).
+pub fn SPI_cursor_find(name: &str) -> Option<cursor::SpiCursor> {
+    portalmem::GetPortalByName(Some(name)).map(cursor::SpiCursor::found)
 }
 
 pub fn SPI_register_trigger_data() -> ! {

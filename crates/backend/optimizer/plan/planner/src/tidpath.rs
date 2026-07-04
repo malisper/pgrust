@@ -229,6 +229,26 @@ fn tid_range_qual_from_restrict_info_list<'mcx>(
 // rejects parameterized paths loudly; plan choice (not results) can differ.
 pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<bool> {
     let mcx = run.mcx;
+    // C walks baserestrictinfo twice unconditionally (TidQualFromRestrictInfoList
+    // + TidRangeQualFromRestrictInfoList); one over-inclusive ctid probe gates
+    // both walks and the RinfoId copy C never makes — any OR or ctid-shaped
+    // clause falls through to the full builders, so path generation is unchanged.
+    let mut maybe_tid = false;
+    for &rid in run.root.rel(rel).baserestrictinfo.iter() {
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if clauses::is_orclause(clause)
+            || is_binary_tid_clause(run, rid, rel)?
+            || is_tid_equal_any_clause(run, rid, rel)?
+            || is_current_of_clause(run, rid, rel)
+        {
+            maybe_tid = true;
+            break;
+        }
+    }
+    if !maybe_tid {
+        return Ok(false);
+    }
+
     let mut baserestrictinfo: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
     baserestrictinfo.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
 
