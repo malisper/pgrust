@@ -1838,6 +1838,7 @@ dependencies = [
  "predicate_seams",
  "readfuncs",
  "relcache",
+ "relmapper",
  "rewrite_manip",
  "smgr",
  "snapmgr",
