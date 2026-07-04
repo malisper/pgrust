@@ -116,6 +116,10 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             Ok(())
         }
         NodeTag::T_RelabelType => cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost),
+        // C: no charge for FieldSelect itself.
+        NodeTag::T_FieldSelect => {
+            cost_qual_eval_walker(node.as_field_select().unwrap().arg, cost)
+        }
         // C charges both I/O functions of the coercion.
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();

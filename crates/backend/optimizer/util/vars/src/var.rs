@@ -1033,6 +1033,16 @@ fn fge_mutate<'mcx>(
                 )?)),
             }
         }
+        NodeTag::T_FieldSelect => {
+            let f = node.as_field_select().unwrap();
+            match fge_mutate(mcx, query, f.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    pn::FieldSelect { arg, ..*f },
+                )?)),
+            }
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             match fge_mutate(mcx, query, r.arg)? {
