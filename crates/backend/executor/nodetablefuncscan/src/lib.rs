@@ -107,7 +107,7 @@ pub fn exec_init_table_func_scan<'mcx>(
     )?;
 
     let natts = tupdesc.natts as usize;
-    let mut in_functions: PgVec<'_, FmgrInfo> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut in_functions: PgVec<'_, FmgrInfo> = PgVec::new_in(mcx);
     let mut typioparams: PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, natts)?;
     for i in 0..natts {
         let (in_funcid, typioparam) = lsyscache::getTypeInputInfo(tupdesc.attr(i).atttypid)?;
