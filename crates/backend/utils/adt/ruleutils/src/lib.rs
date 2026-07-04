@@ -335,6 +335,7 @@ pub(crate) fn generate_function_name(
         !has_variadic,
         true,
         false,
+        false,
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
     if best.is_none() && !cands.is_empty() {
