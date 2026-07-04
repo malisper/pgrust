@@ -102,23 +102,6 @@ fn open_by_rangevar<'mcx>(
     table::table_open(mcx, relid, NoLock)
 }
 
-// build_attrmap_by_name, then the repo-wide map_partition_varattnos stance:
-// identity maps only, anything remapped is loud.
-fn assert_identity_attmap<'mcx>(
-    mcx: Mcx<'mcx>,
-    child: &Relation<'mcx>,
-    parent: &Relation<'mcx>,
-) -> PgResult<()> {
-    let attmap = tupdesc::build_attrmap_by_name(mcx, child.descr(), parent.descr())?;
-    for (i, &a) in attmap.iter().enumerate() {
-        assert!(
-            a == (i + 1) as AttrNumber,
-            "tablecmds attach: attno-remapped partition (map_partition_varattnos) unported"
-        );
-    }
-    Ok(())
-}
-
 pub(crate) fn ATExecAttachPartition<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
@@ -340,8 +323,8 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     if !part_constraint.is_nil() {
         let explicit = partbounds::make_ands_explicit(mcx, part_constraint)?;
         let simplified = clauses::eval_const_expressions(mcx, explicit)?;
-        assert_identity_attmap(mcx, &attachrel, rel)?;
         let one = NodeList::make1(mcx, simplified)?;
+        let one = partbounds::map_partition_varattnos(mcx, one, 1, &attachrel, rel)?;
         QueuePartitionConstraintValidation(mcx, wqueue, &attachrel, &one, false)?;
     }
 
@@ -350,7 +333,8 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
         let defaultrel = table::table_open(mcx, default_part_oid, NoLock)?;
         let def_constraint =
             partbounds::get_proposed_default_constraint(mcx, part_bound_constraint)?;
-        assert_identity_attmap(mcx, &defaultrel, rel)?;
+        let def_constraint =
+            partbounds::map_partition_varattnos(mcx, def_constraint, 1, &defaultrel, rel)?;
         QueuePartitionConstraintValidation(mcx, wqueue, &defaultrel, &def_constraint, true)?;
         defaultrel.close(NoLock)?;
     }
@@ -1003,12 +987,18 @@ fn QueuePartitionConstraintValidation<'mcx>(
         let pdesc = partdesc::RelationGetPartitionDesc(scanrel, true)?;
         for &part_oid in pdesc.oids.iter() {
             let part_rel = table::table_open(mcx, part_oid, AccessExclusiveLock)?;
-            assert_identity_attmap(mcx, &part_rel, scanrel)?;
+            let this_constraint = partbounds::map_partition_varattnos(
+                mcx,
+                part_constraint.clone_in(mcx)?,
+                1,
+                &part_rel,
+                scanrel,
+            )?;
             QueuePartitionConstraintValidation(
                 mcx,
                 wqueue,
                 &part_rel,
-                part_constraint,
+                &this_constraint,
                 validate_default,
             )?;
             part_rel.close(NoLock)?;

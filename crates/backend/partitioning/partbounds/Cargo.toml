@@ -30,3 +30,5 @@ pg_inherits = { path = "../../catalog/pg_inherits" }
 parser_small1 = { path = "../../parser/parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }
 copyfuncs = { path = "../../nodes/copyfuncs" }
+tupdesc = { path = "../../access/common/tupdesc" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }

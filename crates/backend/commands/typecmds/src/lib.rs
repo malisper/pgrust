@@ -6,6 +6,10 @@
 
 mod alter;
 mod range;
+
+pub fn init_seams() {
+    typecmds_seams::alter_type_owner_internal::set(alter::AlterTypeOwnerInternal);
+}
 pub use range::DefineRange;
 pub use alter::{
     checkDomainOwner, AlterDomain, AlterTypeNamespace, AlterTypeNamespace_oid,

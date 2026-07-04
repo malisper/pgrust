@@ -604,29 +604,19 @@ pub fn CreateTriggerFiringOn<'mcx>(
     Ok(trigoid)
 }
 
-// map_partition_varattnos (catalog/partition.c) shim: passes the qual through
-// unchanged when the name-built attribute map is the identity and no
-// whole-row Var needs a ConvertRowtypeExpr wrap; everything else is loud.
+// map_partition_varattnos (catalog/partition.c) over a trigger WHEN qual:
+// both OLD (varno 1) and NEW (varno 2) references translate.
 pub fn map_partition_qual<'mcx>(
     mcx: Mcx<'mcx>,
     qual: Node<'mcx>,
     child: &Relation<'mcx>,
     parent: &Relation<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let vars = vars::pull_var_clause(mcx, qual, 0)?;
-    for v in vars.iter() {
-        let var = v.as_variant::<Var>().expect("pull_var_clause Var");
-        if var.varattno == 0 {
-            unported("map_partition_varattnos whole-row Var (ConvertRowtypeExpr)");
-        }
-    }
     let attmap = tupdesc::build_attrmap_by_name(mcx, child.descr(), parent.descr())?;
-    let identity = child.rd_att.natts == parent.rd_att.natts
-        && attmap.iter().enumerate().all(|(i, &a)| a as usize == i + 1);
-    if !identity {
-        unported("map_partition_varattnos non-identity attribute map");
-    }
-    Ok(qual)
+    let to_rowtype = child.rd_rel.reltype;
+    let (q, _) = rewrite_manip::map_variable_attnos(mcx, qual, 1, 0, &attmap, to_rowtype)?;
+    let (q, _) = rewrite_manip::map_variable_attnos(mcx, q, 2, 0, &attmap, to_rowtype)?;
+    Ok(q)
 }
 
 fn to_rangevar<'a>(rv: &'a types_nodes::primnodes::RangeVar<'a>) -> rel_vocab::RangeVar<'a> {

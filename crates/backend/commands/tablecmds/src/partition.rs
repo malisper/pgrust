@@ -742,3 +742,38 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
     }
     Ok(())
 }
+
+// has_partition_attrs (catalog/partition.c): attnums is offset by
+// FirstLowInvalidHeapAttributeNumber, as pull_varattnos emits.
+pub(crate) fn has_partition_attrs<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnums: &types_nodes::Bitmapset<'mcx>,
+    used_in_expr: &mut bool,
+) -> PgResult<bool> {
+    if attnums.is_empty() || rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+        return Ok(false);
+    }
+    let key = partcache::RelationGetPartitionKey(rel)?;
+    let mut partexprs_it = key.partexprs.iter();
+    for i in 0..key.partnatts as usize {
+        let partattno = key.partattrs[i];
+        if partattno != 0 {
+            if attnums
+                .is_member(partattno as i32 - types_tuple::htup::FirstLowInvalidHeapAttributeNumber)
+            {
+                *used_in_expr = false;
+                return Ok(true);
+            }
+        } else {
+            let expr = partexprs_it.next().expect("partition key expression");
+            let mut expr_attrs = types_nodes::Bitmapset::empty();
+            vars::pull_varattnos(mcx, expr, 1, &mut expr_attrs)?;
+            if attnums.overlap(&expr_attrs) {
+                *used_in_expr = true;
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}

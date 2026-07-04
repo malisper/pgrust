@@ -759,6 +759,31 @@ fn get_qual_for_range<'mcx>(
     Ok(result)
 }
 
+// map_partition_varattnos (catalog/partition.c): translate fromrel-numbered
+// Vars to to_rel attnos; whole-row Vars become ConvertRowtypeExpr(to_rel row).
+pub fn map_partition_varattnos<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: NodeList<'mcx>,
+    fromrel_varno: i32,
+    to_rel: &Relation<'_>,
+    from_rel: &Relation<'_>,
+) -> PgResult<NodeList<'mcx>> {
+    if expr.is_nil() {
+        return Ok(expr);
+    }
+    let attmap = tupdesc::build_attrmap_by_name(mcx, to_rel.descr(), from_rel.descr())?;
+    let node = Node::mk_list(mcx, expr)?;
+    let (mapped, _found_whole_row) = rewrite_manip::map_variable_attnos(
+        mcx,
+        node,
+        fromrel_varno,
+        0,
+        &attmap,
+        to_rel.rd_rel.reltype,
+    )?;
+    Ok(mapped.as_list().expect("List").clone_in(mcx)?)
+}
+
 // make_ands_explicit (makefuncs.c).
 pub fn make_ands_explicit<'mcx>(mcx: Mcx<'mcx>, exprs: NodeList<'mcx>) -> PgResult<Node<'mcx>> {
     match exprs.len() {
@@ -818,12 +843,8 @@ pub fn check_default_partition_contents<'mcx>(
         get_qual_for_range(mcx, key, part_oids, new_spec, false)?
     };
     let def_part_constraints = get_proposed_default_constraint(mcx, new_part_constraints)?;
-    // map_partition_varattnos: attno-remapped partitions unported; the Vars
-    // stay parent-numbered, so every scanned descriptor must match.
-    assert_eq!(
-        default_rel.rd_att.natts, parent.rd_att.natts,
-        "partbounds: attno-remapped partitions unported"
-    );
+    let def_part_constraints =
+        map_partition_varattnos(mcx, def_part_constraints, 1, default_rel, parent)?;
 
     let default_relid = default_rel.rd_id;
     let mut all_parts: Vec<Oid> = Vec::new();
@@ -836,19 +857,11 @@ pub fn check_default_partition_contents<'mcx>(
         all_parts.push(default_relid);
     }
 
-    let constraint = make_ands_explicit(mcx, def_part_constraints)?;
-    let planned = clauses_seams::eval_const_expressions::call(mcx, constraint)?;
-
     for &part_relid in &all_parts {
         let opened;
         let part_rel: &Relation<'mcx> = if part_relid != default_relid {
             opened = Some(table::table_open(mcx, part_relid, NoLock)?);
-            let r = opened.as_ref().unwrap();
-            assert_eq!(
-                r.rd_att.natts, parent.rd_att.natts,
-                "partbounds: attno-remapped partitions unported"
-            );
-            r
+            opened.as_ref().unwrap()
         } else {
             opened = None;
             default_rel
@@ -863,6 +876,20 @@ pub fn check_default_partition_contents<'mcx>(
             }
             continue;
         }
+
+        let this_constraints = if part_relid != default_relid {
+            map_partition_varattnos(
+                mcx,
+                def_part_constraints.clone_in(mcx)?,
+                1,
+                part_rel,
+                default_rel,
+            )?
+        } else {
+            def_part_constraints.clone_in(mcx)?
+        };
+        let constraint = make_ands_explicit(mcx, this_constraints)?;
+        let planned = clauses_seams::eval_const_expressions::call(mcx, constraint)?;
 
         let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("partition constraint expr");
