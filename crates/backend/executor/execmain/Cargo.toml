@@ -93,6 +93,7 @@ nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 [dev-dependencies]
+spi_seams = { path = "../spi_seams" }
 parallel = { path = "../../access/transam/parallel" }
 bgworker = { path = "../../postmaster/bgworker" }
 shm_mq = { path = "../../storage/ipc/shm_mq" }
