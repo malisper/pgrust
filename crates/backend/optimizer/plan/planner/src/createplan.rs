@@ -1926,7 +1926,7 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
 }
 
 
-// create_unique_plan (createplan.c), HASH arm; UNIQUE_PATH_SORT is loud.
+// create_unique_plan (createplan.c).
 fn create_unique_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -1949,10 +1949,6 @@ fn create_unique_plan<'mcx>(
     if umethod == types_pathnodes::UNIQUE_PATH_NOOP {
         return Ok(subplan);
     }
-    assert!(
-        umethod == types_pathnodes::UNIQUE_PATH_HASH,
-        "create_unique_plan (createplan.c): UNIQUE_PATH_SORT arm unported"
-    );
 
     let mut newtlist = build_path_tlist(run, target_id, path_id)?;
     let mut newitems = false;
@@ -1967,9 +1963,11 @@ fn create_unique_plan<'mcx>(
             newitems = true;
         }
     }
-    if newitems {
+    if newitems || umethod == types_pathnodes::UNIQUE_PATH_SORT {
         // change_plan_targetlist (createplan.c).
-        if !crate::pathnode::is_projection_capable_pathtype(subplan.node_tag() as u16) {
+        if !crate::pathnode::is_projection_capable_pathtype(subplan.node_tag() as u16)
+            && !tlist_same_exprs(&newtlist, &subplan.as_plan().expect("plan node").targetlist)
+        {
             let sub = subplan.as_plan().expect("plan node");
             let mut result = Node::build::<ResultPlan>(mcx)?;
             result.plan.targetlist = newtlist.clone_in(mcx)?;
@@ -1981,7 +1979,7 @@ fn create_unique_plan<'mcx>(
             result.plan.plan_rows = sub.plan_rows;
             result.plan.plan_width = sub.plan_width;
             result.plan.parallel_aware = false;
-            result.plan.parallel_safe = parallel_safe;
+            result.plan.parallel_safe = sub.parallel_safe && parallel_safe;
             subplan = result.seal();
         } else {
             // SAFETY: subplan was freshly built by create_plan_recurse; no
@@ -1989,7 +1987,7 @@ fn create_unique_plan<'mcx>(
             unsafe {
                 subplan.with_plan_mut(|p| {
                     p.targetlist = newtlist;
-                    p.parallel_safe = parallel_safe;
+                    p.parallel_safe = p.parallel_safe && parallel_safe;
                 })
             }
             .expect("plan node");
@@ -2013,29 +2011,91 @@ fn create_unique_plan<'mcx>(
         grp_col_idx.push(tle.resno);
         grp_collations.push(expr_collation(tle.expr));
     }
-    let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
-    for &in_oper in in_operators.iter() {
-        let (_, eq_oper) = lsyscache::get_compatible_hash_operators(in_oper)?
-            .unwrap_or_else(|| {
-                panic!("could not find compatible hash operator for operator {in_oper}")
-            });
-        grp_operators.push(eq_oper);
-    }
-
     let num_cols = uniq_expr_ids.len();
     let rows = run.root.path(path_id).base().rows;
-    let mut plan = Node::build::<Agg>(mcx)?;
-    plan.plan.targetlist = build_path_tlist(run, target_id, path_id)?;
+    if umethod == types_pathnodes::UNIQUE_PATH_HASH {
+        let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+        for &in_oper in in_operators.iter() {
+            let (_, eq_oper) = lsyscache::get_compatible_hash_operators(in_oper)?
+                .unwrap_or_else(|| {
+                    panic!("could not find compatible hash operator for operator {in_oper}")
+                });
+            grp_operators.push(eq_oper);
+        }
+
+        let mut plan = Node::build::<Agg>(mcx)?;
+        plan.plan.targetlist = build_path_tlist(run, target_id, path_id)?;
+        plan.plan.qual = NodeList::nil();
+        plan.plan.lefttree = Some(subplan);
+        plan.aggstrategy = types_pathnodes::AGG_HASHED;
+        plan.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+        plan.numCols = num_cols as i32;
+        plan.grpColIdx = mcx::vec_borrow_in(mcx, grp_col_idx)?;
+        plan.grpOperators = mcx::vec_borrow_in(mcx, grp_operators)?;
+        plan.grpCollations = mcx::vec_borrow_in(mcx, grp_collations)?;
+        plan.numGroups = clamp_cardinality_to_long(rows);
+        plan.transitionSpace = 0;
+        copy_generic_path_info(run, &mut plan.plan, path_id);
+        return Ok(plan.seal());
+    }
+
+    debug_assert!(umethod == types_pathnodes::UNIQUE_PATH_SORT);
+    let mut sort_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut uniq_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    for (pos, &in_oper) in in_operators.iter().enumerate() {
+        let sortop = lsyscache::amop::get_ordering_op_for_equality_op(in_oper, false)?;
+        assert!(
+            sortop != 0,
+            "could not find ordering operator for equality operator {in_oper}"
+        );
+        let eqop = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
+            .map(|(op, _)| op)
+            .unwrap_or(0);
+        assert!(
+            eqop != 0,
+            "could not find equality operator for ordering operator {sortop}"
+        );
+        let tle_node = subplan_tlist
+            .iter()
+            .find(|n| n.as_target_entry().expect("tlist cell").resno == grp_col_idx[pos])
+            .expect("grouping column is in the subplan tlist");
+        crate::prepunion::assign_sort_group_ref(tle_node, &subplan_tlist);
+        sort_operators.push(sortop);
+        uniq_operators.push(eqop);
+        nulls_first.push(false);
+    }
+
+    // make_sort_from_sortclauses (createplan.c).
+    let mut sort = Node::build::<types_nodes::plannodes::Sort>(mcx)?;
+    sort.plan.targetlist = NodeList::from_slice(
+        mcx,
+        subplan.as_plan().expect("plan node").targetlist.as_slice(),
+    )?;
+    sort.plan.disabled_nodes = subplan.as_plan().unwrap().disabled_nodes
+        + if crate::gucs::enable_sort() { 0 } else { 1 };
+    sort.plan.qual = NodeList::nil();
+    sort.plan.lefttree = Some(subplan);
+    sort.numCols = num_cols as i32;
+    sort.sortColIdx = mcx::slice_borrow_in(mcx, &grp_col_idx)?;
+    sort.sortOperators = mcx::slice_borrow_in(mcx, &sort_operators)?;
+    sort.collations = mcx::slice_borrow_in(mcx, &grp_collations)?;
+    sort.nullsFirst = mcx::slice_borrow_in(mcx, &nulls_first)?;
+    let sort_plan = sort.seal();
+    label_sort_with_costsize(run, sort_plan, -1.0);
+
+    // make_unique_from_sortclauses (createplan.c).
+    let mut plan = Node::build::<types_nodes::plannodes::Unique>(mcx)?;
+    plan.plan.targetlist = NodeList::from_slice(
+        mcx,
+        sort_plan.as_plan().expect("plan node").targetlist.as_slice(),
+    )?;
     plan.plan.qual = NodeList::nil();
-    plan.plan.lefttree = Some(subplan);
-    plan.aggstrategy = types_pathnodes::AGG_HASHED;
-    plan.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+    plan.plan.lefttree = Some(sort_plan);
     plan.numCols = num_cols as i32;
-    plan.grpColIdx = mcx::vec_borrow_in(mcx, grp_col_idx)?;
-    plan.grpOperators = mcx::vec_borrow_in(mcx, grp_operators)?;
-    plan.grpCollations = mcx::vec_borrow_in(mcx, grp_collations)?;
-    plan.numGroups = clamp_cardinality_to_long(rows);
-    plan.transitionSpace = 0;
+    plan.uniqColIdx = mcx::slice_borrow_in(mcx, &grp_col_idx)?;
+    plan.uniqOperators = mcx::slice_borrow_in(mcx, &uniq_operators)?;
+    plan.uniqCollations = mcx::slice_borrow_in(mcx, &grp_collations)?;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }
