@@ -2348,6 +2348,11 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_ReturningExpr => {
+            let r = node.as_returning_expr().unwrap();
+            let retexpr = fix_scan_expr_mutator(run, r.retexpr, rtoffset, num_exec)?;
+            Node::mk(mcx, types_nodes::primnodes::ReturningExpr { retexpr, ..*r })
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
@@ -3160,6 +3165,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             Ok(())
         }
+        NodeTag::T_ReturningExpr => {
+            fix_scan_expr_walker(run, node.as_returning_expr().unwrap().retexpr)
+        }
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -3477,6 +3485,25 @@ fn fix_join_expr_mutator<'mcx>(
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
+            // C fix_join_expr_mutator's OLD/NEW invariant, resolved here
+            // directly: C's itlist excludes the result relation, so an
+            // OLD/NEW Var can only pass through as acceptable_rel.
+            if var.varreturningtype
+                != types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
+            {
+                assert!(
+                    inner_tlist.is_nil() && !outer_tlist.is_nil() && acceptable_rel != 0,
+                    "variable returning old/new found outside RETURNING list"
+                );
+                assert!(
+                    var.varno == acceptable_rel,
+                    "wrong varno {} (expected {}) for variable returning old/new",
+                    var.varno,
+                    acceptable_rel
+                );
+                debug_assert_eq!(rtoffset, 0);
+                return Ok(node);
+            }
             if let Some(new) = search_join_tlist_for_var(
                 run,
                 var,

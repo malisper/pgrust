@@ -307,8 +307,8 @@ impl<'mcx> NodeWalker<'mcx> for ContainVarsReturningOldOrNew {
                 Ok(v.varlevelsup == 0
                     && v.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT)
             }
-            t @ NodeTag::T_ReturningExpr => {
-                deferred("contain_vars_returning_old_or_new_walker", t)
+            NodeTag::T_ReturningExpr => {
+                Ok(node.as_returning_expr().expect("ReturningExpr").retlevelsup == 0)
             }
             _ => expression_tree_walker(node, self),
         }
