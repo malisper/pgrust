@@ -508,7 +508,19 @@ fn walker<'w, 'mcx: 'w>(
             walk_list(&j.passing_values, context)?;
             Ok(())
         }
-        other => walker_unported(&format!("node tag {other:?}")),
+        // No C case (dependency.c:2330): expression_tree_walker recursion only;
+        // tags unknown to nodes_core stay loud there.
+        _ => {
+            struct Recurse<'a, 'w, 'mcx: 'w>(&'a mut FindExprContext<'w, 'mcx>);
+            impl<'a, 'w, 'mcx: 'w> nodes_core::NodeWalker<'mcx> for Recurse<'a, 'w, 'mcx> {
+                fn visit(&mut self, n: Node<'mcx>) -> PgResult<bool> {
+                    walker(n, self.0)?;
+                    Ok(false)
+                }
+            }
+            nodes_core::expression_tree_walker(node, &mut Recurse(context))?;
+            Ok(())
+        }
     }
 }
 
