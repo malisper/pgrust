@@ -373,7 +373,9 @@ fn build_function_tupdesc<'mcx>(
             }
             Ok((d, true))
         }
-        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::Record => {
+        funcapi::TypeFuncClass::Composite
+        | funcapi::TypeFuncClass::CompositeDomain
+        | funcapi::TypeFuncClass::Record => {
             let d = resolved.result_tuple_desc.unwrap_or_else(|| {
                 panic!(
                     "ExecInitFunctionScan (nodeFunctionscan.c): {:?} result without a \
