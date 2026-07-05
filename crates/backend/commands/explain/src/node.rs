@@ -1358,8 +1358,9 @@ fn show_incremental_sort_group_info(
     append!(es, "\n");
 }
 
-// show_incremental_sort_info (explain.c); the shared_info worker stanza has
-// no parallel lane.
+// show_incremental_sort_info (explain.c). The group-info helper carries the
+// trailing newline C's caller appends, so the stanza composition stays
+// byte-identical.
 fn show_incremental_sort_info<'mcx>(
     node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
@@ -1368,13 +1369,37 @@ fn show_incremental_sort_info<'mcx>(
         return Ok(());
     }
     let id = plan_of(node).plan_node_id;
-    let Some(info) = execmain_seams::query_desc_incsort_instrument::call(es.qd, id) else {
-        return Ok(());
-    };
-    if info.fullsortGroupInfo.groupCount > 0 {
-        show_incremental_sort_group_info(&info.fullsortGroupInfo, "Full-sort", true, es);
-        if info.prefixsortGroupInfo.groupCount > 0 {
-            show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+    if let Some(info) = execmain_seams::query_desc_incsort_instrument::call(es.qd, id) {
+        if info.fullsortGroupInfo.groupCount > 0 {
+            show_incremental_sort_group_info(&info.fullsortGroupInfo, "Full-sort", true, es);
+            if info.prefixsortGroupInfo.groupCount > 0 {
+                show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+            }
+        }
+    }
+    // The shared_info worker stanza; workers with no full-sort groups either
+    // didn't launch or didn't contribute (C skips them).
+    if let Some(workers) = execmain_seams::query_desc_worker_incsort_instrument::call(es.qd, id) {
+        for (n, info) in workers {
+            if info.fullsortGroupInfo.groupCount == 0 {
+                continue;
+            }
+            if es.workers_state.is_some() {
+                explain_open_worker(n as usize, es);
+            }
+            let indent_first_line = es.workers_state.is_none() || es.verbose;
+            show_incremental_sort_group_info(
+                &info.fullsortGroupInfo,
+                "Full-sort",
+                indent_first_line,
+                es,
+            );
+            if info.prefixsortGroupInfo.groupCount > 0 {
+                show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+            }
+            if es.workers_state.is_some() {
+                explain_close_worker(n as usize, es);
+            }
         }
     }
     Ok(())

@@ -504,6 +504,30 @@ pub(crate) fn query_desc_worker_bitmap_instrument_seam(
     })
 }
 
+pub(crate) fn query_desc_worker_incsort_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(i32, types_core::instrument::IncrementalSortInfo)>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            let out: Vec<_> = d
+                .estate
+                .es_worker_instrument
+                .iter()
+                .enumerate()
+                .flat_map(|(n, w)| {
+                    w.incsort
+                        .iter()
+                        .filter(|(id, _)| *id == plan_node_id)
+                        .map(move |(_, si)| (n as i32, *si))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+    })
+}
+
 pub(crate) fn query_desc_hash_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,
