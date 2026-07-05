@@ -144,6 +144,30 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 set_upper_references(run, plan, rtoffset)?;
             } else {
                 debug_assert!(r.plan.qual.is_nil());
+                // A childless Result can carry unresolved ROWID_VAR Vars (a
+                // target relation emptied by constraint exclusion); replace
+                // them with typed NULLs as C does before fix_scan_list.
+                for tle_node in &r.plan.targetlist {
+                    let tle = tle_node.as_target_entry().expect("tlist cell");
+                    let is_rowid = tle
+                        .expr
+                        .as_var()
+                        .is_some_and(|v| v.varno == types_nodes::primnodes::ROWID_VAR);
+                    if is_rowid {
+                        let v = tle.expr.as_var().unwrap();
+                        let nc = crate::inherit::make_null_const(
+                            run.mcx,
+                            v.vartype,
+                            v.vartypmod,
+                            v.varcollid,
+                        )?;
+                        // SAFETY: exclusive plan-tree ownership (prologue note).
+                        unsafe {
+                            tle_node.with_mut::<types_nodes::TargetEntry, _>(|t| t.expr = nc)
+                        }
+                        .expect("TargetEntry");
+                    }
+                }
                 if let Some(tl) = fix_scan_list(run, &r.plan.targetlist, rtoffset, r.plan.plan_rows)? {
                     // SAFETY: exclusive plan-tree ownership (prologue note).
                     unsafe { plan.with_plan_mut(|p| p.targetlist = tl) }.expect("plan node");
@@ -694,7 +718,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
+            debug_assert!(m.rowMarks.is_nil());
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
             // the subplan tlist is empty on this lane (join DML loud upstream;
@@ -886,6 +910,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             }
             for rti in m.resultRelations.iter() {
                 run.glob.result_relations.lappend(run.mcx, rti)?;
+            }
+            if m.rootRelation != 0 {
+                run.glob.result_relations.lappend(run.mcx, m.rootRelation as i32)?;
             }
             if has_returning {
                 // C copyObject's the first RETURNING list into the visible

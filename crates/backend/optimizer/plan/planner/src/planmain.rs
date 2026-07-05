@@ -90,11 +90,18 @@ pub fn query_planner<'mcx>(
 
     crate::initsplan::create_lateral_join_info(run)?;
 
+<<<<<<< HEAD
     crate::initsplan::match_foreign_keys_to_quals(run)?;
+=======
+    // match_foreign_keys_to_quals: structural no-op with no fkeys.
+    debug_assert!(run.root.fkey_list.is_empty());
+>>>>>>> 09c017509 (port(planner): inherited/partitioned target UPDATE/DELETE/MERGE planner half)
 
     crate::orclauses::extract_restriction_or_clauses(run)?;
 
     crate::inherit::add_other_rels_to_query(run)?;
+
+    crate::inherit::distribute_row_identity_vars(run)?;
 
     let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
     if run.root.rel(final_rel).cheapest_total_path.is_none()

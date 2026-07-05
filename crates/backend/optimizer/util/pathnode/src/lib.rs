@@ -251,9 +251,9 @@ pub fn create_set_projection_path<'mcx>(
     }))
 }
 
-// create_modifytable_path (pathnode.c), single-relation arm: no rowmarks
-// (loud upstream), rows = 0. merge_join_condition is Some for CMD_MERGE with
-// the per-rel condition inside (None = C's NULL condition).
+// create_modifytable_path (pathnode.c): no rowmarks (loud upstream), rows = 0.
+// The per-result-rel lists are parallel to result_relations; a
+// merge_join_conditions entry of None is C's NULL condition.
 #[allow(clippy::too_many_arguments)]
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -263,12 +263,15 @@ pub fn create_modifytable_path<'mcx>(
     can_set_tag: bool,
     // (operation is stored as the C CmdType value; types_pathnodes uses u32)
     result_relation: u32,
-    update_colnos: Option<PgVec<'mcx, i16>>,
-    with_check_options: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
-    returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
+    root_relation: u32,
+    part_cols_updated: bool,
+    result_relations: PgVec<'mcx, i32>,
+    update_colnos_lists: PgVec<'mcx, PgVec<'mcx, i16>>,
+    with_check_option_lists: PgVec<'mcx, PgVec<'mcx, types_pathnodes::NodeId>>,
+    returning_lists: PgVec<'mcx, PgVec<'mcx, types_pathnodes::NodeId>>,
     onconflict: Option<types_pathnodes::NodeId>,
-    merge_action_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
-    merge_join_condition: Option<Option<types_pathnodes::NodeId>>,
+    merge_action_lists: PgVec<'mcx, PgVec<'mcx, types_pathnodes::NodeId>>,
+    merge_join_conditions: PgVec<'mcx, Option<types_pathnodes::NodeId>>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -288,60 +291,23 @@ pub fn create_modifytable_path<'mcx>(
         total_cost: sub.total_cost,
         pathkeys: PgVec::new_in(run.mcx),
     };
-    let mut result_relations = PgVec::new_in(run.mcx);
-    result_relations.push(result_relation as i32);
     PathNode::ModifyTablePath(types_pathnodes::ModifyTablePath {
         path,
         subpath: Some(subpath_id),
         operation: operation as u32,
         canSetTag: can_set_tag,
         nominalRelation: result_relation,
-        rootRelation: 0,
-        partColsUpdated: false,
+        rootRelation: root_relation,
+        partColsUpdated: part_cols_updated,
         resultRelations: result_relations,
-        updateColnosLists: match update_colnos {
-            Some(colnos) => {
-                let mut lists = PgVec::new_in(run.mcx);
-                lists.push(colnos);
-                lists
-            }
-            None => PgVec::new_in(run.mcx),
-        },
-        withCheckOptionLists: match with_check_options {
-            Some(wcos) => {
-                let mut lists = PgVec::new_in(run.mcx);
-                lists.push(wcos);
-                lists
-            }
-            None => PgVec::new_in(run.mcx),
-        },
-        returningLists: match returning_list {
-            Some(rlist) => {
-                let mut lists = PgVec::new_in(run.mcx);
-                lists.push(rlist);
-                lists
-            }
-            None => PgVec::new_in(run.mcx),
-        },
+        updateColnosLists: update_colnos_lists,
+        withCheckOptionLists: with_check_option_lists,
+        returningLists: returning_lists,
         rowMarks: PgVec::new_in(run.mcx),
         onconflict,
         epqParam: 0,
-        mergeActionLists: match merge_action_list {
-            Some(actions) => {
-                let mut lists = PgVec::new_in(run.mcx);
-                lists.push(actions);
-                lists
-            }
-            None => PgVec::new_in(run.mcx),
-        },
-        mergeJoinConditions: match merge_join_condition {
-            Some(cond) => {
-                let mut conds = PgVec::new_in(run.mcx);
-                conds.push(cond);
-                conds
-            }
-            None => PgVec::new_in(run.mcx),
-        },
+        mergeActionLists: merge_action_lists,
+        mergeJoinConditions: merge_join_conditions,
     })
 }
 

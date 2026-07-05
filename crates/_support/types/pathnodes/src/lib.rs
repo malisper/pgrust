@@ -421,6 +421,16 @@ impl<'mcx> AppendRelInfo<'mcx> {
     }
 }
 
+/// RowIdentityVarInfo (pathnodes.h): `rowidvar` is an interned Var with
+/// varno = ROWID_VAR and varattno = its 1-based index in row_identity_vars.
+#[derive(Clone, Debug)]
+pub struct RowIdentityVarInfo<'mcx> {
+    pub rowidvar: NodeId,
+    pub rowidwidth: i32,
+    pub rowidname: &'mcx str,
+    pub rowidrels: Relids<'mcx>,
+}
+
 /// C builds each IndexOptInfo once (get_relation_info) and every consumer
 /// shares the pointer; `tree_height`/`predOK`/`indrestrictinfo` are the only
 /// fields C mutates through it afterwards (fabled #356).
@@ -1731,7 +1741,7 @@ pub struct PlannerInfo<'mcx> {
     pub all_result_relids: Relids<'mcx>,
     pub leaf_result_relids: Relids<'mcx>,
     pub append_rel_list: PgVec<'mcx, AppendRelInfo<'mcx>>,
-    pub row_identity_vars: PgVec<'mcx, NodeId>,
+    pub row_identity_vars: PgVec<'mcx, RowIdentityVarInfo<'mcx>>,
     pub rowMarks: PgVec<'mcx, PlanRowMarkId>,
     pub placeholder_list: PgVec<'mcx, PhInfoId>,
     pub placeholder_array: PgVec<'mcx, Option<PhInfoId>>,
@@ -2221,6 +2231,7 @@ mcx::forget_safe_struct!(
     PartitionBoundInfoData<'_> { strategy, ndatums, nindexes, null_index, default_index, indexes, datums, kind, interleaved_parts },
     JoinDomain<'_> { jd_relids },
     AppendRelInfo<'_> { parent_relid, child_relid, parent_reltype, child_reltype, translated_vars, num_child_cols, parent_colnos, parent_reloid },
+    RowIdentityVarInfo<'_> { rowidvar, rowidwidth, rowidname, rowidrels },
     GinIndexStats { pending_pages, total_pages, entry_pages, data_pages, entries, version },
     IndexOptInfo<'_> { indexoid, reltablespace, rel, pages, tuples, tree_height, ncolumns, nkeycolumns, indexkeys, indexcollations, opfamily, opcintype, sortopfamily, reverse_sort, nulls_first, canreturn, relam, indexprs, indpred, indextlist, indrestrictinfo, predOK, unique, nullsnotdistinct, immediate, hypothetical, amcanorderbyop, amoptionalkey, amsearcharray, amsearchnulls, amhasgettuple, amhasgetbitmap, amcanparallel, amcanmarkpos, gin_stats },
     GroupByOrdering<'_> { pathkeys, clauses },

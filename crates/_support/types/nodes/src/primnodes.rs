@@ -162,6 +162,7 @@ pub struct RangeVar<'mcx> {
 pub const INNER_VAR: i32 = -1;
 pub const OUTER_VAR: i32 = -2;
 pub const INDEX_VAR: i32 = -3;
+pub const ROWID_VAR: i32 = -4;
 
 pub struct Var<'mcx> {
     pub varno: i32,

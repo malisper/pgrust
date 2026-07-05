@@ -1062,9 +1062,30 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
         | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
         | NodeTag::T_ProjectSet | NodeTag::T_RecursiveUnion => {}
-        // show_modifytable_info: FDW/ON CONFLICT/MERGE legs absent (asserted
-        // at the name arm); nothing prints without ANALYZE.
-        NodeTag::T_ModifyTable => {}
+        // show_modifytable_info: FDW/ON CONFLICT legs absent (asserted at the
+        // name arm); the labeltargets loop reads the plan node in place of
+        // C's mtstate (no executor result-rel pruning yet).
+        NodeTag::T_ModifyTable => {
+            let mt = node.as_modify_table().unwrap();
+            let nrels = mt.resultRelations.len();
+            let labeltargets = nrels > 1
+                || (nrels == 1 && mt.resultRelations.nth(0) != mt.nominalRelation as i32);
+            if labeltargets {
+                let opname = match mt.operation {
+                    types_nodes::CmdType::CMD_INSERT => "Insert",
+                    types_nodes::CmdType::CMD_UPDATE => "Update",
+                    types_nodes::CmdType::CMD_DELETE => "Delete",
+                    types_nodes::CmdType::CMD_MERGE => "Merge",
+                    _ => "???",
+                };
+                for rti in mt.resultRelations.iter() {
+                    crate::format::ExplainIndentText(es);
+                    append!(es, "{opname}");
+                    ExplainTargetRel(rti as types_core::Index, es)?;
+                    append!(es, "\n");
+                }
+            }
+        }
         _ => unreachable!(),
     }
 

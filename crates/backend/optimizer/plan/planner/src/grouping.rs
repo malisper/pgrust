@@ -297,36 +297,240 @@ fn grouping_planner_tail<'mcx>(
         }
         if parse.commandType != CmdType::CMD_SELECT {
             debug_assert!(run.root.rowMarks.is_empty());
+            let mcx = run.mcx;
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
-            let update_colnos = (parse.commandType == CmdType::CMD_UPDATE).then(|| {
-                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.update_colnos)
-            });
-            let with_check_options = (!parse.withCheckOptions.is_nil()).then(|| {
-                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
-                    mcx::PgVec::new_in(run.mcx);
-                for wco in &parse.withCheckOptions {
-                    ids.push(run.root.alloc_expr_node(wco));
+            let mut root_relation: u32 = 0;
+            let mut result_relations: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+            let mut update_colnos_lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, i16>> =
+                mcx::PgVec::new_in(mcx);
+            let mut wco_lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            let mut returning_lists: mcx::PgVec<
+                'mcx,
+                mcx::PgVec<'mcx, types_pathnodes::NodeId>,
+            > = mcx::PgVec::new_in(mcx);
+            let mut merge_action_lists: mcx::PgVec<
+                'mcx,
+                mcx::PgVec<'mcx, types_pathnodes::NodeId>,
+            > = mcx::PgVec::new_in(mcx);
+            let mut merge_join_conditions: mcx::PgVec<
+                'mcx,
+                Option<types_pathnodes::NodeId>,
+            > = mcx::PgVec::new_in(mcx);
+
+            if crate::relnode::relids_num_members(&run.root.all_result_relids) > 1 {
+                // Inherited UPDATE/DELETE/MERGE: only surviving leaf children
+                // become result relations, with per-leaf translated lists.
+                root_relation = parse.resultRelation as u32;
+                let top_rel = run.root.simple_rel_array[parse.resultRelation as usize]
+                    .expect("target rel built");
+                let leaf = crate::relnode::relids_copy(mcx, &run.root.leaf_result_relids);
+                for rti in crate::relnode::relids_members(&leaf) {
+                    let this_rel = run.root.simple_rel_array[rti as usize]
+                        .expect("leaf result rel built");
+                    if crate::joinrels::is_dummy_rel(&run.root, this_rel) {
+                        continue;
+                    }
+                    result_relations.push(rti);
+                    let is_top = this_rel == top_rel;
+                    if parse.commandType == CmdType::CMD_UPDATE {
+                        let src =
+                            crate::relnode::pgvec_clone_shallow(mcx, &run.root.update_colnos);
+                        let colnos = if is_top {
+                            src
+                        } else {
+                            crate::inherit::adjust_inherited_attnums_multilevel(
+                                run,
+                                src.as_slice(),
+                                rti as u32,
+                                parse.resultRelation as u32,
+                            )
+                        };
+                        update_colnos_lists.push(colnos);
+                    }
+                    if !parse.withCheckOptions.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for wco in &parse.withCheckOptions {
+                            let n = if is_top {
+                                wco
+                            } else {
+                                crate::inherit::adjust_appendrel_attrs_multilevel(
+                                    run, wco, this_rel, top_rel,
+                                )?
+                            };
+                            ids.push(run.root.alloc_expr_node(n));
+                        }
+                        wco_lists.push(ids);
+                    }
+                    if !parse.returningList.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for tle in &parse.returningList {
+                            let n = if is_top {
+                                tle
+                            } else {
+                                crate::inherit::adjust_appendrel_attrs_multilevel(
+                                    run, tle, this_rel, top_rel,
+                                )?
+                            };
+                            ids.push(run.root.alloc_expr_node(n));
+                        }
+                        returning_lists.push(ids);
+                    }
+                    if !parse.mergeActionList.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for action_node in &parse.mergeActionList {
+                            let action =
+                                action_node.as_merge_action().expect("mergeActionList cell");
+                            let qual = match action.qual {
+                                None => None,
+                                Some(q) => Some(crate::inherit::adjust_appendrel_attrs_multilevel(
+                                    run, q, this_rel, top_rel,
+                                )?),
+                            };
+                            let src_tl = action.targetList.clone_in(mcx)?;
+                            let mut new_tl = types_nodes::list::NodeList::nil();
+                            for tle in &src_tl {
+                                new_tl.lappend(
+                                    mcx,
+                                    crate::inherit::adjust_appendrel_attrs_multilevel(
+                                        run, tle, this_rel, top_rel,
+                                    )?,
+                                )?;
+                            }
+                            let action =
+                                action_node.as_merge_action().expect("mergeActionList cell");
+                            let update_colnos = if action.commandType == CmdType::CMD_UPDATE {
+                                let mut src: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+                                for c in action.updateColnos.iter() {
+                                    src.push(c as i16);
+                                }
+                                let tr = crate::inherit::adjust_inherited_attnums_multilevel(
+                                    run,
+                                    src.as_slice(),
+                                    rti as u32,
+                                    parse.resultRelation as u32,
+                                );
+                                let mut il = types_nodes::list::IntList::nil();
+                                for &c in tr.iter() {
+                                    il.lappend(mcx, c as i32)?;
+                                }
+                                il
+                            } else {
+                                action.updateColnos.clone_in(mcx)?
+                            };
+                            let leaf_action = types_nodes::Node::mk(
+                                mcx,
+                                types_nodes::primnodes::MergeAction {
+                                    matchKind: action.matchKind,
+                                    commandType: action.commandType,
+                                    r#override: action.r#override,
+                                    qual,
+                                    targetList: new_tl,
+                                    updateColnos: update_colnos,
+                                },
+                            )?;
+                            ids.push(run.root.alloc_expr_node(leaf_action));
+                        }
+                        merge_action_lists.push(ids);
+                    }
+                    if parse.commandType == CmdType::CMD_MERGE {
+                        let cond = match parse.mergeJoinCondition {
+                            None => None,
+                            Some(jc) => {
+                                let n = if is_top {
+                                    jc
+                                } else {
+                                    crate::inherit::adjust_appendrel_attrs_multilevel(
+                                        run, jc, this_rel, top_rel,
+                                    )?
+                                };
+                                Some(run.root.alloc_expr_node(n))
+                            }
+                        };
+                        merge_join_conditions.push(cond);
+                    }
                 }
-                ids
-            });
-            let returning_list = (!parse.returningList.is_nil()).then(|| {
-                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
-                    mcx::PgVec::new_in(run.mcx);
-                for tle in &parse.returningList {
-                    ids.push(run.root.alloc_expr_node(tle));
+                if result_relations.is_empty() {
+                    // Every child excluded: dummy one-relation plan over the
+                    // top target rel so statement triggers still fire.
+                    result_relations.push(parse.resultRelation);
+                    if parse.commandType == CmdType::CMD_UPDATE {
+                        update_colnos_lists.push(crate::relnode::pgvec_clone_shallow(
+                            mcx,
+                            &run.root.update_colnos,
+                        ));
+                    }
+                    if !parse.withCheckOptions.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for wco in &parse.withCheckOptions {
+                            ids.push(run.root.alloc_expr_node(wco));
+                        }
+                        wco_lists.push(ids);
+                    }
+                    if !parse.returningList.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for tle in &parse.returningList {
+                            ids.push(run.root.alloc_expr_node(tle));
+                        }
+                        returning_lists.push(ids);
+                    }
+                    if !parse.mergeActionList.is_nil() {
+                        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                            mcx::PgVec::new_in(mcx);
+                        for action in &parse.mergeActionList {
+                            ids.push(run.root.alloc_expr_node(action));
+                        }
+                        merge_action_lists.push(ids);
+                    }
+                    if parse.commandType == CmdType::CMD_MERGE {
+                        merge_join_conditions
+                            .push(parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
+                    }
                 }
-                ids
-            });
-            let merge_action_list = (!parse.mergeActionList.is_nil()).then(|| {
-                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
-                    mcx::PgVec::new_in(run.mcx);
-                for action in &parse.mergeActionList {
-                    ids.push(run.root.alloc_expr_node(action));
+            } else {
+                result_relations.push(parse.resultRelation);
+                if parse.commandType == CmdType::CMD_UPDATE {
+                    update_colnos_lists.push(crate::relnode::pgvec_clone_shallow(
+                        mcx,
+                        &run.root.update_colnos,
+                    ));
                 }
-                ids
-            });
-            let merge_join_condition = (parse.commandType == CmdType::CMD_MERGE)
-                .then(|| parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
+                if !parse.withCheckOptions.is_nil() {
+                    let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                        mcx::PgVec::new_in(mcx);
+                    for wco in &parse.withCheckOptions {
+                        ids.push(run.root.alloc_expr_node(wco));
+                    }
+                    wco_lists.push(ids);
+                }
+                if !parse.returningList.is_nil() {
+                    let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                        mcx::PgVec::new_in(mcx);
+                    for tle in &parse.returningList {
+                        ids.push(run.root.alloc_expr_node(tle));
+                    }
+                    returning_lists.push(ids);
+                }
+                if !parse.mergeActionList.is_nil() {
+                    let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                        mcx::PgVec::new_in(mcx);
+                    for action in &parse.mergeActionList {
+                        ids.push(run.root.alloc_expr_node(action));
+                    }
+                    merge_action_lists.push(ids);
+                }
+                if parse.commandType == CmdType::CMD_MERGE {
+                    merge_join_conditions
+                        .push(parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
+                }
+            }
+
+            let part_cols_updated = run.root.partColsUpdated;
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -334,12 +538,15 @@ fn grouping_planner_tail<'mcx>(
                 parse.commandType,
                 parse.canSetTag,
                 parse.resultRelation as u32,
-                update_colnos,
-                with_check_options,
-                returning_list,
+                root_relation,
+                part_cols_updated,
+                result_relations,
+                update_colnos_lists,
+                wco_lists,
+                returning_lists,
                 onconflict,
-                merge_action_list,
-                merge_join_condition,
+                merge_action_lists,
+                merge_join_conditions,
             );
             path_id = run.root.alloc_path(mtpath);
         }

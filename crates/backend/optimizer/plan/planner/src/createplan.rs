@@ -1632,7 +1632,7 @@ fn create_modifytable_plan<'mcx>(
     path_id: PathId,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
+    let (subpath_id, operation, can_set_tag, nominal, root_rel, part_cols_updated, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
         debug_assert!(p.rowMarks.is_empty());
         (
@@ -1641,6 +1641,7 @@ fn create_modifytable_plan<'mcx>(
             p.canSetTag,
             p.nominalRelation,
             p.rootRelation,
+            p.partColsUpdated,
             crate::relnode::pgvec_clone_shallow(mcx, &p.resultRelations),
             p.epqParam,
             p.onconflict,
@@ -1660,7 +1661,6 @@ fn create_modifytable_plan<'mcx>(
 
     let update_colnos_lists = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(p.updateColnosLists.len() <= 1);
         let mut lists = types_nodes::list::NodeList::nil();
         for colnos in p.updateColnosLists.iter() {
             let mut il = types_nodes::list::IntList::nil();
@@ -1674,7 +1674,6 @@ fn create_modifytable_plan<'mcx>(
 
     let with_check_option_lists = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(p.withCheckOptionLists.len() <= 1);
         let mut ids: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
             mcx::PgVec::new_in(mcx);
         for wlist in p.withCheckOptionLists.iter() {
@@ -1693,7 +1692,6 @@ fn create_modifytable_plan<'mcx>(
 
     let returning_lists = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(p.returningLists.len() <= 1);
         let mut ids: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
             mcx::PgVec::new_in(mcx);
         for rlist in p.returningLists.iter() {
@@ -1719,6 +1717,7 @@ fn create_modifytable_plan<'mcx>(
     plan.canSetTag = can_set_tag;
     plan.nominalRelation = nominal;
     plan.rootRelation = root_rel;
+    plan.partColsUpdated = part_cols_updated;
     let mut rr = types_nodes::list::IntList::nil();
     for &rti in result_relations.iter() {
         rr.lappend(mcx, rti)?;
@@ -1751,7 +1750,6 @@ fn create_modifytable_plan<'mcx>(
     {
         let (action_lists, join_conds) = {
             let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-            debug_assert!(p.mergeActionLists.len() <= 1);
             let mut lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
                 mcx::PgVec::new_in(mcx);
             for al in p.mergeActionLists.iter() {
