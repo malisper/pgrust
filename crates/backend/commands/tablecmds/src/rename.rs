@@ -142,7 +142,7 @@ fn pg_class_kind_namespace(mcx: Mcx<'_>, relid: Oid) -> PgResult<Option<(u8, Oid
 
 // find_typed_table_dependencies (tablecmds.c): typed tables of a composite
 // type, or error under RESTRICT.
-fn find_typed_table_dependencies<'mcx>(
+pub(crate) fn find_typed_table_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
     type_name: &str,
