@@ -995,7 +995,12 @@ impl<'mcx> ExprState<'mcx> {
     }
 
     /// Lifetime-erased [`Self::arm_result_mcx`] (nodeAgg tmpcontext).
-    /// # Safety: `mcx`'s context outlives every evaluation of this program.
+    /// # Safety: `mcx`'s context outlives every evaluation of this program,
+    /// AND its MemoryContext struct is address-stable for that whole span:
+    /// the armed pointer is raw. A per-tuple context satisfied this only
+    /// because ExprContextData arena-boxes it (P1 panic-arena-corruption:
+    /// es_exprcontexts growth relocated the struct and the armed program kept
+    /// allocating through the abandoned copy).
     pub unsafe fn arm_result_mcx_raw(&mut self, mcx: Mcx<'_>) {
         for f in self.frames.iter() {
             // SAFETY: frame image live for 'mcx, sole reference; the caller
