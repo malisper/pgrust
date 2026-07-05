@@ -18,4 +18,5 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 tupdesc = { path = "../../access/common/tupdesc" }
 heaptuple = { path = "../../access/common/heaptuple" }
 varlena = { path = "../../utils/adt/varlena" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 libc = "0.2"

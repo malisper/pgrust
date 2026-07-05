@@ -16239,6 +16239,7 @@ dependencies = [
  "libc",
  "mbutils",
  "mcx",
+ "namespace_seams",
  "pg_locale",
  "ts_locale",
  "tupdesc",
