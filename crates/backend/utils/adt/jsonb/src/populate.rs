@@ -51,7 +51,9 @@ pub struct CompositeIoData<'mcx> {
 struct RecordIoData<'mcx> {
     record_type: Oid,
     record_typmod: i32,
-    columns: PgVec<'mcx, Option<ColumnIoData<'mcx>>>,
+    // std Vec justified: droppy element (FmgrInfo) — lives on the
+    // fn_extra-lifetime cache, (re)built once per rowtype per query.
+    columns: alloc::vec::Vec<Option<ColumnIoData<'mcx>>>,
 }
 
 enum ColumnKind<'mcx> {
@@ -702,11 +704,9 @@ fn populate_record<'c>(
         Some(r) => r.columns.len() != ncolumns,
     };
     if refresh {
-        let mut columns: PgVec<'c, Option<ColumnIoData<'c>>> =
-            mcx::vec_with_capacity_in(cache_mcx, ncolumns)?;
-        for _ in 0..ncolumns {
-            columns.push(None);
-        }
+        let mut columns: alloc::vec::Vec<Option<ColumnIoData<'c>>> =
+            alloc::vec::Vec::with_capacity(ncolumns);
+        columns.resize_with(ncolumns, || None);
         *record_io = Some(RecordIoData {
             record_type: InvalidOid,
             record_typmod: 0,
