@@ -4,15 +4,71 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+use std::cell::Cell;
+
 use datum::Datum;
+use elog::ereport;
 use mcx::Mcx;
 use types_core::{
-    AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, NAMEDATALEN, PROCEDURE_RELATION_ID,
-    RELATION_RELATION_ID, TYPE_RELATION_ID,
+    AttrNumber, InvalidOid, Oid, OidIsValid, DEFAULT_COLLATION_OID, NAMEDATALEN,
+    PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
 };
+
+// binary_upgrade_next_{pg_type,array_pg_type,multirange_pg_type,
+// multirange_array_pg_type}_oid (pg_upgrade_support.c): set-once,
+// consume-once per pg_type.c/typecmds.c override site.
+macro_rules! next_oid_override {
+    ($cell:ident, $setter:ident, $take:ident) => {
+        thread_local! {
+            static $cell: Cell<Oid> = const { Cell::new(InvalidOid) };
+        }
+
+        pub fn $setter(oid: Oid) {
+            $cell.set(oid);
+        }
+
+        fn $take() -> Option<Oid> {
+            let oid = $cell.get();
+            if OidIsValid(oid) {
+                $cell.set(InvalidOid);
+                Some(oid)
+            } else {
+                None
+            }
+        }
+    };
+}
+
+next_oid_override!(NEXT_PG_TYPE_OID, SetNextPgTypeOid, take_next_pg_type_oid);
+next_oid_override!(
+    NEXT_ARRAY_PG_TYPE_OID,
+    SetNextArrayPgTypeOid,
+    take_next_array_pg_type_oid
+);
+next_oid_override!(
+    NEXT_MRNG_PG_TYPE_OID,
+    SetNextMultirangePgTypeOid,
+    take_next_mrng_pg_type_oid
+);
+next_oid_override!(
+    NEXT_MRNG_ARRAY_PG_TYPE_OID,
+    SetNextMultirangeArrayPgTypeOid,
+    take_next_mrng_array_pg_type_oid
+);
+
+fn oid_not_set(loc_fn: &'static str, what: &str) -> Box<PgError> {
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("{what} OID value not set when in binary upgrade mode"))
+            .into_error()
+            .with_error_location(ErrorLocation::new("src/backend/catalog/pg_type.c", 0, loc_fn)),
+    )
+}
 use types_rel::{AccessShareLock, RowExclusiveLock, RELKIND_COMPOSITE_TYPE};
 use types_tuple::NameData;
 
@@ -308,10 +364,11 @@ pub fn TypeShellMake<'mcx>(
     nulls[31] = true;
 
     let pg_type_desc = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
-    if init_small::globals::IsBinaryUpgrade() {
-        panic!("pg_type: binary-upgrade type-OID override (TypeShellMake) unported");
-    }
-    let typoid = catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?;
+    let typoid = if init_small::globals::IsBinaryUpgrade() {
+        take_next_pg_type_oid().ok_or_else(|| oid_not_set("TypeShellMake", "pg_type"))?
+    } else {
+        catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?
+    };
     values[0] = Datum::from_oid(typoid);
 
     let mut tup = heaptuple::heap_form_tuple(mcx, pg_type_desc.descr(), &values, &nulls)?;
@@ -428,7 +485,8 @@ fn GenerateTypeDependencies<'mcx>(
 // AssignTypeArrayOid (typecmds.c); IsBinaryUpgrade arm loud below.
 pub fn AssignTypeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     if init_small::globals::IsBinaryUpgrade() {
-        panic!("pg_type: binary-upgrade array-OID override (typecmds.c AssignTypeArrayOid) unported");
+        return take_next_array_pg_type_oid()
+            .ok_or_else(|| oid_not_set("AssignTypeArrayOid", "pg_type array"));
     }
     let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
     let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
@@ -436,10 +494,11 @@ pub fn AssignTypeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     Ok(oid)
 }
 
-// AssignTypeMultirangeOid (typecmds.c); IsBinaryUpgrade arm loud below.
+// AssignTypeMultirangeOid (typecmds.c).
 pub fn AssignTypeMultirangeOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     if init_small::globals::IsBinaryUpgrade() {
-        panic!("pg_type: binary-upgrade multirange-OID override (typecmds.c AssignTypeMultirangeOid) unported");
+        return take_next_mrng_pg_type_oid()
+            .ok_or_else(|| oid_not_set("AssignTypeMultirangeOid", "pg_type multirange"));
     }
     let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
     let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
@@ -447,10 +506,12 @@ pub fn AssignTypeMultirangeOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     Ok(oid)
 }
 
-// AssignTypeMultirangeArrayOid (typecmds.c); IsBinaryUpgrade arm loud below.
+// AssignTypeMultirangeArrayOid (typecmds.c).
 pub fn AssignTypeMultirangeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
     if init_small::globals::IsBinaryUpgrade() {
-        panic!("pg_type: binary-upgrade multirange-array-OID override (typecmds.c AssignTypeMultirangeArrayOid) unported");
+        return take_next_mrng_array_pg_type_oid().ok_or_else(|| {
+            oid_not_set("AssignTypeMultirangeArrayOid", "pg_type multirange array")
+        });
     }
     let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
     let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
@@ -667,5 +728,33 @@ pub fn moveArrayTypeName<'mcx>(
     let newname_str = core::str::from_utf8(newname.name_str()).expect("array type name UTF-8");
     RenameTypeInternal(mcx, typeOid, newname_str, typeNamespace)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod pg_upgrade_oid_tests {
+    use super::*;
+
+    #[test]
+    fn next_oid_overrides_set_take_once() {
+        assert_eq!(take_next_pg_type_oid(), None);
+        SetNextPgTypeOid(100);
+        assert_eq!(take_next_pg_type_oid(), Some(100));
+        assert_eq!(take_next_pg_type_oid(), None);
+
+        assert_eq!(take_next_array_pg_type_oid(), None);
+        SetNextArrayPgTypeOid(101);
+        assert_eq!(take_next_array_pg_type_oid(), Some(101));
+        assert_eq!(take_next_array_pg_type_oid(), None);
+
+        assert_eq!(take_next_mrng_pg_type_oid(), None);
+        SetNextMultirangePgTypeOid(102);
+        assert_eq!(take_next_mrng_pg_type_oid(), Some(102));
+        assert_eq!(take_next_mrng_pg_type_oid(), None);
+
+        assert_eq!(take_next_mrng_array_pg_type_oid(), None);
+        SetNextMultirangeArrayPgTypeOid(103);
+        assert_eq!(take_next_mrng_array_pg_type_oid(), Some(103));
+        assert_eq!(take_next_mrng_array_pg_type_oid(), None);
+    }
 }
 

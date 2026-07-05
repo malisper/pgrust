@@ -540,6 +540,15 @@ pub fn regtypein(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
     }
 }
 
+/// to_regtypemod (regproc.c:1229): parseTypeString's soft-error path,
+/// returning the typmod (not the typid) on success.
+pub fn to_regtypemod(mcx: Mcx<'_>, s: &str, esc: Esc) -> PgResult<Option<i32>> {
+    match regproc_seams::parse_type_string::call(mcx, s) {
+        Ok((_typid, typmod)) => Ok(Some(typmod)),
+        Err(e) => ereturn(esc, None, *e),
+    }
+}
+
 fn cstr_in<'mcx>(mcx: Mcx<'mcx>, parts: &[&[u8]]) -> PgResult<RegName<'mcx>> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let mut v = mcx::vec_with_capacity_in(mcx, len + 1)?;

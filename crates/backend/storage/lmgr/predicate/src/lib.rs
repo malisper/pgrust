@@ -12,7 +12,8 @@ use types_snapshot::SnapshotData;
 use types_tuple::ItemPointerData;
 
 pub use engine::{
-    PredicateLockShmemInit, PredicateLockShmemResetAfterCrash, PredicateLockShmemSize,
+    GetPredicateLockStatusData, GetSafeSnapshotBlockingPids, PredicateLockShmemInit,
+    PredicateLockShmemResetAfterCrash, PredicateLockShmemSize, PredicateLockStatusEntry,
     ReleasePredicateLocks, SerializableXactActive,
 };
 pub use serial::CheckPointPredicate;

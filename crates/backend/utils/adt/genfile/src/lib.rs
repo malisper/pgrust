@@ -4,11 +4,12 @@ pub use builtins::GENFILE_BUILTINS;
 use std::io::{Read, Seek, SeekFrom};
 
 use adt_datetime::{POSTGRES_EPOCH_JDATE, SECS_PER_DAY, UNIX_EPOCH_JDATE, USECS_PER_SEC};
+use datum::Datum;
 use elog::ereport;
 use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 
 const ROLE_PG_READ_SERVER_FILES: Oid = 4569;
@@ -16,6 +17,8 @@ const ROLE_PG_READ_SERVER_FILES: Oid = 4569;
 const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 const VARHDRSZ: usize = 4;
 pub(crate) const XLOGDIR: &str = "pg_wal";
+pub(crate) const PG_LOGICAL_SNAPSHOTS_DIR: &str = "pg_logical/snapshots";
+pub(crate) const PG_LOGICAL_MAPPINGS_DIR: &str = "pg_logical/mappings";
 
 pub(crate) fn io_error(e: &std::io::Error, message: String) -> Box<PgError> {
     let mut builder = ereport(ERROR);
@@ -206,6 +209,22 @@ pub(crate) fn pg_read_binary_file_common(
         return Err(negative_length());
     }
     read_binary_file(&convert_and_check_filename(filename)?, seek_offset, bytes_to_read, missing_ok)
+}
+
+// pg_ls_tmpdir (genfile.c:649): TABLESPACEOID existence check + TempTablespacePath.
+pub(crate) fn tmpdir_path(tblspc: Oid) -> PgResult<String> {
+    use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheKey, TABLESPACEOID};
+    match SearchSysCache1(TABLESPACEOID, SysCacheKey::Value(Datum::from_oid(tblspc)))? {
+        Some(ht) => ReleaseSysCache(ht),
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("tablespace with OID {tblspc} does not exist"))
+                .into_error()
+                .into())
+        }
+    }
+    Ok(fd::TempTablespacePath(tblspc))
 }
 
 pub(crate) fn time_t_to_timestamptz(tm: i64) -> i64 {

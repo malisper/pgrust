@@ -98,7 +98,7 @@ thread_local! {
         const { [ZERO_USE; FP_LOCK_GROUPS_PER_BACKEND_MAX] };
 }
 
-fn fp_groups_per_backend() -> u32 {
+pub(crate) fn fp_groups_per_backend() -> u32 {
     lmgr_proc::ProcGlobal().fpLockGroupsPerBackend
 }
 
@@ -204,13 +204,13 @@ pub(crate) fn fp_info_lock(proc: &PGPROC) -> &lwlock::LWLock {
     unsafe { &*(&proc.fpInfoLock as *const types_storage::storage::LWLock as *const lwlock::LWLock) }
 }
 
-struct FpView<'a> {
+pub(crate) struct FpView<'a> {
     bits: &'a [SyncCell<u64>],
     relids: &'a [SyncCell<Oid>],
 }
 
 /// SAFETY contract: proc's fpInfoLock held.
-unsafe fn fp_view(proc: &PGPROC) -> FpView<'_> {
+pub(crate) unsafe fn fp_view(proc: &PGPROC) -> FpView<'_> {
     let groups = fp_groups_per_backend() as usize;
     FpView {
         bits: proc.fp_lock_bits(groups),
@@ -219,7 +219,7 @@ unsafe fn fp_view(proc: &PGPROC) -> FpView<'_> {
 }
 
 impl FpView<'_> {
-    fn get_bits(&self, f: u32) -> u64 {
+    pub(crate) fn get_bits(&self, f: u32) -> u64 {
         let group = f / FP_LOCK_SLOTS_PER_GROUP as u32;
         let index = f % FP_LOCK_SLOTS_PER_GROUP as u32;
         (self.bits[group as usize].get() >> (FAST_PATH_BITS_PER_SLOT * index)) & FAST_PATH_MASK
@@ -247,11 +247,11 @@ impl FpView<'_> {
         self.bits[group].get() & (1u64 << Self::bit_position(f, l)) != 0
     }
 
-    fn group_bits(&self, group: u32) -> u64 {
+    pub(crate) fn group_bits(&self, group: u32) -> u64 {
         self.bits[group as usize].get()
     }
 
-    fn relid(&self, f: u32) -> Oid {
+    pub(crate) fn relid(&self, f: u32) -> Oid {
         self.relids[f as usize].get()
     }
 

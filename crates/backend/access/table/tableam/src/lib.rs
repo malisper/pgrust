@@ -55,6 +55,7 @@ pub fn init_seams() {
     });
     guc_tables::hooks::check_default_table_access_method
         .install(check_default_table_access_method);
+    tableam_seams::table_tid_get_latest::set(table_tid_get_latest);
 }
 
 // --- The dispatch-facing scan values (closed per-AM extensions, rule 4) ---
@@ -865,6 +866,18 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_end(h),
     }
+}
+
+fn table_tid_get_latest<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: Relation<'mcx>,
+    snapshot: std::rc::Rc<::types_snapshot::SnapshotData<'static>>,
+    mut tid: ItemPointerData,
+) -> PgResult<ItemPointerData> {
+    let mut scan = table_beginscan_tid(mcx, &rel, Some(snapshot))?;
+    table_tuple_get_latest_tid(mcx, &mut scan, &mut tid)?;
+    table_endscan(scan)?;
+    Ok(tid)
 }
 
 pub fn table_rescan<'mcx>(

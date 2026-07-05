@@ -14,7 +14,7 @@ pub fn fc_pg_isolation_test_session_is_blocked(
     let blocked_pid = fcinfo.arg_i32(0);
     // SAFETY: catalog arg 1 is int4[]; strict fn.
     let interesting = unsafe { fcinfo.arg_varlena_packed(1)? };
-    let _num_interesting = int4_array_nelems(interesting.data());
+    let interesting_pids = int4_array_values(interesting.data());
 
     let Some(proc) = procarray::BackendPidGetProc(blocked_pid) else {
         return Ok(Datum::from_bool(false));
@@ -25,20 +25,26 @@ pub fn fc_pg_isolation_test_session_is_blocked(
         return Ok(Datum::from_bool(true));
     }
 
-    panic!(
-        "unported: pg_isolation_test_session_is_blocked heavyweight-lock arm \
-         (lockfuncs.c pg_blocking_pids / lock.c GetBlockerStatusData)"
-    );
+    let blocking_pids = lockfuncs::blocking_pids(blocked_pid)?;
+    if blocking_pids.iter().any(|bp| interesting_pids.contains(bp)) {
+        return Ok(Datum::from_bool(true));
+    }
+
+    if !predicate::GetSafeSnapshotBlockingPids(blocked_pid, 1)?.is_empty() {
+        return Ok(Datum::from_bool(true));
+    }
+
+    Ok(Datum::from_bool(false))
 }
 
-// Array payload (past the varlena header): ndim, dataoffset, elemtype, dims[].
-fn int4_array_nelems(payload: &[u8]) -> usize {
+// Payload past varlena header: ndim, dataoffset, elemtype, dims[], lbound[], data.
+fn int4_array_values(payload: &[u8]) -> Vec<i32> {
     if payload.len() < 12 {
-        return 0;
+        return Vec::new();
     }
     let ndim = i32::from_ne_bytes(payload[0..4].try_into().unwrap());
     if ndim == 0 {
-        return 0;
+        return Vec::new();
     }
     assert_eq!(ndim, 1, "int4[] argument must be 1-D");
     assert_eq!(
@@ -46,7 +52,11 @@ fn int4_array_nelems(payload: &[u8]) -> usize {
         0,
         "array must not contain nulls"
     );
-    i32::from_ne_bytes(payload[12..16].try_into().unwrap()) as usize
+    let nelems = i32::from_ne_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let data = &payload[20..20 + nelems * 4];
+    data.chunks_exact(4)
+        .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

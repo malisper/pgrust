@@ -236,6 +236,7 @@ members = [
     "crates/backend/utils/adt/arrayfuncs",
     "crates/backend/utils/adt/array_userfuncs",
     "crates/backend/utils/adt/domains",
+    "crates/backend/utils/adt/expandedrecord",
     "crates/backend/utils/adt/arrayutils",
     "crates/backend/utils/adt/int8",
     "crates/backend/access/index/amapi",
@@ -447,6 +448,7 @@ members = [
     "crates/backend/regex/regex_core",
     "crates/backend/utils/adt/regexp_seams",
     "crates/backend/utils/adt/regexp",
+    "crates/backend/utils/adt/hbafuncs",
     "crates/backend/utils/adt/name",
     "crates/backend/utils/adt/format_type",
     "crates/backend/utils/resowner/resowner",
@@ -703,8 +705,10 @@ members = [
     "crates/backend/utils/adt/adt_ascii",
     "crates/backend/utils/adt/adt_amutils",
     "crates/backend/utils/adt/mcxtfuncs",
+    "crates/backend/utils/adt/lockfuncs",
     "crates/backend/utils/adt/waitfuncs",
     "crates/backend/utils/adt/pseudorandomfuncs",
+    "crates/backend/utils/adt/pg_upgrade_support",
 ]
 
 [workspace.package]

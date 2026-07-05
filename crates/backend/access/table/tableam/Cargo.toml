@@ -31,3 +31,4 @@ heapam_visibility_seams = { path = "../../heap/heapam_visibility_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 init_small = { path = "../../../utils/init/init_small" }
+tableam_seams = { path = "../tableam_seams" }

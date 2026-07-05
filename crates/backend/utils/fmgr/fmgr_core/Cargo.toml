@@ -61,6 +61,7 @@ adt_multirangetypes = { path = "../../adt/multirangetypes" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
 adt_regexp = { path = "../../adt/regexp" }
+hbafuncs = { path = "../../adt/hbafuncs" }
 adt_oracle_compat = { path = "../../adt/oracle_compat" }
 adt_pseudotypes = { path = "../../adt/pseudotypes" }
 adt_quote = { path = "../../adt/quote" }
@@ -77,6 +78,7 @@ adt_ascii = { path = "../../adt/adt_ascii" }
 adt_amutils = { path = "../../adt/adt_amutils" }
 adt_mcxtfuncs = { path = "../../adt/mcxtfuncs" }
 waitfuncs = { path = "../../adt/waitfuncs" }
+lockfuncs = { path = "../../adt/lockfuncs" }
 pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
 trigfuncs = { path = "../../adt/trigfuncs" }
 conv = { path = "../../mb/conv" }

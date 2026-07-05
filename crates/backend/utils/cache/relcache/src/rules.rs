@@ -60,6 +60,22 @@ pub(crate) fn forget(relid: Oid) {
     with_state(|st| st.rules_cache.remove(&relid));
 }
 
+pub(crate) fn RelationGetRulesShapes(relid: Oid) -> PgResult<Vec<relcache_seams::RuleShape>> {
+    let mcx = cache_mcx();
+    match RelationGetRules(mcx, relid)? {
+        None => Ok(Vec::new()),
+        Some(rules) => Ok(rules
+            .rules
+            .iter()
+            .map(|r| relcache_seams::RuleShape {
+                event: r.event,
+                is_instead: r.is_instead,
+                action_src: r.action_src.as_str().to_string(),
+            })
+            .collect()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

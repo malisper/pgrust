@@ -3,10 +3,12 @@
 //! rest of the adt-scalar batch stays todo.
 
 pub mod builtins;
+mod currtid;
 pub mod datum_ops;
 #[cfg(test)]
 mod tests;
 
+pub use currtid::currtid_byrelname;
 pub use datum_ops::{
     datum_copy, datum_estimate_space, datum_get_size, datum_restore, datum_serialize,
 };

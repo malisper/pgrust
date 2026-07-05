@@ -1,0 +1,26 @@
+[package]
+name = "adt_expandedrecord"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+detoast = { path = "../../../access/common/detoast" }
+heaptoast = { path = "../../../access/heap/heaptoast" }
+catalog_heap = { path = "../../../catalog/catalog_heap" }
+typcache = { path = "../../cache/typcache" }
+adt_scalar = { path = "../scalar" }
+adt_domains = { path = "../domains" }
+format_type = { path = "../format_type" }
+
+[dev-dependencies]
+typcache_seams = { path = "../../cache/typcache_seams" }

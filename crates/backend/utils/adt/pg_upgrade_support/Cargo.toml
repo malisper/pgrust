@@ -1,0 +1,31 @@
+[package]
+name = "pg_upgrade_support"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_upgrade_support"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_rel = { path = "../../../../_support/types/rel" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+table = { path = "../../../access/table/table" }
+relation = { path = "../../../access/common/relation" }
+extension = { path = "../../../commands/extension" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+arrayfuncs = { path = "../arrayfuncs" }
+pg_type = { path = "../../../catalog/pg_type" }
+pg_enum = { path = "../../../catalog/pg_enum" }
+commands_tablespace = { path = "../../../commands/tablespace" }
+pg_subscription = { path = "../../../catalog/pg_subscription" }
+lsyscache = { path = "../../cache/lsyscache" }

@@ -122,6 +122,22 @@ fc_to_reg! {
     fc_to_regrole: regrolein;
 }
 
+pub fn fc_to_regtypemod(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let result = {
+        // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+        let payload = unsafe { fcinfo.arg_varlena_packed(0) }?;
+        let payload = payload.data();
+        let s = String::from_utf8_lossy(payload);
+        let mut soft = SoftErrorContext::new(false);
+        let r = crate::to_regtypemod(fcinfo.result_mcx(), &s, Some(&mut soft))?;
+        if soft.error_occurred() { None } else { r }
+    };
+    Ok(match result {
+        Some(typmod) => Datum::from_i32(typmod),
+        None => fcinfo.return_null(),
+    })
+}
+
 pub fn fc_text_regclass(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
     let payload = unsafe { fcinfo.arg_varlena_packed(0) }?;
@@ -205,4 +221,5 @@ pub const REGPROC_BUILTINS: &[FmgrBuiltin] = &[
     b(4195, "to_regcollation", 1, fc_to_regcollation),
     b(4196, "regcollationrecv", 1, fc_reg_recv),
     b(4197, "regcollationsend", 1, fc_reg_send),
+    b(6317, "to_regtypemod", 1, fc_to_regtypemod),
 ];

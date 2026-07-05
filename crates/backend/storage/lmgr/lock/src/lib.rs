@@ -5,6 +5,7 @@ mod acquire;
 mod fastpath;
 mod locallock;
 mod shared;
+mod status;
 mod twophase;
 mod waitqueue;
 
@@ -28,6 +29,7 @@ pub use shared::{
     foreach_proclock_on_lock, GetRunningTransactionLocks, GrantLock, LockCheckConflicts,
     LockManagerShmemInit, LockManagerShmemResetAfterCrash, LockManagerShmemSize, LockTagHashCode,
 };
+pub use status::{BlockedProcData, BlockedProcsData, GetBlockerStatusData, GetLockStatusData};
 pub use waitqueue::{
     wq_foreach, CheckDeadLock, GetLockHoldersAndWaiters, ProcLockWakeup, ProcSleep, ProcWakeup,
     RemoveFromWaitQueue, SetWaitQueueOrder,
