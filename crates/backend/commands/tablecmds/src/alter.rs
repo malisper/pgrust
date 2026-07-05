@@ -3583,17 +3583,7 @@ fn create_notnull_constraint<'mcx>(
     )?;
 
     // An invalid constraint sets attnotnull without queueing verification.
-    if initially_valid {
-        set_attnotnull(mcx, wqueue, rel, attnum)?;
-    } else if !rel.rd_att.attr(attnum as usize - 1).attnotnull {
-        update_pg_attribute(
-            mcx,
-            rel.rd_id,
-            attnum,
-            &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
-        )?;
-        xact::CommandCounterIncrement()?;
-    }
+    set_attnotnull(mcx, wqueue, rel, attnum, initially_valid)?;
     Ok(())
 }
 
@@ -3750,7 +3740,8 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
             }
         }
         if contype == ConstrType::CONSTR_NOTNULL {
-            set_attnotnull(mcx, wqueue, rel, c.attnum)?;
+            let skip = constr.skip_validation;
+            set_attnotnull(mcx, wqueue, rel, c.attnum, !skip)?;
         }
     }
     xact::CommandCounterIncrement()?;
@@ -3792,13 +3783,17 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
 }
 
 // set_attnotnull (tablecmds.c); NotNullImpliedByRelConstraints proof unported
-// so phase 3 always verifies.
+// so phase 3 always verifies when queue_validation.
 fn set_attnotnull<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
+    queue_validation: bool,
 ) -> PgResult<()> {
+    // CheckAlterTableIsSafe: other-session temp tables are unreachable
+    // (temp relations unported).
+    catalog_heap::CheckTableNotInUse(rel, "ALTER TABLE")?;
     let att = rel.rd_att.attr(attnum as usize - 1);
     if att.attisdropped {
         return Ok(());
@@ -3810,8 +3805,10 @@ fn set_attnotnull<'mcx>(
             attnum,
             &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
         )?;
-        let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
-        wqueue[tabidx].verify_new_notnull = true;
+        if queue_validation {
+            let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
+            wqueue[tabidx].verify_new_notnull = true;
+        }
         xact::CommandCounterIncrement()?;
     } else {
         inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
