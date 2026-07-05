@@ -1660,9 +1660,6 @@ fn transform_index_constraints<'mcx>(
                 constraint.location,
             ));
         }
-        if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
-            unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
-        }
         let mut index = Node::build::<IndexStmt>(mcx)?;
         index.unique = !is_exclusion;
         index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;

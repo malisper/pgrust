@@ -1,8 +1,9 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
-//! _bt_check_unique (YES + PARTIAL arms, with the conflict-wait restart),
-//! _bt_findinsertloc, _bt_insertonpg incl. posting splits (_bt_binsrch_posting,
-//! _bt_swap_posting, the page-split coincidence), _bt_split + parent insertion +
-//! root split, dedup trigger (dedup.rs). Loud: UNIQUE_CHECK_EXISTING, !heapkeyspace.
+//! _bt_check_unique (YES + PARTIAL + EXISTING arms, with the conflict-wait
+//! restart), _bt_findinsertloc, _bt_insertonpg incl. posting splits
+//! (_bt_binsrch_posting, _bt_swap_posting, the page-split coincidence),
+//! _bt_split + parent insertion + root split, dedup trigger (dedup.rs).
+//! Loud: !heapkeyspace.
 
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
@@ -117,9 +118,6 @@ fn bt_doinsert<'mcx>(
 ) -> PgResult<bool> {
     let mut is_unique = false;
     let mut checkingunique = !matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_NO);
-    if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING) {
-        unported_phase2("UNIQUE_CHECK_EXISTING (deferred unique recheck lane)");
-    }
 
     let mut itup_key = bt_mkscankey(rel, Some(itup))?;
     let mut frame = OrderProcFrame::new();
@@ -128,6 +126,9 @@ fn bt_doinsert<'mcx>(
         if !itup_key.anynullkeys {
             itup_key.scantid = None;
         } else {
+            // NULL keys can't conflict; the recheck path never sees them
+            // because a NULL-keyed row was never queued as a conflict.
+            debug_assert!(!matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING));
             checkingunique = false;
             is_unique = true;
         }
@@ -192,28 +193,38 @@ fn bt_doinsert<'mcx>(
         break;
     }
 
-    {
-        let buf = insertstate.buf.as_ref().expect("leaf pinned");
-        predicate_seams::check_for_serializable_conflict_in::call(rel, None, buf.block_number())?;
-    }
-    // SAFETY: insertstate.buf pinned + write-locked.
-    unsafe {
-        let newitemoff = bt_findinsertloc(
-            mcx,
-            rel,
-            &mut insertstate,
-            checkingunique,
-            index_unchanged,
-            heap_rel,
-            &mut frame,
-        )?;
+    if !matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING) {
+        {
+            let buf = insertstate.buf.as_ref().expect("leaf pinned");
+            predicate_seams::check_for_serializable_conflict_in::call(
+                rel,
+                None,
+                buf.block_number(),
+            )?;
+        }
+        // SAFETY: insertstate.buf pinned + write-locked.
+        unsafe {
+            let newitemoff = bt_findinsertloc(
+                mcx,
+                rel,
+                &mut insertstate,
+                checkingunique,
+                index_unchanged,
+                heap_rel,
+                &mut frame,
+            )?;
+            let buf = insertstate.buf.take().expect("leaf pinned");
+            let itemsz = insertstate.itemsz;
+            let postingoff = insertstate.postingoff;
+            bt_insertonpg(
+                mcx, rel, heap_rel, Some(insertstate.itup_key), &mut frame, buf, None, &mut stack,
+                itup, itemsz, newitemoff, postingoff, false,
+            )?;
+        }
+    } else {
+        // Recheck-only call: the tuple is already in the index.
         let buf = insertstate.buf.take().expect("leaf pinned");
-        let itemsz = insertstate.itemsz;
-        let postingoff = insertstate.postingoff;
-        bt_insertonpg(
-            mcx, rel, heap_rel, Some(insertstate.itup_key), &mut frame, buf, None, &mut stack,
-            itup, itemsz, newitemoff, postingoff, false,
-        )?;
+        bt_relbuf(rel, buf)?;
     }
 
     Ok(is_unique)
@@ -582,6 +593,7 @@ unsafe fn bt_check_unique<'mcx>(
 ) -> PgResult<(TransactionId, u32)> {
     let itup = insertstate.itup;
     let mut nbuf: Option<BufferPin> = None;
+    let mut found = false;
 
     *is_unique = true;
 
@@ -642,7 +654,13 @@ unsafe fn bt_check_unique<'mcx>(
                 };
 
                 let mut all_dead = false;
-                if ::tableam::table_index_fetch_tuple_check(
+                // A recheck expects to re-find its own tuple: not a duplicate,
+                // but the scan must go on.
+                if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING)
+                    && ItemPointerCompare(&htid, &t_tid(itup)) == 0
+                {
+                    found = true;
+                } else if ::tableam::table_index_fetch_tuple_check(
                     mcx,
                     heap_rel,
                     &mut htid,
@@ -769,10 +787,42 @@ unsafe fn bt_check_unique<'mcx>(
         }
     }
 
+    if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING) && !found {
+        if let Some(pin) = nbuf.take() {
+            bt_relbuf(rel, pin)?;
+        }
+        let leafpin = insertstate.buf.take().expect("pinned");
+        bt_relbuf(rel, leafpin)?;
+        insertstate.bounds_valid = false;
+        return Err(refind_failed(mcx, rel, heap_rel));
+    }
+
     if let Some(pin) = nbuf {
         bt_relbuf(rel, pin)?;
     }
     Ok((InvalidTransactionId, 0))
+}
+
+#[cold]
+#[inline(never)]
+fn refind_failed<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    heap_rel: &Relation<'mcx>,
+) -> Box<PgError> {
+    let mut e = PgError::error(format!(
+        "failed to re-find tuple within index \"{}\"",
+        rel.name()
+    ))
+    .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
+    .with_hint("This may be because of a non-immutable index expression.".to_string());
+    if let Ok(Some(nsp)) = lsyscache::misc::get_namespace_name(mcx, heap_rel.namespace()) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    Box::new(
+        e.with_table_name(heap_rel.name().to_owned())
+            .with_constraint_name(rel.name().to_owned()),
+    )
 }
 
 #[cold]

@@ -381,9 +381,6 @@ pub fn DefineIndex<'mcx>(
         )?;
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-    if (stmt.deferrable || stmt.initdeferred) && !exclusion {
-        unported("DefineIndex: DEFERRABLE unique/pk constraint indexes");
-    }
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) =
         resolve_index_am(stmt.accessMethod);
     if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {

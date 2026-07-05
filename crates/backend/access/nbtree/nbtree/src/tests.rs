@@ -1039,6 +1039,54 @@ fn unique_check_partial_reports_conflict_and_inserts_anyway() {
 }
 
 #[test]
+fn unique_check_existing_rechecks_without_inserting() {
+    install();
+    build_empty_index(false);
+    HEAP_PAGES.with(|p| {
+        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
+    });
+    let cx = MemoryContext::new("t");
+    let rel = index_rel_opts(cx.mcx(), true);
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    use ::types_nbtree::genam::IndexUniqueCheck::{UNIQUE_CHECK_EXISTING, UNIQUE_CHECK_YES};
+    let insert = |k: i32, htid: ItemPointerData, mode| {
+        let icx = MemoryContext::new("ins");
+        crate::btinsert(
+            icx.mcx(),
+            &rel,
+            &[Datum::from_i32(k)],
+            &[false],
+            &htid,
+            &heap,
+            mode,
+            false,
+        )
+    };
+
+    assert!(insert(10, tid(0, 1), UNIQUE_CHECK_YES).unwrap());
+    assert!(insert(20, tid(0, 2), UNIQUE_CHECK_YES).unwrap());
+    assert!(insert(30, tid(0, 3), UNIQUE_CHECK_YES).unwrap());
+
+    // Recheck of a non-conflicting entry: re-finds itself, inserts nothing.
+    assert!(insert(20, tid(0, 2), UNIQUE_CHECK_EXISTING).unwrap());
+    assert_eq!(drain_forward(cx.mcx(), &rel).len(), 3, "recheck never inserts");
+
+    // Recheck that finds another live row under its key: 23505.
+    let err = insert(20, tid(0, 3), UNIQUE_CHECK_EXISTING).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
+    assert!(err.message().contains("duplicate key value"));
+
+    // Recheck that cannot re-find its tuple: internal re-find failure.
+    let err = insert(99, tid(0, 1), UNIQUE_CHECK_EXISTING).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert!(err.message().contains("failed to re-find tuple"));
+
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
 #[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
 fn unique_check_walks_posting_list_tids() {
     install();

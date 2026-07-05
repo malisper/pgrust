@@ -542,7 +542,9 @@ pub fn ExecInsertIndexTuples<'mcx>(
         } else if index_form.indimmediate {
             IndexUniqueCheck::UNIQUE_CHECK_YES
         } else {
-            unported("deferred unique constraint recheck (trigger queue)");
+            // Deferred constraint: the after-trigger recheck (unique_key_recheck)
+            // enforces it, so a conflict here only queues the oid.
+            IndexUniqueCheck::UNIQUE_CHECK_PARTIAL
         };
         let indimmediate = index_form.indimmediate;
 

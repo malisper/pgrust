@@ -17,6 +17,7 @@ types_fmgr = { path = "../../../_support/types/fmgr" }
 types_rel = { path = "../../../_support/types/rel" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

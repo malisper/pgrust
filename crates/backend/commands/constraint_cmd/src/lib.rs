@@ -1,5 +1,5 @@
-//! commands/constraint.c: unique_key_recheck (deferred exclusion arm; the
-//! deferred-unique index_insert arm stays loud with its DDL).
+//! commands/constraint.c: unique_key_recheck (deferred exclusion + deferred
+//! unique arms).
 #![allow(non_snake_case)]
 
 use datum::Datum;
@@ -96,7 +96,20 @@ pub fn fc_unique_key_recheck(
             false,
         )?;
     } else {
-        panic!("unported: unique_key_recheck deferred-unique index_insert(UNIQUE_CHECK_EXISTING)");
+        // Deferred unique: re-run the duplicate check against the already-
+        // inserted entry (constraint.c:170; the EXISTING mode never inserts).
+        let n = index_info.ii_NumIndexAttrs as usize;
+        indexam::index_insert(
+            mcx,
+            &index_rel,
+            &values[..n],
+            &isnull[..n],
+            &tmptid,
+            trig_rel,
+            ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_EXISTING,
+            false,
+            &mut index_info.ii_AmCache,
+        )?;
     }
 
     indexam::index_close(index_rel, ::types_rel::RowShareLock)?;
