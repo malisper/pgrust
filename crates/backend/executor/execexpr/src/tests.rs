@@ -2475,7 +2475,14 @@ fn run_stepwise<'mcx>(
                     crate::interp::step_has_helper(&other),
                     "stencil {other:?} not emulated by the test driver"
                 );
-                match crate::interp::exec_one_step(state, slots, result_slot.as_deref_mut(), ix)? {
+                let mut ret = crate::interp::RetSlots::none();
+                match crate::interp::exec_one_step(
+                    state,
+                    slots,
+                    &mut ret,
+                    result_slot.as_deref_mut(),
+                    ix,
+                )? {
                     StepFlow::Next => {}
                     StepFlow::Jump(t) => {
                         ix = t;

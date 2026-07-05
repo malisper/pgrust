@@ -28,7 +28,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_fmgr::FmgrInfo;
 use ::types_slot::SlotData;
 
-use crate::interp::{EvalOutcome, EvalSlots, Resume, Suspension};
+use crate::interp::{EvalOutcome, EvalSlots, Resume, RetSlots, Suspension};
 use crate::steps::{ExprState, FuncCall, OutRef, Step};
 
 pub const PGJIT_PERFORM: i32 = 1 << 0;
@@ -63,6 +63,7 @@ struct JitCtx {
 struct HelperEnv {
     state: *mut (),
     slots: *mut (),
+    ret: *mut (),
     result_slot: *mut (),
     err: Option<Box<PgError>>,
     // Panic payload caught at the extern "C" boundary: unwinding through a
@@ -246,6 +247,7 @@ fn slot_arrays(slot: Option<&mut SlotData<'_>>) -> (*const Datum, *const bool) {
 pub(crate) fn run_jit<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
     result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
@@ -293,6 +295,7 @@ pub(crate) fn run_jit<'mcx>(
     let mut env = HelperEnv {
         state: (state as *mut ExprState<'mcx>).cast(),
         slots: (slots as *mut EvalSlots<'_, 'mcx>).cast(),
+        ret: (ret as *mut RetSlots<'_, 'mcx>).cast(),
         result_slot: match result_slot {
             Some(r) => (r as *mut SlotData<'mcx>).cast(),
             None => core::ptr::null_mut(),
@@ -345,13 +348,14 @@ unsafe extern "C" fn jitq_step(env: *mut HelperEnv, ix: u32) -> i64 {
     let env = unsafe { &mut *env };
     let state = unsafe { &mut *(env.state as *mut ExprState<'static>) };
     let slots = unsafe { &mut *(env.slots as *mut EvalSlots<'static, 'static>) };
+    let ret = unsafe { &mut *(env.ret as *mut RetSlots<'static, 'static>) };
     let result_slot = if env.result_slot.is_null() {
         None
     } else {
         Some(unsafe { &mut *(env.result_slot as *mut SlotData<'static>) })
     };
     let r = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-        crate::interp::exec_one_step(state, slots, result_slot, ix)
+        crate::interp::exec_one_step(state, slots, ret, result_slot, ix)
     }));
     match r {
         Ok(Ok(crate::interp::StepFlow::Next)) => ix as i64 + 1,
@@ -826,7 +830,8 @@ mod emit {
                 | Step::BoolOrStepFirst { jumpdone, .. }
                 | Step::BoolOrStep { jumpdone, .. }
                 | Step::SbsrefSubscripts { jumpdone, .. }
-                | Step::JsonbSbsrefSubscripts { jumpdone, .. } => t[*jumpdone as usize] = true,
+                | Step::JsonbSbsrefSubscripts { jumpdone, .. }
+                | Step::ReturningExprStep { jumpdone, .. } => t[*jumpdone as usize] = true,
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. }
                 | Step::AggStrictDeserialize { jumpnull, .. } => t[*jumpnull as usize] = true,
