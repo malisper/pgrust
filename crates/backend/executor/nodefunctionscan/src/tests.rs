@@ -58,12 +58,60 @@ fn mat_srf(
 
 fn setexpr_for(mcx: Mcx<'_>, returns_set: bool) -> SetExprState<'_> {
     SetExprState {
-        flinfo: FmgrInfo::new(mat_srf, 4242, 0, false, returns_set),
+        flinfo: Some(FmgrInfo::new(mat_srf, 4242, 0, false, returns_set)),
         args: PgVec::new_in(mcx),
         collation: 0,
         returns_set,
         returns_tuple: false,
+        elided_func_state: None,
     }
+}
+
+// C elidedFuncState leg: a planner-folded non-FuncExpr item yields exactly
+// one row through the generic ExecEvalExpr path.
+#[test]
+fn elided_expression_stores_one_row() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut estate = EStateData::new_in(mcx);
+    let ecxt = estate.exec_assign_expr_context();
+    let desc = int4_desc(mcx, 1);
+
+    let konst = ::types_nodes::node_tree::Node::mk_const(
+        mcx,
+        23,
+        -1,
+        0,
+        4,
+        Datum::from_i32(7),
+        false,
+        true,
+    )
+    .unwrap();
+    let elided = crate::exec_init_expr(mcx, Some(konst), estate.param_bind()).unwrap().unwrap();
+    let mut setexpr = SetExprState {
+        flinfo: None,
+        args: PgVec::new_in(mcx),
+        collation: 0,
+        returns_set: false,
+        returns_tuple: false,
+        elided_func_state: Some(elided),
+    };
+
+    let mut arg_mcx = MemoryContext::new("t-args");
+    let mut store =
+        exec_make_table_function_result(&mut setexpr, &desc, false, &mut estate, ecxt, &mut arg_mcx)
+            .unwrap();
+    assert_eq!(store.tuple_count(), 1);
+    store.rescan();
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(Rc::new(desc)));
+    assert!(store.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    exectuples::slot_getallattrs(&mut slot);
+    assert_eq!(slot.base().tts_values[0].as_i32(), 7);
+    assert!(!slot.base().tts_isnull[0]);
+    assert!(!store.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    store.end();
 }
 
 #[test]

@@ -28,12 +28,16 @@ pub fn init_seams() {}
 
 // SetExprState resolved once at init; fn_extra carries the SRF frame.
 struct SetExprState<'mcx> {
-    flinfo: FmgrInfo,
+    // None only when elided_func_state is Some (C's fn_oid = InvalidOid).
+    flinfo: Option<FmgrInfo>,
     args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     collation: u32,
     returns_set: bool,
     // C's returnsTuple: composite results are exploded into columns.
     returns_tuple: bool,
+    // C's elidedFuncState: the planner constant-folded/inlined the non-SRF
+    // call, so the tree is no longer a FuncExpr; evaluate it generically.
+    elided_func_state: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 struct FunctionScanPerFuncState<'mcx> {
@@ -306,10 +310,16 @@ fn exec_init_table_function_result<'mcx>(
 ) -> PgResult<SetExprState<'mcx>> {
     let fexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
     let Some(func) = fexpr.as_func_expr() else {
-        panic!(
-            "ExecInitTableFunctionResult (execSRF.c): elidedFuncState (planner-folded \
-             non-SRF item) unported — unit backend-executor-execSRF"
-        );
+        let elided = exec_init_expr(mcx, Some(fexpr), estate.param_bind())?
+            .expect("non-NULL elided table function expression");
+        return Ok(SetExprState {
+            flinfo: None,
+            args: PgVec::new_in(mcx),
+            collation: types_core::InvalidOid,
+            returns_set: false,
+            returns_tuple: false,
+            elided_func_state: Some(elided),
+        });
     };
     let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
     for arg in &func.args {
@@ -324,11 +334,12 @@ fn exec_init_table_function_result<'mcx>(
     // variadic-"any" callees read arg types off fn_expr.
     flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, fexpr)?);
     Ok(SetExprState {
-        flinfo,
+        flinfo: Some(flinfo),
         args,
         collation: func.inputcollid,
         returns_set: func.funcretset,
         returns_tuple: false,
+        elided_func_state: None,
     })
 }
 
@@ -420,6 +431,9 @@ fn exec_make_table_function_result<'mcx>(
     ecxt: ::executils::EcxtId,
     arg_mcx: &mut ::mcx::MemoryContext,
 ) -> PgResult<Tuplestore> {
+    if setexpr.elided_func_state.is_some() {
+        return run_elided(setexpr, expected_desc, random_access, estate, ecxt);
+    }
     match setexpr.args.len() {
         0 => run_value_per_call::<0>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
         1 => run_value_per_call::<1>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
@@ -435,6 +449,33 @@ fn exec_make_table_function_result<'mcx>(
     }
 }
 
+// C's elidedFuncState leg of ExecMakeTableFunctionResult: generic ExecEvalExpr
+// with isDone pinned to ExprSingleResult, so the ValuePerCall loop stores
+// exactly one row (all-nulls expansion for a NULL composite, as C).
+fn run_elided<'mcx>(
+    setexpr: &mut SetExprState<'mcx>,
+    expected_desc: &TupleDescData<'mcx>,
+    random_access: bool,
+    estate: &mut EStateData<'mcx>,
+    ecxt: ::executils::EcxtId,
+) -> PgResult<Tuplestore> {
+    let work_mem = init_small::globals::work_mem();
+    let mut store = Tuplestore::begin_heap(random_access, false, work_mem);
+    estate.ecxt_mut(ecxt).reset();
+    let elided = setexpr.elided_func_state.as_mut().expect("run_elided has elidedFuncState");
+    // The row is copied into the tuplestore before the next per-tuple reset.
+    // SAFETY: the ExprContext outlives this call frame.
+    unsafe { elided.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+    let NullableDatum { value, isnull } = exec_eval_expr(elided, &mut slots)?;
+    if setexpr.returns_tuple {
+        put_composite_row(&mut store, expected_desc, value, isnull, estate)?;
+    } else {
+        store.putvalues(expected_desc, &[value], &[isnull])?;
+    }
+    Ok(store)
+}
+
 fn run_value_per_call<'mcx, const N: usize>(
     setexpr: &mut SetExprState<'mcx>,
     expected_desc: &TupleDescData<'mcx>,
@@ -448,6 +489,7 @@ fn run_value_per_call<'mcx, const N: usize>(
     if random_access {
         allowed |= SFRM_Materialize_Random;
     }
+    let flinfo = setexpr.flinfo.as_mut().expect("ValuePerCall path has a resolved function");
     let mut rsinfo = ReturnSetInfo::new(allowed);
     // SAFETY: expectedDesc contract — points at the scan tupdesc, which
     // outlives this call frame; rsinfo dies with the frame.
@@ -471,7 +513,7 @@ fn run_value_per_call<'mcx, const N: usize>(
         let NullableDatum { value, isnull } = exec_eval_expr(&mut setexpr.args[i], &mut slots)?;
         if isnull {
             fcinfo.set_arg_null(i);
-            all_null_skip |= setexpr.flinfo.fn_strict;
+            all_null_skip |= flinfo.fn_strict;
         } else {
             fcinfo.set_arg(i, value);
         }
@@ -487,16 +529,16 @@ fn run_value_per_call<'mcx, const N: usize>(
         estate.ecxt_mut(ecxt).reset();
         // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
         // early-out, hoisted to the caller as the crate's API requires.
-        let fcu = if setexpr.flinfo.fn_stats < ::types_fmgr::TRACK_FUNC_ALL
-            && ::pgstat::function::pgstat_track_functions() > setexpr.flinfo.fn_stats as i32
+        let fcu = if flinfo.fn_stats < ::types_fmgr::TRACK_FUNC_ALL
+            && ::pgstat::function::pgstat_track_functions() > flinfo.fn_stats as i32
         {
-            Some(::pgstat::function::pgstat_init_function_usage(setexpr.flinfo.fn_oid)?)
+            Some(::pgstat::function::pgstat_init_function_usage(flinfo.fn_oid)?)
         } else {
             None
         };
         fcinfo.isnull = false;
         rsinfo.isDone = ExprDoneCond::ExprSingleResult;
-        let result = setexpr.flinfo.invoke(&mut fcinfo)?;
+        let result = flinfo.invoke(&mut fcinfo)?;
         if let Some(fcu) = &fcu {
             ::pgstat::function::pgstat_end_function_usage(
                 fcu,
@@ -635,7 +677,9 @@ pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
         if let Some(store) = fs.tstore.take() {
             store.end();
         }
-        fs.setexpr.flinfo.fn_extra = None;
+        if let Some(flinfo) = fs.setexpr.flinfo.as_mut() {
+            flinfo.fn_extra = None;
+        }
         fs.setexpr.args.clear();
     }
     node.funcstates.clear();
@@ -691,7 +735,7 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
 
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
-    SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
+    SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args, elided_func_state },
     FunctionScanPerFuncState<'_> { colcount, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
     // arg_mcx: child of es_query_cxt; forget skips its individual delete,
     // the query-context teardown reclaims it (C argcontext lifetime).
