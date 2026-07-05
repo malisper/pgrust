@@ -227,6 +227,9 @@ pub unsafe fn json_populate_type<'mcx>(
         *cache = Some(ColumnIoData::new(cache_mcx, typid, typmod)?);
     }
     let col = cache.as_mut().expect("cache just filled");
+    // C re-prepares on (typid, typmod) change; every coercion step here has a
+    // fixed target, so a mismatch is a caller bug.
+    debug_assert!(col.typid == typid && col.typmod == typmod);
     populate_record_field(col, None, mcx, None, &jsv, isnull, escontext, omit_quotes)
 }
 
@@ -323,7 +326,7 @@ fn populate_record_field(
                 Some(d) => Some(unsafe { detoast_composite(mcx, d)? }),
                 None => None,
             };
-            populate_composite(
+            let r = populate_composite(
                 io,
                 col.typid,
                 colname,
@@ -332,7 +335,13 @@ fn populate_record_field(
                 jsv,
                 isnull,
                 escontext,
-            )
+            );
+            // The Defaulted shortcut returns a datum INTO dfl's buffer; leak
+            // it into mcx (C: the detoasted copy lives in the row context).
+            if let Some(v) = dfl {
+                core::mem::forget(v);
+            }
+            r
         }
         ColumnKind::Domain { base } => populate_domain(
             base,
@@ -828,6 +837,10 @@ fn populate_composite(
             }
             PopulatedRecord::Filled => {
                 let tuple = heaptuple::heap_form_tuple(mcx, tupdesc, &values, &nulls)?;
+                // C HeapTupleHeaderGetDatum flattens external fields here.
+                if tuple.has_external() {
+                    panic!("populate_composite: toast_flatten_tuple_to_datum not ported");
+                }
                 let d = Datum::from_usize(tuple.image().as_ptr() as usize);
                 core::mem::forget(tuple);
                 d
@@ -1412,68 +1425,68 @@ fn populate_record_worker(
     };
 
     let mut rec_holder: Option<PgVec<'_, u8>> = None;
-    if have_record_arg && !fcinfo.argisnull(0) {
-        let rec = rec_holder.insert(arg_record(fcinfo, 0, mcx)?);
-        // C: a declared RECORD arg carries its concrete type in the tuple.
-        if cache.argtype == RECORDOID {
-            let hdr = record_header(rec);
-            let io = cache.composite_io_mut();
-            io.base_typid = hdr.type_id();
-            io.base_typmod = hdr.typmod();
-        }
-    } else if have_record_arg && cache.argtype == RECORDOID {
-        if let Err(e) = get_record_type_from_query(flinfo, fcinfo, funcname, &mut cache) {
-            return Err(e);
-        }
-        debug_assert!(cache.argtype == RECORDOID);
-    }
-
-    if fcinfo.argisnull(json_arg_num) {
-        flinfo.fn_extra = Some(cache);
-        return match rec_holder {
-            Some(rec) => {
-                let d = Datum::from_usize(rec.as_ptr() as usize);
-                core::mem::forget(rec);
-                Ok(d)
+    // C keeps the cache in fn_mcxt across errors; restore before `?`.
+    let result = (|| -> PgResult<Option<Datum>> {
+        if have_record_arg && !fcinfo.argisnull(0) {
+            let rec = rec_holder.insert(arg_record(fcinfo, 0, mcx)?);
+            // C: a declared RECORD arg carries its concrete type in the tuple.
+            if cache.argtype == RECORDOID {
+                let hdr = record_header(rec);
+                let io = cache.composite_io_mut();
+                io.base_typid = hdr.type_id();
+                io.base_typmod = hdr.typmod();
             }
-            None => Ok(fcinfo.return_null()),
+        } else if have_record_arg && cache.argtype == RECORDOID {
+            get_record_type_from_query(flinfo, fcinfo, funcname, &mut cache)?;
+            debug_assert!(cache.argtype == RECORDOID);
+        }
+
+        if fcinfo.argisnull(json_arg_num) {
+            return Ok(rec_holder
+                .as_ref()
+                .map(|rec| Datum::from_usize(rec.as_ptr() as usize)));
+        }
+
+        let mut text_holder = None;
+        let mut payload_holder = None;
+        let jsv = if is_json {
+            // SAFETY: arg checked non-null; live text varlena.
+            let t = text_holder
+                .insert(unsafe { text_payload_from_datum(mcx, fcinfo.arg(json_arg_num))? });
+            JsValue::Json { s: Some(&t[..]), ttype: JsonToken::Invalid }
+        } else {
+            let p = payload_holder.insert(crate::builtins::arg_jsonb(fcinfo, json_arg_num, mcx)?);
+            JsValue::Jsonb(Some(JsonbItem::Binary(p.as_bytes())))
         };
-    }
 
-    let mut text_holder = None;
-    let mut payload_holder = None;
-    let jsv = if is_json {
-        // SAFETY: arg checked non-null; live text varlena.
-        let t = text_holder.insert(unsafe { text_payload_from_datum(mcx, fcinfo.arg(json_arg_num))? });
-        JsValue::Json { s: Some(&t[..]), ttype: JsonToken::Invalid }
-    } else {
-        let p = payload_holder.insert(crate::builtins::arg_jsonb(fcinfo, json_arg_num, mcx)?);
-        JsValue::Jsonb(Some(JsonbItem::Binary(p.as_bytes())))
-    };
-
-    let mut isnull = false;
-    let argtype = cache.argtype;
-    let io = cache.composite_io_mut();
-    let rettuple = populate_composite(
-        io,
-        argtype,
-        None,
-        mcx,
-        rec_holder.as_ref().map(|v| &v[..]),
-        &jsv,
-        &mut isnull,
-        escontext.as_deref_mut(),
-    );
-    let rettuple = match rettuple {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
-    debug_assert!(!isnull || soft_occurred(&escontext));
-    if let Some(rec) = rec_holder {
-        core::mem::forget(rec);
-    }
+        let mut isnull = false;
+        let argtype = cache.argtype;
+        let io = cache.composite_io_mut();
+        let rettuple = populate_composite(
+            io,
+            argtype,
+            None,
+            mcx,
+            rec_holder.as_ref().map(|v| &v[..]),
+            &jsv,
+            &mut isnull,
+            escontext.as_deref_mut(),
+        )?;
+        debug_assert!(!isnull || soft_occurred(&escontext));
+        Ok(Some(rettuple))
+    })();
     flinfo.fn_extra = Some(cache);
-    Ok(rettuple)
+    match result? {
+        Some(d) => {
+            // The result may point into the detoasted record arg; leak it
+            // into mcx (C: the copy lives in the calling context).
+            if let Some(rec) = rec_holder {
+                core::mem::forget(rec);
+            }
+            Ok(d)
+        }
+        None => Ok(fcinfo.return_null()),
+    }
 }
 
 // C populate_recordset_record.
@@ -1520,6 +1533,9 @@ fn populate_recordset_record(
     }
     if is_composite_domain {
         let tuple = heaptuple::heap_form_tuple(mcx, tupdesc, &values, &nulls)?;
+        if tuple.has_external() {
+            panic!("populate_recordset_record: toast_flatten_tuple_to_datum not ported");
+        }
         let d = Datum::from_usize(tuple.image().as_ptr() as usize);
         typcache_seams::domain_check_input::call(d, false, argtype, None)?;
     }
