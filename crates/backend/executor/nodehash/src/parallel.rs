@@ -558,10 +558,13 @@ pub fn exec_parallel_hash_table_create<'mcx>(
 ) -> PgResult<ParallelHashJoinTable<'mcx>> {
     let pstate = Arc::clone(hs.parallel_state.as_ref().expect("parallel hash state attached"));
     let mcx = estate.es_query_cxt;
+    // useskew mirrors C's OidIsValid(node->skewTable) exactly as the serial
+    // create (sizing reserves skew memory even though parallel hash never
+    // builds the skew table).
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) = exec_choose_hash_table_size_full(
         hs.ntuples_est,
         hs.tupwidth,
-        false,
+        true,
         true,
         pstate.nparticipants - 1,
     );
