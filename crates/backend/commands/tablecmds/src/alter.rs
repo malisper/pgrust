@@ -440,6 +440,22 @@ fn ATSimpleRecursion<'mcx>(
     Ok(())
 }
 
+fn ATCheckPartitionsNotInUse<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        let inh = pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode)?;
+        for &childoid in inh.iter().skip(1) {
+            let childrel = table::table_open(mcx, childoid, NoLock)?;
+            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            childrel.close(NoLock)?;
+        }
+    }
+    Ok(())
+}
+
 // ATPrepCmd: the statement arena is single-use, so the subcommand is
 const ATT_TABLE: i32 = 0x0001;
 const ATT_VIEW: i32 = 0x0002;
@@ -680,11 +696,14 @@ fn ATPrepCmd<'mcx>(
             set_recurse();
             AT_PASS_DROP
         }
-        // ATSimpleRecursion: children are loud at exec (no inheritance).
         AlterTableType::AT_ColumnDefault => {
+            ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
             if cmd.def.is_some() { AT_PASS_ADD_OTHERCONSTR } else { AT_PASS_DROP }
         }
-        AlterTableType::AT_DropNotNull => AT_PASS_DROP,
+        AlterTableType::AT_DropNotNull => {
+            set_recurse();
+            AT_PASS_DROP
+        }
         AlterTableType::AT_SetNotNull => {
             set_recurse();
             AT_PASS_COL_ATTRS
@@ -695,6 +714,7 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_ADD_CONSTR
         }
         AlterTableType::AT_DropConstraint => {
+            ATCheckPartitionsNotInUse(mcx, rel, lockmode)?;
             set_recurse();
             AT_PASS_DROP
         }
@@ -713,10 +733,13 @@ fn ATPrepCmd<'mcx>(
             ATPrepAlterColumnType(mcx, &mut wqueue[tabidx], rel, cmd, query_string)?;
             AT_PASS_ALTER_TYPE
         }
-        // ATSimpleRecursion: children are loud at exec (no inheritance).
-        AlterTableType::AT_SetExpression => AT_PASS_SET_EXPRESSION,
+        AlterTableType::AT_SetExpression => {
+            ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
+            AT_PASS_SET_EXPRESSION
+        }
         AlterTableType::AT_DropExpression => {
-            ATPrepDropExpression(mcx, rel, cmd, recurse)?;
+            ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
+            ATPrepDropExpression(mcx, rel, cmd, recurse, recursing, lockmode)?;
             AT_PASS_DROP
         }
         AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
@@ -833,7 +856,6 @@ fn ATPrepCmd<'mcx>(
         }
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
-    let _ = recursing;
     wqueue[tabidx].subcmds[pass].lappend(mcx, cnode)?;
     Ok(())
 }
@@ -1963,9 +1985,6 @@ fn ATExecColumnDefault<'mcx>(
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
     }
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecColumnDefault inheritance recursion");
-    }
     let att = rel.rd_att.attr(attnum as usize - 1);
     if att.attidentity != 0 {
         let mut e = PgError::new(
@@ -2045,9 +2064,6 @@ fn ATExecSetExpression<'mcx>(
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_SetExpression name");
     let relname = rel.name().to_string();
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecSetExpression inheritance recursion");
-    }
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
@@ -2143,32 +2159,32 @@ fn ATPrepDropExpression<'mcx>(
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
     recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        if !recurse {
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    "ALTER TABLE / DROP EXPRESSION must be applied to child tables too"
-                        .to_string(),
-                )
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
-        unported("ATPrepDropExpression recursion");
-    }
-    let col_name = cmd.name.expect("AT_DropExpression name");
-    let Some((_, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
-        return Err(undefined_column(col_name, &rel.name().to_string()));
-    };
-    if attinhcount > 0 {
+    if !recurse && !pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?.is_empty() {
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                "cannot drop generation expression from inherited column".to_string(),
+                "ALTER TABLE / DROP EXPRESSION must be applied to child tables too".to_string(),
             )
-            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
+    }
+    if !recursing {
+        let col_name = cmd.name.expect("AT_DropExpression name");
+        let Some((_, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
+            return Err(undefined_column(col_name, &rel.name().to_string()));
+        };
+        if attinhcount > 0 {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot drop generation expression from inherited column".to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
     }
     Ok(())
 }
