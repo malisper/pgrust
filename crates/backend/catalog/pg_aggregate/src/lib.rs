@@ -532,6 +532,7 @@ pub fn AggregateCreate<'mcx>(
             allParameterTypes: a.all_parameter_types,
             parameterModes: a.parameter_modes,
             parameterNames: a.parameter_names,
+            proconfig: None,
             procost: 1.0,
             prorows: 0.0,
         },

@@ -5370,6 +5370,8 @@ dependencies = [
  "format_type",
  "funcapi",
  "genam",
+ "guc",
+ "guc_funcs",
  "heaptuple",
  "lsyscache",
  "mbutils",
@@ -5402,6 +5404,7 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "utility_seams",
+ "varlena",
 ]
 
 [[package]]

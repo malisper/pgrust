@@ -1,5 +1,5 @@
 // pg_proc.c ProcedureCreate insert/replace slice. Loud: argument defaults,
-// transforms, proconfig, prosqlbody, RECORD-tupdesc replace compare,
+// transforms, prosqlbody, RECORD-tupdesc replace compare,
 // replace of a function with proargmodes+proargnames set.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -121,6 +121,8 @@ pub struct ProcedureCreateArgs<'a> {
     pub parameterModes: Option<&'a [i8]>,
     // One entry per parameter, "" for unnamed; None when no parameter is named.
     pub parameterNames: Option<&'a [&'a str]>,
+    // "name=value" GUC entries for pg_proc.proconfig; None stores NULL.
+    pub proconfig: Option<&'a [String]>,
     pub procost: f32,
     pub prorows: f32,
 }
@@ -451,7 +453,36 @@ pub fn ProcedureCreate<'mcx>(
         ),
         None => nulls[Anum_pg_proc_prosqlbody - 1] = true,
     }
-    nulls[Anum_pg_proc_proconfig - 1] = true;
+    let proconfig_image = match a.proconfig {
+        Some(entries) => {
+            // std Vec: scratch holding droppy Varlena handles (as proargnames).
+            let mut texts = Vec::with_capacity(entries.len());
+            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, entries.len())?;
+            for e in entries {
+                texts.push(varlena::cstring_to_text(mcx, e.as_bytes())?);
+            }
+            for t in texts.iter() {
+                elems.push(Datum::from_usize(t.as_bytes().as_ptr() as usize));
+            }
+            Some(datum::array_build::construct_array_image(
+                mcx,
+                &elems,
+                types_core::TEXTOID,
+                -1,
+                false,
+                b'i',
+            )?)
+        }
+        None => None,
+    };
+    match &proconfig_image {
+        Some(img) => set(
+            &mut values,
+            Anum_pg_proc_proconfig,
+            Datum::from_usize(img.as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_proconfig - 1] = true,
+    }
     let proacl = aclchk_seams::get_user_default_acl::call(mcx, b'f', a.proowner, a.procNamespace)?;
     match proacl.as_deref() {
         Some(img) => set(
