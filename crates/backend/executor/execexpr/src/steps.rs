@@ -1059,6 +1059,7 @@ impl<'mcx> ExprState<'mcx> {
                 Some(m)
             }
             Kernel::AggTransByVal { .. }
+            | Kernel::AggTransByValThin { .. }
             | Kernel::JustConst { .. }
             | Kernel::JustConstAssign { .. } => Some(0),
             Kernel::QualScanVarCmpConst { attnum, .. } => {
