@@ -134,11 +134,11 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
     }
 }
 
+// AggFnArgTypes carriers (agg trans/final flinfos stand in for C's fake
+// transfn FuncExpr) have no expression node; consumers needing arg types go
+// through get_fn_expr_argtype, which understands the carrier.
 pub fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
-    flinfo.fn_expr.as_ref().map(|e| {
-        *e.downcast_ref::<Node<'static>>()
-            .expect("funcapi: fn_expr does not carry a Node")
-    })
+    flinfo.fn_expr.as_ref().and_then(|e| e.downcast_ref::<Node<'static>>().copied())
 }
 
 /// C: exprType over a call expression node (get_fn_expr_rettype's core).
