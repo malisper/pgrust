@@ -2,7 +2,7 @@
 // addFkConstraint/addFkRecurseReferenced/addFkRecurseReferencing +
 // createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint,
 // plain-table lane, all MATCH types and ON DELETE/UPDATE actions. LOUD:
-// PERIOD, partitioned rels, NOT ENFORCED, old_conpfeqop re-add lane.
+// PERIOD, partitioned rels, old_conpfeqop re-add lane.
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_MAX_KEYS};
@@ -109,9 +109,6 @@ fn at_add_foreign_key_constraint<'mcx>(
     }
     if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
         unported("PERIOD (temporal FK)");
-    }
-    if !fkconstraint.is_enforced {
-        unported("NOT ENFORCED");
     }
 
     // A re-added constraint targets the pktable by OID: concurrent activity
@@ -407,8 +404,10 @@ fn at_add_foreign_key_constraint<'mcx>(
         &fkdelsetcols[..numfkdelsetcols],
     )?;
 
-    create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
-    create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
+    if fkconstraint.is_enforced {
+        create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
+        create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
+    }
 
     let validate = if !fkconstraint.skip_validation && fkconstraint.is_enforced {
         debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
