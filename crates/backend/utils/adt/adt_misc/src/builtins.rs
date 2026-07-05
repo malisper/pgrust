@@ -219,6 +219,280 @@ pub fn fc_pg_split_walfile_name(
     composite_result(flinfo, fcinfo, &values, &[false, false])
 }
 
+pub fn fc_pg_current_wal_lsn(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("WAL control functions"));
+    }
+    Ok(Datum::from_i64(transam_xlog::GetXLogWriteRecPtr() as i64))
+}
+
+pub fn fc_pg_current_wal_insert_lsn(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("WAL control functions"));
+    }
+    Ok(Datum::from_i64(transam_xlog::GetXLogInsertRecPtr() as i64))
+}
+
+pub fn fc_pg_current_wal_flush_lsn(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("WAL control functions"));
+    }
+    Ok(Datum::from_i64(transam_xlog::GetFlushRecPtr(None) as i64))
+}
+
+pub fn fc_pg_wal_lsn_diff(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let lsn1 = fcinfo.arg(0).as_u64();
+    let lsn2 = fcinfo.arg(1).as_u64();
+    let img = adt_pg_lsn::pg_lsn_mi(lsn1, lsn2)?;
+    byref_result(fcinfo.result_mcx(), img.as_bytes())
+}
+
+pub fn fc_pg_is_in_recovery(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_bool(transam_xlog::RecoveryInProgress()))
+}
+
+pub fn fc_pg_last_wal_receive_lsn(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!(
+        "pg_last_wal_receive_lsn: GetWalRcvFlushRecPtr unported — backend-replication-walreceiver \
+         is scoped non-core (CATALOG.tsv, 2026-07-03); no walreceiver crate or receivedUpto \
+         tracking exists in this repo"
+    );
+}
+
+pub fn fc_pg_last_wal_replay_lsn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (recptr, _tli) = xlogrecovery::GetXLogReplayRecPtr();
+    if recptr == 0 {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i64(recptr as i64))
+}
+
+pub fn fc_pg_last_xact_replay_timestamp(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!(
+        "pg_last_xact_replay_timestamp: GetLatestXTime unported — no recoveryLastXTime/\
+         xactCompletionTime tracking exists in xlogrecovery or procarray"
+    );
+}
+
+pub fn fc_pg_wal_replay_pause(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!(
+        "pg_wal_replay_pause: recovery pause machinery unported — no SetRecoveryPause/\
+         GetRecoveryPauseState/RecoveryPauseState substrate; WakeupRecovery itself panics \
+         (crates/backend/postmaster/startup/src/lib.rs)"
+    );
+}
+
+pub fn fc_pg_wal_replay_resume(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!("pg_wal_replay_resume: recovery pause machinery unported (see fc_pg_wal_replay_pause)");
+}
+
+pub fn fc_pg_is_wal_replay_paused(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!("pg_is_wal_replay_paused: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)");
+}
+
+pub fn fc_pg_get_wal_replay_pause_state(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!(
+        "pg_get_wal_replay_pause_state: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)"
+    );
+}
+
+pub fn fc_pg_create_restore_point(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("WAL control functions"));
+    }
+    if !transam_xlog::XLogIsNeeded() {
+        return Err(Box::new(
+            types_error::PgError::error("WAL level not sufficient for creating a restore point")
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint(
+                    "\"wal_level\" must be set to \"replica\" or \"logical\" at server start.",
+                ),
+        ));
+    }
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let name = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let name = name.data();
+    // text_to_cstring's strlen() stops at an embedded NUL, a divergence from the varlena length.
+    let cstr_len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    if cstr_len >= transam_xlog::MAXFNAMELEN {
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "value too long for restore point (maximum {} characters)",
+                transam_xlog::MAXFNAMELEN - 1
+            ))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let rp_time = timestamp_seams::get_current_timestamp::call();
+    let mut body = [0u8; 8 + transam_xlog::MAXFNAMELEN];
+    body[..8].copy_from_slice(&rp_time.to_ne_bytes());
+    body[8..8 + cstr_len].copy_from_slice(&name[..cstr_len]);
+    let recptr = xloginsert_seams::xlog_insert::call(
+        transam_xlog::RM_XLOG_ID,
+        transam_xlog::XLOG_RESTORE_POINT,
+        &[&body],
+    )?;
+    let _ = elog::elog(
+        types_error::LOG,
+        format!(
+            "restore point \"{}\" created at {:X}/{:X}",
+            String::from_utf8_lossy(&name[..cstr_len]),
+            (recptr >> 32) as u32,
+            recptr as u32
+        ),
+    );
+    Ok(Datum::from_i64(recptr as i64))
+}
+
+pub fn fc_pg_log_standby_snapshot(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if transam_xlog::RecoveryInProgress() {
+        return Err(recovery_in_progress_err("pg_log_standby_snapshot()"));
+    }
+    if !transam_xlog::XLogStandbyInfoActive() {
+        return Err(Box::new(
+            types_error::PgError::error(
+                "pg_log_standby_snapshot() can only be used if \"wal_level\" >= \"replica\"",
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    let recptr = standby::LogStandbySnapshot()?;
+    Ok(Datum::from_i64(recptr as i64))
+}
+
+#[cold]
+#[inline(never)]
+fn recovery_not_in_progress_err(fname: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error("recovery is not in progress")
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(format!("{fname} can only be executed during recovery.")),
+    )
+}
+
+const PROMOTE_SIGNAL_FILE: &str = "promote";
+const WAIT_EVENT_PROMOTE: u32 = waitevent::PG_WAIT_IPC + 43;
+
+fn saved_errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
+
+    let wait = fcinfo.arg_bool(0);
+    let wait_seconds = fcinfo.arg_i32(1);
+
+    if !transam_xlog::RecoveryInProgress() {
+        return Err(recovery_not_in_progress_err("Recovery control functions"));
+    }
+    if wait_seconds <= 0 {
+        return Err(Box::new(
+            types_error::PgError::error("\"wait_seconds\" must not be negative or zero")
+                .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+        ));
+    }
+
+    let promote_fd = fd::AllocateFile(PROMOTE_SIGNAL_FILE, "w")?;
+    if promote_fd < 0 {
+        return Err(elog::ereport(types_error::ERROR)
+            .with_saved_errno(saved_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{PROMOTE_SIGNAL_FILE}\": %m"))
+            .into_error()
+            .into());
+    }
+    if fd::FreeFile(promote_fd)? != 0 {
+        return Err(elog::ereport(types_error::ERROR)
+            .with_saved_errno(saved_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not write file \"{PROMOTE_SIGNAL_FILE}\": %m"))
+            .into_error()
+            .into());
+    }
+
+    postmaster_seams::signal_postmaster_sigusr1::call();
+
+    if !wait {
+        return Ok(Datum::from_bool(true));
+    }
+
+    const WAITS_PER_SECOND: i32 = 10;
+    for _ in 0..(WAITS_PER_SECOND * wait_seconds) {
+        latch_seams::reset_latch_my_latch::call();
+        if !transam_xlog::RecoveryInProgress() {
+            return Ok(Datum::from_bool(true));
+        }
+        postgres_seams::check_for_interrupts::call()?;
+        let rc = latch_seams::wait_latch_my_latch::call(
+            WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+            1000 / WAITS_PER_SECOND as i64,
+            WAIT_EVENT_PROMOTE,
+        );
+        if rc & WL_POSTMASTER_DEATH != 0 {
+            elog::ereport(types_error::FATAL)
+                .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+                .errmsg("terminating connection due to unexpected postmaster exit")
+                .errcontext_msg("while waiting on promotion")
+                .finish(types_error::ErrorLocation::new("xlogfuncs.c", 0, "pg_promote"))?;
+        }
+    }
+
+    elog::ereport(types_error::WARNING)
+        .errmsg_plural(
+            format!("server did not promote within {wait_seconds} second"),
+            format!("server did not promote within {wait_seconds} seconds"),
+            wait_seconds as u64,
+        )
+        .finish(types_error::ErrorLocation::new("xlogfuncs.c", 0, "pg_promote"))?;
+    Ok(Datum::from_bool(false))
+}
+
+pub fn fc_pg_backup_start(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    panic!(
+        "pg_backup_start: do_pg_backup_start unported — xlog.c's backup state machine \
+         (BackupState/get_backup_status/register_persistent_abort_backup_handler) has no \
+         substrate; only xlogbackup.c's build_backup_content formatting is ported"
+    );
+}
+
+pub fn fc_pg_backup_stop(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    panic!("pg_backup_stop: do_pg_backup_stop unported (see fc_pg_backup_start)");
+}
+
 fn fc_pg_my_temp_schema(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let _ = fcinfo;
     Ok(Datum::from_oid(catalog_namespace::GetTempNamespaceState().0))
@@ -402,6 +676,23 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(2850, "pg_walfile_name_offset", 1, fc_pg_walfile_name_offset),
     b(2851, "pg_walfile_name", 1, fc_pg_walfile_name),
     b(6213, "pg_split_walfile_name", 1, fc_pg_split_walfile_name),
+    b(2849, "pg_current_wal_lsn", 0, fc_pg_current_wal_lsn),
+    b(2852, "pg_current_wal_insert_lsn", 0, fc_pg_current_wal_insert_lsn),
+    b(3330, "pg_current_wal_flush_lsn", 0, fc_pg_current_wal_flush_lsn),
+    b(3165, "pg_wal_lsn_diff", 2, fc_pg_wal_lsn_diff),
+    b(3810, "pg_is_in_recovery", 0, fc_pg_is_in_recovery),
+    b(3820, "pg_last_wal_receive_lsn", 0, fc_pg_last_wal_receive_lsn),
+    b(3821, "pg_last_wal_replay_lsn", 0, fc_pg_last_wal_replay_lsn),
+    b(3830, "pg_last_xact_replay_timestamp", 0, fc_pg_last_xact_replay_timestamp),
+    b(3071, "pg_wal_replay_pause", 0, fc_pg_wal_replay_pause),
+    b(3072, "pg_wal_replay_resume", 0, fc_pg_wal_replay_resume),
+    b(3073, "pg_is_wal_replay_paused", 0, fc_pg_is_wal_replay_paused),
+    b(1137, "pg_get_wal_replay_pause_state", 0, fc_pg_get_wal_replay_pause_state),
+    b(3098, "pg_create_restore_point", 1, fc_pg_create_restore_point),
+    b(6305, "pg_log_standby_snapshot", 0, fc_pg_log_standby_snapshot),
+    b(3436, "pg_promote", 2, fc_pg_promote),
+    b(2172, "pg_backup_start", 2, fc_pg_backup_start),
+    b(2739, "pg_backup_stop", 1, fc_pg_backup_stop),
     FmgrBuiltin {
         foid: 1686,
         name: "pg_get_keywords",
