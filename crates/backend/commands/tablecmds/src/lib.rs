@@ -830,11 +830,16 @@ pub fn DefineRelation<'mcx>(
         }
         let mut connames: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
         if !stmt.constraints.is_nil() {
-            let conlist = constraints::add_relation_new_constraints(
+            // C passes allow_merge=true here (tablecmds.c:1339); partitions
+            // depend on it — the purely-inherited fallback in
+            // MergeWithExistingConstraint excludes relispartition rels.
+            let conlist = constraints::add_relation_new_constraints_ext(
                 mcx,
                 &rel,
                 &[],
                 &stmt.constraints,
+                true,
+                true,
                 query_string,
             )?;
             for con in conlist.iter() {
