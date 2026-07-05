@@ -100,8 +100,8 @@ pub fn RelationGetPartitionDesc(
     RelationBuildPartitionDesc(rel, omit_detached)
 }
 
-// text varlena -> &str, inline images only (relpartbound is written inline).
-fn text_to_str(d: Datum) -> &'static str {
+// text varlena -> &str; long bound lists arrive pglz-compressed inline.
+fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
     let p = d.as_usize() as *const u8;
     // SAFETY: syscache text attribute; toasted/compressed images are loud.
     unsafe {
@@ -114,7 +114,16 @@ fn text_to_str(d: Datum) -> &'static str {
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
-                panic!("partdesc: compressed relpartbound unported");
+                let total = ::types_tuple::varatt::varsize_any(p);
+                let raw = core::slice::from_raw_parts(p, total);
+                let flat = ::detoast_seams::detoast_attr::call(mcx, raw)
+                    .expect("detoast relpartbound");
+                let (ptr, len) = (flat.as_ptr(), flat.len());
+                core::mem::forget(flat);
+                // The detoasted copy lives in the mcx arena until reset;
+                // forget only skips the vec's own dealloc.
+                let s = core::slice::from_raw_parts(ptr, len);
+                return core::str::from_utf8(s).expect("non-UTF-8 relpartbound");
             }
             ((w as usize >> 2) - 4, 4)
         };
@@ -168,7 +177,7 @@ fn RelationBuildPartitionDesc(
         if isnull {
             panic!("missing relpartbound for relation {inhrelid}");
         }
-        let node = readfuncs::stringToNode(smcx, text_to_str(datum))?;
+        let node = readfuncs::stringToNode(smcx, text_to_str(smcx, datum))?;
         cache_syscache::ReleaseSysCache(tuple);
         let spec = node
             .as_variant::<PartitionBoundSpec>()

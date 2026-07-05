@@ -1080,7 +1080,7 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
     const Anum_confmatchtype: i32 = 16;
     const Anum_conkey: i32 = 21;
     const Anum_confkey: i32 = 22;
-    const Anum_conindid: i32 = 14;
+    const Anum_conindid: i32 = 11;
     const Anum_conperiod: i32 = 20;
     const Anum_conpfeqop: i32 = 23;
     const Anum_conppeqop: i32 = 24;

@@ -9294,6 +9294,7 @@ dependencies = [
  "clauses_seams",
  "copyfuncs",
  "datum",
+ "detoast_seams",
  "execexpr",
  "lsyscache",
  "mbutils",
@@ -9314,6 +9315,7 @@ dependencies = [
  "types_pathnodes",
  "types_rel",
  "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -9343,6 +9345,7 @@ version = "0.1.0"
 dependencies = [
  "cache_syscache",
  "datum",
+ "detoast_seams",
  "inval",
  "lsyscache",
  "mcx",
@@ -9356,6 +9359,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_rel",
+ "types_tuple",
 ]
 
 [[package]]

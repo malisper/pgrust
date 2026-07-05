@@ -575,6 +575,8 @@ pub const RANGETYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(3417, "hash_range_extended", 2, true, fc_hash_range_extended),
     b(3834, "range_in", 3, true, fc_range_in),
     b(3835, "range_out", 1, true, fc_range_out),
+    // anyrange_out (pseudotypes.c) is `return range_out(fcinfo)`.
+    b(3833, "anyrange_out", 1, true, fc_range_out),
     b(3836, "range_recv", 3, true, fc_range_recv),
     b(3837, "range_send", 1, true, fc_range_send),
     b(3840, "int4range", 2, false, fc_range_constructor2),

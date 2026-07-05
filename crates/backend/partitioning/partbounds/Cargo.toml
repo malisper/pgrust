@@ -32,3 +32,5 @@ mbutils = { path = "../../utils/mb/mbutils" }
 copyfuncs = { path = "../../nodes/copyfuncs" }
 tupdesc = { path = "../../access/common/tupdesc" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

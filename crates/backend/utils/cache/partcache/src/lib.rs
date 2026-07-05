@@ -56,7 +56,12 @@ pub struct PartitionKeyData {
 impl PartitionKeyData {
     // FunctionCall2Coll(&partsupfunc[col], partcollation[col], a, b) -> int32.
     pub fn cmp(&self, col: usize, a: Datum, b: Datum) -> PgResult<i32> {
+        // range_cmp (range-typed partition keys) detoasts through the result
+        // mcx; arm the frame with call-lifetime scratch.
+        let scratch = ::mcx::MemoryContext::new("partsupfunc cmp");
         let mut fcinfo = LocalFcinfo::<2>::new(self.partcollation[col]);
+        // SAFETY: scratch outlives this call.
+        unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
         fcinfo.set_arg(0, a);
         fcinfo.set_arg(1, b);
         let mut f = self.partsupfunc[col].borrow_mut();

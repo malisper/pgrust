@@ -536,7 +536,12 @@ fn sup_cmp(
     a: Datum,
     b: Datum,
 ) -> i32 {
+    // range_cmp (range-typed partition keys) detoasts through the result
+    // mcx; arm the frame with call-lifetime scratch.
+    let scratch = ::mcx::MemoryContext::new("partsupfunc cmp");
     let mut fcinfo = LocalFcinfo::<2>::new(key.partcollation[col]);
+    // SAFETY: scratch outlives this call.
+    unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
     fcinfo.set_arg(0, a);
     fcinfo.set_arg(1, b);
     let r = supfuncs[col]
