@@ -1103,6 +1103,7 @@ fn ATRewriteCatalogs<'mcx>(
                             tabidx,
                             &rel,
                             cmd,
+                            cmd.recurse,
                             query_string,
                             lockmode,
                         )?,
@@ -1160,6 +1161,7 @@ fn ATRewriteCatalogs<'mcx>(
                             tabidx,
                             &rel,
                             cmd,
+                            true,
                             query_string,
                             lockmode,
                         )?,
@@ -4162,6 +4164,7 @@ fn ATExecAddConstraint<'mcx>(
     tabidx: usize,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    recurse: bool,
     query_string: &str,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
@@ -4170,7 +4173,9 @@ fn ATExecAddConstraint<'mcx>(
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
         let old_desc = wqueue[tabidx].old_desc.clone();
-        return crate::fk::ATExecAddConstraint(mcx, wqueue, rel, constr, &old_desc, lockmode);
+        return crate::fk::ATExecAddConstraint(
+            mcx, wqueue, rel, constr, recurse, &old_desc, lockmode,
+        );
     }
     unported(&format!("ATExecAddConstraint {:?}", constr.contype));
 }
