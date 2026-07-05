@@ -304,3 +304,16 @@ fn search_cycle_ev_action() {
     assert!(cc.cycle_mark_value.unwrap().as_const().unwrap().constvalue.as_bool());
     assert_eq!(cc.cycle_mark_type, 16);
 }
+
+// C nodeToString(list_make1(NIL)) — the stored prosqlbody of an empty
+// BEGIN ATOMIC body — reads back as a list holding one empty list.
+#[test]
+fn reads_nil_list_element_as_empty_list() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node = stringToNode(mcx, "(<>)").unwrap();
+    let outer = node.as_list().expect("outer List");
+    assert_eq!(outer.len(), 1);
+    let inner = outer.nth(0).as_list().expect("NIL element reads as a List");
+    assert!(inner.is_nil());
+}
