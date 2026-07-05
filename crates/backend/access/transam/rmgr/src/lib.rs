@@ -94,26 +94,6 @@ macro_rules! unported_redo {
     )+};
 }
 
-macro_rules! unported_desc {
-    ($($name:ident => $unit:literal;)+) => {$(
-        #[cold]
-        #[inline(never)]
-        fn $name(_buf: &mut StringInfo<'_>, _record: &XLogReaderState) -> PgResult<()> {
-            panic!(concat!("rmgr callback not ported: ", stringify!($name), " — land ", $unit))
-        }
-    )+};
-}
-
-macro_rules! unported_identify {
-    ($($name:ident => $unit:literal;)+) => {$(
-        #[cold]
-        #[inline(never)]
-        fn $name(_info: u8) -> Option<&'static str> {
-            panic!(concat!("rmgr callback not ported: ", stringify!($name), " — land ", $unit))
-        }
-    )+};
-}
-
 macro_rules! unported_mask {
     ($($name:ident => $unit:literal;)+) => {$(
         #[cold]
@@ -135,22 +115,6 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_redo! {
     replorigin_redo => "backend-replication-origin";
     logicalmsg_redo => "backend-replication-message";
-}
-
-unported_desc! {
-    hash_desc => "backend-rmgrdesc-next";
-    gin_desc => "backend-rmgrdesc-next";
-    gist_desc => "backend-rmgrdesc-next";
-    replorigin_desc => "backend-rmgrdesc-extra-small";
-    logicalmsg_desc => "backend-access-rmgrdesc-small";
-}
-
-unported_identify! {
-    hash_identify => "backend-rmgrdesc-next";
-    gin_identify => "backend-rmgrdesc-next";
-    gist_identify => "backend-rmgrdesc-next";
-    replorigin_identify => "backend-rmgrdesc-extra-small";
-    logicalmsg_identify => "backend-access-rmgrdesc-small";
 }
 
 // btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery
@@ -278,8 +242,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Hash",
         rm_redo: hash_xlog::hash_redo,
-        rm_desc: hash_desc,
-        rm_identify: hash_identify,
+        rm_desc: rmgrdesc::hashdesc::hash_desc,
+        rm_identify: rmgrdesc::hashdesc::hash_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(hash_xlog::hash_mask),
@@ -287,8 +251,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Gin",
         rm_redo: gin_xlog::gin_redo,
-        rm_desc: gin_desc,
-        rm_identify: gin_identify,
+        rm_desc: rmgrdesc::gindesc::gin_desc,
+        rm_identify: rmgrdesc::gindesc::gin_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(gin_xlog::gin_mask),
@@ -296,8 +260,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Gist",
         rm_redo: gist_xlog::gist_redo,
-        rm_desc: gist_desc,
-        rm_identify: gist_identify,
+        rm_desc: rmgrdesc::gistdesc::gist_desc,
+        rm_identify: rmgrdesc::gistdesc::gist_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(gist_xlog::gist_mask),
@@ -341,8 +305,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "ReplicationOrigin",
         rm_redo: replorigin_redo,
-        rm_desc: replorigin_desc,
-        rm_identify: replorigin_identify,
+        rm_desc: rmgrdesc::replorigindesc::replorigin_desc,
+        rm_identify: rmgrdesc::replorigindesc::replorigin_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -359,8 +323,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "LogicalMessage",
         rm_redo: logicalmsg_redo,
-        rm_desc: logicalmsg_desc,
-        rm_identify: logicalmsg_identify,
+        rm_desc: rmgrdesc::logicalmsgdesc::logicalmsg_desc,
+        rm_identify: rmgrdesc::logicalmsgdesc::logicalmsg_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
