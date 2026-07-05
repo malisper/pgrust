@@ -92,6 +92,10 @@ enum ProbeKernel {
     Expr,
     Int4,
     Int8,
+    // Binary-mode single byval key (the LATERAL shape — C forces binary_mode
+    // for lateral_vars): hash/eq are datum_image ops over the full Datum
+    // word, so one kernel covers every byval type.
+    ByvalImage,
 }
 
 impl ProbeKernel {
@@ -220,6 +224,9 @@ pub fn exec_init_memoize<'mcx>(
 
     let mut kernel = ProbeKernel::Expr;
     let (hash_expr, eq_expr) = if node.binary_mode {
+        if nkeys == 1 && key_attrs[0].byval {
+            kernel = ProbeKernel::ByvalImage;
+        }
         (None, None)
     } else {
         let mut hashfns: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
@@ -700,23 +707,25 @@ fn cache_lookup<'mcx>(
         let h32 = match (kernel, isnull) {
             (_, true) => 0,
             (ProbeKernel::Int4, _) => hashfn::hash_bytes_uint32(key.as_u32()),
-            _ => hashfn::hash_bytes_uint32(hashint8_fold(key)),
+            (ProbeKernel::Int8, _) => hashfn::hash_bytes_uint32(hashint8_fold(key)),
+            // datum_image_hash byval arm: the full Datum word's bytes.
+            _ => hashfn::hash_bytes(&key.as_usize().to_ne_bytes()),
         };
         hash = hashfn::murmurhash32(h32);
         let MemoizeState { entries, hashtab, .. } = node;
-        // NOT DISTINCT over the entry's cached key word (grouping-equal fold).
+        // NOT DISTINCT over the entry's cached key word: grouping-equal fold
+        // in logical mode, the binary probe_equal isnull fold for ByvalImage
+        // (identical shape); byval datum_image_eq is the full-word compare.
         hashtab
             .find(hash as u64, |&ix| {
                 let e = entries[ix as usize].as_ref().expect("live entry");
                 e.hash == hash
                     && match (isnull, e.key_isnull) {
-                        (false, false) => {
-                            if kernel == ProbeKernel::Int4 {
-                                e.key.as_i32() == key.as_i32()
-                            } else {
-                                e.key.as_i64() == key.as_i64()
-                            }
-                        }
+                        (false, false) => match kernel {
+                            ProbeKernel::Int4 => e.key.as_i32() == key.as_i32(),
+                            ProbeKernel::Int8 => e.key.as_i64() == key.as_i64(),
+                            _ => e.key.as_usize() == key.as_usize(),
+                        },
                         (a, b) => a & b,
                     }
             })
