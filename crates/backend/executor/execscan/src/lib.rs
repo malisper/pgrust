@@ -321,14 +321,32 @@ pub fn exec_assign_scan_projection_info<'mcx>(
     ss: &mut ScanState<'mcx>,
     tlist: &NodeList<'mcx>,
 ) -> PgResult<()> {
+    exec_assign_scan_projection_info_parent(mcx, estate, ss, tlist, None)
+}
+
+/// [`exec_assign_scan_projection_info`] for SubqueryScan/CteScan: the subplan
+/// targetlist feeds whole-row junk filtering (C ExprState.parent).
+pub fn exec_assign_scan_projection_info_parent<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ss: &mut ScanState<'mcx>,
+    tlist: &NodeList<'mcx>,
+    parent_subplan_tlist: Option<&NodeList<'mcx>>,
+) -> PgResult<()> {
     let tupdesc = estate
         .slot(ss.ss_ScanTupleSlot)
         .base()
         .tts_tupleDescriptor
         .clone()
         .expect("scan slot descriptor must be set before projection assignment");
-    ss.ps_ProjInfo =
-        exec_conditional_assign_projection_info(mcx, estate, tlist, ss.scanrelid, &tupdesc)?;
+    ss.ps_ProjInfo = exec_conditional_assign_projection_info_parent(
+        mcx,
+        estate,
+        tlist,
+        ss.scanrelid,
+        &tupdesc,
+        parent_subplan_tlist,
+    )?;
     Ok(())
 }
 
@@ -339,15 +357,27 @@ pub fn exec_conditional_assign_projection_info<'mcx>(
     varno: Index,
     input_desc: &Rc<TupleDescData<'mcx>>,
 ) -> PgResult<Option<ProjectionInfo<'mcx>>> {
+    exec_conditional_assign_projection_info_parent(mcx, estate, tlist, varno, input_desc, None)
+}
+
+pub fn exec_conditional_assign_projection_info_parent<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tlist: &NodeList<'mcx>,
+    varno: Index,
+    input_desc: &Rc<TupleDescData<'mcx>>,
+    parent_subplan_tlist: Option<&NodeList<'mcx>>,
+) -> PgResult<Option<ProjectionInfo<'mcx>>> {
     if tlist_matches_tupdesc(tlist, varno, input_desc) {
         return Ok(None);
     }
     let result_desc = exec_type_from_tl(mcx, tlist)?;
     let result_slot = estate.exec_init_extra_tuple_slot(Some(result_desc), TupleSlotKind::Virtual);
     let params = estate.param_bind();
-    let pi_state = executils::with_subplan_compile_env(estate, |env| {
-        execexpr::exec_build_projection_info_subplans(mcx, tlist, Some(input_desc), params, env)
-    })?;
+    let pi_state =
+        executils::with_subplan_compile_env_parent(estate, parent_subplan_tlist, |env| {
+            execexpr::exec_build_projection_info_subplans(mcx, tlist, Some(input_desc), params, env)
+        })?;
     Ok(Some(ProjectionInfo { pi_state, pi_result_slot: result_slot }))
 }
 

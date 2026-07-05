@@ -429,11 +429,28 @@ pub struct RowNullState {
     pub mcx: Mcx<'static>,
 }
 
-// C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
+// C ExprEvalStep d.wholerow minus var: first-eval compat state. The
+// named-composite leg resolves `tupdesc` at compile; the RECORD leg resolves
+// it at first eval from the (junk-filtered) slot's descriptor. `colnames` is
+// the Var's RTE eref alias list, captured at compile (C reads it through
+// econtext->ecxt_estate at first eval; the range table is init-stable).
+// `mcx` is the compile mcx restamped 'static; it outlives every eval.
 pub struct WholeRowState {
-    pub tupdesc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub tupdesc: Option<NonNull<::types_tuple::TupleDescData<'static>>>,
     pub first: bool,
     pub slow: bool,
+    pub record: bool,
+    pub colnames: Option<NonNull<::types_nodes::list::NodeList<'static>>>,
+    pub junk: Option<NonNull<WholeRowJunk>>,
+    pub mcx: Mcx<'static>,
+}
+
+// C ExprEvalStep d.wholerow.junkFilter (jf_cleanMap + jf_resultSlot). C
+// parks the result slot in the estate tuple table; the interpreter has no
+// estate, so the state owns it.
+pub struct WholeRowJunk {
+    pub clean_map: NonNull<[i16]>,
+    pub slot: NonNull<::types_slot::SlotData<'static>>,
 }
 
 // By-ref copy target: C d.agg_trans.aggcontext + the transtype's typlen.

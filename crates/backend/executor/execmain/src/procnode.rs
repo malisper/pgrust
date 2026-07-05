@@ -515,7 +515,7 @@ pub fn exec_init_node<'mcx>(
             let mcx = estate.es_query_cxt;
             let cte_plan = node.as_cte_scan().unwrap();
             let idx = (cte_plan.ctePlanId - 1) as usize;
-            let scan_desc = {
+            let (scan_desc, sub_tlist) = {
                 let cell = estate.es_subplanstates.get(idx).unwrap_or_else(|| {
                     panic!(
                         "ExecInitCteScan (nodeCtescan.c): could not find plan for \
@@ -535,10 +535,10 @@ pub fn exec_init_node<'mcx>(
                     .nth(idx)
                     .as_plan()
                     .expect("subplans cell is a plan tree");
-                sub.exec_get_result_type(sub_plan)?
+                (sub.exec_get_result_type(sub_plan)?, &sub_plan.targetlist)
             };
             let state = ::nodectescan::exec_init_cte_scan(
-                mcx, cte_plan, estate, eflags, scan_desc,
+                mcx, cte_plan, estate, eflags, scan_desc, sub_tlist,
             )?;
             PlanStateNode::CteScan(::mcx::alloc_in(mcx, state)?)
         }
@@ -1069,16 +1069,20 @@ pub fn exec_init_node<'mcx>(
                 ss_ScanTupleSlot,
                 instr_idx: None,
             };
-            ::execscan::exec_assign_scan_projection_info(
+            // C ExecInitWholeRowVar reaches the subplan tlist through
+            // state->parent; here it rides the compile env.
+            let sub_tlist = &sub_node.as_plan().unwrap().targetlist;
+            ::execscan::exec_assign_scan_projection_info_parent(
                 mcx,
                 estate,
                 &mut ss,
                 &sq_plan.scan.plan.targetlist,
+                Some(sub_tlist),
             )?;
             ss.qual =
                 {
                 let pb = estate.param_bind();
-                ::executils::with_subplan_compile_env(estate, |env| {
+                ::executils::with_subplan_compile_env_parent(estate, Some(sub_tlist), |env| {
                     ::execexpr::exec_init_qual_subplans(mcx, &sq_plan.scan.plan.qual, pb, env)
                 })?
             };

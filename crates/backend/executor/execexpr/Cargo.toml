@@ -37,6 +37,7 @@ format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
 heaptoast = { path = "../../access/heap/heaptoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+nodes_core = { path = "../../nodes/nodes_core" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 adt_scalar = { path = "../../utils/adt/scalar" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }

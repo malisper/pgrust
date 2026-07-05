@@ -4400,6 +4400,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "nodes_core",
  "numutils",
  "pgstat",
  "pgtz",
