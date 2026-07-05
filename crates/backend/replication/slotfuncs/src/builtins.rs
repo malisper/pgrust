@@ -567,12 +567,5 @@ pub const SLOTFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(4222, "pg_copy_logical_replication_slot", 4, fc_pg_copy_logical_replication_slot_a),
     b(4223, "pg_copy_logical_replication_slot", 3, fc_pg_copy_logical_replication_slot_b),
     b(4224, "pg_copy_logical_replication_slot", 2, fc_pg_copy_logical_replication_slot_c),
-    FmgrBuiltin {
-        foid: 6344,
-        name: "pg_sync_replication_slots",
-        nargs: 0,
-        strict: false,
-        retset: false,
-        func: fc_pg_sync_replication_slots,
-    },
+    b(6344, "pg_sync_replication_slots", 0, fc_pg_sync_replication_slots),
 ];
