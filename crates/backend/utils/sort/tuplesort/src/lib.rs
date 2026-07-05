@@ -2130,8 +2130,10 @@ impl<'m> TuplesortData<'m> {
 
     /// Hot leg = TSS_SORTEDINMEM (one predicted-true status compare); the
     /// tape arms live out of line so the in-memory get keeps its pre-spill
-    /// inlining and code size.
-    #[inline]
+    /// inlining and code size. inline(always): post-landing crate growth made
+    /// the inliner outline the get leg into the with_mut closures (+42/row on
+    /// text_sort's get loop, +6% on the datum get micro lanes).
+    #[inline(always)]
     fn gettuple_common(&mut self, forward: bool) -> PgResult<Option<SortTuple>> {
         if self.status == TupSortStatus::SortedInMem {
             debug_assert!(forward || self.sortopt & TUPLESORT_RANDOMACCESS != 0);
