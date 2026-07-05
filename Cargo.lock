@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "adt_float",
  "adt_int8",
+ "adt_numeric",
  "datum",
  "mcx",
  "pg_locale",
@@ -605,6 +606,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "parse_utilcmd",
+ "parser_small1",
  "postgres_seams",
  "postmaster_seams",
  "standby",
@@ -1015,6 +1017,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_tsvector_stat"
+version = "0.1.0"
+dependencies = [
+ "adt_tsvector_core",
+ "coerce",
+ "datum",
+ "detoast",
+ "funcapi",
+ "heaptuple",
+ "mbutils",
+ "mcx",
+ "spi",
+ "to_tsany",
+ "ts_cache",
+ "ts_parse",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "adt_uuid"
 version = "0.1.0"
 dependencies = [
@@ -1271,6 +1300,8 @@ dependencies = [
  "lsyscache",
  "mcx",
  "pg_prng",
+ "pqformat",
+ "stringinfo",
  "tuplesort_seams",
  "typcache",
  "types_core",
@@ -1893,6 +1924,30 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "xloginsert_seams",
+]
+
+[[package]]
+name = "brin_funcs"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "brin_build",
+ "brin_pageops",
+ "catalog_index",
+ "datum",
+ "elog",
+ "guc",
+ "indexam",
+ "mcx",
+ "miscinit",
+ "table",
+ "transam_xlog",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
 ]
 
 [[package]]
@@ -12700,6 +12755,7 @@ dependencies = [
  "adt_tsginidx",
  "adt_tsgistidx",
  "adt_tsquery_rewrite",
+ "adt_tsvector_stat",
  "adt_xml",
  "aio_config",
  "aio_uring",
@@ -12716,6 +12772,7 @@ dependencies = [
  "bgworker",
  "bgwriter",
  "brin_bloom",
+ "brin_funcs",
  "brin_minmax_multi",
  "bufmgr",
  "cache_syscache",
@@ -14668,10 +14725,12 @@ dependencies = [
 name = "to_tsany"
 version = "0.1.0"
 dependencies = [
+ "adt_jsonb",
  "adt_tsquery_core",
  "adt_tsvector_core",
  "datum",
  "fmgr_seams",
+ "mbutils",
  "mcx",
  "ts_cache",
  "ts_locale",
@@ -14680,6 +14739,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_tuple",
+ "wchar",
 ]
 
 [[package]]
@@ -15968,6 +16028,7 @@ dependencies = [
  "detoast_seams",
  "fmgr_seams",
  "format_type",
+ "funcapi_srf",
  "guc_tables",
  "hashfn",
  "hyperloglog",
@@ -15977,6 +16038,7 @@ dependencies = [
  "mcx",
  "numutils",
  "parser_small1",
+ "pg_bitutils",
  "pg_locale_seams",
  "postgres_seams",
  "pqformat",

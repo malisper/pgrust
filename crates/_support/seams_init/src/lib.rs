@@ -206,6 +206,7 @@ pub fn init_all() {
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
+    fmgr_core::register_late_builtins(adt_tsvector_stat::TS_STAT_BUILTINS);
     fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(waitevent::funcs::WAITEVENT_BUILTINS);
     fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
@@ -244,6 +245,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(spgist_kdtree::SPGIST_KD_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(brin_bloom::BLOOM_BUILTINS);
+    fmgr_core::register_late_builtins(brin_funcs::BRIN_FUNCS_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(orderedsetaggs::ORDEREDSETAGGS_BUILTINS);
     funcapi::init_seams();
