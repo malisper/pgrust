@@ -130,8 +130,7 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     Ok(())
 }
 
-// Crash-cycle reset: back to the post-ShmemInit boot image (C recreates the
-// whole segment; extensions re-register on next load).
+// Crash-cycle reset to the post-ShmemInit boot image.
 pub fn WaitEventCustomShmemResetAfterCrash() {
     let Some(t) = CUSTOM.get() else { return };
     // SAFETY: crash choreography — children dead, postmaster thread only;
@@ -271,9 +270,7 @@ fn trim_name(name: &'static [u8; NAMEDATALEN]) -> &'static str {
     core::str::from_utf8(&name[..end]).expect("custom wait event name is valid utf8")
 }
 
-// GetWaitEventCustomNames: C returns a palloc'd char** sized by
-// hash_get_num_entries up front; a `Vec<String>` here is the cold-path
-// equivalent (extension/injection-point enumeration only, never per-query).
+// C returns a palloc'd char**; a Vec is the cold-path equivalent.
 pub fn GetWaitEventCustomNames(class_id: u32) -> Vec<String> {
     let tables = shared();
     LWLockAcquire(main_lock(WAIT_EVENT_CUSTOM_LOCK), LW_SHARED, g::MyProcNumber())
