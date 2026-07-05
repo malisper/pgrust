@@ -16,3 +16,15 @@ seam_core::seam!(
         new_constraint: types_nodes::Node<'mcx>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn alter_type_namespace_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_oid: Oid,
+        nsp_oid: Oid,
+        is_implicit_array: bool,
+        ignore_dependent: bool,
+        error_on_table_type: bool,
+        objs_moved: &mut mcx::PgVec<'mcx, pg_depend::ObjectAddress>,
+    ) -> PgResult<Oid>
+);

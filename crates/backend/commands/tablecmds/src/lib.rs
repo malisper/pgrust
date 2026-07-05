@@ -11,6 +11,7 @@ mod fk;
 mod drop;
 mod owner;
 mod oncommit;
+mod namespace;
 mod rename;
 mod truncate;
 pub use alter::{
@@ -18,6 +19,9 @@ pub use alter::{
     AlterTableLookupRelation,
 };
 pub use constraints::cook_default;
+pub use namespace::{
+    AlterRelationNamespaceInternal, AlterTableNamespace, AlterTableNamespaceInternal,
+};
 pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use partition::SetRelationHasSubclass;

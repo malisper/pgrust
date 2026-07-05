@@ -15484,6 +15484,7 @@ name = "typecmds_seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "pg_depend",
  "seam_core",
  "types_core",
  "types_error",

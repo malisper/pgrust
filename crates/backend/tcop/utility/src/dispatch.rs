@@ -1531,6 +1531,13 @@ fn slow_switch<'mcx>(
                     collect_gap("ALTER SET SCHEMA");
                     commands_alter::ExecAlterObjectSchemaStmt_generic(mcx, stmt)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE
+                | types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE
+                | types_nodes::parsenodes::ObjectType::OBJECT_VIEW
+                | types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
+                | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
+                    tablecmds::AlterTableNamespace(mcx, stmt)?;
+                }
                 other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
             }
             Ok(None)
