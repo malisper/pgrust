@@ -1100,6 +1100,7 @@ pub fn DefineType<'mcx>(
             typeNotNull: false,
             typeCollation: collation,
             defaultValue,
+            defaultTypeBin: None,
         },
     )?;
     debug_assert!(typoid == address.objectId);
