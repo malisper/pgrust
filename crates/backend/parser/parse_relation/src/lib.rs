@@ -29,6 +29,13 @@ const InvalidAttrNumber: AttrNumber = 0;
 
 const MAX_FUZZY_DISTANCE: i32 = 3;
 
+pub fn init_seams() {
+    parse_relation_seams::expand_nsitem_vars_at::set(|mcx, pstate, varno, sublevels_up, location| {
+        let nsitem = GetNSItemByRangeTablePosn(pstate, varno, sublevels_up);
+        Ok(expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?.0)
+    });
+}
+
 fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("parse_relation.c", 0, funcname)
 }

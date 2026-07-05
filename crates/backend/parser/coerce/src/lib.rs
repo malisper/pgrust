@@ -293,8 +293,7 @@ fn type_is_of_typed_table(reltypeId: Oid, reloftypeId: Oid) -> PgResult<bool> {
     }
 }
 
-// coerce_record_to_complex (parse_coerce.c), RowExpr-source leg; the
-// whole-row Var source (expandNSItemVars) is loud.
+// coerce_record_to_complex (parse_coerce.c).
 #[allow(clippy::too_many_arguments)]
 fn coerce_record_to_complex<'mcx>(
     mcx: Mcx<'mcx>,
@@ -305,16 +304,25 @@ fn coerce_record_to_complex<'mcx>(
     cformat: CoercionForm,
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
+    // A RowExpr source is RECORD-typed, so it holds no dropped columns.
     let args = match node.as_row_expr() {
-        Some(r) => &r.args,
-        None => {
-            if node.as_var().is_some_and(|v| v.varattno == types_core::InvalidAttrNumber) {
-                unported("coerce_record_to_complex (parse_coerce.c): whole-row Var source");
+        Some(r) => r.args.clone_in(mcx)?,
+        None => match node.as_var() {
+            Some(v) if v.varattno == types_core::InvalidAttrNumber => {
+                parse_relation_seams::expand_nsitem_vars_at::call(
+                    mcx,
+                    pstate,
+                    v.varno,
+                    v.varlevelsup as i32,
+                    v.location,
+                )?
             }
-            return Err(record_cast_error(pstate, targetTypeId, Option::None, location));
-        }
+            _ => return Err(record_cast_error(pstate, targetTypeId, Option::None, location)),
+        },
     };
-    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, targetTypeId, -1)?;
+    let mut baseTypeMod = -1;
+    let baseTypeId = lsyscache::getBaseTypeAndTypmod(targetTypeId, &mut baseTypeMod)?;
+    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, baseTypeId, baseTypeMod)?;
     let mut newargs = NodeList::nil();
     let mut ucolno = 1usize;
     let mut argix = 0usize;
@@ -363,16 +371,30 @@ fn coerce_record_to_complex<'mcx>(
             location,
         ));
     }
-    Node::mk(
+    let rowexpr = Node::mk(
         mcx,
         types_nodes::RowExpr {
             args: newargs,
-            row_typeid: targetTypeId,
+            row_typeid: baseTypeId,
             row_format: cformat,
             colnames: NodeList::nil(),
             location,
         },
-    )
+    )?;
+    if targetTypeId != baseTypeId {
+        return coerce_to_domain(
+            mcx,
+            rowexpr,
+            baseTypeId,
+            baseTypeMod,
+            targetTypeId,
+            ccontext,
+            cformat,
+            location,
+            false,
+        );
+    }
+    Ok(rowexpr)
 }
 
 #[cold]

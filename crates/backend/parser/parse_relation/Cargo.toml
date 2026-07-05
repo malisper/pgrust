@@ -21,6 +21,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
+parse_relation_seams = { path = "../parse_relation_seams" }
 parse_utilcmd_seams = { path = "../parse_utilcmd_seams" }
 parser_small1 = { path = "../parser_small1" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }
