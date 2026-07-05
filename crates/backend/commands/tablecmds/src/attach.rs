@@ -634,8 +634,12 @@ fn scan_constraints<'mcx>(
 
 fn decompile_conbin(mcx: Mcx<'_>, conbin: &str, relid: Oid) -> PgResult<String> {
     let t = varlena::cstring_to_text(mcx, conbin.as_bytes())?;
-    let d = fmgr_core::oid_function_call2_coll(
-        F_PG_GET_EXPR,
+    // pg_get_expr's result datum aliases the resolved FmgrInfo's retained
+    // scratch; the FmgrInfo must outlive the copy-out (oid_function_call*
+    // drops it before returning).
+    let mut flinfo = fmgr_core::fmgr_info(F_PG_GET_EXPR)?;
+    let d = fmgr_core::function_call2_coll(
+        &mut flinfo,
         InvalidOid,
         Datum::from_usize(t.as_bytes().as_ptr() as usize),
         Datum::from_oid(relid),
