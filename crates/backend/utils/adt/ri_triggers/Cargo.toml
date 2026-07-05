@@ -22,6 +22,8 @@ fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 pg_constraint = { path = "../../../catalog/pg_constraint" }
 cache_syscache = { path = "../../cache/cache_syscache" }
+coerce = { path = "../../../parser/coerce" }
+format_type = { path = "../format_type" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 table = { path = "../../../access/table/table" }
 heapam = { path = "../../../access/heap/heapam" }
