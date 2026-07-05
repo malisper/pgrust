@@ -19,6 +19,7 @@ partbounds = { path = "../../partitioning/partbounds" }
 partcache = { path = "../../utils/cache/partcache" }
 partdesc = { path = "../../partitioning/partdesc" }
 table = { path = "../../access/table/table" }
+tupdesc = { path = "../../access/common/tupdesc" }
 exectuples = { path = "../exectuples" }
 execexpr = { path = "../execexpr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }

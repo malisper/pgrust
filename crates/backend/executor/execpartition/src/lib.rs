@@ -29,26 +29,49 @@ struct PartitionDispatch<'mcx> {
     // ExecPartitionCheck state for default routing, compiled once per tree.
     default_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
     keystate: Vec<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    // C pd->tupmap: immediate-parent layout -> this level's; the paired
+    // conversion slot lives in `dispatch_slots` (split-borrowed vs the
+    // dispatch during key extraction).
+    tupmap: Option<mcx::PgVec<'mcx, i16>>,
 }
 
 pub struct PartitionTupleRouting<'mcx> {
     mcx: Mcx<'mcx>,
     dispatches: Vec<PartitionDispatch<'mcx>>,
+    // C pd->tupslot, indexed like `dispatches`; Some iff tupmap is Some.
+    dispatch_slots: Vec<Option<SlotData<'mcx>>>,
     // leaf oid -> index into `leaves` (linear scan: leaf counts are small on
     // this lane; C uses a hash table once >32).
     leaves: Vec<Relation<'mcx>>,
+    // C ri_RootToPartitionMap + ri_PartitionTupleSlot per leaf; map is
+    // root layout -> leaf layout, None for layout-identical leaves.
+    leaf_maps: Vec<Option<mcx::PgVec<'mcx, i16>>>,
+    leaf_slots: Vec<Option<SlotData<'mcx>>>,
 }
 
 impl<'mcx> PartitionTupleRouting<'mcx> {
     // ExecSetupPartitionTupleRouting: only the root dispatch up front.
     pub fn new(mcx: Mcx<'mcx>, root: &Relation<'mcx>) -> PgResult<Self> {
         let root_rc = root.alias();
-        let mut prt = PartitionTupleRouting { mcx, dispatches: Vec::new(), leaves: Vec::new() };
-        prt.init_dispatch(root_rc)?;
+        let mut prt = PartitionTupleRouting {
+            mcx,
+            dispatches: Vec::new(),
+            dispatch_slots: Vec::new(),
+            leaves: Vec::new(),
+            leaf_maps: Vec::new(),
+            leaf_slots: Vec::new(),
+        };
+        prt.init_dispatch(root_rc, None)?;
         Ok(prt)
     }
 
-    fn init_dispatch(&mut self, rel: Relation<'mcx>) -> PgResult<usize> {
+    // ExecInitPartitionDispatchInfo: tupmap/tupslot convert from the
+    // immediate parent's layout, per C.
+    fn init_dispatch(
+        &mut self,
+        rel: Relation<'mcx>,
+        parent_idx: Option<usize>,
+    ) -> PgResult<usize> {
         let key = partcache::RelationGetPartitionKey(&rel)?;
         let partdesc = partdesc::RelationGetPartitionDesc(&rel, false)?;
         let mut supfuncs = Vec::with_capacity(key.partnatts as usize);
@@ -59,6 +82,22 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                     .unwrap_or_else(|e| panic!("fmgr_info({fn_oid}) failed: {e:?}")),
             );
         }
+        let tupmap = match parent_idx {
+            Some(pi) => tupdesc::build_attrmap_by_name_if_req(
+                self.mcx,
+                &self.dispatches[pi].rel.rd_att,
+                &rel.rd_att,
+                false,
+            )?,
+            None => None,
+        };
+        self.dispatch_slots.push(tupmap.as_ref().map(|_| {
+            exectuples::make_tuple_table_slot(
+                self.mcx,
+                types_slot::TupleSlotKind::Virtual,
+                Some(rel.rd_att.clone()),
+            )
+        }));
         self.dispatches.push(PartitionDispatch {
             rel,
             key,
@@ -66,15 +105,31 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             supfuncs,
             default_check: None,
             keystate: Vec::new(),
+            tupmap,
         });
         Ok(self.dispatches.len() - 1)
     }
 
+    // ExecInitPartitionInfo's ri_RootToPartitionMap + ri_PartitionTupleSlot.
     fn leaf_index(&mut self, oid: Oid) -> PgResult<usize> {
         if let Some(i) = self.leaves.iter().position(|r| r.rd_id == oid) {
             return Ok(i);
         }
         let rel = table::table_open(self.mcx, oid, RowExclusiveLock)?;
+        let map = tupdesc::build_attrmap_by_name_if_req(
+            self.mcx,
+            &self.dispatches[0].rel.rd_att,
+            &rel.rd_att,
+            false,
+        )?;
+        self.leaf_slots.push(map.as_ref().map(|_| {
+            exectuples::make_tuple_table_slot(
+                self.mcx,
+                types_slot::TupleSlotKind::Virtual,
+                Some(rel.rd_att.clone()),
+            )
+        }));
+        self.leaf_maps.push(map);
         self.leaves.push(rel);
         Ok(self.leaves.len() - 1)
     }
@@ -82,6 +137,32 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
     #[inline]
     pub fn leaf_rel(&self, idx: usize) -> &Relation<'mcx> {
         &self.leaves[idx]
+    }
+
+    // ExecPrepareTupleRouting's conversion leg: for an attno-remapped leaf,
+    // converts the root-format tuple into the leaf's layout and returns the
+    // leaf slot; None means the caller's slot already matches.
+    pub fn leaf_rel_and_converted_slot(
+        &mut self,
+        idx: usize,
+        in_slot: &mut SlotData<'mcx>,
+    ) -> (&Relation<'mcx>, Option<&mut SlotData<'mcx>>) {
+        let conv = match (&self.leaf_maps[idx], self.leaf_slots[idx].as_mut()) {
+            (Some(map), Some(out)) => {
+                exectuples::execute_attr_map_slot(map, in_slot, out, self.mcx);
+                Some(out)
+            }
+            _ => None,
+        };
+        (&self.leaves[idx], conv)
+    }
+
+    // Re-access after leaf_rel_and_converted_slot without re-converting.
+    pub fn leaf_rel_and_slot(
+        &mut self,
+        idx: usize,
+    ) -> (&Relation<'mcx>, Option<&mut SlotData<'mcx>>) {
+        (&self.leaves[idx], self.leaf_slots[idx].as_mut())
     }
 
     // ExecFindPartition -> index for leaf_rel(); eval_mcx is C's per-tuple
@@ -95,12 +176,47 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         let mut values = [Datum::null(); PARTITION_MAX_KEYS];
         let mut isnull = [false; PARTITION_MAX_KEYS];
         let mut dispatch_idx = 0usize;
+        // Index into dispatch_slots holding the tuple converted to the
+        // current level's layout; None = the caller's root-format slot.
+        let mut cur: Option<usize> = None;
         loop {
+            // C ExecFindPartition's per-level tupmap conversion.
+            if self.dispatches[dispatch_idx].tupmap.is_some() {
+                let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
+                let map = dispatches[dispatch_idx].tupmap.as_ref().expect("checked");
+                match cur {
+                    None => {
+                        let out = dispatch_slots[dispatch_idx].as_mut().expect("tupslot");
+                        exectuples::execute_attr_map_slot(map, slot, out, mcx);
+                    }
+                    Some(i) => {
+                        assert_ne!(i, dispatch_idx);
+                        let (in_slot, out) = if i < dispatch_idx {
+                            let (a, b) = dispatch_slots.split_at_mut(dispatch_idx);
+                            (a[i].as_mut(), b[0].as_mut())
+                        } else {
+                            let (a, b) = dispatch_slots.split_at_mut(i);
+                            (b[0].as_mut(), a[dispatch_idx].as_mut())
+                        };
+                        exectuples::execute_attr_map_slot(
+                            map,
+                            in_slot.expect("converted"),
+                            out.expect("tupslot"),
+                            mcx,
+                        );
+                    }
+                }
+                cur = Some(dispatch_idx);
+            }
             let (oid, is_leaf, is_default) = {
-                let pd = &mut self.dispatches[dispatch_idx];
+                let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
+                let pd = &mut dispatches[dispatch_idx];
+                let cur_slot: &mut SlotData<'mcx> = match cur {
+                    None => &mut *slot,
+                    Some(i) => dispatch_slots[i].as_mut().expect("converted"),
+                };
                 let n = pd.key.partnatts as usize;
-                // FormPartitionKeyDatum; children share the root's attnos
-                // (asserted at leaf open below).
+                // FormPartitionKeyDatum over the level-converted tuple.
                 if !pd.key.partexprs.is_nil() && pd.keystate.is_empty() {
                     for expr in pd.key.partexprs.iter() {
                         let state =
@@ -118,13 +234,14 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                 for i in 0..n {
                     let attno = pd.key.partattrs[i];
                     if attno != 0 {
-                        values[i] = exectuples::slot_getattr(slot, attno as i32, &mut isnull[i]);
+                        values[i] =
+                            exectuples::slot_getattr(cur_slot, attno as i32, &mut isnull[i]);
                     } else {
                         let state = keystate_item
                             .next()
                             .expect("wrong number of partition key expressions");
                         let mut slots =
-                            execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+                            execexpr::EvalSlots { scan: Some(cur_slot), inner: None, outer: None };
                         let r = execexpr::exec_eval_expr(state, &mut slots)?;
                         values[i] = r.value;
                         isnull[i] = r.isnull;
@@ -152,15 +269,18 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             };
             if is_leaf {
                 let idx = self.leaf_index(oid)?;
-                let root_natts = self.dispatches[0].rel.rd_att.natts;
-                assert_eq!(
-                    self.leaves[idx].rd_att.natts,
-                    root_natts,
-                    "execPartition: attno-remapped partitions unported"
-                );
                 if is_default {
-                    let PartitionTupleRouting { dispatches, leaves, .. } = self;
-                    check_default_partition(mcx, &mut dispatches[dispatch_idx], &leaves[idx], slot)?;
+                    let PartitionTupleRouting { dispatches, dispatch_slots, leaves, .. } = self;
+                    let cur_slot: &mut SlotData<'mcx> = match cur {
+                        None => &mut *slot,
+                        Some(i) => dispatch_slots[i].as_mut().expect("converted"),
+                    };
+                    check_default_partition(
+                        mcx,
+                        &mut dispatches[dispatch_idx],
+                        &leaves[idx],
+                        cur_slot,
+                    )?;
                 }
                 return Ok(idx);
             }
@@ -171,19 +291,24 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             } else {
                 let sub = table::table_open(self.mcx, oid, RowExclusiveLock)?;
                 assert!(sub.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
-                dispatch_idx = self.init_dispatch(sub)?;
+                dispatch_idx = self.init_dispatch(sub, Some(parent_idx))?;
             }
             if is_default {
                 let sub_idx = dispatch_idx;
                 assert_ne!(parent_idx, sub_idx);
+                let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
                 let (parent_pd, sub_rel) = if parent_idx < sub_idx {
-                    let (a, b) = self.dispatches.split_at_mut(sub_idx);
+                    let (a, b) = dispatches.split_at_mut(sub_idx);
                     (&mut a[parent_idx], &b[0].rel)
                 } else {
-                    let (a, b) = self.dispatches.split_at_mut(parent_idx);
+                    let (a, b) = dispatches.split_at_mut(parent_idx);
                     (&mut b[0], &a[sub_idx].rel)
                 };
-                check_default_partition(mcx, parent_pd, sub_rel, slot)?;
+                let cur_slot: &mut SlotData<'mcx> = match cur {
+                    None => &mut *slot,
+                    Some(i) => dispatch_slots[i].as_mut().expect("converted"),
+                };
+                check_default_partition(mcx, parent_pd, sub_rel, cur_slot)?;
             }
         }
     }
@@ -228,9 +353,33 @@ fn check_default_partition<'mcx>(
     Ok(())
 }
 
+// ExecPartitionCheck (execMain.c), direct-DML leg: the compiled qual caches
+// in the caller's per-result-rel state (C ri_PartitionCheckExpr); ExecCheck
+// semantics, so a NULL result passes.
+pub fn exec_partition_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache: &mut Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    if cache.is_none() {
+        let qual = partdesc::RelationGetPartitionQual(mcx, rel)?;
+        let expr = partbounds::make_ands_explicit(mcx, qual)?;
+        let planned = clauses_seams::eval_const_expressions::call(mcx, expr)?;
+        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+            .expect("partition constraint expr");
+        *cache = Some(state);
+    }
+    let state = cache.as_mut().expect("just built");
+    let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+    let r = execexpr::exec_eval_expr(state, &mut slots)?;
+    Ok(r.isnull || r.value.as_bool())
+}
+
+// ExecPartitionCheckEmitError (execMain.c).
 #[cold]
 #[inline(never)]
-fn partition_constraint_violation<'mcx>(
+pub fn partition_constraint_violation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,

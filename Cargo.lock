@@ -4546,6 +4546,7 @@ dependencies = [
  "partprune",
  "ruleutils_seams",
  "table",
+ "tupdesc",
  "types_core",
  "types_error",
  "types_fmgr",
