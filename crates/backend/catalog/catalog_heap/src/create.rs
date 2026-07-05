@@ -728,6 +728,7 @@ pub fn heap_create_with_catalog<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
     }
@@ -833,6 +834,7 @@ fn AddNewRelationType<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )
 }

@@ -137,6 +137,8 @@ pub struct TypeCreateParams<'a> {
     pub typeNotNull: bool,
     pub typeCollation: Oid,
     pub defaultValue: Option<&'a str>,
+    // nodeToString image for pg_type.typdefaultbin (domain DEFAULT).
+    pub defaultTypeBin: Option<&'a str>,
 }
 
 #[cold]
@@ -232,7 +234,14 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     values[26] = Datum::from_i32(p.typeMod);
     values[27] = Datum::from_i32(p.typNDims);
     values[28] = Datum::from_oid(p.typeCollation);
-    nulls[29] = true; // typdefaultbin
+    let default_bin_text = match p.defaultTypeBin {
+        Some(d) => Some(varlena::cstring_to_text(mcx, d.as_bytes())?),
+        None => None,
+    };
+    match &default_bin_text {
+        Some(t) => values[29] = Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        None => nulls[29] = true, // typdefaultbin
+    }
     let default_text = match p.defaultValue {
         Some(d) => Some(varlena::cstring_to_text(mcx, d.as_bytes())?),
         None => None,

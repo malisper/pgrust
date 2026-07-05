@@ -246,6 +246,7 @@ pub fn DefineRange<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
     debug_assert!(typoid == InvalidOid || typoid == address.objectId);
@@ -308,6 +309,7 @@ pub fn DefineRange<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
     debug_assert!(multirangeOid == mltrng_address.objectId);
@@ -358,6 +360,7 @@ pub fn DefineRange<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
@@ -398,6 +401,7 @@ pub fn DefineRange<'mcx>(
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
