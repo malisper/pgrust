@@ -186,6 +186,9 @@ fn RelationReloadIndexInfo(
         // Preserved like rd_support: resolving a support proc scans
         // pg_amproc, which needs these very indexes searchable.
         rd_supportinfo: core::cell::RefCell::new(held.rd_supportinfo.borrow().clone()),
+        // Preserved like rd_supportinfo: attoptions changes swap the whole
+        // entry, and holders keep their Rc.
+        rd_opcoptions: core::cell::RefCell::new(held.rd_opcoptions.borrow().clone()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
@@ -276,6 +279,7 @@ fn RelationReloadNailed(
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: mcx::PgVec::new_in(cache_mcx()),
         rd_supportinfo: Default::default(),
+        rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,

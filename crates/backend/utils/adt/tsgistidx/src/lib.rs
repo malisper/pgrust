@@ -29,11 +29,24 @@ pub const ALLISTRUE: i32 = 0x04;
 const GTHDRSIZE: usize = 8;
 const TOAST_INDEX_TARGET: usize = ::types_storage::bufpage::MaxHeapTupleSize / 16;
 
-// Opclass options are unported; every entry point reads the C default (C
-// GET_SIGLEN() without PG_HAS_OPCLASS_OPTIONS).
+// GISTMaxIndexKeySize bound; the regress-visible "between 1 and 2024" detail
+// pins the value.
+pub const SIGLEN_MAX: usize = 2024;
+// GistTsVectorOptions: int32 vl_len_ then int siglen (offset 4, size 8).
+const GISTTSVECTOROPTIONS_SIZE: usize = 8;
+const GISTTSVECTOROPTIONS_SIGLEN_OFF: usize = 4;
+
+// C GET_SIGLEN(): PG_HAS_OPCLASS_OPTIONS ? options->siglen : SIGLEN_DEFAULT.
 #[inline]
-fn get_siglen() -> usize {
-    SIGLEN_DEFAULT
+fn get_siglen(f: &Option<&mut FmgrInfo>) -> usize {
+    match f.as_ref().and_then(|f| f.opclass_options()) {
+        Some(img) => i32::from_ne_bytes(
+            img[GISTTSVECTOROPTIONS_SIGLEN_OFF..GISTTSVECTOROPTIONS_SIGLEN_OFF + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize,
+        None => SIGLEN_DEFAULT,
+    }
 }
 
 const fn calcgtsize(flag: i32, len: usize) -> usize {
@@ -272,10 +285,10 @@ fn fc_gtsvectorout(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     Ok(cstring_result(out))
 }
 
-fn fc_gtsvector_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtsvector_compress(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let entry = unsafe { entry_arg(fcinfo, 0) };
-    let siglen = get_siglen();
+    let siglen = get_siglen(&f);
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
 
@@ -441,10 +454,10 @@ fn unionkey(sbase: &mut [u8], add: GtsRef<'_>, siglen: usize) -> bool {
     false
 }
 
-fn fc_gtsvector_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtsvector_union(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let entryvec = unsafe { &*(fcinfo.arg(0).as_usize() as *const GistEntryVector) };
-    let siglen = get_siglen();
+    let siglen = get_siglen(&f);
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut result = GtsBuilder::alloc(mcx, SIGNKEY, siglen, None)?;
@@ -466,11 +479,11 @@ fn fc_gtsvector_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(result.finish())
 }
 
-fn fc_gtsvector_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtsvector_same(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol; args 0/1 are key datums.
     let a = unsafe { GtsRef::at(fcinfo.arg(0)) };
     let b = unsafe { GtsRef::at(fcinfo.arg(1)) };
-    let siglen = get_siglen();
+    let siglen = get_siglen(&f);
     let result = fcinfo.arg(2).as_usize() as *mut bool;
     let r = if a.is_signkey() {
         if a.is_alltrue() || b.is_alltrue() {
@@ -487,12 +500,12 @@ fn fc_gtsvector_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(fcinfo.arg(2))
 }
 
-fn fc_gtsvector_penalty(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtsvector_penalty(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let origentry = unsafe { entry_arg(fcinfo, 0) };
     let newentry = unsafe { entry_arg(fcinfo, 1) };
     let penalty = fcinfo.arg(2).as_usize() as *mut f32;
-    let siglen = get_siglen();
+    let siglen = get_siglen(&f);
     // SAFETY: keys are plain SignTSVector images.
     let origval = unsafe { GtsRef::at(origentry.key) };
     let newval = unsafe { GtsRef::at(newentry.key) };
@@ -569,11 +582,11 @@ fn wish_f(a: i32, b: i32, c: f64) -> f64 {
     -((((a - b) * (a - b) * (a - b)) as f64) * c)
 }
 
-fn fc_gtsvector_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtsvector_picksplit(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let entryvec = unsafe { &*(fcinfo.arg(0).as_usize() as *const GistEntryVector) };
     let v = unsafe { &mut *(fcinfo.arg(1).as_usize() as *mut GistSplitVec) };
-    let siglen = get_siglen();
+    let siglen = get_siglen(&f);
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     // SAFETY: keys are plain SignTSVector images.
@@ -698,8 +711,19 @@ fn fc_gtsvector_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 }
 
 #[cold]
-fn fc_gtsvector_options(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("gtsvector_options: opclass options plumbing unported (siglen fixed at {SIGLEN_DEFAULT})")
+fn fc_gtsvector_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: index_opclass_options passes &mut LocalRelopts as arg 0 (C
+    // PG_GETARG_POINTER protocol).
+    let relopts = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut reloptions::LocalRelopts) };
+    relopts.init(GISTTSVECTOROPTIONS_SIZE);
+    relopts.add_int(
+        "siglen",
+        SIGLEN_DEFAULT as i32,
+        1,
+        SIGLEN_MAX as i32,
+        GISTTSVECTOROPTIONS_SIGLEN_OFF,
+    );
+    Ok(Datum::from_usize(0))
 }
 
 // tsquery_op.c makeTSQuerySign: TSQS_SIGLEN = 64.

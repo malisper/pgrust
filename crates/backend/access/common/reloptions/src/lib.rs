@@ -9,6 +9,9 @@
 #[cfg(test)]
 mod tests;
 
+mod local;
+pub use local::{build_local_reloptions, LocalOptDef, LocalRelopts};
+
 use core::fmt::Write;
 
 use ::datum::Datum;
@@ -390,13 +393,27 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
             .into_error()
             .into());
     }
-    let name = option.def.name;
-    let mut parsed = true;
-    match &option.def.data {
+    if let Some(v) = parse_opt_value(option.def.name, &option.def.data, value, validate)? {
+        option.val = v;
+        option.isset = true;
+    } else if let Enum { default_val, .. } = &option.def.data {
+        option.val = OptVal::Enum(*default_val);
+    }
+    Ok(())
+}
+
+// parse_one_reloption's value leg, shared with the local (opclass) options
+// path; Ok(None) = unparsable under !validate.
+fn parse_opt_value(
+    name: &str,
+    data: &OptData,
+    value: &str,
+    validate: bool,
+) -> PgResult<Option<OptVal>> {
+    Ok(match data {
         Bool { .. } => match adt_bool::parse_bool(value) {
-            Some(v) => option.val = OptVal::Bool(v),
+            Some(v) => Some(OptVal::Bool(v)),
             None => {
-                parsed = false;
                 if validate {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -404,6 +421,7 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                         .into_error()
                         .into());
                 }
+                None
             }
         },
         Int { min, max, .. } => match guc::units::parse_int(value, 0) {
@@ -418,10 +436,9 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                         .into_error()
                         .into());
                 }
-                option.val = OptVal::Int(v);
+                Some(OptVal::Int(v))
             }
             guc::units::ParseNum::Err { .. } => {
-                parsed = false;
                 if validate {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -429,6 +446,7 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                         .into_error()
                         .into());
                 }
+                None
             }
         },
         Real { min, max, .. } => match guc::units::parse_real(value, 0) {
@@ -443,10 +461,9 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                         .into_error()
                         .into());
                 }
-                option.val = OptVal::Real(v);
+                Some(OptVal::Real(v))
             }
             guc::units::ParseNum::Err { .. } => {
-                parsed = false;
                 if validate {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -456,11 +473,12 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                         .into_error()
                         .into());
                 }
+                None
             }
         },
-        Enum { members, default_val, detailmsg } => {
+        Enum { members, detailmsg, .. } => {
             match members.iter().find(|(s, _)| s.eq_ignore_ascii_case(value)) {
-                Some((_, sym)) => option.val = OptVal::Enum(*sym),
+                Some((_, sym)) => Some(OptVal::Enum(*sym)),
                 None => {
                     if validate {
                         return Err(ereport(ERROR)
@@ -470,16 +488,11 @@ fn parse_one_reloption(option: &mut RelOptValue, value: &str, validate: bool) ->
                             .into_error()
                             .into());
                     }
-                    parsed = false;
-                    option.val = OptVal::Enum(*default_val);
+                    None
                 }
             }
         }
-    }
-    if parsed {
-        option.isset = true;
-    }
-    Ok(())
+    })
 }
 
 pub fn transformRelOptions<'mcx>(

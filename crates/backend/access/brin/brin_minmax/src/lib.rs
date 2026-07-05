@@ -15,6 +15,7 @@ use ::types_scan::scankey::{
 
 pub fn brin_minmax_opcinfo(typoid: Oid) -> BrinColInfo {
     BrinColInfo {
+        oi_opclass_options: None,
         oi_nstored: 2,
         oi_regular_nulls: true,
         kind: BrinOpcKind::MinMax,

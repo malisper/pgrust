@@ -19,6 +19,7 @@ brin_tuple = { path = "../brin_tuple" }
 brin_pageops = { path = "../brin_pageops" }
 brin_minmax = { path = "../brin_minmax" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 table = { path = "../../table/table" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }

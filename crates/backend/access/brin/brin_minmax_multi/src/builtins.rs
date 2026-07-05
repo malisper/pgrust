@@ -236,7 +236,23 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::fmgr::PGFunction) 
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
+fn fc_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: index_opclass_options passes &mut LocalRelopts as arg 0 (C
+    // PG_GETARG_POINTER protocol).
+    let relopts = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut reloptions::LocalRelopts) };
+    relopts.init(crate::MINMAXMULTIOPTIONS_SIZE);
+    relopts.add_int(
+        "values_per_range",
+        crate::MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE,
+        8,
+        256,
+        crate::MINMAXMULTIOPTIONS_VPR_OFF,
+    );
+    Ok(Datum::from_usize(0))
+}
+
 pub const MINMAX_MULTI_BUILTINS: &[FmgrBuiltin] = &[
+    b(4620, "brin_minmax_multi_options", 1, fc_options),
     b(4621, "brin_minmax_multi_distance_int2", 2, fc_dist_int2),
     b(4622, "brin_minmax_multi_distance_int4", 2, fc_dist_int4),
     b(4623, "brin_minmax_multi_distance_int8", 2, fc_dist_int8),

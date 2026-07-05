@@ -36,8 +36,26 @@ fn fc_summary_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     varlena::builtins::fc_byteasend(None, fcinfo)
 }
 
-fn fc_options(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: brin_bloom_options (per-column opclass options are unported repo-wide)")
+fn fc_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: index_opclass_options passes &mut LocalRelopts as arg 0 (C
+    // PG_GETARG_POINTER protocol).
+    let relopts = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut reloptions::LocalRelopts) };
+    relopts.init(crate::BLOOMOPTIONS_SIZE);
+    relopts.add_real(
+        "n_distinct_per_range",
+        crate::BLOOM_DEFAULT_NDISTINCT_PER_RANGE,
+        -1.0,
+        i32::MAX as f64,
+        crate::BLOOMOPTIONS_NDISTINCT_OFF,
+    );
+    relopts.add_real(
+        "false_positive_rate",
+        crate::BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
+        crate::BLOOM_MIN_FALSE_POSITIVE_RATE,
+        crate::BLOOM_MAX_FALSE_POSITIVE_RATE,
+        crate::BLOOMOPTIONS_FPR_OFF,
+    );
+    Ok(Datum::from_usize(0))
 }
 
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: ::fmgr::PGFunction) -> FmgrBuiltin {

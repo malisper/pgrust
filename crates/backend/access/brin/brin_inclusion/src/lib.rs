@@ -36,6 +36,7 @@ const INCLUSION_CONTAINS_EMPTY: usize = 2;
 
 pub fn brin_inclusion_opcinfo(typoid: Oid) -> BrinColInfo {
     BrinColInfo {
+        oi_opclass_options: None,
         oi_nstored: 3,
         oi_regular_nulls: true,
         kind: BrinOpcKind::Inclusion,

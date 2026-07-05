@@ -70,3 +70,7 @@ predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pg_rusage = { path = "../../utils/misc/pg_rusage" }
 ruleutils = { path = "../../utils/adt/ruleutils" }
 types_relscan = { path = "../../access/index/relscan" }
+reloptions = { path = "../../access/common/reloptions" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+indexam_seams = { path = "../../access/index/indexam_seams" }

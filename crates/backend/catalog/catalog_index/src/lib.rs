@@ -410,8 +410,8 @@ pub fn index_opclass_options<'mcx>(
     indrel: &Relation<'mcx>,
     attnum: AttrNumber,
     attoptions: Datum,
-    _validate: bool,
-) -> PgResult<()> {
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
     let kind = types_relscan::IndexAmKind::from_relam(indrel.rd_rel.relam);
     let amoptsprocnum = kind.amoptsprocnum() as usize;
     let amsupport = kind.amsupport() as usize;
@@ -423,7 +423,7 @@ pub fn index_opclass_options<'mcx>(
         .unwrap_or(InvalidOid);
     if procid == InvalidOid {
         if attoptions == Datum::null() {
-            return Ok(());
+            return Ok(None);
         }
         let opclass = lsyscache::get_index_column_opclass(indrel.rd_id, attnum as i32)?;
         return Err(err(
@@ -434,13 +434,56 @@ pub fn index_opclass_options<'mcx>(
             types_error::ERRCODE_INVALID_PARAMETER_VALUE,
         ));
     }
-    if attoptions == Datum::null() {
-        // C builds and discards the opclass's default options here; options
-        // support procs are unported (AMs read compiled-in defaults), so
-        // there is nothing to compute.
-        return Ok(());
+    let mut relopts = reloptions::LocalRelopts::new();
+    let mut finfo = fmgr_seams::fmgr_info::call(procid)?;
+    let mut frame = types_fmgr::LocalFcinfo::<1>::new(InvalidOid);
+    // C PG_GETARG_POINTER protocol: arg 0 carries &mut LocalRelopts.
+    frame.set_arg(
+        0,
+        Datum::from_usize(&mut relopts as *mut reloptions::LocalRelopts as usize),
+    );
+    finfo.invoke(&mut frame)?;
+    Ok(Some(reloptions::build_local_reloptions(
+        mcx, &relopts, attoptions, validate,
+    )?))
+}
+
+// RelationGetIndexAttOptions (relcache.c): parsed per-key-column opclass
+// options, cached on the relcache entry (C rd_opcoptions).
+pub fn relation_get_index_att_options(
+    rel: &Relation<'_>,
+) -> PgResult<std::rc::Rc<[Option<Box<[u8]>>]>> {
+    const Anum_pg_attribute_attoptions: i32 = 25;
+    if let Some(cached) = rel.rd_opcoptions.borrow().as_ref() {
+        return Ok(cached.clone());
     }
-    unported("index_opclass_options: options support proc (build_local_reloptions)")
+    let owner = mcx::MemoryContext::new("RelationGetIndexAttOptions");
+    let mcx = owner.mcx();
+    let natts = rel.indnkeyatts() as usize;
+    let mut opts: Vec<Option<Box<[u8]>>> = Vec::with_capacity(natts);
+    for attnum in 1..=natts as AttrNumber {
+        let Some(tuple) = cache_syscache::SearchSysCacheAttNum(rel.rd_id, attnum as i16)? else {
+            return Err(PgError::error(format!(
+                "cache lookup failed for attribute {attnum} of relation {}",
+                rel.rd_id
+            ))
+            .into());
+        };
+        let (d, isnull) =
+            cache_syscache::SysCacheGetAttr(cache_syscache::ATTNUM, &tuple, Anum_pg_attribute_attoptions)?;
+        let built = index_opclass_options(
+            mcx,
+            rel,
+            attnum,
+            if isnull { Datum::null() } else { d },
+            false,
+        )?;
+        cache_syscache::ReleaseSysCache(tuple);
+        opts.push(built.map(|v| v.into_boxed_slice()));
+    }
+    let rc: std::rc::Rc<[Option<Box<[u8]>>]> = opts.into();
+    *rel.rd_opcoptions.borrow_mut() = Some(rc.clone());
+    Ok(rc)
 }
 
 pub struct IndexCreateExtra<'a> {
@@ -1306,6 +1349,7 @@ fn index_build_dummy<'mcx>(
 pub fn init_seams() {
     catalog_index_seams::reset_reindex_state::set(ResetReindexState);
     catalog_index_seams::index_build_dummy::set(index_build_dummy);
+    indexam_seams::relation_get_index_att_options::set(relation_get_index_att_options);
 }
 
 pub use drop::{index_drop, IndexGetRelation};
