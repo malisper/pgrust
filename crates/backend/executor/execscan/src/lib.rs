@@ -503,7 +503,6 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_Aggref
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
-        | NodeTag::T_SubLink
         | NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest

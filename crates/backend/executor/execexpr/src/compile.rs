@@ -1206,6 +1206,32 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_NextValueExpr => {
             node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
+        // C exprType T_SubLink (nodeFuncs.c:57-80): an analyzed-but-unplanned
+        // tree (plancache result-desc path) resolves EXPR/ARRAY sublinks from
+        // the subselect Query's first targetlist entry.
+        NodeTag::T_SubLink => {
+            use ::types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            let tent_expr = || {
+                sl.subselect
+                    .as_query()
+                    .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
+                    .targetList
+                    .first()
+                    .expect("sublink subselect targetlist")
+                    .as_target_entry()
+                    .expect("tlist entry")
+                    .expr
+            };
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK => expr_type(tent_expr()),
+                SubLinkType::ARRAY_SUBLINK => ::lsyscache::get_promoted_array_type(
+                    expr_type(tent_expr()),
+                )
+                .expect("array type for ARRAY sublink"),
+                _ => 16,
+            }
+        }
         NodeTag::T_SubPlan => {
             use ::types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
