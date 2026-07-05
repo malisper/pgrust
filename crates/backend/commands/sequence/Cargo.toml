@@ -45,3 +45,4 @@ adt_int8 = { path = "../../utils/adt/int8" }
 sequence_xlog = { path = "../sequence_xlog" }
 sequence_seams = { path = "../sequence_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+elog = { path = "../../utils/error/elog" }
