@@ -1620,6 +1620,11 @@ fn hash_agg_check_limits<'mcx>(
             ph.spill.ever_spilled = true;
             ph.spill.tapeset = Some(LogicalTapeSet::create(mcx, true)?);
         }
+        // Allocator hygiene, not a C step: mimalloc retains freed segments,
+        // and the spill pass's grow/free churn would otherwise hold
+        // batch-sized RSS to query end. The pass is disk-bound; the collect
+        // cost hides.
+        ::mcx::release_retained();
         if hashagg_memdebug_enabled() {
             hashagg_memdebug("enter_spill_mode", ph, tval_mem, 0);
         }
@@ -1876,6 +1881,11 @@ fn hashagg_reset_spill_state(ph: &mut PerHashData<'_>, input_card: f64) {
     }
     ss.input_card = input_card;
     ss.used_bits = 0;
+    if ph.spill.ever_spilled {
+        // A finished spill pass leaves batch-sized freed segments retained
+        // by mimalloc; release them so post-query RSS returns to baseline.
+        ::mcx::release_retained();
+    }
 }
 
 fn agg_instrumentation<'a>(
@@ -1915,6 +1925,10 @@ fn agg_refill_hash_table<'mcx>(
     // SAFETY: sole access path to the node during the reset (C's
     // ReScanExprContext(hashcontext)).
     unsafe { node.agg_node.as_mut() }.reset();
+    // Batch boundary just freed up to a full hash_mem of table memory;
+    // release mimalloc's retained segments before the next fill (disk-bound
+    // here, so the collect cost hides).
+    ::mcx::release_retained();
 
     loop {
         let advance = {
