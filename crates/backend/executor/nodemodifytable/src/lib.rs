@@ -101,6 +101,8 @@ pub struct ModifyTableState<'mcx> {
     leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
     leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
     leaf_virtual_nn: Vec<Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
+    // ri_GeneratedExprsI per leaf: partitions may override generation exprs.
+    leaf_generated: Vec<Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>>,
     // ri_PartitionTupleSlot per remapped leaf (estate slot, leaf layout) and
     // the leaf's ri_PartitionCheckExpr.
     leaf_slots: Vec<Option<ExecSlotId>>,
@@ -563,6 +565,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_indexes: Vec::new(),
         leaf_checks: Vec::new(),
         leaf_virtual_nn: Vec::new(),
+        leaf_generated: Vec::new(),
         leaf_slots: Vec::new(),
         leaf_partition_check: Vec::new(),
         leaf_trigdesc: Vec::new(),
@@ -1672,6 +1675,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     }
     mt.leaf_indexes.clear();
     mt.leaf_checks.clear();
+    mt.leaf_generated.clear();
     mt.leaf_slots.clear();
     mt.leaf_partition_check.clear();
     mt.router = None;
@@ -3035,6 +3039,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_indexes.push(None);
                 mt.leaf_checks.push(None);
                 mt.leaf_virtual_nn.push(None);
+                mt.leaf_generated.push(None);
                 mt.leaf_slots.push(None);
                 mt.leaf_partition_check.push(None);
             }
@@ -3093,12 +3098,13 @@ fn exec_insert<'mcx>(
 
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let (rel, indexes, check_exprs, virtual_nn_exprs, pcheck) = match leaf_idx {
+        let (rel, indexes, check_exprs, virtual_nn_exprs, gen_exprs, pcheck) = match leaf_idx {
             Some(idx) => (
                 mt.router.as_ref().unwrap().leaf_rel(idx),
                 &mut mt.leaf_indexes[idx],
                 &mut mt.leaf_checks[idx],
                 &mut mt.leaf_virtual_nn[idx],
+                &mut mt.leaf_generated[idx],
                 &mut mt.leaf_partition_check[idx],
             ),
             None => (
@@ -3108,6 +3114,7 @@ fn exec_insert<'mcx>(
                 &mut mt.indexes,
                 &mut mt.check_exprs,
                 &mut mt.virtual_nn_exprs,
+                &mut mt.generated_exprs,
                 &mut mt.partition_check,
             ),
         };
@@ -3117,13 +3124,14 @@ fn exec_insert<'mcx>(
         slot.base_mut().tts_tableOid = rel.rd_id;
         if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
             if remapped {
-                // mt.generated_exprs is compiled against the root's attnos.
+                // Leaf-relative compile should agree with the leaf-layout
+                // slot; unverified, loud.
                 panic!(
                     "ExecInsert: stored generated columns on an attno-remapped \
                      partition not ported"
                 );
             }
-            exec_compute_stored_generated(mcx, &mut mt.generated_exprs, rel, slot)?;
+            exec_compute_stored_generated(mcx, gen_exprs, rel, slot)?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -4171,7 +4179,7 @@ mcx::forget_safe_struct!(
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
         check_exprs, partition_check, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
-        virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn,
+        virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when, trig_when,
         transition_capture, oc_transition_capture, all_updated_cols,
