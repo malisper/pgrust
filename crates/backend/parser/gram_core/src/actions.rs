@@ -1418,14 +1418,17 @@ impl<'mcx> Parser<'mcx> {
                 // encoded as [mk_list(cols)] or [mk_list(cols), period]
                 // (rule 560); nil = the EMPTY production.
                 let pk_pair = view.v(9).list();
-                if pk_pair.is_nil() {
-                    n.pk_attrs = NodeList::nil();
-                } else {
-                    n.pk_attrs = *pk_pair.nth(0).as_list().expect("column list");
+                if !pk_pair.is_nil() {
+                    let cols = pk_pair.nth(0).as_list().expect("column list");
+                    let mut pk_attrs = NodeList::nil();
+                    for c in cols.iter() {
+                        pk_attrs.lappend(mcx, c)?;
+                    }
                     if pk_pair.len() == 2 {
-                        n.pk_attrs.lappend(mcx, pk_pair.nth(1))?;
+                        pk_attrs.lappend(mcx, pk_pair.nth(1))?;
                         n.pk_with_period = true;
                     }
+                    n.pk_attrs = pk_attrs;
                 }
                 n.fk_matchtype = view.v(10).ival() as u8;
                 let ka = view.v(11).key_actions();
