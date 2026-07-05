@@ -927,3 +927,223 @@ fn numeric_sign_and_inc() {
     assert_eq!(out(&numeric_inc(n("nan").num()).unwrap()), "NaN");
     assert_eq!(out(&numeric_inc(n("-inf").num()).unwrap()), "-Infinity");
 }
+
+fn serialize_numeric_state(state: &mut NumericAggState, with_sum_x2: bool) -> Vec<u8> {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+    let ctx = MemoryContext::new("numeric-agg-serialize");
+    let mut buf = StringInfo::new_in(ctx.mcx()).unwrap();
+    numeric_agg_state_serialize(state, with_sum_x2, &mut buf).unwrap();
+    buf.as_bytes().to_vec()
+}
+
+fn serialize_int128_state(state: &Int128AggState, with_sum_x2: bool) -> Vec<u8> {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+    let ctx = MemoryContext::new("int128-agg-serialize");
+    let mut buf = StringInfo::new_in(ctx.mcx()).unwrap();
+    int128_agg_state_serialize(state, with_sum_x2, &mut buf).unwrap();
+    buf.as_bytes().to_vec()
+}
+
+#[test]
+fn numeric_agg_serialize_pinned_bytes() {
+    use ::mcx::MemoryContext;
+
+    let ctx = MemoryContext::new("numeric-agg-pinned");
+    let mcx = ctx.mcx();
+    let mut state = NumericAggState::new(true);
+    do_numeric_accum(&mut state, mcx, n("1.5").num()).unwrap();
+    do_numeric_accum(&mut state, mcx, n("2.5").num()).unwrap();
+
+    // Hand-computed C image: N=2; sumX 4.0 = {1, 0, POS, dscale 1, [4]};
+    // sumX2 8.50 = {2, 0, POS, dscale 2, [8, 5000]}; maxScale 1,
+    // maxScaleCount 2, NaN/pInf/nInf 0.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&2i64.to_be_bytes());
+    for v in [1i32, 0, 0, 1] {
+        expected.extend_from_slice(&v.to_be_bytes());
+    }
+    expected.extend_from_slice(&4i16.to_be_bytes());
+    for v in [2i32, 0, 0, 2] {
+        expected.extend_from_slice(&v.to_be_bytes());
+    }
+    expected.extend_from_slice(&8i16.to_be_bytes());
+    expected.extend_from_slice(&5000i16.to_be_bytes());
+    expected.extend_from_slice(&1i32.to_be_bytes());
+    expected.extend_from_slice(&2i64.to_be_bytes());
+    expected.extend_from_slice(&0i64.to_be_bytes());
+    expected.extend_from_slice(&0i64.to_be_bytes());
+    expected.extend_from_slice(&0i64.to_be_bytes());
+    assert_eq!(serialize_numeric_state(&mut state, true), expected);
+
+    // numeric_avg_serialize drops the sumX2 leg only.
+    let mut avg_expected = Vec::new();
+    avg_expected.extend_from_slice(&expected[..26]);
+    avg_expected.extend_from_slice(&expected[46..]);
+    assert_eq!(serialize_numeric_state(&mut state, false), avg_expected);
+}
+
+#[test]
+fn numeric_agg_serialize_round_trip() {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+
+    let ctx = MemoryContext::new("numeric-agg-rt");
+    let mcx = ctx.mcx();
+    for with_sum_x2 in [true, false] {
+        let mut state = NumericAggState::new(with_sum_x2);
+        for v in ["1.5", "-2.25", "1000000.0001", "3", "NaN", "Infinity", "-Infinity", "0"] {
+            do_numeric_accum(&mut state, mcx, n(v).num()).unwrap();
+        }
+        let bytes = serialize_numeric_state(&mut state, with_sum_x2);
+
+        let mut buf = StringInfo::new_in(mcx).unwrap();
+        buf.append_bytes(&bytes).unwrap();
+        let mut back = numeric_agg_state_deserialize(&mut buf, mcx, with_sum_x2).unwrap();
+        assert_eq!(back.n, state.n);
+        assert_eq!(back.nan_count, 1);
+        assert_eq!(back.pinf_count, 1);
+        assert_eq!(back.ninf_count, 1);
+        assert_eq!(back.max_scale, state.max_scale);
+        assert_eq!(back.max_scale_count, state.max_scale_count);
+        assert_eq!(serialize_numeric_state(&mut back, with_sum_x2), bytes);
+    }
+}
+
+#[test]
+fn numeric_agg_deserialize_errors() {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+
+    let ctx = MemoryContext::new("numeric-agg-deserr");
+    let mcx = ctx.mcx();
+    let mut state = NumericAggState::new(true);
+    do_numeric_accum(&mut state, mcx, n("7").num()).unwrap();
+    let bytes = serialize_numeric_state(&mut state, true);
+
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    buf.append_bytes(&bytes[..bytes.len() - 1]).unwrap();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).unwrap_err();
+    assert_eq!(e.message(), "insufficient data left in message");
+
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    buf.append_bytes(&bytes).unwrap();
+    buf.append_bytes(&[0]).unwrap();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).unwrap_err();
+    assert_eq!(e.message(), "invalid message format");
+}
+
+#[test]
+fn numeric_agg_combine_matches_serial() {
+    use ::mcx::MemoryContext;
+
+    let ctx = MemoryContext::new("numeric-agg-combine");
+    let mcx = ctx.mcx();
+    let vals = ["1.5", "-2.25", "1000000.0001", "3", "0.5", "-0.125"];
+    for with_sum_x2 in [true, false] {
+        let mut all = NumericAggState::new(with_sum_x2);
+        for v in vals {
+            do_numeric_accum(&mut all, mcx, n(v).num()).unwrap();
+        }
+        let mut s1 = NumericAggState::new(with_sum_x2);
+        for v in &vals[..2] {
+            do_numeric_accum(&mut s1, mcx, n(v).num()).unwrap();
+        }
+        let mut s2 = NumericAggState::new(with_sum_x2);
+        for v in &vals[2..] {
+            do_numeric_accum(&mut s2, mcx, n(v).num()).unwrap();
+        }
+        numeric_agg_combine(&mut s1, &mut s2, mcx, with_sum_x2).unwrap();
+        assert_eq!(
+            serialize_numeric_state(&mut s1, with_sum_x2),
+            serialize_numeric_state(&mut all, with_sum_x2)
+        );
+
+        // The NULL-state1 arm's field copy.
+        let mut copied = NumericAggState::new(with_sum_x2);
+        numeric_agg_copy(&mut copied, &mut all, mcx, with_sum_x2).unwrap();
+        assert_eq!(
+            serialize_numeric_state(&mut copied, with_sum_x2),
+            serialize_numeric_state(&mut all, with_sum_x2)
+        );
+    }
+}
+
+#[test]
+fn int128_agg_serialize_pinned_bytes() {
+    let mut state = Int128AggState::new(true);
+    do_int128_accum(&mut state, -2);
+    do_int128_accum(&mut state, -3);
+
+    // Hand-computed C image: N=2; sumX -5 = {1, 0, NEG(0x4000), 0, [5]};
+    // sumX2 13 = {1, 0, POS, 0, [13]}.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&2i64.to_be_bytes());
+    for v in [1i32, 0, 0x4000, 0] {
+        expected.extend_from_slice(&v.to_be_bytes());
+    }
+    expected.extend_from_slice(&5i16.to_be_bytes());
+    for v in [1i32, 0, 0, 0] {
+        expected.extend_from_slice(&v.to_be_bytes());
+    }
+    expected.extend_from_slice(&13i16.to_be_bytes());
+    assert_eq!(serialize_int128_state(&state, true), expected);
+
+    // int8_avg_serialize drops the sumX2 leg only.
+    assert_eq!(serialize_int128_state(&state, false), expected[..26].to_vec());
+}
+
+#[test]
+fn int128_agg_serialize_round_trip() {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+
+    let ctx = MemoryContext::new("int128-agg-rt");
+    let mcx = ctx.mcx();
+    for with_sum_x2 in [true, false] {
+        let mut state = Int128AggState::new(with_sum_x2);
+        for v in [i64::MAX as i128, i64::MAX as i128, -1, 123456789, 0, i64::MIN as i128] {
+            do_int128_accum(&mut state, v);
+        }
+        let bytes = serialize_int128_state(&state, with_sum_x2);
+
+        let mut buf = StringInfo::new_in(mcx).unwrap();
+        buf.append_bytes(&bytes).unwrap();
+        let back = int128_agg_state_deserialize(&mut buf, with_sum_x2).unwrap();
+        assert_eq!(back.n, state.n);
+        assert_eq!(back.sum_x, state.sum_x);
+        if with_sum_x2 {
+            assert_eq!(back.sum_x2, state.sum_x2);
+        } else {
+            assert_eq!(back.sum_x2, 0);
+        }
+        assert_eq!(serialize_int128_state(&back, with_sum_x2), bytes[..bytes.len()].to_vec());
+    }
+}
+
+#[test]
+fn int128_agg_combine_matches_serial() {
+    let vals: [i128; 5] = [5, -7, 1_000_000_007, 0, 42];
+    let mut all = Int128AggState::new(true);
+    for v in vals {
+        do_int128_accum(&mut all, v);
+    }
+    let mut s1 = Int128AggState::new(true);
+    for v in &vals[..2] {
+        do_int128_accum(&mut s1, *v);
+    }
+    let mut s2 = Int128AggState::new(true);
+    for v in &vals[2..] {
+        do_int128_accum(&mut s2, *v);
+    }
+    // numeric_poly_combine's non-NULL arm.
+    if s2.n > 0 {
+        s1.n += s2.n;
+        s1.sum_x += s2.sum_x;
+        s1.sum_x2 += s2.sum_x2;
+    }
+    assert_eq!(s1.n, all.n);
+    assert_eq!(s1.sum_x, all.sum_x);
+    assert_eq!(s1.sum_x2, all.sum_x2);
+}

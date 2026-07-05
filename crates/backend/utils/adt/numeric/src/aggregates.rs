@@ -1,4 +1,5 @@
 use ::mcx::{Allocator, Mcx};
+use stringinfo::StringInfo;
 use types_error::PgResult;
 
 use crate::arith::{add_var, cmp_var, div_var, mul_var, select_div_scale, sub_var};
@@ -407,6 +408,130 @@ pub fn do_numeric_discard(
     Ok(true)
 }
 
+// C numeric.c:7843/7859 numericvar_serialize/numericvar_deserialize: int32
+// header fields (unlike numeric_send's int16 — intermediate values may exceed
+// the numeric type's ranges), digits unvalidated.
+pub fn numericvar_serialize(buf: &mut StringInfo<'_>, var: VarView<'_>) -> PgResult<()> {
+    pqformat::pq_sendint32(buf, var.ndigits as u32)?;
+    pqformat::pq_sendint32(buf, var.weight as u32)?;
+    pqformat::pq_sendint32(buf, var.sign as u32)?;
+    pqformat::pq_sendint32(buf, var.dscale as u32)?;
+    for &d in var.digits {
+        pqformat::pq_sendint16(buf, d as u16)?;
+    }
+    Ok(())
+}
+
+pub fn numericvar_deserialize(buf: &mut StringInfo<'_>, var: &mut NumericVar) -> PgResult<()> {
+    let len = pqformat::pq_getmsgint(buf, 4)? as i32;
+    var.alloc(len);
+    var.weight = pqformat::pq_getmsgint(buf, 4)? as i32;
+    var.sign = pqformat::pq_getmsgint(buf, 4)? as u16;
+    var.dscale = pqformat::pq_getmsgint(buf, 4)? as i32;
+    for slot in var.digits_mut() {
+        *slot = pqformat::pq_getmsgint(buf, 2)? as u16 as NumericDigit;
+    }
+    Ok(())
+}
+
+// C numeric.c:5326 numeric_avg_serialize / 5433 numeric_serialize bodies past
+// the AggCheckCallContext gate; they differ only in the sumX2 leg.
+pub fn numeric_agg_state_serialize(
+    state: &mut NumericAggState,
+    with_sum_x2: bool,
+    buf: &mut StringInfo<'_>,
+) -> PgResult<()> {
+    let mut tmp = NumericVar::new();
+    pqformat::pq_sendint64(buf, state.n as u64)?;
+    state.sum_x.finalize(&mut tmp);
+    numericvar_serialize(buf, tmp.view())?;
+    if with_sum_x2 {
+        state.sum_x2.finalize(&mut tmp);
+        numericvar_serialize(buf, tmp.view())?;
+    }
+    pqformat::pq_sendint32(buf, state.max_scale as u32)?;
+    pqformat::pq_sendint64(buf, state.max_scale_count as u64)?;
+    pqformat::pq_sendint64(buf, state.nan_count as u64)?;
+    pqformat::pq_sendint64(buf, state.pinf_count as u64)?;
+    pqformat::pq_sendint64(buf, state.ninf_count as u64)?;
+    Ok(())
+}
+
+// C numeric.c:5382 numeric_avg_deserialize / 5489 numeric_deserialize. C
+// allocates with makeNumericAggStateCurrentContext(false) in both variants;
+// `mcx` is the context the caller stores the state in (digit buffers must
+// share it).
+pub fn numeric_agg_state_deserialize(
+    buf: &mut StringInfo<'_>,
+    mcx: Mcx<'_>,
+    with_sum_x2: bool,
+) -> PgResult<NumericAggState> {
+    let mut result = NumericAggState::new(false);
+    let mut tmp = NumericVar::new();
+    result.n = pqformat::pq_getmsgint64(buf)?;
+    numericvar_deserialize(buf, &mut tmp)?;
+    result.sum_x.add(mcx, tmp.view())?;
+    if with_sum_x2 {
+        numericvar_deserialize(buf, &mut tmp)?;
+        result.sum_x2.add(mcx, tmp.view())?;
+    }
+    result.max_scale = pqformat::pq_getmsgint(buf, 4)? as i32;
+    result.max_scale_count = pqformat::pq_getmsgint64(buf)?;
+    result.nan_count = pqformat::pq_getmsgint64(buf)?;
+    result.pinf_count = pqformat::pq_getmsgint64(buf)?;
+    result.ninf_count = pqformat::pq_getmsgint64(buf)?;
+    pqformat::pq_getmsgend(buf)?;
+    Ok(result)
+}
+
+// C numeric.c:5159 numeric_combine / 5251 numeric_avg_combine, non-NULL
+// state1 arm. `mcx` is state1's owning agg context.
+pub fn numeric_agg_combine(
+    state1: &mut NumericAggState,
+    state2: &mut NumericAggState,
+    mcx: Mcx<'_>,
+    with_sum_x2: bool,
+) -> PgResult<()> {
+    state1.n += state2.n;
+    state1.nan_count += state2.nan_count;
+    state1.pinf_count += state2.pinf_count;
+    state1.ninf_count += state2.ninf_count;
+    if state2.n > 0 {
+        if state2.max_scale > state1.max_scale {
+            state1.max_scale = state2.max_scale;
+            state1.max_scale_count = state2.max_scale_count;
+        } else if state2.max_scale == state1.max_scale {
+            state1.max_scale_count += state2.max_scale_count;
+        }
+        state1.sum_x.combine(mcx, &mut state2.sum_x)?;
+        if with_sum_x2 {
+            state1.sum_x2.combine(mcx, &mut state2.sum_x2)?;
+        }
+    }
+    Ok(())
+}
+
+// C numeric_combine/numeric_avg_combine NULL-state1 arm: field copy into the
+// freshly made agg-context state.
+pub fn numeric_agg_copy(
+    dst: &mut NumericAggState,
+    src: &mut NumericAggState,
+    mcx: Mcx<'_>,
+    with_sum_x2: bool,
+) -> PgResult<()> {
+    dst.n = src.n;
+    dst.nan_count = src.nan_count;
+    dst.pinf_count = src.pinf_count;
+    dst.ninf_count = src.ninf_count;
+    dst.max_scale = src.max_scale;
+    dst.max_scale_count = src.max_scale_count;
+    dst.sum_x.copy_from(mcx, &mut src.sum_x)?;
+    if with_sum_x2 {
+        dst.sum_x2.copy_from(mcx, &mut src.sum_x2)?;
+    }
+    Ok(())
+}
+
 pub fn do_numeric_accum_int64(
     state: &mut NumericAggState,
     mcx: Mcx<'_>,
@@ -592,6 +717,45 @@ pub fn numeric_poly_sum(state: Option<&Int128AggState>) -> PgResult<Option<Numer
     let mut result = NumericVar::new();
     crate::var::int128_to_var(state.sum_x, &mut result);
     Ok(Some(make_result(result.view())?))
+}
+
+// C numeric.c:5793 numeric_poly_serialize / 5997 int8_avg_serialize,
+// HAVE_INT128 arm: int128 sums cross the wire as NumericVar images
+// (int128_to_numericvar) so the combine format is platform-independent.
+pub fn int128_agg_state_serialize(
+    state: &Int128AggState,
+    with_sum_x2: bool,
+    buf: &mut StringInfo<'_>,
+) -> PgResult<()> {
+    let mut tmp = NumericVar::new();
+    pqformat::pq_sendint64(buf, state.n as u64)?;
+    crate::var::int128_to_var(state.sum_x, &mut tmp);
+    numericvar_serialize(buf, tmp.view())?;
+    if with_sum_x2 {
+        crate::var::int128_to_var(state.sum_x2, &mut tmp);
+        numericvar_serialize(buf, tmp.view())?;
+    }
+    Ok(())
+}
+
+// C numeric.c:5855 numeric_poly_deserialize / 6043 int8_avg_deserialize.
+// C ignores numericvar_to_int128's overflow bool, leaving the palloc0'd sum
+// at 0; both variants allocate with calcSumX2=false.
+pub fn int128_agg_state_deserialize(
+    buf: &mut StringInfo<'_>,
+    with_sum_x2: bool,
+) -> PgResult<Int128AggState> {
+    let mut result = Int128AggState::new(false);
+    let mut tmp = NumericVar::new();
+    result.n = pqformat::pq_getmsgint64(buf)?;
+    numericvar_deserialize(buf, &mut tmp)?;
+    result.sum_x = crate::var::var_to_int128(tmp.view()).unwrap_or(0);
+    if with_sum_x2 {
+        numericvar_deserialize(buf, &mut tmp)?;
+        result.sum_x2 = crate::var::var_to_int128(tmp.view()).unwrap_or(0);
+    }
+    pqformat::pq_getmsgend(buf)?;
+    Ok(result)
 }
 
 pub fn numeric_poly_avg(state: Option<&Int128AggState>) -> PgResult<Option<NumericImage>> {
