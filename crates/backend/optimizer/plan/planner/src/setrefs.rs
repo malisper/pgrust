@@ -799,11 +799,30 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                     }
                     .expect("ModifyTable node");
                 } else {
+                    // Vars pass through unchanged, but SubPlan-bearing lists
+                    // can be rewritten (AlternativeSubPlan selection, subplan
+                    // cost adjustment) — install the fixed lists then.
+                    let mut new_lists = NodeList::nil();
+                    let mut changed = false;
                     for rlist_node in &m.returningLists {
                         let rlist =
                             rlist_node.as_list().expect("returningLists cell is a List");
-                        let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
-                        debug_assert!(fixed.is_none());
+                        match fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)? {
+                            None => new_lists.lappend(run.mcx, rlist_node)?,
+                            Some(f) => {
+                                changed = true;
+                                new_lists.lappend(run.mcx, Node::mk_list(run.mcx, f)?)?;
+                            }
+                        }
+                    }
+                    if changed {
+                        // SAFETY: exclusive plan-tree ownership (prologue note).
+                        unsafe {
+                            plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                                p.returningLists = new_lists;
+                            })
+                        }
+                        .expect("ModifyTable node");
                     }
                 }
             }
