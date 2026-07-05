@@ -775,6 +775,7 @@ fn pull_up_simple_subquery<'mcx>(
         last_ph_id: &last_ph_id,
         rv_cache: &rv_cache,
         sub_relids: &full_relids,
+        eref: rte.eref,
     };
 
     // OffsetVarNodes/IncrementVarSublevelsUp over the subroot's
@@ -1355,6 +1356,9 @@ pub(crate) struct PullupPhCtx<'a, 'mcx> {
     rv_cache: &'a core::cell::RefCell<mcx::PgVec<'mcx, Option<Node<'mcx>>>>,
     // C rcon->relids: the subquery's rels including inner-join relids.
     sub_relids: &'a types_nodes::Bitmapset<'mcx>,
+    // The target RTE's eref (C rcon->target_rte through expandRTE): RECORD
+    // whole-row expansion carries its aliases as RowExpr colnames.
+    eref: Option<&'mcx types_nodes::primnodes::Alias<'mcx>>,
 }
 
 // pullup_replace_vars → pullup_replace_vars_callback (prepjointree.c) over
@@ -1407,20 +1411,37 @@ fn replace_var_expr_su<'mcx>(
                     }
                 }
                 let gen = if v.varattno == 0 {
-                    // ReplaceVarFromTargetList's whole-row arm, named-rowtype
-                    // leg: RowExpr over the subquery outputs (RECORD/join legs
-                    // stay loud).
-                    if v.vartype == types_core::catalog::RECORDOID {
-                        panic!(
-                            "ReplaceVarFromTargetList (rewriteManip.c): RECORD whole-row \
-                             Var expansion not ported"
-                        );
-                    }
+                    // pullup_replace_vars_callback's whole-row arm (via
+                    // expandRTE): RowExpr over the subquery's non-junk
+                    // outputs. The RECORD leg carries the RTE's eref aliases
+                    // as colnames, one per non-junk output (expandRTE's
+                    // RTE_SUBQUERY walk).
+                    let mut eref_names = if v.vartype == types_core::catalog::RECORDOID {
+                        let eref = ph.and_then(|p| p.eref).unwrap_or_else(|| {
+                            panic!(
+                                "pullup_replace_vars_callback (prepjointree.c): RECORD \
+                                 whole-row Var over an eref-less pull-up"
+                            )
+                        });
+                        Some(eref.colnames.iter())
+                    } else {
+                        None
+                    };
                     let mut args = NodeList::nil();
+                    let mut colnames = NodeList::nil();
                     for tle_node in tlist {
                         let tle = tle_node.as_target_entry().expect("tlist cell");
                         if tle.resjunk {
                             continue;
+                        }
+                        if let Some(names) = eref_names.as_mut() {
+                            let name = names.next().unwrap_or_else(|| {
+                                panic!(
+                                    "expandRTE (parse_relation.c): eref colnames shorter \
+                                     than the subquery targetlist"
+                                )
+                            });
+                            colnames.lappend(mcx, rewrite_manip::copy_node(mcx, name)?)?;
                         }
                         args.lappend(mcx, copy_expr(mcx, tle.expr, 0)?)?;
                     }
@@ -1430,7 +1451,7 @@ fn replace_var_expr_su<'mcx>(
                             args,
                             row_typeid: v.vartype,
                             row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
-                            colnames: NodeList::nil(),
+                            colnames,
                             location: v.location,
                         },
                     )?
@@ -3174,6 +3195,8 @@ pub fn expand_virtual_generated_columns<'mcx>(
             last_ph_id: &last_ph_id,
             rv_cache: &rv_cache,
             sub_relids: &empty_relids,
+            // Relation-backed expansion: whole-row Vars are named rowtypes.
+            eref: None,
         };
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
             replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
