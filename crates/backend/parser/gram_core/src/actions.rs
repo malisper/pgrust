@@ -5893,6 +5893,21 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 289;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterTableStmt: ALTER FOREIGN TABLE [IF_P EXISTS] relation_expr
+            // alter_table_cmds
+            294 | 295 => {
+                let (rv, cmds) = if rule == 294 {
+                    (view.v(4), view.v(5))
+                } else {
+                    (view.v(6), view.v(7))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("relation_expr").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_FOREIGN_TABLE;
+                n.missing_ok = rule == 295;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // partition_cmd: ATTACH PARTITION qualified_name PartitionBoundSpec
             //             | DETACH PARTITION qualified_name opt_concurrently
             //             | DETACH PARTITION qualified_name FINALIZE
@@ -8138,9 +8153,21 @@ impl<'mcx> Parser<'mcx> {
                 n.objects = view.v(2).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // privilege_target FOREIGN DATA WRAPPER name_list / FOREIGN SERVER
+            // name_list.
+            1049 | 1050 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = if rule == 1049 {
+                    ObjectType::OBJECT_FDW
+                } else {
+                    ObjectType::OBJECT_FOREIGN_SERVER
+                };
+                n.objects = view.v(if rule == 1049 { 4 } else { 3 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // privilege_target DATABASE/DOMAIN/LANGUAGE/LARGE OBJECT/SCHEMA/
-            // TABLESPACE/TYPE forms (FDW 1049 / SERVER 1050 stay louds: fdw
-            // lanes).
+            // TABLESPACE/TYPE forms.
             1054 | 1055 | 1056 | 1057 | 1059 | 1060 | 1061 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
