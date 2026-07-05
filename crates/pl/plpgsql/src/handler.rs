@@ -1,6 +1,6 @@
 // pl_handler.c + pl_comp.c's plpgsql_compile / do_compile + pl_exec.c's
-// plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks,
-// event triggers and polymorphic signatures are named louds. GUC-backed compile options
+// plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks and VARIADIC
+// parameters are named louds. GUC-backed compile options
 // (plpgsql.variable_conflict, ...) read their C-source defaults; SET on the
 // unregistered custom GUCs is loud at the GUC layer.
 use std::collections::HashMap;
@@ -44,21 +44,20 @@ const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
 
 fn is_polymorphic(t: Oid) -> bool {
-    // pseudotypes.dat polymorphic set.
+    // IsPolymorphicType (pg_type.h); excludes ANYOID as C does.
     matches!(
         t,
-        2276 /* any */
-            | 2277 /* anyarray */
+        2277 /* anyarray */
             | 2283 /* anyelement */
             | 2776 /* anynonarray */
             | 3500 /* anyenum */
             | 3831 /* anyrange */
-            | 4537 /* anycompatible */
-            | 4538 /* anycompatiblearray */
-            | 4539 /* anycompatiblenonarray */
-            | 4540 /* anycompatiblerange */
-            | 4642 /* anymultirange */
-            | 4643 /* anycompatiblemultirange */
+            | 4537 /* anymultirange */
+            | 4538 /* anycompatiblemultirange */
+            | 5077 /* anycompatible */
+            | 5078 /* anycompatiblearray */
+            | 5079 /* anycompatiblenonarray */
+            | 5080 /* anycompatiblerange */
     )
 }
 
@@ -72,10 +71,12 @@ struct FuncCacheEntry {
 }
 
 std::thread_local! {
-    // Keyed by (fn_oid, input_collation, is_trigger, trigger oid): C's
-    // hashkey fields (funccache.c compute_function_hashkey) — per-trigger
-    // entries allow different relation rowtypes per usage.
-    static FUNC_CACHE: core::cell::RefCell<FxHashMap<(Oid, Oid, bool, Oid), FuncCacheEntry>> =
+    // Keyed by (fn_oid, input_collation, is_trigger, trigger oid, resolved
+    // input argtypes): funccache.c compute_function_hashkey — per-trigger
+    // entries allow different relation rowtypes per usage; the argtypes
+    // component separates polymorphic/RECORD instantiations and stays empty
+    // for signatures that cannot vary.
+    static FUNC_CACHE: core::cell::RefCell<FxHashMap<(Oid, Oid, bool, Oid, Vec<Oid>), FuncCacheEntry>> =
         core::cell::RefCell::new(FxHashMap::default());
 }
 
@@ -99,13 +100,15 @@ fn plpgsql_compile(
     fn_collation: Oid,
     for_validator: bool,
     kind: CallKind,
+    call_expr: Option<types_nodes::node_tree::Node<'static>>,
 ) -> PgResult<FuncCacheEntry> {
-    let (cur_xmin, cur_tid) = proc_row_stamp(fn_oid)?;
+    let (cur_xmin, cur_tid, key_argtypes) =
+        proc_call_stamp(fn_oid, call_expr, for_validator)?;
     let (is_trigger, trig_oid) = match kind {
         CallKind::Function => (false, types_core::InvalidOid),
         CallKind::Trigger(oid) => (true, oid),
     };
-    let key = (fn_oid, fn_collation, is_trigger, trig_oid);
+    let key = (fn_oid, fn_collation, is_trigger, trig_oid, key_argtypes);
     let cached = FUNC_CACHE.with(|c| c.borrow().get(&key).cloned());
     if let Some(entry) = cached {
         if entry.func.fn_xmin == cur_xmin && entry.func.fn_tid == cur_tid {
@@ -129,6 +132,7 @@ fn plpgsql_compile(
         cur_tid,
         for_validator,
         is_trigger,
+        call_expr,
     )?);
     let entry = FuncCacheEntry { func, use_count: Rc::new(core::cell::Cell::new(0)) };
     if !for_validator {
@@ -139,7 +143,14 @@ fn plpgsql_compile(
     Ok(entry)
 }
 
-fn proc_row_stamp(fn_oid: Oid) -> PgResult<(u32, (u32, u16))> {
+// Tuple stamp + the hashkey argtypes component of funccache.c
+// compute_function_hashkey: input argtypes resolved through the call
+// expression when the signature can vary per call, empty otherwise.
+fn proc_call_stamp(
+    fn_oid: Oid,
+    call_expr: Option<types_nodes::node_tree::Node<'static>>,
+    for_validator: bool,
+) -> PgResult<(u32, (u32, u16), Vec<Oid>)> {
     let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))? else {
         return Err(crate::exec::exec_err(
             types_error::ERRCODE_UNDEFINED_FUNCTION,
@@ -153,8 +164,39 @@ fn proc_row_stamp(fn_oid: Oid) -> PgResult<(u32, (u32, u16))> {
         t.t_self.ip_posid,
     );
     drop(t);
+    let stamp_result = (|| -> PgResult<Vec<Oid>> {
+        let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
+        // SAFETY: proargtypes is a not-null plain-storage oidvector; the
+        // values tail follows the 24-byte header in place, dim1 long.
+        let args = unsafe {
+            let p = argv.as_usize() as *const array::oidvector;
+            core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
+        };
+        if !args.iter().any(|&t| {
+            is_polymorphic(t) || t == RECORDOID || t == types_core::RECORDARRAYOID
+        }) {
+            return Ok(Vec::new());
+        }
+        let mut argtypes = args.to_vec();
+        let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
+        // SAFETY: NameData attr from the live pinned syscache tuple — 64
+        // NUL-padded bytes.
+        let nbytes =
+            unsafe { core::slice::from_raw_parts(proname_d.as_usize() as *const u8, 64) };
+        let nlen = nbytes.iter().position(|&b| b == 0).unwrap_or(64);
+        let proname =
+            core::str::from_utf8(&nbytes[..nlen]).expect("proname is server-encoding text");
+        funcapi::cfunc_resolve_polymorphic_argtypes(
+            &mut argtypes,
+            &[],
+            call_expr,
+            for_validator,
+            proname,
+        )?;
+        Ok(argtypes)
+    })();
     ReleaseSysCache(tup);
-    Ok((xmin, tid))
+    Ok((xmin, tid, stamp_result?))
 }
 
 struct ProcInfo {
@@ -325,8 +367,9 @@ fn do_compile(
     fn_tid: (u32, u16),
     for_validator: bool,
     is_dml_trigger: bool,
+    call_expr: Option<types_nodes::node_tree::Node<'static>>,
 ) -> PgResult<PlFunction> {
-    let proc = read_proc_row(fn_oid)?;
+    let mut proc = read_proc_row(fn_oid)?;
     // plpgsql_compile_error_callback covers header processing too: pre-parse
     // errors report "near line 1" (scanner initialized, nothing consumed).
     let hdr_ctx = |e: Box<types_error::PgError>| {
@@ -339,10 +382,6 @@ fn do_compile(
             "trigger functions can only be called as triggers".to_string(),
         )));
     }
-    if is_polymorphic(proc.rettype) || proc.argtypes.iter().any(|&t| is_polymorphic(t)) {
-        panic!("plpgsql_compile: polymorphic signatures unported (function {fn_oid})");
-    }
-
     let mut comp = CompState::new();
     // Outermost level: named after the function; holds params and FOUND.
     comp.ns_push_label(Some(&proc.proname), crate::gram::LABEL_BLOCK);
@@ -352,7 +391,7 @@ fn do_compile(
     let mut out_param_varno: Dno = -1;
     let mut new_varno: Dno = -1;
     let mut old_varno: Dno = -1;
-    let rettypeid;
+    let mut rettypeid;
     let fn_retistuple;
     let fn_retisdomain;
     let fn_rettyplen;
@@ -442,6 +481,15 @@ fn do_compile(
         const PROARGMODE_INOUT: i8 = b'b' as i8;
         const PROARGMODE_VARIADIC: i8 = b'v' as i8;
         const PROARGMODE_TABLE: i8 = b't' as i8;
+        funcapi::cfunc_resolve_polymorphic_argtypes(
+            &mut proc.argtypes,
+            &proc.argmodes,
+            call_expr,
+            for_validator,
+            &proc.proname,
+        )
+        .map_err(|e| hdr_ctx(e))?;
+
         let mut out_arg_variables: Vec<Dno> = Vec::new();
         for (i, &argtypeid) in proc.argtypes.iter().enumerate() {
             let argmode = proc.argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
@@ -479,6 +527,7 @@ fn do_compile(
             }
         }
 
+        let num_out_args = out_arg_variables.len();
         // out_param_varno: one OUT param is itself; several build a row.
         if out_arg_variables.len() > 1
             || (out_arg_variables.len() == 1 && proc.prokind == b'p' as i8)
@@ -488,8 +537,39 @@ fn do_compile(
             out_param_varno = out_arg_variables[0];
         }
 
-        // Return type checks.
+        // Return type checks; polymorphic returns resolve through the call
+        // expression, or the int4 family in validation mode (pl_comp.c:398).
         rettypeid = proc.rettype;
+        if is_polymorphic(rettypeid) {
+            const ANYARRAYOID: Oid = 2277;
+            const ANYRANGEOID: Oid = 3831;
+            const ANYMULTIRANGEOID: Oid = 4537;
+            const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+            const ANYCOMPATIBLERANGEOID: Oid = 5080;
+            const INT4ARRAYOID: Oid = 1007;
+            const INT4RANGEOID: Oid = 3904;
+            const INT4MULTIRANGEOID: Oid = 4451;
+            if for_validator {
+                rettypeid = match rettypeid {
+                    ANYARRAYOID | ANYCOMPATIBLEARRAYOID => INT4ARRAYOID,
+                    ANYRANGEOID | ANYCOMPATIBLERANGEOID => INT4RANGEOID,
+                    ANYMULTIRANGEOID => INT4MULTIRANGEOID,
+                    _ => types_core::INT4OID,
+                };
+            } else {
+                rettypeid =
+                    call_expr.map_or(types_core::InvalidOid, funcapi::get_call_expr_rettype);
+                if !OidIsValid(rettypeid) {
+                    return Err(hdr_ctx(crate::exec::exec_err(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "could not determine actual return type for polymorphic function \"{}\"",
+                            proc.proname
+                        ),
+                    )));
+                }
+            }
+        }
         let rettyptype = lsyscache::typ::get_typtype(rettypeid)?;
         if rettyptype == TYPTYPE_PSEUDO && rettypeid != VOIDOID && rettypeid != RECORDOID {
             return Err(hdr_ctx(crate::exec::exec_err(
@@ -505,6 +585,16 @@ fn do_compile(
         let (l, bv) = lsyscache::typ::get_typlenbyval(rettypeid)?;
         fn_rettyplen = l;
         fn_retbyval = bv;
+        // $0 references the resolved return type, only for polymorphic
+        // returns not delivered through OUT params (pl_comp.c:469).
+        if is_polymorphic(proc.rettype) && num_out_args == 0 {
+            comp.build_variable(
+                "$0",
+                0,
+                CompState::build_datatype(rettypeid, -1, fn_collation)?,
+                true,
+            )?;
+        }
         fn_is_trigger = FnTrigger::NotTrigger;
     }
 
@@ -695,7 +785,8 @@ fn plpgsql_call_handler(
             Some(td) => CallKind::Trigger(td.tg_trigger.tgoid),
             None => CallKind::Function,
         };
-        let entry = plpgsql_compile(fn_oid, fcinfo.fncollation, false, kind)?;
+        let call_expr = flinfo.as_ref().and_then(|f| funcapi::call_expr_node(f));
+        let entry = plpgsql_compile(fn_oid, fcinfo.fncollation, false, kind, call_expr)?;
         entry.use_count.set(entry.use_count.get() + 1);
         let r = match (entry.func.fn_is_trigger, trigdata, evtrigdata) {
             (FnTrigger::DmlTrigger, Some(td), None) => {
@@ -825,10 +916,42 @@ fn plpgsql_validator(
     // fast path per repo convention (sql validator precedent).
 
     let info = read_proc_row(funcoid)?;
-    if is_polymorphic(info.rettype) || info.argtypes.iter().any(|&t| is_polymorphic(t)) {
-        panic!("plpgsql_validator: polymorphic signatures unported (function {funcoid})");
+    // Pseudotype result disallowed except TRIGGER, EVTTRIGGER, RECORD, VOID,
+    // or polymorphic; pseudotype args except RECORD or polymorphic.
+    let functyptype = lsyscache::typ::get_typtype(info.rettype)?;
+    let mut is_dml_trigger = false;
+    if functyptype == TYPTYPE_PSEUDO
+        && info.rettype != RECORDOID
+        && info.rettype != VOIDOID
+        && !is_polymorphic(info.rettype)
+    {
+        if info.rettype == TRIGGEROID {
+            is_dml_trigger = true;
+        } else if info.rettype != EVENT_TRIGGEROID {
+            return Err(crate::exec::exec_err(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "PL/pgSQL functions cannot return type {}",
+                    format_type::format_type_be(info.rettype)?
+                ),
+            ));
+        }
     }
-    let kind = if info.rettype == TRIGGEROID {
+    for &t in &info.argtypes {
+        if lsyscache::typ::get_typtype(t)? == TYPTYPE_PSEUDO
+            && t != RECORDOID
+            && !is_polymorphic(t)
+        {
+            return Err(crate::exec::exec_err(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "PL/pgSQL functions cannot accept type {}",
+                    format_type::format_type_be(t)?
+                ),
+            ));
+        }
+    }
+    let kind = if is_dml_trigger {
         CallKind::Trigger(types_core::InvalidOid)
     } else {
         CallKind::Function
@@ -837,7 +960,7 @@ fn plpgsql_validator(
     if guc_check_function_bodies() {
         let rc = spi::SPI_connect_ext(0)?;
         assert_eq!(rc, spi::SPI_OK_CONNECT, "SPI_connect failed");
-        let r = plpgsql_compile(funcoid, types_core::InvalidOid, true, kind);
+        let r = plpgsql_compile(funcoid, types_core::InvalidOid, true, kind, None);
         let _ = spi::SPI_finish()?;
         r?;
     }

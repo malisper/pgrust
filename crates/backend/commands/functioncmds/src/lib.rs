@@ -1,7 +1,7 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
 // WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal+C+plpgsql,
-// %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION, DO.
+// %TYPE / typmod TypeNames, ALTER/DROP FUNCTION, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -267,9 +267,6 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
     if !tn.typmods.is_nil() || tn.typemod != -1 {
         unported("type modifiers on function signature types");
     }
-    if !tn.arrayBounds.is_nil() {
-        unported("array-bound TypeNames on function signatures");
-    }
     if tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid");
     }
@@ -299,6 +296,13 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
             }
             found
         }
+    };
+    // LookupTypeNameExtended (parse_type.c): an array reference yields the
+    // array type of the base.
+    let typoid = if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
+        lsyscache::get_array_type(typoid)?
+    } else {
+        typoid
     };
     Ok((typoid, typname))
 }

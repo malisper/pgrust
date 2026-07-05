@@ -34,3 +34,5 @@ dfmgr = { path = "../../utils/fmgr/dfmgr" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 xact = { path = "../../access/transam/xact" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
