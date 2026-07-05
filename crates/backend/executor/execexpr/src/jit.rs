@@ -113,6 +113,9 @@ static OPEN_SESSIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 /// Opens a compile window (nestable: SPI executors inside InitPlan).
 pub fn session_begin(flags: i32) {
     OPEN_SESSIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if log_enabled() {
+        eprintln!("jitq session begin: flags={flags:#x}");
+    }
     SESSION.with(|s| {
         let prev = s.borrow_mut().take().map(Box::new);
         *s.borrow_mut() = Some(SessionState {
@@ -171,6 +174,9 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
         return;
     };
     stats().compiled.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if log_enabled() {
+        eprintln!("jitq compile: {} steps, {} bytes", state.steps().len(), words.len() * 4);
+    }
     // SAFETY: block holds a complete kernel starting at base, RX-mapped.
     let entry: KernelFn = unsafe { core::mem::transmute(block.base()) };
     let nanos = t0.elapsed().as_nanos() as u64;
@@ -199,12 +205,16 @@ pub fn stats() -> &'static JitStats {
     STATS.get_or_init(JitStats::default)
 }
 
+fn log_enabled() -> bool {
+    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOG.get_or_init(|| {
+        matches!(std::env::var("PGRUST_JITQ_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
+    })
+}
+
 fn note_refusal(state: &ExprState<'_>) {
     stats().refused.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *LOG.get_or_init(|| {
-        matches!(std::env::var("PGRUST_JITQ_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
-    }) {
+    if log_enabled() {
         for s in state.steps() {
             if !emit::step_supported(s) {
                 let d = format!("{s:?}");
