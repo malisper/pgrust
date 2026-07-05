@@ -1760,4 +1760,13 @@ pub fn init_seams() {
     });
     guc_tables::hooks::check_synchronized_standby_slots.install(check_synchronized_standby_slots);
     guc_tables::hooks::assign_synchronized_standby_slots.install(assign_synchronized_standby_slots);
+    // C home: slotsync.c `bool sync_replication_slots` (slotsync.c unported;
+    // the postmaster serverloop reads it in hot standby).
+    guc_tables::vars::sync_replication_slots.install(guc_tables::GucVarAccessors {
+        get: || SYNC_REPLICATION_SLOTS.load(std::sync::atomic::Ordering::Relaxed),
+        set: |v| SYNC_REPLICATION_SLOTS.store(v, std::sync::atomic::Ordering::Relaxed),
+    });
 }
+
+static SYNC_REPLICATION_SLOTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
