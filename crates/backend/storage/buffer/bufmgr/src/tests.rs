@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Once;
 
 use init_small::globals;
-use types_core::{ForkNumber, BLCKSZ, INVALID_PROC_NUMBER};
+use types_core::{ForkNumber, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
 use types_error::PgError;
 use types_storage::buf::{
     BufferAccessStrategyType, BM_DIRTY, BM_LOCKED, BM_VALID, BUF_REFCOUNT_MASK,
