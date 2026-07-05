@@ -1857,6 +1857,7 @@ dependencies = [
 name = "brin_inclusion"
 version = "0.1.0"
 dependencies = [
+ "adt_scalar",
  "datum",
  "fmgr_core",
  "lsyscache",
