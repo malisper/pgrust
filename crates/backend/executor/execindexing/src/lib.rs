@@ -803,6 +803,7 @@ fn check_exclusion_or_unique_constraint<'mcx>(
 
             if scan.xs_recheck
                 && !index_recheck_constraint(
+                    mcx,
                     index_relation,
                     &constr_procs,
                     &existing_values,
@@ -985,6 +986,7 @@ pub fn check_exclusion_constraint<'mcx>(
 // index_recheck_constraint (execIndexing.c): exclusion operators assumed
 // strict; returns true on a real conflict.
 fn index_recheck_constraint(
+    mcx: Mcx<'_>,
     index: &Relation<'_>,
     constr_procs: &[Oid],
     existing_values: &[Datum],
@@ -996,9 +998,13 @@ fn index_recheck_constraint(
         if existing_isnull[i] {
             return Ok(false);
         }
-        let matched = fmgr_core::oid_function_call2_coll(
-            constr_procs[i],
+        // Armed frame: bool-returning operators may still detoast args in the
+        // result mcx (multirange_eq/overlaps).
+        let mut finfo = fmgr_core::fmgr_info(constr_procs[i])?;
+        let matched = fmgr_core::function_call2_coll_in(
+            &mut finfo,
             index.rd_indcollation[i],
+            mcx,
             existing_values[i],
             new_values[i],
         )?
