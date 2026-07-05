@@ -145,7 +145,7 @@ fn option_list_to_array<'mcx>(
 }
 
 /// transformGenericOptions (foreigncmds.c).
-pub(crate) fn transformGenericOptions<'mcx>(
+pub fn transformGenericOptions<'mcx>(
     mcx: Mcx<'mcx>,
     catalog_id: Oid,
     old_options: Option<Datum>,

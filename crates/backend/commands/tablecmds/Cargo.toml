@@ -36,6 +36,7 @@ catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 event_trigger = { path = "../event_trigger" }
 inval = { path = "../../utils/cache/inval" }
+foreigncmds = { path = "../foreigncmds" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }

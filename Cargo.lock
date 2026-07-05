@@ -14313,6 +14313,7 @@ dependencies = [
  "exectuples",
  "fmgr_core",
  "fmgr_seams",
+ "foreigncmds",
  "format_type",
  "genam",
  "heapam",
