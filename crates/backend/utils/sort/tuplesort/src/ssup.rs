@@ -117,10 +117,12 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         }
         SortComparator::Float32 => ::adt_float::float4_cmp_internal(x.as_f32(), y.as_f32()),
         SortComparator::Float64 => ::adt_float::float8_cmp_internal(x.as_f64(), y.as_f64()),
-        // SAFETY: TextC contract (enum doc) — both datums are live untoasted
-        // varlena pointers owned by the sort's tuplecontext.
+        // SAFETY: TextC contract (enum doc) — both datums are live varlena
+        // pointers owned by the sort's tuplecontext.
         SortComparator::TextC => unsafe {
-            varlena::varstrfastcmp_c(varlena_payload(x), varlena_payload(y))
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| varlena::varstrfastcmp_c(a, b))
+            })
         },
         // SAFETY: Interval contract (enum doc) — live 16-byte images.
         SortComparator::Interval => unsafe {
@@ -130,7 +132,9 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         },
         // SAFETY: as TextC (all three arms).
         SortComparator::BpcharC => unsafe {
-            varlena::bpcharfastcmp_c(varlena_payload(x), varlena_payload(y))
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| varlena::bpcharfastcmp_c(a, b))
+            })
         },
         SortComparator::NameC => {
             // SAFETY: name datums point at live 64-byte NameData blocks.
@@ -144,11 +148,15 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         }
         // SAFETY: as TextC.
         SortComparator::TextLocale(locale) => unsafe {
-            varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, false)
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| varstrfastcmp_locale(a, b, locale, false))
+            })
         },
         // SAFETY: as TextC.
         SortComparator::BpcharLocale(locale) => unsafe {
-            varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, true)
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| varstrfastcmp_locale(a, b, locale, true))
+            })
         },
         // SAFETY: Uuid contract (enum doc) — live 16-byte images.
         SortComparator::Uuid => unsafe {
@@ -156,16 +164,23 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let b = &*(y.as_usize() as *const ::adt_uuid::PgUuid);
             ::adt_uuid::uuid_internal_cmp(a, b)
         },
-        // SAFETY: Network contract (enum doc) — live untoasted inet varlenas.
+        // SAFETY: Network contract (enum doc) — live inet varlenas.
         SortComparator::Network => unsafe {
-            ::adt_network::network_cmp_internal(
-                ::adt_network::InetRef::from_payload(varlena_payload(x)),
-                ::adt_network::InetRef::from_payload(varlena_payload(y)),
-            )
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| {
+                    ::adt_network::network_cmp_internal(
+                        ::adt_network::InetRef::from_payload(a),
+                        ::adt_network::InetRef::from_payload(b),
+                    )
+                })
+            })
         },
-        // SAFETY: Numeric contract (enum doc) — live untoasted numeric varlenas.
+        // SAFETY: Numeric contract (enum doc) — live numeric varlenas (short
+        // or long numeric format).
         SortComparator::Numeric => unsafe {
-            ::adt_numeric::sortsupport::numeric_fast_cmp(varlena_payload(x), varlena_payload(y))
+            with_varlena_payload(x, |a| {
+                with_varlena_payload(y, |b| ::adt_numeric::sortsupport::numeric_fast_cmp(a, b))
+            })
         },
         SortComparator::NumericAbbrev => {
             let (x, y) = (x.as_i64(), y.as_i64());
@@ -254,28 +269,35 @@ fn bpchartruelen(s: &[u8]) -> &[u8] {
 }
 
 /// # Safety
-/// `d` points at a live untoasted varlena (short 1B or full 4B header).
+/// `d` points at a live varlena of any form, readable through its header.
+/// `DatumGetVarStringPP` + `VARDATA_ANY` (varlena.c fastcmp/abbrev entries):
+/// plain and short forms borrow in place; compressed/external detoast into a
+/// scratch context dropped on return — C's comparator-local pfree.
 #[inline]
-pub(crate) unsafe fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
-    use ::types_tuple::varatt::{
-        varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b,
-    };
+pub(crate) unsafe fn with_varlena_payload<R>(d: Datum, f: impl FnOnce(&[u8]) -> R) -> R {
+    use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b};
     let p = d.as_usize() as *const u8;
-    if varatt_is_1b_e(p) {
-        // Ordered-agg datum sorts can carry toast pointers; C detoasts in
-        // bttextfastcmp (DatumGetTextPP) — loud until that lane lands.
-        panic!("varstrfastcmp: external/toasted varlena sort key (detoast-in-comparator lane)");
+    if varatt_is_1b_e(p) || (*p & 0x03) == 0x02 {
+        return detoast_payload(p, f);
     }
     if varatt_is_1b(p) {
-        core::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1)
+        f(core::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1))
     } else {
-        // Compressed inline would memcmp the compressed image (C decompresses).
-        assert!(
-            varatt_is_4b_u(p),
-            "varstrfastcmp: inline-compressed varlena sort key (detoast-in-comparator lane)"
-        );
-        core::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4)
+        f(core::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4))
     }
+}
+
+/// # Safety
+/// `p` heads a live external or inline-compressed varlena image.
+#[cold]
+unsafe fn detoast_payload<R>(p: *const u8, f: impl FnOnce(&[u8]) -> R) -> R {
+    let scratch = ::mcx::MemoryContext::new_bump("varstr cmp detoast");
+    let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+    let img = ::detoast_seams::detoast_attr::call(scratch.mcx(), raw)
+        // Infallible qsort plumbing above; a detoast failure is C's
+        // ereport-out-of-sort.
+        .unwrap_or_else(|e| panic!("sort key detoast failed: {}", e.message()));
+    f(&img[4..])
 }
 
 /// `ApplySortComparator` (sortsupport.h); `cmp` is passed separately so each
