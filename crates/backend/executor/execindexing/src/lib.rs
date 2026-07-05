@@ -19,7 +19,7 @@ use ::types_tuple::ItemPointerData;
 mod tests;
 
 mod build_scan;
-pub use build_scan::table_index_build_scan;
+pub use build_scan::{table_index_build_range_scan, table_index_build_scan};
 mod validate_scan;
 pub use validate_scan::{table_index_validate_scan, ValidateIndexState};
 

@@ -1,6 +1,6 @@
 //! brin.c: the BRIN index access method (build, insert, bitmap scan).
-//! Loud lanes: summarize/desummarize SQL paths, autosummarize, vacuum,
-//! parallel build, reloptions, inclusion/bloom opclasses.
+//! Summarize/desummarize SQL paths live in brin_funcs/brin_build. Loud
+//! lanes: autosummarize, vacuum, parallel build, reloptions.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -593,8 +593,7 @@ fn check_null_keys(bval: &BrinValues, nullkeys: &[&ScanKeyData]) -> bool {
     true
 }
 
-/// union_tuples (summarize_range's merge step; the summarize lanes are loud,
-/// so this is exercised only by tests until they land).
+/// union_tuples (summarize_range's merge step).
 pub fn union_tuples(bdesc: &BrinDesc<'_>, a: &mut BrinMemTuple, b: &[u8]) -> PgResult<()> {
     let mut db = brin_new_memtuple(bdesc);
     brin_deform_tuple(bdesc, b, &mut db)?;
@@ -691,17 +690,12 @@ fn disk_attr_for(bdesc: &BrinDesc<'_>, keyno: usize, i: usize) -> (bool, i16) {
     (att.attbyval, att.attlen)
 }
 
-/// summarize_range/brinsummarize and the SQL entry points are loud lanes.
-pub fn brinsummarize(_index: &Relation<'_>, _heapRel: &Relation<'_>) -> ! {
-    unported("brinsummarize (brin.c; summarize lane)")
-}
-
 pub fn brinbulkdelete() -> ! {
     unported("brinbulkdelete (vacuum lane)")
 }
 
 pub fn brinvacuumcleanup() -> ! {
-    unported("brinvacuumcleanup (vacuum lane; calls brinsummarize)")
+    unported("brinvacuumcleanup (vacuum lane; brinsummarize itself is ported in brin_build)")
 }
 
 pub fn brinoptions() -> ! {

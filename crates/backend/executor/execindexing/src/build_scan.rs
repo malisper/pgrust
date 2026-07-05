@@ -1,11 +1,11 @@
-// heapam_index_build_range_scan (heapam_handler.c), serial non-concurrent
-// whole-relation lane; boundary hoisted above heapam_handler (execindexing
-// already sits above the AM stack — a heapam_handler home would cycle).
+// heapam_index_build_range_scan (heapam_handler.c), serial lane; boundary
+// hoisted above heapam_handler (execindexing already sits above the AM stack
+// — a heapam_handler home would cycle).
 // Loud: concurrent builds, parallel scans, foreign in-progress xacts
-// (XactLockTableWait lane).
+// (XactLockTableWait lane; "anyvisible" mode indexes those without waiting).
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
-use ::types_core::{INDEX_MAX_KEYS, InvalidBlockNumber};
+use ::types_core::{BlockNumber, INDEX_MAX_KEYS, InvalidBlockNumber};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
 use ::types_slot::SlotData;
@@ -23,6 +23,34 @@ pub fn table_index_build_scan<'mcx, F>(
     index_relation: &Relation<'mcx>,
     index_info: &mut IndexInfo<'mcx>,
     allow_sync: bool,
+    callback: F,
+) -> PgResult<f64>
+where
+    F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
+{
+    table_index_build_range_scan(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        allow_sync,
+        false,
+        0,
+        InvalidBlockNumber,
+        callback,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn table_index_build_range_scan<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    allow_sync: bool,
+    anyvisible: bool,
+    start_blockno: BlockNumber,
+    numblocks: BlockNumber,
     mut callback: F,
 ) -> PgResult<f64>
 where
@@ -31,6 +59,10 @@ where
     let concurrent = index_info.ii_Concurrent;
     let is_system_catalog = catalog::IsSystemRelation(heap_relation);
     let checking_uniqueness = index_info.ii_Unique || index_info.ii_HasExclusion;
+    // C: "any visible" is incompatible with uniqueness checks and only valid
+    // under SnapshotAny (non-concurrent).
+    debug_assert!(!(anyvisible && checking_uniqueness));
+    debug_assert!(!(anyvisible && concurrent));
 
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,
@@ -67,6 +99,13 @@ where
         None,
         flags,
     )?;
+
+    if !allow_sync {
+        heapam::heap_setscanlimits(&mut scan, start_blockno, numblocks);
+    } else {
+        // C: syncscan can only be requested on the whole relation.
+        debug_assert!(start_blockno == 0 && numblocks == InvalidBlockNumber);
+    }
 
     let mut reltuples = 0.0f64;
     let mut root_blkno = InvalidBlockNumber;
@@ -123,6 +162,11 @@ where
                     }
                     tuple_is_alive = false;
                 }
+                HEAPTUPLE_INSERT_IN_PROGRESS if anyvisible => {
+                    index_it = true;
+                    tuple_is_alive = true;
+                    reltuples += 1.0;
+                }
                 HEAPTUPLE_INSERT_IN_PROGRESS => {
                     let xwait = tuple.t_data().xmin();
                     if !xact::TransactionIdIsCurrentTransactionId(xwait) {
@@ -142,6 +186,11 @@ where
                     }
                     index_it = true;
                     tuple_is_alive = true;
+                }
+                HEAPTUPLE_DELETE_IN_PROGRESS if anyvisible => {
+                    index_it = true;
+                    tuple_is_alive = false;
+                    reltuples += 1.0;
                 }
                 HEAPTUPLE_DELETE_IN_PROGRESS => {
                     let xwait = heapam::HeapTupleHeaderGetUpdateXid(tuple.t_data())?;
