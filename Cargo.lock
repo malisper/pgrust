@@ -3398,6 +3398,7 @@ dependencies = [
  "elog",
  "execmain",
  "execmain_seams",
+ "execreplication_seams",
  "exectuples",
  "executils",
  "explain",

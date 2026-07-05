@@ -93,6 +93,7 @@ condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams
 controldata_utils = { path = "../../../common/controldata_utils" }
 deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
 execmain = { path = "../../executor/execmain" }
+execreplication_seams = { path = "../../executor/execreplication_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 executils = { path = "../../executor/executils" }
 exectuples = { path = "../../executor/exectuples" }
