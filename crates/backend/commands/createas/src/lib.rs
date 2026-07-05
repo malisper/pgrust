@@ -59,13 +59,13 @@ pub fn ExecCreateTableAs<'mcx>(
     params: ParamListHandle,
     query_env: QueryEnvHandle,
     mut qc: Option<&mut QueryCompletion>,
-) -> PgResult<()> {
+) -> PgResult<Oid> {
     let into_node = stmt.into.expect("CreateTableAsStmt.into");
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
     let is_matview = into.viewQuery.is_some();
 
     if CreateTableAsRelExists(mcx, stmt)? {
-        return Ok(());
+        return Ok(InvalidOid);
     }
 
     let query_node = stmt.query.expect("CreateTableAsStmt.query");
@@ -86,8 +86,13 @@ pub fn ExecCreateTableAs<'mcx>(
             .expect("CTAS utility query is EXECUTE (excluded by syntax)");
         let mut dest = tcop_dest::DestReceiver::IntoRel(IntoRelState::new(mcx, into_node));
         let r = prepare::ExecuteQuery(mcx, estmt, source_text, params, Some(into), &mut dest, qc);
+        let relid = match &dest {
+            tcop_dest::DestReceiver::IntoRel(st) => st.reladdr,
+            _ => unreachable!(),
+        };
         dest.destroy();
-        return r;
+        r?;
+        return Ok(relid);
     }
     debug_assert!(query.commandType == CmdType::CMD_SELECT);
 
@@ -108,15 +113,14 @@ pub fn ExecCreateTableAs<'mcx>(
                 qc.as_deref_mut(),
             )?;
         }
-        return Ok(());
+        return Ok(relid);
     }
 
     if into.skipData {
         // WITH NO DATA skips rewriter/planner/executor entirely; the portal's
         // parse-time tag (CREATE TABLE AS / SELECT INTO) reaches the client.
         let mut query = query;
-        create_ctas_nodata(mcx, &mut query, into_node, false)?;
-        return Ok(());
+        return create_ctas_nodata(mcx, &mut query, into_node, false);
     }
 
     let mut dest = tcop_dest::DestReceiver::IntoRel(IntoRelState::new(mcx, into_node));
@@ -168,9 +172,13 @@ pub fn ExecCreateTableAs<'mcx>(
     qd_owner.disarm();
     execmain_seams::free_query_desc::call(qd);
     snapmgr::PopActiveSnapshot()?;
+    let relid = match &dest {
+        tcop_dest::DestReceiver::IntoRel(st) => st.reladdr,
+        _ => unreachable!(),
+    };
     dest.destroy();
 
-    Ok(())
+    Ok(relid)
 }
 
 pub fn GetIntoRelEFlags(into: &IntoClause<'_>) -> i32 {

@@ -38,7 +38,7 @@ pub fn CreateTrigger<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTrigStmt<'mcx>,
     query_string: &str,
-) -> PgResult<()> {
+) -> PgResult<Oid> {
     CreateTriggerFiringOn(
         mcx,
         stmt,
@@ -53,8 +53,7 @@ pub fn CreateTrigger<'mcx>(
         false,
         false,
         TRIGGER_FIRES_ON_ORIGIN,
-    )?;
-    Ok(())
+    )
 }
 
 pub fn get_trigger_oid<'mcx>(

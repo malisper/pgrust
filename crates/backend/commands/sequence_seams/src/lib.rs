@@ -35,7 +35,7 @@ seam_core::seam!(
     pub fn alter_sequence<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         stmt: &types_nodes::AlterSeqStmt<'mcx>,
-    ) -> PgResult<()>
+    ) -> PgResult<Oid>
 );
 
 seam_core::seam!(

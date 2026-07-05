@@ -179,7 +179,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFdwStmt<'mcx>,
     source_text: &str,
-) -> PgResult<()> {
+) -> PgResult<Oid> {
     let fdwname = stmt.fdwname.expect("CreateFdwStmt.fdwname");
     let rel = table::table_open(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, RowExclusiveLock)?;
 
@@ -250,7 +250,8 @@ pub fn CreateForeignDataWrapper<'mcx>(
     // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
     // outside extension scripts.
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(fdw_id)
 }
 
 pub fn AlterForeignDataWrapper<'mcx>(
@@ -558,7 +559,7 @@ pub fn AlterForeignServerOwner<'mcx>(
 pub fn CreateForeignServer<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateForeignServerStmt<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Oid> {
     let servername = stmt.servername.expect("CreateForeignServerStmt.servername");
     let fdwname = stmt.fdwname.expect("CreateForeignServerStmt.fdwname");
     let rel = table::table_open(mcx, FOREIGN_SERVER_RELATION_ID, RowExclusiveLock)?;
@@ -639,7 +640,8 @@ pub fn CreateForeignServer<'mcx>(
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, owner_id)?;
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(srv_id)
 }
 
 pub fn AlterForeignServer<'mcx>(

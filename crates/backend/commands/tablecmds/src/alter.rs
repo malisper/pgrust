@@ -455,13 +455,14 @@ pub fn AlterTable<'mcx>(
     lockmode: LOCKMODE,
     stmt: &AlterTableStmt<'mcx>,
     query_string: &str,
+    tag: types_core::CommandTag,
 ) -> PgResult<()> {
     let rel = relation_seams::relation_open::call(mcx, relid, NoLock)?;
     // CheckAlterTableIsSafe: other-session temp tables are unreachable
     // (temp relations unported).
     catalog_heap::CheckTableNotInUse(&rel, "ALTER TABLE")?;
     let recurse = stmt.relation.expect("AlterTableStmt.relation").inh;
-    ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string)
+    ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string, Some(tag))
 }
 
 // AlterTableInternal (tablecmds.c); EventTriggerAlterTableRelid is a no-op
@@ -474,7 +475,7 @@ pub fn AlterTableInternal<'mcx>(
 ) -> PgResult<()> {
     let lockmode = AlterTableGetLockLevel(cmds);
     let rel = relation_seams::relation_open::call(mcx, relid, lockmode)?;
-    ATController(mcx, rel, cmds, recurse, lockmode, "")
+    ATController(mcx, rel, cmds, recurse, lockmode, "", None)
 }
 
 fn ATController<'mcx>(
@@ -484,6 +485,7 @@ fn ATController<'mcx>(
     recurse: bool,
     lockmode: LOCKMODE,
     query_string: &str,
+    rewrite_tag: Option<types_core::CommandTag>,
 ) -> PgResult<()> {
     let mut wqueue: Wqueue<'mcx> = PgVec::new_in(mcx);
     for cnode in cmds.iter() {
@@ -492,7 +494,7 @@ fn ATController<'mcx>(
     rel.close(NoLock)?;
 
     ATRewriteCatalogs(mcx, &mut wqueue, lockmode, query_string)?;
-    ATRewriteTables(mcx, &mut wqueue, lockmode)
+    ATRewriteTables(mcx, &mut wqueue, lockmode, rewrite_tag)
 }
 
 // ATSimpleRecursion: prep-time recursion to all inheritors.
@@ -1531,9 +1533,10 @@ fn ATRewriteTables<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     lockmode: LOCKMODE,
+    rewrite_tag: Option<types_core::CommandTag>,
 ) -> PgResult<()> {
     for tabidx in 0..wqueue.len() {
-        ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode)?;
+        ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode, rewrite_tag)?;
     }
     for tab in wqueue.iter() {
         run_seq_stmts(mcx, &tab.after_stmts)?;
@@ -1545,6 +1548,7 @@ fn ATRewriteTableOne<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
     lockmode: LOCKMODE,
+    rewrite_tag: Option<types_core::CommandTag>,
 ) -> PgResult<()> {
     if !types_rel::RELKIND_HAS_STORAGE(tab.relkind) {
         return Ok(());
@@ -1598,6 +1602,12 @@ fn ATRewriteTableOne<'mcx>(
             old_heap.rd_rel.reltablespace
         };
         old_heap.close(NoLock)?;
+        // Fire the table_rewrite event trigger before rewriting; parsetree is
+        // NULL (no tag) when coming from AlterTableInternal, and it fires
+        // only once (tablecmds.c:5950-5964).
+        if let Some(tag) = rewrite_tag {
+            event_trigger::EventTriggerTableRewrite(mcx, tag, tab.relid, tab.rewrite)?;
+        }
         let oid_new_heap =
             commands_cluster::make_new_heap(mcx, tab.relid, new_tablespace, persistence, lockmode)?;
         ATRewriteTable(mcx, tab, oid_new_heap)?;
