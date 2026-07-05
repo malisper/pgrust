@@ -97,6 +97,7 @@ pub fn gistrescan(
         panic!("unported: gist ordered (KNN) scans (distance/pairing-heap lane)");
     }
 
+    let index_rel = scan.indexRelation.as_ref().expect("index scan parked (skeleton)").alias();
     let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
         crate::non_gist_opaque()
     };
@@ -108,7 +109,7 @@ pub fn gistrescan(
         // Storage types == opcintypes: the index descriptor IS C's built
         // descriptor; the divergent case was built at beginscan.
         if so.giststate.fetchTupdesc.is_none() {
-            so.giststate.fetchTupdesc = Some(scan.indexRelation.rd_att.clone());
+            so.giststate.fetchTupdesc = Some(index_rel.rd_att.clone());
         }
         scan.xs_itupdesc = so.giststate.fetchTupdesc.clone();
     }

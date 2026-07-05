@@ -589,7 +589,7 @@ fn spg_walk(
     scan_whole_index: bool,
     mut dest: StoreDest<'_, '_>,
 ) -> PgResult<()> {
-    let rel = scan.indexRelation.alias();
+    let rel = scan.index_rel().alias();
     let IndexScanOpaque::Spgist(so) = &mut scan.opaque else {
         crate::non_spgist_opaque()
     };

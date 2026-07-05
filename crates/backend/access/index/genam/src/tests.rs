@@ -197,7 +197,7 @@ fn relation_get_index_scan_matches_c_init() {
     assert!(scan.ignore_killed_tuples);
     assert!(!scan.xs_recheck);
     assert!(scan.xs_heapfetch.is_none());
-    assert_eq!(scan.indexRelation.rd_id, IDX);
+    assert_eq!(scan.index_rel().rd_id, IDX);
 }
 
 #[test]

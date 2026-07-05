@@ -1272,7 +1272,7 @@ pub fn gingetbitmap(
         opaque,
         ..
     } = scan;
-    let rel: &Relation<'_> = indexRelation;
+    let rel: &Relation<'_> = indexRelation.as_ref().expect("index scan parked (skeleton)");
     let snapshot = xs_snapshot.as_deref();
     let IndexScanOpaque::Gin(so) = opaque else {
         non_gin_opaque()

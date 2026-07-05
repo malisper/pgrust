@@ -299,12 +299,12 @@ pub fn bringetbitmap(
     scan: &mut IndexScanDescData<'_>,
     tbm: &mut tidbitmap::TIDBitmap<'_>,
 ) -> PgResult<i64> {
-    if scan.indexRelation.pgstat_enabled.get() {
+    if scan.index_rel().pgstat_enabled.get() {
         scan.xs_pgstat_index_scans += 1;
     }
     scan.xs_nsearches += 1;
 
-    let idxRel = scan.indexRelation.alias();
+    let idxRel = scan.index_rel().alias();
     let scan_mcx = *scan.keyData.allocator();
     let nkeys_total = scan.numberOfKeys.max(0) as usize;
 

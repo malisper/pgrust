@@ -86,7 +86,7 @@ macro_rules! split_scan {
             non_btree_opaque()
         };
         ScanCtx {
-            rel: indexRelation,
+            rel: indexRelation.as_ref().expect("index scan parked (skeleton)"),
             so: &mut **so,
             snapshot: xs_snapshot.as_deref(),
             ignore_killed_tuples: *ignore_killed_tuples,
@@ -144,7 +144,7 @@ pub fn btrescan(
         };
         if BTScanPosIsValid(&so.currPos) {
             if so.numKilled > 0 {
-                bt_killitems(&scan.indexRelation, so)?;
+                bt_killitems(scan.indexRelation.as_ref().expect("index scan parked (skeleton)"), so)?;
             }
             pos_unpin_if_pinned(&mut so.currPos)?;
             BTScanPosInvalidate(&mut so.currPos);
@@ -153,7 +153,7 @@ pub fn btrescan(
         // off for index-only scans, non-MVCC snapshots, unlogged, bitmap.
         so.dropPin = !scan.xs_want_itup
             && scan.xs_snapshot.as_deref().is_some_and(IsMVCCSnapshot)
-            && relation_needs_wal(&scan.indexRelation)
+            && scan.indexRelation.as_ref().is_some_and(relation_needs_wal)
             && scan.heapRelation.is_some();
 
         so.markItemIndex = -1;
@@ -251,7 +251,7 @@ pub fn btendscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
     if BTScanPosIsValid(&so.currPos) {
         if so.numKilled > 0 {
-            bt_killitems(&scan.indexRelation, so)?;
+            bt_killitems(scan.indexRelation.as_ref().expect("index scan parked (skeleton)"), so)?;
         }
         pos_unpin_if_pinned(&mut so.currPos)?;
     }
@@ -272,7 +272,7 @@ pub fn btparkscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
     if BTScanPosIsValid(&so.currPos) {
         if so.numKilled > 0 {
-            bt_killitems(&scan.indexRelation, so)?;
+            bt_killitems(scan.indexRelation.as_ref().expect("index scan parked (skeleton)"), so)?;
         }
         pos_unpin_if_pinned(&mut so.currPos)?;
         BTScanPosInvalidate(&mut so.currPos);
@@ -315,7 +315,7 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
     if BTScanPosIsValid(&so.currPos) {
         if so.numKilled > 0 {
-            bt_killitems(&scan.indexRelation, so)?;
+            bt_killitems(scan.indexRelation.as_ref().expect("index scan parked (skeleton)"), so)?;
         }
         pos_unpin_if_pinned(&mut so.currPos)?;
     }

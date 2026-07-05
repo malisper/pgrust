@@ -78,7 +78,7 @@ macro_rules! split_scan {
             non_hash_opaque()
         };
         HashScanCtx {
-            rel: indexRelation,
+            rel: indexRelation.as_ref().expect("index scan parked (skeleton)"),
             so: &mut **so,
             snapshot: xs_snapshot.as_deref(),
             ignore_killed_tuples: *ignore_killed_tuples,
