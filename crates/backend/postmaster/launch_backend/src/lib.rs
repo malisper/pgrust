@@ -136,6 +136,24 @@ fn reserve_child_pid() -> pid_t {
     NEXT_CHILD_PID.fetch_add(1, Ordering::Relaxed)
 }
 
+// C waitpid reports a child only after the process is fully dead; announce
+// fires before this thread's TLS destructors run, so the reaper must join
+// here or a parallel leader can free leader-owned state (execparallel's
+// pstmt/param_extern contract) while the worker thread is still tearing down.
+static CHILD_THREADS: std::sync::Mutex<Vec<(pid_t, std::thread::JoinHandle<()>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Joins the announced child's thread (TLS destructors included). Announce is
+/// the closure's last act, so this blocks only for teardown, as waitpid does.
+pub fn join_announced_child(pid: pid_t) {
+    let handle = {
+        let mut t = CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(idx) = t.iter().position(|(p, _)| *p == pid) else { return };
+        t.swap_remove(idx).1
+    };
+    let _ = handle.join();
+}
+
 // Fork-inherited postmaster globals, applied to the fresh thread's TLS first;
 // per-child state is deliberately absent (the child-init sequence owns it).
 macro_rules! inherited {
@@ -292,8 +310,13 @@ pub fn postmaster_child_launch(
         });
 
     match spawned {
-        Ok(_handle) => child_pid, // detached; reaping is pmchild design
-
+        Ok(handle) => {
+            CHILD_THREADS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((child_pid, handle));
+            child_pid
+        }
         Err(_) => -1,
     }
 }
