@@ -1426,7 +1426,7 @@ fn populate_record_worker(
             types_fmgr::FnExtra::new(cache)
         }
     };
-    let cache = cache_extra.downcast_mut::<PopulateRecordCache>();
+    let mut cache = cache_extra.downcast_mut::<PopulateRecordCache>();
 
     let mut rec_holder: Option<PgVec<'_, u8>> = None;
     // C keeps the cache in fn_mcxt across errors; restore before `?`.
@@ -1712,7 +1712,7 @@ fn populate_recordset_worker(
             types_fmgr::FnExtra::new(cache)
         }
     };
-    let cache = cache_extra.downcast_mut::<PopulateRecordCache>();
+    let mut cache = cache_extra.downcast_mut::<PopulateRecordCache>();
 
     let mut rec_holder: Option<PgVec<'_, u8>> = None;
     if have_record_arg && !fcinfo.argisnull(0) {
