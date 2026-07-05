@@ -7790,6 +7790,7 @@ dependencies = [
  "ipc_seams",
  "lsyscache",
  "mcx",
+ "mcxt_stats",
  "miscinit_seams",
  "pglz",
  "pgstat_seams",
