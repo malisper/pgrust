@@ -394,6 +394,29 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
     let mvcc = snapshot.snapshot_type == SnapshotType::SNAPSHOT_MVCC;
     let mut memo = XidVisMemo::new();
 
+    // All-visible pages consult lp_flags alone, so an all-normal page (the
+    // vacuumed common case) selects exactly 1..=lines: one vectorizable
+    // flag reduction + a sequential fill replace the item-at-a-time walk.
+    // Any non-normal line falls to the exact walk below.
+    if ALL_VISIBLE && !CHECK_SERIALIZABLE {
+        let mut all_normal = true;
+        let mut off = FirstOffsetNumber;
+        while off <= lines {
+            // SAFETY: off <= lines <= MaxHeapTuplesPerPage (fn contract).
+            all_normal &= unsafe { page.item_id_unchecked(off) }.is_normal();
+            off += 1;
+        }
+        if all_normal {
+            let mut i: u32 = 0;
+            while i < lines as u32 {
+                // SAFETY: i < lines <= MaxHeapTuplesPerPage (fn contract).
+                unsafe { *vistuples.get_unchecked_mut(i as usize) = (i + 1) as OffsetNumber };
+                i += 1;
+            }
+            return Ok(lines as u32);
+        }
+    }
+
     // C's `for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)`:
     // a manual while — RangeInclusive drags an exhausted-flag (cset/cinc)
     // through the per-tuple loop control.
