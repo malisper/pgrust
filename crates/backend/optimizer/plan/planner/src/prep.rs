@@ -499,6 +499,12 @@ fn collect_jointree_relids<'mcx>(
     ) -> PgResult<()> {
         if let Some(rtr) = node.as_range_tbl_ref() {
             out.add_member(mcx, rtr.rtindex)?;
+        } else if let Some(f) = node.as_from_expr() {
+            // Nested FromExpr: transform_MERGE_to_join wraps the target in
+            // one as the join's larg.
+            for child in &f.fromlist {
+                walk(mcx, child, out)?;
+            }
         } else if let Some(j) = node.as_join_expr() {
             walk(mcx, j.larg, out)?;
             walk(mcx, j.rarg, out)?;
