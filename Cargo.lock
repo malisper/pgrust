@@ -848,6 +848,7 @@ dependencies = [
  "hashfn",
  "mcx",
  "miscinit_seams",
+ "multixact",
  "namespace_seams",
  "nbt_compare",
  "numutils",
@@ -867,6 +868,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]
@@ -6501,6 +6503,7 @@ dependencies = [
  "types_guc",
  "types_storage",
  "varsup",
+ "waitevent",
  "walsummarizer",
  "xact_seams",
  "xlogprefetcher",
@@ -8072,10 +8075,10 @@ name = "nodes_params"
 version = "0.1.0"
 dependencies = [
  "adt_scalar",
+ "conv",
  "datum",
  "fmgr_seams",
  "lsyscache",
- "mbutils",
  "mcx",
  "syscache_seams",
  "types_core",
@@ -12170,6 +12173,7 @@ dependencies = [
  "clog",
  "commit_ts",
  "controldata_utils",
+ "gin_vocab",
  "heapam_xlog",
  "mcx",
  "multixact",
@@ -12182,6 +12186,8 @@ dependencies = [
  "types_brin",
  "types_core",
  "types_error",
+ "types_gist",
+ "types_hash",
  "types_nbtree",
  "types_spgist",
  "types_storage",
