@@ -1,7 +1,6 @@
 //! sequence.c write half: DefineSequence, AlterSequence, nextval/currval/
 //! lastval/setval, the backend SeqTable cache, and OWNED BY. Loud (named
-//! panics): unlogged sequences, IF NOT EXISTS,
-//! ResetSequence/SequenceChangePersistence consumers.
+//! panics): IF NOT EXISTS.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -283,13 +282,31 @@ fn rd_locator_bytes(rel: &Relation<'_>) -> [u8; SizeOfXlSeqRec] {
 }
 
 fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) -> PgResult<()> {
-    if rel.rd_rel.relpersistence == RELPERSISTENCE_UNLOGGED {
-        unported("unlogged sequences (init-fork lane)");
-    }
+    fill_seq_fork_with_data(rel, tuple, types_core::ForkNumber::MAIN_FORKNUM)?;
 
+    if rel.rd_rel.relpersistence == RELPERSISTENCE_UNLOGGED {
+        let key = types_storage::RelFileLocatorBackend {
+            locator: rel.rd_locator.get(),
+            backend: rel.rd_backend,
+        };
+        smgr::smgropen(key.locator, key.backend)?;
+        smgr::smgrcreate(key, types_core::ForkNumber::INIT_FORKNUM, false)?;
+        catalog_storage::log_smgrcreate(&key.locator, types_core::ForkNumber::INIT_FORKNUM)?;
+        fill_seq_fork_with_data(rel, tuple, types_core::ForkNumber::INIT_FORKNUM)?;
+        bufmgr::FlushRelationBuffers(key)?;
+        smgr::smgrclose(key)?;
+    }
+    Ok(())
+}
+
+fn fill_seq_fork_with_data(
+    rel: &Relation<'_>,
+    tuple: &mut heaptuple::HeapTuple<'_>,
+    forknum: types_core::ForkNumber,
+) -> PgResult<()> {
     let (buf, _) = bufmgr::ExtendBufferedRelBy(
         rel,
-        types_core::ForkNumber::MAIN_FORKNUM,
+        forknum,
         None,
         bufmgr_seams::EB_LOCK_FIRST | bufmgr_seams::EB_SKIP_EXTENSION_LOCK,
         1,
@@ -328,7 +345,7 @@ fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) 
         ));
     }
 
-    if relation_needs_wal(rel) {
+    if relation_needs_wal(rel) || forknum == types_core::ForkNumber::INIT_FORKNUM {
         let xlrec = rd_locator_bytes(rel);
         let recptr = xloginsert_seams::xlog_insert_record::call(
             RM_SEQ_ID,
@@ -667,9 +684,6 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
         unported("CREATE SEQUENCE IF NOT EXISTS");
     }
     let rv = seq.sequence.expect("CreateSeqStmt.sequence");
-    if rv.relpersistence == RELPERSISTENCE_UNLOGGED {
-        unported("unlogged sequences");
-    }
 
     let mut form = SeqFormLocal {
         seqtypid: INT8OID,
