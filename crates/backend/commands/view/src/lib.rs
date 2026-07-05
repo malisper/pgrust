@@ -192,23 +192,52 @@ fn DefineVirtualRelation<'mcx>(
         attrList.lappend(mcx, def.seal())?;
     }
 
-    if stmt.replace {
-        // RangeVarGetAndCheckCreationNamespace resolve + existing-oid probe;
-        // CREATE ACL check and concurrent-drop retry ride with the aclchk lane.
-        let creation_rv = rel_vocab::RangeVar {
-            catalogname: view.catalogname,
-            schemaname: view.schemaname,
-            relname: view.relname.expect("RangeVar.relname"),
-            inh: view.inh,
-            relpersistence: view.relpersistence,
-            location: view.location,
-        };
-        let namespace_id = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
-        let view_oid = lsyscache::get_relname_relid(creation_rv.relname, namespace_id)?;
-        if view_oid != InvalidOid {
-            lmgr::LockRelationOid(view_oid, types_rel::AccessExclusiveLock)?;
-            return ReplaceViewQuery(mcx, view_oid, attrList, options, viewParse);
+    // RangeVarGetAndCheckCreationNamespace (namespace.c): creation-namespace
+    // resolve, schema ACL_CREATE check, existing-oid probe, and (OR REPLACE
+    // only) ownercheck + AccessExclusiveLock on the existing relation. The
+    // concurrent-DDL retry loop and namespace AccessShareLock remain tracked
+    // debt (audit-debt-sweep SEV-3).
+    let creation_rv = rel_vocab::RangeVar {
+        catalogname: view.catalogname,
+        schemaname: view.schemaname,
+        relname: view.relname.expect("RangeVar.relname"),
+        inh: view.inh,
+        relpersistence: view.relpersistence,
+        location: view.location,
+    };
+    let namespace_id = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
+    let view_oid = lsyscache::get_relname_relid(creation_rv.relname, namespace_id)?;
+
+    let aclresult = aclchk::object_aclcheck(
+        types_core::catalog::NAMESPACE_RELATION_ID,
+        namespace_id,
+        miscinit::GetUserId(),
+        adt_acl::ACL_CREATE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let nspname = lsyscache::get_namespace_name(mcx, namespace_id)?;
+        aclchk::aclcheck_error(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA,
+            nspname.as_ref().map(|s| s.as_str()).unwrap_or(""),
+        )?;
+    }
+
+    if stmt.replace && view_oid != InvalidOid {
+        if !aclchk::object_ownercheck(
+            types_core::catalog::RELATION_RELATION_ID,
+            view_oid,
+            miscinit::GetUserId(),
+        )? {
+            let relkind = lsyscache::get_rel_relkind(view_oid)? as u8;
+            aclchk::aclcheck_error(
+                aclchk::ACLCHECK_NOT_OWNER,
+                tablecmds::get_relkind_objtype(relkind),
+                creation_rv.relname,
+            )?;
         }
+        lmgr::LockRelationOid(view_oid, types_rel::AccessExclusiveLock)?;
+        return ReplaceViewQuery(mcx, view_oid, attrList, options, viewParse);
     }
 
     let mut createStmt = Node::build::<CreateStmt>(mcx)?;

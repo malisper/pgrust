@@ -102,7 +102,7 @@ pub(crate) fn unported(what: &str) -> ! {
 }
 
 // get_relkind_objtype (objectaddress.c)
-pub(crate) fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+pub fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     use types_nodes::parsenodes::ObjectType::*;
     match relkind {
         RELKIND_RELATION | types_rel::RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,

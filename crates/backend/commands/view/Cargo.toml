@@ -31,4 +31,7 @@ catalog_heap = { path = "../../catalog/catalog_heap" }
 relation_seams = { path = "../../access/common/relation_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_depend = { path = "../../catalog/pg_depend" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
 format_type = { path = "../../utils/adt/format_type" }
