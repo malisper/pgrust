@@ -1390,8 +1390,8 @@ fn fix_upper_expr<'mcx>(
             let var = node.as_var().expect("Var");
             search_indexed_tlist_for_var(run, var, subplan_tlist, rtoffset, newvarno)
         }
+        NodeTag::T_Param => fix_param_node(run, node),
         NodeTag::T_Const
-        | NodeTag::T_Param
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
@@ -2240,11 +2240,12 @@ fn fix_scan_list<'mcx>(
     rtoffset: i32,
     num_exec: f64,
 ) -> PgResult<Option<NodeList<'mcx>>> {
-    debug_assert!(run.root.multiexpr_params.is_empty());
     if rtoffset == 0
         && !run.glob.has_alternative_subplans
         && run.root.minmax_aggs.is_empty()
         && run.glob.last_ph_id == 0
+        // PARAM_MULTIEXPR Params need the rewriting path (fix_param_node).
+        && run.root.multiexpr_params.is_empty()
     {
         for node in list {
             fix_scan_expr_walker(run, node)?;
@@ -2256,6 +2257,29 @@ fn fix_scan_list<'mcx>(
         out.lappend(run.mcx, fix_scan_expr_mutator(run, node, rtoffset, num_exec)?)?;
     }
     Ok(Some(out))
+}
+
+// fix_param_node (setrefs.c): PARAM_MULTIEXPR Params encode
+// (subLinkId << 16 | colno) and are replaced by the output PARAM_EXEC
+// Param the MULTIEXPR subplan registered in root.multiexpr_params; every
+// other Param passes through (immutable arena share stands in for C's
+// copyObject).
+fn fix_param_node<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
+    if p.paramkind == types_nodes::primnodes::ParamKind::PARAM_MULTIEXPR {
+        let subqueryid = (p.paramid >> 16) as usize;
+        let colno = (p.paramid & 0xFFFF) as usize;
+        if subqueryid == 0 || subqueryid > run.root.multiexpr_params.len() {
+            panic!("unexpected PARAM_MULTIEXPR ID: {}", p.paramid);
+        }
+        let params = &run.root.multiexpr_params[subqueryid - 1];
+        if colno == 0 || colno > params.len() {
+            panic!("unexpected PARAM_MULTIEXPR ID: {}", p.paramid);
+        }
+        return Ok(*run.root.expr_node(params[colno - 1]));
+    }
+    fix_scan_expr_walker(run, node)?;
+    Ok(node)
 }
 
 // fix_scan_expr_mutator (setrefs.c) over the shapes subplan trees carry.
@@ -2299,8 +2323,8 @@ fn fix_scan_expr_mutator<'mcx>(
             }
             Node::mk(mcx, newvar)
         }
-        NodeTag::T_Param
-        | NodeTag::T_Const
+        NodeTag::T_Param => fix_param_node(run, node),
+        NodeTag::T_Const
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
@@ -2964,9 +2988,16 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
     match node.node_tag() {
         // fix_expr_common touches no Var fields; INDEX_VAR Vars pass through.
         NodeTag::T_Var => Ok(()),
-        // fix_param_node: only PARAM_MULTIEXPR is rewritten (multiexpr_params
-        // asserted empty in fix_scan_list); PARAM_EXEC passes through.
-        NodeTag::T_Param => Ok(()),
+        // fix_param_node: only PARAM_MULTIEXPR is rewritten, and the walker
+        // shortcut is disabled while multiexpr_params is non-empty; PARAM_EXEC
+        // passes through.
+        NodeTag::T_Param => {
+            debug_assert!(
+                node.as_variant::<types_nodes::primnodes::Param>().unwrap().paramkind
+                    != types_nodes::primnodes::ParamKind::PARAM_MULTIEXPR
+            );
+            Ok(())
+        }
         // fix_expr_common has nothing to record for a SQLValueFunction.
         NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(()),
         // fix_expr_common ignores CurrentOfExpr; rtoffset==0 leaves cvarno.
@@ -3861,10 +3892,7 @@ fn fix_join_expr_mutator<'mcx>(
                 },
             )
         }
-        NodeTag::T_Param => {
-            fix_scan_expr_walker(run, node)?;
-            Ok(node)
-        }
+        NodeTag::T_Param => fix_param_node(run, node),
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             let testexpr = match sp.testexpr {

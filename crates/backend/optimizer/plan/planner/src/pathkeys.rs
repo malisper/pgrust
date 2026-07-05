@@ -1159,9 +1159,8 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
                 SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColCollation,
-                SubLinkType::MULTIEXPR_SUBLINK => {
-                    panic!("exprCollation (nodeFuncs.c): MULTIEXPR SubPlan not ported")
-                }
+                // C: a MULTIEXPR SubPlan's dummy result is an uncollatable RECORD.
+                SubLinkType::MULTIEXPR_SUBLINK => ::types_core::InvalidOid,
                 _ => 0,
             }
         }

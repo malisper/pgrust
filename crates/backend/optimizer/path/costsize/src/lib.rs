@@ -1939,9 +1939,8 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
                     nodes_core::node_funcs::promoted_array_type(sp.firstColType),
                     sp.firstColTypmod,
                 ),
-                SubLinkType::MULTIEXPR_SUBLINK => {
-                    panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
-                }
+                // C: a MULTIEXPR SubPlan returns a dummy NULL::record.
+                SubLinkType::MULTIEXPR_SUBLINK => (::types_core::RECORDOID, -1),
                 _ => (types_core::catalog::BOOLOID, -1),
             }
         }
