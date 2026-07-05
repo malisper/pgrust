@@ -281,10 +281,18 @@ fn rd_locator_bytes(rel: &Relation<'_>) -> [u8; SizeOfXlSeqRec] {
     out
 }
 
-fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) -> PgResult<()> {
-    fill_seq_fork_with_data(rel, tuple, types_core::ForkNumber::MAIN_FORKNUM)?;
+// persistence is passed explicitly: after RelationSetNewRelfilenumber the C
+// relcache rebuild refreshes rel->rd_rel->relpersistence in place, but our
+// open handle keeps the pre-CCI snapshot (SequenceChangePersistence must fill
+// per the NEW persistence).
+fn fill_seq_with_data(
+    rel: &Relation<'_>,
+    tuple: &mut heaptuple::HeapTuple<'_>,
+    persistence: u8,
+) -> PgResult<()> {
+    fill_seq_fork_with_data(rel, tuple, persistence, types_core::ForkNumber::MAIN_FORKNUM)?;
 
-    if rel.rd_rel.relpersistence == RELPERSISTENCE_UNLOGGED {
+    if persistence == RELPERSISTENCE_UNLOGGED {
         let key = types_storage::RelFileLocatorBackend {
             locator: rel.rd_locator.get(),
             backend: rel.rd_backend,
@@ -292,7 +300,7 @@ fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) 
         smgr::smgropen(key.locator, key.backend)?;
         smgr::smgrcreate(key, types_core::ForkNumber::INIT_FORKNUM, false)?;
         catalog_storage::log_smgrcreate(&key.locator, types_core::ForkNumber::INIT_FORKNUM)?;
-        fill_seq_fork_with_data(rel, tuple, types_core::ForkNumber::INIT_FORKNUM)?;
+        fill_seq_fork_with_data(rel, tuple, persistence, types_core::ForkNumber::INIT_FORKNUM)?;
         bufmgr::FlushRelationBuffers(key)?;
         smgr::smgrclose(key)?;
     }
@@ -302,6 +310,7 @@ fn fill_seq_with_data(rel: &Relation<'_>, tuple: &mut heaptuple::HeapTuple<'_>) 
 fn fill_seq_fork_with_data(
     rel: &Relation<'_>,
     tuple: &mut heaptuple::HeapTuple<'_>,
+    persistence: u8,
     forknum: types_core::ForkNumber,
 ) -> PgResult<()> {
     let (buf, _) = bufmgr::ExtendBufferedRelBy(
@@ -330,7 +339,7 @@ fn fill_seq_fork_with_data(
         ItemPointerSet(&mut hdr.t_ctid, 0, 1);
     }
 
-    if relation_needs_wal(rel) {
+    if persistence == RELPERSISTENCE_PERMANENT {
         xact::GetTopTransactionId()?;
     }
 
@@ -345,7 +354,8 @@ fn fill_seq_fork_with_data(
         ));
     }
 
-    if relation_needs_wal(rel) || forknum == types_core::ForkNumber::INIT_FORKNUM {
+    if persistence == RELPERSISTENCE_PERMANENT || forknum == types_core::ForkNumber::INIT_FORKNUM
+    {
         let xlrec = rd_locator_bytes(rel);
         let recptr = xloginsert_seams::xlog_insert_record::call(
             RM_SEQ_ID,
@@ -715,7 +725,7 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
     ];
     let nulls = [false; SEQ_COLS];
     let mut tuple = heaptuple::heap_form_tuple(mcx, seqrel.descr(), &values, &nulls)?;
-    fill_seq_with_data(&seqrel, &mut tuple)?;
+    fill_seq_with_data(&seqrel, &mut tuple, seqrel.rd_rel.relpersistence)?;
 
     if let Some(owned_by) = p.owned_by {
         process_owned_by(mcx, &seqrel, owned_by, seq.for_identity)?;
@@ -850,7 +860,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
         ];
         let nulls = [false; SEQ_COLS];
         let mut tuple = heaptuple::heap_form_tuple(mcx, seqrel.descr(), &values, &nulls)?;
-        fill_seq_with_data(&seqrel, &mut tuple)?;
+        fill_seq_with_data(&seqrel, &mut tuple, seqrel.rd_rel.relpersistence)?;
     }
 
     with_elm(relid, |e| e.cached = e.last);
@@ -906,7 +916,7 @@ pub fn ResetSequence(mcx: Mcx<'_>, seq_relid: Oid) -> PgResult<()> {
     copy.set(startv, 0, false);
 
     catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, seqrel.rd_rel.relpersistence)?;
-    fill_seq_with_data(&seqrel, &mut tuple)?;
+    fill_seq_with_data(&seqrel, &mut tuple, seqrel.rd_rel.relpersistence)?;
 
     // Local cache cleared; currval() state intentionally kept.
     with_elm(seq_relid, |e| e.cached = e.last);
@@ -939,7 +949,7 @@ pub fn SequenceChangePersistence(mcx: Mcx<'_>, relid: Oid, newrelpersistence: u8
     };
     let mut tuple = heaptuple::heap_copytuple(mcx, &view)?;
     catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, newrelpersistence)?;
-    fill_seq_with_data(&seqrel, &mut tuple)?;
+    fill_seq_with_data(&seqrel, &mut tuple, newrelpersistence)?;
     bufmgr::UnlockReleaseBuffer(buf)?;
 
     seqrel.close(NoLock)
