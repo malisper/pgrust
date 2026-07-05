@@ -1020,16 +1020,26 @@ pub fn exec_parallel_hash_increase_num_batches(
                 let gen = g.batches.as_ref().expect("batches installed");
                 let old_nbatch = g.old_nbatch;
                 for i in 0..table.nbatch {
-                    let b = gen[i as usize].lock();
-                    if b.space_exhausted || b.estimated_size > g.space_allowed {
+                    let parent = (i % old_nbatch) as usize;
+                    // Sequential locking: parent may equal i (non-reentrant
+                    // Mutex); this phase is barrier-exclusive anyway.
+                    let (b_exhausted, b_estimated, b_ntuples, b_old_ntuples) = {
+                        let b = gen[i as usize].lock();
+                        (b.space_exhausted, b.estimated_size, b.ntuples, b.old_ntuples)
+                    };
+                    if b_exhausted || b_estimated > g.space_allowed {
                         space_exhausted = true;
                     }
-                    let parent = (i % old_nbatch) as usize;
-                    let old_b = old_gen[parent].lock();
-                    if old_b.space_exhausted || b.estimated_size > g.space_allowed {
+                    let old_exhausted = old_gen[parent].lock().space_exhausted;
+                    if old_exhausted || b_estimated > g.space_allowed {
                         // A child holding ALL of its parent's tuples means
                         // repartitioning cannot help (identical hash values).
-                        if b.ntuples == gen[parent].lock().old_ntuples {
+                        let parent_old_ntuples = if parent == i as usize {
+                            b_old_ntuples
+                        } else {
+                            gen[parent].lock().old_ntuples
+                        };
+                        if b_ntuples == parent_old_ntuples {
                             extreme_skew_detected = true;
                         }
                     }
