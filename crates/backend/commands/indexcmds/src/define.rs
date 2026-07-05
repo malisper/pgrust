@@ -159,6 +159,7 @@ pub fn CheckIndexCompatible<'mcx>(
     let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut opclassIds = [InvalidOid; INDEX_MAX_KEYS as usize];
+    let mut opclassOptions = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut coloptions = [0i16; INDEX_MAX_KEYS as usize];
     let rel = table::table_open(mcx, relationId, types_rel::AccessShareLock)?;
     ComputeIndexAttrs(
@@ -168,6 +169,7 @@ pub fn CheckIndexCompatible<'mcx>(
         &mut typeIds,
         &mut collationIds,
         &mut opclassIds,
+        &mut opclassOptions,
         &mut coloptions,
         attribute_list,
         exclusion_op_names,
@@ -218,13 +220,28 @@ pub fn CheckIndexCompatible<'mcx>(
             break;
         }
     }
-    // New-side opclass options are impossible (ComputeIndexAttrs louds on
-    // opclassopts), so C's CompareOpclassOptions reduces to old-side nullness.
+    // CompareOpclassOptions (indexcmds.c:307-318, 341-396). Both sides are
+    // transformRelOptions-built text[] images, so the byte comparison of the
+    // 4-byte-header normalized images coincides with C's array_eq under C
+    // collation.
     if ret {
         for i in 0..old_natts {
-            if lsyscache::get_attoptions(mcx, old_id, (i + 1) as i16)? != Datum::null() {
-                ret = false;
-                break;
+            let old = lsyscache::get_attoptions(mcx, old_id, (i + 1) as i16)?;
+            let new = opclassOptions[i];
+            match (old == Datum::null(), new == Datum::null()) {
+                (true, true) => {}
+                (false, false) => {
+                    if reloptions::text_array_image(mcx, old)?
+                        != reloptions::text_array_image(mcx, new)?
+                    {
+                        ret = false;
+                        break;
+                    }
+                }
+                _ => {
+                    ret = false;
+                    break;
+                }
             }
         }
     }
@@ -578,6 +595,7 @@ pub fn DefineIndex<'mcx>(
     let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut opclassIds = [InvalidOid; INDEX_MAX_KEYS as usize];
+    let mut opclassOptions = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut coloptions = [0i16; INDEX_MAX_KEYS as usize];
     ComputeIndexAttrs(
         mcx,
@@ -586,6 +604,7 @@ pub fn DefineIndex<'mcx>(
         &mut typeIds,
         &mut collationIds,
         &mut opclassIds,
+        &mut opclassOptions,
         &mut coloptions,
         &allIndexParams,
         &stmt.excludeOpNames,
@@ -830,7 +849,7 @@ pub fn DefineIndex<'mcx>(
             parent_index_relid: parentIndexId,
             parent_constraint_id: parentConstraintId,
             reloptions: reloptions.as_deref(),
-            opclass_options: None,
+            opclass_options: Some(&opclassOptions[..numberOfAttributes]),
             stattargets: None,
             old_number: stmt.oldNumber,
         },
@@ -1291,6 +1310,7 @@ fn ComputeIndexAttrs<'mcx>(
     typeIds: &mut [Oid],
     collationIds: &mut [Oid],
     opclassIds: &mut [Oid],
+    opclassOptions: &mut [Datum],
     coloptions: &mut [i16],
     attList: &types_nodes::NodeList<'mcx>,
     exclusionOpNames: &types_nodes::NodeList<'mcx>,
@@ -1308,9 +1328,6 @@ fn ComputeIndexAttrs<'mcx>(
         let attribute = node
             .as_variant::<IndexElem>()
             .unwrap_or_else(|| panic!("IndexElem expected in indexParams"));
-        if !attribute.opclassopts.is_nil() {
-            unported("ComputeIndexAttrs: opclass options (attoptions)");
-        }
         let (atttype, attcollation) = if let Some(name) = attribute.name {
             let desc = rel.descr();
             let mut found = None;
@@ -1538,6 +1555,23 @@ fn ComputeIndexAttrs<'mcx>(
                 ));
             }
         }
+
+        // Per-column opclass options, attoptions field (indexcmds.c:2237-2247).
+        opclassOptions[attn] = if !attribute.opclassopts.is_nil() {
+            let opts = reloptions::transformRelOptions(
+                mcx,
+                None,
+                &attribute.opclassopts,
+                None,
+                &[],
+                false,
+                false,
+            )?
+            .expect("transformRelOptions: non-nil opclassopts");
+            Datum::from_usize(opts.leak().as_ptr() as usize)
+        } else {
+            Datum::null()
+        };
     }
     Ok(())
 }

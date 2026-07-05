@@ -657,6 +657,13 @@ fn opclass_is_visible(opclass: Oid, opcname: &str, opcmethod: Oid) -> PgResult<b
     Ok(false)
 }
 
+// generate_opclass_name (ruleutils.c:12898).
+pub fn generate_opclass_name(mcx: Mcx<'_>, opclass: Oid) -> PgResult<String> {
+    let mut buf = String::new();
+    get_opclass_name(mcx, opclass, InvalidOid, &mut buf)?;
+    Ok(buf.split_off(1))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn pg_get_indexdef_worker(
     mcx: Mcx<'_>,

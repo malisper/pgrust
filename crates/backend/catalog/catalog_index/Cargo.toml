@@ -68,3 +68,5 @@ smgr = { path = "../../storage/smgr/smgr" }
 ginbuild = { path = "../../access/gin/ginbuild" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pg_rusage = { path = "../../utils/misc/pg_rusage" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+types_relscan = { path = "../../access/index/relscan" }

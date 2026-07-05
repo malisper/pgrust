@@ -401,6 +401,47 @@ fn UpdateIndexRelation<'mcx>(
     pg_index.close(RowExclusiveLock)
 }
 
+// index_opclass_options (indexam.c:1043). Lives here rather than the indexam
+// crate: the no-options-proc error needs syscache-backed opclass naming, and
+// the syscache sits above indexam in the crate graph.
+pub fn index_opclass_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    indrel: &Relation<'mcx>,
+    attnum: AttrNumber,
+    attoptions: Datum,
+    _validate: bool,
+) -> PgResult<()> {
+    let kind = types_relscan::IndexAmKind::from_relam(indrel.rd_rel.relam);
+    let amoptsprocnum = kind.amoptsprocnum() as usize;
+    let amsupport = kind.amsupport() as usize;
+    // index_getprocid over the rd_support preload (nkey x amsupport, row-major).
+    let procid = indrel
+        .rd_support
+        .get((attnum as usize - 1) * amsupport + (amoptsprocnum - 1))
+        .copied()
+        .unwrap_or(InvalidOid);
+    if procid == InvalidOid {
+        if attoptions == Datum::null() {
+            return Ok(());
+        }
+        let opclass = lsyscache::get_index_column_opclass(indrel.rd_id, attnum as i32)?;
+        return Err(err(
+            format!(
+                "operator class {} has no options",
+                ruleutils::generate_opclass_name(mcx, opclass)?
+            ),
+            types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+        ));
+    }
+    if attoptions == Datum::null() {
+        // C builds and discards the opclass's default options here; options
+        // support procs are unported (AMs read compiled-in defaults), so
+        // there is nothing to compute.
+        return Ok(());
+    }
+    unported("index_opclass_options: options support proc (build_local_reloptions)")
+}
+
 pub struct IndexCreateExtra<'a> {
     pub flags: u16,
     pub constr_flags: u16,
@@ -774,6 +815,15 @@ pub fn index_create<'mcx>(
     }
 
     xact::CommandCounterIncrement()?;
+
+    // Validate opclass-specific options (index.c:1243-1248).
+    if let Some(attopts) = extra.opclass_options {
+        let irel = indexam::index_open(mcx, indexRelationId, NoLock)?;
+        for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
+            index_opclass_options(mcx, &irel, (i + 1) as AttrNumber, attopts[i], true)?;
+        }
+        indexam::index_close(irel, NoLock)?;
+    }
 
     if skip_build {
         // The heap must still be marked as indexed; the caller fills the
