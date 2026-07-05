@@ -1,12 +1,13 @@
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 use types_core::{ProcNumber, INVALID_PROC_NUMBER};
-use types_error::{PgResult, LOG};
+use types_error::{PgResult, DEBUG1, LOG, WARNING};
 use types_storage::lock::{
     DeadLockState, LockMethod, LOCALLOCKTAG, LOCK, LOCKBIT_OFF, LOCKBIT_ON, LOCKMODE, PROCLOCK,
 };
 use types_storage::storage::{
-    proclist_node, ProcWaitStatus, NUM_LOCK_PARTITIONS, PROC_ARRAY_LOCK, PROC_WAIT_STATUS_ERROR, PROC_WAIT_STATUS_OK,
+    proclist_node, ProcWaitStatus, NUM_LOCK_PARTITIONS, PROC_ARRAY_LOCK, PROC_IS_AUTOVACUUM,
+    PROC_VACUUM_FOR_WRAPAROUND, PROC_WAIT_STATUS_ERROR, PROC_WAIT_STATUS_OK,
     PROC_WAIT_STATUS_WAITING,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
@@ -342,12 +343,62 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
     Ok(my_wait_status)
 }
 
+/// proc.c's DS_BLOCKED_BY_AUTOVACUUM arm: SIGINT the autovacuum worker that
+/// hard-blocks us, unless it is working to prevent Xid wraparound.
 #[cold]
-fn cancel_blocking_autovacuum(_lock: *mut LOCK, _lockmode: LOCKMODE) -> PgResult<()> {
-    // Reachable only when a live autovacuum worker directly hard-blocks us.
-    let blocker = deadlock_seams::get_blocking_autovacuum_procno::call();
-    let _ = lwlock::main_lock(PROC_ARRAY_LOCK);
-    panic!("cancel of blocking autovacuum (procno {blocker:?}) requires procsignal (phase 2)");
+fn cancel_blocking_autovacuum(lock: *mut LOCK, lockmode: LOCKMODE) -> PgResult<()> {
+    // libc constants inlined; the lock crate is seams-only.
+    const SIGINT: i32 = 2;
+    const ESRCH: i32 = 3;
+
+    let Some(blocker) = deadlock_seams::get_blocking_autovacuum_procno::call() else {
+        return Ok(());
+    };
+    let autovac = lmgr_proc::GetPGProcByNumber(blocker);
+
+    // Grab info we need, then release the lock immediately. C's race note:
+    // the worker can switch transactions before the signal lands; worst case
+    // a for-wraparound vacuum is canceled.
+    let proc_array_lock = lwlock::main_lock(PROC_ARRAY_LOCK);
+    lwlock::LWLockAcquire(proc_array_lock, lwlock::LW_EXCLUSIVE, my_procno())?;
+    let status_flags = lmgr_proc::ProcGlobal().statusFlags
+        [autovac.pgxactoff.load(Relaxed) as usize]
+        .load(Relaxed);
+    // SAFETY: `lock` is the LOCK we wait on; its tag is immutable while our
+    // request keeps it pinned.
+    let (lockmethod_copy, locktag_copy) =
+        unsafe { ((*lock).tag.locktag_lockmethodid, (*lock).tag) };
+    lwlock::LWLockRelease(proc_array_lock)?;
+
+    // Only do it if the worker is not working to protect against Xid wraparound.
+    if status_flags & PROC_IS_AUTOVACUUM != 0 && status_flags & PROC_VACUUM_FOR_WRAPAROUND == 0 {
+        let pid = autovac.pid.load(Relaxed);
+
+        let modename = crate::GetLockmodeName(
+            lockmethod_copy as types_storage::lock::LOCKMETHODID,
+            lockmode,
+        );
+        let tag_desc = lmgr_seams::describe_lock_tag::call(locktag_copy);
+        elog_seams::ereport_msg::call(
+            DEBUG1,
+            format!("sending cancel to blocking autovacuum PID {pid}"),
+            Some(format!(
+                "Process {} waits for {modename} on {tag_desc}.",
+                init_small::globals::MyProcPid()
+            )),
+        )?;
+
+        // kill(pid, SIGINT); the worker exiting first is expected (ESRCH).
+        let err = procsignal_seams::send_thread_signal::call(pid, SIGINT);
+        if err != 0 && err != ESRCH {
+            elog_seams::ereport_msg::call(
+                WARNING,
+                format!("could not send signal to process {pid}: errno {err}"),
+                None,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cold]

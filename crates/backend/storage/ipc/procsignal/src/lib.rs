@@ -705,10 +705,32 @@ fn log_never_raises(result: PgResult<()>) {
     debug_assert!(result.is_ok());
 }
 
+fn errno() -> i32 {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // SAFETY: __error returns this thread's valid errno location.
+    unsafe {
+        *libc::__error()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    // SAFETY: __errno_location returns this thread's valid errno location.
+    unsafe {
+        *libc::__errno_location()
+    }
+}
+
+fn send_thread_signal_errno(pid: i32, signo: i32) -> i32 {
+    if SendThreadSignal(pid, signo) < 0 {
+        errno()
+    } else {
+        0
+    }
+}
+
 pub fn init_seams() {
     procsignal_seams::proc_signal_barrier_pending::set(g::ProcSignalBarrierPending);
     procsignal_seams::process_proc_signal_barrier::set(ProcessProcSignalBarrier);
     procsignal_seams::drain_thread_signals::set(DrainThreadSignals);
+    procsignal_seams::send_thread_signal::set(send_thread_signal_errno);
 }
 
 #[cfg(test)]
