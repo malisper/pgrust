@@ -3371,7 +3371,7 @@ mod join {
             init_small::init_seams();
         }
         // FROM (jt3 JOIN jt4 ON jt3.a = jt4.a), jt1 WHERE jt4.a = jt1.a
-        let query = |mcx: Mcx<'_>| {
+        fn query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
             let mut rtable = NodeList::nil();
             for relid in [JT3, JT4, JT1] {
                 rtable.lappend(mcx, mk_plain_rte(mcx, relid)).unwrap();
@@ -3399,7 +3399,7 @@ mod join {
                 stmt_len: 42,
                 ..Query::default()
             }
-        };
+        }
         crate::gucs::set_from_collapse_limit(2);
         let stmt = planner(
             mcx,
