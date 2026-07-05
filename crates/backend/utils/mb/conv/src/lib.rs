@@ -1560,5 +1560,31 @@ pub fn conv_builtin(oid: Oid) -> Option<&'static FmgrBuiltin> {
         .map(|i| &CONV_BUILTINS[i])
 }
 
+/// `appendStringInfoStringQuoted` (stringinfo_mb.c): appends `s` single-quoted
+/// with embedded quotes doubled, clipped to `maxlen` bytes (mb-aware, `maxlen
+/// < 0` means unclipped) with a trailing ellipsis when truncated.
+pub fn append_string_info_string_quoted(
+    buf: &mut mcx::PgString<'_>,
+    s: &str,
+    maxlen: i32,
+) -> PgResult<()> {
+    let slen = s.len() as i32;
+    let (s, ellipsis) = if maxlen >= 0 && maxlen < slen {
+        (&s[..mbutils::pg_mbcliplen(s.as_bytes(), slen, maxlen) as usize], true)
+    } else {
+        (s, false)
+    };
+    buf.try_push('\'')?;
+    let mut first = true;
+    for chunk in s.split('\'') {
+        if !first {
+            buf.try_push_str("''")?;
+        }
+        buf.try_push_str(chunk)?;
+        first = false;
+    }
+    buf.try_push_str(if ellipsis { "...'" } else { "'" })
+}
+
 #[cfg(test)]
 mod tests;

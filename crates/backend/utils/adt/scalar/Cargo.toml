@@ -29,3 +29,5 @@ syscache_seams = { path = "../../cache/syscache_seams" }
 tableam_seams = { path = "../../../access/table/tableam_seams" }
 snapmgr_seams = { path = "../../time/snapmgr_seams" }
 relcache_seams = { path = "../../cache/relcache_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+multixact = { path = "../../../access/transam/multixact" }

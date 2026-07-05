@@ -107,7 +107,7 @@ pub fn build_param_log_string<'mcx>(
         } else if let Some(known) =
             known_text_values.and_then(|k| k.get(paramno).copied().flatten())
         {
-            append_string_quoted(&mut buf, known, maxlen)?;
+            conv::append_string_info_string_quoted(&mut buf, known, maxlen)?;
         } else {
             let (typoutput, _typisvarlena) = lsyscache::getTypeOutputInfo(param.ptype)?;
             let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
@@ -115,29 +115,8 @@ pub fn build_param_log_string<'mcx>(
             // SAFETY: out functions return a NUL-terminated cstring datum,
             // consumed before finfo scratch dies.
             let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-            append_string_quoted(&mut buf, s.to_str().expect("non-UTF-8 output"), maxlen)?;
+            conv::append_string_info_string_quoted(&mut buf, s.to_str().expect("non-UTF-8 output"), maxlen)?;
         }
     }
     Ok(Some(buf))
-}
-
-/// `appendStringInfoStringQuoted` (stringinfo_mb.c): single quotes around `s`
-/// with embedded quotes doubled; clip to `maxlen` bytes (mb-aware) + "..." .
-fn append_string_quoted(buf: &mut PgString<'_>, s: &str, maxlen: i32) -> PgResult<()> {
-    let slen = s.len() as i32;
-    let (s, ellipsis) = if maxlen >= 0 && maxlen < slen {
-        (&s[..mbutils::pg_mbcliplen(s.as_bytes(), slen, maxlen) as usize], true)
-    } else {
-        (s, false)
-    };
-    buf.try_push('\'')?;
-    let mut first = true;
-    for chunk in s.split('\'') {
-        if !first {
-            buf.try_push_str("''")?;
-        }
-        buf.try_push_str(chunk)?;
-        first = false;
-    }
-    buf.try_push_str(if ellipsis { "...'" } else { "'" })
 }

@@ -33,6 +33,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // xid_age() (xid.c) needs the age reference point.
+    pub fn get_stable_latest_transaction_id() -> types_error::PgResult<types_core::TransactionId>
+);
+
+seam_core::seam!(
     pub fn is_transaction_or_transaction_block() -> bool
 );
 
