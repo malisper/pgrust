@@ -1,7 +1,6 @@
 use ::types_core::{AttrNumber, Oid, INDEX_MAX_KEYS};
 
-// ForeignKeyCacheInfo (utils/rel.h): rd_fkeylist element. Cached slice is
-// shared read-only; callers needing a mutable copy clone the element.
+// rd_fkeylist element; the cached slice is shared read-only (clone to mutate).
 #[derive(Clone, Debug)]
 pub struct ForeignKeyCacheInfo {
     pub conoid: Oid,
