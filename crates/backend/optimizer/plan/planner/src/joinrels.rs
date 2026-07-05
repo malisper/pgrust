@@ -996,6 +996,15 @@ fn build_joinrel_tlist<'mcx>(
         let var = node
             .as_var()
             .unwrap_or_else(|| panic!("unexpected node type in rel targetlist: {:?}", node.node_tag()));
+        if var.varno == types_nodes::primnodes::ROWID_VAR {
+            // relnode.c:1176-1184: UPDATE/DELETE/MERGE row identity vars are
+            // always needed; width from the RowIdentityVarInfo. Never nulled
+            // (cf. setrefs.c comments), so the interned Var passes through.
+            let ridinfo = &run.root.row_identity_vars[(var.varattno - 1) as usize];
+            tuple_width += ridinfo.rowidwidth as i64;
+            run.root.rel_reltarget_mut(joinrel).exprs.push(id);
+            continue;
+        }
         debug_assert!(var.varno > 0 && relids_is_member(var.varno, &relids));
         let baserel = find_base_rel(&run.root, var.varno);
         let ndx = (var.varattno - run.root.rel(baserel).min_attr) as usize;

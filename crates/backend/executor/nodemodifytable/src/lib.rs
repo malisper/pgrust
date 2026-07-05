@@ -105,6 +105,10 @@ pub struct ModifyTableState<'mcx> {
     root: Option<ResultRelExec<'mcx>>,
     // mt_lastResultIndex + mt_lastResultOid: one-element dispatch cache.
     cur: usize,
+    // MERGE ... WHEN NOT MATCHED INSERT over an inherited/partitioned target
+    // inserts via the root (C passes rootResultRelInfo to ExecInsert);
+    // rel()/rel_mut() honor this so the whole insert path targets the root.
+    insert_target_root: bool,
     last_result_oid: Oid,
     // mt_resultOidAttno: the "tableoid" junk attr when total_nrels > 1.
     result_oid_attno: i16,
@@ -148,11 +152,17 @@ impl<'mcx> ModifyTableState<'mcx> {
     // from mt_lastResultIndex).
     #[inline]
     fn rel(&self) -> &ResultRelExec<'mcx> {
+        if self.insert_target_root {
+            return self.root_rel();
+        }
         &self.rels[self.cur]
     }
 
     #[inline]
     fn rel_mut(&mut self) -> &mut ResultRelExec<'mcx> {
+        if self.insert_target_root {
+            return self.root_rel_mut();
+        }
         &mut self.rels[self.cur]
     }
 
@@ -290,14 +300,20 @@ pub fn exec_init_modify_table<'mcx>(
     let mut root = None;
     if node.rootRelation > 0 {
         debug_assert!(estate.es_unpruned_relids.is_member(node.rootRelation as i32));
-        root = Some(init_result_rel(node, estate, node.rootRelation as u32, None)?);
+        root = Some(init_result_rel(node, estate, node.rootRelation as u32, None, None)?);
     } else {
         assert_eq!(total_nrels, 1);
     }
 
     let mut rels: Vec<ResultRelExec<'mcx>> = Vec::with_capacity(nrels);
     for &(rti, i) in &kept {
-        rels.push(init_result_rel(node, estate, rti, Some(i))?);
+        rels.push(init_result_rel(
+            node,
+            estate,
+            rti,
+            Some(i),
+            (node.rootRelation > 0).then_some(node.rootRelation as u32),
+        )?);
     }
 
     // ExecSetupTransitionCaptureState (skipped in explain-only mode); the
@@ -317,6 +333,37 @@ pub fn exec_init_modify_table<'mcx>(
                     oc_transition_capture =
                         ::trigger::MakeTransitionCaptureState(td, target.rd_id, CmdType::CMD_UPDATE)?;
                 }
+            }
+        }
+    }
+
+    // ExecInitMerge root-INSERT half: NOT MATCHED INSERTs over an inherited/
+    // partitioned target insert via the root, projecting into a root-format
+    // slot (C tgtslot: rootRelInfo->ri_newTupleSlot / mt_root_tuple_slot).
+    if node.operation == CmdType::CMD_MERGE {
+        if let Some(root_exec) = root.as_mut() {
+            let has_insert = rels.iter().any(|r| {
+                r.merge.as_ref().is_some_and(|m| {
+                    m.not_matched_actions.iter().any(|a| a.command_type == CmdType::CMD_INSERT)
+                })
+            });
+            if has_insert {
+                if !node.returningLists.is_nil() {
+                    panic!(
+                        "ExecInitMerge (nodeModifyTable.c:3844-3900): RETURNING over an                          inherited/partitioned-target MERGE with INSERT actions (root                          RETURNING attno translation) not ported"
+                    );
+                }
+                let mcx = estate.es_query_cxt;
+                let (kind, desc) = {
+                    let rel = estate.es_relations[(root_exec.rti - 1) as usize]
+                        .as_ref()
+                        .expect("root relation opened");
+                    (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+                };
+                let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+                let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+                estate.es_tupleTable.push(slot);
+                root_exec.ri_newTupleSlot = Some(id);
             }
         }
     }
@@ -458,6 +505,7 @@ pub fn exec_init_modify_table<'mcx>(
         rels,
         root,
         cur: 0,
+        insert_target_root: false,
         last_result_oid: 0,
         result_oid_attno,
         index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
@@ -491,6 +539,9 @@ fn init_result_rel<'mcx>(
     estate: &mut EStateData<'mcx>,
     rti: u32,
     list_index: Option<usize>,
+    // The separate root's rti when node.rootRelation > 0: MERGE INSERT action
+    // projections build against the ROOT descriptor (C nodeModifyTable.c:3754).
+    root_rti: Option<u32>,
 ) -> PgResult<ResultRelExec<'mcx>> {
     estate.exec_init_result_relation(rti)?;
     let mcx = estate.es_query_cxt;
@@ -668,7 +719,11 @@ fn init_result_rel<'mcx>(
                 };
                 match action.commandType {
                     CmdType::CMD_INSERT => {
-                        let rel = estate.es_relations[(rti - 1) as usize]
+                        // INSERT actions always use the root relation (its
+                        // descriptor shapes the projection and the plan-output
+                        // check; the insert itself routes through the root).
+                        let insert_rti = root_rti.unwrap_or(rti);
+                        let rel = estate.es_relations[(insert_rti - 1) as usize]
                             .as_ref()
                             .expect("result relation opened");
                         exec_check_plan_output(rel, &action.targetList)?;
@@ -1046,6 +1101,12 @@ pub fn exec_modify_table<'mcx>(
             }
             CmdType::CMD_MERGE => {
                 let tupleid = fetch_merge_row_id(mt, estate, plan_slot);
+                if tupleid.is_none() {
+                    // NOT MATCHED rows run against the node's toplevel result
+                    // relation, not any specific child's (C 4283-4287).
+                    mt.cur = 0;
+                    mt.last_result_oid = 0;
+                }
                 if let Some(rslot) = exec_merge(mt, estate, plan_slot, tupleid, &mut epq_eval)? {
                     return Ok(Some(rslot));
                 }
@@ -1846,7 +1907,13 @@ fn exec_merge_not_matched<'mcx>(
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
-    let new_id = mt.rel().ri_newTupleSlot.expect("ExecInitMergeTupleSlots ran");
+    // INSERT actions project into and insert via the root relation when the
+    // target is inherited/partitioned (C rootRelInfo).
+    let new_id = if mt.root.is_some() {
+        mt.root_rel().ri_newTupleSlot.expect("ExecInitMerge built the root new slot")
+    } else {
+        mt.rel().ri_newTupleSlot.expect("ExecInitMergeTupleSlots ran")
+    };
     let n_actions = mt.rel().merge.as_ref().expect("merge state").not_matched_actions.len();
     for ai in 0..n_actions {
         let (command_type, pass) = {
@@ -1879,8 +1946,10 @@ fn exec_merge_not_matched<'mcx>(
                     let proj = action.proj.as_deref_mut().expect("INSERT action projection");
                     execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
                 }
-                let inserted = exec_insert(mt, estate, new_id, epq_eval)?;
-                if let Some(islot) = inserted {
+                mt.insert_target_root = mt.root.is_some();
+                let inserted = exec_insert(mt, estate, new_id, epq_eval);
+                mt.insert_target_root = false;
+                if let Some(islot) = inserted? {
                     if mt.rel().project_returning.is_some() {
                         return Ok(Some(exec_process_returning(
                             mt,
@@ -4551,7 +4620,8 @@ mcx::forget_safe_struct!(
         trig_fmgr, trig_old_slot, trig_when, all_updated_cols, generated_exprs,
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
-        last_result_oid, result_oid_attno, returning_slot, oc_old_slot;
+        insert_target_root, last_result_oid, result_oid_attno, returning_slot,
+        oc_old_slot;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check,
