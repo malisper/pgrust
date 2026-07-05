@@ -34,6 +34,7 @@ use types_portal::QueryEnvHandle;
 pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
     analyze_seams::parse_analyze_sql_fn::set(parse_analyze_sql_fn);
+    analyze_seams::transform_stmt_sql_fn::set(transform_stmt_sql_fn);
     analyze_seams::parse_analyze_varparams::set(parse_analyze_varparams);
     analyze_seams::parse_analyze_plpgsql::set(parse_analyze_plpgsql);
     analyze_seams::analyze_requires_snapshot::set(analyze_requires_snapshot);
@@ -105,6 +106,36 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
     free_parsestate(pstate)?;
 
     backend_status::pgstat_report_query_id(query.queryId, false);
+
+    Ok(query)
+}
+
+// interpret_AS_clause (functioncmds.c:936-977): make_parsestate +
+// sql_fn_parser_setup + transformStmt, nothing else.
+pub fn transform_stmt_sql_fn<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: Node<'mcx>,
+    source_text: &'a str,
+    fname: &'a str,
+    argtypes: &'a [Oid],
+    argnames: &'a [&'a str],
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+
+    parser_small1::setup_parse_sql_fn_parameters(
+        &mut pstate,
+        parser_small1::SqlFnParamState {
+            fname,
+            argtypes,
+            argnames,
+            input_collation: types_core::InvalidOid,
+        },
+    );
+
+    let query = transformStmt(mcx, &mut pstate, stmt)?;
+
+    free_parsestate(pstate)?;
 
     Ok(query)
 }
@@ -303,10 +334,11 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
             parse_merge::transformMergeStmt(mcx, pstate, parse_tree.as_merge_stmt().unwrap())?
         }
         NodeTag::T_CallStmt => transformCallStmt(mcx, pstate, parse_tree)?,
-        t @ NodeTag::T_ReturnStmt => panic!(
-            "transformStmt (analyze.c): transform arm for {t:?} unported — \
-             unit backend-parser-analyze"
-        ),
+        NodeTag::T_ReturnStmt => transformReturnStmt(
+            mcx,
+            pstate,
+            parse_tree.as_variant::<types_nodes::parsenodes::ReturnStmt>().unwrap(),
+        )?,
         _ => {
             let mut result = Query::default();
             result.commandType = CmdType::CMD_UTILITY;
@@ -1031,6 +1063,43 @@ fn transformSelectStmt<'mcx>(
     {
         parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
+
+    Ok(qry)
+}
+
+// transformReturnStmt (analyze.c:2433-2456).
+fn transformReturnStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    stmt: &types_nodes::parsenodes::ReturnStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let mut qry = Query::default();
+    qry.commandType = CmdType::CMD_SELECT;
+    qry.isReturn = true;
+
+    let expr = parse_expr::transformExpr(
+        mcx,
+        pstate,
+        stmt.returnval.expect("ReturnStmt.returnval"),
+        ParseExprKind::EXPR_KIND_SELECT_TARGET,
+    )?;
+    qry.targetList.lappend(mcx, Node::mk_target_entry(mcx, expr, 1, None, false)?)?;
+
+    if pstate.p_resolve_unknowns {
+        resolveTargetListUnknowns(mcx, pstate, &qry.targetList)?;
+    }
+    qry.rtable = mem::take(&mut pstate.p_rtable);
+    qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
+    qry.jointree = Some(
+        Node::mk_mut(mcx, FromExpr { fromlist: mem::take(&mut pstate.p_joinlist), quals: None })?
+            .seal_ref(),
+    );
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+    qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
+    qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
+    qry.hasAggs = pstate.p_hasAggs.get();
+
+    assign_query_collations(mcx, pstate, &qry)?;
 
     Ok(qry)
 }
