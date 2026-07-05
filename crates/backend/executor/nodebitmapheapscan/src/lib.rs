@@ -1,14 +1,17 @@
 // nodeBitmapHeapscan.c. The bitmapqual child subtree stays with execmain's
-// dispatcher (nodesort precedent): it runs MultiExec and hands the finished
-// TIDBitmap to bitmap_table_scan_setup. Parallel (pstate) arms loud there.
+// dispatcher (nodesort precedent): it runs MultiExec (parallel: only in the
+// worker that wins BM_INITIAL) and hands the TIDBitmap to
+// bitmap_table_scan_setup.
 #![allow(non_snake_case)]
+
+use std::sync::{Arc, Condvar, Mutex};
 
 use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState};
 use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::tableam::{table_beginscan_bm, table_endscan, table_rescan, table_slot_callbacks};
-use ::tidbitmap::{TbmIterator, TIDBitmap};
+use ::tidbitmap::{TbmIterator, TbmSharedIterator, TbmSharedIterState, TIDBitmap};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::BitmapHeapScan;
 use ::types_rel::Relation;
@@ -19,6 +22,35 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SharedBitmapState {
+    Initial,
+    InProgress,
+    Finished,
+}
+
+struct BmShared {
+    state: SharedBitmapState,
+    iterator: Option<Arc<TbmSharedIterState>>,
+}
+
+/// C ParallelBitmapHeapState (shm_toc entry -> Arc): the spinlock-guarded
+/// state machine plus the dsa_pointer to the shared iterator, folded into one
+/// mutex; the cv wakes waiters when the builder publishes.
+pub struct ParallelBitmapHeapState {
+    shared: Mutex<BmShared>,
+    cv: Condvar,
+}
+
+impl Default for ParallelBitmapHeapState {
+    fn default() -> Self {
+        ParallelBitmapHeapState {
+            shared: Mutex::new(BmShared { state: SharedBitmapState::Initial, iterator: None }),
+            cv: Condvar::new(),
+        }
+    }
+}
+
 pub struct BitmapHeapScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     pub bitmapqualorig: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -28,6 +60,9 @@ pub struct BitmapHeapScanState<'mcx> {
     pub recheck: bool,
     pub stats_exact_pages: u64,
     pub stats_lossy_pages: u64,
+    pub pstate: Option<Arc<ParallelBitmapHeapState>>,
+    pub plan_node_id: i32,
+    pub parallel_aware: bool,
 }
 
 impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
@@ -72,17 +107,20 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 .ss_currentScanDesc
                 .as_mut()
                 .expect("bitmap heap scan without a table scan descriptor");
-            let tbm = self.tbm.as_ref().expect("bitmap heap scan without a bitmap");
-            if !::tableam::table_scan_bitmap_next_tuple(
+            let found = ::tableam::table_scan_bitmap_next_tuple(
                 mcx,
                 scandesc,
-                tbm,
+                self.tbm.as_ref(),
                 &mut self.tbmiterator,
                 estate.slot_mut(slot_id),
                 &mut self.recheck,
                 &mut self.stats_lossy_pages,
                 &mut self.stats_exact_pages,
-            )? {
+            )?;
+            if estate.es_instrument != 0 && self.pstate.is_some() {
+                self.publish_stats(estate);
+            }
+            if !found {
                 exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
                 return Ok(false);
             }
@@ -131,21 +169,23 @@ pub fn bitmap_scan_next_pagebatch<'mcx>(
 ) -> PgResult<u32> {
     debug_assert!(node.initialized, "pagebatch before bitmap_table_scan_setup");
     check_for_interrupts()?;
-    let _ = estate;
     let scandesc = node
         .ss
         .ss_currentScanDesc
         .as_mut()
         .expect("bitmap heap scan without a table scan descriptor");
-    let tbm = node.tbm.as_ref().expect("bitmap heap scan without a bitmap");
-    ::tableam::table_scan_bitmap_next_pagebatch(
+    let n = ::tableam::table_scan_bitmap_next_pagebatch(
         scandesc,
-        tbm,
+        node.tbm.as_ref(),
         &mut node.tbmiterator,
         &mut node.recheck,
         &mut node.stats_lossy_pages,
         &mut node.stats_exact_pages,
-    )
+    )?;
+    if estate.es_instrument != 0 && node.pstate.is_some() {
+        node.publish_stats(estate);
+    }
+    Ok(n)
 }
 
 /// Store staged tuple `i` and apply the page's recheck qual; false = filtered.
@@ -189,15 +229,111 @@ pub fn bitmap_scan_batch_fetch<'mcx>(
     Ok(true)
 }
 
-/// `BitmapTableScanSetup` minus MultiExec: the dispatcher passes the bitmap.
+impl BitmapHeapScanState<'_> {
+    #[cold]
+    fn publish_stats(&self, estate: &mut EStateData<'_>) {
+        estate.instr_set_bitmap_stats(
+            self.plan_node_id,
+            ::types_core::instrument::BitmapHeapScanInstrumentation {
+                exact_pages: self.stats_exact_pages,
+                lossy_pages: self.stats_lossy_pages,
+            },
+        );
+    }
+}
+
+/// `BitmapShouldInitializeSharedState`: true = this participant won
+/// BM_INITIAL and must build the bitmap; false = the bitmap is BM_FINISHED.
+/// The CV sleep is a timed wait + interrupt check (C's ConditionVariableSleep
+/// checks interrupts per wakeup).
+pub fn bitmap_should_initialize_shared_state(
+    pstate: &ParallelBitmapHeapState,
+) -> PgResult<bool> {
+    let mut guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        match guard.state {
+            SharedBitmapState::Initial => {
+                guard.state = SharedBitmapState::InProgress;
+                return Ok(true);
+            }
+            SharedBitmapState::Finished => return Ok(false),
+            SharedBitmapState::InProgress => {
+                let (g, _) = pstate
+                    .cv
+                    .wait_timeout(guard, core::time::Duration::from_millis(10))
+                    .unwrap_or_else(|e| e.into_inner());
+                guard = g;
+                if init_small::globals::InterruptPending() {
+                    drop(guard);
+                    postgres_seams::check_for_interrupts::call()?;
+                    guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+                }
+            }
+        }
+    }
+}
+
+/// `ExecBitmapHeapInitializeDSM` (thread-native: no instrumentation block —
+/// worker stats flow through the estate report).
+pub fn exec_bitmap_heap_initialize_dsm(
+    node: &mut BitmapHeapScanState<'_>,
+) -> Arc<ParallelBitmapHeapState> {
+    let pstate = Arc::new(ParallelBitmapHeapState::default());
+    node.pstate = Some(Arc::clone(&pstate));
+    pstate
+}
+
+/// `ExecBitmapHeapReInitializeDSM`.
+pub fn exec_bitmap_heap_reinitialize_dsm(node: &mut BitmapHeapScanState<'_>) {
+    let pstate = node.pstate.as_ref().expect("parallel bitmap scan was initialized");
+    let mut guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+    guard.state = SharedBitmapState::Initial;
+    guard.iterator = None;
+}
+
+/// `ExecBitmapHeapInitializeWorker`.
+pub fn exec_bitmap_heap_initialize_worker(
+    node: &mut BitmapHeapScanState<'_>,
+    shared: Arc<ParallelBitmapHeapState>,
+) {
+    node.pstate = Some(shared);
+}
+
+/// `BitmapTableScanSetup` minus MultiExec: the dispatcher passes the bitmap
+/// (None = parallel non-builder; it attaches the shared iterator instead).
 pub fn bitmap_table_scan_setup<'mcx>(
     node: &mut BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tbm: TIDBitmap<'mcx>,
+    tbm: Option<TIDBitmap<'mcx>>,
 ) -> PgResult<()> {
-    node.tbm = Some(tbm);
-    let iter = node.tbm.as_mut().expect("just set").begin_private_iterate()?;
-    node.tbmiterator = TbmIterator::private(iter);
+    match (&node.pstate, tbm) {
+        (None, Some(tbm)) => {
+            node.tbm = Some(tbm);
+            let iter = node.tbm.as_mut().expect("just set").begin_private_iterate()?;
+            node.tbmiterator = TbmIterator::private(iter);
+        }
+        (Some(ps), Some(mut tbm)) => {
+            let shared = tbm.prepare_shared_iterate()?;
+            {
+                let mut guard = ps.shared.lock().unwrap_or_else(|e| e.into_inner());
+                debug_assert!(guard.state == SharedBitmapState::InProgress);
+                guard.iterator = Some(Arc::clone(&shared));
+                guard.state = SharedBitmapState::Finished;
+            }
+            ps.cv.notify_all();
+            node.tbm = Some(tbm);
+            node.tbmiterator = TbmIterator::shared(TbmSharedIterator::attach(shared));
+        }
+        (Some(ps), None) => {
+            let shared = {
+                let guard = ps.shared.lock().unwrap_or_else(|e| e.into_inner());
+                debug_assert!(guard.state == SharedBitmapState::Finished);
+                Arc::clone(guard.iterator.as_ref().expect("BM_FINISHED without an iterator"))
+            };
+            node.tbmiterator = TbmIterator::shared(TbmSharedIterator::attach(shared));
+        }
+        (None, None) => unreachable!("serial bitmap heap scan setup without a bitmap"),
+    }
 
     if node.ss.ss_currentScanDesc.is_none() {
         let snapshot = estate
@@ -276,6 +412,9 @@ pub fn exec_init_bitmap_heap_scan_rel<'mcx>(
         recheck: true,
         stats_exact_pages: 0,
         stats_lossy_pages: 0,
+        pstate: None,
+        plan_node_id: node.scan.plan.plan_node_id,
+        parallel_aware: node.scan.plan.parallel_aware,
     })
 }
 
@@ -288,6 +427,7 @@ pub fn exec_end_bitmap_heap_scan(node: &mut BitmapHeapScanState<'_>) -> PgResult
     }
     node.tbm = None;
     node.bitmapqualorig = None;
+    node.pstate = None;
     Ok(())
 }
 
@@ -316,8 +456,10 @@ fn check_for_interrupts() -> types_error::PgResult<()> {
     Ok(())
 }
 
-// Exempt: bitmapqualorig is released in exec_end_bitmap_heap_scan.
+// Exempt: bitmapqualorig, tbmiterator (Arc), and pstate (Arc) are released
+// in exec_end_bitmap_heap_scan.
 mcx::forget_safe_struct!(
-    BitmapHeapScanState<'_> { ss, tbm, tbmiterator, initialized, recheck,
-        stats_exact_pages, stats_lossy_pages; bitmapqualorig },
+    BitmapHeapScanState<'_> { ss, tbm, initialized, recheck,
+        stats_exact_pages, stats_lossy_pages, plan_node_id, parallel_aware;
+        bitmapqualorig, tbmiterator, pstate },
 );

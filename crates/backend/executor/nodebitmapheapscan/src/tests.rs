@@ -654,7 +654,7 @@ fn bitmap_scan_matches_seqscan_across_pages() {
         let mut c = setup(mcx, pages, OP_INT4GT, F_INT4GT, 10);
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
         assert!(!tbm.is_empty());
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         let got = drain(&mut c.bhs, &mut c.estate);
         assert_eq!(got, seqscan_reference(pages, |v| v > 10));
         assert!(c.bhs.stats_exact_pages == 3 && c.bhs.stats_lossy_pages == 0);
@@ -669,7 +669,7 @@ fn point_bitmap_scan_single_tuple() {
         let pages: &[&[i32]] = &[&[3, 1], &[2, 9]];
         let mut c = setup(mcx, pages, OP_INT4EQ, F_INT4EQ, 9);
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         assert_eq!(drain(&mut c.bhs, &mut c.estate), vec![9]);
         teardown(c);
     });
@@ -683,7 +683,7 @@ fn empty_bitmap_returns_no_rows() {
         let mut c = setup(mcx, pages, OP_INT4EQ, F_INT4EQ, 99);
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
         assert!(tbm.is_empty());
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         assert_eq!(drain(&mut c.bhs, &mut c.estate), Vec::<i32>::new());
         teardown(c);
     });
@@ -700,7 +700,7 @@ fn lossy_page_rechecks_bitmapqualorig() {
         let mut tbm = TIDBitmap::new(mcx, usize::MAX);
         tbm.add_page(0).unwrap();
         tbm.add_page(1).unwrap();
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         let got = drain(&mut c.bhs, &mut c.estate);
         assert_eq!(got, seqscan_reference(pages, |v| v > 10));
         assert!(c.bhs.stats_lossy_pages == 2 && c.bhs.stats_exact_pages == 0);
@@ -715,13 +715,13 @@ fn rescan_rebuilds_from_fresh_bitmap() {
         let pages: &[&[i32]] = &[&[10, 20, 30]];
         let mut c = setup(mcx, pages, OP_INT4GT, F_INT4GT, 15);
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         assert!(exec_bitmap_heap_scan(&mut c.bhs, &mut c.estate).unwrap().is_some());
         exec_rescan_bitmap_heap_scan(&mut c.bhs, &mut c.estate).unwrap();
         assert!(!c.bhs.initialized);
         nodebitmapindexscan::exec_rescan_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
         let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
-        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, tbm).unwrap();
+        bitmap_table_scan_setup(&mut c.bhs, &mut c.estate, Some(tbm)).unwrap();
         assert_eq!(drain(&mut c.bhs, &mut c.estate), vec![20, 30]);
         teardown(c);
     });

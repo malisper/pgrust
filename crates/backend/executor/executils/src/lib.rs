@@ -14,8 +14,8 @@ use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
-    AggregateInstrumentation, HashInstrumentation, IncrementalSortInfo, Instrumentation,
-    TuplesortInstrumentation,
+    AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
+    IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
@@ -434,6 +434,9 @@ pub struct EStateData<'mcx> {
     pub es_hash_instrumentation: PgVec<'mcx, (i32, HashInstrumentation)>,
     /// (plan_node_id, nsearches); C's IndexScanInstrumentation, hoisted.
     pub es_index_instrumentation: PgVec<'mcx, (i32, u64)>,
+    /// (plan_node_id, stats); C's BitmapHeapScanState.stats, hoisted for the
+    /// parallel-worker report (leader-side EXPLAIN reads the planstate).
+    pub es_bitmap_instrumentation: PgVec<'mcx, (i32, BitmapHeapScanInstrumentation)>,
     /// One entry per parallel worker (C PlanState.worker_instrument + the
     /// per-node shared_info arrays, hoisted; execParallel retrieve fills it).
     pub es_worker_instrument: PgVec<'mcx, WorkerInstr<'mcx>>,
@@ -477,6 +480,7 @@ pub struct WorkerInstr<'mcx> {
     pub agg: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub hash: PgVec<'mcx, (i32, HashInstrumentation)>,
     pub index: PgVec<'mcx, (i32, u64)>,
+    pub bitmap: PgVec<'mcx, (i32, BitmapHeapScanInstrumentation)>,
 }
 
 pub struct EpqSubs<'mcx> {
@@ -496,6 +500,23 @@ impl<'mcx> EStateData<'mcx> {
             }
         }
         self.es_index_instrumentation.push((plan_node_id, nsearches));
+    }
+
+    /// Current bitmap heap scan page stats, republished per node; ANALYZE +
+    /// parallel only.
+    #[cold]
+    pub fn instr_set_bitmap_stats(
+        &mut self,
+        plan_node_id: i32,
+        stats: BitmapHeapScanInstrumentation,
+    ) {
+        for e in self.es_bitmap_instrumentation.iter_mut() {
+            if e.0 == plan_node_id {
+                e.1 = stats;
+                return;
+            }
+        }
+        self.es_bitmap_instrumentation.push((plan_node_id, stats));
     }
 
     pub fn new_in(mcx: Mcx<'mcx>) -> Self {
@@ -534,6 +555,7 @@ impl<'mcx> EStateData<'mcx> {
             es_incsort_instrumentation: PgVec::new_in(mcx),
             es_hash_instrumentation: PgVec::new_in(mcx),
             es_index_instrumentation: PgVec::new_in(mcx),
+            es_bitmap_instrumentation: PgVec::new_in(mcx),
             es_worker_instrument: PgVec::new_in(mcx),
             es_aux_contexts: PgVec::new_in(mcx),
             es_finished: false,
@@ -973,7 +995,8 @@ mcx::forget_safe_struct!(
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
-        es_hash_instrumentation, es_index_instrumentation, es_worker_instrument,
+        es_hash_instrumentation, es_index_instrumentation,
+        es_bitmap_instrumentation, es_worker_instrument,
         es_subplan_hook, es_subplan_init_hook,
         es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
     },

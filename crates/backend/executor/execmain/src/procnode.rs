@@ -614,9 +614,8 @@ pub fn exec_init_node<'mcx>(
         NodeTag::T_BitmapOr => {
             let mcx = estate.es_query_cxt;
             let plan = node.as_bitmap_or().unwrap();
-            if plan.isshared {
-                panic!("ExecInitBitmapOr: isshared (parallel bitmap scan lane) not ported");
-            }
+            // isshared only picks C's dsa allocator for the shared result
+            // bitmap; thread-native needs no arm (see nodebitmapindexscan).
             PlanStateNode::BitmapOr(::mcx::alloc_in(
                 mcx,
                 init_bitmap_combine(&plan.bitmapplans, estate, eflags)?,
@@ -1522,8 +1521,7 @@ fn agg_arm<'mcx>(
                 && b.scan.ss.ps_ProjInfo.is_none()
             {
                 if !b.scan.initialized {
-                    let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
-                    ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
+                    bitmap_table_scan_setup_dispatch(b, estate)?;
                 }
                 let outer_slot = b.scan.ss.ss_ScanTupleSlot;
                 let src = BitmapScanBatchSource { bhs: &mut b.scan, outer_slot };
@@ -2007,10 +2005,27 @@ fn bitmap_heap_scan_arm<'mcx>(
 ) -> ProcResult {
     let b = &mut **b;
     if !b.scan.initialized {
-        let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
-        ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
+        bitmap_table_scan_setup_dispatch(b, estate)?;
     }
     ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
+}
+
+// BitmapTableScanSetup's MultiExec leg (nodeBitmapHeapscan.c): serial always
+// builds; parallel builds only in the participant that wins BM_INITIAL.
+fn bitmap_table_scan_setup_dispatch<'mcx>(
+    b: &mut BitmapHeapPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let build = match b.scan.pstate.as_deref() {
+        None => true,
+        Some(ps) => ::nodebitmapheapscan::bitmap_should_initialize_shared_state(ps)?,
+    };
+    let tbm = if build {
+        Some(multi_exec_bitmap_node(&mut b.bitmapqual, estate)?)
+    } else {
+        None
+    };
+    ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)
 }
 
 #[inline(never)]

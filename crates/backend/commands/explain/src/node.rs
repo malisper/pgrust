@@ -1898,8 +1898,7 @@ fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) 
     crate::format::ExplainPropertyUInteger("Index Searches", None, nsearches, es);
 }
 
-// show_tidbitmap_info (explain.c), text arm; parallel worker stats have no
-// parallel lane.
+// show_tidbitmap_info (explain.c), text arm.
 fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if !es.analyze {
         return;
@@ -1907,10 +1906,11 @@ fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if es.format != EXPLAIN_FORMAT_TEXT {
         crate::format::nontext_gap(es, "show_tidbitmap_info");
     }
+    let id = plan_of(node).plan_node_id;
     let stats = if es.qd.is_null() {
         None
     } else {
-        execmain_seams::query_desc_bitmap_instrument::call(es.qd, plan_of(node).plan_node_id)
+        execmain_seams::query_desc_bitmap_instrument::call(es.qd, id)
     };
     let stats = stats.unwrap_or_default();
     if stats.exact_pages > 0 || stats.lossy_pages > 0 {
@@ -1923,6 +1923,33 @@ fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
             append!(es, " lossy={}", stats.lossy_pages);
         }
         append!(es, "\n");
+    }
+    // Per-worker stats (C reads planstate->sinstrument; all-zero worker rows
+    // are skipped there and never reported here).
+    if es.qd.is_null() {
+        return;
+    }
+    if let Some(workers) = execmain_seams::query_desc_worker_bitmap_instrument::call(es.qd, id) {
+        for (n, si) in workers {
+            if si.exact_pages == 0 && si.lossy_pages == 0 {
+                continue;
+            }
+            if es.workers_state.is_some() {
+                explain_open_worker(n as usize, es);
+            }
+            crate::format::ExplainIndentText(es);
+            append!(es, "Heap Blocks:");
+            if si.exact_pages > 0 {
+                append!(es, " exact={}", si.exact_pages);
+            }
+            if si.lossy_pages > 0 {
+                append!(es, " lossy={}", si.lossy_pages);
+            }
+            append!(es, "\n");
+            if es.workers_state.is_some() {
+                explain_close_worker(n as usize, es);
+            }
+        }
     }
 }
 
