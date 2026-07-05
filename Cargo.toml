@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/_support/jit_deform",
     "crates/_support/types/types_error",
     "crates/_support/types/types_core",
     "crates/_support/mcx",

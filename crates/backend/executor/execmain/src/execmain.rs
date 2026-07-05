@@ -379,7 +379,22 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         es.es_top_eflags = eflags;
         es.es_instrument = instrument;
         es.es_jit_flags = pstmt.jitFlags;
-        init_plan(data, pstmt, operation, eflags)
+        // C jit_compile_expr reads es_jit_flags through the PlanState parent;
+        // expression compile has no estate linkage here, so the flags ride a
+        // thread-local window over InitPlan and the kernels come back through
+        // the session collector onto the estate (C's es_jit JitContext).
+        // Below the cost gate (jitFlags == 0) the window stays closed: the
+        // select1/point compile path pays only this branch.
+        if pstmt.jitFlags == 0 {
+            init_plan(data, pstmt, operation, eflags)
+        } else {
+            ::execexpr::jit::session_begin(pstmt.jitFlags);
+            let r = init_plan(data, pstmt, operation, eflags);
+            let jc = ::execexpr::jit::session_end();
+            data.estate.es_jit_blocks = jc.blocks;
+            data.estate.es_jit_instr = jc.instr;
+            r
+        }
     })?;
     qd.tup_desc = Some(tup_desc);
     qd.exec = Some(Box::new(exec));

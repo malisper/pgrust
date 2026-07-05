@@ -168,6 +168,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // C queryDesc->estate->{es_jit_flags, es_jit->instr} for EXPLAIN's JIT
+    // block: (jit_flags, created_functions, generation_nanos).
+    pub fn query_desc_jit_instr(query_desc: QueryDescHandle) -> (i32, i32, u64)
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,

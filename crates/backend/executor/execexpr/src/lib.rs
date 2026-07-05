@@ -18,6 +18,7 @@ mod arrayops;
 mod compile;
 pub mod domain;
 mod interp;
+pub mod jit;
 mod jsonbsubs;
 mod xmlops;
 mod steps;

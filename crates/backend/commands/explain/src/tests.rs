@@ -655,6 +655,46 @@ fn es_text<'a>(es: &'a ExplainState<'_>) -> &'a str {
     std::str::from_utf8(es.str.as_bytes()).unwrap()
 }
 
+// Pinned against C 18.3 ExplainPrintJIT (explain.c) text output; flag bits
+// are jit.h's PGJIT_*.
+#[test]
+fn jit_block_matches_pg() {
+    install_fixtures();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let expr_deform = (1 << 0) | (1 << 3) | (1 << 4);
+
+    let mut es = NewExplainState(mcx).unwrap();
+    es.analyze = true;
+    es.timing = true;
+    crate::ExplainPrintJIT(&mut es, expr_deform, 3, 1_234_567);
+    assert_eq!(
+        es_text(&es),
+        "JIT:\n\
+         \x20 Functions: 3\n\
+         \x20 Options: Inlining false, Optimization false, Expressions true, Deforming true\n\
+         \x20 Timing: Generation 1.235 ms (Deform 0.000 ms), Inlining 0.000 ms, \
+         Optimization 0.000 ms, Emission 0.000 ms, Total 1.235 ms\n"
+    );
+
+    // Plain EXPLAIN (no analyze/timing) omits the Timing line.
+    let mut es = NewExplainState(mcx).unwrap();
+    crate::ExplainPrintJIT(&mut es, 0b11111, 1, 0);
+    assert_eq!(
+        es_text(&es),
+        "JIT:\n\
+         \x20 Functions: 1\n\
+         \x20 Options: Inlining true, Optimization true, Expressions true, Deforming true\n"
+    );
+
+    // created_functions == 0 suppresses the whole block.
+    let mut es = NewExplainState(mcx).unwrap();
+    es.analyze = true;
+    es.timing = true;
+    crate::ExplainPrintJIT(&mut es, expr_deform, 0, 55);
+    assert_eq!(es_text(&es), "");
+}
+
 // Pinned against real PostgreSQL 18.3: EXPLAIN (ANALYZE, TIMING OFF,
 // SUMMARY OFF, BUFFERS OFF) SELECT 1 (captured 2026-07-02, Homebrew 18.3).
 #[test]

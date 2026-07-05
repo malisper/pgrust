@@ -91,6 +91,48 @@ pub fn install(desc: &Rc<TupleDescData<'static>>, ncols: usize) -> Option<Rc<Def
     imp::install(desc, ncols)
 }
 
+// Arena reuse surface for other copy-and-patch emitters (jit-qual lane):
+// same thread-local chunked W^X arena, whole-kernel granularity, fail-open.
+pub struct CodeBlock {
+    code: imp::CodeAlloc,
+    len: usize,
+}
+
+impl CodeBlock {
+    #[inline]
+    pub fn base(&self) -> *const u8 {
+        self.code.base()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// None = refused (arch, arena full): callers fail open to their interpreter.
+pub fn install_code(words: &[u32]) -> Option<CodeBlock> {
+    let code = imp::alloc_code(words)?;
+    Some(CodeBlock { code, len: words.len() * 4 })
+}
+
+// C JitInstrumentation slice we can attribute (created_functions +
+// generation time; inlining/optimization/emission are LLVM phases that stay
+// zero under copy-and-patch). Lives here so executor state crates can carry
+// it without depending on the emitters.
+#[derive(Clone, Copy, Default)]
+pub struct JitInstrumentation {
+    pub created_functions: i32,
+    pub generation_nanos: u64,
+}
+
+mcx::forget_safe_nodrop!(JitInstrumentation);
+
 #[cfg(not(target_arch = "aarch64"))]
 mod imp {
     pub(crate) struct CodeAlloc;
@@ -98,6 +140,9 @@ mod imp {
         pub(crate) fn base(&self) -> *const u8 {
             unreachable!("no kernels are installed off-aarch64")
         }
+    }
+    pub(crate) fn alloc_code(_words: &[u32]) -> Option<CodeAlloc> {
+        None
     }
     pub(crate) fn install(
         _desc: &std::rc::Rc<types_tuple::TupleDescData<'static>>,
@@ -177,7 +222,7 @@ mod imp {
         Some(Rc::new(Chunk { base: base.cast(), used: Cell::new(0), live: Cell::new(0) }))
     }
 
-    fn alloc_code(words: &[u32]) -> Option<CodeAlloc> {
+    pub(crate) fn alloc_code(words: &[u32]) -> Option<CodeAlloc> {
         let len = words.len() * 4;
         debug_assert!(len <= CHUNK_BYTES);
         ARENA.with(|arena| {

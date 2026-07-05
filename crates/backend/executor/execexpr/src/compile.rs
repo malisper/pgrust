@@ -3945,7 +3945,14 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     // Kernelized programs never run their steps: skipping the peephole keeps
     // compile-per-query lanes (point/select1) free of the pass cost.
     if matches!(state.kernel, Kernel::Program) {
-        fuse_program(state);
+        // JIT compiles the unfused program (kernel and interpreter share the
+        // step-state contract); fusion only serves the interpreter loop, so
+        // a jitted program skips it. Below the planner's jit gate this is a
+        // single thread-local read.
+        crate::jit::try_compile(state);
+        if state.jit.is_none() {
+            fuse_program(state);
+        }
     }
     if dump_programs_enabled() {
         dump_program(state);
@@ -4139,7 +4146,19 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
 // pairs collapse into fused steps (one dispatch + arg-slot round trip per
 // pair). Runs after select_kernel (kernel matchers see raw shapes); a pair
 // whose second step is a jump target stays unfused.
+// Test hook: the jit single-step cross-check drives exec_one_step over
+// unfused programs (the shape jitted programs keep).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SKIP_FUSE_FOR_TESTS: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(false) };
+}
+
 pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
+    #[cfg(test)]
+    if SKIP_FUSE_FOR_TESTS.with(|c| c.get()) {
+        return;
+    }
     let len = state.steps.len();
     if len < 3 {
         for s in state.steps.iter_mut() {

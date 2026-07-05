@@ -8,6 +8,7 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 
 use ::datum::Datum;
 use ::mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
@@ -561,6 +562,10 @@ pub struct EStateData<'mcx> {
     pub es_parallel_workers_to_launch: i32,
     pub es_parallel_workers_launched: i32,
     pub es_jit_flags: i32,
+    // C es_jit (JitContext): this execution's copy-and-patch kernels +
+    // instrumentation; blocks released in teardown (droppy owner).
+    pub es_jit_blocks: Vec<::jit_deform::CodeBlock>,
+    pub es_jit_instr: ::jit_deform::JitInstrumentation,
     // C EPQState.relsubs_*, hosted on the (shared) estate — no child EState.
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
@@ -672,6 +677,8 @@ impl<'mcx> EStateData<'mcx> {
             es_parallel_workers_to_launch: 0,
             es_parallel_workers_launched: 0,
             es_jit_flags: 0,
+            es_jit_blocks: Vec::new(),
+            es_jit_instr: ::jit_deform::JitInstrumentation::default(),
             es_epq: None,
             es_epq_active: false,
         }
@@ -1036,6 +1043,7 @@ impl<'mcx> EStateData<'mcx> {
             *slot = None;
         }
         self.es_aux_contexts.clear();
+        self.es_jit_blocks.clear();
     }
 
     /// True iff every census-exempt owner has been released — the
@@ -1049,6 +1057,7 @@ impl<'mcx> EStateData<'mcx> {
             && self.es_cte_shared.iter().all(Option::is_none)
             && self.es_worktable_shared.iter().all(Option::is_none)
             && self.es_aux_contexts.is_empty()
+            && self.es_jit_blocks.is_empty()
             && self.es_subplan_expr_states.is_empty()
             && self
                 .es_tupleTable
@@ -1091,8 +1100,9 @@ mcx::forget_safe_struct!(
         es_top_eflags, es_instrument, es_finished, es_subplanstates,
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
-        es_parallel_workers_launched, es_jit_flags, es_epq, es_epq_active,
-        es_rowmarks;
+        es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
+        es_epq_active, es_rowmarks;
+        es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
         es_aux_contexts,
