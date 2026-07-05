@@ -30,8 +30,21 @@ executils = { path = "../executils" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_portal = { path = "../../../_support/types/portal" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
+sort_storage = { path = "../../utils/sort/sort_storage" }
+hyperloglog = { path = "../../lib/hyperloglog" }
+hashfn = { path = "../../../common/hashfn" }
 init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
 adt_numeric = { path = "../../utils/adt/numeric" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }

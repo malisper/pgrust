@@ -2043,3 +2043,283 @@ fn mixed_grouping_sets_empty_input() {
     let got = run_rollup(agg, &[]);
     assert_eq!(got, vec![]);
 }
+
+// Spill lane: hash_mem-bounded fills partition to tapes and recombine.
+mod hashspill {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Once;
+
+    use super::*;
+
+    static SPILL_SETUP: Once = Once::new();
+    static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
+    static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn enter_datadir(tag: &str) -> (std::sync::MutexGuard<'static, ()>, String) {
+        let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = format!(
+            "{}/pgrust-hashaggspill-{}-{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            tag
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(format!("{dir}/base/pgsql_tmp")).unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        (guard, dir)
+    }
+
+    fn setup() {
+        install_seams();
+        SPILL_SETUP.call_once(|| {
+            elog::init_seams();
+            fd::init_seams();
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+            aio_seams::pgaio_closing_fd::set(|_| {});
+            aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            pgstat_seams::pgstat_report_tempfile::set(|_| {});
+            ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
+            ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+            resowner::init_seams();
+            guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
+                get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
+                set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
+            });
+        });
+        fd::InitFileAccess();
+        let _ = fd::InitTemporaryFileAccess();
+        if resowner_seams::current_resource_owner::call().is_null() {
+            let owner = resowner::ResourceOwnerCreate(
+                types_resowner::ResourceOwner::NULL,
+                "hashagg-spill-test",
+            )
+            .unwrap();
+            resowner_seams::set_current_resource_owner::call(owner);
+        }
+    }
+
+    fn temp_files(dir: &str) -> usize {
+        std::fs::read_dir(format!("{dir}/base/pgsql_tmp"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    const NGROUPS: i32 = 10_000;
+
+    fn spill_rows() -> &'static [i32] {
+        let mut v: Vec<i32> = (0..NGROUPS).collect();
+        v.extend(0..NGROUPS);
+        Box::leak(v.into_boxed_slice())
+    }
+
+    #[test]
+    fn hashed_group_by_spills_and_recombines() {
+        setup();
+        let (_cwd, dir) = enter_datadir("count");
+        let saved_work_mem = init_small::globals::work_mem();
+        init_small::globals::set_work_mem(64);
+
+        let agg = mk_hashed_count_agg(leaked_mcx());
+        let rows = spill_rows();
+        let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+        let mut estate_owner = estate_owner.unwrap();
+        estate_owner.with_mut(|estate| {
+            let mcx = estate.es_query_cxt;
+            let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+            let outer_id =
+                estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+            // SAFETY: agg is leaked ('static) and read-only.
+            let agg = unsafe { shorten(agg) };
+            let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx()), None).unwrap();
+
+            let mut got: Vec<(i32, i64)> = Vec::new();
+            {
+                let mut feed = feeder(outer_id, rows);
+                while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+                    let base = estate.slot_mut(slot_id).base();
+                    got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+                }
+            }
+            got.sort_unstable();
+            let expect: Vec<(i32, i64)> = (0..NGROUPS).map(|k| (k, 2)).collect();
+            assert_eq!(got, expect);
+
+            let ai = estate
+                .es_agg_instrumentation
+                .iter()
+                .find_map(|(id, ai)| (*id == agg.plan.plan_node_id).then_some(ai))
+                .unwrap();
+            assert!(ai.hash_batches_used > 1, "expected spill batches, got {ai:?}");
+            assert!(ai.hash_disk_used > 0, "expected disk usage, got {ai:?}");
+            assert!(ai.hash_mem_peak > 0);
+
+            exec_rescan_agg(&mut state, estate);
+            let mut again: Vec<(i32, i64)> = Vec::new();
+            {
+                let mut feed = feeder(outer_id, rows);
+                while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+                    let base = estate.slot_mut(slot_id).base();
+                    again.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+                }
+            }
+            again.sort_unstable();
+            assert_eq!(again, expect);
+
+            crate::exec_end_agg(&mut state);
+        });
+        assert_eq!(temp_files(&dir), 0, "end must drop the tape files");
+        init_small::globals::set_work_mem(saved_work_mem);
+    }
+
+    // Unneeded filler column: the all_cols_needed=false wslot projection.
+    fn mk_spill_min_text_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+        let g_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let g_tle = Node::mk_target_entry(mcx, g_var, 1, Some("g"), false).unwrap();
+        let f_var = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+        let f_tle = Node::mk_target_entry(mcx, f_var, 2, Some("filler"), false).unwrap();
+        let t_var = Node::mk_var(mcx, 1, 3, TEXTOID, -1, C_COLLATION, 0).unwrap();
+        let t_tle = Node::mk_target_entry(mcx, t_var, 3, Some("t"), false).unwrap();
+        let outer_plan = {
+            let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+            let mut tl = NodeList::make1(mcx, g_tle).unwrap();
+            tl.lappend(mcx, f_tle).unwrap();
+            tl.lappend(mcx, t_tle).unwrap();
+            r.plan.targetlist = tl;
+            r.plan.plan_width = 24;
+            r.seal()
+        };
+
+        let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("g"), false).unwrap();
+        let arg_var = Node::mk_var(mcx, OUTER_VAR, 3, TEXTOID, -1, C_COLLATION, 0).unwrap();
+        let arg_tle = Node::mk_target_entry(mcx, arg_var, 1, None, false).unwrap();
+        let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+        aggref.aggfnoid = MIN_TEXT_OID;
+        aggref.aggtype = TEXTOID;
+        aggref.aggtranstype = TEXTOID;
+        aggref.inputcollid = C_COLLATION;
+        aggref.aggargtypes = types_nodes::list::OidList::make1(mcx, TEXTOID).unwrap();
+        aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+        aggref.aggno = 0;
+        aggref.aggtransno = 0;
+        let min_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("m"), false).unwrap();
+
+        let mut agg = Node::build::<Agg>(mcx).unwrap();
+        let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+        tlist.lappend(mcx, min_tle).unwrap();
+        agg.plan.targetlist = tlist;
+        agg.plan.lefttree = Some(outer_plan);
+        agg.aggstrategy = 2;
+        agg.numCols = 1;
+        agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        agg.numGroups = 4;
+        agg.seal_ref()
+    }
+
+    #[test]
+    fn hashed_min_text_spills_byref_transvalues() {
+        setup();
+        let (_cwd, dir) = enter_datadir("mintext");
+        let saved_work_mem = init_small::globals::work_mem();
+        init_small::globals::set_work_mem(64);
+
+        const N: i32 = 4_000;
+        let agg = mk_spill_min_text_agg(leaked_mcx());
+        let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+        let mut estate_owner = estate_owner.unwrap();
+        estate_owner.with_mut(|estate| {
+            let mcx = estate.es_query_cxt;
+            let outer_desc = {
+                let int4 = |attnum: i16| FormData_pg_attribute {
+                    attnum,
+                    atttypid: INT4OID,
+                    atttypmod: -1,
+                    attlen: 4,
+                    attbyval: true,
+                    attalign: TYPALIGN_INT,
+                    attstorage: TYPSTORAGE_PLAIN,
+                    ..Default::default()
+                };
+                let text = FormData_pg_attribute {
+                    attnum: 3,
+                    atttypid: TEXTOID,
+                    atttypmod: -1,
+                    attlen: -1,
+                    attbyval: false,
+                    attalign: TYPALIGN_INT,
+                    attstorage: b'x' as i8,
+                    ..Default::default()
+                };
+                let mut attrs = PgVec::new_in(mcx);
+                let mut compact = PgVec::new_in(mcx);
+                for a in [int4(1), int4(2), text] {
+                    compact.push(CompactAttribute::populate_from(&a));
+                    attrs.push(a);
+                }
+                Rc::new(TupleDescData {
+                    natts: 3,
+                    tdtypeid: 0,
+                    tdtypmod: -1,
+                    tdrefcount: -1,
+                    constr: None,
+                    compact_attrs: compact,
+                    attrs,
+                })
+            };
+            let outer_id =
+                estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+            // SAFETY: agg is leaked ('static) and read-only.
+            let agg = unsafe { shorten(agg) };
+            let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx()), None).unwrap();
+
+            // Two passes: "b#####" first, then the winning "a#####".
+            let mut i = 0i32;
+            let mut feed = move |estate: &mut EStateData<'_>| {
+                if i >= 2 * N {
+                    return Ok(None);
+                }
+                let (g, s) = if i < N {
+                    (i, format!("b{i:05}"))
+                } else {
+                    (i - N, format!("a{:05}", i - N))
+                };
+                let mcx = estate.es_query_cxt;
+                let slot = estate.slot_mut(outer_id);
+                exectuples::exec_clear_tuple(slot, mcx);
+                slot.base_mut().tts_values[0] = Datum::from_i32(g);
+                slot.base_mut().tts_isnull[0] = false;
+                slot.base_mut().tts_values[1] = Datum::from_i32(-g);
+                slot.base_mut().tts_isnull[1] = false;
+                slot.base_mut().tts_values[2] = text_datum(&s);
+                slot.base_mut().tts_isnull[2] = false;
+                exectuples::exec_store_virtual_tuple(slot);
+                i += 1;
+                Ok(Some(outer_id))
+            };
+            let mut got: Vec<(i32, String)> = Vec::new();
+            while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+                let base = estate.slot_mut(slot_id).base();
+                assert!(!base.tts_isnull[1]);
+                got.push((base.tts_values[0].as_i32(), text_datum_str(base.tts_values[1])));
+            }
+            got.sort_unstable();
+            let expect: Vec<(i32, String)> = (0..N).map(|k| (k, format!("a{k:05}"))).collect();
+            assert_eq!(got, expect);
+
+            let ai = estate
+                .es_agg_instrumentation
+                .iter()
+                .find_map(|(id, ai)| (*id == agg.plan.plan_node_id).then_some(ai))
+                .unwrap();
+            assert!(ai.hash_batches_used > 1, "expected spill batches, got {ai:?}");
+
+            crate::exec_end_agg(&mut state);
+        });
+        assert_eq!(temp_files(&dir), 0, "end must drop the tape files");
+        init_small::globals::set_work_mem(saved_work_mem);
+    }
+}
