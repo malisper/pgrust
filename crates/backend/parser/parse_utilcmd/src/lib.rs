@@ -456,6 +456,302 @@ pub struct CreateStmtCxt<'mcx> {
     pub alist: NodeList<'mcx>,
 }
 
+// setSchemaName (parse_utilcmd.c). RangeVars sit behind shared refs, so a
+// missing schemaname is fixed by swapping in a stamped copy (C scribbles).
+fn set_schema_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    context_schema: &str,
+    rv: Option<&'mcx RangeVar<'mcx>>,
+) -> PgResult<Option<&'mcx RangeVar<'mcx>>> {
+    let rv = rv.expect("schema element names a relation");
+    match rv.schemaname {
+        None => {
+            let stamped = RangeVar {
+                catalogname: rv.catalogname,
+                schemaname: Some(crate::like::str_in(mcx, context_schema)?),
+                relname: rv.relname,
+                inh: rv.inh,
+                relpersistence: rv.relpersistence,
+                alias: rv.alias,
+                location: rv.location,
+            };
+            Ok(Some(Node::mk_mut(mcx, stamped)?.seal_ref()))
+        }
+        Some(s) if s != context_schema => Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "CREATE specifies a schema ({s}) different from the one being created ({context_schema})"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_SCHEMA_DEFINITION),
+        )),
+        _ => Ok(None),
+    }
+}
+
+// transformCreateSchemaStmtElements (parse_utilcmd.c): reorganize CREATE
+// SCHEMA elements into a sequentially executable order and stamp the schema.
+pub fn transformCreateSchemaStmtElements<'mcx>(
+    mcx: Mcx<'mcx>,
+    schema_elts: &NodeList<'mcx>,
+    schema_name: &str,
+) -> PgResult<NodeList<'mcx>> {
+    use types_nodes::rawnodes::{CreateTrigStmt, ViewStmt};
+    let mut sequences = NodeList::nil();
+    let mut tables = NodeList::nil();
+    let mut views = NodeList::nil();
+    let mut indexes = NodeList::nil();
+    let mut triggers = NodeList::nil();
+    let mut grants = NodeList::nil();
+    for element in schema_elts.iter() {
+        // SAFETY (each with_mut): parse tree is analyze-owned; no derived
+        // refs live across the write.
+        match element.node_tag() {
+            NodeTag::T_CreateSeqStmt => {
+                let s = element.as_variant::<CreateSeqStmt>().expect("CreateSeqStmt");
+                if let Some(rv) = set_schema_name(mcx, schema_name, s.sequence)? {
+                    unsafe {
+                        element
+                            .with_mut::<CreateSeqStmt, _>(|s| s.sequence = Some(rv))
+                            .expect("CreateSeqStmt");
+                    }
+                }
+                sequences.lappend(mcx, element)?;
+            }
+            NodeTag::T_CreateStmt => {
+                let s = element.as_variant::<CreateStmt>().expect("CreateStmt");
+                if let Some(rv) = set_schema_name(mcx, schema_name, s.relation)? {
+                    unsafe {
+                        element
+                            .with_mut::<CreateStmt, _>(|s| s.relation = Some(rv))
+                            .expect("CreateStmt");
+                    }
+                }
+                tables.lappend(mcx, element)?;
+            }
+            NodeTag::T_ViewStmt => {
+                let s = element.as_variant::<ViewStmt>().expect("ViewStmt");
+                if let Some(rv) = set_schema_name(mcx, schema_name, s.view)? {
+                    unsafe {
+                        element
+                            .with_mut::<ViewStmt, _>(|s| s.view = Some(rv))
+                            .expect("ViewStmt");
+                    }
+                }
+                views.lappend(mcx, element)?;
+            }
+            NodeTag::T_IndexStmt => {
+                let s = element.as_variant::<IndexStmt>().expect("IndexStmt");
+                if let Some(rv) = set_schema_name(mcx, schema_name, s.relation)? {
+                    unsafe {
+                        element
+                            .with_mut::<IndexStmt, _>(|s| s.relation = Some(rv))
+                            .expect("IndexStmt");
+                    }
+                }
+                indexes.lappend(mcx, element)?;
+            }
+            NodeTag::T_CreateTrigStmt => {
+                let s = element.as_variant::<CreateTrigStmt>().expect("CreateTrigStmt");
+                if let Some(rv) = set_schema_name(mcx, schema_name, s.relation)? {
+                    unsafe {
+                        element
+                            .with_mut::<CreateTrigStmt, _>(|s| s.relation = Some(rv))
+                            .expect("CreateTrigStmt");
+                    }
+                }
+                triggers.lappend(mcx, element)?;
+            }
+            NodeTag::T_GrantStmt => grants.lappend(mcx, element)?,
+            other => panic!("unrecognized node type: {other:?}"),
+        }
+    }
+    let mut result = sequences;
+    for l in [&tables, &views, &indexes, &triggers, &grants] {
+        for n in l.iter() {
+            result.lappend(mcx, n)?;
+        }
+    }
+    Ok(result)
+}
+
+// transformConstraintAttrs (parse_utilcmd.c): fold CONSTR_ATTR_* markers onto
+// the preceding constraint. Deferrable UNIQUE/PK louds downstream in the
+// transformIndexConstraint lanes; NOT ENFORCED louds here, mirroring the
+// processCASbits policy (deferred-unique / not-enforced lanes own them).
+fn transformConstraintAttrs<'mcx>(
+    constraints: &NodeList<'mcx>,
+    src: Option<&str>,
+) -> PgResult<()> {
+    let supports_attrs = |c: Option<&Constraint<'_>>| {
+        matches!(
+            c.map(|c| c.contype),
+            Some(
+                ConstrType::CONSTR_PRIMARY
+                    | ConstrType::CONSTR_UNIQUE
+                    | ConstrType::CONSTR_EXCLUSION
+                    | ConstrType::CONSTR_FOREIGN
+            )
+        )
+    };
+    let misplaced = |clause: &str, location: i32| {
+        column_syntax_error(format_args!("misplaced {clause} clause"), src, location)
+    };
+    let multiple = |what: &str, location: i32| {
+        column_syntax_error(
+            format_args!("multiple {what} clauses not allowed"),
+            src,
+            location,
+        )
+    };
+    let initially_deferred_not_deferrable = |location: i32| {
+        column_syntax_error(
+            format_args!("constraint declared INITIALLY DEFERRED must be DEFERRABLE"),
+            src,
+            location,
+        )
+    };
+    let mut lastprimarycon: Option<Node<'mcx>> = None;
+    let mut saw_deferrability = false;
+    let mut saw_initially = false;
+    let mut saw_enforced = false;
+    for cnode in constraints.iter() {
+        let con = cnode.as_variant::<Constraint>().expect("column constraint");
+        let last = lastprimarycon
+            .map(|n| n.as_variant::<Constraint>().expect("Constraint"));
+        // SAFETY (each with_mut): parse tree is analyze-owned; `last` is not
+        // read again after the write.
+        match con.contype {
+            ConstrType::CONSTR_ATTR_DEFERRABLE => {
+                if !supports_attrs(last) {
+                    return Err(misplaced("DEFERRABLE", con.location));
+                }
+                if saw_deferrability {
+                    return Err(multiple("DEFERRABLE/NOT DEFERRABLE", con.location));
+                }
+                saw_deferrability = true;
+                unsafe {
+                    lastprimarycon
+                        .expect("SUPPORTS_ATTRS checked")
+                        .with_mut::<Constraint, _>(|c| c.deferrable = true)
+                        .expect("Constraint");
+                }
+            }
+            ConstrType::CONSTR_ATTR_NOT_DEFERRABLE => {
+                if !supports_attrs(last) {
+                    return Err(misplaced("NOT DEFERRABLE", con.location));
+                }
+                if saw_deferrability {
+                    return Err(multiple("DEFERRABLE/NOT DEFERRABLE", con.location));
+                }
+                saw_deferrability = true;
+                let last_node = lastprimarycon.expect("SUPPORTS_ATTRS checked");
+                unsafe {
+                    last_node
+                        .with_mut::<Constraint, _>(|c| c.deferrable = false)
+                        .expect("Constraint");
+                }
+                if saw_initially
+                    && last_node.as_variant::<Constraint>().expect("Constraint").initdeferred
+                {
+                    return Err(initially_deferred_not_deferrable(con.location));
+                }
+            }
+            ConstrType::CONSTR_ATTR_DEFERRED => {
+                if !supports_attrs(last) {
+                    return Err(misplaced("INITIALLY DEFERRED", con.location));
+                }
+                if saw_initially {
+                    return Err(multiple("INITIALLY IMMEDIATE/DEFERRED", con.location));
+                }
+                saw_initially = true;
+                let last_node = lastprimarycon.expect("SUPPORTS_ATTRS checked");
+                unsafe {
+                    last_node
+                        .with_mut::<Constraint, _>(|c| {
+                            c.initdeferred = true;
+                            // If only INITIALLY DEFERRED appears, assume DEFERRABLE
+                            if !saw_deferrability {
+                                c.deferrable = true;
+                            }
+                        })
+                        .expect("Constraint");
+                }
+                if saw_deferrability
+                    && !last_node.as_variant::<Constraint>().expect("Constraint").deferrable
+                {
+                    return Err(initially_deferred_not_deferrable(con.location));
+                }
+            }
+            ConstrType::CONSTR_ATTR_IMMEDIATE => {
+                if !supports_attrs(last) {
+                    return Err(misplaced("INITIALLY IMMEDIATE", con.location));
+                }
+                if saw_initially {
+                    return Err(multiple("INITIALLY IMMEDIATE/DEFERRED", con.location));
+                }
+                saw_initially = true;
+                unsafe {
+                    lastprimarycon
+                        .expect("SUPPORTS_ATTRS checked")
+                        .with_mut::<Constraint, _>(|c| c.initdeferred = false)
+                        .expect("Constraint");
+                }
+            }
+            ConstrType::CONSTR_ATTR_ENFORCED => {
+                if !matches!(
+                    last.map(|c| c.contype),
+                    Some(ConstrType::CONSTR_CHECK | ConstrType::CONSTR_FOREIGN)
+                ) {
+                    return Err(misplaced("ENFORCED", con.location));
+                }
+                if saw_enforced {
+                    return Err(multiple("ENFORCED/NOT ENFORCED", con.location));
+                }
+                saw_enforced = true;
+                unsafe {
+                    lastprimarycon
+                        .expect("contype checked")
+                        .with_mut::<Constraint, _>(|c| c.is_enforced = true)
+                        .expect("Constraint");
+                }
+            }
+            ConstrType::CONSTR_ATTR_NOT_ENFORCED => {
+                if !matches!(
+                    last.map(|c| c.contype),
+                    Some(ConstrType::CONSTR_CHECK | ConstrType::CONSTR_FOREIGN)
+                ) {
+                    return Err(misplaced("NOT ENFORCED", con.location));
+                }
+                if saw_enforced {
+                    return Err(multiple("ENFORCED/NOT ENFORCED", con.location));
+                }
+                saw_enforced = true;
+                unsafe {
+                    lastprimarycon
+                        .expect("contype checked")
+                        .with_mut::<Constraint, _>(|c| {
+                            c.is_enforced = false;
+                            // A NOT ENFORCED constraint must be marked as invalid.
+                            c.skip_validation = true;
+                            c.initially_valid = false;
+                        })
+                        .expect("Constraint");
+                }
+                unported("NOT ENFORCED column constraints");
+            }
+            _ => {
+                lastprimarycon = Some(cnode);
+                saw_deferrability = false;
+                saw_initially = false;
+                saw_enforced = false;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn transformColumnDefinition<'mcx>(
     mcx: Mcx<'mcx>,
     column_node: Node<'mcx>,
@@ -558,6 +854,8 @@ fn transformColumnDefinition<'mcx>(
         }
         need_notnull = true;
     }
+
+    transformConstraintAttrs(&column.constraints, src)?;
 
     let mut saw_nullable = false;
     let mut saw_default = false;
@@ -735,9 +1033,17 @@ fn transformColumnDefinition<'mcx>(
                 }
                 fkconstraints.lappend(mcx, cnode)?;
             }
+            ConstrType::CONSTR_ATTR_DEFERRABLE
+            | ConstrType::CONSTR_ATTR_NOT_DEFERRABLE
+            | ConstrType::CONSTR_ATTR_DEFERRED
+            | ConstrType::CONSTR_ATTR_IMMEDIATE
+            | ConstrType::CONSTR_ATTR_ENFORCED
+            | ConstrType::CONSTR_ATTR_NOT_ENFORCED => {
+                // transformConstraintAttrs took care of these
+            }
             other => unported(match other {
                 ConstrType::CONSTR_NULL => "NULL column constraints",
-                _ => "constraint attributes (transformConstraintAttrs)",
+                _ => "unexpected column constraint type",
             }),
         }
         if saw_default && saw_identity {
@@ -1119,6 +1425,12 @@ fn transform_index_constraints<'mcx>(
         if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
             unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
         }
+        if constraint.without_overlaps {
+            // NARROWED: WITHOUT OVERLAPS parses; the temporal (WITHOUT
+            // OVERLAPS / PERIOD) index+constraint machinery belongs to the
+            // exclusion/temporal-constraints lane.
+            unported("transformIndexConstraint: WITHOUT OVERLAPS (temporal constraints)");
+        }
 
         let mut index = Node::build::<IndexStmt>(mcx)?;
         index.unique = !is_exclusion;
@@ -1294,6 +1606,10 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     }
     if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
         unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
+    }
+    if constraint.without_overlaps {
+        // NARROWED: as the CREATE lane — temporal-constraints lane owns this.
+        unported("transformIndexConstraint: WITHOUT OVERLAPS (temporal constraints)");
     }
     if !constraint.including.is_nil() {
         unported("transformIndexConstraint: INCLUDE columns");

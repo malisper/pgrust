@@ -428,6 +428,11 @@ pub struct AlterObjectSchemaStmt<'mcx> {
     pub missing_ok: bool,
 }
 
+#[derive(Default)]
+pub struct ReturnStmt<'mcx> {
+    pub returnval: Option<Node<'mcx>>,
+}
+
 // C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
 #[derive(Default)]
 pub struct CreateFunctionStmt<'mcx> {
@@ -1459,6 +1464,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CopyStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
     const TAG: NodeTag = NodeTag::T_FunctionParameter;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReturnStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReturnStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateFunctionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateFunctionStmt;

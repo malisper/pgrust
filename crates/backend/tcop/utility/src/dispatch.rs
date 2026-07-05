@@ -823,15 +823,49 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::CreateSchemaStmt<'mcx>,
                 >(stmt)
             };
-            let nsp_oid = schemacmds::CreateSchemaCommand(mcx, stmt)?;
-            // C collects inside CreateSchemaCommand ahead of its element
-            // subcommands; the port rejects schema elements, so collecting
-            // here is order-identical.
-            event_trigger::EventTriggerCollectSimpleCommand(
-                ObjectAddress::set(NAMESPACE_RELATION_ID, nsp_oid),
-                INVALID_OBJECT_ADDRESS,
-                CreateCommandTag(parsetree),
-            );
+            let tag = CreateCommandTag(parsetree);
+            let (stmt_location, stmt_len) = (pstmt.stmt_location, pstmt.stmt_len);
+            // C runs this block inside CreateSchemaCommand: collect the
+            // schema for event triggers ahead of the element subcommands,
+            // then hand each element straight to ProcessUtility (the grammar
+            // guarantees they are utility statements).
+            let mut exec_elements = |nsp_oid: types_core::Oid,
+                                     elts: &types_nodes::NodeList<'mcx>,
+                                     schema_name: &str|
+             -> PgResult<()> {
+                event_trigger::EventTriggerCollectSimpleCommand(
+                    ObjectAddress::set(NAMESPACE_RELATION_ID, nsp_oid),
+                    INVALID_OBJECT_ADDRESS,
+                    tag,
+                );
+                let elements =
+                    parse_utilcmd::transformCreateSchemaStmtElements(mcx, elts, schema_name)?;
+                for element in elements.iter() {
+                    let wrapper = PlannedStmt {
+                        commandType: CmdType::CMD_UTILITY,
+                        canSetTag: false,
+                        utilityStmt: Some(element),
+                        stmt_location,
+                        stmt_len,
+                        ..PlannedStmt::default()
+                    };
+                    let mut dest = DestReceiver::DoNothing;
+                    ProcessUtility(
+                        mcx,
+                        &wrapper,
+                        source_text,
+                        false,
+                        PROCESS_UTILITY_SUBCOMMAND,
+                        types_portal::ParamListHandle::NULL,
+                        types_portal::QueryEnvHandle::NULL,
+                        &mut dest,
+                        None,
+                    )?;
+                    xact::CommandCounterIncrement()?;
+                }
+                Ok(())
+            };
+            schemacmds::CreateSchemaCommand(mcx, stmt, &mut exec_elements)?;
             Ok(None)
         }
 
