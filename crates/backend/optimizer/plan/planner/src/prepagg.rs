@@ -190,6 +190,12 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_AlternativeSubPlan => {
+            for sp in &node.as_alternative_sub_plan().unwrap().subplans {
+                preprocess_aggrefs_walker(run, sp)?;
+            }
+            Ok(())
+        }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
             for a in &c.args {
