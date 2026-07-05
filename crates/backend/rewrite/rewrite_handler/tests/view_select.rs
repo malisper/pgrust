@@ -640,6 +640,7 @@ fn explain_stmt(sql: &'static str) -> String {
     explain::ExplainOnePlan(
         mcx,
         pstmt,
+        None,
         &mut es,
         sql,
         types_portal::ParamListHandle::NULL,

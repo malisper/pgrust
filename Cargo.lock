@@ -4865,6 +4865,7 @@ dependencies = [
  "backend_status_seams",
  "bufmgr_seams",
  "condition_variable_seams",
+ "createas_seams",
  "datum",
  "deadlock_seams",
  "define",
