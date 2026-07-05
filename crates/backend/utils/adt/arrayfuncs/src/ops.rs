@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
-use ::types_core::{InvalidOid, Oid, RECORDOID};
+use ::types_core::{InvalidOid, Oid, FLOAT8OID, RECORDOID};
 use ::types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -13,7 +13,7 @@ use ::types_error::{
 use ::types_fmgr::{byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, LocalFcinfo};
 
 use crate::builtins::arg_array_bytes;
-use crate::construct::{construct_empty_array, construct_md_array, deconstruct_array};
+use crate::construct::{array_contains_nulls, construct_empty_array, construct_md_array, deconstruct_array};
 use crate::foundation::{
     arr_data_offset, arr_elemtype, arr_ndim, arr_nullbitmap_off, arr_overhead_nonulls,
     arr_overhead_withnulls, array_cast_and_set, att_addlength_pointer, att_align_nominal,
@@ -1012,4 +1012,151 @@ pub fn fc_array_fill_with_lower_bounds(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     fill_common(flinfo, fcinfo, true)
+}
+
+pub(crate) fn width_bucket_array_float8(operand: Datum, thresholds: &[u8], nitems: i32) -> i32 {
+    let op = operand.as_f64();
+    let mut left = 0i32;
+    let mut right = nitems;
+    let off = arr_data_offset(thresholds);
+    let elt = |i: i32| -> f64 {
+        let p = thresholds[off + i as usize * 8..off + i as usize * 8 + 8]
+            .try_into()
+            .unwrap();
+        f64::from_ne_bytes(p)
+    };
+
+    // NaN sorts greater than every threshold (including other NaNs), so it
+    // never needs a search.
+    if op.is_nan() {
+        return right;
+    }
+    while left < right {
+        let mid = (left + right) / 2;
+        let t = elt(mid);
+        if t.is_nan() || op < t {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    left
+}
+
+pub(crate) fn width_bucket_array_fixed(
+    mcx: Mcx<'_>,
+    operand: Datum,
+    thresholds: &[u8],
+    collation: Oid,
+    meta: ElemMeta,
+    cmpfn: &mut FmgrInfo,
+    nitems: i32,
+) -> PgResult<i32> {
+    let off = arr_data_offset(thresholds);
+    let typlen = meta.typlen as usize;
+    let mut lfc = LocalFcinfo::<2>::fresh(collation);
+    // SAFETY: mcx outlives every invoke through this stack frame.
+    unsafe { lfc.set_result_mcx(mcx) };
+
+    let mut left = 0i32;
+    let mut right = nitems;
+    while left < right {
+        let mid = (left + right) / 2;
+        let p = thresholds[off + mid as usize * typlen..].as_ptr();
+        lfc.rearm(collation);
+        lfc.set_arg(0, operand);
+        lfc.set_arg(1, fetch_att(p, meta.typbyval, meta.typlen));
+        let cmpresult = cmpfn.invoke(&mut lfc)?.as_i32();
+        if cmpresult < 0 {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    Ok(left)
+}
+
+pub(crate) fn width_bucket_array_variable(
+    mcx: Mcx<'_>,
+    operand: Datum,
+    thresholds: &[u8],
+    collation: Oid,
+    meta: ElemMeta,
+    cmpfn: &mut FmgrInfo,
+    nitems: i32,
+) -> PgResult<i32> {
+    let mut lfc = LocalFcinfo::<2>::fresh(collation);
+    // SAFETY: mcx outlives every invoke through this stack frame.
+    unsafe { lfc.set_result_mcx(mcx) };
+    let mut left = 0i32;
+    let mut right = nitems;
+    let mut thresholds_off = arr_data_offset(thresholds);
+
+    while left < right {
+        let mid = (left + right) / 2;
+        // Variable-width elements aren't randomly addressable; walk from the
+        // last-known `left` offset instead of the array start (keeps the
+        // search O(N) total, not O(N log N)).
+        let mut off = thresholds_off;
+        let mut p = thresholds[off..].as_ptr();
+        for _ in left..mid {
+            off = att_addlength_pointer(off, meta.typlen, p);
+            off = att_align_nominal(off, meta.typalign);
+            p = thresholds[off..].as_ptr();
+        }
+
+        lfc.rearm(collation);
+        lfc.set_arg(0, operand);
+        lfc.set_arg(1, fetch_att(p, meta.typbyval, meta.typlen));
+        let cmpresult = cmpfn.invoke(&mut lfc)?.as_i32();
+        if cmpresult < 0 {
+            right = mid;
+        } else {
+            left = mid + 1;
+            off = att_addlength_pointer(off, meta.typlen, p);
+            thresholds_off = att_align_nominal(off, meta.typalign);
+        }
+    }
+    Ok(left)
+}
+
+pub fn fc_width_bucket_array(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let operand = fcinfo.arg(0);
+    let thresholds = arg_array_bytes(fcinfo, 1, mcx)?;
+    let collation = fcinfo.get_collation();
+    let element_type = arr_elemtype(&thresholds);
+
+    if arr_ndim(&thresholds) > 1 {
+        return Err(Box::new(
+            PgError::error("thresholds must be one-dimensional array")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+        ));
+    }
+    if array_contains_nulls(&thresholds) {
+        return Err(Box::new(
+            PgError::error("thresholds array must not contain NULLs")
+                .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        ));
+    }
+
+    let (ndim, dims, _lbs) = read_dims_lbounds(&thresholds);
+    let nitems = ::arrayutils::array_get_n_items(ndim, &dims)?;
+
+    let result = if element_type == FLOAT8OID {
+        width_bucket_array_float8(operand, &thresholds, nitems)
+    } else {
+        let flinfo = flinfo.expect("width_bucket_array: NULL flinfo");
+        let memo = cached_typentry(flinfo, element_type, TcWant::Cmp)?;
+        let meta = memo.meta();
+        let mut cmpfn = memo.entry.cmp_proc_finfo();
+
+        if meta.typlen > 0 {
+            width_bucket_array_fixed(mcx, operand, &thresholds, collation, meta, &mut cmpfn, nitems)?
+        } else {
+            width_bucket_array_variable(mcx, operand, &thresholds, collation, meta, &mut cmpfn, nitems)?
+        }
+    };
+
+    Ok(Datum::from_i32(result))
 }

@@ -468,3 +468,120 @@ fn cmp_helpers_present() {
     assert_eq!(ARRAY_GT_OP, 1073);
     assert_eq!(F_BTARRAYCMP, 382);
 }
+
+mod agg_array_serial {
+    use super::*;
+    use crate::{
+        clone_array_build_state_arr, combine_array_build_state_arr,
+        deserialize_array_build_state_arr, serialize_array_build_state_arr,
+    };
+
+    const INT4_ARRAY: Oid = 1007;
+
+    fn state_of<'m>(mcx: Mcx<'m>, arrays: &[&[Option<i32>]]) -> ArrayBuildStateArr<'m> {
+        let mut st = init_array_result_arr(mcx, INT4_ARRAY, INT4OID).unwrap();
+        for a in arrays {
+            let img = int4_arr(mcx, a, 1);
+            st = accum_array_result_arr(mcx, Some(st), Some(&img), INT4_ARRAY).unwrap();
+        }
+        st
+    }
+
+    // Hand-derived from the C wire layout: elemtype/arrtype/nbytes (i32 BE),
+    // data raw, abytes/aitems (i32 BE), [nullbitmap], nitems/ndims (i32 BE),
+    // whole dims/lbs arrays raw native.
+    #[test]
+    fn serialize_golden_int4() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = state_of(mcx, &[&[Some(1), Some(2)]]);
+        let out = serialize_array_build_state_arr(mcx, &st).unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        expected.extend_from_slice(&23u32.to_be_bytes());
+        expected.extend_from_slice(&1007u32.to_be_bytes());
+        expected.extend_from_slice(&8u32.to_be_bytes());
+        expected.extend_from_slice(&1i32.to_ne_bytes());
+        expected.extend_from_slice(&2i32.to_ne_bytes());
+        // abytes: pg_nextpower2_32(max(1024, 8 + 1)) = 1024; aitems: 0.
+        expected.extend_from_slice(&1024u32.to_be_bytes());
+        expected.extend_from_slice(&0u32.to_be_bytes());
+        expected.extend_from_slice(&2u32.to_be_bytes());
+        expected.extend_from_slice(&2u32.to_be_bytes());
+        let mut dims = [0i32; MAXDIM];
+        dims[0] = 1;
+        dims[1] = 2;
+        let mut lbs = [0i32; MAXDIM];
+        lbs[0] = 1;
+        lbs[1] = 1;
+        for d in dims {
+            expected.extend_from_slice(&d.to_ne_bytes());
+        }
+        for l in lbs {
+            expected.extend_from_slice(&l.to_ne_bytes());
+        }
+        assert_eq!(out.data(), &expected[..]);
+    }
+
+    #[test]
+    fn roundtrip_with_null_elements() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = state_of(mcx, &[&[Some(1), Some(2)], &[Some(3), None]]);
+        // aitems: pg_nextpower2_32(max(256, 4 + 1)) = 256.
+        assert_eq!(st.aitems, 256);
+        let img = serialize_array_build_state_arr(mcx, &st).unwrap();
+        let back = deserialize_array_build_state_arr(mcx, img.data()).unwrap();
+        assert_eq!(back.array_type, INT4_ARRAY);
+        assert_eq!(back.element_type, INT4OID);
+        assert_eq!((back.abytes, back.aitems), (st.abytes, st.aitems));
+        assert_eq!((back.nbytes, back.nitems, back.ndims), (st.nbytes, st.nitems, st.ndims));
+        let out = make_array_result_arr(mcx, &back).unwrap();
+        assert_eq!(dims_of(&out), (2, vec![2, 2], vec![1, 1]));
+        assert_eq!(to_int4(mcx, &out), vec![Some(1), Some(2), Some(3), None]);
+    }
+
+    #[test]
+    fn roundtrip_no_nulls() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = state_of(mcx, &[&[Some(5)], &[Some(6)]]);
+        let img = serialize_array_build_state_arr(mcx, &st).unwrap();
+        let back = deserialize_array_build_state_arr(mcx, img.data()).unwrap();
+        assert!(back.nullbitmap.is_none());
+        let out = make_array_result_arr(mcx, &back).unwrap();
+        assert_eq!(to_int4(mcx, &out), vec![Some(5), Some(6)]);
+    }
+
+    #[test]
+    fn combine_clone_and_append() {
+        let agg = MemoryContext::new_bump("agg");
+        let aggmcx = agg.mcx();
+        let s1 = {
+            let worker = MemoryContext::new_bump("w1");
+            let wmcx = worker.mcx();
+            let s2 = state_of(wmcx, &[&[Some(1), Some(2)]]);
+            clone_array_build_state_arr(aggmcx, &s2).unwrap()
+        };
+        // Worker context dropped: the clone owns its buffers.
+        let mut s1 = s1;
+        assert_eq!((s1.nitems, s1.ndims, s1.dims[0]), (2, 2, 1));
+
+        let s3 = state_of(aggmcx, &[&[Some(3), None]]);
+        combine_array_build_state_arr(&mut s1, &s3).unwrap();
+        assert_eq!((s1.nitems, s1.dims[0]), (4, 2));
+        // First nulls arrive via combine: aitems = pg_nextpower2_32(max(256, 5)).
+        assert_eq!(s1.aitems, 256);
+        let out = make_array_result_arr(aggmcx, &s1).unwrap();
+        assert_eq!(to_int4(aggmcx, &out), vec![Some(1), Some(2), Some(3), None]);
+    }
+
+    #[test]
+    fn combine_dimensionality_mismatch() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut s1 = state_of(mcx, &[&[Some(1), Some(2)]]);
+        let s2 = state_of(mcx, &[&[Some(1)]]);
+        let err = combine_array_build_state_arr(&mut s1, &s2).err().unwrap();
+        assert_eq!(err.message(), "cannot accumulate arrays of different dimensionality");
+    }
+}

@@ -1,14 +1,14 @@
 use ::datum::array_build::ArrayBuildState;
 use ::datum::Datum;
-use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext};
+use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::stringinfo::StringInfo;
-use ::types_core::{INT4OID, TEXTOID};
-use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use ::types_core::{FLOAT8OID, INT4OID, TEXTOID};
+use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, LocalFcinfo};
 use ::types_error::PgResult;
 
 use crate::build::{accum_array_result, make_array_result};
-use crate::construct::{construct_md_array, deconstruct_array};
-use crate::foundation::varsize_any;
+use crate::construct::{construct_array, construct_md_array, deconstruct_array};
+use crate::foundation::{varsize_any, TYPALIGN_DOUBLE, TYPALIGN_INT};
 use crate::io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
 
 // Local identity text codec (avoids depending on the sibling `varlena` crate,
@@ -542,8 +542,9 @@ mod expanded {
 mod ops_tests {
     use super::*;
     use crate::ops::{
-        array_cmp_core, array_eq_loop, array_fill_core, contain_core, dims_text, hash_array_core,
-        replace_core, ElemMeta, FlatIter,
+        array_cmp_core, array_eq_loop, array_fill_core, contain_core, dims_text,
+        fc_width_bucket_array, hash_array_core, replace_core, width_bucket_array_fixed,
+        width_bucket_array_float8, width_bucket_array_variable, ElemMeta, FlatIter,
     };
     use ::mcx::PgVec;
 
@@ -740,5 +741,285 @@ mod ops_tests {
         )
         .unwrap_err();
         assert_eq!(e.message(), "wrong number of array subscripts");
+    }
+
+    fn install_identity_detoast() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            ::detoast_seams::detoast_attr::set(identity_detoast);
+        });
+    }
+
+    fn identity_detoast<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+        let mut out = vec_with_capacity_in(mcx, image.len())?;
+        out.extend_from_slice(image);
+        Ok(out)
+    }
+
+    fn float8_arr<'m>(mcx: Mcx<'m>, vals: &[f64]) -> PgVec<'m, u8> {
+        let elems: std::vec::Vec<Datum> = vals.iter().map(|&v| Datum::from_f64(v)).collect();
+        construct_array(mcx, &elems, FLOAT8OID, 8, true, TYPALIGN_DOUBLE).unwrap()
+    }
+
+    fn text_arr<'m>(mcx: Mcx<'m>, vals: &[&str]) -> PgVec<'m, u8> {
+        let elems: std::vec::Vec<Datum> =
+            vals.iter().map(|v| build_varlena(mcx, v.as_bytes()).unwrap()).collect();
+        construct_array(mcx, &elems, TEXTOID, -1, false, TYPALIGN_INT).unwrap()
+    }
+
+    fn fc_text_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let a = varlena_payload(fcinfo.arg(0));
+        let b = varlena_payload(fcinfo.arg(1));
+        Ok(Datum::from_i32(a.cmp(b) as i32))
+    }
+
+    #[test]
+    fn width_bucket_array_float8_matches_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let thresholds = float8_arr(mcx, &[1.0, 5.0, 10.0]);
+        assert_eq!(width_bucket_array_float8(Datum::from_f64(0.5), &thresholds, 3), 0);
+        assert_eq!(width_bucket_array_float8(Datum::from_f64(1.0), &thresholds, 3), 1);
+        assert_eq!(width_bucket_array_float8(Datum::from_f64(7.0), &thresholds, 3), 2);
+        assert_eq!(width_bucket_array_float8(Datum::from_f64(11.0), &thresholds, 3), 3);
+        // NaN sorts as greater than every threshold, so it needs no search.
+        assert_eq!(width_bucket_array_float8(Datum::from_f64(f64::NAN), &thresholds, 3), 3);
+    }
+
+    #[test]
+    fn width_bucket_array_fixed_int4() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let thresholds = int4_arr(mcx, &[Some(1), Some(5), Some(10)]);
+        let mut cmp = finfo(fc_i4cmp);
+        let r = |op: i32| {
+            width_bucket_array_fixed(mcx, Datum::from_i32(op), &thresholds, 0, INT4_META, &mut cmp, 3)
+                .unwrap()
+        };
+        assert_eq!(r(0), 0);
+        assert_eq!(r(5), 2);
+        assert_eq!(r(11), 3);
+    }
+
+    #[test]
+    fn width_bucket_array_variable_text() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let thresholds = text_arr(mcx, &["b", "m", "t"]);
+        let meta = ElemMeta { typlen: -1, typbyval: false, typalign: TYPALIGN_INT };
+        let mut cmp = finfo(fc_text_cmp);
+        let r = |op: &str| {
+            let operand = build_varlena(mcx, op.as_bytes()).unwrap();
+            width_bucket_array_variable(mcx, operand, &thresholds, 0, meta, &mut cmp, 3).unwrap()
+        };
+        assert_eq!(r("a"), 0);
+        assert_eq!(r("n"), 2);
+        assert_eq!(r("z"), 3);
+    }
+
+    #[test]
+    fn width_bucket_array_top_level_errors_and_dispatch() {
+        install_identity_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        // SAFETY: mcx outlives the call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.set_arg(0, Datum::from_f64(0.0));
+
+        let md = construct_md_array(
+            mcx,
+            &[Datum::from_f64(1.0); 4],
+            None,
+            2,
+            &[2, 2],
+            &[1, 1],
+            FLOAT8OID,
+            8,
+            true,
+            TYPALIGN_DOUBLE,
+        )
+        .unwrap();
+        fcinfo.set_arg(1, Datum::from_usize(md.as_ptr() as usize));
+        let e = fc_width_bucket_array(None, &mut fcinfo).unwrap_err();
+        assert_eq!(e.message(), "thresholds must be one-dimensional array");
+
+        let withnull = construct_md_array(
+            mcx,
+            &[Datum::from_f64(1.0), Datum::null()],
+            Some(&[false, true]),
+            1,
+            &[2],
+            &[1],
+            FLOAT8OID,
+            8,
+            true,
+            TYPALIGN_DOUBLE,
+        )
+        .unwrap();
+        fcinfo.set_arg(1, Datum::from_usize(withnull.as_ptr() as usize));
+        let e = fc_width_bucket_array(None, &mut fcinfo).unwrap_err();
+        assert_eq!(e.message(), "thresholds array must not contain NULLs");
+
+        let thresholds = float8_arr(mcx, &[1.0, 5.0, 10.0]);
+        fcinfo.set_arg(0, Datum::from_f64(7.0));
+        fcinfo.set_arg(1, Datum::from_usize(thresholds.as_ptr() as usize));
+        let d = fc_width_bucket_array(None, &mut fcinfo).unwrap();
+        assert_eq!(d.as_i32(), 2);
+    }
+}
+
+mod agg_serial {
+    use super::*;
+    use crate::build::{
+        array_agg_combine_append, array_agg_combine_clone, array_agg_deserialize_state,
+        array_agg_serialize_state,
+    };
+
+    fn text_send() -> FmgrInfo { FmgrInfo::new(fc_mytextsend, 48, 1, true, false) }
+    fn text_recv() -> FmgrInfo { FmgrInfo::new(fc_mytextrecv, 49, 1, true, false) }
+
+    fn int4_state<'m>(mcx: Mcx<'m>, elems: &[Option<i32>]) -> ArrayBuildState<'m> {
+        let mut st = ArrayBuildState::new(mcx, INT4OID, false).unwrap();
+        st.typlen = 4;
+        st.typbyval = true;
+        st.typalign = b'i';
+        let mut out = Some(st);
+        for e in elems {
+            let (d, isnull) = match e {
+                Some(v) => (Datum::from_i32(*v), false),
+                None => (Datum::null(), true),
+            };
+            out = Some(accum_array_result(mcx, out, d, isnull, INT4OID).unwrap());
+        }
+        out.unwrap()
+    }
+
+    fn text_state<'m>(mcx: Mcx<'m>, elems: &[Option<&str>]) -> ArrayBuildState<'m> {
+        let mut st = ArrayBuildState::new(mcx, TEXTOID, false).unwrap();
+        st.typlen = -1;
+        st.typbyval = false;
+        st.typalign = b'i';
+        let mut out = Some(st);
+        for e in elems {
+            let (d, isnull) = match e {
+                Some(s) => (build_varlena(mcx, s.as_bytes()).unwrap(), false),
+                None => (Datum::null(), true),
+            };
+            out = Some(accum_array_result(mcx, out, d, isnull, TEXTOID).unwrap());
+        }
+        out.unwrap()
+    }
+
+    fn int4_result(mcx: Mcx<'_>, st: &ArrayBuildState<'_>) -> std::vec::Vec<Option<i32>> {
+        let img = make_array_result(mcx, st).unwrap();
+        let (elems, nulls) = deconstruct_array(mcx, &img, 4, true, b'i', true).unwrap();
+        elems
+            .iter()
+            .zip(nulls.iter())
+            .map(|(d, &n)| if n { None } else { Some(d.as_i32()) })
+            .collect()
+    }
+
+    // Hand-derived from the C wire layout: elemtype(i32 BE), nelems(i64 BE),
+    // typlen(i16 BE), typbyval, typalign, dnulls raw, byval Datums raw.
+    #[test]
+    fn serialize_golden_int4() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = int4_state(mcx, &[Some(1), None, Some(2)]);
+        let out = array_agg_serialize_state(mcx, &st, None).unwrap();
+        let mut expected: std::vec::Vec<u8> = std::vec::Vec::new();
+        expected.extend_from_slice(&23u32.to_be_bytes());
+        expected.extend_from_slice(&3i64.to_be_bytes());
+        expected.extend_from_slice(&4i16.to_be_bytes());
+        expected.push(1);
+        expected.push(b'i');
+        expected.extend_from_slice(&[0, 1, 0]);
+        expected.extend_from_slice(&1u64.to_ne_bytes());
+        expected.extend_from_slice(&0u64.to_ne_bytes());
+        expected.extend_from_slice(&2u64.to_ne_bytes());
+        assert_eq!(out.data(), &expected[..]);
+    }
+
+    #[test]
+    fn roundtrip_int4_with_nulls() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = int4_state(mcx, &[Some(7), None, Some(-1), Some(0)]);
+        let img = array_agg_serialize_state(mcx, &st, None).unwrap();
+        let back = array_agg_deserialize_state(mcx, img.data(), None).unwrap();
+        assert_eq!(back.element_type, INT4OID);
+        assert_eq!(back.nelems, 4);
+        assert_eq!((back.typlen, back.typbyval, back.typalign), (4, true, b'i'));
+        assert_eq!(int4_result(mcx, &back), vec![Some(7), None, Some(-1), Some(0)]);
+    }
+
+    #[test]
+    fn roundtrip_text_with_nulls() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let st = text_state(mcx, &[Some("ab"), None, Some(""), Some("hello world")]);
+        let mut sp = text_send();
+        let img = array_agg_serialize_state(mcx, &st, Some(&mut sp)).unwrap();
+        let mut rp = text_recv();
+        let back = array_agg_deserialize_state(mcx, img.data(), Some((&mut rp, TEXTOID))).unwrap();
+        assert_eq!(back.nelems, 4);
+        assert!(!back.typbyval);
+        let out = make_array_result(mcx, &back).unwrap();
+        let (elems, nulls) = deconstruct_array(mcx, &out, -1, false, b'i', true).unwrap();
+        let got: std::vec::Vec<Option<std::string::String>> = elems
+            .iter()
+            .zip(nulls.iter())
+            .map(|(d, &n)| {
+                if n {
+                    None
+                } else {
+                    Some(std::string::String::from_utf8(varlena_payload(*d).to_vec()).unwrap())
+                }
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Some("ab".to_string()),
+                None,
+                Some("".to_string()),
+                Some("hello world".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn combine_clone_and_append() {
+        let ctx1 = MemoryContext::new_bump("agg");
+        let ctx2 = MemoryContext::new_bump("worker");
+        let aggmcx = ctx1.mcx();
+        let mcx2 = ctx2.mcx();
+        let s2 = int4_state(mcx2, &[Some(3), None]);
+        // NULL-state1 arm: clone into the agg context.
+        let mut s1 = array_agg_combine_clone(aggmcx, &s2).unwrap();
+        assert_eq!(int4_result(aggmcx, &s1), vec![Some(3), None]);
+        // Append arm.
+        let s3 = int4_state(mcx2, &[Some(9)]);
+        array_agg_combine_append(&mut s1, &s3).unwrap();
+        assert_eq!(s1.nelems, 3);
+        assert_eq!(int4_result(aggmcx, &s1), vec![Some(3), None, Some(9)]);
+    }
+
+    #[test]
+    fn combine_clone_copies_byref_payloads() {
+        let ctx1 = MemoryContext::new_bump("agg");
+        let aggmcx = ctx1.mcx();
+        let cloned = {
+            let ctx2 = MemoryContext::new_bump("worker");
+            let mcx2 = ctx2.mcx();
+            let s2 = text_state(mcx2, &[Some("deep"), None]);
+            array_agg_combine_clone(aggmcx, &s2).unwrap()
+        };
+        // Source context dropped; clone must own its payloads.
+        assert_eq!(cloned.nelems, 2);
+        assert_eq!(varlena_payload(cloned.dvalues[0]), b"deep");
+        assert!(cloned.dnulls[1]);
     }
 }
