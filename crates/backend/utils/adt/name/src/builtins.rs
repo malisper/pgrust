@@ -122,6 +122,14 @@ pub fn fc_nameout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     })
 }
 
+// C text_name (name.c): namein over the text body (mbcliplen truncation).
+pub fn fc_text_name(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn: arg 0 is a non-null live text varlena.
+    let v = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let nd = crate::namein(v.data());
+    byref_result(fcinfo.result_mcx(), &nd.data)
+}
+
 // C name_text (name.c): cstring_to_text(NameStr(*s)) — bytes up to NUL.
 pub fn fc_name_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a = arg_name(fcinfo, 0);
@@ -224,6 +232,7 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(253, "bttextnamecmp", 2, fc_bttextnamecmp),
     b(359, "btnamecmp", 2, fc_btnamecmp),
     b(406, "name_text", 1, fc_name_text),
+    b(407, "text_name", 1, fc_text_name),
     b(447, "hashnameextended", 2, fc_hashnameextended),
     b(455, "hashname", 1, fc_hashname),
     b(655, "namelt", 2, fc_namelt),

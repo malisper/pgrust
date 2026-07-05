@@ -946,20 +946,9 @@ fn ATPrepCmd<'mcx>(
             ATPrepSetAccessMethod(&mut wqueue[tabidx], rel, cmd.name)?;
             AT_PASS_MISC
         }
-        AlterTableType::AT_GenericOptions => {
-            // ATSimplePermissions(ATT_FOREIGN_TABLE): foreign tables cannot
-            // exist yet, so only the relkind error is reachable.
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    format!(
-                        "ALTER action OPTIONS cannot be performed on relation \"{}\"",
-                        rel.name()
-                    ),
-                )
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
-                .with_detail("This operation is not supported for tables.".to_string()),
-            ));
+        // ATSimplePermissions(ATT_FOREIGN_TABLE) ran above; never recurses.
+        AlterTableType::AT_GenericOptions | AlterTableType::AT_AlterColumnGenericOptions => {
+            AT_PASS_MISC
         }
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
@@ -1465,6 +1454,23 @@ fn ATRewriteCatalogs<'mcx>(
                         false,
                         lockmode,
                     )?;
+                }
+                AlterTableType::AT_GenericOptions => {
+                    if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
+                        ATExecGenericOptions(mcx, &rel, &options)?;
+                        // Cached plans may depend on the old options.
+                        inval::invalidate::CacheInvalidateRelcache(&rel)?;
+                    }
+                }
+                AlterTableType::AT_AlterColumnGenericOptions => {
+                    if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
+                        ATExecAlterColumnGenericOptions(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("AT_AlterColumnGenericOptions column name"),
+                            &options,
+                        )?;
+                    }
                 }
                 // Phase-2 arms only fire for partitioned relkinds (no
                 // storage), which are unreachable here; phase 3 does the work.
@@ -6936,4 +6942,200 @@ fn find_composite_type_dependencies_impl<'mcx>(
     }
     genam::systable_endscan(mcx, scan)?;
     dep_rel.close(types_rel::AccessShareLock)
+}
+
+// ATExecGenericOptions (tablecmds.c): ALTER FOREIGN TABLE ... OPTIONS (...).
+fn ATExecGenericOptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    options: &NodeList<'mcx>,
+) -> PgResult<()> {
+    use cache_syscache::cacheinfo::FOREIGNTABLEREL;
+    use foreigncmds::foreign::{
+        Anum_pg_foreign_table_ftoptions, Anum_pg_foreign_table_ftserver, Natts_pg_foreign_table,
+        GetForeignDataWrapper, GetForeignServer,
+    };
+
+    if options.is_nil() {
+        return Ok(());
+    }
+    let ftrel =
+        table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
+    let Some(tp) = cache_syscache::SearchSysCacheCopy(
+        mcx,
+        FOREIGNTABLEREL,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(rel.rd_id)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("foreign table \"{}\" does not exist", rel.name()),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    };
+    let getattr = |attnum: i32| -> (Datum, bool) {
+        let mut isnull = false;
+        // SAFETY: pg_foreign_table column of the copied tuple.
+        let d = unsafe { types_tuple::heap_getattr(&tp, attnum, ftrel.descr(), &mut isnull) };
+        (d, isnull)
+    };
+    let server = GetForeignServer(mcx, getattr(Anum_pg_foreign_table_ftserver).0.as_oid())?;
+    let fdw = GetForeignDataWrapper(mcx, server.fdwid)?;
+
+    let mut repl_val = [Datum::null(); Natts_pg_foreign_table];
+    let mut repl_null = [false; Natts_pg_foreign_table];
+    let mut repl_repl = [false; Natts_pg_foreign_table];
+
+    let (datum, isnull) = getattr(Anum_pg_foreign_table_ftoptions);
+    let old = if isnull { None } else { Some(datum) };
+    let new_options = foreigncmds::options::transformGenericOptions(
+        mcx,
+        types_core::FOREIGN_TABLE_RELATION_ID,
+        old,
+        options,
+        fdw.fdwvalidator,
+    )?;
+    match &new_options {
+        Some(image) => {
+            repl_val[Anum_pg_foreign_table_ftoptions as usize - 1] =
+                Datum::from_usize(image.as_ptr() as usize)
+        }
+        None => repl_null[Anum_pg_foreign_table_ftoptions as usize - 1] = true,
+    }
+    repl_repl[Anum_pg_foreign_table_ftoptions as usize - 1] = true;
+
+    let mut newtup =
+        heaptuple::heap_modify_tuple(mcx, &tp, ftrel.descr(), &repl_val, &repl_null, &repl_repl)?;
+    let otid = tp.t_self;
+    catalog_indexing::CatalogTupleUpdate(mcx, &ftrel, &otid, &mut newtup)?;
+
+    ftrel.close(RowExclusiveLock)
+}
+
+// ATExecAlterColumnGenericOptions (tablecmds.c): ALTER FOREIGN TABLE ...
+// ALTER COLUMN ... OPTIONS (...) over pg_attribute.attfdwoptions.
+fn ATExecAlterColumnGenericOptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colname: &str,
+    options: &NodeList<'mcx>,
+) -> PgResult<()> {
+    use cache_syscache::cacheinfo::FOREIGNTABLEREL;
+    use foreigncmds::foreign::{
+        Anum_pg_foreign_table_ftserver, GetForeignDataWrapper, GetForeignServer,
+    };
+
+    const Anum_pg_attribute_attnum: i32 = 5;
+    const Anum_pg_attribute_attfdwoptions: i32 = 24;
+    const Natts_pg_attribute: usize = 25;
+
+    if options.is_nil() {
+        return Ok(());
+    }
+    let Some(fttp) = cache_syscache::SearchSysCache1(
+        FOREIGNTABLEREL,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(rel.rd_id)),
+    )?
+    else {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("foreign table \"{}\" does not exist", rel.name()),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    };
+    let ftserver =
+        cache_syscache::SysCacheGetAttrNotNull(FOREIGNTABLEREL, &fttp, Anum_pg_foreign_table_ftserver)?
+            .as_oid();
+    cache_syscache::ReleaseSysCache(fttp);
+    let server = GetForeignServer(mcx, ftserver)?;
+    let fdw = GetForeignDataWrapper(mcx, server.fdwid)?;
+
+    let attrel =
+        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let key1 = oid_scankey(1, rel.rd_id);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &attrel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &[key1],
+    )?;
+    let desc = attrel.descr();
+    let mut found = false;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed pg_attribute columns under its own descriptor.
+        let name = unsafe { types_tuple::heap_getattr(tup, 2, desc, &mut isnull) };
+        let name = unsafe { core::slice::from_raw_parts(name.as_usize() as *const u8, 64) };
+        let len = name.iter().position(|&b| b == 0).unwrap_or(64);
+        if &name[..len] != colname.as_bytes() {
+            continue;
+        }
+        let dropped = unsafe { types_tuple::heap_getattr(tup, 17, desc, &mut isnull) }.as_bool();
+        if dropped {
+            continue;
+        }
+        let attnum =
+            unsafe { types_tuple::heap_getattr(tup, Anum_pg_attribute_attnum, desc, &mut isnull) }
+                .as_i16();
+        if attnum <= 0 {
+            genam::systable_endscan(mcx, scan)?;
+            attrel.close(RowExclusiveLock)?;
+            return Err(Box::new(
+                PgError::new(ERROR, format!("cannot alter system column \"{colname}\""))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        let old_datum = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_attribute_attfdwoptions, desc, &mut isnull)
+        };
+        let old = if isnull { None } else { Some(old_datum) };
+        let new_options = foreigncmds::options::transformGenericOptions(
+            mcx,
+            types_core::ATTRIBUTE_RELATION_ID,
+            old,
+            options,
+            fdw.fdwvalidator,
+        )?;
+        let mut repl_val = [Datum::null(); Natts_pg_attribute];
+        let mut repl_null = [false; Natts_pg_attribute];
+        let mut repl_repl = [false; Natts_pg_attribute];
+        match &new_options {
+            Some(image) => {
+                repl_val[Anum_pg_attribute_attfdwoptions as usize - 1] =
+                    Datum::from_usize(image.as_ptr() as usize)
+            }
+            None => repl_null[Anum_pg_attribute_attfdwoptions as usize - 1] = true,
+        }
+        repl_repl[Anum_pg_attribute_attfdwoptions as usize - 1] = true;
+        let mut newtup =
+            heaptuple::heap_modify_tuple(mcx, tup, desc, &repl_val, &repl_null, &repl_repl)?;
+        let otid = tup.t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &attrel, &otid, &mut newtup)?;
+        found = true;
+        break;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    attrel.close(RowExclusiveLock)?;
+    if !found {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "column \"{colname}\" of relation \"{}\" does not exist",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+        ));
+    }
+    Ok(())
 }

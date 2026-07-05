@@ -726,6 +726,16 @@ pub(crate) fn pg_aclmask_for_grant(
         ObjectType::OBJECT_PARAMETER_ACL => {
             pg_parameter_acl_aclmask(object_oid, roleid, mask, how)
         }
+        ObjectType::OBJECT_FDW => object_aclmask(
+            types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+            object_oid,
+            roleid,
+            mask,
+            how,
+        ),
+        ObjectType::OBJECT_FOREIGN_SERVER => {
+            object_aclmask(types_core::FOREIGN_SERVER_RELATION_ID, object_oid, roleid, mask, how)
+        }
         other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
     }
 }

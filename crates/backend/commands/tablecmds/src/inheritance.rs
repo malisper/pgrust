@@ -1007,7 +1007,10 @@ pub(crate) fn ATExecAddInherit<'mcx>(
             parent_rel.name(),
         )?;
     }
-    if child_rel.rd_rel.relkind != RELKIND_RELATION {
+    // ATSimplePermissions(AT_AddInherit) allows ATT_TABLE | ATT_FOREIGN_TABLE.
+    if child_rel.rd_rel.relkind != RELKIND_RELATION
+        && child_rel.rd_rel.relkind != types_rel::RELKIND_FOREIGN_TABLE
+    {
         unported("ATExecAddInherit: non-plain-table child relkind");
     }
     if parent_rel.rd_rel.relkind != RELKIND_RELATION

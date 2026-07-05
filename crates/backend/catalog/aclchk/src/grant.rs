@@ -203,8 +203,10 @@ fn restrict_and_check_grant(
         ObjectType::OBJECT_TABLESPACE => ACL_ALL_RIGHTS_TABLESPACE,
         ObjectType::OBJECT_TYPE => ACL_ALL_RIGHTS_TYPE,
         ObjectType::OBJECT_PARAMETER_ACL => ACL_ALL_RIGHTS_PARAMETER_ACL,
+        ObjectType::OBJECT_FDW => ACL_ALL_RIGHTS_FDW,
+        ObjectType::OBJECT_FOREIGN_SERVER => ACL_ALL_RIGHTS_FOREIGN_SERVER,
         other => panic!(
-            "restrict_and_check_grant (aclchk.c): object type {} arm unported (fdw lanes)",
+            "restrict_and_check_grant (aclchk.c): object type {} arm unported",
             other as i32
         ),
     };
