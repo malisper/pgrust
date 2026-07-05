@@ -521,6 +521,7 @@ pub fn AggregateCreate<'mcx>(
             languageValidator: InvalidOid,
             prosrc: "aggregate_dummy", // placeholder (no such proc)
             probin: None,
+            prosqlbody: None,
             prokind: PROKIND_AGGREGATE,
             security_definer: false,
             isLeakProof: false,

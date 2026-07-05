@@ -106,6 +106,8 @@ pub struct ProcedureCreateArgs<'a> {
     pub languageValidator: Oid,
     pub prosrc: &'a str,
     pub probin: Option<&'a str>,
+    // Analyzed body of an SQL-standard-body function (BEGIN ATOMIC / RETURN).
+    pub prosqlbody: Option<types_nodes::Node<'a>>,
     pub prokind: i8,
     pub security_definer: bool,
     pub isLeakProof: bool,
@@ -326,6 +328,11 @@ pub fn ProcedureCreate<'mcx>(
         Some(s) => Some(varlena::cstring_to_text(mcx, s.as_bytes())?),
         None => None,
     };
+    // pg_proc.c:372-373: CStringGetTextDatum(nodeToString(prosqlbody)).
+    let prosqlbody_text = match a.prosqlbody {
+        Some(n) => Some(varlena::cstring_to_text(mcx, outfuncs::nodeToString(mcx, n)?.as_bytes())?),
+        None => None,
+    };
     let argtypes_image = build_oidvector_image(mcx, a.parameterTypes)?;
 
     let mut values = [Datum::null(); Natts_pg_proc];
@@ -436,7 +443,14 @@ pub fn ProcedureCreate<'mcx>(
         ),
         None => nulls[Anum_pg_proc_probin - 1] = true,
     }
-    nulls[Anum_pg_proc_prosqlbody - 1] = true;
+    match &prosqlbody_text {
+        Some(t) => set(
+            &mut values,
+            Anum_pg_proc_prosqlbody,
+            Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_prosqlbody - 1] = true,
+    }
     nulls[Anum_pg_proc_proconfig - 1] = true;
     let proacl = aclchk_seams::get_user_default_acl::call(mcx, b'f', a.proowner, a.procNamespace)?;
     match proacl.as_deref() {
@@ -731,6 +745,19 @@ pub fn ProcedureCreate<'mcx>(
         &mut referenced,
         DependencyType::Normal,
     )?;
+
+    // pg_proc.c:665-666: dependencies on objects the SQL-standard body uses.
+    if a.languageObjectId == SQLlanguageId {
+        if let Some(body) = a.prosqlbody {
+            dependency_seams::record_dependency_on_expr::call(
+                mcx,
+                &myself,
+                body,
+                &types_nodes::list::NodeList::nil(),
+                DependencyType::Normal,
+            )?;
+        }
+    }
 
     if !is_update {
         pg_depend::recordDependencyOnOwner(mcx, PROCEDURE_RELATION_ID, retval, a.proowner)?;

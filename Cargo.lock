@@ -4113,6 +4113,7 @@ name = "dependency_seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "pg_depend",
  "seam_core",
  "types_core",
  "types_error",
@@ -5349,11 +5350,13 @@ dependencies = [
  "aclchk",
  "aclchk_seams",
  "adt_acl",
+ "analyze_seams",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
  "catalog_namespace",
  "catalog_objectaddress",
+ "cmdtag",
  "coerce",
  "commands_define",
  "datum",
@@ -5398,6 +5401,7 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+ "utility_seams",
 ]
 
 [[package]]
@@ -9932,6 +9936,7 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "dependency_seams",
  "dfmgr",
  "elog",
  "fmgr_core",
@@ -9940,6 +9945,7 @@ dependencies = [
  "heaptuple",
  "lsyscache",
  "mcx",
+ "outfuncs",
  "pg_depend",
  "pgstat",
  "pquery",
